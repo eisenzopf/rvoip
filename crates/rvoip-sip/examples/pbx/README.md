@@ -34,8 +34,21 @@ Options:
 - `--api endpoint|stream_peer|callback|all`
 - `--scenario registration|basic_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all`
 
-The runner builds the PBX Cargo examples and stores logs/WAV evidence
-under `examples/pbx/output/<provider>/<api>/<scenario>/<transport>/`.
+The runner builds the PBX Cargo examples and stores logs/WAV evidence under
+`examples/pbx/output/<provider>/<api>/<scenario>/<transport>/` by default. Set
+`PBX_OUT_ROOT=/path/to/artifacts` to write the same evidence tree somewhere
+else, which is what the beta gate does.
+
+Each run also writes release-audit artifacts at the output root:
+
+- `environment-*.md`: host, toolchain, git revision, SIPp/tshark availability,
+  selected runner arguments, and redacted runtime environment.
+- `matrix.tsv`: one row per provider/API/scenario/transport/role command with
+  pass/fail status, duration, exit code, log path, and output directory.
+- `summary.md`: markdown summary of the matrix suitable for attaching to beta
+  release evidence.
+- `<provider>/<api>/<scenario>/<transport>/*_metadata.md`: per-cell command and
+  redacted environment details next to the raw logs and media artifacts.
 
 ## Cargo Examples
 

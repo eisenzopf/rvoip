@@ -587,19 +587,17 @@ pub struct Config {
     /// Default: `true`.
     pub strict_codec_matching: bool,
 
-    /// NEXT_STEPS C2 — RTP payload types this UA advertises in
-    /// outgoing offers and accepts in answers. Default `[0, 8, 101]`
-    /// (PCMU + PCMA + telephone-event) preserves the pre-C2 wire
-    /// shape. Add `111` to advertise Opus (`opus/48000/2`); `9` for
-    /// G.722; `18` for G.729. CN (PT 13) is folded in automatically
-    /// when `comfort_noise_enabled = true`.
+    /// RTP payload types this UA advertises in outgoing offers and accepts in
+    /// answers. Default `[0, 8, 101]` (PCMU + PCMA + telephone-event)
+    /// preserves the established beta media profile.
     ///
-    /// Note: the rvoip-sip SDP builder will advertise any PT listed
-    /// here, but actually encoding/decoding the codec requires
-    /// media-core to be built with the matching feature flag
-    /// (e.g. `--features opus`). Advertising a codec that media-core
-    /// can't process surfaces as a negotiated session that drops
-    /// audio rather than a build-time error.
+    /// Beta validation intentionally rejects audio payload types that
+    /// media-core cannot encode/decode end to end. Today that means the
+    /// advertised full-media set is limited to PCMU (`0`), PCMA (`8`),
+    /// telephone-event (`101`), and comfort noise (`13`) when
+    /// `comfort_noise_enabled = true`. Opus (`111`), G.722 (`9`), and G.729
+    /// (`18`) remain post-beta or signaling-only experiments until media-core
+    /// support is wired through and covered by interop/perf tests.
     ///
     /// Default: `vec![0, 8, 101]`.
     pub offered_codecs: Vec<u8>,
@@ -609,7 +607,7 @@ pub struct Config {
     /// Modern [`CallbackPeer`](crate::api::callback_peer::CallbackPeer) and
     /// [`StreamPeer`](crate::api::stream_peer::StreamPeer) consumers receive
     /// incoming calls through the app event publisher. The compatibility
-    /// receiver exposed by [`UnifiedCoordinator::next_incoming_call`] is still
+    /// receiver exposed by [`UnifiedCoordinator::get_incoming_call`] is still
     /// kept for lower-level callers, so the buffer must be large enough for
     /// bursts without becoming a hidden backpressure point in the dialog event
     /// handler. Default: `1000`.
@@ -1972,6 +1970,17 @@ impl Config {
                 "signaling-only media SDP RTP port must be at least 1".to_string(),
             ));
         }
+        validate_beta_media_codecs(&self.offered_codecs, self.comfort_noise_enabled)?;
+        if self.srtp_required && !self.offer_srtp {
+            return Err(SessionError::ConfigError(
+                "srtp_required=true requires offer_srtp=true".to_string(),
+            ));
+        }
+        if self.offer_srtp && self.srtp_offered_suites.is_empty() {
+            return Err(SessionError::ConfigError(
+                "offer_srtp=true requires at least one srtp_offered_suites entry".to_string(),
+            ));
+        }
         if matches!(
             effective_tls_mode,
             SipTlsMode::ServerOnly | SipTlsMode::ClientAndServer
@@ -2076,6 +2085,51 @@ impl Config {
             self.sip_tls_mode
         }
     }
+}
+
+fn validate_beta_media_codecs(offered_codecs: &[u8], comfort_noise_enabled: bool) -> Result<()> {
+    if offered_codecs.is_empty() {
+        return Err(SessionError::ConfigError(
+            "offered_codecs must include at least one beta-supported audio codec".to_string(),
+        ));
+    }
+
+    let mut has_audio = false;
+    let mut seen = std::collections::BTreeSet::new();
+    for &pt in offered_codecs {
+        if !seen.insert(pt) {
+            return Err(SessionError::ConfigError(format!(
+                "offered_codecs contains duplicate payload type {}",
+                pt
+            )));
+        }
+
+        match pt {
+            0 | 8 => has_audio = true,
+            101 => {}
+            13 if comfort_noise_enabled => {}
+            13 => {
+                return Err(SessionError::ConfigError(
+                    "payload type 13 requires comfort_noise_enabled=true".to_string(),
+                ));
+            }
+            unsupported => {
+                return Err(SessionError::ConfigError(format!(
+                    "payload type {} is not beta-supported for full media; supported payloads are 0, 8, 101, and 13 when comfort_noise_enabled=true",
+                    unsupported
+                )));
+            }
+        }
+    }
+
+    if !has_audio {
+        return Err(SessionError::ConfigError(
+            "offered_codecs must include PCMU (0) or PCMA (8) for beta full-media support"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 impl Default for Config {

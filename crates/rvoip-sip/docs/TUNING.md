@@ -285,8 +285,8 @@ knobs in a promoted candidate.
 - [`BENCHMARKING.md`](BENCHMARKING.md) covers publishable benchmark suite runs.
 - [`PROFILING.md`](PROFILING.md) covers Criterion, samply, flamegraph, and dhat
   workflows.
-- [`SIGNALING_SHARDING_PERF_EXPERIMENT.md`](SIGNALING_SHARDING_PERF_EXPERIMENT.md)
-  records the signaling-only SIPp matrix history.
-- [`DIALOG_CORE_BYE_TERMINATION_HOT_PATH_PLAN.md`](DIALOG_CORE_BYE_TERMINATION_HOT_PATH_PLAN.md)
+- [`archived/SIGNALING_SHARDING_PERF_EXPERIMENT.md`](archived/SIGNALING_SHARDING_PERF_EXPERIMENT.md)
+  records the archived signaling-only SIPp matrix history.
+- [`archived/DIALOG_CORE_BYE_TERMINATION_HOT_PATH_PLAN.md`](archived/DIALOG_CORE_BYE_TERMINATION_HOT_PATH_PLAN.md)
   records the BYE/termination investigation, priority-lane decision, and
-  current 18k/20k findings.
+  archived 18k/20k findings.

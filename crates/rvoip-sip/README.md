@@ -5,6 +5,19 @@ coordinates dialog, registration, media, call state, transfer, DTMF, hold/resume
 and app-visible events so Rust applications can behave like programmable SIP
 endpoints without owning low-level SIP transaction and RTP details directly.
 
+## Beta target
+
+This crate is moving from alpha toward beta/production-candidate quality for
+bounded SIP client, server, PBX, and gateway scenarios. Beta claims are tracked
+in [`docs/COMPATIBILITY_MATRIX.md`](docs/COMPATIBILITY_MATRIX.md) and
+[`docs/RFC_COMPLIANCE_MATRIX.md`](docs/RFC_COMPLIANCE_MATRIX.md).
+
+The general-user full-media beta profile is capped at 2,000 CPS until a
+published benchmark report proves the exact setup. Results above that line are
+tuned profiles and must include configuration, hardware, topology, and caveats.
+WebRTC-grade media, DTLS-SRTP, ICE, TURN, browser interop, and carrier SBC
+certification are post-beta unless separately completed and tested.
+
 ## Where it fits
 
 | Crate | Responsibility |
@@ -81,3 +94,14 @@ See:
 
 The active release-hardening checklist lives in
 [`RELEASE_HARDENING_PLAN.md`](RELEASE_HARDENING_PLAN.md).
+
+The beta release gate is scripted at [`scripts/beta_gate.sh`](scripts/beta_gate.sh):
+
+```sh
+crates/rvoip-sip/scripts/beta_gate.sh --local
+```
+
+External PBX, SIPp, strict-UA, and performance evidence is recorded by the
+same script in `--full`, `--interop`, and `--perf` modes. Missing external lab
+dependencies are recorded as skips unless `BETA_GATE_REQUIRE_EXTERNAL=1` is set
+for a release-candidate run.

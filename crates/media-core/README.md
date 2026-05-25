@@ -4,6 +4,13 @@
 [![Documentation](https://docs.rs/rvoip-media-core/badge.svg)](https://docs.rs/rvoip-media-core)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 
+> **Beta scope notice:** for the `rvoip-sip` beta, full-media claims are
+> limited to the paths that are wired and tested end to end through SIP:
+> PCMU/PCMA, telephone-event DTMF, optional comfort noise, RTP, and tested
+> SDES-SRTP/PBX flows. Older sections in this README describe intended or
+> lower-level capabilities and must not be read as beta release claims until
+> they are linked from `crates/rvoip-sip/docs/COMPATIBILITY_MATRIX.md`.
+
 ## Overview
 
 The `media-core` library provides comprehensive media processing and audio management capabilities for the [rvoip](../../README.md) VoIP stack. It handles all media-level operations including codec management, advanced audio processing, quality monitoring, and multi-party conference mixing while integrating seamlessly with `session-core` (SIP signaling) and `rtp-core` (RTP transport).
@@ -127,12 +134,12 @@ Clean separation of concerns across the rvoip stack:
   - ✅ Event-driven architecture with comprehensive events
 
 #### **Conference Audio Mixing**
-- ✅ **N-Way Audio Mixing**: Professional conference capabilities
+- ⚠️ **N-Way Audio Mixing**: implemented as a lower-level media capability; not a `rvoip-sip` beta claim unless release-gated
   - ✅ Dynamic participant management (add/remove streams)
   - ✅ Real-time audio processing with frame buffering
   - ✅ N-1 mixing for each participant (exclude own voice)
   - ✅ Voice activity detection for selective mixing
-- ✅ **Conference Integration**: Production-ready implementation
+- ⚠️ **Conference Integration**: implemented, but not a `rvoip-sip` beta claim unless release-gated
   - ✅ AudioMixer with MediaSessionController integration
   - ✅ Event system for conference monitoring
   - ✅ Quality monitoring for mixed audio streams
@@ -148,17 +155,17 @@ Clean separation of concerns across the rvoip stack:
   - ✅ Quality degradation alerts and monitoring
   - ✅ Performance metrics collection and reporting
 
-#### **Production-Ready Infrastructure**
+#### **Beta-Candidate Infrastructure**
 - ✅ **Comprehensive Testing**: Extensive validation
   - ✅ 80+ tests passing (66 unit + 7 conference + 6 RTP + 1 doc)
   - ✅ Performance benchmarking and regression detection
   - ✅ Integration test coverage for all major components
-- ✅ **Error Handling**: Robust production deployment
+- ✅ **Error Handling**: Robust handling for tested paths
   - ✅ Comprehensive error types and handling
   - ✅ Graceful degradation scenarios
   - ✅ Resource cleanup and lifecycle management
 
-### 🚧 Planned Features
+### 🚧 Planned / Post-Beta Features
 
 #### **Advanced Processing**
 - 🚧 Machine learning-based VAD for enhanced accuracy
@@ -487,7 +494,10 @@ The library provides cutting-edge audio processing algorithms competitive with c
 
 ### Audio Muting Implementation
 
-The media-core library implements production-ready audio muting that maintains RTP flow by sending silence packets instead of dropping RTP transmission. This approach ensures compatibility with NAT traversal, firewalls, and all SIP endpoints.
+The media-core library implements audio muting that maintains RTP flow by
+sending silence packets instead of dropping RTP transmission. Treat this as a
+beta-scoped media behavior only where it is covered by the `rvoip-sip`
+compatibility matrix and tests.
 
 ```rust
 use rvoip_media_core::prelude::*;
@@ -649,4 +659,4 @@ This project is licensed under either of
 - Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
 - MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
-at your option. 
+at your option.

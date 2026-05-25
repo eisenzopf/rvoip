@@ -289,7 +289,7 @@ impl ConnectionAdapter for SipAdapter {
             TransferTarget::Uri(uri) => uri,
             TransferTarget::Connection(_) | TransferTarget::Session(_) => {
                 return Err(RvoipError::NotImplemented(
-                    "SipAdapter::transfer — Connection/Session targets need attended-transfer wiring (server::transfer in step 8)",
+                    "unsupported beta feature: attended transfer by Connection/Session target is post-beta for SipAdapter",
                 ));
             }
         };
@@ -313,7 +313,7 @@ impl ConnectionAdapter for SipAdapter {
         // (Step 8 hooks it up once the rvoip-core Message → SIP MESSAGE body
         //  shape is decided).
         Err(RvoipError::NotImplemented(
-            "SipAdapter::send_message — SIP MESSAGE wiring lands in step 8",
+            "unsupported beta feature: rvoip-core Message to SIP MESSAGE bridging is post-beta for SipAdapter",
         ))
     }
 
@@ -340,7 +340,7 @@ impl ConnectionAdapter for SipAdapter {
         _capabilities: CapabilityDescriptor,
     ) -> CoreResult<NegotiatedCodecs> {
         Err(RvoipError::NotImplemented(
-            "SipAdapter::renegotiate_media — re-INVITE wiring lands in step 8",
+            "unsupported beta feature: generic media renegotiation via SipAdapter is post-beta",
         ))
     }
 

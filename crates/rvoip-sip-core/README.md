@@ -6,14 +6,18 @@
 
 ## Overview
 
-`rvoip-sip-core` provides a **production-ready, RFC-compliant implementation** of the Session Initiation Protocol (SIP) in Rust. This library serves as the foundational protocol layer for the entire rvoip VoIP ecosystem, offering a complete toolkit for building SIP-based applications including VoIP clients, SIP proxies, PBX systems, and other SIP-enabled communications infrastructure.
+`rvoip-sip-core` provides the foundational SIP parser, serializer, types, and
+validation utilities for the RVOIP stack. Its beta release claims are tracked
+through `crates/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md`; parser support for a
+header or SDP attribute is not by itself a production claim for the higher SIP,
+media, or WebRTC behavior.
 
 ### ✅ **Core Responsibilities**
 - **SIP Protocol Implementation**: Complete RFC 3261 compliance with extensions for modern VoIP
 - **Message Parsing & Serialization**: High-performance parsing with both strict and lenient modes
 - **Header Management**: Strongly-typed headers with automatic validation and parameter handling
 - **URI Processing**: Comprehensive SIP, SIPS, and TEL URI support with parameter manipulation
-- **SDP Integration**: Full Session Description Protocol support including WebRTC extensions
+- **SDP Integration**: SDP parser/serializer support; WebRTC attributes are parser-level claims only
 - **Authentication**: Complete digest authentication with various challenge-response schemes
 - **SIMPLE Presence**: Complete RFC 3903/6665 implementation for presence services
 - **Event Notifications (NOTIFY/SUBSCRIBE)**: Full RFC 6665 event framework with subscription lifecycle
@@ -52,18 +56,18 @@ The SIP-Core sits at the protocol foundation layer, providing the building block
 
 ## Features
 
-### ✅ Completed Features - Production Ready SIP Implementation
+### Beta-Audited Feature Inventory In Progress
 
 #### **Complete RFC 3261 SIP Implementation**
 - ✅ **Message Parsing**: High-performance parser with strict and lenient modes
-  - ✅ Request parsing (INVITE, REGISTER, BYE, CANCEL, ACK, OPTIONS, NOTIFY, SUBSCRIBE, REFER, PUBLISH, etc.)
+  - ✅ Request parsing (INVITE, REGISTER, BYE, CANCEL, ACK, OPTIONS, NOTIFY, SUBSCRIBE, REFER, PUBLISH, etc.); PUBLISH is parser/builder only for `rvoip-sip` beta
   - ✅ Response parsing (1xx-6xx status codes with custom reason phrases)
   - ✅ Header parsing with 65+ standard headers and custom header support
   - ✅ Body parsing including SDP, PIDF (presence), and multipart MIME content
 - ✅ **Message Construction**: Fluent builder patterns and declarative macros
   - ✅ Type-safe header construction with automatic validation
   - ✅ URI building with comprehensive parameter support
-  - ✅ SDP generation with WebRTC attribute support
+  - ✅ SDP generation with WebRTC attribute parser/serializer support
   - ✅ Multipart body assembly for complex content scenarios
   - ✅ Event notification message builders (NOTIFY, SUBSCRIBE)
 
@@ -134,13 +138,13 @@ The SIP-Core sits at the protocol foundation layer, providing the building block
   - ✅ Parameter name and value validation
   - ✅ Reserved character handling and percent-encoding
 
-#### **Complete SDP Support (RFC 8866 + WebRTC)**
+#### **SDP Support (RFC 8866; WebRTC Attributes Are Parser-Level Claims)**
 - ✅ **Session Description Parsing**: Full SDP session and media description support
   - ✅ Session-level attributes (v=, o=, s=, c=, t=, etc.)
   - ✅ Media-level attributes (m=, a=, c=, b=, etc.)
   - ✅ Time descriptions with repeat intervals and time zones
   - ✅ Connection data with multicast and TTL support
-- ✅ **WebRTC Extensions**: Complete support for modern WebRTC attributes
+- ✅ **WebRTC Attribute Parsing**: parser/serializer support for modern WebRTC attributes
   - ✅ ICE attributes (candidate, ice-ufrag, ice-pwd, ice-options)
   - ✅ DTLS-SRTP attributes (fingerprint, setup)
   - ✅ Media stream identification (mid, msid, ssrc)
@@ -739,7 +743,7 @@ SIP-core provides the protocol foundation for a wide variety of VoIP application
 - **Load Balancers**: SIP-aware load balancing with session affinity
 
 ### ✅ **Modern Communication Platforms**
-- **WebRTC Signaling**: Complete SDP offer/answer with WebRTC extension support
+- **WebRTC Signaling**: SDP attribute parsing/serialization support; full WebRTC behavior is post-beta at the `rvoip-sip` layer
 - **Cloud Contact Centers**: Scalable SIP infrastructure for call center solutions
 - **Unified Communications**: Multi-protocol communication systems with SIP foundation
 - **IoT and Embedded**: Lightweight SIP clients for embedded and IoT devices
@@ -1060,7 +1064,7 @@ cargo test -p rvoip-sip-core --features="lenient_parsing"
 ### Media-Core Integration
 
 - **SDP Attributes**: Media descriptions with codec and transport information
-- **WebRTC Support**: Complete ICE, DTLS, and RTP attribute support
+- **WebRTC Attributes**: parser/serializer support only; full ICE, DTLS, and browser interop are post-beta at the `rvoip-sip` layer
 - **Quality Parameters**: Bandwidth and quality-of-service information
 - **Data Channels**: Application media type support for WebRTC data channels
 

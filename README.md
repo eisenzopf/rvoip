@@ -18,7 +18,14 @@
 
 ---
 
-> **⚠️ Alpha Release** - This is an alpha release with rapidly evolving APIs. Libraries will change significantly as we move toward production readiness, but the core architecture and design principles are stable. The intent is to make this library production-ready for enterprise VoIP deployments. We are in the process of doing real-world testing and would appreciate any feedback, feature requests, contributions, or bug reports.
+> **Alpha Release moving toward beta** - This repository is not yet a broad
+> production release. The current beta target is production-candidate quality
+> for bounded SIP client, server, PBX, and gateway scenarios. General-user
+> full-media performance claims are capped at 2,000 CPS until backed by the
+> beta performance report; higher CPS numbers are tuned profiles with explicit
+> caveats. WebRTC-grade media, DTLS-SRTP, ICE, TURN, browser interop, and
+> carrier SBC certification are post-beta unless separately completed and
+> tested.
 
 ## 📋 Table of Contents
 
@@ -124,10 +131,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 <div align="center">
 
-| 🦀 **Pure Rust** | 🏗️ **Modular** | 📋 **RFC Compliant** | 🏢 **Production Ready** |
+| 🦀 **Pure Rust** | 🏗️ **Modular** | 📋 **RFC Tracked** | 🏢 **Beta Target** |
 |:---:|:---:|:---:|:---:|
-| Zero FFI dependencies | Clean separation of concerns | Standards-compliant SIP | Enterprise deployment ready |
-| Memory safety & performance | Specialized crates | Extensive RFC support | High availability design |
+| Zero FFI dependencies | Clean separation of concerns | Compliance matrix in progress | Production-candidate hardening |
+| Memory safety & performance | Specialized crates | Extensive RFC coverage under audit | Bounded SIP/PBX scenarios |
 
 </div>
 
@@ -135,8 +142,8 @@ rvoip is a pure Rust set of libraries built from the ground up and follows SIP b
 
 - 🦀 **Pure Rust Implementation**: Zero FFI dependencies, leveraging Rust's safety and performance
 - 🏗️ **Modular Architecture**: Clean separation of concerns across specialized crates  
-- 📋 **RFC Compliance**: Standards-compliant SIP implementation with extensive RFC support
-- 🏢 **Production Ready**: Designed for enterprise deployment with high availability
+- 📋 **RFC Compliance Tracking**: Standards-oriented SIP implementation with a beta compliance matrix in progress
+- 🏢 **Beta Target**: Production-candidate hardening for bounded SIP/PBX deployments
 - 👨‍💻 **Developer Friendly**: Multiple API levels from low-level protocol to high-level applications
 
 ## 📦 Library Structure
@@ -185,7 +192,7 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 <summary><strong>📞 call-engine</strong> - Complete Call Center Solution</summary>
 
 **Purpose**: Proof of concept call center orchestration with agent management, queuing, and routing  
-**Status**: ⚠️ **Not Production Ready** - Limited functionality and not yet tested in production
+**Status**: ⚠️ **Alpha / Not Beta-Gated** - Limited functionality and not yet tested as a release claim
 
 **🎯 Key Features**:
 - 👥 Agent SIP registration and status management
@@ -354,7 +361,7 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 | **INFO** | ✅ Complete | RFC 6086 | Mid-session information | DTMF relay, application data |
 | **PRACK** | ✅ Complete | RFC 3262 | Provisional response acknowledgment | Reliable provisionals, sequence tracking |
 | **REFER** | ✅ Complete | RFC 3515 | Call transfer initiation | Transfer correlation, refer-to handling |
-| **PUBLISH** | ✅ Complete | RFC 3903 | Event state publication | Presence publishing, event state |
+| **PUBLISH** | Post-beta | RFC 3903 | Event state publication | Parser support exists; application flow is not a beta claim |
 
 ### 🔐 Authentication & Security
 
@@ -362,12 +369,12 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 |---------|--------|------------|-----|-------------|
 | **Digest Authentication** | ✅ Complete | MD5, SHA-256, SHA-512-256 | RFC 3261 | Challenge-response authentication |
 | **Quality of Protection** | ✅ Complete | auth, auth-int | RFC 3261 | Integrity protection levels |
-| **SRTP/SRTCP** | ✅ Complete | AES-CM, AES-GCM, HMAC-SHA1 | RFC 3711 | Secure media transport |
-| **DTLS-SRTP** | ✅ Complete | ECDHE, RSA | RFC 5763 | WebRTC-compatible security |
-| **ZRTP** | ✅ Complete | DH, ECDH, SAS | RFC 6189 | Peer-to-peer key agreement |
-| **MIKEY-PSK** | ✅ Complete | Pre-shared keys | RFC 3830 | Enterprise key management |
-| **MIKEY-PKE** | ✅ Complete | RSA, X.509 | RFC 3830 | Certificate-based keys |
-| **SDES-SRTP** | ✅ Complete | SDP-based | RFC 4568 | SIP signaling key exchange |
+| **SRTP/SRTCP** | Partial | AES-CM, HMAC-SHA1 where tested | RFC 3711 | Beta claims limited to tested profiles |
+| **DTLS-SRTP** | Post-beta | ECDHE, RSA | RFC 5763 | Not a beta claim |
+| **ZRTP** | Post-beta | DH, ECDH, SAS | RFC 6189 | Not a beta claim |
+| **MIKEY-PSK** | Post-beta | Pre-shared keys | RFC 3830 | Not a beta claim |
+| **MIKEY-PKE** | Post-beta | RSA, X.509 | RFC 3830 | Not a beta claim |
+| **SDES-SRTP** | Partial | SDP-based | RFC 4568 | PBX/profile-specific beta evidence required |
 | **TLS Transport** | ✅ Complete | TLS 1.2/1.3 | RFC 3261 | Secure SIP transport |
 
 ### 🎵 Media & Codec Support
@@ -375,9 +382,9 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 | Category | Feature | Status | Standards | Description |
 |----------|---------|--------|-----------|-------------|
 | **Audio Codecs** | G.711 PCMU/PCMA | ✅ Complete | ITU-T G.711 | μ-law/A-law, 8kHz |
-| | G.722 | ✅ Complete | ITU-T G.722 | Wideband audio, 16kHz |
-| | Opus | ✅ Complete | RFC 6716 | Adaptive bitrate, 8-48kHz |
-| | G.729 | ✅ Complete | ITU-T G.729 | Low bandwidth, 8kHz |
+| | G.722 | Post-beta | ITU-T G.722 | Not a beta full-media claim |
+| | Opus | Post-beta | RFC 6716 | Not a beta full-media claim |
+| | G.729 | Post-beta | ITU-T G.729 | Not a beta full-media claim |
 | **Audio Processing** | Echo Cancellation | ✅ Complete | Advanced AEC | 16.4 dB ERLE improvement |
 | | Gain Control | ✅ Complete | Advanced AGC | Multi-band processing |
 | | Voice Activity | ✅ Complete | Advanced VAD | Spectral analysis |
@@ -395,7 +402,7 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 | **UDP** | ✅ Complete | Optional SRTP | RFC 3261 | Primary SIP transport |
 | **TCP** | ✅ Complete | Optional TLS | RFC 3261 | Reliable transport |
 | **TLS** | ✅ Complete | TLS 1.2/1.3 | RFC 3261 | Secure transport |
-| **WebSocket** | ✅ Complete | WSS support | RFC 7118 | Web browser compatibility |
+| **WebSocket** | Partial | WS; WSS outbound post-beta | RFC 7118 | Browser/WebRTC is not a beta claim |
 | **SCTP** | 🚧 Planned | DTLS-SCTP | RFC 4168 | Multi-streaming transport |
 
 ### 🔌 NAT Traversal Support
@@ -403,8 +410,8 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 | Feature | Status | RFC | Description |
 |---------|--------|-----|-------------|
 | **STUN Client** | ✅ Complete | RFC 5389 | NAT binding discovery |
-| **TURN Client** | 🚧 Partial | RFC 5766 | Relay through NAT |
-| **ICE** | 🚧 Partial | RFC 8445 | Connectivity establishment |
+| **TURN Client** | Post-beta | RFC 5766 | Relay through NAT |
+| **ICE** | Post-beta | RFC 8445 | Connectivity establishment |
 | **Symmetric RTP** | ✅ Complete | RFC 4961 | Bidirectional media flow |
 
 ### 📞 Dialog & Session Management
@@ -422,9 +429,9 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 | Feature | Status | RFC | Description |
 |---------|--------|-----|-------------|
 | **Core SDP** | ✅ Complete | RFC 8866 | Session description |
-| **WebRTC Extensions** | ✅ Complete | Various | Modern web compatibility |
-| **ICE Attributes** | ✅ Complete | RFC 8839 | Connectivity attributes |
-| **DTLS Fingerprints** | ✅ Complete | RFC 8122 | Security fingerprints |
+| **WebRTC Extensions** | Parser only | Various | Not a beta media/browser claim |
+| **ICE Attributes** | Parser only | RFC 8839 | Not a beta ICE claim |
+| **DTLS Fingerprints** | Parser only | RFC 8122 | Not a beta DTLS-SRTP claim |
 | **Media Grouping** | ✅ Complete | RFC 5888 | BUNDLE support |
 | **Simulcast** | ✅ Complete | RFC 8853 | Multiple stream support |
 
@@ -533,7 +540,7 @@ at your option.
 
 **💡 Ready to get started?** Check out the [examples](examples/) directory for working code samples, or dive into the individual crate documentation for detailed usage patterns.
 
-**🏢 Enterprise users:** This library is designed for production deployment. While currently in alpha, the architecture is stable and suitable for evaluation and development.
+**🏢 Enterprise users:** Treat this library as alpha moving toward a beta-candidate release. It is suitable for evaluation and development; production use should be limited to scenarios you validate with your own interop, security, and performance gates.
 
 <sub>Built with ❤️ in Rust</sub>
 

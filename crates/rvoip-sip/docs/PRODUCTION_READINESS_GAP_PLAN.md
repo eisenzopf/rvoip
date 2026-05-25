@@ -202,7 +202,7 @@ Release blocker for server adoption:
 
 Known local evidence:
 
-- `docs/RVOIP_VS_ASTERISK.md` shows Asterisk succeeding at 30, 100, and 300
+- `docs/archived/RVOIP_VS_ASTERISK.md` shows Asterisk succeeding at 30, 100, and 300
   CPS in the tested SIPp scenario, while `rvoip-sip` succeeded at 30 CPS,
   partially failed at 100 CPS, and failed at 300 CPS in that run.
 - `docs/BENCHMARKING.md` defines a useful benchmark harness, but publishable
@@ -412,7 +412,7 @@ Required follow-up:
 | P1 | Build the RFC inventory | RFC matrix covers SIP, transport, SDP, RTP, SRTP, NAT traversal, auth, identity, and supported extensions with test evidence for each row. |
 | P2 | Make compliance executable | CI runs parser torture tests, generated message validation, SIPp positive/negative scenarios, fuzz smoke jobs, and cross-crate integration tests. |
 | P3 | Automate interop | Asterisk and FreeSWITCH suites run in CI or nightly; Kamailio/OpenSIPS proxy profile is added; PJSIP or baresip client profile is added; packet captures are stored for failing cases. |
-| P4 | Fix server performance | SIPp high-CPS stalls are root-caused; benchmark thresholds are set; release report publishes CPS, latency, memory, soak, overload, and recovery numbers. |
+| P4 | Fix server performance | General full-media beta profile passes up to 2,000 CPS; higher results are published only as tuned profiles with explicit configuration, hardware, topology, and caveats. |
 | P5 | Harden media and security | Codec advertising is guarded; SDES-SRTP matrix is published; DTLS-SRTP is completed or de-scoped; ICE/TURN stance is explicit; DTMF, recording, playback, and media quality tests are release-gated where claimed. |
 | P6 | Stabilize API and packaging | Semver policy, MSRV, feature flags, docs.rs, changelog, migration docs, rustdoc examples, examples, and lint gates are release-ready. |
 
@@ -421,8 +421,8 @@ Required follow-up:
 1. No complete RFC support and compliance matrix exists.
 2. No published compliance suite proves RFC claims across parser, transport,
    dialog, application, media, and RTP layers.
-3. Current performance evidence shows `rvoip-sip` failing high-CPS SIPp
-   scenarios where Asterisk passes.
+3. General full-media beta performance evidence is not yet published through
+   the 2,000 CPS gate.
 4. Asterisk and FreeSWITCH interop examples are not yet release gates with a
    published compatibility matrix.
 5. Transport, media, and RTP docs contain overclaims or contradictions.
@@ -449,6 +449,8 @@ Required follow-up:
 
 - Requires RFC matrix, compliance CI, performance report, 24-hour soak,
   security audit pass, API freeze, and release notes with tested claims only.
+  The default full-media performance claim is capped at 2,000 CPS; any higher
+  result is a tuned profile, not a general-user promise.
 
 `production`:
 

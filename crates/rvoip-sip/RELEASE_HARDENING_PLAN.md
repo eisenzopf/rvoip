@@ -31,10 +31,13 @@ plan is tracked in
 | REFER metadata propagation | Done | `Referred-By` and `Replaces` flow from dialog-core to public `Event::ReferReceived`. |
 | README & module rustdoc | Done | `crates/rvoip-sip/README.md` plus all `//!`/`///` module headers use the new name. |
 | Production readiness gap plan | Added | `docs/PRODUCTION_READINESS_GAP_PLAN.md` defines the release requirements, RFC audit, interop, performance, media, security, and packaging gates for wide adoption. |
-| Compatibility matrix | Needs refresh | `docs/COMPATIBILITY_MATRIX.md` is referenced by older notes but is not present in this checkout. Regenerate it from the RFC and interop audit before release. |
-| Topology profiles | Needs refresh | `docs/TOPOLOGY_PROFILES.md` is referenced by older notes but is not present in this checkout. Recreate it from validated deployment profiles. |
-| Release notes draft | Needs refresh | `docs/RELEASE_NOTES_NEXT.md` is referenced by older notes but is not present in this checkout. Keep release notes limited to tested claims. |
-| Interop CI plan | Needs refresh | `docs/INTEROP_CI_PLAN.md` is referenced by older notes but is not present in this checkout. Recreate it with SIPp, Asterisk, FreeSWITCH, proxy, and client matrices. |
+| Compatibility matrix | Added | `docs/COMPATIBILITY_MATRIX.md` defines beta support levels by API, method, transport, media, security, and performance profile. |
+| Topology profiles | Added | `docs/TOPOLOGY_PROFILES.md` separates beta-supported profiles from post-beta and tuned profiles. |
+| RFC compliance matrix | Added | `docs/RFC_COMPLIANCE_MATRIX.md` records the conservative beta claim level for each RFC. |
+| Security posture | Added | `docs/SECURITY_POSTURE.md` records beta security claims and non-claims. |
+| Beta performance report | Added | `docs/BETA_PERFORMANCE_REPORT.md` defines the 2,000 CPS full-media beta gate and tuned-profile policy. |
+| Release notes draft | Added | `docs/RELEASE_NOTES_NEXT.md` limits next-release claims to beta evidence. |
+| Interop CI plan | Added | `docs/INTEROP_CI_PLAN.md` defines SIPp, Asterisk, FreeSWITCH, strict-UA, and proxy investigation matrices. |
 | Tests | Done | `cargo check -p rvoip-sip` and `cargo test -p rvoip-sip --doc` pass (217 doctests). |
 
 ## Verification before release

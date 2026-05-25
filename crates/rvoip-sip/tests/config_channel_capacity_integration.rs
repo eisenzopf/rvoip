@@ -452,6 +452,101 @@ fn zero_server_call_capacity_is_rejected_when_set() {
     );
 }
 
+#[test]
+fn unsupported_beta_media_codec_advertisement_is_rejected() {
+    let mut config = Config::local("codec-test", 5060);
+    config.offered_codecs = vec![0, 8, 111, 101];
+
+    let err = config
+        .validate()
+        .expect_err("unsupported Opus advertisement must fail beta validation");
+    assert!(
+        err.to_string()
+            .contains("payload type 111 is not beta-supported for full media"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
+fn comfort_noise_payload_requires_comfort_noise_flag() {
+    let mut config = Config::local("codec-test", 5060);
+    config.offered_codecs = vec![0, 8, 13, 101];
+
+    let err = config
+        .validate()
+        .expect_err("CN without comfort_noise_enabled must fail");
+    assert!(
+        err.to_string()
+            .contains("payload type 13 requires comfort_noise_enabled=true"),
+        "unexpected validation error: {err}"
+    );
+
+    config.comfort_noise_enabled = true;
+    config.validate().expect("CN should pass when enabled");
+}
+
+#[test]
+fn beta_media_codec_set_requires_real_audio_codec() {
+    let mut config = Config::local("codec-test", 5060);
+    config.offered_codecs = vec![101];
+
+    let err = config
+        .validate()
+        .expect_err("DTMF-only codec set must fail");
+    assert!(
+        err.to_string()
+            .contains("offered_codecs must include PCMU (0) or PCMA (8)"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
+fn duplicate_payload_types_are_rejected() {
+    let mut config = Config::local("codec-test", 5060);
+    config.offered_codecs = vec![0, 8, 8, 101];
+
+    let err = config
+        .validate()
+        .expect_err("duplicate codec payload types must fail");
+    assert!(
+        err.to_string()
+            .contains("offered_codecs contains duplicate payload type 8"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
+fn mandatory_srtp_requires_srtp_offer() {
+    let mut config = Config::local("srtp-test", 5060);
+    config.srtp_required = true;
+    config.offer_srtp = false;
+
+    let err = config
+        .validate()
+        .expect_err("mandatory SRTP without offer_srtp must fail");
+    assert!(
+        err.to_string()
+            .contains("srtp_required=true requires offer_srtp=true"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
+fn srtp_offer_requires_at_least_one_suite() {
+    let mut config = Config::local("srtp-test", 5060);
+    config.offer_srtp = true;
+    config.srtp_offered_suites.clear();
+
+    let err = config
+        .validate()
+        .expect_err("SRTP offer without suites must fail");
+    assert!(
+        err.to_string()
+            .contains("offer_srtp=true requires at least one srtp_offered_suites entry"),
+        "unexpected validation error: {err}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn diagnostic_flags_are_independent_at_runtime() {
