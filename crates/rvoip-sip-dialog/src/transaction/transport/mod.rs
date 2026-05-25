@@ -333,6 +333,7 @@ impl TransportManager {
     /// Initializes the transport manager with configured transport types
     pub async fn initialize(&mut self) -> Result<()> {
         let mut initialized = false;
+        let mut initialization_errors = Vec::new();
 
         // Initialize UDP transport if enabled
         if self.config.enable_udp {
@@ -355,6 +356,8 @@ impl TransportManager {
                     }
                     Err(e) => {
                         error!("Failed to initialize UDP transport on {}: {}", addr, e);
+                        initialization_errors
+                            .push(format!("UDP transport on {} failed: {}", addr, e));
                     }
                 }
             }
@@ -375,6 +378,8 @@ impl TransportManager {
                     }
                     Err(e) => {
                         error!("Failed to initialize TCP transport on {}: {}", addr, e);
+                        initialization_errors
+                            .push(format!("TCP transport on {} failed: {}", addr, e));
                     }
                 }
             }
@@ -426,6 +431,8 @@ impl TransportManager {
                         }
                         Err(e) => {
                             error!("Failed to initialize TLS transport on {}: {}", addr, e);
+                            initialization_errors
+                                .push(format!("TLS transport on {} failed: {}", addr, e));
                         }
                     }
                 }
@@ -450,6 +457,8 @@ impl TransportManager {
                             "Failed to initialize WebSocket transport on {}: {}",
                             addr, e
                         );
+                        initialization_errors
+                            .push(format!("WebSocket transport on {} failed: {}", addr, e));
                     }
                 }
             }
@@ -472,6 +481,8 @@ impl TransportManager {
                             }
                             Err(e) => {
                                 error!("Failed to initialize WSS transport on {}: {}", addr, e);
+                                initialization_errors
+                                    .push(format!("WSS transport on {} failed: {}", addr, e));
                             }
                         }
                     }
@@ -481,9 +492,15 @@ impl TransportManager {
 
         // Return error if no transports were initialized
         if !initialized {
-            return Err(Error::Transport(
-                "Failed to initialize any transport".into(),
-            ));
+            let detail = if initialization_errors.is_empty() {
+                "no transport initialization attempts were made".to_string()
+            } else {
+                initialization_errors.join("; ")
+            };
+            return Err(Error::Transport(format!(
+                "Failed to initialize any transport: {}",
+                detail
+            )));
         }
 
         // Start event processing

@@ -2575,6 +2575,16 @@ impl DialogAdapter {
 
         Ok(())
     }
+
+    /// Stop the dialog API and release its transaction transports.
+    pub async fn stop(&self) -> Result<()> {
+        self.dialog_api
+            .stop()
+            .await
+            .map_err(|e| SessionError::DialogError(format!("Failed to stop dialog API: {}", e)))?;
+
+        Ok(())
+    }
 }
 
 impl Clone for DialogAdapter {

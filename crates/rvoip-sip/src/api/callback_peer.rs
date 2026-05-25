@@ -56,6 +56,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::api::dialog_package::{DialogInfo, DialogInfoDocument};
 use crate::api::events::{
@@ -1671,8 +1672,17 @@ impl<H: CallHandler> CallbackPeer<H> {
             deferred.clear();
         }
 
-        // Shut down the coordinator's background tasks too
-        self.coordinator.shutdown();
+        // Shut down the coordinator and wait for dialog/transaction
+        // transports to close before `run()` returns. Tests and services may
+        // immediately restart a peer on the same port after this future
+        // resolves.
+        if let Err(e) = self
+            .coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+        {
+            tracing::warn!("[CallbackPeer] Coordinator shutdown failed: {}", e);
+        }
         Ok(())
     }
 

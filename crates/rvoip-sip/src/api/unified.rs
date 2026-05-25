@@ -2765,6 +2765,11 @@ impl UnifiedCoordinator {
         if timeout.is_zero() {
             dialog_adapter.abort_all_registration_refreshes();
             let _ = shutdown_tx.send(true);
+            tokio::spawn(async move {
+                if let Err(e) = dialog_adapter.stop().await {
+                    tracing::warn!("Dialog adapter stop failed during shutdown: {}", e);
+                }
+            });
             return;
         }
 
@@ -2772,6 +2777,9 @@ impl UnifiedCoordinator {
             Self::unregister_registered_sessions_best_effort(helpers, timeout).await;
             dialog_adapter.abort_all_registration_refreshes();
             let _ = shutdown_tx.send(true);
+            if let Err(e) = dialog_adapter.stop().await {
+                tracing::warn!("Dialog adapter stop failed during shutdown: {}", e);
+            }
         });
     }
 
@@ -2798,6 +2806,7 @@ impl UnifiedCoordinator {
         }
         self.dialog_adapter.abort_all_registration_refreshes();
         let _ = self.shutdown_tx.send(true);
+        self.dialog_adapter.stop().await?;
         Ok(())
     }
 

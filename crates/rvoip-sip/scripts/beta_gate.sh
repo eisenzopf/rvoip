@@ -42,6 +42,8 @@ Modes:
 
 Environment:
   BETA_GATE_ARTIFACT_DIR         Output directory. Defaults to target/beta-gate/<timestamp>.
+  BETA_REPORT_DIR                Crate-local report directory. Defaults to crates/rvoip-sip/beta-report.
+  BETA_REPORT_PACKAGE=0          Disable copying completed artifacts into BETA_REPORT_DIR.
   BETA_GATE_REQUIRE_EXTERNAL=1   Treat skipped external gates as failures.
   BETA_RUN_PBX=1                 Run examples/pbx/run.sh when PBX configs are present.
   BETA_RUN_LOCAL_PBX=1           Manage ~/Developer/asterisk and ~/Developer/freeswitch sequentially.
@@ -86,9 +88,6 @@ cat > "$SUMMARY" <<EOF
 - workspace: $WORKSPACE_ROOT
 - artifact_dir: $ARTIFACT_DIR
 - environment: \`environment/environment.md\`
-
-| Status | Gate | Duration | Log |
-|--------|------|----------|-----|
 EOF
 
 slugify() {
@@ -190,6 +189,82 @@ redacted_env() {
   '
 }
 
+captured_payload() {
+  local file="$1"
+  if [ ! -f "$file" ]; then
+    printf 'not captured\n'
+    return
+  fi
+  awk 'NR == 1 && /^\+ / { next } { print }' "$file"
+}
+
+captured_first_line() {
+  local value
+  value="$(captured_payload "$1" | awk 'NF { print; exit }')"
+  printf '%s' "${value:-none}"
+}
+
+captured_status_label() {
+  local payload
+  payload="$(captured_payload "$1")"
+  if [ "$payload" = "not captured" ]; then
+    printf 'not captured'
+  elif [ -z "$payload" ]; then
+    printf 'clean'
+  else
+    printf 'dirty'
+  fi
+}
+
+markdown_payload_block() {
+  local title="$1"
+  local file="$2"
+  echo "## $title"
+  echo
+  echo '```text'
+  captured_payload "$file"
+  echo '```'
+  echo
+}
+
+markdown_file_block() {
+  local title="$1"
+  local file="$2"
+  echo "## $title"
+  echo
+  if [ -f "$file" ]; then
+    echo '```text'
+    cat "$file"
+    echo '```'
+  else
+    echo 'not captured'
+  fi
+  echo
+}
+
+markdown_local_pbx_config() {
+  local name="$1"
+  local source_dir="$2"
+  local out_dir="$3"
+  echo "## Local PBX Config: $name"
+  echo
+  echo "- source_dir: $source_dir"
+  if [ -d "$out_dir" ]; then
+    echo "- captured_files:"
+    find "$out_dir" -maxdepth 1 -type f -print | sort | while IFS= read -r file; do
+      echo "  - ${file#$ARTIFACT_DIR/}"
+    done
+  else
+    echo "- captured_files: none"
+  fi
+  echo
+  for file in README.md docker-compose.yml rvoip-local.env freeswitch-local.env git-rev.txt git-status.txt; do
+    if [ -f "$out_dir/$file" ]; then
+      markdown_file_block "$name $file" "$out_dir/$file"
+    fi
+  done
+}
+
 redact_file() {
   local input="$1"
   local output="$2"
@@ -200,6 +275,7 @@ redact_file() {
     -e 's/([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd][[:space:]]*[:=][[:space:]]*).*/\1<redacted>/' \
     -e 's/([Ss][Ee][Cc][Rr][Ee][Tt][[:space:]]*[:=][[:space:]]*).*/\1<redacted>/' \
     -e 's/([Tt][Oo][Kk][Ee][Nn][[:space:]]*[:=][[:space:]]*).*/\1<redacted>/' \
+    -e 's/password123/<redacted>/g' \
     "$input" > "$output" || true
 }
 
@@ -273,28 +349,155 @@ write_environment_report() {
   copy_local_pbx_config_evidence freeswitch "$freeswitch_dir"
   capture_docker_snapshot start
 
-  cat > "$ENV_REPORT" <<EOF
+  {
+    cat <<EOF
 # Beta Gate Environment
 
 - timestamp_utc: $TIMESTAMP
 - mode: $MODE
 - workspace: $WORKSPACE_ROOT
 - artifact_dir: $ARTIFACT_DIR
-- git: \`environment/git-rev.txt\`
-- git_status: \`environment/git-status.txt\`
-- rustc: \`environment/rustc-version.txt\`
-- cargo: \`environment/cargo-version.txt\`
-- host: \`environment/host-uname.txt\`
-- docker: \`environment/docker-version.txt\`
-- initial_docker_state: \`environment/docker-ps-start.txt\`
-- redacted_gate_env: \`environment/beta-env-redacted.txt\`
-- local_asterisk_config: \`environment/local-pbx/asterisk/\`
-- local_freeswitch_config: \`environment/local-pbx/freeswitch/\`
+- git_revision: \`$(captured_first_line "$env_dir/git-rev.txt")\`
+- git_status: \`$(captured_status_label "$env_dir/git-status.txt")\`
+- rustc: \`$(captured_first_line "$env_dir/rustc-version.txt")\`
+- cargo: \`$(captured_first_line "$env_dir/cargo-version.txt")\`
+- host: \`$(captured_first_line "$env_dir/host-uname.txt")\`
+- docker: \`$(captured_first_line "$env_dir/docker-version.txt")\`
 
 Docker snapshots captured during local PBX lifecycle events are stored under
 \`environment/docker-<phase>/\`. Secrets in copied local env/config files are
 redacted by key name before being written into this artifact tree.
 EOF
+
+    echo
+    markdown_payload_block "Git Status" "$env_dir/git-status.txt"
+    markdown_payload_block "Rust Toolchain" "$env_dir/rustc-version.txt"
+    markdown_payload_block "Cargo Toolchain" "$env_dir/cargo-version.txt"
+    markdown_payload_block "Host Kernel" "$env_dir/host-uname.txt"
+    if [ -f "$env_dir/macos-version.txt" ]; then
+      markdown_payload_block "macOS Version" "$env_dir/macos-version.txt"
+    fi
+    if [ -f "$env_dir/host-hardware.txt" ]; then
+      markdown_payload_block "Host Hardware" "$env_dir/host-hardware.txt"
+    fi
+    if [ -f "$env_dir/docker-version.txt" ]; then
+      markdown_payload_block "Docker Version" "$env_dir/docker-version.txt"
+    fi
+    if [ -f "$env_dir/docker-compose-version.txt" ]; then
+      markdown_payload_block "Docker Compose Version" "$env_dir/docker-compose-version.txt"
+    fi
+    if [ -f "$env_dir/docker-ps-start.txt" ]; then
+      markdown_payload_block "Initial Docker State" "$env_dir/docker-ps-start.txt"
+    fi
+    markdown_file_block "Redacted Gate Environment" "$env_dir/beta-env-redacted.txt"
+    markdown_local_pbx_config asterisk "$asterisk_dir" "$env_dir/local-pbx/asterisk"
+    markdown_local_pbx_config freeswitch "$freeswitch_dir" "$env_dir/local-pbx/freeswitch"
+
+    cat <<EOF
+## Raw Evidence Files
+
+The inlined values above are also retained as raw evidence files under
+\`environment/\` so scripts can consume the same captured data without parsing
+Markdown.
+EOF
+  } > "$ENV_REPORT"
+}
+
+write_summary_gate_table_header() {
+  local env_dir="$ARTIFACT_DIR/environment"
+  {
+    cat <<EOF
+
+## Environment Snapshot
+
+- git_revision: \`$(captured_first_line "$env_dir/git-rev.txt")\`
+- git_status: \`$(captured_status_label "$env_dir/git-status.txt")\`
+- rustc: \`$(captured_first_line "$env_dir/rustc-version.txt")\`
+- cargo: \`$(captured_first_line "$env_dir/cargo-version.txt")\`
+- host: \`$(captured_first_line "$env_dir/host-uname.txt")\`
+- docker: \`$(captured_first_line "$env_dir/docker-version.txt")\`
+- beta_full_media_cps: \`${BETA_FULL_MEDIA_CPS:-30 100 300 1000 2000}\`
+- beta_pbx_provider: \`${BETA_PBX_PROVIDER:-both}\`
+- beta_pbx_api: \`${BETA_PBX_API:-all}\`
+- beta_pbx_scenario: \`${BETA_PBX_SCENARIO:-all}\`
+- beta_run_local_pbx: \`${BETA_RUN_LOCAL_PBX:-0}\`
+- beta_run_sipp: \`${BETA_RUN_SIPP:-1}\`
+- beta_run_strict_ua: \`${BETA_RUN_STRICT_UA:-1}\`
+- beta_run_long_soak: \`${BETA_RUN_LONG_SOAK:-1}\`
+- rvoip_perf_soak_duration_secs: \`${RVOIP_PERF_SOAK_DURATION_SECS:-perf test default}\`
+
+Full environment evidence, Docker state, redacted runtime variables, and local
+PBX config snapshots are in \`environment/environment.md\`.
+
+## Gates
+
+| Status | Gate | Duration | Log |
+|--------|------|----------|-----|
+EOF
+  } >> "$SUMMARY"
+}
+
+beta_report_root() {
+  printf '%s' "${BETA_REPORT_DIR:-$CRATE_DIR/beta-report}"
+}
+
+beta_report_run_dir() {
+  printf '%s/%s' "$(beta_report_root)" "$TIMESTAMP"
+}
+
+write_report_manifest() {
+  local report_dir="$1"
+  local manifest="$report_dir/report-manifest.md"
+  cat > "$manifest" <<EOF
+# rvoip-sip Beta Report Manifest
+
+- timestamp: $TIMESTAMP
+- mode: $MODE
+- workspace: $WORKSPACE_ROOT
+- source_artifact_dir: $ARTIFACT_DIR
+- report_dir: $report_dir
+- summary: \`summary.md\`
+- environment: \`environment/environment.md\`
+- generated_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+## Primary Evidence
+
+- \`summary.md\`
+- \`environment/environment.md\`
+- \`pbx/summary.md\`
+- \`pbx/matrix.tsv\`
+- \`sipp/environment.md\`
+- \`sipp/run_summary.md\`
+- \`sipp/analysis.md\`
+- \`strict-ua/summary.md\`
+
+The report directory is a packaged copy of the beta-gate artifact tree. Logs,
+matrices, redacted environment evidence, PBX lifecycle snapshots, and scenario
+metadata are kept with their original relative paths.
+EOF
+}
+
+package_beta_report() {
+  if [ "${BETA_REPORT_PACKAGE:-1}" = "0" ]; then
+    return 0
+  fi
+
+  local root
+  local report_dir
+  local artifact_abs
+  local report_abs
+  root="$(beta_report_root)"
+  report_dir="$(beta_report_run_dir)"
+  mkdir -p "$report_dir"
+  artifact_abs="$(cd "$ARTIFACT_DIR" && pwd -P)"
+  report_abs="$(cd "$report_dir" && pwd -P)"
+
+  if [ "$artifact_abs" != "$report_abs" ]; then
+    (cd "$ARTIFACT_DIR" && tar cf - .) | (cd "$report_dir" && tar xf -)
+  fi
+
+  write_report_manifest "$report_dir"
+  printf '%s\n' "$TIMESTAMP" > "$root/latest.txt"
 }
 
 container_running() {
@@ -561,6 +764,7 @@ run_perf_gates() {
 }
 
 write_environment_report
+write_summary_gate_table_header
 
 case "$MODE" in
   local)
@@ -585,14 +789,25 @@ esac
 
 cat >> "$SUMMARY" <<EOF
 
+## Report Package
+
+- enabled: \`${BETA_REPORT_PACKAGE:-1}\`
+- report_dir: \`$(beta_report_run_dir)\`
+- latest_pointer: \`$(beta_report_root)/latest.txt\`
+
 ## Result
 
 - failures: $FAILURES
 - skips: $SKIPS
 EOF
 
+package_beta_report
+
 echo
 echo "Summary: $SUMMARY"
+if [ "${BETA_REPORT_PACKAGE:-1}" != "0" ]; then
+  echo "Beta report: $(beta_report_run_dir)"
+fi
 if [ "$FAILURES" -ne 0 ]; then
   exit 1
 fi

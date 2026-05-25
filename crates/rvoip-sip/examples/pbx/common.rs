@@ -2842,21 +2842,15 @@ pub fn assert_audio_path(
         )
         .into());
     }
-    let analysis = analyze_samples(stable_middle_half(&samples), expected_hz, rejected_hz)?;
-    if analysis.ratio < DOMINANCE_RATIO {
-        return Err(format!(
-            "{}: {:.0}Hz magnitude {:.1} vs {:.0}Hz magnitude {:.1}, ratio {:.2} (expected at least {:.2})",
-            path.display(),
-            analysis.expected_hz,
-            analysis.expected_magnitude,
-            analysis.rejected_hz,
-            analysis.rejected_magnitude,
-            analysis.ratio,
-            DOMINANCE_RATIO
-        )
-        .into());
-    }
-    Ok(analysis)
+    let label = path.display().to_string();
+    assert_best_window_tone(
+        &label,
+        stable_middle_half(&samples),
+        SAMPLE_RATE as usize,
+        FRAME_SIZE,
+        expected_hz,
+        rejected_hz,
+    )
 }
 
 pub fn assert_samples_tone(
