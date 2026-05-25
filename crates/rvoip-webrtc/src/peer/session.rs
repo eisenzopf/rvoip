@@ -14,13 +14,17 @@ use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
 use webrtc::media_stream::track_local::TrackLocal;
 use webrtc::media_stream::track_remote::TrackRemote;
 use webrtc::peer_connection::PeerConnection;
-use webrtc::peer_connection::{RTCSdpType, RTCSessionDescription};
+use webrtc::peer_connection::{
+    RTCIceCandidate, RTCIceCandidateInit, RTCSdpType, RTCSessionDescription,
+};
 use webrtc::rtp_transceiver::{RtpTransceiver, RTCRtpTransceiverDirection};
 
 use crate::config::WebRtcConfig;
 use crate::errors::{Result, WebRtcError};
-use crate::peer::builder::{self, MIME_TYPE_OPUS, MIME_TYPE_VP8};
-use crate::peer::handler::{ConnectionHandler, HandlerChannels};
+use crate::peer::builder::{
+    self, audio_track_rtcp_feedback, video_track_rtcp_feedback, MIME_TYPE_OPUS, MIME_TYPE_VP8,
+};
+use crate::peer::handler::{ConnectionHandler, HandlerChannels, HandlerDropCounters};
 use crate::peer::ice::IceCandidateLog;
 use crate::sdp::inspect::sdp_has_media_line;
 use crate::sdp::session::{parse_sdp, sdp_to_string};
@@ -29,6 +33,15 @@ use crate::sdp::session::{parse_sdp, sdp_to_string};
 pub enum PeerRole {
     Offerer,
     Answerer,
+}
+
+impl PeerRole {
+    fn name(self) -> &'static str {
+        match self {
+            PeerRole::Offerer => "offerer",
+            PeerRole::Answerer => "answerer",
+        }
+    }
 }
 
 /// One Participant's WebRTC attach — wraps `Arc<dyn PeerConnection>` plus
@@ -44,17 +57,20 @@ pub struct RvoipPeerConnection {
     ice_candidates: IceCandidateLog,
     remote_track_rx: Arc<AsyncMutex<mpsc::Receiver<Arc<dyn TrackRemote>>>>,
     data_channel_rx: Arc<AsyncMutex<mpsc::Receiver<Arc<dyn DataChannel>>>>,
+    local_ice_rx: Arc<AsyncMutex<mpsc::Receiver<RTCIceCandidate>>>,
     local_audio: SyncMutex<Option<Arc<TrackLocalStaticRTP>>>,
     local_audio_ssrc: SyncMutex<Option<u32>>,
     local_video: SyncMutex<Option<Arc<TrackLocalStaticRTP>>>,
     local_video_ssrc: SyncMutex<Option<u32>>,
     gather_timeout: Duration,
+    trickle_ice: bool,
+    drops: Arc<HandlerDropCounters>,
 }
 
 impl RvoipPeerConnection {
     pub async fn new(config: &WebRtcConfig, role: PeerRole) -> Result<Arc<Self>> {
-        let (channels, receivers, connected_flag, failed_flag, ice_candidates) =
-            HandlerChannels::pair(8);
+        let (channels, receivers, connected_flag, failed_flag, ice_candidates, drops) =
+            HandlerChannels::pair(config.handler_channel_capacity);
         let handler = ConnectionHandler::new(channels);
         let pc = builder::build_peer_connection(config, handler).await?;
         let gather_timeout = Duration::from_secs(config.gather_timeout_secs);
@@ -70,16 +86,40 @@ impl RvoipPeerConnection {
             ice_candidates,
             remote_track_rx: Arc::new(AsyncMutex::new(receivers.remote_track)),
             data_channel_rx: Arc::new(AsyncMutex::new(receivers.data_channel)),
+            local_ice_rx: Arc::new(AsyncMutex::new(receivers.local_ice)),
             local_audio: SyncMutex::new(None),
             local_audio_ssrc: SyncMutex::new(None),
             local_video: SyncMutex::new(None),
             local_video_ssrc: SyncMutex::new(None),
             gather_timeout,
+            trickle_ice: config.trickle_ice,
+            drops,
         }))
     }
 
     pub fn role(&self) -> PeerRole {
         self.role
+    }
+
+    /// Drop counters for handler event channels (remote_track, data_channel, state).
+    pub fn handler_drop_counters(&self) -> &HandlerDropCounters {
+        &self.drops
+    }
+
+    fn require_role(&self, expected: PeerRole) -> Result<()> {
+        if self.role != expected {
+            return Err(WebRtcError::WrongRole {
+                expected: expected.name(),
+                actual: self.role.name(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Blocking receive of the next remote track. Returns `None` when the
+    /// underlying channel is closed (peer dropped).
+    pub async fn recv_remote_track(&self) -> Option<Arc<dyn TrackRemote>> {
+        self.remote_track_rx.lock().await.recv().await
     }
 
     pub fn peer_connection(&self) -> &Arc<dyn PeerConnection> {
@@ -102,10 +142,10 @@ impl RvoipPeerConnection {
         Ok(())
     }
 
-    /// Apply a remote trickle ICE candidate (signaling not wired in v1).
+    /// Apply a remote trickle ICE candidate.
     pub async fn add_remote_ice_candidate(
         self: &Arc<Self>,
-        candidate: webrtc::peer_connection::RTCIceCandidateInit,
+        candidate: RTCIceCandidateInit,
     ) -> Result<()> {
         self.pc
             .add_ice_candidate(candidate)
@@ -113,7 +153,44 @@ impl RvoipPeerConnection {
             .map_err(|e| WebRtcError::Webrtc(format!("add_ice_candidate: {e}")))
     }
 
+    /// Try to receive the next locally-gathered ICE candidate (non-blocking).
+    /// Used by trickle signalers to forward outbound candidates to the remote.
+    pub async fn try_recv_local_ice(&self) -> Option<RTCIceCandidate> {
+        self.local_ice_rx.lock().await.try_recv().ok()
+    }
+
+    /// Receive the next locally-gathered ICE candidate; awaits until one
+    /// arrives or the channel closes (peer dropped).
+    pub async fn recv_local_ice(&self) -> Option<RTCIceCandidate> {
+        self.local_ice_rx.lock().await.recv().await
+    }
+
+    /// Drain all currently-buffered local ICE candidates without blocking.
+    /// Helpful right after `create_offer_and_gather` in trickle mode for the
+    /// first batch.
+    pub async fn drain_local_ice(&self) -> Vec<RTCIceCandidate> {
+        let mut out = Vec::new();
+        let mut rx = self.local_ice_rx.lock().await;
+        while let Ok(c) = rx.try_recv() {
+            out.push(c);
+        }
+        out
+    }
+
+    /// Ask webrtc-rs to restart ICE (fresh ufrag/pwd on the next offer).
+    pub async fn restart_ice(self: &Arc<Self>) -> Result<()> {
+        self.pc
+            .restart_ice()
+            .await
+            .map_err(|e| WebRtcError::Webrtc(format!("restart_ice: {e}")))
+    }
+
     async fn wait_gather(&self) -> Result<()> {
+        if self.trickle_ice {
+            // Trickle mode: return immediately; candidates will arrive via
+            // [`Self::recv_local_ice`] for the signaler to forward.
+            return Ok(());
+        }
         let mut rx = self.gather_rx.lock().await;
         tokio::time::timeout(self.gather_timeout, rx.recv())
             .await
@@ -122,7 +199,24 @@ impl RvoipPeerConnection {
         Ok(())
     }
 
+    /// Returns true if this peer is in trickle mode.
+    pub fn is_trickle(&self) -> bool {
+        self.trickle_ice
+    }
+
     /// Add a local Opus audio track (required before offer/answer for media).
+    ///
+    /// G7 (deferred): a future change should advertise both Opus (PT 111)
+    /// and the RFC 4733 telephone-event codec (PT 101) on the same
+    /// transceiver so DTMF generated via [`crate::media::dtmf::send_dtmf`]
+    /// survives SRTP filtering on the remote side. The naive two-encoding
+    /// approach (one per codec on the same SSRC) breaks the inbound RTP
+    /// round-trip in webrtc-rs 0.20-alpha — the receiver picks the second
+    /// encoding's codec for inbound packets even when the wire PT matches
+    /// the first. The proper fix needs a separate sender per codec on the
+    /// same transceiver (mirroring the JS `transceiver.sender.setParameters`
+    /// surface), which 0.20-alpha doesn't yet expose. See
+    /// [`tests/dtmf_wire.rs`] for the test that this unblocks.
     pub async fn add_local_audio_track(self: &Arc<Self>) -> Result<()> {
         if self.local_audio.lock().is_some() {
             return Ok(());
@@ -133,7 +227,7 @@ impl RvoipPeerConnection {
             clock_rate: 48000,
             channels: 2,
             sdp_fmtp_line: "minptime=10;useinbandfec=1".into(),
-            rtcp_feedback: vec![],
+            rtcp_feedback: audio_track_rtcp_feedback(),
         };
         let ssrc = rand_ssrc();
         let track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
@@ -180,7 +274,7 @@ impl RvoipPeerConnection {
             clock_rate: 90000,
             channels: 0,
             sdp_fmtp_line: String::new(),
-            rtcp_feedback: vec![],
+            rtcp_feedback: video_track_rtcp_feedback(),
         };
         let ssrc = rand_ssrc();
         let track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
@@ -216,11 +310,34 @@ impl RvoipPeerConnection {
     }
 
     /// Create a labeled SCTP data channel (must be called before offer for offerer).
-    pub async fn create_data_channel(self: &Arc<Self>, label: &str) -> Result<Arc<dyn DataChannel>> {
+    ///
+    /// `opts` controls reliability/ordering/protocol per RFC 8832 §5.1 — see
+    /// [`DataChannelOptions`](crate::peer::DataChannelOptions) for the
+    /// available knobs (use `DataChannelOptions::reliable()` to match the
+    /// previous default behavior).
+    pub async fn create_data_channel(
+        self: &Arc<Self>,
+        label: &str,
+        opts: crate::peer::DataChannelOptions,
+    ) -> Result<Arc<dyn DataChannel>> {
+        opts.validate()?;
         self.pc
-            .create_data_channel(label, None)
+            .create_data_channel(label, Some(opts.to_rtc_init()))
             .await
             .map_err(|e| WebRtcError::Webrtc(format!("create_data_channel: {e}")))
+    }
+
+    /// Create a labeled SCTP data channel and return the typed
+    /// [`RvoipDataChannel`](crate::peer::RvoipDataChannel) wrapper. Use this
+    /// in new code; the raw [`Self::create_data_channel`] is preserved for
+    /// callers that need the bare trait object.
+    pub async fn create_data_channel_typed(
+        self: &Arc<Self>,
+        label: &str,
+        opts: crate::peer::DataChannelOptions,
+    ) -> Result<crate::peer::RvoipDataChannel> {
+        let dc = self.create_data_channel(label, opts).await?;
+        Ok(crate::peer::RvoipDataChannel::new(dc, label.to_string()))
     }
 
     pub async fn try_recv_data_channel(&self) -> Option<Arc<dyn DataChannel>> {
@@ -315,7 +432,7 @@ impl RvoipPeerConnection {
 
     /// Offerer: create offer, set local description, wait for ICE, return SDP string.
     pub async fn create_offer_and_gather(self: &Arc<Self>) -> Result<String> {
-        assert_eq!(self.role, PeerRole::Offerer);
+        self.require_role(PeerRole::Offerer)?;
 
         if self.local_audio.lock().is_none() && self.local_video.lock().is_none() {
             self.add_local_audio_track().await?;
@@ -336,7 +453,7 @@ impl RvoipPeerConnection {
 
     /// Answerer: apply remote offer SDP without creating the answer yet.
     pub async fn apply_remote_offer(self: &Arc<Self>, remote_sdp: &str) -> Result<()> {
-        assert_eq!(self.role, PeerRole::Answerer);
+        self.require_role(PeerRole::Answerer)?;
 
         self.prepare_answerer_media_for_offer(remote_sdp).await?;
 
@@ -347,7 +464,7 @@ impl RvoipPeerConnection {
 
     /// Answerer: create answer, gather ICE, return SDP (after [`Self::apply_remote_offer`]).
     pub async fn create_answer_and_gather(self: &Arc<Self>) -> Result<String> {
-        assert_eq!(self.role, PeerRole::Answerer);
+        self.require_role(PeerRole::Answerer)?;
 
         let answer = self.pc.create_answer(None).await?;
         self.pc.set_local_description(answer).await?;
@@ -370,7 +487,7 @@ impl RvoipPeerConnection {
 
     /// Answerer: ICE restart / renegotiation — new remote offer → fresh answer SDP.
     pub async fn renegotiate_as_answerer(self: &Arc<Self>, remote_sdp: &str) -> Result<String> {
-        assert_eq!(self.role, PeerRole::Answerer);
+        self.require_role(PeerRole::Answerer)?;
 
         let remote = parse_sdp(remote_sdp, RTCSdpType::Offer)?;
         self.pc.set_remote_description(remote).await?;
@@ -389,7 +506,7 @@ impl RvoipPeerConnection {
 
     /// Offerer: ICE restart — create a fresh offer SDP after the session is up.
     pub async fn renegotiate_as_offerer(self: &Arc<Self>) -> Result<String> {
-        assert_eq!(self.role, PeerRole::Offerer);
+        self.require_role(PeerRole::Offerer)?;
 
         let offer = self.pc.create_offer(None).await?;
         self.pc.set_local_description(offer).await?;
@@ -408,6 +525,43 @@ impl RvoipPeerConnection {
     pub async fn set_remote_answer(self: &Arc<Self>, remote_sdp: &str) -> Result<()> {
         let remote = parse_sdp(remote_sdp, RTCSdpType::Answer)?;
         self.pc.set_remote_description(remote).await?;
+        Ok(())
+    }
+
+    /// G3 — true when the underlying peer connection has no pending local or
+    /// remote description (W3C "stable" signaling state). Used by the
+    /// perfect-negotiation helper to decide whether an incoming offer
+    /// collides with our own pending offer.
+    pub async fn signaling_is_stable(&self) -> bool {
+        self.pc.pending_local_description().await.is_none()
+            && self.pc.pending_remote_description().await.is_none()
+    }
+
+    /// G11 — SDP rollback (JSEP §4.1.10.2).
+    ///
+    /// Used by the perfect-negotiation pattern to undo an unfinished local
+    /// offer when a competing remote offer arrives. Calls
+    /// `setLocalDescription({ type: "rollback" })` on the underlying
+    /// webrtc-rs peer connection. Returns `Err(InvalidState)` if the
+    /// signaling state is `stable` (nothing to rollback).
+    pub async fn rollback_local(self: &Arc<Self>) -> Result<()> {
+        let rollback = rtc::peer_connection::sdp::RTCSessionDescription::rollback(None)
+            .map_err(|e| WebRtcError::Webrtc(format!("build rollback: {e}")))?;
+        self.pc
+            .set_local_description(rollback)
+            .await
+            .map_err(|e| {
+                // Translate the "already stable" error into our typed variant.
+                let msg = e.to_string();
+                if msg.contains("InvalidModificationError")
+                    || msg.contains("InvalidState")
+                    || msg.contains("stable")
+                {
+                    WebRtcError::InvalidState("rollback called in stable signaling state")
+                } else {
+                    WebRtcError::Webrtc(format!("rollback: {e}"))
+                }
+            })?;
         Ok(())
     }
 

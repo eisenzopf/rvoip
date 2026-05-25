@@ -1,0 +1,64 @@
+# G8 — nightly browser-interop workflow template.
+#
+# This file is a TEMPLATE — copy it to `.github/workflows/nightly-interop.yml`
+# at the repo root to activate. The interop test is `#[ignore]`'d by default
+# because it requires a Chromium binary on PATH and a working WebRTC stack.
+#
+# What it does:
+#   1. Installs Chromium on the runner.
+#   2. Builds the crate with `interop-browser` + `signaling-whip,signaling-ws`.
+#   3. Runs `tests/browser_interop.rs --include-ignored` (the headless
+#      Chromium harness from H6 follow-up #43).
+#   4. Optionally posts to a Slack webhook on failure (set
+#      `secrets.NIGHTLY_INTEROP_WEBHOOK`).
+#
+# Why nightly rather than per-PR:
+#   - Chromium install + launch is heavy (~3 min cold).
+#   - WebRTC interop is most useful as a trend signal, not a per-PR gate.
+#
+# Manually trigger from the Actions UI any time.
+
+name: nightly-interop
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  interop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+      - name: Install Chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser
+      - name: Build interop tests
+        run: |
+          cargo test -p rvoip-webrtc \
+            --features interop-browser,signaling-whip,signaling-ws \
+            --test browser_interop \
+            --no-run
+      - name: Run interop tests
+        env:
+          RUST_BACKTRACE: 1
+        run: |
+          cargo test -p rvoip-webrtc \
+            --features interop-browser,signaling-whip,signaling-ws \
+            --test browser_interop \
+            -- --include-ignored --nocapture
+      # Optional — post a Slack message on failure if a webhook secret exists.
+      - name: Notify Slack on failure
+        if: failure() && env.WEBHOOK != ''
+        env:
+          WEBHOOK: ${{ secrets.NIGHTLY_INTEROP_WEBHOOK }}
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"rvoip-webrtc nightly interop failed on ${{ github.ref }} (commit ${{ github.sha }})\"}" \
+            "$WEBHOOK"

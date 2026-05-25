@@ -219,7 +219,7 @@ pub async fn prepare_offer_media(
             peer.add_local_video_track().await?;
         }
     }
-    peer.create_data_channel(DC_LABEL).await
+    peer.create_data_channel(DC_LABEL, crate::peer::DataChannelOptions::reliable()).await
 }
 
 /// Server-side handlers for comprehensive demo: DC echo + bidirectional fixture media.
@@ -231,6 +231,14 @@ pub async fn handle_server_connection(
         return;
     };
     let peer = route.peer.clone();
+    // IMPORTANT: drop the DashMap read guard before `await`ing on the peer.
+    // Holding a DashMap ref across await points can deadlock with any task
+    // that wants a write lock (notably `WebRtcAdapter::end` / the session
+    // reaper) on the same shard. This was the root cause of the H4
+    // comprehensive-test hang — the original `let Some(route) = ...` binding
+    // held its guard through every `wait_connected` / `wait_data_channel` /
+    // `poll_data_channel` await, blocking writers indefinitely.
+    drop(route);
 
     if peer.wait_connected(Duration::from_secs(15)).await.is_err() {
         return;

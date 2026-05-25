@@ -15,8 +15,11 @@ use rvoip_webrtc::{IceServerConfig, WebRtcAdapter, WebRtcConfig};
 #[test]
 fn feature_support_defaults_document_gaps() {
     let features = WebRtcFeatureSupport::default();
-    assert!(!features.trickle_ice_signaling, "trickle ICE signaling is deferred");
-    assert!(!features.simulcast, "simulcast is deferred");
+    assert!(
+        features.trickle_ice_signaling,
+        "trickle ICE on WS / WHIP PATCH is supported as of H2"
+    );
+    assert!(!features.simulcast, "simulcast is deferred to H3");
     assert!(!features.turn_relay_server, "hosted TURN is out of scope");
 }
 
@@ -61,16 +64,26 @@ async fn loopback_sdp_uses_full_gather_not_simulcast() {
 }
 
 #[tokio::test]
-async fn ws_signaler_send_ice_is_noop_gap() {
+async fn ws_signaler_send_ice_is_wired_post_h5() {
+    // Pre-H5 `send_ice` was a no-op (full-gather only). H5 wired it to a real
+    // WS roundtrip — so against a closed port it must now surface a connect
+    // error rather than silently succeed.
     let signaler = WsSignaler::new("ws://127.0.0.1:1");
-    let result = signaler
+    let err = signaler
         .send_ice(&IceCandidate(r#"{"candidate":"..."}"#.into()))
-        .await;
-    assert!(result.is_ok(), "v1 uses full SDP gather; send_ice is intentionally inert");
+        .await
+        .expect_err("send_ice should attempt a real WS connect post-H5");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("connect") || msg.contains("signaling"),
+        "diagnostic must mention the failed connect; got: {msg}"
+    );
 }
 
 #[tokio::test]
-async fn ws_ice_candidate_message_not_implemented() {
+async fn ws_ice_candidate_for_unknown_connection_id_errors() {
+    // Trickle is now accepted; sending one for a non-existent route should be
+    // rejected (and close the WS) rather than being silently dropped.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let adapter = WebRtcAdapter::new(WebRtcConfig::loopback());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -90,8 +103,8 @@ async fn ws_ice_candidate_message_not_implemented() {
         serde_json::to_string(&SignalingMessage {
             msg_type: "ice-candidate".into(),
             sdp: String::new(),
-            connection_id: "conn-1".into(),
-            candidate: r#"{"candidate":"candidate:1 1 UDP 2130706431 127.0.0.1 9 typ host"}"#
+            connection_id: "conn-does-not-exist".into(),
+            candidate: r#"{"candidate":"candidate:1 1 UDP 2130706431 127.0.0.1 9 typ host","sdpMid":"0","sdpMLineIndex":0}"#
                 .into(),
         })
         .unwrap()
@@ -105,7 +118,10 @@ async fn ws_ice_candidate_message_not_implemented() {
         .expect("timeout");
     match next {
         None | Some(Err(_)) => {}
-        Some(Ok(msg)) => assert!(msg.is_close(), "server should close after unsupported ice-candidate"),
+        Some(Ok(msg)) => assert!(
+            msg.is_close(),
+            "server should close after applying candidate to unknown route"
+        ),
     }
 
     server.abort();

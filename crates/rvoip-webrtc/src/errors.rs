@@ -25,8 +25,32 @@ pub enum WebRtcError {
     #[error("incompatible capabilities")]
     IncompatibleCapabilities,
 
+    #[error("wrong peer role: expected {expected}, got {actual}")]
+    WrongRole {
+        expected: &'static str,
+        actual: &'static str,
+    },
+
+    #[error("subscribe_events already taken; only one subscriber is supported")]
+    AlreadySubscribed,
+
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
+
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
+    #[error("precondition failed: {0}")]
+    PreconditionFailed(String),
+
+    #[error("invalid state: {0}")]
+    InvalidState(&'static str),
+
+    #[error("DTLS fingerprint not in pinned list")]
+    FingerprintNotPinned,
 }
 
 impl From<webrtc::error::Error> for WebRtcError {

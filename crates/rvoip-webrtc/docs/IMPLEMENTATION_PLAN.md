@@ -412,7 +412,7 @@ media, with optional frame pass-through verification.
 
 ---
 
-## 8.3 Phase status (integration — complete through Phase 10)
+## 8.3 Phase status (integration — complete through Phase 11)
 
 | Phase | Status | Notes |
 |-------|--------|-------|
@@ -422,6 +422,34 @@ media, with optional frame pass-through verification.
 | 9 orchestrator E2E | ✅ | WHIP → orchestrator; mock QUIC bridge demo |
 | 10 hardening | ✅ | DTMF, stats, loopback RTP, transfer stub |
 | 11 real QUIC bridge | ✅ | `bridge-quic` feature, `webrtc_quic_bridge_e2e`, demo binary |
+
+## 8.4 Production-hardening phases (H1–H7) — complete
+
+A full audit after the original phases shipped (see [HARDENING_PLAN.md](HARDENING_PLAN.md))
+identified that the v1 spike was **demo-grade** rather than production-grade:
+panics on benign inputs, silent event drops, missing trickle ICE, no real
+client surfaces, no metrics/CORS/rate-limit, etc. H1–H7 closed every gap.
+
+| Phase | Status | Headline deliverables |
+|-------|--------|------------------------|
+| H1 correctness baseline | ✅ | No panics on any externally-reachable path; bounded handler channels; race-free `on_track` attach; typed [`WebRtcTransportHandle`](../src/adapter.rs); session reaper; `clippy::unwrap_used`/`expect_used` denied outside tests |
+| H2 trickle ICE + renegotiation | ✅ | WS `{type:"ice-candidate"}` JSON + WHIP `PATCH application/trickle-ice-sdpfrag` (RFC 8840); per-route local-candidate forwarder; `WebRtcConfig::trickle_ice`; `restart_ice()`; hold/resume via SDP renegotiation |
+| H3 RTCP + codecs + stats | ✅ | NACK / NACK+PLI / CCM+FIR / REMB / TWCC feedback on all video codecs + Opus; H.264 (constrained-baseline `42e01f`) + VP9 (profile-id 0); typed [`WebRtcStatsSnapshot`](../src/media/pump.rs) with packets/bytes/loss/jitter/MOS estimate |
+| H4 server hardening | ✅ | WHIP RFC 9725 compliance (`Content-Type` enforcement, `ETag`, `Accept-Patch`, `Link: rel=ice-server`); CORS layer; `/healthz` + `/readyz` + Prometheus `/metrics`; in-memory `WebRtcMetrics`; per-IP token-bucket rate limit (429); race-free session cap via atomic [`SessionSlotGuard`](../src/adapter.rs) (503 over cap); WS server-driven keepalive ping + bounded message size; `WebRtcServer::shutdown_with_deadline`; [`turn_rest::generate_ephemeral`](../src/turn_rest.rs) helper (HMAC-SHA256 ephemeral credentials) |
+| H5 real `WebRtcClient` | ✅ | `WsSignaler::send_answer` (answerer flow with `connection_id` scoping); `WsSignaler::send_ice` (real trickle, scope helper `send_ice_for`); [`WsSignalerConfig`](../src/client/ws_signaler.rs) with exponential-backoff connect retry; `SessionHandle::close()` + best-effort `Drop` via `Arc` strong-count; [`AudioSource`/`AudioSink`](../src/client/media_source.rs) + `FixtureAudioSource` + `NullAudioSink` + `CountingAudioSink` + `run_audio` pump bridge with paced/unpaced mode |
+| H6 interop + load (pragmatic slice) | ✅ | 50-session concurrent WHIP load test; recorded-Chromium SDP interop fixture; open/close lifecycle no-panic loop; static browser demo pages + [`tests/browser_interop.rs`](../tests/browser_interop.rs) headless-Chromium harness; [`tests/sip_webrtc_bridge.rs`](../tests/sip_webrtc_bridge.rs) SIP+WebRTC adapter coexistence; `WebRtcConfig::ice_transport_policy: { All, Relay }` for TURN-only mode; [`tests/soak_long.rs`](../tests/soak_long.rs) leak-detecting soak (1-hour run validated: 9 701 cycles / 48 505 peer pairs / `num_alive_tasks` stays at baseline throughout) |
+| H7 identity + observability | ✅ | Prometheus text-format exporter ([`src/observability.rs`](../src/observability.rs)); `WebRtcConfig::mdns_candidate_policy: { Drop, Pass }` filter for RFC 8839 `.local` candidates; `#[instrument]` spans on every public adapter entry point; DTLS-SRTP fingerprint extraction via [`adapter.remote_dtls_fingerprint()`](../src/adapter.rs) + [`identity::DtlsFingerprint`](../src/identity.rs); in-process TLS termination via [`WebRtcServerBuilder::with_whips`/`with_wss`](../src/server.rs) (feature `tls-rustls`, `axum-server` + `tokio-rustls`) |
+
+**Bug squashed during H6:** the comprehensive client/server tests hung after
+H4 changes — root cause was [`handle_server_connection`](../src/client/comprehensive.rs)
+holding a `DashMap::Ref` across multiple `.await` points. Fix: `drop(route)`
+right after `let peer = route.peer.clone();`. See HARDENING_PLAN.md for the
+14-hypothesis bisect trail and post-mortem.
+
+**Test footprint after all phases:** 33 integration test files, ~90 integration
+tests + 12 lib unit tests, all green; 2 documented `#[ignore]`'d tests
+(DTMF wire test needs multi-codec audio transceiver; browser interop needs
+Chromium binary on `PATH`).
 
 ---
 
@@ -439,15 +467,18 @@ No changes to existing workspace integration tests (`rvoip-quic/tests`, etc.) in
 
 ---
 
-## 10. Explicitly deferred (document, do not implement)
+## 10. Originally-deferred items — status after H1–H7
 
-- Video / simulcast / SVC (INTERFACE_DESIGN §20.2 — audio-only v1)
-- Trickle ICE (`connection.ice-candidate` envelope — UCTP v1)
-- Multi-party / SFU (PRD §5 — 1:1 bridges only)
-- DTLS-SRTP fingerprint binding to Identity (INTERFACE_DESIGN §8.4 — feature-flagged elsewhere)
-- vCon emission (adapter emits events; vCon builder lives in rvoip-core)
-- Standalone TURN relay server (use external TURN; configure via `WebRtcConfig::ice_servers`)
-- Generic WebRTC media server without orchestrator/bridge path (SFU/MCU semantics)
+| Original deferral | Current status |
+|---|---|
+| Video (VP8) | ✅ Shipped in v1 |
+| Trickle ICE | ✅ H2 — full bidirectional WS + WHIP PATCH per RFC 8840 |
+| DTLS-SRTP fingerprint binding to Identity | ⚠ Partial — H7 extracts fingerprints via `adapter.remote_dtls_fingerprint()`; full `IdentityAssurance::DtlsFingerprint` variant blocked on rvoip-core (see §14) |
+| Simulcast / SVC | ⛔ Still deferred — single-encoding video only |
+| Multi-party / SFU | ⛔ Still deferred — 1:1 bridges only |
+| vCon emission | ⛔ Out of crate scope (lives in rvoip-core) |
+| Standalone TURN relay server | ⛔ Out of crate scope; H4 ships `turn_rest::generate_ephemeral` for external coturn integration |
+| Generic SFU/MCU media server | ⛔ Out of crate scope |
 
 ---
 
@@ -471,6 +502,19 @@ No changes to existing workspace integration tests (`rvoip-quic/tests`, etc.) in
 11. WebSocket signaler routes `{type:"answer"}` to the correct outbound `ConnectionId` ✅
 12. **Real cross-transport bridge:** WHIP WebRTC leg bridged to `rvoip-quic` UCTP leg (not mock) ✅
 
+### Production hardening (H1–H7)
+
+13. No panic on any externally-reachable path (lint-enforced; verified by stress test) ✅
+14. Trickle ICE end-to-end (WS + WHIP `PATCH application/trickle-ice-sdpfrag`) ✅
+15. RTCP feedback (NACK/PLI/FIR/REMB/TWCC) advertised on all video codecs + Opus ✅
+16. H.264 + VP9 codec offerings (Safari + SBC interop) ✅
+17. WHIP RFC 9725 surface compliance (headers, content-type validation, error codes) ✅
+18. Operational surface: `/healthz`, `/readyz`, `/metrics` (Prometheus), CORS, per-IP rate limit, atomic session cap, graceful drain, TURN REST helper ✅
+19. Client surfaces: `WsSignaler` answerer flow, exponential-backoff retry, `SessionHandle::close()`+`Drop`, `AudioSource`/`AudioSink` trait surface ✅
+20. Identity introspection: `WebRtcAdapter::remote_dtls_fingerprint()` extracts negotiated peer fingerprints ✅
+21. In-process TLS termination via `WebRtcServerBuilder::with_whips`/`with_wss` (feature `tls-rustls`) ✅
+22. 1-hour soak passes with zero task leaks (`tests/soak_long.rs`, `SOAK_SECS=3600`) ✅
+
 ---
 
 ## 12. Future integration note — `rvoip-websocket` (Phase 7)
@@ -486,3 +530,39 @@ use rvoip_webrtc::WebRtcConfig;
 ```
 
 The bridge owns one `Arc<RvoipPeerConnection>` per UCTP Connection. Signaling stays in `rvoip-websocket` (UCTP envelopes over WS text frames); ICE/DTLS-SRTP/media stays in `rvoip-webrtc`. That split preserves the dual-role design: **server surfaces** for foreign peers (WHIP/WS/interop) and **embedded peers** for UCTP substrate connections both use the same peer/media implementation.
+
+---
+
+## 13. Remaining work
+
+Everything below is *either* upstream-blocked (rvoip-core API additions) or
+*opt-in* user-side work. None of it blocks production deployment of the
+current crate.
+
+### 13.1 Upstream rvoip-core
+
+| Item | Blocks | Workaround today |
+|---|---|---|
+| `IdentityAssurance::DtlsFingerprint` variant on the enum | `verify_request_signature` returning a real assurance instead of `Anonymous` | Call [`adapter.remote_dtls_fingerprint(conn)`](../src/adapter.rs) directly; pin/verify out of band |
+| Full `Orchestrator::bridge_connections` for SIP transport | Real-media SIP↔WebRTC gateway test ([`tests/sip_webrtc_bridge.rs`](../tests/sip_webrtc_bridge.rs) is wiring-only today) | Use `rvoip-uctp/examples/uctp_to_sip_bridge` pattern; document at the orchestrator layer |
+
+### 13.2 Optional crate-local follow-ups
+
+| Item | Effort | Notes |
+|---|---|---|
+| `client-cpal` feature — microphone backend | Small | Plug `cpal::Stream` into the H5 [`AudioSource`/`AudioSink`](../src/client/media_source.rs) trait surface; mostly cross-platform glue |
+| H.265 / AV1 video codecs | Small | Add to [`build_media_engine`](../src/peer/builder.rs) when webrtc-rs lands them; depacketizer support TBD |
+| Multi-codec audio transceiver | Small | Register both Opus and `telephone-event` payload types on a single `add_local_audio_track` call — unblocks the `dtmf_wire::send_dtmf_emits_rfc4733_telephone_events` test |
+| Headless-Chromium binary install in CI | Medium | The `interop-browser` test is wired; needs `apt install chromium` / equivalent in the CI image to drop `#[ignore]` |
+| Real coturn integration test | Medium | TURN-only ICE policy ships in H6; relay-path E2E needs a `coturn` container fixture |
+| Simulcast / SVC sender support | Large | Architectural change to `media::pump`; requires per-encoding rate control |
+| Hosted TURN relay server | Out of scope | Use external coturn; configure via `WebRtcConfig::ice_servers` + `turn_rest::generate_ephemeral` |
+| SFU/MCU semantics | Out of scope | This crate is the 1:1 gateway/server adapter, not a media server |
+
+### 13.3 Documentation deliverables
+
+- ✅ [`docs/IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) — this file
+- ✅ [`docs/HARDENING_PLAN.md`](HARDENING_PLAN.md) — H1–H7 detailed status + the `drop(route)` bisect post-mortem
+- ✅ [`CHANGELOG.md`](../CHANGELOG.md) — full release notes for the H1–H7 arc
+- ✅ [`README.md`](../README.md) — features, examples, deployment guidance
+- ✅ [`static/README.md`](../static/README.md) — browser demo pages runbook

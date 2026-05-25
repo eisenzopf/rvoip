@@ -9,7 +9,7 @@ pub use fixtures::{
     OPUS_FIXTURE_PAYLOAD, VP8_KEYFRAME_FIXTURE_PAYLOAD,
 };
 pub use pump::{
-    silent_rtp_packet, silent_rtp_payload, silent_rtp_payload_for_ssrc, InboundStats,
-    FRAME_CHANNEL_CAP,
+    silent_rtp_packet, silent_rtp_payload, silent_rtp_payload_for_ssrc, CandidatePairStats,
+    InboundStats, OutboundStats, WebRtcStatsSnapshot, FRAME_CHANNEL_CAP,
 };
 pub use stream::{from_tracks, WebRtcMediaStream};

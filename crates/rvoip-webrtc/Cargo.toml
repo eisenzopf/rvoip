@@ -14,10 +14,17 @@ description = "rvoip-core WebRTC interop adapter built on webrtc-rs 0.20.0-alpha
 
 [features]
 default = []
-signaling-whip = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http"]
-signaling-ws = ["dep:tokio-tungstenite"]
+signaling-whip = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http", "dep:serde_json"]
+signaling-ws = ["dep:tokio-tungstenite", "dep:serde_json"]
 client = []
 comprehensive = ["client", "signaling-ws", "dep:serde_json"]
+tls-rustls = ["dep:axum-server", "dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile"]
+# Headless-Chromium driven interop test (dev-only; needs Chromium binary on PATH).
+interop-browser = ["signaling-whip", "signaling-ws", "dep:chromiumoxide"]
+# Long-running soak test (default 60s; set SOAK_SECS=3600 for the full 1h run).
+# Asserts tokio task count returns to baseline after sustained churn — catches
+# task leaks that the regular test suite doesn't have time to surface.
+soak-1h = []
 bridge-quic = [
     "signaling-whip",
     "dep:rvoip-quic",
@@ -45,6 +52,9 @@ tracing.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 url = "2"
+hmac = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
 
 rvoip-quic = { workspace = true, optional = true }
 rvoip-uctp = { workspace = true, optional = true }
@@ -55,14 +65,18 @@ rustls = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 hyper = { version = "1", optional = true }
 tower = { version = "0.5", optional = true }
-tower-http = { version = "0.6", features = ["trace"], optional = true }
+tower-http = { version = "0.6", features = ["trace", "cors"], optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
+axum-server = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
+chromiumoxide = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-tokio-tungstenite = { workspace = true }
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 rustls.workspace = true
 rvoip-quic.workspace = true
 rvoip-uctp.workspace = true
@@ -70,6 +84,9 @@ rvoip-auth-core.workspace = true
 quinn.workspace = true
 parking_lot.workspace = true
 serde_json.workspace = true
+rcgen.workspace = true
+rvoip-sip = { workspace = true }
+rand = { workspace = true }
 
 [[test]]
 name = "webrtc_bridge_e2e"
@@ -94,6 +111,110 @@ required-features = ["bridge-quic"]
 [[test]]
 name = "ws_dc_comprehensive"
 required-features = ["comprehensive"]
+
+[[test]]
+name = "ws_trickle_ice"
+required-features = ["signaling-ws"]
+
+[[test]]
+name = "whip_trickle_patch"
+required-features = ["signaling-whip"]
+
+[[test]]
+name = "ice_restart_and_hold"
+required-features = ["signaling-whip"]
+
+[[test]]
+name = "dtmf_wire"
+required-features = []
+
+[[test]]
+name = "sdp_codec_feedback"
+required-features = []
+
+[[test]]
+name = "whip_compliance"
+required-features = ["signaling-whip"]
+
+[[test]]
+name = "whip_auth"
+required-features = ["signaling-whip"]
+
+[[test]]
+name = "ws_auth"
+required-features = ["signaling-ws"]
+
+[[test]]
+name = "server_graceful_shutdown"
+required-features = ["signaling-whip"]
+
+[[test]]
+name = "client_h5"
+required-features = ["comprehensive"]
+
+[[test]]
+name = "whip_load"
+required-features = ["signaling-whip"]
+
+[[test]]
+name = "browser_sdp_interop"
+required-features = ["signaling-whip"]
+
+[[test]]
+name = "dc_soak"
+required-features = []
+
+[[test]]
+name = "dc_options"
+required-features = []
+
+[[test]]
+name = "dc_backpressure"
+required-features = []
+
+[[test]]
+name = "rollback"
+required-features = []
+
+[[test]]
+name = "g12_ops_tail"
+required-features = []
+
+[[test]]
+name = "perfect_negotiation"
+required-features = ["comprehensive"]
+
+[[test]]
+name = "lossy_link"
+required-features = []
+
+[[test]]
+name = "turn_relay_e2e"
+required-features = []
+
+[[test]]
+name = "h7_observability"
+required-features = ["signaling-whip"]
+
+[[test]]
+name = "tls_termination"
+required-features = ["tls-rustls", "signaling-whip", "signaling-ws"]
+
+[[test]]
+name = "turn_relay"
+required-features = []
+
+[[test]]
+name = "sip_webrtc_bridge"
+required-features = ["signaling-whip"]
+
+[[test]]
+name = "browser_interop"
+required-features = ["interop-browser"]
+
+[[test]]
+name = "soak_long"
+required-features = ["soak-1h"]
 
 [[test]]
 name = "dc_loopback"

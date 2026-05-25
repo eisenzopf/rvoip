@@ -1,11 +1,11 @@
 //! `MediaStream` implementation over webrtc-rs tracks.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
 use webrtc::media_stream::track_remote::TrackRemote;
@@ -16,7 +16,10 @@ use rvoip_core::error::Result as RvoipResult;
 use rvoip_core::ids::StreamId;
 use rvoip_core::stream::{MediaStream, QualitySnapshot, StreamKind};
 
-use crate::media::pump::{spawn_inbound_pump, spawn_outbound_pump, InboundStats, FRAME_CHANNEL_CAP};
+use crate::media::pump::{
+    spawn_inbound_pump, spawn_outbound_pump, InboundStats, WebRtcStatsSnapshot,
+    DEFAULT_INBOUND_SEND_DEADLINE_MS, FRAME_CHANNEL_CAP,
+};
 use crate::media::stats::spawn_webrtc_stats_collector;
 
 struct WebRtcMediaStreamInner {
@@ -29,6 +32,10 @@ struct WebRtcMediaStreamInner {
     pumps: Mutex<Vec<JoinHandle<()>>>,
     remote_attached: AtomicBool,
     inbound_stats: Arc<InboundStats>,
+    /// Local cancel used to stop owned pump tasks on `close()`. The adapter may
+    /// also pass a route-level Notify into `enable_webrtc_stats` for global cancel.
+    cancel: Arc<Notify>,
+    send_deadline_ms: u64,
 }
 
 /// Concrete media stream — supports late remote-track attachment.
@@ -53,17 +60,31 @@ impl WebRtcMediaStream {
             self.inner.id.clone(),
             self.inner.frames_in_tx.clone(),
             Arc::clone(&self.inner.inbound_stats),
+            self.inner.send_deadline_ms,
+            Some(Arc::clone(&self.inner.cancel)),
         );
         self.inner.pumps.lock().push(handle);
     }
 
     /// Poll webrtc-rs `get_stats` in the background to enrich [`QualitySnapshot`].
-    pub fn enable_webrtc_stats(&self, peer: Arc<dyn webrtc::peer_connection::PeerConnection>) {
+    /// `cancel` is honored so the loop exits cleanly when the route is closed.
+    pub fn enable_webrtc_stats(
+        &self,
+        peer: Arc<dyn webrtc::peer_connection::PeerConnection>,
+        cancel: Arc<Notify>,
+    ) {
         let handle = spawn_webrtc_stats_collector(
             Arc::clone(&self.inner.inbound_stats),
             peer,
+            cancel,
         );
         self.inner.pumps.lock().push(handle);
+    }
+
+    /// Typed inbound RTP stats snapshot (packets/bytes/loss/jitter/MOS).
+    /// Richer than the core `QualitySnapshot` returned by `quality_snapshot()`.
+    pub fn webrtc_stats_snapshot(&self) -> WebRtcStatsSnapshot {
+        self.inner.inbound_stats.webrtc_snapshot()
     }
 }
 
@@ -77,6 +98,8 @@ pub fn from_tracks(
     let (frames_in_tx, frames_in_rx) = mpsc::channel(FRAME_CHANNEL_CAP);
     let (frames_out_tx, frames_out_rx) = mpsc::channel(FRAME_CHANNEL_CAP);
     let inbound_stats = Arc::new(InboundStats::default());
+    let cancel = Arc::new(Notify::new());
+    let send_deadline_ms = DEFAULT_INBOUND_SEND_DEADLINE_MS;
 
     let mut pumps = Vec::new();
     pumps.push(spawn_outbound_pump(local, frames_out_rx));
@@ -88,6 +111,8 @@ pub fn from_tracks(
             id.clone(),
             frames_in_tx.clone(),
             Arc::clone(&inbound_stats),
+            send_deadline_ms,
+            Some(Arc::clone(&cancel)),
         ));
         remote_attached.store(true, Ordering::SeqCst);
     }
@@ -103,6 +128,8 @@ pub fn from_tracks(
             pumps: Mutex::new(pumps),
             remote_attached,
             inbound_stats,
+            cancel,
+            send_deadline_ms,
         }),
     })
 }
@@ -142,6 +169,9 @@ impl MediaStream for WebRtcMediaStream {
     }
 
     async fn close(self: Arc<Self>) -> RvoipResult<()> {
+        // Signal background tasks (stats poller, inbound pump) to exit cleanly,
+        // then abort anything that hasn't finished yet.
+        self.inner.cancel.notify_waiters();
         for handle in self.inner.pumps.lock().drain(..) {
             handle.abort();
         }

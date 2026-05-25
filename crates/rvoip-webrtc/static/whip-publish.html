@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>rvoip-webrtc — WHIP publisher</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; margin: 2em; max-width: 720px; }
+    button { padding: 0.5em 1em; margin-right: 0.5em; }
+    #log { background: #f4f4f4; padding: 1em; height: 240px; overflow: auto; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
+    code { background: #f4f4f4; padding: 0.1em 0.3em; }
+    .status { padding: 0.2em 0.6em; border-radius: 4px; font-weight: bold; }
+    .status.idle { background: #ddd; }
+    .status.connecting { background: #fc8; }
+    .status.connected { background: #8c8; }
+    .status.failed { background: #c88; }
+  </style>
+</head>
+<body>
+  <h1>WHIP publisher</h1>
+  <p>Publishes mic audio (and optional camera video) to <code id="endpoint">http://127.0.0.1:8080/whip/demo</code> via WHIP (RFC 9725). Use with <code>cargo run -p rvoip-webrtc --example webrtc_server --features signaling-whip</code>.</p>
+  <p>Status: <span id="status" class="status idle">idle</span></p>
+  <p>
+    <button id="start">Start publish</button>
+    <button id="stop" disabled>Stop</button>
+    <label><input type="checkbox" id="video" /> include video</label>
+  </p>
+  <div id="log"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const log = (m) => { const el = $('log'); el.textContent += m + '\n'; el.scrollTop = el.scrollHeight; };
+    const setStatus = (s) => { const el = $('status'); el.className = 'status ' + s; el.textContent = s; };
+
+    const whipUrl = new URL(location.search).searchParams.get('whip') || $('endpoint').textContent;
+    $('endpoint').textContent = whipUrl;
+
+    let pc, locationHeader, stream;
+
+    $('start').onclick = async () => {
+      try {
+        setStatus('connecting');
+        $('start').disabled = true;
+
+        const constraints = { audio: true, video: $('video').checked };
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        log('captured ' + stream.getTracks().map(t => t.kind).join('+'));
+
+        pc = new RTCPeerConnection();
+        pc.onconnectionstatechange = () => {
+          log('pc.connectionState = ' + pc.connectionState);
+          setStatus(pc.connectionState === 'connected' ? 'connected' : pc.connectionState);
+        };
+        pc.oniceconnectionstatechange = () => log('ice: ' + pc.iceConnectionState);
+        pc.onicegatheringstatechange = () => log('gather: ' + pc.iceGatheringState);
+        for (const track of stream.getTracks()) pc.addTrack(track, stream);
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        // Wait for full ICE gather (matches the server's default full-SDP mode).
+        await new Promise((r) => {
+          if (pc.iceGatheringState === 'complete') return r();
+          pc.addEventListener('icegatheringstatechange', () =>
+            pc.iceGatheringState === 'complete' && r()
+          );
+        });
+
+        log('POST ' + whipUrl);
+        const resp = await fetch(whipUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/sdp' },
+          body: pc.localDescription.sdp,
+        });
+        if (resp.status !== 201) {
+          throw new Error('WHIP POST failed: ' + resp.status + ' ' + (await resp.text()));
+        }
+        locationHeader = resp.headers.get('Location');
+        log('Location: ' + locationHeader);
+        log('ETag: ' + resp.headers.get('ETag'));
+        const answer = await resp.text();
+        await pc.setRemoteDescription({ type: 'answer', sdp: answer });
+        log('answer applied');
+        $('stop').disabled = false;
+      } catch (e) {
+        log('ERROR: ' + e.message);
+        setStatus('failed');
+        $('start').disabled = false;
+      }
+    };
+
+    $('stop').onclick = async () => {
+      try {
+        if (locationHeader) {
+          const teardownUrl = new URL(locationHeader, whipUrl).toString();
+          await fetch(teardownUrl, { method: 'DELETE' });
+          log('DELETE ' + teardownUrl);
+        }
+      } finally {
+        if (stream) stream.getTracks().forEach((t) => t.stop());
+        if (pc) pc.close();
+        pc = stream = locationHeader = null;
+        setStatus('idle');
+        $('start').disabled = false;
+        $('stop').disabled = true;
+      }
+    };
+  </script>
+</body>
+</html>

@@ -9,6 +9,7 @@ use rvoip_core::stream::MediaStream;
 use rvoip_webrtc::config::WebRtcConfig;
 use rvoip_webrtc::media::{from_tracks, silent_rtp_payload_for_ssrc};
 use rvoip_webrtc::peer::{connect_loopback, RvoipPeerConnection};
+use tokio::sync::Notify;
 
 #[tokio::test]
 async fn loopback_peer_connections_connect() {
@@ -43,7 +44,8 @@ async fn loopback_rtp_inbound_round_trip() {
 
     let answerer_local = answerer.local_audio_track().expect("answerer local track");
     let answerer_stream = from_tracks(StreamId::new(), codec, answerer_local, None);
-    answerer_stream.enable_webrtc_stats(Arc::clone(answerer.peer_connection()));
+    answerer_stream
+        .enable_webrtc_stats(Arc::clone(answerer.peer_connection()), Arc::new(Notify::new()));
 
     let remote = RvoipPeerConnection::prime_remote_track(
         &offerer,

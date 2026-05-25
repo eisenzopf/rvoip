@@ -53,6 +53,10 @@ pub enum SessionMedium {
 }
 
 /// Handle returned from [`WebRtcClient::call`].
+///
+/// Cloning a handle increments the refcount on the underlying peer connection;
+/// the connection closes only when the last clone is dropped. For deterministic
+/// teardown call [`SessionHandle::close`] explicitly — `Drop` is best-effort.
 #[derive(Clone)]
 pub struct SessionHandle {
     session_id: SessionId,
@@ -62,6 +66,9 @@ pub struct SessionHandle {
     answer: Answer,
     peer: Arc<RvoipPeerConnection>,
     data_channel: Arc<dyn DataChannel>,
+    /// When all clones drop, the strong count hits 1 here and the Drop impl
+    /// fires a detached close on the underlying peer.
+    closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SessionHandle {
@@ -96,6 +103,39 @@ impl SessionHandle {
     /// Wait until ICE/DTLS reaches connected.
     pub async fn wait_connected(&self, timeout: Duration) -> Result<()> {
         self.peer.wait_connected(timeout).await
+    }
+
+    /// Explicitly close the peer connection. Idempotent — subsequent calls
+    /// (or `Drop`) are no-ops.
+    pub async fn close(&self) -> Result<()> {
+        if self
+            .closed
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Ok(());
+        }
+        self.peer.close().await
+    }
+}
+
+impl Drop for SessionHandle {
+    fn drop(&mut self) {
+        // Only the last clone runs the actual close — `peer` Arc refcount tells
+        // us if anyone else still holds the peer (the comprehensive checks
+        // hand the peer around via `session.peer()`).
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        if Arc::strong_count(&self.peer) <= 1 {
+            // Best-effort detached close — Drop is sync.
+            let peer = Arc::clone(&self.peer);
+            let closed = Arc::clone(&self.closed);
+            tokio::spawn(async move {
+                if !closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                    let _ = peer.close().await;
+                }
+            });
+        }
     }
 }
 
@@ -166,6 +206,7 @@ impl WebRtcClient {
             answer,
             peer: Arc::clone(&self.peer),
             data_channel,
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 

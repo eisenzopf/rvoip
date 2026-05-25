@@ -76,9 +76,13 @@ async fn whip_patch_ice_restart_returns_new_answer() {
         .await
         .expect("restart offer");
 
+    // G2: ICE restart PATCH now requires If-Match per RFC 9725 §4.4.1.
+    // The ETag is the quoted connection id (see build_session_headers).
+    let etag = format!("\"{conn_id}\"");
     let patch_resp = client
         .patch(format!("{base}/whip/{conn_id}"))
         .header("content-type", "application/sdp")
+        .header("if-match", &etag)
         .body(restart_offer)
         .send()
         .await

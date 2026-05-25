@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>rvoip-webrtc — WebSocket signaling demo</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; margin: 2em; max-width: 720px; }
+    button { padding: 0.5em 1em; margin-right: 0.5em; }
+    #log { background: #f4f4f4; padding: 1em; height: 240px; overflow: auto; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
+    code { background: #f4f4f4; padding: 0.1em 0.3em; }
+    .status { padding: 0.2em 0.6em; border-radius: 4px; font-weight: bold; }
+    .status.idle { background: #ddd; }
+    .status.connecting { background: #fc8; }
+    .status.connected { background: #8c8; }
+    .status.failed { background: #c88; }
+  </style>
+</head>
+<body>
+  <h1>WebSocket signaling demo</h1>
+  <p>Sends an offer to <code id="endpoint">ws://127.0.0.1:8081</code> as
+    <code>{"type":"offer","sdp":"..."}</code>, applies the returned answer,
+    and exchanges a data-channel <code>ping</code> with the server. Use with
+    <code>cargo run -p rvoip-webrtc --example webrtc_server --features signaling-whip,signaling-ws</code>.</p>
+  <p>Status: <span id="status" class="status idle">idle</span></p>
+  <p>
+    <button id="start">Connect</button>
+    <button id="hangup" disabled>Hang up</button>
+    <button id="ping" disabled>Send ping</button>
+  </p>
+  <div id="log"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const log = (m) => { const el = $('log'); el.textContent += m + '\n'; el.scrollTop = el.scrollHeight; };
+    const setStatus = (s) => { const el = $('status'); el.className = 'status ' + s; el.textContent = s; };
+
+    const wsUrl = new URL(location.search).searchParams.get('ws') || $('endpoint').textContent;
+    $('endpoint').textContent = wsUrl;
+
+    let ws, pc, dc, stream, connectionId;
+
+    $('start').onclick = async () => {
+      try {
+        setStatus('connecting');
+        $('start').disabled = true;
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+        pc = new RTCPeerConnection();
+        pc.onconnectionstatechange = () => {
+          log('pc: ' + pc.connectionState);
+          if (pc.connectionState === 'connected') setStatus('connected');
+          if (pc.connectionState === 'failed') setStatus('failed');
+        };
+        for (const t of stream.getTracks()) pc.addTrack(t, stream);
+
+        dc = pc.createDataChannel('demo');
+        dc.onopen = () => { log('dc open'); $('ping').disabled = false; };
+        dc.onmessage = (e) => log('dc recv: ' + e.data);
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await new Promise((r) => {
+          if (pc.iceGatheringState === 'complete') return r();
+          pc.addEventListener('icegatheringstatechange', () =>
+            pc.iceGatheringState === 'complete' && r()
+          );
+        });
+
+        ws = new WebSocket(wsUrl);
+        ws.onopen = () => {
+          log('ws open — sending offer');
+          ws.send(JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp }));
+        };
+        ws.onmessage = async (msg) => {
+          const data = JSON.parse(msg.data);
+          log('ws recv ' + data.type);
+          if (data.type === 'answer') {
+            connectionId = data.connection_id;
+            await pc.setRemoteDescription({ type: 'answer', sdp: data.sdp });
+            $('hangup').disabled = false;
+          }
+        };
+        ws.onclose = () => log('ws closed');
+        ws.onerror = (e) => log('ws error');
+      } catch (e) {
+        log('ERROR: ' + e.message);
+        setStatus('failed');
+        $('start').disabled = false;
+      }
+    };
+
+    $('ping').onclick = () => {
+      if (dc && dc.readyState === 'open') dc.send('ping-' + Date.now());
+    };
+
+    $('hangup').onclick = () => {
+      try {
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'bye', connection_id: connectionId || '' }));
+          ws.close();
+        }
+      } finally {
+        if (stream) stream.getTracks().forEach((t) => t.stop());
+        if (pc) pc.close();
+        ws = pc = dc = stream = connectionId = null;
+        setStatus('idle');
+        $('start').disabled = false;
+        $('hangup').disabled = true;
+        $('ping').disabled = true;
+      }
+    };
+  </script>
+</body>
+</html>

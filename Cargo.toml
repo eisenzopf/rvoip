@@ -211,6 +211,14 @@ socket2 = { version = "0.5", features = ["all"] }
 mio = { version = "0.8", features = ["os-poll", "net"] }
 rustls = { version = "0.23", features = ["ring", "std"] }  # "std" needed for RootCertStore::add in rvoip-uctp::substrate::tls
 rustls-pemfile = "2.0"
+# Used by rvoip-webrtc tls-rustls feature for in-process HTTPS/WSS termination.
+tokio-rustls = "0.26"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+# Headless-Chromium driver for rvoip-webrtc's interop-browser dev-only test.
+# Requires a Chromium binary on PATH at test time. Default features disabled
+# to avoid pulling chromiumoxide_cdp's heavy proc-macro chain when the
+# feature isn't selected.
+chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
 sha2 = "0.10"
 hmac = "0.12"
 aes = "0.8"
