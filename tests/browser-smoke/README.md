@@ -70,6 +70,41 @@ This is a Node.js project. `cargo metadata` would choke on its
 member discovery. The repo's root `Cargo.toml` lists `tests/browser-smoke`
 in the workspace `exclude` array.
 
+## WebRTC RFC suite (opt-in)
+
+Six additional specs validate `rvoip-webrtc` against a real Chromium.
+They share the static frontends already shipped in
+`crates/rvoip-webrtc/static/` and a new
+`crates/rvoip-webrtc/examples/webrtc_browser_demo.rs` server that boots
+WHIP + WHEP + WS + a static HTTP server on one process.
+
+```bash
+npm run test:webrtc            # equivalent to:
+RVOIP_WEBRTC_SMOKE=1 npx playwright test --project=chromium-webrtc
+```
+
+The suite is gated by `RVOIP_WEBRTC_SMOKE=1` because the cargo build is
+heavier than the UCTP smokes (pulls in the `comprehensive`,
+`signaling-whip`, and `signaling-ws` features).
+
+| Spec                              | RFC(s)        | What it asserts                                                                    |
+| --------------------------------- | ------------- | ---------------------------------------------------------------------------------- |
+| `webrtc_whip.spec.mjs`            | 9725          | POST returns 201 + Location + ETag + Accept-Patch; OPTIONS preflight; DELETE 200/204 |
+| `webrtc_whep.spec.mjs`            | 9725          | POST(empty)→201 + server-generated A+V offer; PATCH(answer)→204; bytesReceived grows |
+| `webrtc_trickle.spec.mjs`         | 8840          | PATCH `application/trickle-ice-sdpfrag` for each gathered candidate → 204         |
+| `webrtc_ws_media.spec.mjs`        | 8825/26/29    | Offer/answer round-trip, ICE connected, **bidirectional** audio + video bytes     |
+| `webrtc_datachannels.spec.mjs`    | 8831 / 8832   | Three reliability profiles (reliable / unreliable+retransmits / partial+lifetime) round-trip |
+| `webrtc_ice.spec.mjs`             | 8445 / 8839   | ≥1 host candidate gathered, no `.local` mDNS leak in gathered candidates          |
+
+The fixture `_webrtc_fixture.mjs` spawns `cargo run -p rvoip-webrtc
+--example webrtc_browser_demo …` once per spec file, parses the
+`[webrtc_browser_demo] READY whip=… ws=… static=…` line for ephemeral
+URLs, and kills the cargo child on `afterAll`. Each frontend page
+publishes a structured `window.__rfcResults` object the specs read to
+make assertions about RFC behavior; on failure the spec dumps the full
+`__rfcResults` so you can see exactly which clause regressed without
+re-running.
+
 ## CI
 
 `.github/workflows/browser-smoke.yml` runs this suite on every PR.

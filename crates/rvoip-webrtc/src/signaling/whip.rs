@@ -242,6 +242,12 @@ fn build_router(state: WhipState, adapter: &Arc<WebRtcAdapter>) -> Router {
                     axum::http::header::HeaderName::from_static("location"),
                     axum::http::header::HeaderName::from_static("etag"),
                     axum::http::header::HeaderName::from_static("accept-patch"),
+                    // RFC 9725 §4.6 — WHIP clients need to read the
+                    // `Link: …; rel="ice-server"` header to discover
+                    // server-advertised STUN/TURN. Without it in the
+                    // expose list, browsers return null from
+                    // Response.headers.get('Link').
+                    axum::http::header::HeaderName::from_static("link"),
                 ])
         } else {
             let mut layer = CorsLayer::new()
@@ -257,6 +263,12 @@ fn build_router(state: WhipState, adapter: &Arc<WebRtcAdapter>) -> Router {
                     axum::http::header::HeaderName::from_static("location"),
                     axum::http::header::HeaderName::from_static("etag"),
                     axum::http::header::HeaderName::from_static("accept-patch"),
+                    // RFC 9725 §4.6 — WHIP clients need to read the
+                    // `Link: …; rel="ice-server"` header to discover
+                    // server-advertised STUN/TURN. Without it in the
+                    // expose list, browsers return null from
+                    // Response.headers.get('Link').
+                    axum::http::header::HeaderName::from_static("link"),
                 ]);
             for o in origins {
                 if let Ok(v) = o.parse::<HeaderValue>() {

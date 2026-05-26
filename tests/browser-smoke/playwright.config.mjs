@@ -64,6 +64,17 @@ export default defineConfig({
   workers: 1,
   timeout: 120_000,
   reporter: process.env.CI ? "github" : "list",
+  // Only the WebRTC suite needs the shared cargo demo; the UCTP smokes
+  // still spawn their own bridge in beforeAll. We still set them
+  // unconditionally because globalSetup is a single hook — it bails
+  // immediately when the state path can be skipped (i.e. when the
+  // chromium-webrtc project isn't selected, no spec reads the file).
+  ...(process.env.RVOIP_WEBRTC_SMOKE === "1"
+    ? {
+        globalSetup: "./tests/_webrtc_global_setup.mjs",
+        globalTeardown: "./tests/_webrtc_global_teardown.mjs",
+      }
+    : {}),
   use: {
     headless: true,
     actionTimeout: 15_000,
@@ -88,5 +99,40 @@ export default defineConfig({
     // WT smoke is opt-in: gate behind RVOIP_WT_SMOKE so existing CI
     // doesn't break if Chromium's SPKI pinning regresses.
     ...(process.env.RVOIP_WT_SMOKE === "1" ? [wtProject] : []),
+    // WebRTC RFC suite: drives rvoip-webrtc's whip-publish / ws-signaling
+    // / whep-subscribe pages from a real Chromium against an in-process
+    // `webrtc_browser_demo`. Opt-in via RVOIP_WEBRTC_SMOKE=1 because the
+    // cargo build is heavier than the other smokes (pulls in
+    // comprehensive + signaling-whip + signaling-ws).
+    ...(process.env.RVOIP_WEBRTC_SMOKE === "1"
+      ? [
+          {
+            name: "chromium-webrtc",
+            testMatch: /webrtc_.*\.spec\.mjs$/,
+            use: {
+              browserName: "chromium",
+              launchOptions: {
+                args: [
+                  // Merge all disabled features into one flag — Chromium
+                  // only honors the LAST `--disable-features=` it sees, so
+                  // splitting into multiple flags silently drops earlier
+                  // ones. `WebRtcHideLocalIpsWithMdns` is the key one for
+                  // the WebRTC suite: by default Chromium replaces host
+                  // candidate IPs with `<uuid>.local` mDNS hostnames the
+                  // server's `mdns_candidate_policy=Drop` filter discards
+                  // → ICE never connects on loopback.
+                  "--disable-features=BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights,PrivateNetworkAccessRespectPreflightResults,WebRtcHideLocalIpsWithMdns",
+                  "--use-fake-ui-for-media-stream",
+                  "--use-fake-device-for-media-stream",
+                  "--autoplay-policy=no-user-gesture-required",
+                  // Required when running inside most CI containers; harmless
+                  // on a developer laptop.
+                  "--no-sandbox",
+                ],
+              },
+            },
+          },
+        ]
+      : []),
   ],
 });

@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>rvoip-webrtc — WHEP subscriber</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; margin: 2em; max-width: 720px; }
+    button { padding: 0.5em 1em; margin-right: 0.5em; }
+    #log { background: #f4f4f4; padding: 1em; height: 240px; overflow: auto; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
+    code { background: #f4f4f4; padding: 0.1em 0.3em; }
+    .status { padding: 0.2em 0.6em; border-radius: 4px; font-weight: bold; }
+    .status.idle { background: #ddd; }
+    .status.connecting { background: #fc8; }
+    .status.connected { background: #8c8; }
+    .status.failed { background: #c88; }
+    video { width: 240px; height: 135px; background: black; }
+  </style>
+</head>
+<body>
+  <h1>WHEP subscriber</h1>
+  <p>Pulls the server's RFC 9725 WHEP stream from
+    <code id="endpoint">http://127.0.0.1:8080/whep/demo</code>:
+    POST (empty body) → 201 + offer; PATCH the answer → 204. Use with
+    <code>cargo run -p rvoip-webrtc --example webrtc_browser_demo
+      --features comprehensive,signaling-whip,signaling-ws</code>.</p>
+  <p>Status: <span id="status" class="status idle">idle</span></p>
+  <p>
+    <button id="start">Subscribe</button>
+    <button id="stop" disabled>Unsubscribe</button>
+  </p>
+  <p>
+    <video id="remote-audio" autoplay playsinline muted></video>
+    <video id="remote-video" autoplay playsinline muted></video>
+  </p>
+  <div id="log"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const log = (m) => { const el = $('log'); el.textContent += m + '\n'; el.scrollTop = el.scrollHeight; };
+    const setStatus = (s) => { const el = $('status'); el.className = 'status ' + s; el.textContent = s; };
+
+    const params = new URL(location.href).searchParams;
+    const whepUrl = params.get('whep') || $('endpoint').textContent;
+    $('endpoint').textContent = whepUrl;
+
+    const initialResults = () => ({
+      status: 'idle',
+      postStatusCode: null,
+      patchStatusCode: null,
+      deleteStatusCode: null,
+      locationHeader: null,
+      etagHeader: null,
+      linkHeader: null,
+      acceptPatchHeader: null,
+      contentTypeHeader: null,
+      offerSdp: null,
+      sdpHasAudio: false,
+      sdpHasVideo: false,
+      remoteAudioBytes: 0,
+      remoteVideoBytes: 0,
+      iceConnected: false,
+      error: null,
+    });
+    window.__rfcResults = initialResults();
+
+    let pc, locationHeader, statsTimer;
+
+    async function pollStats() {
+      if (!pc) return;
+      try {
+        const stats = await pc.getStats();
+        let audioBytes = 0, videoBytes = 0;
+        stats.forEach((rep) => {
+          if (rep.type === 'inbound-rtp') {
+            if (rep.kind === 'audio') audioBytes += rep.bytesReceived || 0;
+            else if (rep.kind === 'video') videoBytes += rep.bytesReceived || 0;
+          }
+        });
+        window.__rfcResults.remoteAudioBytes = audioBytes;
+        window.__rfcResults.remoteVideoBytes = videoBytes;
+      } catch (e) { /* ignore */ }
+    }
+
+    $('start').onclick = async () => {
+      window.__rfcResults = initialResults();
+      window.__rfcResults.status = 'connecting';
+      try {
+        setStatus('connecting');
+        $('start').disabled = true;
+
+        pc = new RTCPeerConnection();
+        // We need recvonly transceivers so the server's sendrecv tracks
+        // map to receivers on our side and pc.ontrack fires.
+        pc.addTransceiver('audio', { direction: 'recvonly' });
+        pc.addTransceiver('video', { direction: 'recvonly' });
+        pc.ontrack = (ev) => {
+          log('ontrack ' + ev.track.kind);
+          const target = ev.track.kind === 'audio' ? $('remote-audio') : $('remote-video');
+          if (target && !target.srcObject) target.srcObject = ev.streams[0] || new MediaStream([ev.track]);
+        };
+        pc.onconnectionstatechange = () => {
+          log('pc: ' + pc.connectionState);
+          window.__rfcResults.status = pc.connectionState;
+          if (pc.connectionState === 'connected') {
+            setStatus('connected');
+            window.__rfcResults.iceConnected = true;
+            if (!statsTimer) statsTimer = setInterval(pollStats, 500);
+          }
+          if (pc.connectionState === 'failed') setStatus('failed');
+        };
+
+        log('POST ' + whepUrl);
+        const postResp = await fetch(whepUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/sdp' },
+          body: '',
+        });
+        window.__rfcResults.postStatusCode = postResp.status;
+        window.__rfcResults.locationHeader = postResp.headers.get('Location');
+        window.__rfcResults.etagHeader = postResp.headers.get('ETag');
+        window.__rfcResults.linkHeader = postResp.headers.get('Link');
+        window.__rfcResults.acceptPatchHeader = postResp.headers.get('Accept-Patch');
+        window.__rfcResults.contentTypeHeader = postResp.headers.get('Content-Type');
+        if (postResp.status !== 201) {
+          throw new Error('WHEP POST failed: ' + postResp.status + ' ' + (await postResp.text()));
+        }
+        locationHeader = postResp.headers.get('Location');
+        const offerSdp = await postResp.text();
+        window.__rfcResults.offerSdp = offerSdp;
+        window.__rfcResults.sdpHasAudio = /\bm=audio\b/.test(offerSdp);
+        window.__rfcResults.sdpHasVideo = /\bm=video\b/.test(offerSdp);
+        log('Location: ' + locationHeader);
+
+        await pc.setRemoteDescription({ type: 'offer', sdp: offerSdp });
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        await new Promise((r) => {
+          if (pc.iceGatheringState === 'complete') return r();
+          pc.addEventListener('icegatheringstatechange', () =>
+            pc.iceGatheringState === 'complete' && r()
+          );
+        });
+
+        const patchUrl = new URL(locationHeader, whepUrl).toString();
+        log('PATCH ' + patchUrl);
+        const patchResp = await fetch(patchUrl, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/sdp' },
+          body: pc.localDescription.sdp,
+        });
+        window.__rfcResults.patchStatusCode = patchResp.status;
+        if (patchResp.status !== 204 && patchResp.status !== 200) {
+          throw new Error('WHEP PATCH failed: ' + patchResp.status + ' ' + (await patchResp.text()));
+        }
+        $('stop').disabled = false;
+      } catch (e) {
+        log('ERROR: ' + e.message);
+        window.__rfcResults.error = e.message;
+        window.__rfcResults.status = 'failed';
+        setStatus('failed');
+        $('start').disabled = false;
+      }
+    };
+
+    $('stop').onclick = async () => {
+      try {
+        if (locationHeader) {
+          const teardownUrl = new URL(locationHeader, whepUrl).toString();
+          const resp = await fetch(teardownUrl, { method: 'DELETE' });
+          window.__rfcResults.deleteStatusCode = resp.status;
+          log('DELETE ' + teardownUrl + ' → ' + resp.status);
+        }
+      } finally {
+        if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+        if (pc) pc.close();
+        pc = locationHeader = null;
+        setStatus('idle');
+        window.__rfcResults.status = 'closed';
+        $('start').disabled = false;
+        $('stop').disabled = true;
+      }
+    };
+
+    if (params.get('autostart') === '1') {
+      window.addEventListener('load', () => $('start').click());
+    }
+  </script>
+</body>
+</html>

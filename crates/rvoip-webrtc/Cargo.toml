@@ -295,5 +295,9 @@ required-features = ["bridge-quic"]
 name = "webrtc_server"
 required-features = ["signaling-whip", "signaling-ws"]
 
+[[example]]
+name = "webrtc_browser_demo"
+required-features = ["comprehensive", "signaling-whip", "signaling-ws"]
+
 [lints]
 workspace = true

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>rvoip-webrtc — WHIP publisher</title>
+  <title>rvoip-webrtc — WHIP publisher (trickle ICE)</title>
   <style>
     body { font-family: -apple-system, system-ui, sans-serif; margin: 2em; max-width: 720px; }
     button { padding: 0.5em 1em; margin-right: 0.5em; }
@@ -16,13 +16,16 @@
   </style>
 </head>
 <body>
-  <h1>WHIP publisher</h1>
-  <p>Publishes mic audio (and optional camera video) to <code id="endpoint">http://127.0.0.1:8080/whip/demo</code> via WHIP (RFC 9725). Use with <code>cargo run -p rvoip-webrtc --example webrtc_server --features signaling-whip</code>.</p>
+  <h1>WHIP publisher — trickle ICE</h1>
+  <p>Publishes mic audio + camera video to <code id="endpoint">http://127.0.0.1:8080/whip/demo</code>
+    via WHIP (RFC 9725), streaming ICE candidates via PATCH
+    <code>application/trickle-ice-sdpfrag</code> (RFC 8840). Use with
+    <code>cargo run -p rvoip-webrtc --example webrtc_browser_demo
+      --features comprehensive,signaling-whip,signaling-ws</code>.</p>
   <p>Status: <span id="status" class="status idle">idle</span></p>
   <p>
     <button id="start">Start publish</button>
     <button id="stop" disabled>Stop</button>
-    <label><input type="checkbox" id="video" /> include video</label>
   </p>
   <div id="log"></div>
 
@@ -31,39 +34,113 @@
     const log = (m) => { const el = $('log'); el.textContent += m + '\n'; el.scrollTop = el.scrollHeight; };
     const setStatus = (s) => { const el = $('status'); el.className = 'status ' + s; el.textContent = s; };
 
-    const whipUrl = new URL(location.search).searchParams.get('whip') || $('endpoint').textContent;
+    const params = new URL(location.href).searchParams;
+    const whipUrl = params.get('whip') || $('endpoint').textContent;
     $('endpoint').textContent = whipUrl;
 
+    // Surface results for Playwright. Reset on each Start.
+    const initialResults = () => ({
+      status: 'idle',
+      locationHeader: null,
+      etagHeader: null,
+      linkHeader: null,
+      acceptPatchHeader: null,
+      contentTypeHeader: null,
+      postStatusCode: null,
+      deleteStatusCode: null,
+      iceCandidatesGathered: 0,
+      iceCandidatesSent: 0,
+      trickleStatusCodes: [],
+      trickleBodies: [],
+      localHostCandidate: false,
+      mdnsCandidatePresent: false,
+      sdpHasAudio: false,
+      sdpHasVideo: false,
+      error: null,
+    });
+    window.__rfcResults = initialResults();
+
     let pc, locationHeader, stream;
+    // Candidates can fire faster than the POST returns. Queue any that
+    // arrive before we know the Location URL, then drain on POST success.
+    let pendingCandidates = [];
+
+    async function sendTrickle(candidate) {
+      // Per RFC 8840 the body is an SDP fragment containing
+      // a=mid:<sdpMid> followed by the a=candidate: line.
+      const sdpfrag = `a=mid:${candidate.sdpMid || '0'}\r\na=${candidate.candidate}\r\n`;
+      window.__rfcResults.iceCandidatesSent += 1;
+      window.__rfcResults.trickleBodies.push(sdpfrag);
+      try {
+        const resp = await fetch(new URL(locationHeader, whipUrl).toString(), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/trickle-ice-sdpfrag' },
+          body: sdpfrag,
+        });
+        window.__rfcResults.trickleStatusCodes.push(resp.status);
+        log(`PATCH ${candidate.candidate.slice(0, 40)}... → ${resp.status}`);
+      } catch (e) {
+        window.__rfcResults.error = 'trickle PATCH: ' + e.message;
+        log('PATCH error: ' + e.message);
+      }
+    }
+
+    function patchTrickle(candidate) {
+      if (!locationHeader) {
+        pendingCandidates.push(candidate);
+        return;
+      }
+      sendTrickle(candidate);
+    }
+
+    async function drainPendingCandidates() {
+      // Move out so re-entrant onicecandidate handlers don't double-send.
+      const drained = pendingCandidates;
+      pendingCandidates = [];
+      for (const c of drained) await sendTrickle(c);
+    }
 
     $('start').onclick = async () => {
+      window.__rfcResults = initialResults();
+      window.__rfcResults.status = 'connecting';
+      pendingCandidates = [];
       try {
         setStatus('connecting');
         $('start').disabled = true;
 
-        const constraints = { audio: true, video: $('video').checked };
-        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        // Always capture A+V — Chromium's fake-device flag synthesizes both.
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
         log('captured ' + stream.getTracks().map(t => t.kind).join('+'));
 
         pc = new RTCPeerConnection();
         pc.onconnectionstatechange = () => {
           log('pc.connectionState = ' + pc.connectionState);
+          window.__rfcResults.status = pc.connectionState;
           setStatus(pc.connectionState === 'connected' ? 'connected' : pc.connectionState);
         };
         pc.oniceconnectionstatechange = () => log('ice: ' + pc.iceConnectionState);
         pc.onicegatheringstatechange = () => log('gather: ' + pc.iceGatheringState);
+        pc.onicecandidate = (ev) => {
+          if (!ev.candidate || !ev.candidate.candidate) {
+            log('ice: end-of-candidates');
+            return;
+          }
+          const c = ev.candidate.candidate;
+          window.__rfcResults.iceCandidatesGathered += 1;
+          if (c.includes(' typ host ')) window.__rfcResults.localHostCandidate = true;
+          if (/\.local /.test(c)) window.__rfcResults.mdnsCandidatePresent = true;
+          patchTrickle(ev.candidate);
+        };
+
         for (const track of stream.getTracks()) pc.addTrack(track, stream);
 
+        // RFC 8840: POST the offer BEFORE ICE gathering completes so the
+        // server allocates the resource and we can stream candidates via
+        // PATCH. setLocalDescription kicks gathering off.
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-
-        // Wait for full ICE gather (matches the server's default full-SDP mode).
-        await new Promise((r) => {
-          if (pc.iceGatheringState === 'complete') return r();
-          pc.addEventListener('icegatheringstatechange', () =>
-            pc.iceGatheringState === 'complete' && r()
-          );
-        });
+        window.__rfcResults.sdpHasAudio = /\bm=audio\b/.test(pc.localDescription.sdp);
+        window.__rfcResults.sdpHasVideo = /\bm=video\b/.test(pc.localDescription.sdp);
 
         log('POST ' + whipUrl);
         const resp = await fetch(whipUrl, {
@@ -71,18 +148,31 @@
           headers: { 'Content-Type': 'application/sdp' },
           body: pc.localDescription.sdp,
         });
+        window.__rfcResults.postStatusCode = resp.status;
+        window.__rfcResults.locationHeader = resp.headers.get('Location');
+        window.__rfcResults.etagHeader = resp.headers.get('ETag');
+        window.__rfcResults.linkHeader = resp.headers.get('Link');
+        window.__rfcResults.acceptPatchHeader = resp.headers.get('Accept-Patch');
+        window.__rfcResults.contentTypeHeader = resp.headers.get('Content-Type');
         if (resp.status !== 201) {
           throw new Error('WHIP POST failed: ' + resp.status + ' ' + (await resp.text()));
         }
         locationHeader = resp.headers.get('Location');
         log('Location: ' + locationHeader);
         log('ETag: ' + resp.headers.get('ETag'));
+        log('Link: ' + (resp.headers.get('Link') || '(none)'));
         const answer = await resp.text();
         await pc.setRemoteDescription({ type: 'answer', sdp: answer });
         log('answer applied');
+        // Drain any candidates that fired between createOffer() and the
+        // POST response arriving. After this the synchronous patchTrickle
+        // path will send them immediately as they gather.
+        drainPendingCandidates();
         $('stop').disabled = false;
       } catch (e) {
         log('ERROR: ' + e.message);
+        window.__rfcResults.error = e.message;
+        window.__rfcResults.status = 'failed';
         setStatus('failed');
         $('start').disabled = false;
       }
@@ -92,18 +182,24 @@
       try {
         if (locationHeader) {
           const teardownUrl = new URL(locationHeader, whipUrl).toString();
-          await fetch(teardownUrl, { method: 'DELETE' });
-          log('DELETE ' + teardownUrl);
+          const resp = await fetch(teardownUrl, { method: 'DELETE' });
+          window.__rfcResults.deleteStatusCode = resp.status;
+          log('DELETE ' + teardownUrl + ' → ' + resp.status);
         }
       } finally {
         if (stream) stream.getTracks().forEach((t) => t.stop());
         if (pc) pc.close();
         pc = stream = locationHeader = null;
         setStatus('idle');
+        window.__rfcResults.status = 'closed';
         $('start').disabled = false;
         $('stop').disabled = true;
       }
     };
+
+    if (params.get('autostart') === '1') {
+      window.addEventListener('load', () => $('start').click());
+    }
   </script>
 </body>
 </html>

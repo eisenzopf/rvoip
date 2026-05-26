@@ -897,6 +897,20 @@ impl ConnectionAdapter for WebRtcAdapter {
             .await
             .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
 
+        // Pre-attach a video track when the caller wants outbound offers to
+        // include `m=video`. `create_offer_and_gather` skips its auto-audio
+        // path when *any* local track is already present, so we still need
+        // an explicit audio attach below to keep symmetry with the default
+        // behavior.
+        if self.config.originate_include_video {
+            peer.add_local_audio_track()
+                .await
+                .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
+            peer.add_local_video_track()
+                .await
+                .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
+        }
+
         let offer_sdp = peer
             .create_offer_and_gather()
             .await

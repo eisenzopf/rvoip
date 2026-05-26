@@ -166,6 +166,14 @@ pub struct WebRtcConfig {
     /// for per-route overrides (e.g. multi-tenant pinning).
     #[serde(default)]
     pub pinned_fingerprints: Vec<DtlsFingerprint>,
+
+    /// When `true`, outbound peers created via [`crate::WebRtcAdapter::originate`]
+    /// (WHEP `POST`, orchestrator-driven outbound) get a local video track
+    /// attached *before* the offer SDP is generated, so the resulting offer
+    /// advertises an `m=video` section. Default `false`, which preserves
+    /// the historical audio-only outbound offer shape.
+    #[serde(default)]
+    pub originate_include_video: bool,
 }
 
 /// G12 — Opus encoder/decoder hints carried in the SDP fmtp line for
@@ -296,6 +304,7 @@ impl Default for WebRtcConfig {
             ice_transport_policy: IceTransportPolicy::All,
             opus_settings: OpusSettings::default(),
             pinned_fingerprints: Vec::new(),
+            originate_include_video: false,
         }
     }
 }
@@ -324,6 +333,7 @@ impl WebRtcConfig {
             ice_transport_policy: IceTransportPolicy::All,
             opus_settings: OpusSettings::default(),
             pinned_fingerprints: Vec::new(),
+            originate_include_video: false,
         }
     }
 
