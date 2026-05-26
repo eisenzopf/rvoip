@@ -25,6 +25,7 @@ async fn whip_post_returns_sdp_answer_and_inbound_event() {
             target: String::new(),
             direction: Direction::Outbound,
             capabilities: offerer.capabilities(),
+            transport: None,
         })
         .await
         .expect("originate");

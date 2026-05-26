@@ -92,6 +92,7 @@ async fn whip_webrtc_bridged_to_real_quic_leg() {
             target: String::new(),
             direction: Direction::Outbound,
             capabilities: publisher.capabilities(),
+            transport: None,
         })
         .await
         .expect("originate");

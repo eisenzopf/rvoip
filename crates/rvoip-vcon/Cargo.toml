@@ -13,7 +13,9 @@ keywords.workspace = true
 description = "vCon (Virtualized Conversation) document builder + store per the IETF vCon WG draft. Builds + signs the recording artifacts UCTP / SIP / WebRTC adapters reference via Event::RecordingComplete.vcon_ref."
 
 [dependencies]
-rvoip-core.workspace = true
+# V2.A — rvoip-core dep dropped (was unused except in doc comments).
+# This combined with auth-core's switch to rvoip-core-traits breaks
+# the rvoip-core → rvoip-vcon → rvoip-auth-core → rvoip-core cycle.
 rvoip-auth-core.workspace = true
 
 tokio = { workspace = true }

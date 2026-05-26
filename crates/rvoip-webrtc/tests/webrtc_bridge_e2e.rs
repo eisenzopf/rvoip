@@ -54,6 +54,7 @@ async fn whip_webrtc_bridged_to_quic_leg_via_orchestrator() {
             target: String::new(),
             direction: Direction::Outbound,
             capabilities: publisher.capabilities(),
+            transport: None,
         })
         .await
         .expect("originate");

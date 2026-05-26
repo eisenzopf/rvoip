@@ -34,6 +34,7 @@ async fn server_builder_exposes_whip_and_ws_addrs() {
             target: String::new(),
             direction: Direction::Outbound,
             capabilities: offerer.capabilities(),
+            transport: None,
         })
         .await
         .expect("originate");

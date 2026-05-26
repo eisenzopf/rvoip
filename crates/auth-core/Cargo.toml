@@ -52,7 +52,11 @@ rand = "0.8"
 
 # Internal dependencies
 rvoip-infra-common = { path = "../infra-common", version = "0.1.0" }
-rvoip-core = { path = "../rvoip-core", version = "0.1.26" }
+# V2.A — depend on the trait-only crate, not rvoip-core itself.
+# This is what breaks the rvoip-core → rvoip-vcon → rvoip-auth-core →
+# rvoip-core cycle so rvoip-core can take an optional rvoip-vcon dep
+# for the `vcon-signing` feature.
+rvoip-core-traits = { path = "../rvoip-core-traits", version = "0.1.26" }
 
 # uuid (used by bearer_stub for the throwaway JWK key id)
 uuid = { version = "1.7", features = ["v4"] }

@@ -58,13 +58,48 @@
 //! [`Orchestrator::register`] dispatches every per-connection command
 //! ([`Orchestrator::route_inbound_connection`], [`Orchestrator::originate_connection`],
 //! [`Orchestrator::end_connection`], [`Orchestrator::hold`], [`Orchestrator::resume`],
-//! [`Orchestrator::transfer_connection`], [`Orchestrator::send_dtmf`]) through the
-//! adapter for the connection's [`Transport`]. Cross-transport bridging
-//! (cross-codec frame-pump per `INTERFACE_DESIGN.md` §10.2) lands in a
-//! follow-up.
+//! [`Orchestrator::transfer_connection`], [`Orchestrator::send_dtmf`],
+//! [`Orchestrator::mute`], [`Orchestrator::unmute`],
+//! [`Orchestrator::play_audio`]) through the adapter for the
+//! connection's [`Transport`]. Cross-transport bridging
+//! (cross-codec frame-pump per `INTERFACE_DESIGN.md` §10.2) is fully
+//! wired, including hot-swap on `renegotiate_media` and DTMF auto-
+//! route across legs.
+//!
+//! ## Conversation / Session / Participant lifecycle
+//!
+//! Beyond per-Connection dispatch, the Orchestrator owns live
+//! Conversation/Session/Participant state. See
+//! [`Orchestrator::open_conversation`], [`Orchestrator::start_session`],
+//! [`Orchestrator::join_session`], [`Orchestrator::leave_session`],
+//! [`Orchestrator::end_session`], [`Orchestrator::close_conversation`]
+//! and the cross-substrate messaging methods
+//! [`Orchestrator::send_message_to_conversation`] +
+//! [`Orchestrator::list_messages`] + [`Orchestrator::mark_message_read`].
+//!
+//! ## vCon, recording, transcription, AI harness
+//!
+//! Every Session gets a [`DefaultVconBuilder`] auto-bound at
+//! `start_session`; on `end_session` the snapshot is encoded, persisted
+//! via [`VconStore`], and emitted as `Event::VconReady`. Recording
+//! and transcription dispatch via consumer-registered providers
+//! ([`Orchestrator::register_recording_sink`],
+//! [`Orchestrator::register_asr_provider`]); the AI harness path
+//! includes barge-in support (`Event::BargeInDetected`).
+//!
+//! ## Tenant scoping, capacity, observability
+//!
+//! [`Config::TenantQuotas`](crate::config::TenantQuotas) enforces
+//! per-tenant maxes on concurrent sessions, recordings, and AI
+//! attachments. Periodic emit cadences live in
+//! [`Orchestrator::spawn_capacity_scheduler`],
+//! [`Orchestrator::spawn_media_quality_sampler`], and
+//! [`Orchestrator::spawn_idle_closer`] (Ephemeral Conversation
+//! close-after-idle driver).
 //!
 //! See `examples/sip_only_orchestrator.rs` for the working SIP-adapter
-//! flow end-to-end.
+//! flow end-to-end, and [`GAP_PLAN.md`](../../crates/rvoip-core/GAP_PLAN.md)
+//! for the phased-roadmap status.
 //!
 //! ## Layering rule
 //!
@@ -83,12 +118,14 @@ pub mod connection;
 pub mod conversation;
 pub mod error;
 pub mod events;
+pub mod harness;
 pub mod identity;
 pub mod ids;
 pub mod message;
 pub mod orchestrator;
 pub mod participant;
 pub mod session;
+pub mod signing;
 pub mod store;
 pub mod stream;
 pub mod subscriptions;
@@ -96,7 +133,7 @@ pub mod vcon;
 
 pub use adapter::{
     AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest,
-    RejectReason, SignatureHeaders, TransferTarget,
+    PlaybackHandle, RejectReason, SignatureHeaders, TransferTarget,
 };
 pub use bridge::{BridgeError, BridgeHandle, BridgeManager};
 pub use capability::{CapabilityDescriptor, CapabilityIntersection, CodecInfo, NegotiatedCodecs};
@@ -108,21 +145,44 @@ pub use config::Config;
 pub use connection::{Connection, ConnectionState, Direction, Transport};
 pub use conversation::{Conversation, ConversationPolicy, ConversationState};
 pub use error::{Result, RvoipError};
-pub use events::{AnomalyKind, ConnectionProgressKind, Event, UsageKind};
+pub use events::{
+    AnomalyKind, ConnectionProgressKind, Event, SessionQualityReport, UsageKind,
+};
 pub use identity::{
-    Credential, CredentialKind, Device, Identity, IdentityAssurance, IdentityProvider, Jwk,
+    Credential, CredentialKind, Device, DtlsFingerprint, Identity, IdentityAssurance,
+    IdentityProvider, Jwk,
 };
 pub use ids::{
     AiAttachmentId, AttachmentId, BridgeId, ConnectionId, ConversationId, DeviceId, IdentityId,
-    ListenerId, MessageId, ParticipantId, RecordingId, SessionId, StreamId, TenantId,
+    ListenerId, MessageId, ParticipantId, PlaybackId, RecordingId, SessionId, StreamId, TenantId,
+    TranscriptionId,
 };
 pub use message::{ContentType, Message, MessageOrigin, MessageRecipients};
 pub use orchestrator::Orchestrator;
 pub use participant::{Participant, ParticipantKind, ParticipantRole};
 pub use session::{Session, SessionMedium, SessionState};
-pub use store::{ConversationStore, MemoryConversationStore, MemoryVconStore, VconStore};
+pub use store::{
+    ConversationFilter, ConversationStore, MemoryConversationStore, MemoryMessageStore,
+    MemoryVconStore, MessageFilter, MessagePage, MessageStore, PageCursor, VconStore,
+};
 pub use stream::{MediaFrame, MediaStream, MediaStreamHandle, QualitySnapshot, StreamKind};
 pub use vcon::{
-    VconAnalysis, VconAnalysisKind, VconAttachment, VconBuilderHandle, VconDialog, VconDialogKind,
-    VconParty, VconSnapshot,
+    DefaultVconBuilder, VconAnalysis, VconAnalysisKind, VconAttachment, VconBuilderHandle,
+    VconDialog, VconDialogKind, VconParty, VconRef, VconSnapshot,
 };
+
+// V2.A.8 — when `vcon-signing` is enabled, re-export the
+// `rvoip-vcon` crate's surface so consumers can sign vCons + plug
+// their own `VconStore` impl without adding rvoip-vcon as a separate
+// Cargo dep. The orchestrator's auto-emission path still produces
+// raw bytes via `vcon::encode_snapshot` for the unsigned default; a
+// consumer wanting JWS signing constructs an adapter `VconStore`
+// impl that builds an `rvoip_vcon::Vcon` from the snapshot, calls
+// `signed_vcon::sign_jws`, then persists.
+#[cfg(feature = "vcon-signing")]
+pub mod signed_vcon {
+    //! V2.A.8 — feature-gated re-export of `rvoip-vcon` so consumers
+    //! enabling `vcon-signing` get the signing surface from a single
+    //! dep on rvoip-core.
+    pub use rvoip_vcon::*;
+}

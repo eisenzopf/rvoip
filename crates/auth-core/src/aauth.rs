@@ -23,8 +23,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rvoip_core::identity::{CredentialKind, IdentityAssurance};
-use rvoip_core::ids::IdentityId;
+use rvoip_core_traits::identity::{CredentialKind, IdentityAssurance};
+use rvoip_core_traits::ids::IdentityId;
 
 use crate::bearer::{BearerAuthError, BearerValidator};
 
@@ -143,8 +143,8 @@ mod tests {
     use super::*;
     use crate::bearer::{bearer_stub, BearerValidator};
     use async_trait::async_trait;
-    use rvoip_core::identity::IdentityAssurance;
-    use rvoip_core::ids::IdentityId;
+    use rvoip_core_traits::identity::IdentityAssurance;
+    use rvoip_core_traits::ids::IdentityId;
 
     struct StaticActor {
         identity: IdentityId,

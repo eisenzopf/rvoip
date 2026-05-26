@@ -1,0 +1,26 @@
+[package]
+name = "rvoip-core-traits"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description = "Pure-data trait + type surface for the rvoip ecosystem. Holds ID newtypes and Identity data types so consumer crates (auth-core, vcon, harness, adapters) can depend on the type surface without pulling in rvoip-core's implementation. Carved out to break the rvoip-core → rvoip-vcon → rvoip-auth-core → rvoip-core dependency cycle (GAP_PLAN V2.A)."
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+
+[lints]
+workspace = true

@@ -7,7 +7,7 @@
 use chrono::Utc;
 use jsonwebtoken::{encode, EncodingKey, Header};
 use rvoip_auth_core::{BearerAuthError, BearerValidator, JwtValidator};
-use rvoip_core::identity::IdentityAssurance;
+use rvoip_core_traits::identity::IdentityAssurance;
 use serde::Serialize;
 
 const HMAC_SECRET: &[u8] = b"test-secret-key-do-not-use-in-prod";

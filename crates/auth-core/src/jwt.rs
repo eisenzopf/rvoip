@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
-use rvoip_core::identity::IdentityAssurance;
-use rvoip_core::ids::IdentityId;
+use rvoip_core_traits::identity::IdentityAssurance;
+use rvoip_core_traits::ids::IdentityId;
 use serde::Deserialize;
 
 use crate::bearer::{BearerAuthError, BearerValidator};

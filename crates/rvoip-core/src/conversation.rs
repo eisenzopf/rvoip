@@ -35,5 +35,10 @@ pub struct Conversation {
     pub messages: Vec<MessageId>,
     pub opened_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
+    /// Bumped on every lifecycle event the Conversation owns (Session
+    /// start/end, Participant join/leave, Message send). Drives the
+    /// Ephemeral-policy idle-close timer landing in P10; populated now
+    /// so call sites don't churn when the driver is wired up.
+    pub last_activity_at: DateTime<Utc>,
     pub metadata: HashMap<String, String>,
 }

@@ -182,11 +182,25 @@ async fn register_then_dispatch_routes_through_adapter() {
         other => panic!("unexpected event: {other:?}"),
     }
 
-    // Now route — accept dispatches to adapter.accept().
+    // Now route — accept dispatches to adapter.accept(). P1.8 made
+    // InboundAction::Accept require a live SessionId, so open a
+    // Conversation + start a Session first.
+    let cid = orch
+        .open_conversation(
+            rvoip_core::ids::TenantId::new(),
+            rvoip_core::conversation::ConversationPolicy::default(),
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("open_conversation");
+    let sid = orch
+        .start_session(cid, rvoip_core::session::SessionMedium::Voice, vec![])
+        .await
+        .expect("start_session");
     orch.route_inbound_connection(
         conn_id.clone(),
         InboundAction::Accept {
-            session_id: SessionId::new(),
+            session_id: sid,
             participant_id: ParticipantId::new(),
         },
     )

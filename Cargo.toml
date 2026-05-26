@@ -26,6 +26,9 @@ members = [
     "crates/rvoip-webrtc",
     "crates/rvoip-vcon",
     "crates/auth-core",
+    "crates/rvoip-harness",
+    "crates/rvoip-identity",
+    "crates/rvoip-core-traits",
 ]
 
 # orchestration-core is excluded from the workspace as part of the
@@ -180,6 +183,9 @@ rvoip-auth-core = { path = "crates/auth-core", version = "0.1.0" }
 # vCon container builder + store (plan C1) — IETF vCon WG draft impl
 # referenced by Event::RecordingComplete.vcon_ref.
 rvoip-vcon = { path = "crates/rvoip-vcon", version = "0.1.26" }
+rvoip-harness = { path = "crates/rvoip-harness", version = "0.1.26" }
+rvoip-identity = { path = "crates/rvoip-identity", version = "0.1.26" }
+rvoip-core-traits = { path = "crates/rvoip-core-traits", version = "0.1.26" }
 rtc = "=0.20.0-alpha.1"
 
 # External dependencies

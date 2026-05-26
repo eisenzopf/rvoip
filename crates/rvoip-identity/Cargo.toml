@@ -1,0 +1,21 @@
+[package]
+name = "rvoip-identity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description = "Identity backends (Bearer, OAuth 2.1+DPoP, OIDC, SIP Digest, Passkey, AAuth) for rvoip-core::IdentityProvider."
+
+[dependencies]
+async-trait.workspace = true
+rvoip-core.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

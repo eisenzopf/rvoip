@@ -1509,6 +1509,12 @@ mod tests {
     use crate::adapters::SessionApiCrossCrateEvent;
     use crate::api::unified::Config;
 
+    /// Publish an event through the global event singleton. Used by
+    /// tests that don't have a UnifiedCoordinator handle. NOTE:
+    /// UnifiedCoordinator::new constructs its own private coordinator,
+    /// so this helper won't reach subscribers attached to a specific
+    /// UnifiedCoordinator instance — use `publish_via` for that.
+    #[allow(dead_code)]
     async fn publish_synthetic(event: Event) {
         let wrapped = SessionApiCrossCrateEvent::new(event);
         let coord = rvoip_infra_common::events::global_coordinator()
@@ -1518,6 +1524,22 @@ mod tests {
             .publish(wrapped)
             .await
             .expect("publish synthetic event");
+    }
+
+    /// B1 — publish a synthetic event through the supplied
+    /// UnifiedCoordinator's private global_coordinator. This is the
+    /// path the `wait_for_cancelled` tests need because they
+    /// construct a fresh UnifiedCoordinator per test (each with its
+    /// own private coordinator instance) and subscribe through that
+    /// instance — publishing via the cross-test singleton would land
+    /// on a different bus.
+    async fn publish_via(coordinator: &UnifiedCoordinator, event: Event) {
+        let wrapped = SessionApiCrossCrateEvent::new(event);
+        coordinator
+            .global_coordinator
+            .publish(wrapped)
+            .await
+            .expect("publish via coordinator");
     }
 
     #[tokio::test]
@@ -1575,7 +1597,9 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        publish_synthetic(Event::CallCancelled { call_id }).await;
+        // B1 — publish through this UnifiedCoordinator's private
+        // event bus, not the cross-test singleton.
+        publish_via(&coordinator, Event::CallCancelled { call_id }).await;
 
         waiter.await.unwrap().unwrap();
         assert!(resolved.load(Ordering::SeqCst));
@@ -1598,7 +1622,8 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        publish_synthetic(Event::CallAnswered { call_id, sdp: None }).await;
+        // B1 — publish through this UnifiedCoordinator's private bus.
+        publish_via(&coordinator, Event::CallAnswered { call_id, sdp: None }).await;
 
         let err = waiter.await.unwrap().unwrap_err();
         assert!(err.to_string().contains("answered before cancellation"));

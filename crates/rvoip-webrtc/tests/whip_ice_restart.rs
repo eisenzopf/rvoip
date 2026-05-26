@@ -37,6 +37,7 @@ async fn whip_patch_ice_restart_returns_new_answer() {
             target: String::new(),
             direction: Direction::Outbound,
             capabilities: offerer.capabilities(),
+            transport: None,
         })
         .await
         .expect("originate");

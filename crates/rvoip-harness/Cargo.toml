@@ -1,0 +1,25 @@
+[package]
+name = "rvoip-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description = "Pluggable provider trait surfaces for ASR, TTS, DialogManager, RecordingSink — consumed by rvoip-core for the AI / recording harness."
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+# V2.A — depend on the trait-only crate so rvoip-core can take an
+# optional `rvoip-harness` dep behind the `harness` feature without
+# cycling.
+rvoip-core-traits.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -277,6 +277,7 @@ async fn remote_dtls_fingerprint_returns_empty_for_outbound_before_answer() {
             target: String::new(),
             direction: rvoip_core::connection::Direction::Outbound,
             capabilities: rvoip_core::adapter::ConnectionAdapter::capabilities(&*adapter),
+            transport: None,
         },
     )
     .await

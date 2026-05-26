@@ -2,7 +2,18 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crate::store::{ConversationStore, MemoryConversationStore, MemoryVconStore, VconStore};
+use crate::store::{
+    ConversationStore, MemoryConversationStore, MemoryMessageStore, MemoryVconStore, MessageStore,
+    VconStore,
+};
+
+/// P6 — per-tenant quota envelope. Each `None` means "unlimited".
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TenantQuotas {
+    pub max_concurrent_sessions: Option<usize>,
+    pub max_concurrent_recordings: Option<usize>,
+    pub max_concurrent_ai_sessions: Option<usize>,
+}
 
 /// Orchestrator configuration.
 ///
@@ -13,6 +24,8 @@ pub struct Config {
     pub max_concurrent_setups: usize,
     pub conversation_store: Arc<dyn ConversationStore>,
     pub vcon_store: Arc<dyn VconStore>,
+    /// P4 — message log + history pager. Default in-memory.
+    pub message_store: Arc<dyn MessageStore>,
     /// How long `bridge_connections` waits for both peers' audio streams
     /// to appear before failing the admission check. Adapters populate
     /// streams lazily (typically on `connection.ready`), so a caller
@@ -27,6 +40,9 @@ pub struct Config {
     /// realistic mobile network jitter without holding admission for
     /// pathologically dead peers.
     pub bridge_stream_deadline: Duration,
+    /// P6 — `Event::CapacityReport` emit cadence. None disables the
+    /// scheduler entirely.
+    pub capacity_report_interval: Option<Duration>,
 }
 
 impl Default for Config {
@@ -38,7 +54,9 @@ impl Default for Config {
             max_concurrent_setups: 256 * cpus,
             conversation_store: Arc::new(MemoryConversationStore::new()),
             vcon_store: Arc::new(MemoryVconStore::new()),
+            message_store: Arc::new(MemoryMessageStore::new()),
             bridge_stream_deadline: Duration::from_secs(5),
+            capacity_report_interval: Some(Duration::from_secs(30)),
         }
     }
 }

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use jsonwebtoken::{encode, EncodingKey, Header};
 use rvoip_auth_core::{BearerAuthError, BearerValidator, JwksJwtValidator};
-use rvoip_core::identity::IdentityAssurance;
+use rvoip_core_traits::identity::IdentityAssurance;
 use serde::Serialize;
 use serde_json::json;
 use url::Url;

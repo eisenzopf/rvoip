@@ -1,12 +1,13 @@
 use crate::capability::{CapabilityDescriptor, NegotiatedCodecs};
+use crate::commands::{AudioSource, MuteDirection};
 use crate::connection::{Connection, Direction, Transport};
 use crate::error::{Result, RvoipError};
 use crate::identity::{IdentityAssurance, Jwk};
-use crate::ids::{ConnectionId, ParticipantId, SessionId};
+use crate::ids::{ConnectionId, ParticipantId, PlaybackId, SessionId};
 use crate::message::Message;
 use crate::stream::MediaStream;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdapterKind {
@@ -23,6 +24,11 @@ pub struct OriginateRequest {
     pub target: String,
     pub direction: Direction,
     pub capabilities: CapabilityDescriptor,
+    /// P6 — transport selector. When `Some`, the Orchestrator
+    /// dispatches the originate through the adapter registered for
+    /// this transport. When `None`, the "first registered adapter"
+    /// fallback applies (single-adapter deployments).
+    pub transport: Option<Transport>,
 }
 
 #[derive(Clone, Debug)]
@@ -55,6 +61,41 @@ pub enum TransferTarget {
     Uri(String),
     Connection(ConnectionId),
     Session(SessionId),
+}
+
+/// P2 — handle returned by [`ConnectionAdapter::play_audio`] (and
+/// surfaced by [`crate::Orchestrator::play_audio`]) that lets the
+/// caller stop an in-flight playback. The cancel channel is fired
+/// at-most-once by [`Self::cancel`]; subsequent calls compile-error
+/// because cancel takes `self`.
+#[derive(Debug)]
+pub struct PlaybackHandle {
+    id: PlaybackId,
+    cancel_tx: oneshot::Sender<()>,
+}
+
+impl PlaybackHandle {
+    /// Adapter helper: build a handle + the matching cancel receiver.
+    /// The adapter spawns its playback task watching `cancel_rx`; when
+    /// the consumer calls [`Self::cancel`] the task gets `Ok(())` on
+    /// its receiver and tears down.
+    pub fn new(id: PlaybackId) -> (Self, oneshot::Receiver<()>) {
+        let (tx, rx) = oneshot::channel();
+        (Self { id, cancel_tx: tx }, rx)
+    }
+
+    pub fn id(&self) -> &PlaybackId {
+        &self.id
+    }
+
+    /// Best-effort cancellation. Returns `Err` only when the adapter's
+    /// playback task already exited (receiver dropped) — which means
+    /// playback is already over and cancel is moot.
+    pub fn cancel(self) -> std::result::Result<(), &'static str> {
+        self.cancel_tx
+            .send(())
+            .map_err(|_| "playback already ended")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -182,6 +223,38 @@ pub trait ConnectionAdapter: Send + Sync {
         conn: ConnectionId,
         capabilities: CapabilityDescriptor,
     ) -> Result<NegotiatedCodecs>;
+
+    /// P2 — local mute/unmute on a per-direction basis. Default
+    /// `NotImplemented` so adapters opt in; the Orchestrator surfaces
+    /// the error verbatim when a caller invokes mute against a
+    /// transport that hasn't wired it.
+    async fn mute(
+        &self,
+        _conn: ConnectionId,
+        _direction: MuteDirection,
+    ) -> Result<()> {
+        Err(RvoipError::NotImplemented("ConnectionAdapter::mute"))
+    }
+    async fn unmute(
+        &self,
+        _conn: ConnectionId,
+        _direction: MuteDirection,
+    ) -> Result<()> {
+        Err(RvoipError::NotImplemented("ConnectionAdapter::unmute"))
+    }
+
+    /// P2 — play `source` toward the peer on `conn`. Adapters that
+    /// implement this construct a [`PlaybackHandle`] via
+    /// [`PlaybackHandle::new`], spawn the playback task watching the
+    /// returned `cancel_rx`, and return the handle. Default
+    /// `NotImplemented`.
+    async fn play_audio(
+        &self,
+        _conn: ConnectionId,
+        _source: AudioSource,
+    ) -> Result<PlaybackHandle> {
+        Err(RvoipError::NotImplemented("ConnectionAdapter::play_audio"))
+    }
 
     fn subscribe_events(&self) -> mpsc::Receiver<AdapterEvent>;
     fn capabilities(&self) -> CapabilityDescriptor;

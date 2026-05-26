@@ -40,6 +40,7 @@ async fn ws_inbound_offer_returns_answer() {
             target: String::new(),
             direction: Direction::Outbound,
             capabilities: offerer.capabilities(),
+            transport: None,
         })
         .await
         .expect("originate");
@@ -94,6 +95,7 @@ async fn ws_outbound_answer_routes_by_connection_id() {
             target: String::new(),
             direction: Direction::Outbound,
             capabilities: adapter.capabilities(),
+            transport: None,
         })
         .await
         .expect("originate");

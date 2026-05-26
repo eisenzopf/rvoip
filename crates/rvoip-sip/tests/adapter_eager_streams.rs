@@ -37,6 +37,7 @@ async fn originate_populates_connection_streams_eagerly() {
             target: format!("sip:loopback@127.0.0.1:{}", sip_port),
             direction: Direction::Outbound,
             capabilities: caps,
+            transport: None,
         },
     )
     .await

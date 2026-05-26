@@ -41,6 +41,10 @@ pub enum Event {
     },
     SessionEnded {
         session_id: SessionId,
+        /// P9 — quality / accounting payload aggregated over the
+        /// Session's lifetime. `None` when no quality samples landed
+        /// (e.g. message-only Session).
+        report: Option<SessionQualityReport>,
         at: DateTime<Utc>,
     },
     SessionFailed {
@@ -255,6 +259,47 @@ pub enum Event {
         snapshot: QualitySnapshot,
         at: DateTime<Utc>,
     },
+
+    /// P5 — fired when ASR detects speech while a TTS playback is
+    /// in flight. The orchestrator's AI loop cancels the current
+    /// playback before firing this; downstream consumers can use it
+    /// for analytics (barge-in count is one of the AI-quality
+    /// signals PRD §11 calls out).
+    BargeInDetected {
+        connection_id: ConnectionId,
+        ai_attachment_id: AiAttachmentId,
+        at: DateTime<Utc>,
+    },
+
+    /// P8 — active-speaker advisory per CONVERSATION_PROTOCOL §6
+    /// `stream.active-speaker`. Emitted (optionally) by the UCTP
+    /// coordinator when audio-level extension data identifies a new
+    /// dominant speaker. Pure advisory — subscribers may use it to
+    /// drive UI focus; no media routing decisions are made off it.
+    ActiveSpeakerChanged {
+        session_id: SessionId,
+        connection_id: ConnectionId,
+        audio_level_dbov: i8,
+        at: DateTime<Utc>,
+    },
+}
+
+/// P9 — per-Session quality + accounting report carried on
+/// `Event::SessionEnded`. Mirrors PRD §10.2.
+#[derive(Clone, Debug, Default)]
+pub struct SessionQualityReport {
+    pub mos: Option<f32>,
+    pub packet_loss_pct: f32,
+    pub jitter_ms: f32,
+    pub rtt_ms: Option<f32>,
+    pub codec: Option<String>,
+    pub bitrate_bps: Option<u32>,
+    pub talk_pct: Option<f32>,
+    pub silence_pct: Option<f32>,
+    pub pdd_ms: Option<u32>,
+    pub ring_time_ms: Option<u32>,
+    pub setup_time_ms: Option<u32>,
+    pub hangup_reason: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -565,6 +610,29 @@ impl Event {
                 packet_loss_pct: snapshot.packet_loss_pct,
                 mos: snapshot.mos,
             },
+            BargeInDetected { connection_id, .. } => {
+                // No dedicated cross-crate variant yet; surface as
+                // IdentityAssuranceChanged with None identity so
+                // downstream services notice an event on the bus.
+                RvoipCoreCrossCrateEvent::IdentityAssuranceChanged {
+                    connection_id: connection_id.to_string(),
+                    identity_id: None,
+                }
+            }
+            ActiveSpeakerChanged {
+                connection_id,
+                ..
+            } => {
+                // No dedicated wire variant yet — surface as MediaQuality
+                // with zero loss so downstream crates that don't know
+                // about ActiveSpeaker still see *something* on the bus.
+                RvoipCoreCrossCrateEvent::MediaQuality {
+                    connection_id: connection_id.to_string(),
+                    jitter_ms: 0.0,
+                    packet_loss_pct: 0.0,
+                    mos: None,
+                }
+            }
         };
         RvoipCrossCrateEvent::Core(inner)
     }

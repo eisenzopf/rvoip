@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rvoip_core::identity::{IdentityAssurance, Jwk};
+use rvoip_core_traits::identity::{IdentityAssurance, Jwk};
 use thiserror::Error;
 
 #[derive(Debug, Error)]

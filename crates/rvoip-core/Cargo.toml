@@ -19,10 +19,24 @@ chrono.workspace = true
 dashmap.workspace = true
 rvoip-infra-common.workspace = true
 rvoip-media-core.workspace = true
+# V2.A — the pure-type/trait surface that consumer crates depend on.
+# rvoip-core re-exports from it so existing `use rvoip_core::ids::*`
+# and `use rvoip_core::identity::*` call sites keep working unchanged.
+rvoip-core-traits.workspace = true
+# V2.A.8 — optional rvoip-vcon dep, gated by `vcon-signing`. Now
+# possible because the cycle (rvoip-core → rvoip-vcon →
+# rvoip-auth-core → rvoip-core) was broken by switching auth-core
+# to depend on rvoip-core-traits.
+rvoip-vcon = { workspace = true, optional = true }
+# V2.A.9 — optional rvoip-harness dep, gated by `harness`. Now
+# possible because rvoip-harness depends on rvoip-core-traits, not
+# rvoip-core, so this dep doesn't cycle.
+rvoip-harness = { workspace = true, optional = true }
 tracing.workspace = true
 metrics.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
@@ -31,11 +45,49 @@ uuid.workspace = true
 # Examples — sip_only_orchestrator demonstrates the cross-transport seam by
 # registering rvoip-sip's SipAdapter against a rvoip-core Orchestrator.
 rvoip-sip = { path = "../rvoip-sip" }
+# P5 tests use no-op providers + VecRecordingSink from rvoip-harness to
+# exercise the AI / recording dispatch.
+rvoip-harness = { path = "../rvoip-harness" }
 tracing-subscriber.workspace = true
 
 [[example]]
 name = "sip_only_orchestrator"
 path = "examples/sip_only_orchestrator.rs"
+
+[features]
+# P11 — feature flags per INTERFACE_DESIGN.md §2.2. The "shape" flags
+# (`uctp`/`sip`/`rtp`/`media`) are advisory today — they signal what
+# substrate adapters the consumer plans to use but don't gate code in
+# `rvoip-core` itself (the trait surface is always compiled). The
+# `harness`, `vcon-signing`, and `identity-fingerprint-binding` flags
+# DO gate actual code (see the `#[cfg(feature = ...)]` attributes in
+# `harness.rs` / `vcon.rs` / `identity.rs`).
+default = ["uctp", "sip", "rtp", "media", "vcon", "identity"]
+uctp = []
+sip = []
+rtp = []
+media = []
+vcon = []
+identity = []
+webrtc = []
+aauth-experimental = []
+identity-fingerprint-binding = []
+# V2.A.8 — Production vCon JWS signing. Now a real Cargo gate (the
+# cycle was broken in V2.A.1). Pulls rvoip-vcon and lets the
+# orchestrator's auto-emission path sign before persisting.
+vcon-signing = ["dep:rvoip-vcon"]
+# V2.A.9 — Recording / transcription / AI dispatch — pulls
+# rvoip-harness (now possible after V2.A cycle break).
+harness = ["dep:rvoip-harness"]
+client = []
+full = [
+    "webrtc",
+    "harness",
+    "client",
+    "aauth-experimental",
+    "identity-fingerprint-binding",
+    "vcon-signing",
+]
 
 [lints]
 workspace = true

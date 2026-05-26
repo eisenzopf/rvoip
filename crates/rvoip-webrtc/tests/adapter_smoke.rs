@@ -27,6 +27,7 @@ async fn adapter_smoke_all_methods() {
             target: String::new(),
             direction: Direction::Outbound,
             capabilities: caps.clone(),
+            transport: None,
         })
         .await
         .expect("originate");
@@ -134,6 +135,7 @@ async fn subscribe_events_receives_inbound_connection() {
             target: String::new(),
             direction: Direction::Outbound,
             capabilities: adapter2.capabilities(),
+            transport: None,
         })
         .await
         .expect("originate");

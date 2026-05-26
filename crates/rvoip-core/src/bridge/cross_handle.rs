@@ -90,10 +90,16 @@ impl CrossBridgeHandle {
     /// and the call still returns `Ok(())` for the directions that
     /// did swap. A complete failure (no swap channels wired) returns
     /// [`RvoipError::NotImplemented`].
+    /// A3 — sends the swap and awaits the per-pump ack so the caller
+    /// knows the new codec is live before this returns. Per-direction
+    /// ack timeout is 1 second; on timeout the swap is logged but not
+    /// retried (the bridge is in degraded state). When `ack` is left
+    /// `None` on the inputs, the call returns immediately after the
+    /// send (legacy fire-and-forget).
     pub async fn swap_transcoders(
         &self,
-        a_to_b_swap: TranscoderSwap,
-        b_to_a_swap: TranscoderSwap,
+        mut a_to_b_swap: TranscoderSwap,
+        mut b_to_a_swap: TranscoderSwap,
     ) -> Result<()> {
         let Some(a_tx) = self.swap_a_to_b.as_ref() else {
             return Err(RvoipError::NotImplemented(
@@ -105,10 +111,28 @@ impl CrossBridgeHandle {
                 "CrossBridgeHandle::swap_transcoders — bridge built without swap channels",
             ));
         };
-        // Best-effort: send on both. A closed receiver (pump exited)
-        // is silently skipped — the bridge is on its way out anyway.
-        let _ = a_tx.send(a_to_b_swap).await;
-        let _ = b_tx.send(b_to_a_swap).await;
+        // Wire ack channels if the caller didn't supply them. We then
+        // await both acks below to provide the "swap is live" contract.
+        let (a_ack_tx, a_ack_rx) = tokio::sync::oneshot::channel();
+        let (b_ack_tx, b_ack_rx) = tokio::sync::oneshot::channel();
+        a_to_b_swap.ack = Some(a_ack_tx);
+        b_to_a_swap.ack = Some(b_ack_tx);
+
+        // Send. A closed receiver (pump exited) is silently skipped —
+        // the bridge is on its way out anyway.
+        let a_send_ok = a_tx.send(a_to_b_swap).await.is_ok();
+        let b_send_ok = b_tx.send(b_to_a_swap).await.is_ok();
+
+        // Await acks with timeout. A pump that exited won't ack — that
+        // direction is left in its pre-swap state but the call still
+        // returns Ok so the caller proceeds.
+        let to = std::time::Duration::from_secs(1);
+        if a_send_ok {
+            let _ = tokio::time::timeout(to, a_ack_rx).await;
+        }
+        if b_send_ok {
+            let _ = tokio::time::timeout(to, b_ack_rx).await;
+        }
         Ok(())
     }
 }

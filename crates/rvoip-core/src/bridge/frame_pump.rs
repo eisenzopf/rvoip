@@ -42,6 +42,12 @@ pub struct TranscoderSwap {
     pub new_transcoder: Option<Transcoder>,
     pub new_from_pt: u8,
     pub new_to_pt: u8,
+    /// A3 — ack channel. When `Some`, the pump fires `()` on it after
+    /// it has applied the swap to its local state, so the caller can
+    /// `.await` confirmation that subsequent frames will use the new
+    /// codec pair. `None` for callers that don't need synchronization
+    /// (legacy / fire-and-forget).
+    pub ack: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// Spawn a frame-pump task. Returns the `JoinHandle` so the caller can
@@ -125,6 +131,13 @@ pub fn spawn_pump_with_swap(
                                     "direction" => direction,
                                 )
                                 .increment(1);
+                                // A3 — confirm swap application to the
+                                // caller. The next iteration of this
+                                // loop reads the new state, so by the
+                                // time the ack fires the swap is live.
+                                if let Some(ack) = s.ack {
+                                    let _ = ack.send(());
+                                }
                                 debug!(
                                     direction,
                                     from_pt,
@@ -430,6 +443,7 @@ mod tests {
                 new_transcoder: None,
                 new_from_pt: 0,
                 new_to_pt: 0,
+                ack: None,
             })
             .await
             .expect("swap sent");

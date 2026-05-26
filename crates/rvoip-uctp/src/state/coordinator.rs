@@ -70,6 +70,12 @@ pub struct UctpCoordinatorCaps {
     /// Maximum Sessions per peer. Excess invites get `error 429`. See
     /// [`MAX_SESSIONS_PER_PEER`].
     pub max_sessions_per_peer: usize,
+    /// P7 — envelope-id replay protection window. `Some(ttl)` enables
+    /// the [`rvoip_core::signing::ReplayCache`] gate on dispatch;
+    /// `None` disables it (legacy / dev). Default off — production
+    /// deployments enable it explicitly via
+    /// `UctpCoordinatorCaps::with_replay_protection`.
+    pub replay_protection: Option<Duration>,
 }
 
 impl Default for UctpCoordinatorCaps {
@@ -77,7 +83,17 @@ impl Default for UctpCoordinatorCaps {
         Self {
             signaling_send_timeout: SIGNALING_SEND_TIMEOUT,
             max_sessions_per_peer: MAX_SESSIONS_PER_PEER,
+            replay_protection: None,
         }
+    }
+}
+
+impl UctpCoordinatorCaps {
+    /// P7 — enable envelope replay protection with the given TTL.
+    /// CONVERSATION_PROTOCOL.md §5.5 recommends 5 minutes.
+    pub fn with_replay_protection(mut self, ttl: Duration) -> Self {
+        self.replay_protection = Some(ttl);
+        self
     }
 }
 
@@ -138,6 +154,11 @@ pub struct UctpCoordinator {
     /// [`UctpCoordinatorCaps::default`] for the legacy entry points.
     /// Plan D1 / D2.
     caps: UctpCoordinatorCaps,
+    /// P7 — envelope-id replay cache. `Some` when
+    /// `caps.replay_protection` was set at construction. Inbound
+    /// `dispatch_inner` rejects duplicate `env.id` within the cache
+    /// TTL with an `error 401 auth/replay` envelope.
+    replay_cache: Option<Arc<rvoip_core::signing::ReplayCache>>,
     /// Optional AAuth validator (gap plan §5.1). When `Some`, an
     /// `auth.response` envelope with `method == "aauth"` is routed
     /// here instead of the standard `bearer` validator. When `None`,
@@ -288,6 +309,9 @@ impl UctpCoordinator {
             pending: Arc::new(Pending::new()),
             subscription_handler,
             peer_auth: Arc::new(Mutex::new(PeerAuthState::Unauthenticated)),
+            replay_cache: caps
+                .replay_protection
+                .map(|ttl| Arc::new(rvoip_core::signing::ReplayCache::new(ttl))),
             caps,
             aauth: None,
             sig_verifier: None,
@@ -342,6 +366,9 @@ impl UctpCoordinator {
             pending: Arc::new(Pending::new()),
             subscription_handler,
             peer_auth: Arc::new(Mutex::new(PeerAuthState::Unauthenticated)),
+            replay_cache: caps
+                .replay_protection
+                .map(|ttl| Arc::new(rvoip_core::signing::ReplayCache::new(ttl))),
             caps,
             aauth: Some(aauth),
             sig_verifier: None,
@@ -393,6 +420,9 @@ impl UctpCoordinator {
             pending: Arc::new(Pending::new()),
             subscription_handler,
             peer_auth: Arc::new(Mutex::new(PeerAuthState::Unauthenticated)),
+            replay_cache: caps
+                .replay_protection
+                .map(|ttl| Arc::new(rvoip_core::signing::ReplayCache::new(ttl))),
             caps,
             aauth: None,
             sig_verifier: Some(sig_verifier),
@@ -597,6 +627,29 @@ impl UctpCoordinator {
         } else {
             env
         };
+        // P7 — envelope replay protection (CONVERSATION_PROTOCOL §5.5).
+        // Runs AFTER the in-reply-to delivery gate so legitimate
+        // retransmits of correlated replies still reach their waiters
+        // (the waiter's oneshot semantics de-dup naturally); for
+        // peer-initiated envelopes, replay-rejects on duplicate `id`
+        // within the TTL window. Disabled by default — production
+        // deployments enable via `UctpCoordinatorCaps::with_replay_protection`.
+        if let Some(cache) = &self.replay_cache {
+            if cache.check_and_record(&env.id).is_err() {
+                warn!(
+                    transport = %self.transport,
+                    envelope = %env.msg_type,
+                    id = %env.id,
+                    "uctp.coordinator: rejecting replayed envelope"
+                );
+                self.metric(
+                    "uctp_envelopes_replay_rejected_total",
+                    "in",
+                    env.msg_type.as_wire_str(),
+                );
+                return Ok(());
+            }
+        }
         // Gap plan §5.2 v1 punch list — RFC 9421 signature gate.
         // Opt-in: only runs when the coordinator was built via
         // `start_full_with_sig9421`. The gate sits after the version
