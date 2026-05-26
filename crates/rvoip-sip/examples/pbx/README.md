@@ -95,7 +95,9 @@ flags, not duplicated scenario code:
 
 - Asterisk defaults to `SIP_PORT=5060`, `SIP_TLS_PORT=5061`,
   `SIP_PASSWORD=password123`, longer registration settle/retry windows, and
-  optional registered-flow operation.
+  optional registered-flow operation. Asterisk TLS blind-transfer tests use a
+  longer default REFER settle window; override with
+  `ASTERISK_TLS_TRANSFER_SETTLE_SECS` when needed.
 - FreeSWITCH defaults to `FREESWITCH_UDP_ADDR=127.0.0.1:5062`,
   `FREESWITCH_TLS_ADDR=127.0.0.1:5063`, `FREESWITCH_PASSWORD=1234`,
   `15070/15080` local SIP ports, and `SrtpSuitePolicy::FreeSwitchCompatible`.
