@@ -233,4 +233,15 @@ async fn observability_emits_counter_gauge_histogram() {
         "expected uctp_connections_negotiating gauge; got {:?}",
         *gauges
     );
+
+    // (e) `uctp_substrate_pending_outstanding` gauge fires alongside
+    // the other gauges in `refresh_gauges()` — present even when zero
+    // outstanding requests, so leak detection has a baseline reading.
+    assert!(
+        gauges
+            .iter()
+            .any(|(name, _, _)| name == "uctp_substrate_pending_outstanding"),
+        "expected uctp_substrate_pending_outstanding gauge; got {:?}",
+        *gauges
+    );
 }

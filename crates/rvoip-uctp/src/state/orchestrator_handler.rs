@@ -4,19 +4,19 @@
 //!
 //! Adapters (rvoip-quic, rvoip-webtransport, …) build one of these at
 //! connection-acceptance time and hand it to
-//! [`UctpCoordinator::start_full`]. The handler:
+//! [`UctpCoordinator::start_full`]. The handler resolves all three
+//! §7.7 subscription forms:
 //!
-//! 1. On `stream.subscribe`: resolves each subscription's `strm_id`
-//!    against the publisher registry; calls
-//!    [`Orchestrator::add_subscription`] for each resolved row.
-//! 2. On `stream.unsubscribe`: calls
+//! 1. **Explicit `strm_id`**: looked up against the publisher
+//!    registry; one [`Orchestrator::add_subscription`] call.
+//! 2. **`from_participant`** (optionally with a `kinds` filter):
+//!    resolved via the registry's `(SessionId, ParticipantId) →
+//!    Vec<strm_id>` index (landed in MP2.5); one `add_subscription`
+//!    per matching stream, with codec-gate filtering per §13.3 (B2).
+//! 3. **`stream.unsubscribe`**: calls
 //!    [`Orchestrator::remove_subscription`] for each `strm_id`. The
 //!    spec mandates idempotent semantics (§7.7) so unknown strm_ids
 //!    are silently treated as successful no-ops.
-//!
-//! `from_participant` and `kinds`-filtered subscriptions are
-//! recognized but rejected with `404 from-participant-resolution-not-implemented`
-//! until v0.x MP2.5 lands Session-aware Participant tracking.
 
 use std::collections::HashSet;
 use std::sync::Arc;

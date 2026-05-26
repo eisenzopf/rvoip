@@ -69,6 +69,19 @@ impl Pending {
     pub fn close(&self) {
         self.inner.clear();
     }
+
+    /// Number of outstanding correlated requests. Surfaced as the
+    /// `uctp_substrate_pending_outstanding` gauge per design doc §3.9
+    /// so leak detection on request/response flows (renegotiate-media,
+    /// future DPoP step-up) has a real-time signal.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// `true` when no correlated requests are outstanding.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
 }
 
 /// Gap plan §4.2 v1 punch list — convenience helper for adapter

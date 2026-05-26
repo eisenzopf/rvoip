@@ -479,22 +479,6 @@ impl UctpCoordinator {
         .increment(1);
     }
 
-    // §3.9 metrics deferred to v0.x:
-    //
-    // - `uctp_substrate_pending_outstanding` (gauge): requires
-    //   `substrate::correlation::Pending` to be wired into the coordinator,
-    //   which only matters once request/response correlation is exercised
-    //   (DPoP step-up, message.history, etc.). v0 envelope flows don't
-    //   await responses through Pending, so the integration is structural
-    //   pre-work not yet needed.
-    //
-    // - `uctp.connection.lifetime` span: needs per-connection span storage
-    //   that survives across discrete handler calls (offer → ready → end).
-    //   The current coordinator dispatches handlers individually with no
-    //   carry-over context, so adding the span requires restructuring to
-    //   carry a `tracing::Span` (or `EnteredSpan`) on the ConnectionMachine.
-    //   Track separately when that refactor lands.
-
     fn refresh_gauges(&self) {
         metrics::gauge!(
             "uctp_sessions_active",
@@ -522,6 +506,14 @@ impl UctpCoordinator {
             "transport" => self.transport
         )
         .set(negotiating as f64);
+
+        // Plan §3.9 — leak detector for request/response correlation.
+        // Active once `Pending` is exercised (renegotiate-media etc.).
+        metrics::gauge!(
+            "uctp_substrate_pending_outstanding",
+            "transport" => self.transport
+        )
+        .set(self.pending.len() as f64);
     }
 
     #[instrument(name = "uctp.coordinator.driver", skip(self, in_rx), fields(transport = %self.transport))]
