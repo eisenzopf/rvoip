@@ -29,8 +29,10 @@ The beta gap-closing plan has been implemented in repository files:
 - Current short security gate passed with Rust 1.88:
   `target/beta-gate/20260526T194243Z/summary.md`.
 
-The release is still not fully attested because the final clean report,
-security artifacts, and 24-hour soak have not been produced in this change.
+The release is still not fully attested because the final clean report has not
+been produced in this change. The 24-hour soak has been explicitly waived for
+beta in `BETA_RELEASE_CHECKLIST.md`; the 30-minute soak is accepted as the beta
+bar.
 
 Latest complete no-skip reference gate:
 
@@ -67,7 +69,6 @@ These tasks block beta release feature completeness.
 | Release hygiene | Re-run the final full beta gate from a clean commit. | New `summary.md` with `0` failures, `0` skips, and `git_status: clean`. |
 | Security | Carry the audit-clean security run into the final clean report. | `security/cargo-audit.txt` and `security/cargo-audit.json` archived with no vulnerabilities or unaccepted advisories. Current Rust 1.88 short audit passes; remaining advisory output is limited to allowed/documented warnings (`async-std`, `audiopus_sys`, `paste`, `rustls-pemfile`, `yaml-rust`, `lru`). |
 | Security | Run parser fuzz smoke coverage from the final gate. | `security/fuzz/sip_message.log`, `security/fuzz/uri.log`, `security/fuzz/header.log`, and `security/fuzz/sdp.log` archived with no crashes. Short smoke passed in `target/beta-gate/20260526T194243Z`. |
-| Soak | Run the documented 24-hour release-candidate soak, or deliberately waive it for beta. | Soak artifact showing `duration_secs=86400`, RSS gate pass, retained objects `0`, and no stuck receivers/runners; or a checklist change accepting 30-minute evidence. |
 | Release notes | Finalize `RELEASE_NOTES_NEXT.md` against the clean report. | Release notes reference the final clean beta report and contain no broad readiness, WebRTC, DTLS-SRTP, ICE, TURN, WSS outbound, carrier SBC, or general 10,000 CPS full-media claim. |
 
 ## Evidence Already Available
@@ -147,8 +148,7 @@ These are not blockers if release notes and public docs do not claim them.
 - Dependency audit output is archived and has no unaccepted advisories.
 - Parser fuzz smoke output is archived for SIP message, URI, header, and SDP
   parsing.
-- The documented 24-hour soak passes, or the checklist explicitly accepts the
-  30-minute soak as the beta bar.
+- The checklist explicitly accepts the 30-minute soak as the beta bar.
 - `BETA_RELEASE_CHECKLIST.md` is fully checked or every unchecked item is an
   explicit beta non-claim.
 - Release notes contain only verified claims from the final clean report.

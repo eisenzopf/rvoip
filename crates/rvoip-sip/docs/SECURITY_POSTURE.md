@@ -68,4 +68,4 @@ Current short security run:
 | Dependency advisory audit archived with no unaccepted advisories | Current Rust 1.88 short run passes; final clean report pending. |
 | Parser fuzz smoke logs archived for SIP message, URI, header, and SDP parsing | Current Rust 1.88 short smoke passed; final clean report pending. |
 | Final full beta gate run from clean commit | Pending. |
-| 24-hour soak evidence archived | Pending. |
+| 24-hour soak evidence archived | Waived for beta in `BETA_RELEASE_CHECKLIST.md`; 30-minute soak accepted as the beta bar. |

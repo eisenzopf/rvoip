@@ -92,9 +92,10 @@ Reference soak artifact:
 |----------|---------|-----------|-----|------------------|----------|---------------------|------------------------------|----------------------------------------|---------------------------------|
 | 1,800 s | 35,010 | 35,010 | 1.0 | 30 | 312.7 MB | 0.75 MB/hr against 10 MB/hr default | 0 | 0 | 0 |
 
-The 30-minute soak passed the current gate. The release checklist still requires
-a documented 24-hour release-candidate soak unless that requirement is
-explicitly waived.
+The 30-minute soak passed the current gate. The release checklist explicitly
+waives the 24-hour release-candidate soak for beta and accepts this 30-minute
+artifact as the beta release bar. A 24-hour soak remains recommended before a
+broader production-readiness claim.
 
 ## Other Reference Performance Gates
 
@@ -120,6 +121,4 @@ Before these numbers can be used as final beta release evidence:
 - Re-run `BETA_RUN_LOCAL_PBX=1 crates/rvoip-sip/scripts/beta_gate.sh --full --require-external` from a clean commit.
 - Include the security gates added to `scripts/beta_gate.sh`, including
   dependency audit and parser fuzz smoke logs.
-- Archive the 24-hour soak result, or update the checklist to deliberately
-  accept the 30-minute soak as the beta bar.
 - Ensure release notes cite only the final clean report directory.

@@ -73,7 +73,8 @@ Current reference report:
 - [x] 30-minute soak passes with retained objects `0`, active Bob audio receivers `0`, and post-drain RSS gate pass.
 - [x] Overload/recovery scenario passes in the reference full gate.
 - [x] Any result above 2,000 CPS is labeled as tuned or experimental.
-- [ ] 24-hour release-candidate soak passes, or this requirement is explicitly waived for beta.
+- [x] 24-hour release-candidate soak is explicitly waived for beta; the
+  30-minute soak is accepted as the beta release bar.
 
 ## Commands
 
@@ -123,6 +124,14 @@ Required release evidence from each interop/perf/security run:
   short audit passes with zero vulnerabilities; allowed warnings remain
   documented separately.
 - Archived parser fuzz smoke logs for all four parser targets.
-- 24-hour soak artifact, or a deliberate checklist change accepting the
-  30-minute soak as sufficient for beta.
 - Final release notes updated to cite the clean report directory.
+
+## Beta Soak Waiver
+
+The 24-hour release-candidate soak is waived for beta on 2026-05-26. The beta
+bar is the archived 30-minute soak from
+`crates/rvoip-sip/beta-report/20260526T032035Z/perf-results/perf_soak_30min.json`:
+`35,010 / 35,010` calls succeeded, ASR was `1.0`, retained objects after drain
+were `0`, active Bob audio receivers after drain were `0`, and the post-drain
+RSS slope was `0.75 MB/hr` against the `10 MB/hr` threshold. A 24-hour soak
+remains recommended before a broader production-readiness claim.

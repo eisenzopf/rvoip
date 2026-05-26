@@ -63,5 +63,4 @@ release-hardening changes are committed.
 - `scripts/beta_gate.sh --security` passes and archives dependency audit plus
   parser fuzz smoke logs.
 - `scripts/beta_gate.sh --full --require-external` passes from a clean commit.
-- The 24-hour soak passes, or the checklist explicitly accepts the 30-minute
-  soak as the beta release bar.
+- The checklist explicitly accepts the 30-minute soak as the beta release bar.
