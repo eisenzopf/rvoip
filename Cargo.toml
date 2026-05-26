@@ -37,6 +37,10 @@ members = [
 #
 exclude = [
     "crates/orchestration-core",
+    # Gap plan §3.2 — Playwright browser smoke. Node.js project; lives
+    # outside the Cargo workspace so `cargo` doesn't try to interpret
+    # `package.json` or descend into `node_modules`.
+    "tests/browser-smoke",
 ]
 
 # Default members - when you run cargo commands without -p or --workspace,
@@ -233,7 +237,7 @@ fastrand = "2.0"
 # UCTP substrate deps — QUIC, WebTransport, length-prefix codec, metrics.
 # Consumed by rvoip-uctp / rvoip-quic / rvoip-webtransport.
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
-web-transport-quinn = "0.5"
+web-transport-quinn = "0.11"
 tokio-util = { version = "0.7", features = ["codec", "compat"] }
 metrics = "0.23"
 # rvoip-websocket signaling + media. tokio-tungstenite for the WebSocket

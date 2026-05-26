@@ -106,6 +106,7 @@ async fn loopback_auth_handshake_via_wt_adapter() {
         connid: None,
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
+    signature: None,
     };
     client.send(env).await.expect("send");
 

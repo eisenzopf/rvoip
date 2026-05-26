@@ -25,10 +25,19 @@ pub struct AuthChallenge {
 /// `auth.response` (C→S) payload.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AuthResponse {
-    /// Auth method name (`bearer`, `oauth2-dpop`, `passkey`, ...).
+    /// Auth method name (`bearer`, `oauth2-dpop`, `passkey`, `aauth`, ...).
     pub method: String,
-    /// Opaque credential body. Shape depends on `method`.
+    /// Opaque credential body. Shape depends on `method`. For
+    /// `method = "aauth"` this is the subject token.
     pub credential: String,
+    /// Actor token, present only for AAuth (`method = "aauth"`). The
+    /// actor token identifies the agent (bot, assistant, service)
+    /// acting on behalf of the subject; the combined pair maps to
+    /// `IdentityAssurance::UserAuthorized { user_id: subject,
+    /// identity: actor }`. See CONVERSATION_PROTOCOL.md §5.6 and
+    /// `rvoip_auth_core::aauth`. Gap plan §5.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_token: Option<String>,
 }
 
 /// `auth.session` (S→C) payload.

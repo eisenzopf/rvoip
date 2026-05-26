@@ -153,6 +153,7 @@ fn invite_env(sid: &str) -> UctpEnvelope {
         connid: None,
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
+    signature: None,
     }
 }
 
@@ -171,6 +172,7 @@ fn accept_env(sid: &str) -> UctpEnvelope {
         connid: None,
         in_reply_to: Some("env_inv".into()),
         payload: serde_json::to_value(payload).unwrap(),
+    signature: None,
     }
 }
 

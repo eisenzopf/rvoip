@@ -49,6 +49,20 @@ pub struct UctpEnvelope<T = serde_json::Value> {
 
     /// Type-specific body. May be `{}` for envelopes that carry only routing fields.
     pub payload: T,
+
+    /// Optional inline RFC 9421 signature per CONVERSATION_PROTOCOL.md
+    /// §5.5.1. When present, deployments configured with a
+    /// `Sig9421Verifier` will canonicalize the envelope (excluding
+    /// this field), verify the signature, and reject the envelope if
+    /// verification fails. Unsigned envelopes pass through unchanged
+    /// unless the deployment's policy marks the envelope's
+    /// `msg_type` as requiring a signature.
+    ///
+    /// `#[serde(default)]` means existing wire formats without a
+    /// `signature` field continue to deserialize cleanly — no
+    /// wire-compatibility break (gap plan §5.2 v1 punch list).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub signature: Option<rvoip_auth_core::sig9421::EnvelopeSignature>,
 }
 
 impl<T> UctpEnvelope<T> {
@@ -66,7 +80,19 @@ impl<T> UctpEnvelope<T> {
             connid: None,
             in_reply_to: None,
             payload,
+            signature: None,
         }
+    }
+
+    /// Attach an inline RFC 9421 signature to this envelope. Used by
+    /// signing producers; the corresponding verify happens via
+    /// `Sig9421Verifier` on the receiving coordinator's dispatch gate.
+    pub fn with_signature(
+        mut self,
+        signature: rvoip_auth_core::sig9421::EnvelopeSignature,
+    ) -> Self {
+        self.signature = Some(signature);
+        self
     }
 
     pub fn with_cid(mut self, cid: impl Into<String>) -> Self {
@@ -114,6 +140,7 @@ impl<T: Serialize> UctpEnvelope<T> {
             connid: self.connid,
             in_reply_to: self.in_reply_to,
             payload,
+            signature: self.signature,
         })
     }
 }

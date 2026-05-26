@@ -5,7 +5,7 @@
 //! error directing callers to enable the feature.
 
 use crate::errors::{Result, UctpWsError};
-use rvoip_uctp::payloads::connection::WebRtcSubstrateSetup;
+use rvoip_uctp::payloads::connection::{IceCandidateInit, WebRtcSubstrateSetup};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BridgeRole {
@@ -54,6 +54,16 @@ impl WebRtcMediaBridge {
             "enable the `media-webrtc` feature on rvoip-websocket".into(),
         ))
     }
+
+    pub async fn next_local_ice_candidate(&self) -> Option<IceCandidateInit> {
+        None
+    }
+
+    pub async fn add_remote_ice_candidate(&self, _init: IceCandidateInit) -> Result<()> {
+        Err(UctpWsError::WebRtc(
+            "enable the `media-webrtc` feature on rvoip-websocket".into(),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -69,11 +79,12 @@ mod bridge {
     use rvoip_core::capability::CodecInfo;
     use rvoip_core::ids::StreamId;
     use rvoip_core::stream::MediaStream;
-    use rvoip_uctp::payloads::connection::WebRtcSubstrateSetup;
+    use rvoip_uctp::payloads::connection::{IceCandidateInit, WebRtcSubstrateSetup};
     use rvoip_webrtc::config::WebRtcConfig;
     use rvoip_webrtc::media::{from_tracks, WebRtcMediaStream};
     use rvoip_webrtc::peer::{PeerRole, RvoipPeerConnection};
     use rvoip_webrtc::sdp::default_webrtc_capabilities;
+    use rvoip_webrtc::RTCIceCandidateInit;
 
     use super::{BridgeRole, Result, UctpWsError};
 
@@ -149,6 +160,33 @@ mod bridge {
             Ok(WebRtcSubstrateSetup::new(sdp))
         }
 
+        /// Gap plan §4.2 v1 punch list — drive a mid-call SDP
+        /// renegotiation. Returns the new local SDP wrapped in a
+        /// `WebRtcSubstrateSetup` ready to ride in a
+        /// `connection.update` envelope.
+        ///
+        /// Offerer side: re-creates an offer (ICE restart semantics
+        /// from webrtc-rs). Answerer side: requires the peer to have
+        /// sent a new remote offer first; pass it as `remote_sdp` so
+        /// the bridge applies it before generating the answer.
+        pub async fn renegotiate_codec(
+            &self,
+            remote_sdp: Option<&str>,
+        ) -> Result<WebRtcSubstrateSetup> {
+            let sdp = match self.role {
+                BridgeRole::Offerer => self.peer.renegotiate_as_offerer().await?,
+                BridgeRole::Answerer => {
+                    let remote = remote_sdp.ok_or_else(|| {
+                        UctpWsError::WebRtc(
+                            "answerer renegotiate_codec requires the peer's new offer SDP".into(),
+                        )
+                    })?;
+                    self.peer.renegotiate_as_answerer(remote).await?
+                }
+            };
+            Ok(WebRtcSubstrateSetup::new(sdp))
+        }
+
         /// Apply peer SDP from `substrate_setup`.
         pub async fn set_remote_substrate_setup(
             &self,
@@ -170,6 +208,45 @@ mod bridge {
                     *self.remote_offer_applied.lock() = true;
                 }
             }
+            Ok(())
+        }
+
+        /// Gap plan §4.1 — block until the next locally-gathered ICE
+        /// candidate is available, return it as an [`IceCandidateInit`]
+        /// ready to drop into a `connection.ice-candidate` envelope.
+        /// Returns `None` when the bridge is closed or the underlying
+        /// peer connection's local-ICE channel closes (e.g. gathering
+        /// complete in non-trickle mode).
+        pub async fn next_local_ice_candidate(&self) -> Option<IceCandidateInit> {
+            let cand = self.peer.recv_local_ice().await?;
+            let init = match cand.to_json() {
+                Ok(i) => i,
+                Err(_) => return None,
+            };
+            Some(IceCandidateInit {
+                candidate: init.candidate,
+                sdp_m_line_index: init.sdp_mline_index.unwrap_or(0),
+                sdp_mid: init.sdp_mid.unwrap_or_default(),
+            })
+        }
+
+        /// Gap plan §4.1 — apply an inbound remote ICE candidate. An
+        /// empty `candidate` string is the spec's end-of-candidates
+        /// marker and is silently dropped (webrtc-rs has no explicit
+        /// API for it; the gathering state on the remote side has the
+        /// information).
+        pub async fn add_remote_ice_candidate(&self, init: IceCandidateInit) -> Result<()> {
+            if init.is_end_of_candidates() {
+                return Ok(());
+            }
+            let rtc_init = RTCIceCandidateInit {
+                candidate: init.candidate,
+                sdp_mid: Some(init.sdp_mid),
+                sdp_mline_index: Some(init.sdp_m_line_index),
+                username_fragment: None,
+                url: None,
+            };
+            self.peer.add_remote_ice_candidate(rtc_init).await?;
             Ok(())
         }
 

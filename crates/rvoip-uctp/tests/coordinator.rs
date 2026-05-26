@@ -39,6 +39,7 @@ fn auth_hello_env() -> UctpEnvelope {
         connid: None,
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
+    signature: None,
     }
 }
 
@@ -46,6 +47,7 @@ fn auth_response_env(token: &str, in_reply_to: &str) -> UctpEnvelope {
     let payload = auth::AuthResponse {
         method: "bearer".into(),
         credential: token.into(),
+    actor_token: None,
     };
     UctpEnvelope {
         v: 1,
@@ -57,6 +59,7 @@ fn auth_response_env(token: &str, in_reply_to: &str) -> UctpEnvelope {
         connid: None,
         in_reply_to: Some(in_reply_to.into()),
         payload: serde_json::to_value(payload).unwrap(),
+    signature: None,
     }
 }
 
@@ -78,6 +81,7 @@ fn session_invite_env(sid: &str, cid: &str) -> UctpEnvelope {
         connid: None,
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
+    signature: None,
     }
 }
 
@@ -168,7 +172,7 @@ async fn inbound_invite_emits_event() {
 }
 
 #[tokio::test]
-async fn multi_party_stream_subscribe_rejected_with_503() {
+async fn multi_party_stream_subscribe_rejected_with_501() {
     let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (events_tx, _events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
@@ -190,13 +194,14 @@ async fn multi_party_stream_subscribe_rejected_with_503() {
             "by_participant": "part_alice",
             "subscriptions": [{"strm_id": "strm_z"}]
         }),
+    signature: None,
     };
     in_tx.send(env).await.unwrap();
 
     let reply = out_rx.recv().await.expect("expected error envelope");
     assert_eq!(reply.msg_type, MessageType::Error);
     let payload: rvoip_uctp::payloads::control::Error = reply.decode_payload().unwrap();
-    assert_eq!(payload.code, 503);
+    assert_eq!(payload.code, 501);
     assert_eq!(payload.reason, "multi-party-routing-not-implemented");
 }
 
@@ -223,6 +228,7 @@ fn connection_offer_env(sid: &str, connid: &str, prefs: &[&str]) -> UctpEnvelope
         connid: Some(connid.into()),
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
+    signature: None,
     }
 }
 
@@ -374,6 +380,7 @@ async fn envelope_for_unknown_connid_emits_404() {
             "streams_answered": [],
             "substrate_setup": null
         }),
+    signature: None,
     };
     let env_id = env.id.clone();
     in_tx.send(env).await.unwrap();
@@ -490,6 +497,7 @@ async fn unknown_envelope_types_are_silently_ignored() {
         connid: None,
         in_reply_to: None,
         payload: serde_json::Value::Object(Default::default()),
+    signature: None,
     };
     in_tx.send(env).await.unwrap();
 
@@ -656,6 +664,7 @@ async fn inbound_dtmf_send_emits_session_event() {
             "duration_ms": 120,
             "method": "rfc4733"
         }),
+    signature: None,
     };
     in_tx.send(env).await.unwrap();
 
@@ -746,6 +755,7 @@ async fn inbound_connection_quality_emits_per_stream_events() {
                 }
             ]
         }),
+    signature: None,
     };
     in_tx.send(env).await.unwrap();
 
@@ -928,6 +938,7 @@ async fn dtmf_send_for_unknown_connid_emits_404() {
             "duration_ms": 100,
             "method": "rfc4733"
         }),
+    signature: None,
     };
     in_tx.send(env).await.unwrap();
 

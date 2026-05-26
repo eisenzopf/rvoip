@@ -65,6 +65,19 @@ url = "2"
 # JWT validator integration test (plan C4 prelude).
 jsonwebtoken = "9.3"
 
+# Gap plan §5.2 v1 punch list — sig9421_gate.rs test signs envelopes
+# directly with Ed25519 + base64 to drive the coordinator's verify
+# gate end-to-end.
+ring = { workspace = true }
+base64 = { workspace = true }
+
+# Gap plan §3.2 v1 punch list — orchestrator_bridge.rs example writes
+# the demo cert's SPKI fingerprint to /tmp/uctp_demo_cert.spki so the
+# Playwright wt_smoke.spec.mjs can pin it via Chromium's
+# --ignore-certificate-errors-spki-list flag.
+x509-parser = "0.15"
+sha2 = { workspace = true }
+
 [lints]
 workspace = true
 

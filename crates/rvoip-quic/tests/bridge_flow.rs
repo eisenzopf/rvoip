@@ -116,6 +116,7 @@ async fn dial_and_invite(
             capabilities: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
+    signature: None,
     };
     client.send(hello).await.expect("send hello");
     let challenge = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
@@ -135,8 +136,10 @@ async fn dial_and_invite(
         payload: serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "test-token".into(),
+        actor_token: None,
         })
         .unwrap(),
+    signature: None,
     };
     client.send(response).await.expect("send response");
     let session_reply = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
@@ -162,6 +165,7 @@ async fn dial_and_invite(
             capabilities_offer: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
+    signature: None,
     };
     client.send(env).await.expect("send invite");
     client
@@ -292,6 +296,7 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
             payload: Bytes::from(vec![0xDE, 0xAD, 0xBE, 0xEF, i]),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
+        payload_type: None,
         };
         client_a_out.send(frame).await.expect("inject frame");
     }

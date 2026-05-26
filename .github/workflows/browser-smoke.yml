@@ -1,0 +1,55 @@
+name: browser-smoke
+
+on:
+  pull_request:
+    paths:
+      - "crates/rvoip-uctp/**"
+      - "crates/rvoip-websocket/**"
+      - "crates/rvoip-quic/**"
+      - "crates/rvoip-webtransport/**"
+      - "tests/browser-smoke/**"
+      - ".github/workflows/browser-smoke.yml"
+  push:
+    branches: [main]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: browser-smoke
+
+      - name: Pre-build orchestrator_bridge example
+        run: cargo build -p rvoip-uctp --example orchestrator_bridge
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install browser-smoke deps
+        working-directory: tests/browser-smoke
+        run: npm ci || npm install
+
+      - name: Install Chromium for Playwright
+        working-directory: tests/browser-smoke
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser smoke
+        working-directory: tests/browser-smoke
+        env:
+          RUST_LOG: warn
+        run: npm test
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: tests/browser-smoke/playwright-report/
+          retention-days: 7

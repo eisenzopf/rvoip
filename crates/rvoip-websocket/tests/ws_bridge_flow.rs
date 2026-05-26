@@ -81,6 +81,7 @@ fn auth_hello() -> UctpEnvelope {
             capabilities: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
+    signature: None,
     }
 }
 
@@ -97,8 +98,10 @@ fn auth_response(in_reply_to: String) -> UctpEnvelope {
         payload: serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "test-token".into(),
+        actor_token: None,
         })
         .unwrap(),
+    signature: None,
     }
 }
 
@@ -120,6 +123,7 @@ fn invite(sid: &str, participant: &str) -> UctpEnvelope {
             capabilities_offer: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
+    signature: None,
     }
 }
 
@@ -386,6 +390,8 @@ async fn ws_to_ws_bridge_flows_frames_end_to_end() {
     // these and forward as-is.
     //
     // On the answerer_1 side, the inbound pump strips the RTP header and
+    // emits `MediaFrame { payload: pkt.payload, ... 
+    // emits `MediaFrame { payload: pkt.payload, ... payload_type: None,
     // emits `MediaFrame { payload: pkt.payload, ... }` — i.e. just the
     // codec payload (our 5-byte marker). The bridge forwards that to
     // answerer_2's outbound pump, which wraps it in a fresh RTP packet
@@ -412,6 +418,7 @@ async fn ws_to_ws_bridge_flows_frames_end_to_end() {
             payload: rtp_bytes,
             timestamp_rtp: 0,
             captured_at: Utc::now(),
+        payload_type: None,
         };
         out_1.send(frame).await.expect("inject");
     }

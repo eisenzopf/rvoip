@@ -15,6 +15,7 @@ description = "rvoip-core ConnectionAdapter implementation over WebSocket (signa
 [features]
 default = []
 media-webrtc = ["dep:rvoip-webrtc"]
+wss = ["dep:tokio-rustls", "dep:rustls", "tokio-tungstenite/rustls-tls-webpki-roots"]
 
 [dependencies]
 rvoip-core.workspace = true
@@ -33,7 +34,9 @@ chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
-tokio-tungstenite.workspace = true
+tokio-tungstenite = { workspace = true }
+tokio-rustls = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
 url = "2"
 
 tracing.workspace = true
@@ -48,6 +51,18 @@ required-features = ["media-webrtc"]
 [[test]]
 name = "ws_bridge_flow"
 required-features = ["media-webrtc"]
+
+[[test]]
+name = "ws_envelope_sdp_bridge"
+required-features = ["media-webrtc"]
+
+[[test]]
+name = "trickle_ice"
+required-features = ["media-webrtc"]
+
+[[test]]
+name = "wss_loopback"
+required-features = ["wss"]
 
 [dev-dependencies]
 rvoip-webrtc.workspace = true

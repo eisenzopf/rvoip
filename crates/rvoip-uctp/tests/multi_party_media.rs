@@ -115,6 +115,7 @@ async fn drive_auth_quic(
         serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "test-token".into(),
+        actor_token: None,
         })
         .unwrap(),
     )
@@ -167,6 +168,7 @@ fn invite(sid: &str, participant: &str) -> UctpEnvelope {
             capabilities_offer: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
+    signature: None,
     }
 }
 
@@ -302,6 +304,7 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
             payload: Bytes::from(vec![0x00, 0x00, 0x00, 0x00, 0xFF]),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
+        payload_type: None,
         })
         .await
         .expect("prime frame");
@@ -341,6 +344,7 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
             payload: Bytes::from(vec![0x4D, 0x50, 0x33, 0x42, i]),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
+        payload_type: None,
         };
         publisher_out.send(frame).await.expect("inject frame");
     }
@@ -468,6 +472,7 @@ async fn fanout_with_no_subscription_does_not_leak_frames() {
             payload: Bytes::from(vec![0xDE, 0xAD, 0xBE, 0xEF, i]),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
+        payload_type: None,
         };
         publisher_out.send(frame).await.expect("inject");
     }

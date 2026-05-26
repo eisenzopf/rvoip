@@ -199,6 +199,7 @@ fn frame(kind: StreamKind, body: &[u8]) -> MediaFrame {
         payload: Bytes::copy_from_slice(body),
         timestamp_rtp: 0,
         captured_at: Utc::now(),
+        payload_type: None,
     }
 }
 

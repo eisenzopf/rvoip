@@ -7,6 +7,7 @@ pub mod coordinator;
 pub mod events;
 pub mod orchestrator_handler;
 pub mod session;
+pub mod signature_policy;
 pub mod subscription;
 
 pub use connection::{ConnectionInput, ConnectionMachine, UctpConnectionState};
@@ -17,6 +18,7 @@ pub use coordinator::{
 pub use events::UctpSessionEvent;
 pub use orchestrator_handler::{OrchestratorSubscriptionHandler, DEFAULT_ACCEPTED_CODECS};
 pub use session::{SessionInput, SessionMachine, UctpSessionState};
+pub use signature_policy::Sig9421Policy;
 pub use subscription::{
     rejecting_handler, PublisherInfo, RejectingHandler, SubscriptionHandler, SubscriptionOutcome,
 };

@@ -251,6 +251,7 @@ fn mk_frame(stream_id: StreamId, byte: u8) -> MediaFrame {
         payload: Bytes::from(vec![byte]),
         timestamp_rtp: 0,
         captured_at: Utc::now(),
+        payload_type: None,
     }
 }
 

@@ -10,7 +10,7 @@ pub mod framing;
 pub mod quinn;
 pub mod tls;
 
-pub use correlation::Pending;
+pub use correlation::{send_and_wait, Pending};
 pub use datagram::{pack, unpack, MediaDatagram};
 pub use framing::{envelope_reader, envelope_writer, length_prefixed_codec};
 pub use quinn::{

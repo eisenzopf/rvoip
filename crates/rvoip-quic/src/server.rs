@@ -193,6 +193,11 @@ async fn spawn_peer_session(
             coordinator_caps,
         ),
     };
+    // Gap plan §4.2 v1 punch list — capture the coordinator's
+    // `Pending` correlator so per-Route adapter code can await
+    // typed responses (`renegotiate_media`, future correlated
+    // ops). Cloned into every `Route` built below.
+    let pending = _coord.pending();
 
     // Inbound substrate → coordinator pump.
     let in_tx_for_pump = in_tx.clone();
@@ -316,6 +321,7 @@ async fn spawn_peer_session(
                             Route {
                                 sid: sid.to_string(),
                                 out_tx: route_out_tx.clone(),
+                                pending: Arc::clone(&pending),
                                 streams: route_streams,
                                 conn: conn_for_translator.clone(),
                                 // Default audio stream claims local_id=1

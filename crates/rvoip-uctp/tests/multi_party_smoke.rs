@@ -71,6 +71,7 @@ fn offer_env(sid: &str, connid: &str, strm_id: &str) -> UctpEnvelope {
             substrate_setup: serde_json::Value::Null,
         })
         .unwrap(),
+    signature: None,
     }
 }
 
@@ -85,6 +86,7 @@ fn ready_env(sid: &str, connid: &str) -> UctpEnvelope {
         connid: Some(connid.into()),
         in_reply_to: None,
         payload: serde_json::Value::Object(Default::default()),
+    signature: None,
     }
 }
 
@@ -107,6 +109,7 @@ fn subscribe_env(sid: &str, connid: &str, strm_id: &str) -> UctpEnvelope {
             }],
         })
         .unwrap(),
+    signature: None,
     }
 }
 

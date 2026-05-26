@@ -51,13 +51,26 @@ pub const ADAPTER_EVENT_CAP: usize = 256;
 /// the bridge connects and exposes a `WebRtcMediaStream`, the server's
 /// ready-watcher pushes the stream into `streams`, which makes
 /// `Orchestrator::bridge_connections` resolve a real audio path.
+///
+/// `pending_offer` holds a `WebRtcSubstrateSetup` that arrived before the
+/// answerer bridge finished constructing. The bridge-setup task drains
+/// it as soon as the bridge is wired (gap plan §2.4 envelope SDP
+/// interception).
 #[derive(Clone)]
 pub(crate) struct Route {
     pub sid: String,
     pub out_tx: mpsc::Sender<UctpEnvelope>,
+    /// Gap plan §4.2 v1 punch list — see rvoip-quic Route doc.
+    pub pending: Arc<rvoip_uctp::substrate::Pending>,
     pub streams: Arc<DashMap<rvoip_core::ids::StreamId, Arc<dyn MediaStream>>>,
     #[cfg(feature = "media-webrtc")]
     pub bridge: Arc<parking_lot::Mutex<Option<Arc<crate::media_bridge::WebRtcMediaBridge>>>>,
+    #[cfg(feature = "media-webrtc")]
+    pub pending_offer: Arc<
+        parking_lot::Mutex<
+            Option<rvoip_uctp::payloads::connection::WebRtcSubstrateSetup>,
+        >,
+    >,
 }
 
 pub struct UctpWsConfig {
@@ -69,6 +82,13 @@ pub struct UctpWsConfig {
     /// Per-peer resource caps (plan D1 / D2). See
     /// [`rvoip_quic::UctpQuicConfig::coordinator_caps`].
     pub coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
+    /// Optional `rustls::ServerConfig` for TLS-terminating WSS. When
+    /// `Some`, the accept loop wraps each `TcpStream` in
+    /// `tokio_rustls::TlsAcceptor::accept(...)` before running the
+    /// WebSocket handshake. When `None`, the plain `ws://` path runs
+    /// unchanged. Only enabled under the `wss` feature.
+    #[cfg(feature = "wss")]
+    pub tls: Option<Arc<rustls::ServerConfig>>,
 }
 
 impl UctpWsConfig {
@@ -79,6 +99,8 @@ impl UctpWsConfig {
             max_concurrent_connections: 1024,
             client_url: None,
             coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps::default(),
+            #[cfg(feature = "wss")]
+            tls: None,
         }
     }
 
@@ -94,6 +116,18 @@ impl UctpWsConfig {
         caps: rvoip_uctp::state::UctpCoordinatorCaps,
     ) -> Self {
         self.coordinator_caps = caps;
+        self
+    }
+
+    /// Enable TLS termination on the WS server socket using the given
+    /// `rustls::ServerConfig`. The server's `accept` loop will wrap
+    /// each TCP stream via `tokio_rustls::TlsAcceptor` before running
+    /// the WebSocket handshake. See `crates/rvoip-uctp/src/substrate/tls.rs`
+    /// for a `self_signed_for_dev` helper that produces a suitable
+    /// config for dev/test.
+    #[cfg(feature = "wss")]
+    pub fn with_tls(mut self, tls: Arc<rustls::ServerConfig>) -> Self {
+        self.tls = Some(tls);
         self
     }
 }
@@ -126,6 +160,8 @@ impl UctpWsAdapter {
             Arc::clone(&routes),
             config.max_concurrent_connections,
             config.coordinator_caps,
+            #[cfg(feature = "wss")]
+            config.tls,
         );
 
         Ok(Arc::new(Self {
@@ -386,12 +422,29 @@ impl ConnectionAdapter for UctpWsAdapter {
 
     async fn renegotiate_media(
         &self,
-        _conn: ConnectionId,
-        _capabilities: CapabilityDescriptor,
+        conn: ConnectionId,
+        capabilities: CapabilityDescriptor,
     ) -> RvoipResult<NegotiatedCodecs> {
-        Err(RvoipError::NotImplemented(
-            "rvoip-websocket::renegotiate_media",
-        ))
+        // Gap plan §4.2 v1 punch list — see rvoip-quic adapter for
+        // the design (shared envelope helper, awaits peer reply via
+        // `Pending`). The optional `media-webrtc` SDP renegotiation
+        // is application-driven for now (caller holds the bridge
+        // handle); auto-driving it on a successful reply is a
+        // follow-up.
+        let route = self
+            .routes
+            .get(&conn)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?
+            .clone();
+        rvoip_uctp::adapter_helpers::renegotiate_via_envelope(
+            &route.out_tx,
+            &route.pending,
+            &route.sid,
+            &conn,
+            &capabilities,
+            rvoip_uctp::adapter_helpers::DEFAULT_RENEGOTIATE_TIMEOUT,
+        )
+        .await
     }
 
     fn subscribe_events(&self) -> mpsc::Receiver<AdapterEvent> {

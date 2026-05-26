@@ -76,7 +76,7 @@ async fn coordinator_accepts_valid_jwt_and_unlocks_envelopes() {
         serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: token,
-        })
+            actor_token: None,        })
         .unwrap(),
     )
     .with_in_reply_to(challenge.id);
@@ -138,7 +138,7 @@ async fn coordinator_rejects_invalid_jwt_with_401() {
         serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "not.a.valid.jwt".into(),
-        })
+            actor_token: None,        })
         .unwrap(),
     )
     .with_in_reply_to(challenge.id);
@@ -191,7 +191,7 @@ async fn coordinator_rejects_expired_jwt_with_401() {
         serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: expired,
-        })
+            actor_token: None,        })
         .unwrap(),
     )
     .with_in_reply_to(challenge.id);

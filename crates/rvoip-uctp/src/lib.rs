@@ -20,6 +20,7 @@
 //! `rvoip_uctp::substrate::quinn::*`) are stable but not the intended
 //! entry points.
 
+pub mod adapter_helpers;
 pub mod envelope;
 pub mod errors;
 pub mod ids;

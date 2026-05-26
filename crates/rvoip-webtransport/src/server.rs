@@ -134,13 +134,16 @@ async fn spawn_peer_session(
         }
     };
 
-    if !request.url().path().eq(&mount_path) {
+    // web-transport-quinn 0.11+: `url` is a field, not a method.
+    // The graceful `close(StatusCode)` API was removed; for now we
+    // drop the request on path mismatch, which manifests as a
+    // closed CONNECT stream on the client side.
+    if !request.url.path().eq(&mount_path) {
         warn!(
-            requested = %request.url().path(),
+            requested = %request.url.path(),
             expected = %mount_path,
             "rvoip-webtransport: mount path mismatch; closing"
         );
-        let _ = request.close(http::StatusCode::NOT_FOUND).await;
         return;
     }
 
@@ -200,6 +203,10 @@ async fn spawn_peer_session(
             coordinator_caps,
         ),
     };
+    // Gap plan §4.2 v1 punch list — capture the coordinator's
+    // `Pending` correlator so per-Route adapter code can await
+    // typed responses.
+    let pending = _coord.pending();
 
     let in_tx_for_pump = in_tx.clone();
     let inbound_pump = tokio::spawn(async move {
@@ -304,6 +311,7 @@ async fn spawn_peer_session(
                             Route {
                                 sid: sid.to_string(),
                                 out_tx: route_out_tx.clone(),
+                                pending: Arc::clone(&pending),
                                 streams: route_streams,
                                 session: session_for_translator.clone(),
                                 next_local_id: Arc::new(

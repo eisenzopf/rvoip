@@ -369,6 +369,11 @@ pub fn spawn_inbound_pump(
                         payload: pkt.payload.clone(),
                         timestamp_rtp: pkt.header.timestamp,
                         captured_at: Utc::now(),
+                        // Gap plan §4.3 — carry the wire RTP payload-type
+                        // so the cross-transport `frame_pump` can route
+                        // RFC 4733 telephone-events (PT 101 by convention)
+                        // distinctly from audio.
+                        payload_type: Some(pkt.header.payload_type),
                     };
                     match tokio::time::timeout(deadline, frames_in_tx.send(frame)).await {
                         Ok(Ok(())) => {}

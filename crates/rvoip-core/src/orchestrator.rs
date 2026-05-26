@@ -181,6 +181,26 @@ impl Orchestrator {
             .insert(conn.clone(), ConnectionEntry { transport });
     }
 
+    /// If `conn` is currently in a cross-transport bridge, return the
+    /// peer `ConnectionId` on the other leg. Gap plan §4.3 / v1 punch
+    /// list — used by the DTMF auto-route in the `AdapterEvent::Dtmf`
+    /// handler to forward digits across the bridge when one side
+    /// signals DTMF out-of-band (e.g. UCTP `dtmf.send` envelope) and
+    /// the bridged peer needs to inject the corresponding RFC 4733
+    /// telephone-event packets onto its outbound RTP.
+    fn bridge_peer_of(&self, conn: &ConnectionId) -> Option<ConnectionId> {
+        for entry in self.cross_bridges.iter() {
+            let h = entry.value();
+            if &h.a == conn {
+                return Some(h.b.clone());
+            }
+            if &h.b == conn {
+                return Some(h.a.clone());
+            }
+        }
+        None
+    }
+
     fn forget_connection(&self, conn: &ConnectionId) {
         self.connections.remove(conn);
         // Eagerly clean up any subscriptions that name this Connection
@@ -472,7 +492,7 @@ impl Orchestrator {
             AdapterEvent::Dtmf {
                 connection_id,
                 digits,
-                duration_ms: _,
+                duration_ms,
             } => {
                 // `Event::DtmfReceived` carries digits + connection_id
                 // only — duration_ms is dropped at the orchestrator
@@ -480,10 +500,63 @@ impl Orchestrator {
                 // per-digit timing subscribe to the adapter event
                 // stream directly. Plan C2.
                 self.emit(Event::DtmfReceived {
-                    connection_id,
-                    digits,
+                    connection_id: connection_id.clone(),
+                    digits: digits.clone(),
                     at: Utc::now(),
                 });
+                // Gap plan §4.3 / v1 punch list — cross-bridge DTMF
+                // auto-route. When the connection is part of a
+                // cross-transport bridge, forward the digits to the
+                // peer leg via the adapter's `send_dtmf`. This is what
+                // makes UCTP→SIP DTMF work end-to-end without app
+                // code: a UCTP peer signals digits out-of-band via
+                // `dtmf.send`, the SIP-side adapter synthesizes RFC
+                // 4733 packets onto outbound RTP.
+                //
+                // `handle_adapter_event` is synchronous; spawn a task
+                // so the forward doesn't block adapter-event ingest.
+                if let Some(peer) = self.bridge_peer_of(&connection_id) {
+                    metrics::counter!("uctp_bridge_dtmf_forwarded_total").increment(1);
+                    let peer_for_task = peer.clone();
+                    let digits_for_task = digits.clone();
+                    let adapter = self.adapter_for(&peer);
+                    match adapter {
+                        Ok(adapter) => {
+                            let src = connection_id.clone();
+                            tokio::spawn(async move {
+                                match adapter
+                                    .send_dtmf(peer_for_task.clone(), &digits_for_task, duration_ms)
+                                    .await
+                                {
+                                    Ok(()) => {
+                                        debug!(
+                                            ?src,
+                                            ?peer_for_task,
+                                            digits = %digits_for_task,
+                                            "orchestrator: auto-forwarded DTMF across cross-transport bridge"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            ?src,
+                                            ?peer_for_task,
+                                            error = %e,
+                                            "orchestrator: cross-bridge DTMF auto-forward failed"
+                                        );
+                                    }
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            warn!(
+                                ?connection_id,
+                                ?peer,
+                                error = %e,
+                                "orchestrator: cross-bridge DTMF auto-forward — no adapter for peer transport"
+                            );
+                        }
+                    }
+                }
             }
             AdapterEvent::Quality {
                 connection_id,
@@ -605,7 +678,81 @@ impl Orchestrator {
         capabilities: CapabilityDescriptor,
     ) -> Result<crate::capability::NegotiatedCodecs> {
         let adapter = self.adapter_for(&connection_id)?;
-        adapter.renegotiate_media(connection_id, capabilities).await
+        let negotiated = adapter
+            .renegotiate_media(connection_id.clone(), capabilities)
+            .await?;
+
+        // Gap plan §4.2 v1 punch list — if the connection is in a
+        // cross-transport bridge, hot-swap its transcoders so the
+        // pump's `from_pt`/`to_pt` reflect the post-renegotiation
+        // codec on this leg. The other leg's codec is unchanged
+        // (renegotiate_media is per-connection); the swap only
+        // touches the direction whose PT actually moved.
+        if let Some(peer) = self.bridge_peer_of(&connection_id) {
+            if let Some(audio) = negotiated.audio.as_ref() {
+                if let Some(new_pt) = codec_to_pt(&audio.name) {
+                    // Look up the bridge handle and which leg is "this" connection.
+                    let bridge_entry = self
+                        .cross_bridges
+                        .iter()
+                        .find(|e| e.value().a == connection_id || e.value().b == connection_id);
+                    if let Some(entry) = bridge_entry {
+                        let bridge = entry.value();
+                        // We don't know the peer leg's PT post-renegotiation
+                        // (it didn't renegotiate). Best-effort: assume the
+                        // existing PT is preserved by re-deriving from the
+                        // adapter's stream codec lookup. For now reuse the
+                        // bridged peer's negotiated codec via the adapter
+                        // stream cache.
+                        let peer_pt = self
+                            .adapter_for(&peer)
+                            .ok()
+                            .and_then(|adp| {
+                                tokio::task::block_in_place(|| {
+                                    let rt = tokio::runtime::Handle::current();
+                                    rt.block_on(adp.streams(peer.clone())).ok()
+                                })
+                            })
+                            .and_then(|streams| {
+                                streams
+                                    .into_iter()
+                                    .find(|s| s.kind() == StreamKind::Audio)
+                                    .map(|s| s.codec().name)
+                            })
+                            .and_then(|n| codec_to_pt(&n))
+                            .unwrap_or(new_pt);
+
+                        // Build per-direction swap messages. We need
+                        // transcoders if the PTs differ.
+                        let (a_swap, b_swap) = if bridge.a == connection_id {
+                            // a is "this" connection (new_pt), b is peer (peer_pt).
+                            let a_to_b = make_swap(new_pt, peer_pt);
+                            let b_to_a = make_swap(peer_pt, new_pt);
+                            (a_to_b, b_to_a)
+                        } else {
+                            let a_to_b = make_swap(peer_pt, new_pt);
+                            let b_to_a = make_swap(new_pt, peer_pt);
+                            (a_to_b, b_to_a)
+                        };
+                        if let Err(e) = bridge.swap_transcoders(a_swap, b_swap).await {
+                            warn!(
+                                ?connection_id,
+                                error = %e,
+                                "orchestrator: bridge transcoder hot-swap failed; bridge may carry stale codecs"
+                            );
+                        } else {
+                            metrics::counter!(
+                                "uctp_renegotiations_completed_total",
+                                "outcome" => "hot-swapped",
+                            )
+                            .increment(1);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(negotiated)
     }
 
     // Mute/Unmute aren't on the ConnectionAdapter trait yet (per
@@ -738,13 +885,44 @@ impl Orchestrator {
         let b_in = b_audio.frames_in();
         let b_out = b_audio.frames_out();
 
-        let a_to_b = frame_pump::spawn_pump("a->b", a_in, b_out, transcoder_a_to_b, a_pt, b_pt);
-        let b_to_a = frame_pump::spawn_pump("b->a", b_in, a_out, transcoder_b_to_a, b_pt, a_pt);
+        // Gap plan §4.2 v1 punch list — wire each pump with a swap
+        // channel so `Orchestrator::renegotiate_media` can hot-swap
+        // the transcoders after a successful codec renegotiation.
+        let (swap_a_to_b_tx, swap_a_to_b_rx) =
+            tokio::sync::mpsc::channel::<frame_pump::TranscoderSwap>(4);
+        let (swap_b_to_a_tx, swap_b_to_a_rx) =
+            tokio::sync::mpsc::channel::<frame_pump::TranscoderSwap>(4);
+        let a_to_b = frame_pump::spawn_pump_with_swap(
+            "a->b",
+            a_in,
+            b_out,
+            transcoder_a_to_b,
+            a_pt,
+            b_pt,
+            swap_a_to_b_rx,
+        );
+        let b_to_a = frame_pump::spawn_pump_with_swap(
+            "b->a",
+            b_in,
+            a_out,
+            transcoder_b_to_a,
+            b_pt,
+            a_pt,
+            swap_b_to_a_rx,
+        );
 
         let id = BridgeId::new();
         self.cross_bridges.insert(
             id.clone(),
-            CrossBridgeHandle::new(id.clone(), a.clone(), b.clone(), a_to_b.abort_handle(), b_to_a.abort_handle()),
+            CrossBridgeHandle::with_swap_channels(
+                id.clone(),
+                a.clone(),
+                b.clone(),
+                a_to_b.abort_handle(),
+                b_to_a.abort_handle(),
+                swap_a_to_b_tx,
+                swap_b_to_a_tx,
+            ),
         );
         self.emit(Event::ConnectionsBridged {
             bridge_id: id.clone(),
@@ -782,3 +960,22 @@ impl Orchestrator {
 // Allow forwarding the `RejectReason` argument from older call sites that
 // already had it imported. Re-exported for consumer convenience.
 pub use crate::adapter::RejectReason as InboundRejectReason;
+
+/// Gap plan §4.2 v1 punch list — construct a [`TranscoderSwap`] for
+/// one direction of a hot-swap. Builds a fresh `Transcoder` (with a
+/// new per-direction `FormatConverter`) when `from_pt != to_pt`;
+/// otherwise leaves the transcoder slot empty (passthrough).
+fn make_swap(from_pt: u8, to_pt: u8) -> frame_pump::TranscoderSwap {
+    let transcoder = if from_pt != to_pt {
+        Some(Transcoder::new(Arc::new(TokioRwLock::new(
+            FormatConverter::new(),
+        ))))
+    } else {
+        None
+    };
+    frame_pump::TranscoderSwap {
+        new_transcoder: transcoder,
+        new_from_pt: from_pt,
+        new_to_pt: to_pt,
+    }
+}

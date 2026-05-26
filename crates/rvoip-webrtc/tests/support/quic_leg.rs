@@ -121,6 +121,7 @@ impl QuicLegHarness {
                 capabilities: serde_json::Value::Object(Default::default()),
             })
             .unwrap(),
+        signature: None,
         };
         client.send(hello).await.expect("auth.hello");
         let challenge = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
@@ -141,8 +142,10 @@ impl QuicLegHarness {
             payload: serde_json::to_value(auth::AuthResponse {
                 method: "bearer".into(),
                 credential: "test-token".into(),
+            actor_token: None,
             })
             .unwrap(),
+        signature: None,
         };
         client.send(response).await.expect("auth.response");
         let session_reply = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
@@ -168,6 +171,7 @@ impl QuicLegHarness {
                 capabilities_offer: serde_json::Value::Object(Default::default()),
             })
             .unwrap(),
+        signature: None,
         };
         client.send(invite).await.expect("session.invite");
         client

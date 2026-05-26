@@ -240,6 +240,7 @@ pub fn spawn_datagram_reader(
                                     payload: datagram.payload,
                                     timestamp_rtp: 0,
                                     captured_at: Utc::now(),
+                                    payload_type: None,
                                 };
                                 match stream.inbound_tx().try_send(frame.clone()) {
                                     Ok(_) => {

@@ -138,6 +138,21 @@ pub struct UctpCoordinator {
     /// [`UctpCoordinatorCaps::default`] for the legacy entry points.
     /// Plan D1 / D2.
     caps: UctpCoordinatorCaps,
+    /// Optional AAuth validator (gap plan §5.1). When `Some`, an
+    /// `auth.response` envelope with `method == "aauth"` is routed
+    /// here instead of the standard `bearer` validator. When `None`,
+    /// `aauth` requests are rejected with `401 auth/aauth-not-configured`.
+    aauth: Option<Arc<rvoip_auth_core::AAuthValidator>>,
+    /// Optional RFC 9421 inline-signature verifier (gap plan §5.2 v1
+    /// punch list). When `Some`, the dispatch gate runs every signed
+    /// envelope through this verifier and rejects on failure; if
+    /// `sig_policy.requires(env.msg_type)` and `env.signature` is
+    /// `None`, the envelope is rejected with `401-1 signature-required`.
+    sig_verifier: Option<Arc<rvoip_auth_core::sig9421::Sig9421Verifier>>,
+    /// Per-deployment policy for which `MessageType`s mandate a
+    /// signature when `sig_verifier` is wired. Defaults to empty
+    /// (opportunistic verification only).
+    sig_policy: Option<super::Sig9421Policy>,
 }
 
 /// Default permissive v0 descriptor — supports the codecs every v0 demo
@@ -274,6 +289,9 @@ impl UctpCoordinator {
             subscription_handler,
             peer_auth: Arc::new(Mutex::new(PeerAuthState::Unauthenticated)),
             caps,
+            aauth: None,
+            sig_verifier: None,
+            sig_policy: None,
         });
 
         let driver = Arc::clone(&coord);
@@ -290,6 +308,101 @@ impl UctpCoordinator {
     /// matched responses via `Pending::deliver`. Drained on `shutdown()`.
     pub fn pending(&self) -> Arc<Pending> {
         Arc::clone(&self.pending)
+    }
+
+    /// Variant of [`Self::start_full_with_caps`] that also wires an
+    /// AAuth validator (gap plan §5.1). With this set, an inbound
+    /// `auth.response` envelope with `method == "aauth"` is routed
+    /// to the AAuth validator (`subject_token = payload.credential`,
+    /// `actor_token = payload.actor_token`). Other methods still go
+    /// through the standard `bearer` validator.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_full_with_aauth(
+        transport: TransportLabel,
+        in_rx: mpsc::Receiver<UctpEnvelope>,
+        out_tx: mpsc::Sender<UctpEnvelope>,
+        events_tx: mpsc::Sender<UctpSessionEvent>,
+        bearer: Arc<dyn BearerValidator>,
+        aauth: Arc<rvoip_auth_core::AAuthValidator>,
+        local_descriptor: Arc<CapabilityDescriptor>,
+        subscription_handler: Arc<dyn SubscriptionHandler>,
+        caps: UctpCoordinatorCaps,
+    ) -> Arc<Self> {
+        let cancel = CancellationToken::new();
+        let coord = Arc::new(Self {
+            transport,
+            sessions: Arc::new(DashMap::new()),
+            connections: Arc::new(DashMap::new()),
+            handshake_started: Arc::new(DashMap::new()),
+            out_tx,
+            events_tx,
+            cancel,
+            bearer,
+            local_descriptor,
+            pending: Arc::new(Pending::new()),
+            subscription_handler,
+            peer_auth: Arc::new(Mutex::new(PeerAuthState::Unauthenticated)),
+            caps,
+            aauth: Some(aauth),
+            sig_verifier: None,
+            sig_policy: None,
+        });
+        let driver = Arc::clone(&coord);
+        tokio::spawn(async move {
+            driver.run(in_rx).await;
+        });
+        coord
+    }
+
+    /// Gap plan §5.2 v1 punch list — variant of
+    /// [`Self::start_full_with_caps`] that also wires an RFC 9421
+    /// inline-signature verifier plus a policy describing which
+    /// envelope types require a signature. Envelopes that carry a
+    /// `signature` field are always verified; envelopes without one
+    /// pass through unless `policy.requires(env.msg_type)` is true,
+    /// in which case the dispatch gate emits
+    /// `error 401-1 signature-required`.
+    ///
+    /// Deployments that want signature enforcement opt in via this
+    /// entry point. Default constructors leave both fields `None`,
+    /// preserving the pre-v1 behavior.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_full_with_sig9421(
+        transport: TransportLabel,
+        in_rx: mpsc::Receiver<UctpEnvelope>,
+        out_tx: mpsc::Sender<UctpEnvelope>,
+        events_tx: mpsc::Sender<UctpSessionEvent>,
+        bearer: Arc<dyn BearerValidator>,
+        sig_verifier: Arc<rvoip_auth_core::sig9421::Sig9421Verifier>,
+        sig_policy: super::Sig9421Policy,
+        local_descriptor: Arc<CapabilityDescriptor>,
+        subscription_handler: Arc<dyn SubscriptionHandler>,
+        caps: UctpCoordinatorCaps,
+    ) -> Arc<Self> {
+        let cancel = CancellationToken::new();
+        let coord = Arc::new(Self {
+            transport,
+            sessions: Arc::new(DashMap::new()),
+            connections: Arc::new(DashMap::new()),
+            handshake_started: Arc::new(DashMap::new()),
+            out_tx,
+            events_tx,
+            cancel,
+            bearer,
+            local_descriptor,
+            pending: Arc::new(Pending::new()),
+            subscription_handler,
+            peer_auth: Arc::new(Mutex::new(PeerAuthState::Unauthenticated)),
+            caps,
+            aauth: None,
+            sig_verifier: Some(sig_verifier),
+            sig_policy: Some(sig_policy),
+        });
+        let driver = Arc::clone(&coord);
+        tokio::spawn(async move {
+            driver.run(in_rx).await;
+        });
+        coord
     }
 
     /// Trigger shutdown and run the §3.5 choreography:
@@ -449,6 +562,127 @@ impl UctpCoordinator {
     }
 
     async fn dispatch_inner(&self, env: UctpEnvelope) -> Result<()> {
+        // §3.1 / §11.2 — version gate. This server only speaks v=1; any
+        // envelope with a different `v` gets `505 version-not-supported`
+        // (the payload includes the set of `v` values we do speak so
+        // the peer can downgrade). Pre-v0.x silently dropped these.
+        if env.v != 1 {
+            warn!(
+                transport = %self.transport,
+                got_v = env.v,
+                envelope = %env.msg_type,
+                "uctp.coordinator: rejecting envelope with unsupported protocol version"
+            );
+            return self
+                .emit_version_not_supported(&env)
+                .await
+                .or_else(|_| Ok(()));
+        }
+        // Gap plan §4.2 v1 punch list — reply-correlator gate.
+        //
+        // Adapter code that needs to await a typed response (e.g.
+        // `renegotiate_media` waiting for the peer's `connection.update`
+        // reply) registers an envelope id on `self.pending` and awaits.
+        // If this inbound envelope's `in_reply_to` matches a registered
+        // waiter, hand the envelope to the waiter and return; otherwise
+        // fall through to the normal handler dispatch path (the
+        // `in_reply_to` field is fine on a peer-initiated envelope —
+        // see e.g. `connection.update` requests, which we route below).
+        //
+        // The deliver gate sits BEFORE the signature gate. Replies that
+        // carry an inline signature get delivered unverified — that's
+        // intentional in v0: `wait_for` callers are local adapter code
+        // that already trusts the upstream pipeline, and the signature
+        // verifier's primary job is gating peer-initiated envelopes
+        // (auth handshake, session.invite, etc.). A future hardening
+        // pass can swap the ordering if signed replies become load-
+        // bearing.
+        let env = if env.in_reply_to.is_some() {
+            match self.pending.deliver(env) {
+                Ok(()) => return Ok(()),
+                Err(env) => env, // no waiter matched — keep dispatching
+            }
+        } else {
+            env
+        };
+        // Gap plan §5.2 v1 punch list — RFC 9421 signature gate.
+        // Opt-in: only runs when the coordinator was built via
+        // `start_full_with_sig9421`. The gate sits after the version
+        // check (so we can still answer 505 on a mismatched v) but
+        // before any handler dispatch. Auth envelopes are NOT exempt
+        // here — deployments that exempt them do so via a policy that
+        // omits AuthHello/AuthResponse from the required set, which
+        // is the default.
+        if let Some(verifier) = self.sig_verifier.as_ref() {
+            let required = self
+                .sig_policy
+                .as_ref()
+                .map(|p| p.requires(&env.msg_type))
+                .unwrap_or(false);
+            match &env.signature {
+                Some(_) => {
+                    // The verifier expects the envelope as a JSON value
+                    // (canonicalization runs over the same shape).
+                    let env_value = match serde_json::to_value(&env) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!(error = %e, "uctp.coordinator: sig9421 serialize failed");
+                            return self
+                                .emit_error(env.id.clone(), 401, "auth", "invalid-signature")
+                                .await
+                                .or_else(|_| Ok(()));
+                        }
+                    };
+                    if let Err(e) = verifier.verify(&env_value).await {
+                        let reason = match e {
+                            rvoip_auth_core::sig9421::Sig9421Error::ReplayDetected(_) => {
+                                "replay-detected"
+                            }
+                            rvoip_auth_core::sig9421::Sig9421Error::StaleTimestamp(_) => {
+                                "stale-timestamp"
+                            }
+                            rvoip_auth_core::sig9421::Sig9421Error::UnknownKeyid(_) => {
+                                "unknown-keyid"
+                            }
+                            rvoip_auth_core::sig9421::Sig9421Error::UnsupportedAlgorithm(_) => {
+                                "unsupported-algorithm"
+                            }
+                            rvoip_auth_core::sig9421::Sig9421Error::MalformedSignature(_)
+                            | rvoip_auth_core::sig9421::Sig9421Error::MalformedEnvelope
+                            | rvoip_auth_core::sig9421::Sig9421Error::MissingEnvelopeId
+                            | rvoip_auth_core::sig9421::Sig9421Error::InvalidEnvelopeTimestamp => {
+                                "malformed-signature"
+                            }
+                            _ => "invalid-signature",
+                        };
+                        warn!(
+                            transport = %self.transport,
+                            envelope = %env.msg_type,
+                            env_id = %env.id,
+                            %reason,
+                            "uctp.coordinator: sig9421 verify rejected envelope"
+                        );
+                        return self
+                            .emit_error(env.id.clone(), 401, "auth", reason)
+                            .await
+                            .or_else(|_| Ok(()));
+                    }
+                }
+                None if required => {
+                    warn!(
+                        transport = %self.transport,
+                        envelope = %env.msg_type,
+                        env_id = %env.id,
+                        "uctp.coordinator: required signature missing"
+                    );
+                    return self
+                        .emit_error(env.id.clone(), 401, "auth", "signature-required")
+                        .await
+                        .or_else(|_| Ok(()));
+                }
+                None => {} // unsigned + not required → continue.
+            }
+        }
         match env.msg_type.clone() {
             // Auth envelopes are the one class that runs pre-auth — the
             // four-envelope handshake from CONVERSATION_PROTOCOL.md §5.1
@@ -475,6 +709,7 @@ impl UctpCoordinator {
                     MessageType::ConnectionOffer => self.handle_connection_offer(env).await,
                     MessageType::ConnectionAnswer => self.handle_connection_answer(env).await,
                     MessageType::ConnectionReady => self.handle_connection_ready(env).await,
+                    MessageType::ConnectionUpdate => self.handle_connection_update(env).await,
                     MessageType::StreamSubscribe => self.handle_stream_subscribe(env).await,
                     MessageType::StreamUnsubscribe => self.handle_stream_unsubscribe(env).await,
                     MessageType::DtmfSend => self.handle_dtmf_send(env).await,
@@ -609,6 +844,34 @@ impl UctpCoordinator {
         self.send_out(env).await
     }
 
+    /// Emit `error 505 version-not-supported` for an envelope whose
+    /// `v` field is outside the set this server understands. The reply
+    /// includes `details.supported = [1]` so the peer can downgrade.
+    /// See CONVERSATION_PROTOCOL.md §11.2.
+    async fn emit_version_not_supported(&self, env: &UctpEnvelope) -> Result<()> {
+        let payload = payloads::control::Error {
+            code: 505,
+            category: "protocol".into(),
+            reason: "version-not-supported".into(),
+            details: serde_json::json!({ "supported": [1u8] }),
+        };
+        metrics::counter!(
+            "uctp_envelope_errors_total",
+            "code" => "505".to_string(),
+            "transport" => self.transport
+        )
+        .increment(1);
+        let mut reply = UctpEnvelope::new(MessageType::Error, serde_json::to_value(payload)?)
+            .with_in_reply_to(env.id.clone());
+        if let Some(s) = env.sid.clone() {
+            reply = reply.with_sid(s);
+        }
+        if let Some(c) = env.connid.clone() {
+            reply = reply.with_connid(c);
+        }
+        self.send_out(reply).await
+    }
+
     /// Emit `error 404 not-found` for an envelope addressed to an unknown
     /// session or connection id, per plan §3.5. Returns `Ok(())` so
     /// callers can `return self.not_found(...).await` in a single line.
@@ -644,16 +907,46 @@ impl UctpCoordinator {
 
     async fn handle_auth_response(&self, env: UctpEnvelope) -> Result<()> {
         let payload: payloads::auth::AuthResponse = env.decode_payload()?;
-        let bearer_span = info_span!(
-            "uctp.auth.bearer",
-            method = %payload.method,
-            transport = %self.transport,
-        );
-        let validation = self
-            .bearer
-            .validate(&payload.credential)
-            .instrument(bearer_span)
-            .await;
+        // Gap plan §5.1 — AAuth routing. When the peer signals
+        // `method = "aauth"` and the coordinator was constructed with
+        // an AAuth validator, run the dual-token check; the bearer
+        // path stays for every other method (oauth2-dpop, passkey,
+        // plain bearer, ...).
+        let validation = if payload.method == "aauth" {
+            let aauth_span = info_span!(
+                "uctp.auth.aauth",
+                transport = %self.transport,
+            );
+            match self.aauth.as_ref() {
+                Some(validator) => {
+                    let subject = payload.credential.clone();
+                    let actor = payload.actor_token.clone().unwrap_or_default();
+                    validator
+                        .validate_aauth(&subject, &actor)
+                        .instrument(aauth_span)
+                        .await
+                }
+                None => {
+                    warn!(
+                        transport = %self.transport,
+                        "auth.aauth: rejected — no AAuthValidator configured"
+                    );
+                    return self
+                        .emit_error(env.id, 401, "auth", "aauth-not-configured")
+                        .await;
+                }
+            }
+        } else {
+            let bearer_span = info_span!(
+                "uctp.auth.bearer",
+                method = %payload.method,
+                transport = %self.transport,
+            );
+            self.bearer
+                .validate(&payload.credential)
+                .instrument(bearer_span)
+                .await
+        };
         match validation {
             Ok(assurance) => {
                 let session = payloads::auth::AuthSession {
@@ -927,6 +1220,122 @@ impl UctpCoordinator {
             let _ = m.apply(ConnectionInput::AnswerReceived);
         });
         Ok(())
+    }
+
+    /// Handle `connection.update` (CONVERSATION_PROTOCOL.md §7.4).
+    ///
+    /// Supported actions (gap plan §4.2):
+    /// - `"renegotiate-media"` — runs the §8.1 negotiation algorithm
+    ///   against the requested `codec_preferences` and the local
+    ///   capability descriptor. On overlap, replies with a
+    ///   `connection.update` envelope carrying the chosen codec under
+    ///   the same action label. On no overlap, replies with `error 488
+    ///   not-acceptable`.
+    /// - `"hold"`, `"resume"`, `"mute"`, `"unmute"` — currently emit
+    ///   `ack`. The actual stream-direction change is a future hop.
+    /// - Unknown actions — emit `ack` for forward-compat (peers may
+    ///   send v1 actions we don't yet recognize).
+    ///
+    /// Pre-§4.2 the coordinator silently dropped `connection.update`
+    /// envelopes; the adapter-level `renegotiate_media` (still a
+    /// `NotImplemented` stub at the moment per §4.2 carryover) is the
+    /// driver-side counterpart of this handler.
+    async fn handle_connection_update(&self, env: UctpEnvelope) -> Result<()> {
+        let payload: payloads::connection::ConnectionUpdate = env.decode_payload()?;
+        let connid_str = env.connid.clone().ok_or(UctpError::MissingField("connid"))?;
+        let connid = ConnectionId::from_string(connid_str.clone());
+        if !self.connections.contains_key(&connid) {
+            return self.not_found(&env, "unknown-connid").await;
+        }
+
+        match payload.action.as_str() {
+            "renegotiate-media" => {
+                let prefs = payload.codec_preferences.clone();
+                let stream_ids: Vec<String> = if payload.streams.is_empty() {
+                    vec!["strm_audio".into()]
+                } else {
+                    payload.streams.clone()
+                };
+                let offers: Vec<StreamOffer<'_>> = stream_ids
+                    .iter()
+                    .map(|sid| StreamOffer {
+                        id: sid.as_str(),
+                        kind: "audio",
+                        direction: "send-recv",
+                        codec_preferences: prefs.as_slice(),
+                    })
+                    .collect();
+
+                match negotiate_streams(offers, &self.local_descriptor) {
+                    NegotiationOutcome::NotAcceptable488 => {
+                        metrics::counter!(
+                            "uctp_capability_renegotiations_total",
+                            "outcome" => "488",
+                            "transport" => self.transport
+                        )
+                        .increment(1);
+                        return self
+                            .emit_error_full(
+                                env.id.clone(),
+                                488,
+                                "capability",
+                                "incompatible-capabilities",
+                                env.sid.clone(),
+                                Some(connid_str),
+                            )
+                            .await;
+                    }
+                    NegotiationOutcome::Ok(results) => {
+                        metrics::counter!(
+                            "uctp_capability_renegotiations_total",
+                            "outcome" => "ok",
+                            "transport" => self.transport
+                        )
+                        .increment(1);
+                        // Echo the chosen codec(s) back. The body is a
+                        // `connection.update` reply with the same action
+                        // label plus the chosen codec under
+                        // `codec_preferences` (a single-element list —
+                        // the negotiation collapsed the preference
+                        // ordering to one). Peers that initiated the
+                        // renegotiation use this to drive their
+                        // adapter-side codec swap.
+                        let chosen: Vec<String> = results
+                            .into_iter()
+                            .filter_map(|r| r.chosen_codec)
+                            .collect();
+                        let reply_payload = payloads::connection::ConnectionUpdate {
+                            action: "renegotiate-media".into(),
+                            streams: stream_ids,
+                            codec_preferences: chosen,
+                            details: serde_json::Value::Null,
+                        };
+                        let mut reply = UctpEnvelope::new(
+                            MessageType::ConnectionUpdate,
+                            serde_json::to_value(reply_payload)?,
+                        )
+                        .with_in_reply_to(env.id.clone())
+                        .with_connid(connid_str);
+                        if let Some(s) = env.sid.clone() {
+                            reply = reply.with_sid(s);
+                        }
+                        return self.send_out(reply).await;
+                    }
+                }
+            }
+            // Forward-compat: ack any other (or unknown) action.
+            _ => {
+                let ack = UctpEnvelope::new(MessageType::Ack, serde_json::Value::Null)
+                    .with_in_reply_to(env.id.clone());
+                let ack = if let Some(s) = env.sid.clone() {
+                    ack.with_sid(s)
+                } else {
+                    ack
+                };
+                let ack = ack.with_connid(connid_str);
+                return self.send_out(ack).await;
+            }
+        }
     }
 
     async fn handle_connection_ready(&self, env: UctpEnvelope) -> Result<()> {

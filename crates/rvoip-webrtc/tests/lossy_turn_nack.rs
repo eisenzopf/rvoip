@@ -119,6 +119,7 @@ async fn nack_round_trip_through_lossy_turn() {
                     payload,
                     timestamp_rtp: seq as u32 * 960,
                     captured_at: chrono::Utc::now(),
+                    payload_type: None,
                 })
                 .await
                 .is_err()

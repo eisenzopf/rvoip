@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "demo-token".into(),
-        })?,
+            actor_token: None,        })?,
     )
     .with_in_reply_to(challenge.id);
     client.send(response).await?;

@@ -208,6 +208,7 @@ async fn whip_webrtc_bridged_to_real_quic_leg() {
                 payload,
                 timestamp_rtp: seq as u32 * 960,
                 captured_at: Utc::now(),
+                payload_type: None,
             })
             .await
             .expect("publisher send");

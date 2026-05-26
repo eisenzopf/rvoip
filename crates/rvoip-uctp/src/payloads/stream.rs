@@ -25,8 +25,9 @@ pub struct StreamClosed {
 /// `stream.subscribe` (bidi) payload.
 ///
 /// Multi-party: v0 parses but does not route. Receiving servers return
-/// `error` 503 `multi-party-routing-not-implemented` per
-/// `UCTP_IMPLEMENTATION_PLAN.md` §7.
+/// `error` 501 `multi-party-routing-not-implemented` per
+/// CONVERSATION_PROTOCOL.md §11.2 and `UCTP_IMPLEMENTATION_PLAN.md` §7.
+/// (Pre-v0.x servers used 503 here; v0.x distinguishes 501 from 503.)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StreamSubscribe {
     pub by_participant: String,

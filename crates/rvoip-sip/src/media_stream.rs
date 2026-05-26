@@ -129,6 +129,13 @@ impl SipMediaStream {
                             payload: Bytes::from(encoded),
                             timestamp_rtp: audio_frame.timestamp,
                             captured_at: Utc::now(),
+                            // Gap plan §4.3 — SIP `SipMediaStream` always
+                            // emits G.711 mu-law (PCMU = PT 0). DTMF
+                            // (RFC 4733, PT 101) arrives via a separate
+                            // callback in the underlying media_adapter
+                            // and never flows through this audio path,
+                            // so PCMU is correct for every frame here.
+                            payload_type: Some(0),
                         };
                         if frames_in_tx_pump.send(media_frame).await.is_err() {
                             break;
@@ -157,6 +164,29 @@ impl SipMediaStream {
                     _ = cancel_out.notified() => break,
                     frame = frames_out_rx.recv() => {
                         let Some(media_frame) = frame else { break; };
+                        // Gap plan §4.3 — RFC 4733 telephone-event
+                        // routing. When a cross-substrate bridge
+                        // forwards a frame labelled with the
+                        // telephone-event PT (101 by convention),
+                        // route it through the SIP session's DTMF
+                        // emitter rather than the audio decoder.
+                        // The 4-byte payload encodes (event, end+r+vol,
+                        // duration) per RFC 4733 §2.3; we parse the
+                        // event byte and emit the corresponding DTMF
+                        // digit on the start packet (end=0). The same
+                        // digit retransmitted with end=1 is treated as
+                        // a duplicate and skipped.
+                        const TELEPHONE_EVENT_PT: u8 = 101;
+                        if media_frame.payload_type == Some(TELEPHONE_EVENT_PT) {
+                            if let Some(digit) = parse_rfc4733_digit(&media_frame.payload) {
+                                if let Err(e) =
+                                    coordinator_out.send_dtmf(&session_id_out, digit).await
+                                {
+                                    tracing::trace!(target: "rvoip_sip", error = %e, "SipMediaStream: send_dtmf failed");
+                                }
+                            }
+                            continue;
+                        }
                         // Skip frames that don't look like G.711 codec payload.
                         // A 20 ms G.711 mono frame is exactly 160 bytes; the
                         // transcoder upstream may have produced shorter
@@ -253,5 +283,81 @@ impl MediaStream for SipMediaStream {
             }
         }
         Ok(())
+    }
+}
+
+/// Parse an RFC 4733 `telephone-event` payload (4 bytes) into a digit
+/// character, but only on the **start** packet of an event (duration
+/// field is zero). Returns `None` for retransmits (duration > 0) and
+/// for malformed payloads so the caller can skip without double-
+/// emitting the same DTMF.
+///
+/// Payload layout (§2.3 of RFC 4733):
+/// ```text
+///  0                   1                   2                   3
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |     event     |E|R| volume    |          duration             |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+fn parse_rfc4733_digit(payload: &[u8]) -> Option<char> {
+    if payload.len() < 4 {
+        return None;
+    }
+    let event = payload[0];
+    let duration = u16::from_be_bytes([payload[2], payload[3]]);
+    if duration != 0 {
+        // Retransmit / end-marker — already emitted on the start packet.
+        return None;
+    }
+    // Event codes 0–9 → '0'..'9', 10 → '*', 11 → '#', 12–15 → 'A'..'D'.
+    match event {
+        0..=9 => Some((b'0' + event) as char),
+        10 => Some('*'),
+        11 => Some('#'),
+        12 => Some('A'),
+        13 => Some('B'),
+        14 => Some('C'),
+        15 => Some('D'),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod rfc4733_tests {
+    use super::parse_rfc4733_digit;
+
+    #[test]
+    fn start_packet_returns_digit() {
+        // event=5, end=0, volume=10, duration=0
+        let packet = [0x05, 0x0A, 0x00, 0x00];
+        assert_eq!(parse_rfc4733_digit(&packet), Some('5'));
+    }
+
+    #[test]
+    fn duration_nonzero_returns_none_to_avoid_duplicates() {
+        // event=5, end=0, volume=10, duration=160
+        let packet = [0x05, 0x0A, 0x00, 0xA0];
+        assert_eq!(parse_rfc4733_digit(&packet), None);
+    }
+
+    #[test]
+    fn star_hash_letters_map_correctly() {
+        assert_eq!(parse_rfc4733_digit(&[10, 0, 0, 0]), Some('*'));
+        assert_eq!(parse_rfc4733_digit(&[11, 0, 0, 0]), Some('#'));
+        assert_eq!(parse_rfc4733_digit(&[12, 0, 0, 0]), Some('A'));
+        assert_eq!(parse_rfc4733_digit(&[15, 0, 0, 0]), Some('D'));
+    }
+
+    #[test]
+    fn unknown_events_return_none() {
+        assert_eq!(parse_rfc4733_digit(&[99, 0, 0, 0]), None);
+        assert_eq!(parse_rfc4733_digit(&[0xFF, 0, 0, 0]), None);
+    }
+
+    #[test]
+    fn short_payload_returns_none() {
+        assert_eq!(parse_rfc4733_digit(&[5, 0, 0]), None);
+        assert_eq!(parse_rfc4733_digit(&[]), None);
     }
 }

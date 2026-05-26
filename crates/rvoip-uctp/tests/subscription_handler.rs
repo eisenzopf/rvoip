@@ -49,6 +49,7 @@ fn subscribe_env(sid: &str, connid: &str, strm_ids: &[&str]) -> UctpEnvelope {
         connid: Some(connid.into()),
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
+    signature: None,
     }
 }
 
@@ -66,6 +67,7 @@ fn unsubscribe_env(sid: &str, connid: &str, strm_ids: &[&str]) -> UctpEnvelope {
         connid: Some(connid.into()),
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
+    signature: None,
     }
 }
 
@@ -300,6 +302,7 @@ fn from_participant_env(
             }],
         })
         .unwrap(),
+    signature: None,
     }
 }
 
@@ -598,6 +601,7 @@ async fn from_participant_skips_unsupported_codec_streams() {
             }],
         })
         .unwrap(),
+    signature: None,
     };
     in_tx.send(env).await.unwrap();
 

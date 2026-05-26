@@ -51,7 +51,7 @@ impl UctpWtClient {
             .map_err(rvoip_uctp::errors::SubstrateError::Quinn)?;
 
         // Upgrade to a WT session.
-        let session = web_transport_quinn::Session::connect(conn, url)
+        let session = web_transport_quinn::Session::connect(conn, url.clone())
             .await
             .map_err(|e| UctpWtError::Session(format!("{}", e)))?;
 

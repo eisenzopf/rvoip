@@ -39,6 +39,8 @@ pub const ADAPTER_EVENT_CAP: usize = 256;
 pub(crate) struct Route {
     pub sid: String,
     pub out_tx: mpsc::Sender<UctpEnvelope>,
+    /// Gap plan §4.2 v1 punch list — see rvoip-quic Route doc.
+    pub pending: Arc<rvoip_uctp::substrate::Pending>,
     pub streams: Arc<DashMap<rvoip_core::ids::StreamId, Arc<dyn MediaStream>>>,
     /// The WT session; cloned into per-Stream pumps allocated by
     /// `allocate_subscriber_stream` (plan B1 / MP3c).
@@ -450,12 +452,26 @@ impl ConnectionAdapter for UctpWtAdapter {
 
     async fn renegotiate_media(
         &self,
-        _conn: ConnectionId,
-        _capabilities: CapabilityDescriptor,
+        conn: ConnectionId,
+        capabilities: CapabilityDescriptor,
     ) -> RvoipResult<NegotiatedCodecs> {
-        Err(RvoipError::NotImplemented(
-            "rvoip-webtransport::renegotiate_media",
-        ))
+        // Gap plan §4.2 v1 punch list — see rvoip-quic adapter for
+        // the design (shared envelope helper, awaits peer reply via
+        // `Pending`).
+        let route = self
+            .routes
+            .get(&conn)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?
+            .clone();
+        rvoip_uctp::adapter_helpers::renegotiate_via_envelope(
+            &route.out_tx,
+            &route.pending,
+            &route.sid,
+            &conn,
+            &capabilities,
+            rvoip_uctp::adapter_helpers::DEFAULT_RENEGOTIATE_TIMEOUT,
+        )
+        .await
     }
 
     fn subscribe_events(&self) -> mpsc::Receiver<AdapterEvent> {

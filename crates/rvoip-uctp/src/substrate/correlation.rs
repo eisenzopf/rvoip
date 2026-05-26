@@ -71,6 +71,43 @@ impl Pending {
     }
 }
 
+/// Gap plan §4.2 v1 punch list — convenience helper for adapter
+/// methods that need to send an envelope and synchronously await a
+/// correlated reply (`in_reply_to == request.id`). Used by the
+/// QUIC/WT/WS adapters' `renegotiate_media` impls.
+///
+/// Steps: register on `pending` first (so a fast reply doesn't race
+/// us), send the envelope on `out_tx`, await the reply up to `ttl`.
+/// On send error or timeout the registration is rolled back by
+/// `Pending::wait_for`'s own cleanup path.
+pub async fn send_and_wait(
+    out_tx: &tokio::sync::mpsc::Sender<UctpEnvelope>,
+    pending: &Pending,
+    env: UctpEnvelope,
+    ttl: Duration,
+) -> Result<UctpEnvelope, SubstrateError> {
+    let req_id = crate::ids::EnvelopeId::from_string(env.id.clone());
+    // Register before sending so an immediate reply doesn't fire
+    // through deliver() into an empty map.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    pending.inner.insert(req_id.clone(), tx);
+    if out_tx.send(env).await.is_err() {
+        pending.inner.remove(&req_id);
+        return Err(SubstrateError::Closed);
+    }
+    match tokio::time::timeout(ttl, rx).await {
+        Ok(Ok(reply)) => Ok(reply),
+        Ok(Err(_)) => {
+            pending.inner.remove(&req_id);
+            Err(SubstrateError::Closed)
+        }
+        Err(_) => {
+            pending.inner.remove(&req_id);
+            Err(SubstrateError::Closed)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,6 +125,7 @@ mod tests {
             connid: None,
             in_reply_to: in_reply_to.map(String::from),
             payload: serde_json::Value::Null,
+        signature: None,
         }
     }
 

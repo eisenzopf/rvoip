@@ -199,6 +199,7 @@ impl AudioSource for CpalAudioSource {
             payload: Bytes::from(encoded),
             timestamp_rtp: self.timestamp,
             captured_at: Utc::now(),
+            payload_type: None,
         };
         self.seq = self.seq.wrapping_add(1);
         self.timestamp = self.timestamp.wrapping_add(SAMPLES_PER_FRAME as u32);

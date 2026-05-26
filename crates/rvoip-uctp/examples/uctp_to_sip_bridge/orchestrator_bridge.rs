@@ -39,6 +39,12 @@ use tokio::net::TcpListener;
 const ALPN_UCTP: &[u8] = b"uctp/1";
 const ALPN_H3: &[u8] = b"h3";
 const CERT_DER_PATH: &str = "/tmp/uctp_demo_cert.der";
+/// Gap plan §3.2 v1 punch list — Chromium's
+/// `--ignore-certificate-errors-spki-list` flag pins by base64-encoded
+/// SHA-256 of the cert's SubjectPublicKeyInfo block. The Playwright
+/// `wt_smoke.spec.mjs` reads this file to extract the SPKI hash for
+/// the Chromium launch args.
+const CERT_SPKI_PATH: &str = "/tmp/uctp_demo_cert.spki";
 
 #[derive(Debug)]
 struct Args {
@@ -82,6 +88,28 @@ fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+/// Gap plan §3.2 v1 punch list — compute the Chromium-format SPKI
+/// fingerprint for a DER-encoded cert: SHA-256 over the cert's
+/// `SubjectPublicKeyInfo` ASN.1 block, base64-encoded.
+///
+/// `--ignore-certificate-errors-spki-list=<base64>` takes this exact
+/// string (one or comma-separated multiple) and pins the listed
+/// SPKIs as exceptions in an otherwise-strict cert chain.
+fn compute_spki_fingerprint(
+    cert_der: &[u8],
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    use x509_parser::prelude::*;
+
+    let (_, cert) = X509Certificate::from_der(cert_der)?;
+    let spki_der = cert.tbs_certificate.subject_pki.raw;
+    let mut hasher = Sha256::new();
+    hasher.update(spki_der);
+    let digest = hasher.finalize();
+    Ok(base64::engine::general_purpose::STANDARD.encode(digest))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
@@ -116,6 +144,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // adding the `pem` crate just for the demo is overkill.
     std::fs::write(CERT_DER_PATH, cert_der.as_ref())?;
     println!("[orchestrator_bridge] wrote demo cert (DER) to {CERT_DER_PATH}");
+
+    // Gap plan §3.2 v1 punch list — extract the cert's SubjectPublicKeyInfo
+    // block, SHA-256 + base64-encode it (Chromium's SPKI pinning format
+    // for the `--ignore-certificate-errors-spki-list` flag), and persist
+    // alongside the cert so the Playwright wt_smoke spec can read it.
+    let spki_b64 = compute_spki_fingerprint(cert_der.as_ref())?;
+    std::fs::write(CERT_SPKI_PATH, &spki_b64)?;
+    println!("[orchestrator_bridge] wrote spki hash: {spki_b64} -> {CERT_SPKI_PATH}");
 
     let mut routes = dispatch_by_alpn(Arc::clone(&quinn_ep), &[ALPN_UCTP, ALPN_H3])?;
     let uctp_accept_rx = routes.take(ALPN_UCTP).expect("uctp/1 channel");

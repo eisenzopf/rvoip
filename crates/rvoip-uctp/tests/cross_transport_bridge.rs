@@ -102,6 +102,7 @@ fn auth_response(in_reply_to: String) -> UctpEnvelope {
         serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "test-token".into(),
+        actor_token: None,
         })
         .unwrap(),
     )
@@ -131,6 +132,7 @@ fn invite(sid: &str, participant: &str) -> UctpEnvelope {
             capabilities_offer: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
+    signature: None,
     }
 }
 
@@ -325,6 +327,7 @@ async fn quic_to_wt_bridge_flows_frames_end_to_end() {
             payload: Bytes::from(vec![0xCA, 0xFE, 0xBA, 0xBE, i]),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
+        payload_type: None,
         };
         quic_out.send(frame).await.expect("inject");
     }
@@ -474,6 +477,7 @@ async fn wt_to_wt_bridge_flows_frames_end_to_end() {
             payload: Bytes::from(vec![0xFE, 0xED, 0xBE, 0xEF, i]),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
+        payload_type: None,
         };
         out_a.send(frame).await.expect("inject");
     }

@@ -91,6 +91,38 @@ impl WebRtcSubstrateSetup {
     }
 }
 
+/// `connection.ice-candidate` payload (CONVERSATION_PROTOCOL.md §10.2.2).
+///
+/// Mirrors the browser-native `RTCIceCandidateInit` shape so JS clients
+/// can forward `pc.onicecandidate` events as-is. An empty `candidate`
+/// string signals end-of-candidates for the given `sdp_mid`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IceCandidateInit {
+    /// SDP `a=candidate:` attribute value, without the leading `a=`.
+    /// An empty string signals end-of-candidates.
+    pub candidate: String,
+    /// Zero-based index of the m-line this candidate belongs to.
+    pub sdp_m_line_index: u16,
+    /// `a=mid:` value of the corresponding m-line.
+    pub sdp_mid: String,
+}
+
+impl IceCandidateInit {
+    /// Build an end-of-candidates marker for the given `sdp_mid`.
+    pub fn end_of_candidates(sdp_mid: impl Into<String>, sdp_m_line_index: u16) -> Self {
+        Self {
+            candidate: String::new(),
+            sdp_m_line_index,
+            sdp_mid: sdp_mid.into(),
+        }
+    }
+
+    /// True when this envelope marks the end of the gathering process.
+    pub fn is_end_of_candidates(&self) -> bool {
+        self.candidate.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StreamQuality {
     pub strm_id: String,

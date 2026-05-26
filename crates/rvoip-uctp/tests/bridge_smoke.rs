@@ -249,7 +249,7 @@ async fn drive_quic_auth(client: &Arc<UctpQuicClient>) {
         serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "test-token".into(),
-        })
+            actor_token: None,        })
         .unwrap(),
     )
     .with_in_reply_to(challenge.id);
@@ -289,7 +289,7 @@ async fn drive_ws_auth(client: &Arc<UctpWsClient>) {
         serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "test-token".into(),
-        })
+            actor_token: None,        })
         .unwrap(),
     )
     .with_in_reply_to(challenge.id);

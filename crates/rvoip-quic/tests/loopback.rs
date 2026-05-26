@@ -110,6 +110,7 @@ async fn loopback_auth_handshake_via_adapter() {
         connid: None,
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
+    signature: None,
     };
     client.send(env).await.expect("send");
 
@@ -176,6 +177,7 @@ async fn loopback_five_envelopes_each_direction_in_order() {
             connid: None,
             in_reply_to: None,
             payload: serde_json::to_value(payload).unwrap(),
+        signature: None,
         };
         client.send(env).await.expect("send");
     }
@@ -278,6 +280,7 @@ async fn loopback_datagram_pump_round_trip() {
             payload: Bytes::from(vec![i]),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
+        payload_type: None,
         };
         client_out.send(frame).await.expect("client send");
     }
@@ -302,6 +305,7 @@ async fn loopback_datagram_pump_round_trip() {
             payload: Bytes::from(vec![100 + i]),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
+        payload_type: None,
         };
         server_out.send(frame).await.expect("server send");
     }

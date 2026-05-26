@@ -57,6 +57,10 @@ pub enum MessageType {
     ConnectionReady,
     ConnectionUpdate,
     ConnectionEnd,
+    /// `connection.ice-candidate` (§10.2.2 — trickle ICE). Bidirectional,
+    /// no reply expected. Each envelope carries one ICE candidate
+    /// (or end-of-candidates if `candidate` is empty).
+    ConnectionIceCandidate,
     StreamOpened,
     StreamClosed,
     StreamSubscribe,
@@ -128,6 +132,7 @@ impl MessageType {
             MessageType::ConnectionReady => "connection.ready",
             MessageType::ConnectionUpdate => "connection.update",
             MessageType::ConnectionEnd => "connection.end",
+            MessageType::ConnectionIceCandidate => "connection.ice-candidate",
             MessageType::StreamOpened => "stream.opened",
             MessageType::StreamClosed => "stream.closed",
             MessageType::StreamSubscribe => "stream.subscribe",
@@ -183,6 +188,7 @@ impl MessageType {
             "connection.ready" => MessageType::ConnectionReady,
             "connection.update" => MessageType::ConnectionUpdate,
             "connection.end" => MessageType::ConnectionEnd,
+            "connection.ice-candidate" => MessageType::ConnectionIceCandidate,
             "stream.opened" => MessageType::StreamOpened,
             "stream.closed" => MessageType::StreamClosed,
             "stream.subscribe" => MessageType::StreamSubscribe,

@@ -293,6 +293,53 @@ Substrates that carry HTTP-shaped requests (UCTP-over-WebTransport, UCTP-over-We
 
 A server that receives a signed envelope verifies the signature against the registered signing keys for the Identity claimed in `auth.session.payload.identity_id` and updates the Connection's `IdentityAssurance` accordingly. Servers MAY require signed requests for any envelope that crosses an assurance threshold (e.g., `session.invite` to a UserAuthorized-required Session).
 
+#### 5.5.1 Inline envelope signatures
+
+For non-HTTP substrates (QUIC datagrams, raw WS frames) the RFC 9421 headers can't ride alongside the envelope, so v0.x defines an **inline** signature shape that carries the same information inside the envelope itself:
+
+```json
+{
+  "v": 1,
+  "type": "session.invite",
+  "id": "env_...",
+  "ts": "<iso-ts>",
+  "cid": "conv_...",
+  "sid": "sess_...",
+  "payload": { ... },
+  "signature": {
+    "keyid": "key:agent-7:2026",
+    "alg": "EdDSA",
+    "sig": "<base64url-no-pad>"
+  }
+}
+```
+
+**Covered components.** The signature is computed over the JSON Canonical Form (RFC 8785) of the envelope **with the `signature` field omitted**. Concretely, the verifier:
+
+1. Parses the envelope.
+2. Clones it and removes the `signature` field from the clone.
+3. Serializes the clone using JCS (sorted keys, no insignificant whitespace, escapes per RFC 8785).
+4. Verifies `signature.sig` over the byte sequence from step 3 using the public key resolved via `signature.keyid`.
+
+The serialized base therefore includes the full set of envelope fields: `v`, `type`, `id`, `ts`, `cid`, `sid`, `connid`, `in_reply_to`, and `payload`. Optional fields (e.g. `sid` on connection-level envelopes) participate only when present — JCS omits absent keys.
+
+**Algorithm support.** Verifiers MUST support `EdDSA` (Ed25519). They SHOULD also support `ES256` (ECDSA P-256) and MAY support `PS256` / `RS256`. The `signature.alg` field uses the JWA names from RFC 7518.
+
+**Replay protection.** Verifiers MUST cache `envelope.id` for at least the duration of `Connection.session.lifetime`, with a default cache TTL of 5 minutes. A signed envelope whose `id` is already in the cache MUST be rejected with `error 401-1 invalid-signature` and a `reason` of `replay-detected`. Verifiers MUST also reject envelopes whose `ts` is older than the cache TTL.
+
+**Failure modes:**
+
+| Condition | Response |
+|---|---|
+| `signature.sig` doesn't verify against the resolved key | `error 401-1 invalid-signature` |
+| `signature.keyid` doesn't resolve to a known public key | `error 401-1 invalid-signature` (do not leak which) |
+| `signature.alg` not in verifier's supported set | `error 401-1 invalid-signature` |
+| `envelope.id` already seen | `error 401-1 invalid-signature` reason=`replay-detected` |
+| `envelope.ts` older than cache TTL | `error 401-1 invalid-signature` reason=`stale-timestamp` |
+| Required-signed envelope arrives without `signature` field | `error 401-1 invalid-signature` reason=`signature-required` |
+
+Whether a given envelope type requires a signature is policy: by default no envelopes do, but a deployment MAY configure the verifier to require signatures on (for example) every envelope whose `sid` references a Session at `user-authorized` assurance.
+
 ### 5.6 IdentityAssurance gradient
 
 Every authenticated Connection has an `IdentityAssurance` value, returned in `auth.session.payload.assurance`. The gradient is:
@@ -1213,9 +1260,40 @@ This is the only case where UCTP envelopes carry SDP-shaped payloads. The SDP is
   - `a=setup:actpass`/`active`/`passive` — DTLS role per RFC 5763 §5
 - v0 implementations gather all candidates via `RTCPeerConnection`'s `gathering_complete_promise()` (or equivalent) before emitting the `connection.offer` — peers do not need to support trickle ICE.
 
-#### 10.2.2 Trickle ICE (v1)
+#### 10.2.2 Trickle ICE
 
-Trickle ICE — emitting candidates incrementally as they're gathered — is **v1** work. v0.x ships full-SDP exchange only. When trickle is added, a new envelope type `connection.ice-candidate` will carry mid-session candidates without re-running the full offer/answer.
+Trickle ICE — emitting candidates incrementally as they're gathered — uses the `connection.ice-candidate` envelope. v0 implementations MAY skip trickle and emit a full-SDP offer/answer; trickle is opt-in via the offerer / answerer's `WebRtcConfig.trickle_ice` flag (see rvoip-webrtc).
+
+**Envelope shape:**
+
+```json
+{
+  "v": 1,
+  "type": "connection.ice-candidate",
+  "id": "env_...",
+  "ts": "<iso-ts>",
+  "cid": "conv_...",
+  "sid": "sess_...",
+  "connid": "conn_...",
+  "payload": {
+    "candidate": "candidate:1 1 udp 2122260223 192.0.2.1 5060 typ host",
+    "sdp_m_line_index": 0,
+    "sdp_mid": "0"
+  }
+}
+```
+
+The payload mirrors the browser-native `RTCIceCandidateInit` shape:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `candidate` | string | SDP `a=candidate:` attribute value (without the leading `a=`). An **empty string** signals end-of-candidates for the given `sdp_mid`. |
+| `sdp_m_line_index` | u16 | Zero-based index of the m-line this candidate belongs to. |
+| `sdp_mid` | string | The m-line's `a=mid:` value. |
+
+**Validity window:** valid from immediately after the initial `connection.offer` / `connection.answer` exchange until the Session ends. Either peer MAY send candidates at any time; envelopes do not require a reply. End-of-candidates is signalled by sending one envelope with `candidate=""`.
+
+**Backward compatibility:** servers that do not understand the envelope SHOULD silently ignore it (per §3.2 forward-compat rule). Peers that need to know whether the remote supports trickle infer it from the presence of `a=ice-options:trickle` in the SDP exchanged in `connection.offer` / `connection.answer`.
 
 ### 10.3 RTCP / quality feedback
 
@@ -1270,10 +1348,14 @@ Cadence: default every 5s; tunable per Connection via `connection.update`.
 |---|---|---|
 | 200–299 | informational / success | 200 normal-clearing |
 | 400–499 | client error | 401 unauthenticated, 401-1 invalid-signature (RFC 9421 verification failed), 401-2 step-up-failed (`identity.step-up-response` rejected by server), 403 forbidden, 403-1 forbidden-for-assurance-level (Connection's assurance below Session minimum), 404 not-found, 408 timeout, 409 conflict, 409-1 vcon-redaction-conflict (concurrent redaction attempts), 410 gone, 411 vcon-not-found, 486 busy, 487 request-cancelled (matches `session.cancel`), 488 incompatible-capabilities |
-| 500–599 | server error | 500 internal, 502 upstream-failure, 503 unavailable, 504 gateway-timeout, 510 vcon-store-unavailable |
+| 500–599 | server error | 500 internal, 501 not-implemented (the receiver recognized the envelope type but cannot service it on this connection — e.g. `connection.update action=renegotiate-media` on an adapter that has not wired re-negotiation), 502 upstream-failure, 503 unavailable, 504 gateway-timeout, 505 version-not-supported (the envelope's `v` field is not understood by this peer — e.g. a future `v=2` envelope reaching a `v=1`-only server), 510 vcon-store-unavailable |
 | 600–699 | global / terminal | 603 decline, 604 does-not-exist-anywhere |
 
 Codes are intentionally aligned with SIP/HTTP for ease of mental mapping; UCTP servers may map SIP responses straight to UCTP codes when bridging.
+
+**`501 not-implemented` vs `503 unavailable`:** use `501` when the operation is well-defined by the spec but the *receiving implementation* lacks the wiring (capability gap; another server build might handle it). Use `503` when the operation is supported but the server is transiently overloaded or unable to service it right now (resource gap; same server may handle it later). Pre-v0.x servers conflated these as `503`; v0.x and later must distinguish them.
+
+**`505 version-not-supported`:** servers MUST reply with `505` (rather than silently dropping) when an envelope arrives with a `v` value outside the set the server understands. The reply's `payload.details` SHOULD include `{"supported": [1]}` so the peer can downgrade.
 
 ### 11.3 `ack` envelope
 

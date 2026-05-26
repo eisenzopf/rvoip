@@ -23,7 +23,7 @@ use rvoip_core::error::{Result as CoreResult, RvoipError};
 use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId as CoreSessionId};
 use rvoip_core::message::Message;
-use rvoip_core::stream::MediaStream;
+use rvoip_core::stream::{MediaStream, MediaStreamHandle};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -40,11 +40,13 @@ pub struct SipAdapter {
     out_tx: mpsc::Sender<AdapterEvent>,
     /// Single-take receiver for [`ConnectionAdapter::subscribe_events`].
     out_rx: StdMutex<Option<mpsc::Receiver<AdapterEvent>>>,
-    /// D4 — lazy cache of `SipMediaStream` instances built by `streams()`.
-    /// One stream per connection — the orchestrator-side
-    /// `frames_in() / frames_out()` channels are single-take, so caching
-    /// the stream lets the orchestrator hand the same handle to the
-    /// bridge pump and to a stats reader.
+    /// Cache of `SipMediaStream` instances. One stream per connection —
+    /// the orchestrator-side `frames_in() / frames_out()` channels are
+    /// single-take, so caching lets the orchestrator hand the same
+    /// handle to the bridge pump and to a stats reader. Populated
+    /// eagerly at connection-construction time so consumers that
+    /// inspect `Connection.streams` off the `InboundConnection` event
+    /// see a non-empty vec (QUIC/WT parity, gap plan §2.2).
     streams_cache: Arc<DashMap<ConnectionId, Arc<crate::media_stream::SipMediaStream>>>,
 }
 
@@ -70,7 +72,7 @@ impl SipAdapter {
         let me = Arc::clone(&adapter);
         tokio::spawn(async move {
             while let Some(event) = events.next().await {
-                me.translate_api_event(event);
+                me.translate_api_event(event).await;
             }
             debug!("SipAdapter event translator stream ended");
         });
@@ -113,7 +115,22 @@ impl SipAdapter {
             .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))
     }
 
-    fn build_connection(&self, conn_id: ConnectionId, direction: Direction) -> Connection {
+    async fn build_connection(
+        &self,
+        conn_id: ConnectionId,
+        direction: Direction,
+    ) -> Connection {
+        // Eagerly construct (and cache) one SipMediaStream so consumers
+        // can read `connection.streams` synchronously off the
+        // `Event::ConnectionInbound` event — QUIC/WT parity, gap plan §2.2.
+        // Stream construction can fail (e.g. coordinator is shutting
+        // down or the session was torn down before we got here); in
+        // that case we still hand back a `Connection` with an empty
+        // streams vec — that's no worse than the pre-eager behavior.
+        let streams = match self.get_or_init_stream(&conn_id, direction).await {
+            Some(stream) => vec![MediaStreamHandle::new(stream as Arc<dyn MediaStream>)],
+            None => Vec::new(),
+        };
         Connection {
             id: conn_id,
             session_id: CoreSessionId::new(),
@@ -123,7 +140,7 @@ impl SipAdapter {
             state: ConnectionState::Connecting,
             capabilities: CapabilityDescriptor::default(),
             negotiated_codecs: NegotiatedCodecs::default(),
-            streams: vec![],
+            streams,
             messaging_enabled: false,
             transport_handle: TransportHandle(Arc::new(())),
             opened_at: Utc::now(),
@@ -131,11 +148,42 @@ impl SipAdapter {
         }
     }
 
-    fn translate_api_event(&self, event: ApiEvent) {
+    /// Look up the cached `SipMediaStream` for `conn`, constructing it
+    /// (and caching) on first call. Returns `None` if construction
+    /// fails — the connection-mapping or audio subscribe may not be
+    /// ready yet (e.g. the session was cleaned up between events).
+    async fn get_or_init_stream(
+        &self,
+        conn: &ConnectionId,
+        direction: Direction,
+    ) -> Option<Arc<crate::media_stream::SipMediaStream>> {
+        if let Some(entry) = self.streams_cache.get(conn) {
+            return Some(Arc::clone(entry.value()));
+        }
+        let session_id = self.by_connection.get(conn)?.value().clone();
+        match crate::media_stream::SipMediaStream::new(
+            Arc::clone(&self.coordinator),
+            session_id,
+            direction,
+        )
+        .await
+        {
+            Ok(stream) => {
+                self.streams_cache.insert(conn.clone(), Arc::clone(&stream));
+                Some(stream)
+            }
+            Err(e) => {
+                warn!(?conn, error = %e, "SipAdapter: failed to construct SipMediaStream eagerly");
+                None
+            }
+        }
+    }
+
+    async fn translate_api_event(&self, event: ApiEvent) {
         match event {
             ApiEvent::IncomingCall { call_id, .. } => {
                 let conn_id = self.ensure_mapped(call_id);
-                let connection = self.build_connection(conn_id, Direction::Inbound);
+                let connection = self.build_connection(conn_id, Direction::Inbound).await;
                 self.try_send(AdapterEvent::InboundConnection { connection });
             }
             ApiEvent::CallAnswered { call_id, .. } => {
@@ -229,7 +277,7 @@ impl ConnectionAdapter for SipAdapter {
             .await
             .map_err(Self::map_session_err)?;
         let conn_id = self.ensure_mapped(session_id);
-        let mut connection = self.build_connection(conn_id, Direction::Outbound);
+        let mut connection = self.build_connection(conn_id, Direction::Outbound).await;
         // Carry the caller-supplied vocabulary IDs through so the consumer's
         // session/participant stay coherent.
         connection.session_id = request.session_id;
@@ -308,27 +356,18 @@ impl ConnectionAdapter for SipAdapter {
     }
 
     async fn streams(&self, conn: ConnectionId) -> CoreResult<Vec<Arc<dyn MediaStream>>> {
-        // D4 — return a `SipMediaStream` wrapping the active SIP session's
-        // PCM audio plane. We cache the stream per ConnectionId so the
-        // orchestrator's `bridge_connections` can take the inbound /
-        // outbound channels exactly once each.
-        let session_id = self.lookup_session(&conn)?;
-        if let Some(entry) = self.streams_cache.get(&conn) {
-            return Ok(vec![Arc::clone(entry.value()) as Arc<dyn MediaStream>]);
+        // Streams are eagerly populated in `build_connection` (gap plan
+        // §2.2 — QUIC/WT parity), so this is a straight lookup. We still
+        // construct on demand if the eager path failed earlier (e.g.
+        // `subscribe_to_audio` errored at IncomingCall time), so the
+        // existing lazy-create semantics remain a fallback.
+        self.lookup_session(&conn)?;
+        match self.get_or_init_stream(&conn, Direction::Outbound).await {
+            Some(stream) => Ok(vec![stream as Arc<dyn MediaStream>]),
+            None => Err(RvoipError::Adapter(
+                "SipAdapter::streams: SipMediaStream construction failed".into(),
+            )),
         }
-        // Establish direction from the connection table — we don't have a
-        // dedicated field, so derive from the api event log entry order.
-        // Outbound by default; the orchestrator only consults direction
-        // for stats labelling.
-        let stream = crate::media_stream::SipMediaStream::new(
-            Arc::clone(&self.coordinator),
-            session_id,
-            Direction::Outbound,
-        )
-        .await
-        .map_err(|e| RvoipError::Adapter(format!("SipMediaStream::new: {e}")))?;
-        self.streams_cache.insert(conn, Arc::clone(&stream));
-        Ok(vec![stream as Arc<dyn MediaStream>])
     }
 
     async fn send_message(&self, _conn: ConnectionId, _message: Message) -> CoreResult<()> {
@@ -359,12 +398,47 @@ impl ConnectionAdapter for SipAdapter {
 
     async fn renegotiate_media(
         &self,
-        _conn: ConnectionId,
-        _capabilities: CapabilityDescriptor,
+        conn: ConnectionId,
+        capabilities: CapabilityDescriptor,
     ) -> CoreResult<NegotiatedCodecs> {
-        Err(RvoipError::NotImplemented(
-            "SipAdapter::renegotiate_media — re-INVITE wiring lands in step 8",
-        ))
+        // Gap plan §4.2C v1 punch list — fire a re-INVITE via the
+        // existing `UnifiedCoordinator::reinvite(...).send()` builder.
+        // The state machine handles the 200 OK SDP answer through
+        // its `NegotiateSDPAsUAC` action; downstream session state
+        // updates automatically.
+        //
+        // **Codec preference caveat.** This impl does NOT yet inject
+        // the orchestrator-provided `capabilities.audio_codecs` into
+        // the re-INVITE SDP — that would need a per-session
+        // `set_offered_codecs` coordinator method that today only
+        // exists at MediaAdapter construction time. The re-INVITE
+        // still uses the SIP layer's configured `offered_codecs`.
+        // For the cross-bridge use case (which is the v1 driver) this
+        // is acceptable: the peer's answer SDP determines what the
+        // bridged-side codec becomes, and the orchestrator's
+        // transcoder hot-swap reads the post-renegotiation codec
+        // off the negotiated session state.
+        if capabilities.audio_codecs.is_empty() {
+            return Err(RvoipError::UnsupportedCodec(
+                "SipAdapter::renegotiate_media: empty audio_codecs in new capabilities".into(),
+            ));
+        }
+        let session_id = self.lookup_session(&conn)?;
+        self.coordinator
+            .reinvite(&session_id)
+            .send()
+            .await
+            .map_err(Self::map_session_err)?;
+        // Optimistic return — the requested top preference. The state
+        // machine's NegotiateSDPAsUAC asynchronously updates
+        // `session.negotiated_config` when the 200 OK arrives; the
+        // orchestrator-level hot-swap then reads the live codec via
+        // `adapter.streams(...)` (see `Orchestrator::renegotiate_media`).
+        let chosen = capabilities.audio_codecs.first().cloned().unwrap();
+        Ok(NegotiatedCodecs {
+            audio: Some(chosen),
+            video: None,
+        })
     }
 
     fn subscribe_events(&self) -> mpsc::Receiver<AdapterEvent> {

@@ -22,8 +22,43 @@ pub struct UctpWsClient {
 impl UctpWsClient {
     pub async fn connect(url: &Url) -> Result<Arc<Self>> {
         let (ws, _resp) = tokio_tungstenite::connect_async(url.as_str()).await?;
-        let (mut sink, mut stream) = ws.split();
+        let (sink, stream) = ws.split();
+        Ok(Self::spawn_pumps(sink, stream))
+    }
 
+    /// Dial a `wss://` URL, pinning the given `rustls::ClientConfig` for
+    /// certificate verification. Use [`rvoip_uctp::substrate::tls::dev_client_config_trusting`]
+    /// to build a config that trusts a single self-signed cert (test /
+    /// dev only).
+    #[cfg(feature = "wss")]
+    pub async fn connect_with_tls(
+        url: &Url,
+        tls: Arc<rustls::ClientConfig>,
+    ) -> Result<Arc<Self>> {
+        let connector = tokio_tungstenite::Connector::Rustls(tls);
+        let (ws, _resp) = tokio_tungstenite::connect_async_tls_with_config(
+            url.as_str(),
+            None,
+            false,
+            Some(connector),
+        )
+        .await?;
+        let (sink, stream) = ws.split();
+        Ok(Self::spawn_pumps(sink, stream))
+    }
+
+    fn spawn_pumps<S>(
+        mut sink: futures::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<S>,
+            Message,
+        >,
+        mut stream: futures::stream::SplitStream<
+            tokio_tungstenite::WebSocketStream<S>,
+        >,
+    ) -> Arc<Self>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         let (out_tx, mut out_rx) = mpsc::channel::<UctpEnvelope>(256);
         let (in_tx, in_rx) = mpsc::channel::<UctpEnvelope>(256);
 
@@ -72,10 +107,10 @@ impl UctpWsClient {
             debug!("rvoip-websocket-client: read pump exiting");
         });
 
-        Ok(Arc::new(Self {
+        Arc::new(Self {
             out_tx,
             in_rx: parking_lot::Mutex::new(Some(in_rx)),
-        }))
+        })
     }
 
     pub async fn send(&self, env: UctpEnvelope) -> Result<()> {

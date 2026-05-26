@@ -37,6 +37,7 @@ pub async fn drive_auth_handshake(
             capabilities: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
+    signature: None,
     };
     in_tx.send(hello).await.expect("send auth.hello");
 
@@ -59,8 +60,10 @@ pub async fn drive_auth_handshake(
         payload: serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "test-token".into(),
+        actor_token: None,
         })
         .unwrap(),
+    signature: None,
     };
     in_tx.send(response).await.expect("send auth.response");
 

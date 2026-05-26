@@ -23,6 +23,16 @@ pub struct MediaFrame {
     pub payload: Bytes,
     pub timestamp_rtp: u32,
     pub captured_at: DateTime<Utc>,
+    /// RTP payload type for this frame, when known. Set by adapter
+    /// inbound pumps that read the wire RTP header (SIP, WebRTC, QUIC,
+    /// WT). Used by the cross-transport [`crate::bridge::frame_pump`]
+    /// to route RFC 4733 telephone-events (typically PT 101) to the
+    /// DTMF event sink instead of through the codec transcoder. `None`
+    /// for construction sites that don't have a wire RTP header
+    /// (synthetic test frames, transcoder outputs).
+    ///
+    /// Gap plan §4.3 / CONVERSATION_PROTOCOL.md §7.5.
+    pub payload_type: Option<u8>,
 }
 
 #[derive(Clone, Debug, Default)]

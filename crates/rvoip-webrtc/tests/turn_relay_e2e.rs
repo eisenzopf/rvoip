@@ -148,6 +148,7 @@ async fn relay_only_two_peer_media_round_trip() {
                 payload,
                 timestamp_rtp: seq as u32 * 960,
                 captured_at: chrono::Utc::now(),
+                payload_type: None,
             })
             .await
             .expect("send frame");

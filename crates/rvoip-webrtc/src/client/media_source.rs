@@ -125,6 +125,7 @@ impl AudioSource for FixtureAudioSource {
             payload,
             timestamp_rtp: self.timestamp,
             captured_at: Utc::now(),
+            payload_type: None,
         };
         self.seq = self.seq.wrapping_add(1);
         self.timestamp = self.timestamp.wrapping_add(960); // 20 ms @ 48 kHz

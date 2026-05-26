@@ -103,6 +103,7 @@ fn invite(sid: &str, participant: &str) -> UctpEnvelope {
             capabilities_offer: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
+    signature: None,
     }
 }
 
@@ -135,6 +136,7 @@ async fn drive_auth_quic(
         serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "test-token".into(),
+        actor_token: None,
         })
         .unwrap(),
     )
@@ -326,6 +328,7 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
             payload: prime.clone(),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
+        payload_type: None,
         })
         .await
         .expect("prime a");
@@ -337,6 +340,7 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
             payload: prime.clone(),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
+        payload_type: None,
         })
         .await
         .expect("prime b");
@@ -398,6 +402,7 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
                 payload: Bytes::from(vec![0xAA, i]),
                 timestamp_rtp: 0,
                 captured_at: Utc::now(),
+            payload_type: None,
             })
             .await
             .expect("inject a");
@@ -409,6 +414,7 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
                 payload: Bytes::from(vec![0xBB, i]),
                 timestamp_rtp: 0,
                 captured_at: Utc::now(),
+            payload_type: None,
             })
             .await
             .expect("inject b");

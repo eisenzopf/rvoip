@@ -45,6 +45,13 @@ pub const ADAPTER_EVENT_CAP: usize = 256;
 pub(crate) struct Route {
     pub sid: String,
     pub out_tx: mpsc::Sender<UctpEnvelope>,
+    /// Gap plan §4.2 v1 punch list — coordinator's `Pending` map,
+    /// so adapter methods that need a correlated reply (e.g.
+    /// `renegotiate_media`) can `wait_for(env.id, timeout)` after
+    /// sending. The dispatch gate in
+    /// `UctpCoordinator::dispatch_inner` matches inbound envelopes'
+    /// `in_reply_to` against this map.
+    pub pending: Arc<rvoip_uctp::substrate::Pending>,
     pub streams: Arc<DashMap<rvoip_core::ids::StreamId, Arc<dyn MediaStream>>>,
     /// The underlying `quinn::Connection` for this peer. Plumbed in so
     /// the adapter's `allocate_subscriber_stream` (plan B1 / MP3c) can
@@ -506,10 +513,29 @@ impl ConnectionAdapter for UctpQuicAdapter {
 
     async fn renegotiate_media(
         &self,
-        _conn: ConnectionId,
-        _capabilities: CapabilityDescriptor,
+        conn: ConnectionId,
+        capabilities: CapabilityDescriptor,
     ) -> RvoipResult<NegotiatedCodecs> {
-        Err(RvoipError::NotImplemented("rvoip-quic::renegotiate_media"))
+        // Gap plan §4.2 v1 punch list — drive a mid-call codec
+        // renegotiation through the shared envelope helper. The
+        // helper sends `connection.update` with
+        // `action=renegotiate-media`, awaits the peer's correlated
+        // reply via `Pending`, parses the chosen codec (or maps
+        // `error 488` to AdmissionRejected).
+        let route = self
+            .routes
+            .get(&conn)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?
+            .clone();
+        rvoip_uctp::adapter_helpers::renegotiate_via_envelope(
+            &route.out_tx,
+            &route.pending,
+            &route.sid,
+            &conn,
+            &capabilities,
+            rvoip_uctp::adapter_helpers::DEFAULT_RENEGOTIATE_TIMEOUT,
+        )
+        .await
     }
 
     fn subscribe_events(&self) -> mpsc::Receiver<AdapterEvent> {

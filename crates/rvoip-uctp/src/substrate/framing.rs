@@ -79,6 +79,7 @@ mod tests {
             connid: None,
             in_reply_to: None,
             payload: serde_json::json!({"hi": "there"}),
+        signature: None,
         };
 
         writer.send(env.clone()).await.expect("send");

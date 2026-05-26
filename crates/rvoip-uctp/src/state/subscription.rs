@@ -27,7 +27,8 @@ use crate::payloads::stream::{StreamSubscribe, StreamUnsubscribe};
 /// `Reject{code, reason}` → coordinator emits `error` with that code
 /// and reason, also in_reply_to. Codes follow the
 /// CONVERSATION_PROTOCOL.md §11.2 catalog: 404 (unknown participant /
-/// stream), 488 (capability mismatch), 503 (capacity / not-ready).
+/// stream), 488 (capability mismatch), 501 (recognized but not wired
+/// in this build), 503 (transient capacity / not-ready).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubscriptionOutcome {
     Ok,
@@ -50,7 +51,7 @@ impl SubscriptionOutcome {
 /// Plug-in trait implemented by whatever owns the multi-party routing
 /// table. The UCTP coordinator calls into this on inbound
 /// `stream.subscribe` / `stream.unsubscribe` envelopes. The default
-/// `None` handler keeps the legacy 503 reject for back-compat.
+/// `None` handler keeps the legacy 501 reject for back-compat.
 ///
 /// Implementations are typically not blocking, so the trait is sync
 /// (no `async fn`). If a future impl needs to block, switch the trait
@@ -113,18 +114,22 @@ pub struct PublisherInfo<'a> {
     pub codec: Option<rvoip_core::capability::CodecInfo>,
 }
 
-/// Default handler — every request is rejected with 503
-/// `multi-party-routing-not-implemented`. Used when no handler is
-/// configured so the legacy v0 behavior is preserved.
+/// Default handler — every request is rejected with `501 not-implemented`
+/// (`multi-party-routing-not-implemented`). The receiver recognized the
+/// envelope type but lacks the wiring to service it; another build of
+/// the same server might. Used when no handler is configured.
+///
+/// Pre-v0.x servers conflated `501` and `501` as `501`; per
+/// [`CONVERSATION_PROTOCOL.md`] §11.2 these are now distinct.
 pub struct RejectingHandler;
 
 impl SubscriptionHandler for RejectingHandler {
     fn subscribe(&self, _: &SessionId, _: &ConnectionId, _: &StreamSubscribe) -> SubscriptionOutcome {
-        SubscriptionOutcome::reject(503, "multi-party-routing-not-implemented")
+        SubscriptionOutcome::reject(501, "multi-party-routing-not-implemented")
     }
 
     fn unsubscribe(&self, _: &SessionId, _: &ConnectionId, _: &StreamUnsubscribe) -> SubscriptionOutcome {
-        SubscriptionOutcome::reject(503, "multi-party-routing-not-implemented")
+        SubscriptionOutcome::reject(501, "multi-party-routing-not-implemented")
     }
 }
 

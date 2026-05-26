@@ -14,6 +14,8 @@ This document tracks every item from the original plan that is **not yet landed*
 
 The split matters because category 1 and 2 are decisions for a human, not implementation work; category 3 is just queued effort.
 
+> **Note (2026-05-25):** see [`UCTP_GAP_PLAN.md`](UCTP_GAP_PLAN.md) for the live remaining-work picture. The C3 row below has since landed; the rest of the table is being executed in the gap plan's order.
+
 ---
 
 ## 1. Externally blocked
@@ -38,15 +40,7 @@ The split matters because category 1 and 2 are decisions for a human, not implem
 
 ### 1.2 C3 — `rvoip-websocket` media plane (webrtc-rs integration)
 
-**Owner:** parallel contributor working on `crates/rvoip-webrtc/`.
-
-**Why blocked:** off-limits this session per direct instruction. The `rvoip-webrtc` crate is being independently developed; the WebSocket adapter's media plane (`media_bridge.rs`'s `WebRtcMediaBridge`) is the integration point but the webrtc-rs side isn't ready.
-
-**Current state of WS:** signaling fully implemented ([server.rs](src/state/coordinator.rs) — sorry, [`crates/rvoip-websocket/src/server.rs`](../rvoip-websocket/src/server.rs)). The MP3c `allocate_subscriber_stream` returns `NotImplemented` with a documentary comment pointing at this blocker. Single-publisher rooms over WS work via the legacy fanout fallback in [`Orchestrator::fanout_frame`](../rvoip-core/src/orchestrator.rs).
-
-**What unblocks:** webrtc-rs 1.0 stable (or the parallel contributor declaring `rvoip-webrtc`'s `RTCPeerConnection` API stable enough). The 6-step integration plan is documented inline in [`crates/rvoip-websocket/src/media_bridge.rs:26-44`](../rvoip-websocket/src/media_bridge.rs).
-
-**Scope when unblocked:** ~400-600 LOC for the full WebRtcMediaBridge implementation + integration tests with mock WebRTC peer. The signaling side is already validated by the existing loopback test.
+**Landed 2026-05-25.** `WebRtcMediaBridge` is fully wired under the `media-webrtc` feature; end-to-end WS↔WS bridge proof at [`crates/rvoip-websocket/tests/ws_bridge_flow.rs`](../rvoip-websocket/tests/ws_bridge_flow.rs). See [`UCTP_GAP_PLAN.md`](UCTP_GAP_PLAN.md) for follow-ups.
 
 ---
 
@@ -127,7 +121,6 @@ Without the canonical-fields spec, any implementation would lock in choices that
 | ID | Item | Category | Why | Owner / unblock |
 |---|---|---|---|---|
 | **B3** | Spec codes 501 / 505 | Externally blocked | Spec PR needed; refusing to land non-canonical codes | CONVERSATION_PROTOCOL.md maintainer |
-| **C3** | WS WebRTC media plane | Externally blocked | Off-limits this session; `rvoip-webrtc` parallel work | Contributor on `rvoip-webrtc` + webrtc-rs 1.0 |
 | **D5** | Playwright browser smoke | Cross-ecosystem | Adds Node.js to a Rust workspace; deliberate decision | Workspace-policy decision |
 | **C4 AAuth** | AAuth validator | Substantial standards | ~500 LOC IETF standards-track work | Queued |
 | **C4 RFC 9421** | HTTP Message Signatures | Externally blocked (spec) + Substantial | Spec PR needed first to define canonical fields | CONVERSATION_PROTOCOL.md maintainer, then ~600-800 LOC |
