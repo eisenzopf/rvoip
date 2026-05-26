@@ -18,6 +18,30 @@ tuned profiles and must include configuration, hardware, topology, and caveats.
 WebRTC-grade media, DTLS-SRTP, ICE, TURN, browser interop, and carrier SBC
 certification are post-beta unless separately completed and tested.
 
+## MSRV, semver, and feature flags
+
+`rvoip-sip` uses the workspace Rust version as its minimum supported Rust
+version. The current workspace MSRV is Rust `1.85`, verified by the beta
+security-hardening dependency set.
+
+During the beta line, public API changes can still happen before `1.0`. Breaking
+changes should be released as minor-version bumps, patch releases should be
+limited to compatible fixes, and migration notes should be captured in the
+release notes when public APIs move.
+
+Feature flags:
+
+| Flag | Beta stance |
+|------|-------------|
+| default feature set | Supported baseline for beta validation. |
+| `event-history` | Optional event history/debug support; enable only when the application needs retained event inspection. |
+| `persistence` | Experimental persistence path using `sqlx`; applications must validate their own storage behavior before relying on it. |
+| `generated-validation` | Development and CI validation for generated SIP messages. |
+| `dev-insecure-tls` | Local test-only TLS convenience; do not use for deployed systems. |
+| `perf-tests` | Performance gate and benchmark support. |
+| `dhat` | Profiling support. |
+| `tokio-console` | Profiling support; requires `RUSTFLAGS="--cfg tokio_unstable"`. |
+
 ## Where it fits
 
 | Crate | Responsibility |

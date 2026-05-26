@@ -46,7 +46,7 @@ rustls-native-certs = { version = "0.6", optional = true }
 webpki-roots = { version = "0.25", optional = true }
 
 # WebSocket support
-tokio-tungstenite = { version = "0.19", optional = true }
+tokio-tungstenite = { version = "0.20", optional = true }
 http = { version = "0.2", optional = true }
 
 # RFC 3263 NAPTR/SRV/A resolver (opt-in via `dns` feature).

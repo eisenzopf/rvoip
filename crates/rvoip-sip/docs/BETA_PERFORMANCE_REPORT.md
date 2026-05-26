@@ -1,23 +1,21 @@
 # rvoip-sip Beta Performance Report
 
-Date: 2026-05-25
+Date: 2026-05-26
 
-This is the beta performance report template and claim policy. It does not
-replace raw benchmark output. Raw output should remain under `target/` or the
-CI artifact store; release notes should cite the summarized tables here.
+This report summarizes the current beta-candidate performance evidence and the
+claim policy for the next release. The current complete report is useful
+evidence, but it is not the final release attestation because it was captured
+from a dirty working tree.
 
-The release-gate entry point is:
+Current reference report:
 
-```sh
-crates/rvoip-sip/scripts/beta_gate.sh --perf
-```
-
-For the full beta candidate, run:
-
-```sh
-BETA_RUN_LONG_SOAK=1 RVOIP_PERF_SOAK_DURATION_SECS=86400 \
-crates/rvoip-sip/scripts/beta_gate.sh --perf
-```
+- Command: `BETA_RUN_LOCAL_PBX=1 crates/rvoip-sip/scripts/beta_gate.sh --full --require-external`
+- Summary: `crates/rvoip-sip/beta-report/20260526T032035Z/summary.md`
+- Result: `0` failures, `0` skips
+- Git revision: `d6e8beaa`
+- Git status at run time: `dirty`
+- Environment: `crates/rvoip-sip/beta-report/20260526T032035Z/environment/environment.md`
+- Raw performance artifacts: `crates/rvoip-sip/beta-report/20260526T032035Z/perf-results/`
 
 ## Claim Policy
 
@@ -31,9 +29,22 @@ crates/rvoip-sip/scripts/beta_gate.sh --perf
 Near-10,000 CPS results must be described as tuned or signaling-only unless
 they pass the full-media beta profile with the same evidence bar.
 
+## Reference Environment
+
+| Field | Value |
+|-------|-------|
+| Rust | `rustc 1.95.0 (59807616e 2026-04-14)` |
+| Cargo | `cargo 1.95.0 (f2d3ce0bd 2026-03-21)` |
+| Host | Apple M3 Max, 128 GB RAM, macOS Darwin 25.2.0 |
+| SIPp | SIPp standalone matrix artifacts under `sipp/` and `perf-results/sipp_local_2k_full_media_20260525_145559/` |
+| Feature/config source | Bundled `config/performance-recipes.yaml` |
+| PBX provider coverage | Local Asterisk and local FreeSWITCH |
+| Media mode | Full-media profile for beta claim rows unless marked otherwise |
+| Security media mode | Tested SDES-SRTP interop in PBX matrix; DTLS-SRTP remains post-beta |
+
 ## General Full-Media Gate
 
-The beta release should pass:
+The beta release gate requires the following sweep points:
 
 - 30 CPS
 - 100 CPS
@@ -51,39 +62,64 @@ Required result at the declared beta target:
 - CPU and memory reported
 - exact configuration recorded
 
-## Required Report Fields
+Reference sweep artifact:
+`crates/rvoip-sip/beta-report/20260526T032035Z/perf-results/perf_call_setup_cps/_sweep.md`
 
-| Field | Required |
-|-------|----------|
-| Git revision | Yes |
-| Rust version | Yes |
-| OS and kernel | Yes |
-| CPU model and core count | Yes |
-| RAM | Yes |
-| SIPp version | Yes |
-| Peer versions | Yes |
-| Feature flags | Yes |
-| Media mode | Yes |
-| Codec set | Yes |
-| SRTP/TLS mode | Yes |
-| Config tuning knobs | Yes |
-| Raw artifact location | Yes |
+| CPS target | Achieved CPS | Success rate | p50 setup | p95 setup | p99 setup | Full-cycle p99 | RSS delta | CPU | Errors |
+|------------|--------------|--------------|-----------|-----------|-----------|----------------|-----------|-----|--------|
+| 30 | 27.9 | 1.0000 | 12.1 ms | 13.0 ms | 13.6 ms | 127.4 ms | 207.0 MB | 23% | 0 |
+| 100 | 92.8 | 1.0000 | 11.6 ms | 12.7 ms | 13.4 ms | 126.9 ms | 240.7 MB | 47% | 0 |
+| 300 | 278.6 | 1.0000 | 11.4 ms | 12.4 ms | 12.9 ms | 126.3 ms | 348.6 MB | 77% | 0 |
+| 1,000 | 928.6 | 1.0000 | 11.2 ms | 12.1 ms | 12.6 ms | 125.8 ms | 990.7 MB | 149% | 0 |
+| 2,000 | 1,857.1 | 1.0000 | 11.2 ms | 12.3 ms | 12.9 ms | 126.3 ms | 1,434.6 MB | 226% | 0 |
 
-## Result Table Template
+The SIPp full-media sidecar run also reached the 2,000 CPS target with 120,000
+successful calls and no failed calls:
 
-| CPS target | Achieved CPS | Success rate | p50 setup | p95 setup | p99 setup | RSS delta | CPU | Retransmits | Cleanup |
-|------------|--------------|--------------|-----------|-----------|-----------|-----------|-----|-------------|---------|
-| 30 | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| 100 | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| 300 | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| 1,000 | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| 2,000 | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+- Artifact: `crates/rvoip-sip/beta-report/20260526T032035Z/perf-results/sipp_local_2k_full_media_20260525_145559/analysis.md`
+- Target: 2,000 CPS
+- Achieved: 1,967.2 CPS
+- Success: 120,000 / 120,000 calls
+- P95/P99 INVITE-to-200 OK latency: `<10 ms` / `<10 ms`
+- Retransmissions: 0
 
-## Current Evidence Notes
+## Soak Evidence
 
-- Existing tuning docs show signaling-only and tuned high-CPS investigations
-  above the general beta target.
-- Existing investigation docs also show normal media becoming the limiting path
-  above roughly the low-thousands CPS range.
-- The beta release should therefore lead with 2,000 CPS full-media evidence and
-  keep higher results in a separate tuned-profile section.
+Reference soak artifact:
+`crates/rvoip-sip/beta-report/20260526T032035Z/perf-results/perf_soak_30min.json`
+
+| Duration | Offered | Succeeded | ASR | Held media calls | Peak RSS | Post-drain RSS gate | Retained objects after drain | Active Bob audio receivers after drain | Transaction runners after drain |
+|----------|---------|-----------|-----|------------------|----------|---------------------|------------------------------|----------------------------------------|---------------------------------|
+| 1,800 s | 35,010 | 35,010 | 1.0 | 30 | 312.7 MB | 0.75 MB/hr against 10 MB/hr default | 0 | 0 | 0 |
+
+The 30-minute soak passed the current gate. The release checklist still requires
+a documented 24-hour release-candidate soak unless that requirement is
+explicitly waived.
+
+## Other Reference Performance Gates
+
+The reference report passed these additional gates:
+
+| Gate | Evidence |
+|------|----------|
+| Endpoint call setup CPS | `summary.md`, `perf_call_setup_cps_endpoint.log` |
+| PBX media server call setup CPS | `summary.md`, `perf_call_setup_cps_pbx-media-server.log` |
+| Signaling-only high-performance setup CPS | `summary.md`, `perf_call_setup_cps_signaling-only-server-high-performance.log` |
+| Registration throughput | `perf-results/perf_registration_throughput.json` |
+| Concurrent active calls | `perf-results/perf_concurrent_active_calls.json` |
+| RTP steady state | `perf-results/perf_rtp_steady_state.json` |
+| Backpressure step | `perf-results/perf_backpressure_step.json` |
+| Transport recovery | `perf-results/perf_transport_recovery.json` |
+| Session churn leak | `perf-results/perf_session_churn_leak.json` |
+| SIPp standalone matrix | `sipp/analysis.md`, `sipp/run_summary.md` |
+
+## Final Release Requirements
+
+Before these numbers can be used as final beta release evidence:
+
+- Re-run `BETA_RUN_LOCAL_PBX=1 crates/rvoip-sip/scripts/beta_gate.sh --full --require-external` from a clean commit.
+- Include the security gates added to `scripts/beta_gate.sh`, including
+  dependency audit and parser fuzz smoke logs.
+- Archive the 24-hour soak result, or update the checklist to deliberately
+  accept the 30-minute soak as the beta bar.
+- Ensure release notes cite only the final clean report directory.

@@ -1,10 +1,10 @@
 # rvoip-sip Next Release Notes Draft
 
-Date: 2026-05-25
+Date: 2026-05-26
 
-These notes are a draft for the beta/production-candidate line. Only keep
-claims that are backed by the compatibility matrix, RFC matrix, interop
-results, and performance report.
+These notes are a draft for the beta line. Keep only claims that are backed by
+the final clean beta report, compatibility matrix, RFC matrix, interop results,
+security posture, and performance report.
 
 ## Headline
 
@@ -17,11 +17,29 @@ layer for bounded client, server, PBX, and gateway scenarios.
   `CallbackPeer`, `UnifiedCoordinator`, and `SessionHandle`.
 - Beta media support is limited to PCMU, PCMA, telephone-event DTMF, optional
   comfort noise, RTP, and tested SDES-SRTP profiles.
+- Interop evidence covers local Asterisk, local FreeSWITCH, SIPp standalone
+  load scenarios, and baresip strict-UA behavior in the current reference
+  report.
 - General full-media performance claims are capped at the documented 2,000 CPS
   beta profile until release evidence proves the exact setup.
 - Higher CPS results are advanced tuned profiles and must include tuning,
-  hardware, and topology caveats.
-- WebRTC-grade media is post-beta unless completed and separately tested.
+  hardware, topology, and caveats.
+- SIP trace output redacts authorization data, authentication challenges,
+  cookies, identity headers, token-like headers, and SDP keying attributes.
+- The release gate includes local tests, interop/performance modes, dependency
+  audit, and parser fuzz smoke targets.
+
+## Current Reference Evidence
+
+- Reference report:
+  `crates/rvoip-sip/beta-report/20260526T032035Z/summary.md`
+- Result: `0` failures, `0` skips
+- Git revision: `d6e8beaa`
+- Git status at run time: `dirty`
+
+The dirty status means the reference report is not the final release
+attestation. The final notes must cite a clean report generated after the
+release-hardening changes are committed.
 
 ## Must Not Claim Yet
 
@@ -42,5 +60,8 @@ layer for bounded client, server, PBX, and gateway scenarios.
 - `BETA_PERFORMANCE_REPORT.md` populated with raw-result links.
 - `SECURITY_POSTURE.md` release checks complete.
 - `scripts/beta_gate.sh --local` passes.
-- `scripts/beta_gate.sh --full` either passes with external artifacts or every
-  skip is converted into an explicit non-claim in these notes.
+- `scripts/beta_gate.sh --security` passes and archives dependency audit plus
+  parser fuzz smoke logs.
+- `scripts/beta_gate.sh --full --require-external` passes from a clean commit.
+- The 24-hour soak passes, or the checklist explicitly accepts the 30-minute
+  soak as the beta release bar.

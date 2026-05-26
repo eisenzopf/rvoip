@@ -2,6 +2,7 @@
 name = "rvoip-sip"
 version = "0.2.0"
 edition = "2021"
+rust-version.workspace = true
 authors = ["RVoIP Contributors"]
 description = "SIP umbrella for RVoIP: api/* (UnifiedCoordinator, StreamPeer, CallbackPeer, Endpoint), server/* (B2BUA helpers), adapter/* (rvoip-core::ConnectionAdapter impl)"
 license = "MIT OR Apache-2.0"
@@ -476,7 +477,7 @@ path = "tests/perf/perf_sipp_parity.rs"
 required-features = ["perf-tests"]
 
 [dependencies.sqlx]
-version = "0.7"
+version = "0.8"
 optional = true
 features = ["sqlite", "runtime-tokio"]
 

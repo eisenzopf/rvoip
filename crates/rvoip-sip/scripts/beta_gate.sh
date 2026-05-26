@@ -14,6 +14,7 @@ WORKSPACE_ROOT="$(cd "$CRATE_DIR/../.." && pwd)"
 
 MODE="${BETA_GATE_MODE:-local}"
 REQUIRE_EXTERNAL="${BETA_GATE_REQUIRE_EXTERNAL:-0}"
+BETA_FUZZ_TOOLCHAIN="${BETA_FUZZ_TOOLCHAIN:-nightly}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 ARTIFACT_DIR="${BETA_GATE_ARTIFACT_DIR:-$WORKSPACE_ROOT/target/beta-gate/$TIMESTAMP}"
 SUMMARY="$ARTIFACT_DIR/summary.md"
@@ -32,13 +33,14 @@ trap cleanup_background EXIT
 
 usage() {
   cat <<'EOF'
-Usage: beta_gate.sh [--local|--full|--interop|--perf] [--require-external]
+Usage: beta_gate.sh [--local|--full|--interop|--perf|--security] [--require-external]
 
 Modes:
   --local    Fast local gate: format/check/tests/docs/examples/compliance smoke.
   --full     Local gate plus interop and perf gates.
   --interop  External interop gates only.
   --perf     Performance gates only.
+  --security Dependency audit and parser fuzz-smoke gates only.
 
 Environment:
   BETA_GATE_ARTIFACT_DIR         Output directory. Defaults to target/beta-gate/<timestamp>.
@@ -66,6 +68,10 @@ Environment:
   RVOIP_PERF_MIN_SUCCESS_PCT     SIPp pass threshold. Defaults to 99.9.
   BETA_RUN_STRICT_UA=0           Disable the baresip strict-UA gate; fails with --require-external.
   BETA_RUN_LONG_SOAK=0           Disable the ignored soak test; fails with --require-external.
+  BETA_RUN_FUZZ_SMOKE=0          Disable parser fuzz-smoke coverage; fails with --require-external.
+  BETA_FUZZ_TOOLCHAIN            Rust toolchain used by cargo-fuzz. Defaults to nightly.
+  BETA_FUZZ_SMOKE_RUNS           libFuzzer runs per parser target. Defaults to 1000.
+  BETA_FUZZ_SMOKE_SECONDS        libFuzzer max_total_time per parser target. Defaults to 10.
   RVOIP_PERF_SOAK_DURATION_SECS  Soak duration. Defaults to the perf test default.
   RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR
                                   Soak RSS growth threshold. Defaults to Config's 10 MB/hr.
@@ -83,6 +89,7 @@ while [ "$#" -gt 0 ]; do
     --full) MODE=full ;;
     --interop) MODE=interop ;;
     --perf) MODE=perf ;;
+    --security) MODE=security ;;
     --require-external) REQUIRE_EXTERNAL=1 ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -485,6 +492,8 @@ write_report_manifest() {
 - \`sipp/run_summary.md\`
 - \`sipp/analysis.md\`
 - \`strict-ua/summary.md\`
+- \`security/cargo-audit.txt\`
+- \`security/fuzz/\`
 - \`perf-results/\`
 
 The report directory is a packaged copy of the beta-gate artifact tree plus
@@ -729,6 +738,79 @@ run_proxy_descope_audit() {
      rg -q 'Kamailio/OpenSIPS.*Investigation only' crates/rvoip-sip/docs/INTEROP_CI_PLAN.md"
 }
 
+run_dependency_audit() {
+  local security_dir="$ARTIFACT_DIR/security"
+  mkdir -p "$security_dir"
+  run_gate "dependency advisory audit" env SECURITY_DIR="$security_dir" bash -c '
+    set -euo pipefail
+    mkdir -p "$SECURITY_DIR"
+    if ! cargo audit --version > "$SECURITY_DIR/cargo-audit-version.txt" 2>&1; then
+      echo "cargo-audit is not available. Install it with: cargo install cargo-audit" >&2
+      exit 127
+    fi
+    set +e
+    cargo audit > "$SECURITY_DIR/cargo-audit.txt" 2>&1
+    audit_status=$?
+    cargo audit --json > "$SECURITY_DIR/cargo-audit.json" 2> "$SECURITY_DIR/cargo-audit-json.stderr"
+    json_status=$?
+    set -e
+    cat "$SECURITY_DIR/cargo-audit.txt"
+    if [ "$audit_status" -ne 0 ] || [ "$json_status" -ne 0 ]; then
+      exit 1
+    fi
+  '
+}
+
+run_fuzz_smoke_target() {
+  local target="$1"
+  local fuzz_dir="$ARTIFACT_DIR/security/fuzz"
+  mkdir -p "$fuzz_dir"
+  run_gate "parser fuzz smoke ($target)" env \
+    CRATE_DIR="$CRATE_DIR" \
+    WORKSPACE_ROOT="$WORKSPACE_ROOT" \
+    FUZZ_TARGET="$target" \
+    FUZZ_LOG="$fuzz_dir/$target.log" \
+    BETA_FUZZ_SMOKE_RUNS="${BETA_FUZZ_SMOKE_RUNS:-1000}" \
+    BETA_FUZZ_SMOKE_SECONDS="${BETA_FUZZ_SMOKE_SECONDS:-10}" \
+    BETA_FUZZ_TOOLCHAIN="${BETA_FUZZ_TOOLCHAIN:-nightly}" \
+    bash -c '
+      set -euo pipefail
+      mkdir -p "$(dirname "$FUZZ_LOG")"
+      if ! cargo +"$BETA_FUZZ_TOOLCHAIN" fuzz --version > "${FUZZ_LOG%.log}.version.txt" 2>&1; then
+        echo "cargo-fuzz or Rust toolchain '$BETA_FUZZ_TOOLCHAIN' is not available." >&2
+        echo "Install with: rustup toolchain install $BETA_FUZZ_TOOLCHAIN && cargo install cargo-fuzz" >&2
+        exit 127
+      fi
+      cd "$CRATE_DIR"
+      set +e
+      CARGO_TARGET_DIR="$WORKSPACE_ROOT/target/fuzz" \
+        cargo +"$BETA_FUZZ_TOOLCHAIN" fuzz run "$FUZZ_TARGET" -- \
+          -runs="$BETA_FUZZ_SMOKE_RUNS" \
+          -max_total_time="$BETA_FUZZ_SMOKE_SECONDS" \
+          > "$FUZZ_LOG" 2>&1
+      fuzz_status=$?
+      set -e
+      cat "$FUZZ_LOG"
+      exit "$fuzz_status"
+    '
+}
+
+run_fuzz_smoke_gates() {
+  if [ "${BETA_RUN_FUZZ_SMOKE:-1}" = "0" ]; then
+    skip_gate "parser fuzz smoke" "BETA_RUN_FUZZ_SMOKE=0 disables required parser fuzz-smoke evidence."
+    return
+  fi
+  run_fuzz_smoke_target sip_message
+  run_fuzz_smoke_target uri
+  run_fuzz_smoke_target header
+  run_fuzz_smoke_target sdp
+}
+
+run_security_gates() {
+  run_dependency_audit || true
+  run_fuzz_smoke_gates || true
+}
+
 run_local_gates() {
   run_gate "format check" cargo fmt --all -- --check
   run_gate "rvoip-sip all-target check" cargo check -p rvoip-sip --all-targets --features generated-validation,dev-insecure-tls
@@ -814,6 +896,7 @@ case "$MODE" in
     ;;
   full)
     run_local_gates
+    run_security_gates
     run_interop_gates
     run_perf_gates
     ;;
@@ -822,6 +905,9 @@ case "$MODE" in
     ;;
   perf)
     run_perf_gates
+    ;;
+  security)
+    run_security_gates
     ;;
   *)
     echo "Unknown mode: $MODE" >&2

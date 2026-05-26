@@ -8,6 +8,7 @@
 //! is the §10-named entry point; companion redactor unit-style tests
 //! live in `sip_api_design_2_section_10_skeletons.rs`.
 
+use rvoip_infra_common::events::cross_crate::{format_sip_trace_message, SipTraceConfig};
 use rvoip_sip::api::trace_redactor::{
     apply_message_redactor, PassthroughRedactor, RedactionDecision, TraceRedactor,
 };
@@ -81,4 +82,43 @@ fn passthrough_redactor_is_identity_on_trace_payload() {
         out, raw,
         "PassthroughRedactor must not alter the trace payload"
     );
+}
+
+#[test]
+fn default_trace_policy_redacts_identity_tokens_and_sdp_keying() {
+    let raw = concat!(
+        "INVITE sip:bob@example.com SIP/2.0\r\n",
+        "Authorization: Digest response=\"deadbeef\"\r\n",
+        "Identity: signed-passport;info=<https://cert.example>\r\n",
+        "P-Asserted-Identity: <sip:+15551234567@example.com>\r\n",
+        "X-Carrier-Token: carrier-secret-token\r\n",
+        "Content-Type: application/sdp\r\n",
+        "\r\n",
+        "v=0\r\n",
+        "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:sdes-master-key\r\n",
+        "a=ice-pwd:ice-secret\r\n",
+        "a=rtpmap:0 PCMU/8000\r\n",
+    );
+
+    let config = SipTraceConfig {
+        enabled: true,
+        redact_sensitive_headers: true,
+        include_body: true,
+        ..SipTraceConfig::default()
+    };
+    let (scrubbed, truncated) = format_sip_trace_message(raw, &config);
+
+    assert!(!truncated);
+    assert!(scrubbed.contains("Authorization: <redacted>"));
+    assert!(scrubbed.contains("Identity: <redacted>"));
+    assert!(scrubbed.contains("P-Asserted-Identity: <redacted>"));
+    assert!(scrubbed.contains("X-Carrier-Token: <redacted>"));
+    assert!(scrubbed.contains("a=crypto:<redacted>"));
+    assert!(scrubbed.contains("a=ice-pwd:<redacted>"));
+    assert!(scrubbed.contains("a=rtpmap:0 PCMU/8000"));
+    assert!(!scrubbed.contains("deadbeef"));
+    assert!(!scrubbed.contains("signed-passport"));
+    assert!(!scrubbed.contains("carrier-secret-token"));
+    assert!(!scrubbed.contains("sdes-master-key"));
+    assert!(!scrubbed.contains("ice-secret"));
 }

@@ -55,7 +55,7 @@ homepage = "https://github.com/eisenzopf/rvoip"
 repository = "https://github.com/eisenzopf/rvoip"
 documentation = "https://docs.rs/rvoip"
 authors = ["RVOIP AUTHORS"]
-rust-version = "1.70"  # Minimum supported Rust version
+rust-version = "1.85"  # Minimum supported Rust version
 categories = ["network-programming", "multimedia", "web-programming"]
 keywords = ["sip", "voip", "rtp", "communication", "telephony"]
 

@@ -386,7 +386,8 @@ pub fn format_sip_trace_message(raw: &str, config: &SipTraceConfig) -> (String, 
     )
 }
 
-/// Redact auth-bearing SIP headers while preserving all other lines.
+/// Redact auth-bearing and identity-bearing SIP headers plus SDP keying
+/// material while preserving all other lines.
 pub fn redact_sip_message(raw: &str) -> String {
     let mut in_headers = true;
     let mut redacted = Vec::new();
@@ -406,6 +407,13 @@ pub fn redact_sip_message(raw: &str) -> String {
                     continue;
                 }
             }
+        } else if is_sensitive_sdp_line(trimmed) {
+            if let Some((name, _value)) = trimmed.split_once(':') {
+                redacted.push(format!("{}:<redacted>", name.trim()));
+            } else {
+                redacted.push("<redacted>".to_string());
+            }
+            continue;
         }
 
         redacted.push(trimmed.to_string());
@@ -431,10 +439,29 @@ fn strip_sip_body(raw: &str) -> String {
 }
 
 fn is_sensitive_sip_header(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
     matches!(
-        name.trim().to_ascii_lowercase().as_str(),
-        "authorization" | "proxy-authorization" | "www-authenticate" | "proxy-authenticate"
-    )
+        name.as_str(),
+        "authorization"
+            | "proxy-authorization"
+            | "www-authenticate"
+            | "proxy-authenticate"
+            | "cookie"
+            | "set-cookie"
+            | "identity"
+            | "p-asserted-identity"
+            | "p-preferred-identity"
+    ) || name.contains("token")
+        || name.contains("secret")
+        || name.contains("credential")
+        || name.contains("api-key")
+}
+
+fn is_sensitive_sdp_line(line: &str) -> bool {
+    let lower = line.trim_start().to_ascii_lowercase();
+    lower.starts_with("a=crypto:")
+        || lower.starts_with("a=ice-pwd:")
+        || lower.starts_with("a=identity:")
 }
 
 fn truncate_at_char_boundary(raw: &str, max_bytes: usize) -> (String, bool) {
@@ -1892,6 +1919,38 @@ mod tests {
         assert!(redacted.contains("body"));
         assert!(!redacted.contains("secret"));
         assert!(!redacted.contains("proxy-secret"));
+    }
+
+    #[test]
+    fn sip_trace_redacts_identity_token_and_sdp_secrets() {
+        let raw = concat!(
+            "INVITE sip:bob@example.com SIP/2.0\r\n",
+            "Identity: eyJhbGciOiJFUzI1NiJ9.payload.signature;info=<https://cert.example>\r\n",
+            "P-Asserted-Identity: <sip:+15551234567@example.com>\r\n",
+            "X-Customer-Token: tenant-token-123\r\n",
+            "Cookie: sid=super-secret-cookie\r\n",
+            "Content-Type: application/sdp\r\n",
+            "Content-Length: 160\r\n",
+            "\r\n",
+            "v=0\r\n",
+            "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:keying-material\r\n",
+            "a=ice-pwd:ice-password-secret\r\n",
+            "a=rtpmap:0 PCMU/8000\r\n",
+        );
+
+        let redacted = redact_sip_message(raw);
+
+        assert!(redacted.contains("Identity: <redacted>"));
+        assert!(redacted.contains("P-Asserted-Identity: <redacted>"));
+        assert!(redacted.contains("X-Customer-Token: <redacted>"));
+        assert!(redacted.contains("Cookie: <redacted>"));
+        assert!(redacted.contains("a=crypto:<redacted>"));
+        assert!(redacted.contains("a=ice-pwd:<redacted>"));
+        assert!(redacted.contains("a=rtpmap:0 PCMU/8000"));
+        assert!(!redacted.contains("tenant-token-123"));
+        assert!(!redacted.contains("super-secret-cookie"));
+        assert!(!redacted.contains("keying-material"));
+        assert!(!redacted.contains("ice-password-secret"));
     }
 
     #[test]

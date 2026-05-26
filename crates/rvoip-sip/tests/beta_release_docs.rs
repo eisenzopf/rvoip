@@ -70,6 +70,22 @@ fn active_release_docs_keep_high_cps_and_webrtc_as_non_claims() {
 }
 
 #[test]
+fn beta_release_docs_require_security_gate_and_no_placeholder_results() {
+    let docs = manifest_dir().join("docs");
+    let checklist = read(docs.join("BETA_RELEASE_CHECKLIST.md"));
+    let security = read(docs.join("SECURITY_POSTURE.md"));
+    let performance = read(docs.join("BETA_PERFORMANCE_REPORT.md"));
+
+    assert!(checklist.contains("scripts/beta_gate.sh --security"));
+    assert!(security.contains("security/cargo-audit.txt"));
+    assert!(security.contains("security/fuzz/sip_message.log"));
+    assert!(
+        !performance.contains("TBD"),
+        "performance report must contain current values, not placeholders"
+    );
+}
+
+#[test]
 fn crate_readmes_do_not_make_unqualified_beta_production_claims() {
     let workspace = manifest_dir().join("../..");
     let readmes = [
