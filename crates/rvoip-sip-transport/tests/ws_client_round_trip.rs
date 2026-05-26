@@ -112,8 +112,8 @@ fn write_self_signed_localhost_cert() -> (tempfile::TempDir, std::path::PathBuf,
 
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
         .expect("rcgen self-signed");
-    let cert_pem = cert.serialize_pem().expect("cert PEM");
-    let key_pem = cert.serialize_private_key_pem();
+    let cert_pem = cert.cert.pem();
+    let key_pem = cert.signing_key.serialize_pem();
 
     std::fs::File::create(&cert_path)
         .and_then(|mut f| f.write_all(cert_pem.as_bytes()))
@@ -141,7 +141,11 @@ fn write_self_signed_localhost_cert() -> (tempfile::TempDir, std::path::PathBuf,
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wss_server_accepts_tls_handshake_and_negotiates_sip_subprotocol() {
     use std::sync::Arc as StdArc;
-    use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerName};
+    use tokio_rustls::rustls::{
+        client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        pki_types::{CertificateDer, ServerName, UnixTime},
+        ClientConfig, DigitallySignedStruct, SignatureScheme,
+    };
     use tokio_rustls::TlsConnector;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -173,34 +177,61 @@ async fn wss_server_accepts_tls_handshake_and_negotiates_sip_subprotocol() {
         .await
         .expect("client tcp connect");
 
-    let mut config = ClientConfig::builder()
-        .with_safe_defaults()
-        .with_root_certificates(RootCertStore::empty())
-        .with_no_client_auth();
-
     // Accept the self-signed server cert. This is the same shape as
     // the TLS transport's `dev-insecure-tls` verifier.
+    #[derive(Debug)]
     struct AcceptAll;
-    impl tokio_rustls::rustls::client::ServerCertVerifier for AcceptAll {
+    impl ServerCertVerifier for AcceptAll {
         fn verify_server_cert(
             &self,
-            _end_entity: &tokio_rustls::rustls::Certificate,
-            _intermediates: &[tokio_rustls::rustls::Certificate],
-            _server_name: &ServerName,
-            _scts: &mut dyn Iterator<Item = &[u8]>,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
             _ocsp_response: &[u8],
-            _now: std::time::SystemTime,
-        ) -> Result<tokio_rustls::rustls::client::ServerCertVerified, tokio_rustls::rustls::Error>
-        {
-            Ok(tokio_rustls::rustls::client::ServerCertVerified::assertion())
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, tokio_rustls::rustls::Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            vec![
+                SignatureScheme::ECDSA_NISTP256_SHA256,
+                SignatureScheme::ECDSA_NISTP384_SHA384,
+                SignatureScheme::ED25519,
+                SignatureScheme::RSA_PSS_SHA256,
+                SignatureScheme::RSA_PSS_SHA384,
+                SignatureScheme::RSA_PSS_SHA512,
+                SignatureScheme::RSA_PKCS1_SHA256,
+                SignatureScheme::RSA_PKCS1_SHA384,
+                SignatureScheme::RSA_PKCS1_SHA512,
+            ]
         }
     }
-    config
+    let config = ClientConfig::builder()
         .dangerous()
-        .set_certificate_verifier(StdArc::new(AcceptAll));
+        .with_custom_certificate_verifier(StdArc::new(AcceptAll))
+        .with_no_client_auth();
 
     let connector = TlsConnector::from(StdArc::new(config));
-    let server_name = ServerName::try_from("localhost").expect("server name");
+    let server_name = ServerName::try_from("localhost".to_string()).expect("server name");
     let tls_stream = connector
         .connect(server_name, tcp_stream)
         .await

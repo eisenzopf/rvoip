@@ -16,9 +16,6 @@ use crate::srtp::{SrtpCryptoSuite, SRTP_AES128_CM_SHA1_80};
 use crate::Error;
 use hmac::{Hmac, Mac};
 use rand::{rngs::OsRng, RngCore};
-use rsa::pkcs1::{DecodeRsaPublicKey, EncodeRsaPublicKey};
-use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey};
-use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
 use sha2::{Digest, Sha256};
 use x509_parser::prelude::*;
 

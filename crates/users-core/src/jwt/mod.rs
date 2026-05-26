@@ -61,7 +61,7 @@ impl Default for JwtConfig {
             audience: vec!["rvoip-api".to_string(), "rvoip-sip".to_string()],
             access_ttl_seconds: 900,      // 15 minutes
             refresh_ttl_seconds: 2592000, // 30 days
-            algorithm: "RS256".to_string(),
+            algorithm: "HS256".to_string(),
             signing_key: None,
         }
     }
@@ -69,9 +69,18 @@ impl Default for JwtConfig {
 
 impl JwtIssuer {
     pub fn new(mut config: JwtConfig) -> Result<Self> {
-        // Generate RSA key pair if not provided
         if config.signing_key.is_none() {
-            config.signing_key = Some(Self::generate_rsa_key_pair()?);
+            match config.algorithm.as_str() {
+                "HS256" => config.signing_key = Some(Self::generate_hs256_secret()),
+                "RS256" => {
+                    return Err(Error::Config(
+                        "RS256 requires a caller-supplied PEM signing key; users-core no longer \
+                         generates RSA keys internally"
+                            .to_string(),
+                    ))
+                }
+                _ => {}
+            }
         }
 
         let signing_key = config.signing_key.as_ref().unwrap();
@@ -89,13 +98,9 @@ impl JwtIssuer {
             }
         };
 
-        // For RS256, we need to extract public key for decoding
         let decoding_key = match config.algorithm.as_str() {
-            "RS256" => {
-                let public_key = Self::extract_public_key_from_private(signing_key)?;
-                DecodingKey::from_rsa_pem(public_key.as_bytes())
-                    .map_err(|e| Error::Config(format!("Invalid public key: {}", e)))?
-            }
+            "RS256" => DecodingKey::from_rsa_pem(signing_key.as_bytes())
+                .map_err(|e| Error::Config(format!("Invalid RSA verification key: {}", e)))?,
             "HS256" => DecodingKey::from_secret(signing_key.as_bytes()),
             _ => unreachable!(),
         };
@@ -163,40 +168,27 @@ impl JwtIssuer {
         Ok(token_data.claims)
     }
 
+    /// Algorithm configured for issued JWTs.
+    pub fn algorithm(&self) -> Algorithm {
+        self.header.alg
+    }
+
+    /// Verification key for tokens issued by this service.
+    pub fn decoding_key(&self) -> &DecodingKey {
+        &self.decoding_key
+    }
+
     /// Get the public key in JWK format (for auth-core)
     pub fn public_key_jwk(&self) -> serde_json::Value {
-        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-        use rsa::pkcs8::DecodePrivateKey;
-        use rsa::traits::PublicKeyParts;
-        use rsa::{RsaPrivateKey, RsaPublicKey};
-
         if self.config.algorithm == "RS256" {
-            // Extract RSA components from the private key
-            if let Ok(private_key) =
-                RsaPrivateKey::from_pkcs8_pem(self.config.signing_key.as_ref().unwrap())
-            {
-                let public_key = RsaPublicKey::from(&private_key);
-
-                // Get modulus and exponent
-                let n = public_key.n();
-                let e = public_key.e();
-
-                // Convert to base64url encoding
-                let n_bytes = n.to_bytes_be();
-                let e_bytes = e.to_bytes_be();
-
-                return serde_json::json!({
-                    "kty": "RSA",
-                    "use": "sig",
-                    "kid": self.header.kid.as_ref().unwrap(),
-                    "alg": self.config.algorithm,
-                    "n": URL_SAFE_NO_PAD.encode(&n_bytes),
-                    "e": URL_SAFE_NO_PAD.encode(&e_bytes),
-                });
-            }
+            return serde_json::json!({
+                "kty": "RSA",
+                "use": "sig",
+                "kid": self.header.kid.as_ref().unwrap(),
+                "alg": self.config.algorithm,
+            });
         }
 
-        // Fallback for non-RSA algorithms
         serde_json::json!({
             "kty": "oct",
             "use": "sig",
@@ -207,13 +199,9 @@ impl JwtIssuer {
 
     /// Get the public key in PEM format
     pub fn public_key_pem(&self) -> Result<String> {
-        if self.config.algorithm == "RS256" {
-            Self::extract_public_key_from_private(self.config.signing_key.as_ref().unwrap())
-        } else {
-            Err(Error::Config(
-                "Public key only available for RS256".to_string(),
-            ))
-        }
+        Err(Error::Config(
+            "public key PEM export is unavailable without an RSA key parser dependency".to_string(),
+        ))
     }
 
     fn roles_to_scope(&self, roles: &[String]) -> String {
@@ -229,36 +217,13 @@ impl JwtIssuer {
         scopes.join(" ")
     }
 
-    fn generate_rsa_key_pair() -> Result<String> {
-        use rand::rngs::OsRng;
-        use rsa::{pkcs8::EncodePrivateKey, pkcs8::LineEnding, RsaPrivateKey};
+    fn generate_hs256_secret() -> String {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use rand::{rngs::OsRng, RngCore};
 
-        let mut rng = OsRng;
-        let bits = 2048;
-        let private_key = RsaPrivateKey::new(&mut rng, bits)
-            .map_err(|e| Error::Config(format!("Failed to generate RSA key: {}", e)))?;
-
-        let pem = private_key
-            .to_pkcs8_pem(LineEnding::LF)
-            .map_err(|e| Error::Config(format!("Failed to encode RSA key: {}", e)))?;
-
-        Ok(pem.to_string())
-    }
-
-    fn extract_public_key_from_private(private_pem: &str) -> Result<String> {
-        use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding};
-        use rsa::{RsaPrivateKey, RsaPublicKey};
-
-        let private_key = RsaPrivateKey::from_pkcs8_pem(private_pem)
-            .map_err(|e| Error::Config(format!("Failed to parse private key: {}", e)))?;
-
-        let public_key = RsaPublicKey::from(&private_key);
-
-        let public_pem = public_key
-            .to_public_key_pem(LineEnding::LF)
-            .map_err(|e| Error::Config(format!("Failed to encode public key: {}", e)))?;
-
-        Ok(public_pem)
+        let mut secret = [0u8; 32];
+        OsRng.fill_bytes(&mut secret);
+        URL_SAFE_NO_PAD.encode(secret)
     }
 }
 
@@ -271,6 +236,6 @@ mod tests {
         let config = JwtConfig::default();
         assert_eq!(config.issuer, "https://users.rvoip.local");
         assert_eq!(config.access_ttl_seconds, 900);
-        assert_eq!(config.algorithm, "RS256");
+        assert_eq!(config.algorithm, "HS256");
     }
 }

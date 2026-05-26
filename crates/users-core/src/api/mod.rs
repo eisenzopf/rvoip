@@ -817,24 +817,14 @@ where
             if let Some(token) = auth_header.strip_prefix("Bearer ") {
                 let api_state = ApiState::from_ref(state);
 
-                // Get public key and validate
-                let public_key = api_state
-                    .auth_service
-                    .jwt_issuer()
-                    .public_key_pem()
-                    .map_err(|e| AppError::Internal(e.into()))?;
-
-                let decoding_key =
-                    DecodingKey::from_rsa_pem(public_key.as_bytes()).map_err(|e| {
-                        AppError::Internal(anyhow::anyhow!("Invalid public key: {}", e))
-                    })?;
-
-                let mut validation = Validation::new(Algorithm::RS256);
+                let issuer = api_state.auth_service.jwt_issuer();
+                let mut validation = Validation::new(issuer.algorithm());
                 validation.set_issuer(&["https://users.rvoip.local"]);
                 validation.set_audience(&["rvoip-api", "rvoip-sip"]);
 
-                let token_data = decode::<crate::UserClaims>(token, &decoding_key, &validation)
-                    .map_err(|_| AppError::Forbidden)?;
+                let token_data =
+                    decode::<crate::UserClaims>(token, issuer.decoding_key(), &validation)
+                        .map_err(|_| AppError::Forbidden)?;
 
                 return Ok(AuthContext {
                     user_id: token_data.claims.sub,

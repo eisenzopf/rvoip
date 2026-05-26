@@ -3,7 +3,8 @@
 use crate::{CreateUserRequest, Error, Result, UpdateUserRequest, User, UserFilter};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{Row, SqlitePool};
+use sqlx_core::{query::query, raw_sql::raw_sql, row::Row};
+use sqlx_sqlite::{SqlitePool, SqliteRow};
 
 /// User storage trait
 #[async_trait]
@@ -31,7 +32,7 @@ impl SqliteUserStore {
 
         // Run migrations
         let migration_sql = include_str!("../../migrations/001_initial_schema.sql");
-        sqlx::raw_sql(migration_sql)
+        raw_sql(migration_sql)
             .execute(&pool)
             .await
             .map_err(|e| Error::Database(e))?;
@@ -70,7 +71,7 @@ impl UserStore for SqliteUserStore {
 
         let roles_json = serde_json::to_string(&user.roles).unwrap();
 
-        sqlx::query(
+        query(
             "INSERT INTO users (id, username, email, display_name, password_hash, roles, active, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
@@ -90,7 +91,7 @@ impl UserStore for SqliteUserStore {
     }
 
     async fn get_user(&self, id: &str) -> Result<Option<User>> {
-        let row = sqlx::query(
+        let row = query(
             "SELECT id, username, email, display_name, password_hash, roles, active, created_at, updated_at, last_login
              FROM users WHERE id = ?"
         )
@@ -102,7 +103,7 @@ impl UserStore for SqliteUserStore {
     }
 
     async fn get_user_by_username(&self, username: &str) -> Result<Option<User>> {
-        let row = sqlx::query(
+        let row = query(
             "SELECT id, username, email, display_name, password_hash, roles, active, created_at, updated_at, last_login
              FROM users WHERE username = ?"
         )
@@ -136,7 +137,7 @@ impl UserStore for SqliteUserStore {
         user.updated_at = Utc::now();
         let roles_json = serde_json::to_string(&user.roles).unwrap();
 
-        sqlx::query(
+        query(
             "UPDATE users SET email = ?, display_name = ?, roles = ?, active = ?, updated_at = ?
              WHERE id = ?",
         )
@@ -153,7 +154,7 @@ impl UserStore for SqliteUserStore {
     }
 
     async fn delete_user(&self, id: &str) -> Result<()> {
-        let result = sqlx::query("DELETE FROM users WHERE id = ?")
+        let result = query("DELETE FROM users WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -227,7 +228,7 @@ impl UserStore for SqliteUserStore {
         }
 
         // Execute with proper parameter binding
-        let mut query = sqlx::query(&query_str);
+        let mut query = query(&query_str);
         for param in params {
             query = query.bind(param);
         }
@@ -238,7 +239,7 @@ impl UserStore for SqliteUserStore {
 }
 
 impl SqliteUserStore {
-    fn row_to_user(&self, row: sqlx::sqlite::SqliteRow) -> User {
+    fn row_to_user(&self, row: SqliteRow) -> User {
         User {
             id: row.get("id"),
             username: row.get("username"),
@@ -295,7 +296,7 @@ impl crate::ApiKeyStore for SqliteUserStore {
 
         let permissions_json = serde_json::to_string(&api_key.permissions).unwrap();
 
-        sqlx::query(
+        query(
             "INSERT INTO api_keys (id, user_id, name, key_hash, permissions, expires_at, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)"
         )
@@ -320,7 +321,7 @@ impl crate::ApiKeyStore for SqliteUserStore {
         hasher.update(key.as_bytes());
         let key_hash = format!("{:x}", hasher.finalize());
 
-        let row = sqlx::query(
+        let row = query(
             "SELECT id, user_id, name, key_hash, permissions, expires_at, last_used, created_at
              FROM api_keys WHERE key_hash = ?",
         )
@@ -349,7 +350,7 @@ impl crate::ApiKeyStore for SqliteUserStore {
 
             // Update last_used
             let now = Utc::now();
-            sqlx::query("UPDATE api_keys SET last_used = ? WHERE id = ?")
+            query("UPDATE api_keys SET last_used = ? WHERE id = ?")
                 .bind(&now)
                 .bind(&api_key.id)
                 .execute(&self.pool)
@@ -365,7 +366,7 @@ impl crate::ApiKeyStore for SqliteUserStore {
     }
 
     async fn revoke_api_key(&self, id: &str) -> Result<()> {
-        let result = sqlx::query("DELETE FROM api_keys WHERE id = ?")
+        let result = query("DELETE FROM api_keys WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -378,7 +379,7 @@ impl crate::ApiKeyStore for SqliteUserStore {
     }
 
     async fn list_api_keys(&self, user_id: &str) -> Result<Vec<crate::ApiKey>> {
-        let rows = sqlx::query(
+        let rows = query(
             "SELECT id, user_id, name, key_hash, permissions, expires_at, last_used, created_at
              FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
         )

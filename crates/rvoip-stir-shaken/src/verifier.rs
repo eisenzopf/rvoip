@@ -46,6 +46,7 @@ use crate::trust::{decode_pem_bundle, TrustStore};
 use async_trait::async_trait;
 use bytes::Bytes;
 use jsonwebtoken::{Algorithm, DecodingKey};
+use rustls_pki_types::{CertificateDer, SignatureVerificationAlgorithm, UnixTime};
 use rvoip_sip_core::types::identity::Identity;
 use rvoip_sip_core::Request;
 use rvoip_sip_dialog::manager::{PASSporTVerifier, VerificationOutcome};
@@ -406,25 +407,32 @@ fn validate_chain(
         .as_trust_anchors()
         .map_err(|e| format!("trust store: {:?}", e))?;
 
-    let leaf = webpki::EndEntityCert::try_from(leaf_der)
+    let leaf_cert = CertificateDer::from(leaf_der);
+    let leaf = webpki::EndEntityCert::try_from(&leaf_cert)
         .map_err(|e| format!("leaf cert parse failed: {}", e))?;
+    let intermediate_certs: Vec<CertificateDer<'_>> = intermediates
+        .iter()
+        .map(|der| CertificateDer::from(*der))
+        .collect();
 
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| "system clock before UNIX epoch".to_string())?
         .as_secs();
-    let time = webpki::Time::from_seconds_since_unix_epoch(now_secs);
+    let time = UnixTime::since_unix_epoch(Duration::from_secs(now_secs));
 
-    static ALGS: &[&webpki::SignatureAlgorithm] = &[&webpki::ECDSA_P256_SHA256];
+    static ALGS: &[&dyn SignatureVerificationAlgorithm] = &[webpki::ring::ECDSA_P256_SHA256];
 
     leaf.verify_for_usage(
         ALGS,
         &anchors,
-        intermediates,
+        &intermediate_certs,
         time,
         webpki::KeyUsage::client_auth(),
-        &[],
+        None,
+        None,
     )
+    .map(|_| ())
     .map_err(|e| format!("chain validation failed: {}", e))
 }
 

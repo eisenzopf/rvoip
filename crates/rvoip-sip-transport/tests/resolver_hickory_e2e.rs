@@ -12,11 +12,10 @@ use std::time::Duration;
 
 use hickory_proto::rr::rdata::{NAPTR, SRV};
 use hickory_proto::rr::{LowerName, Name, RData, Record, RecordType};
-use hickory_resolver::config::ResolverOpts;
-use hickory_resolver::config::{NameServerConfig, NameServerConfigGroup, Protocol, ResolverConfig};
-use hickory_server::authority::{Catalog, ZoneType};
-use hickory_server::store::in_memory::InMemoryAuthority;
-use hickory_server::ServerFuture;
+use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
+use hickory_server::store::in_memory::InMemoryZoneHandler;
+use hickory_server::zone_handler::{AxfrPolicy, Catalog, ZoneHandler, ZoneType};
+use hickory_server::Server;
 use rvoip_sip_core::Uri;
 use rvoip_sip_transport::resolver::{HickoryResolver, Resolver};
 use rvoip_sip_transport::transport::TransportType;
@@ -51,31 +50,25 @@ fn naptr_rdata(order: u16, preference: u16, service: &str, replacement: &str) ->
     ))
 }
 
-fn add_record(authority: &mut InMemoryAuthority, owner: &str, rtype: RecordType, rdata: RData) {
-    let mut record = Record::with(name(owner), rtype, TTL);
-    record.set_data(Some(rdata));
+fn add_record(authority: &mut InMemoryZoneHandler, owner: &str, rdata: RData) {
+    let record = Record::from_rdata(name(owner), TTL, rdata);
     authority.upsert_mut(record, 0);
 }
 
-fn build_fixture_authority() -> InMemoryAuthority {
+fn build_fixture_authority() -> InMemoryZoneHandler {
     let origin = name("example.test.");
-    let mut authority = InMemoryAuthority::empty(
-        origin.clone(),
-        ZoneType::Primary,
-        /* allow_axfr */ false,
-    );
+    let mut authority =
+        InMemoryZoneHandler::empty(origin.clone(), ZoneType::Primary, AxfrPolicy::Deny);
 
     // Top-level domain NAPTRs — SIPS+D2T first (lower order), then SIP+D2U.
     add_record(
         &mut authority,
         "example.test.",
-        RecordType::NAPTR,
         naptr_rdata(10, 50, "SIPS+D2T", "_sips._tcp.example.test."),
     );
     add_record(
         &mut authority,
         "example.test.",
-        RecordType::NAPTR,
         naptr_rdata(20, 50, "SIP+D2U", "_sip._udp.example.test."),
     );
 
@@ -83,23 +76,16 @@ fn build_fixture_authority() -> InMemoryAuthority {
     add_record(
         &mut authority,
         "_sips._tcp.example.test.",
-        RecordType::SRV,
         srv_rdata(1, 1, 5061, "host.example.test."),
     );
     add_record(
         &mut authority,
         "_sip._udp.example.test.",
-        RecordType::SRV,
         srv_rdata(1, 1, 5060, "host.example.test."),
     );
 
     // A record for the SRV target — same loopback for both flavours.
-    add_record(
-        &mut authority,
-        "host.example.test.",
-        RecordType::A,
-        host_rdata(),
-    );
+    add_record(&mut authority, "host.example.test.", host_rdata());
 
     authority
 }
@@ -111,12 +97,15 @@ fn build_fixture_authority() -> InMemoryAuthority {
 async fn spin_up_fixture() -> (SocketAddr, HickoryResolver, tokio::task::JoinHandle<()>) {
     let authority = Arc::new(build_fixture_authority());
     let mut catalog = Catalog::new();
-    catalog.upsert(LowerName::from(name("example.test.")), Box::new(authority));
+    catalog.upsert(
+        LowerName::from(name("example.test.")),
+        vec![authority as Arc<dyn ZoneHandler>],
+    );
 
     let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind UDP");
     let local = socket.local_addr().expect("local_addr");
 
-    let mut server = ServerFuture::new(catalog);
+    let mut server = Server::new(catalog);
     server.register_socket(socket);
     let handle = tokio::spawn(async move {
         // `block_until_done` consumes the server. When the test holds
@@ -125,9 +114,9 @@ async fn spin_up_fixture() -> (SocketAddr, HickoryResolver, tokio::task::JoinHan
     });
 
     // Build resolver pointed at the fixture.
-    let mut ns_group = NameServerConfigGroup::new();
-    ns_group.push(NameServerConfig::new(local, Protocol::Udp));
-    let config = ResolverConfig::from_parts(None, vec![], ns_group);
+    let mut name_server = NameServerConfig::udp(local.ip());
+    name_server.connections[0].port = local.port();
+    let config = ResolverConfig::from_parts(None, vec![], vec![name_server]);
     let mut opts = ResolverOpts::default();
     opts.timeout = Duration::from_secs(2);
     let resolver = HickoryResolver::with_resolver(config, opts);

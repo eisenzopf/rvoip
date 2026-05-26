@@ -5,7 +5,8 @@ use crate::jwt::RefreshTokenClaims;
 use crate::{ApiKeyStore, CreateUserRequest, Error, JwtIssuer, Result, User, UserStore};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use password_hash::{rand_core::OsRng, SaltString};
-use sqlx::{Row, SqlitePool};
+use sqlx_core::{query::query, row::Row};
+use sqlx_sqlite::SqlitePool;
 use std::sync::Arc;
 
 /// Authentication service
@@ -279,7 +280,7 @@ impl AuthenticationService {
     /// Revoke tokens for a user
     pub async fn revoke_tokens(&self, user_id: &str) -> Result<()> {
         if let Some(pool) = &self.pool {
-            sqlx::query(
+            query(
                 "UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
             )
             .bind(&chrono::Utc::now())
@@ -330,7 +331,7 @@ impl AuthenticationService {
 
         // Update password in database
         if let Some(pool) = &self.pool {
-            sqlx::query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
+            query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
                 .bind(&new_hash)
                 .bind(&chrono::Utc::now())
                 .bind(user_id)
@@ -346,7 +347,7 @@ impl AuthenticationService {
 
     async fn update_last_login(&self, user_id: &str) -> Result<()> {
         if let Some(pool) = &self.pool {
-            sqlx::query("UPDATE users SET last_login = ? WHERE id = ?")
+            query("UPDATE users SET last_login = ? WHERE id = ?")
                 .bind(&chrono::Utc::now())
                 .bind(user_id)
                 .execute(pool)
@@ -360,7 +361,7 @@ impl AuthenticationService {
         pool: &SqlitePool,
         claims: &RefreshTokenClaims,
     ) -> Result<()> {
-        sqlx::query(
+        query(
             "INSERT INTO refresh_tokens (jti, user_id, expires_at, created_at)
              VALUES (?, ?, ?, ?)",
         )
@@ -378,7 +379,7 @@ impl AuthenticationService {
     }
 
     async fn check_refresh_token_revoked(&self, pool: &SqlitePool, jti: &str) -> Result<()> {
-        let row = sqlx::query("SELECT revoked_at FROM refresh_tokens WHERE jti = ?")
+        let row = query("SELECT revoked_at FROM refresh_tokens WHERE jti = ?")
             .bind(jti)
             .fetch_optional(pool)
             .await?;

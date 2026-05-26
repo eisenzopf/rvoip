@@ -5,7 +5,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(#[from] sqlx_core::Error),
 
     #[error("Invalid credentials")]
     InvalidCredentials,

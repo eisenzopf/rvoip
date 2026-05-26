@@ -31,8 +31,6 @@ tracing-appender = "0.2"
 
 # CLI and utilities
 clap = { version = "4.0", features = ["derive"] }
-uuid = { version = "1.0", features = ["v4"] }
 anyhow = "1.0"
-serde_json = "1.0"
 
 [workspace] 

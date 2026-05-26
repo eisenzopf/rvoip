@@ -13,8 +13,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_rustls::rustls::{
-    self, client::ServerCertVerified, Certificate, ClientConfig, OwnedTrustAnchor, PrivateKey,
-    RootCertStore, ServerConfig, ServerName,
+    self,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
+    ClientConfig, DigitallySignedStruct, RootCertStore, ServerConfig, SignatureScheme,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::{debug, error, info, trace, warn};
@@ -181,7 +183,6 @@ impl TlsTransport {
         let cert = load_certs(cert_path)?;
         let key = load_private_key(key_path)?;
         let server_config = ServerConfig::builder()
-            .with_safe_defaults()
             .with_no_client_auth()
             .with_single_cert(cert, key)
             .map_err(|e| Error::TlsHandshakeFailed(format!("TLS server config: {}", e)))?;
@@ -457,7 +458,7 @@ impl TlsTransport {
         &self,
         data: Bytes,
         addr: SocketAddr,
-        server_name: Option<ServerName>,
+        server_name: Option<ServerName<'static>>,
     ) -> Result<()> {
         // Fast path: existing connection. Clone the bytes for the fast
         // path send so we still have the original on hand for the
@@ -521,7 +522,7 @@ impl TlsTransport {
     pub async fn connect_with_server_name(
         &self,
         remote_addr: SocketAddr,
-        server_name: ServerName,
+        server_name: ServerName<'static>,
     ) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
@@ -678,13 +679,13 @@ impl Transport for TlsTransport {
 pub(crate) fn tls_server_name_for_message(
     message: &rvoip_sip_core::Message,
     destination: SocketAddr,
-) -> Option<ServerName> {
+) -> Option<ServerName<'static>> {
     let rvoip_sip_core::Message::Request(request) = message else {
         return Some(ip_to_server_name(destination));
     };
 
     match &request.uri().host {
-        Host::Domain(domain) => ServerName::try_from(domain.as_str()).ok(),
+        Host::Domain(domain) => ServerName::try_from(domain.to_string()).ok(),
         Host::Address(_) => Some(ip_to_server_name(destination)),
     }
 }
@@ -735,7 +736,7 @@ pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig>
                  server certificates will NOT be validated. Dev only."
             );
             let builder = ClientConfig::builder()
-                .with_safe_defaults()
+                .dangerous()
                 .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier));
             return match (&cfg.client_cert_path, &cfg.client_key_path) {
                 (Some(cert_path), Some(key_path)) => {
@@ -763,34 +764,36 @@ pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig>
     let mut root_store = RootCertStore::empty();
 
     let mut loaded_any_system = false;
-    match rustls_native_certs::load_native_certs() {
-        Ok(certs) => {
-            for cert in certs {
-                if root_store.add(&Certificate(cert.0)).is_ok() {
-                    loaded_any_system = true;
-                }
-            }
-            debug!(
-                "TLS client root store loaded {} system certs",
-                root_store.len()
-            );
+    let certs = rustls_native_certs::load_native_certs();
+    for cert in certs.certs {
+        if root_store.add(cert).is_ok() {
+            loaded_any_system = true;
         }
-        Err(e) => {
+    }
+    for error in &certs.errors {
+        warn!(
+            "TLS client: failed to load one system trust anchor: {}",
+            error
+        );
+    }
+    if loaded_any_system {
+        debug!(
+            "TLS client root store loaded {} system certs",
+            root_store.len()
+        );
+    } else {
+        if let Some(error) = certs.errors.first().map(|e| e.to_string()) {
             warn!(
                 "TLS client: failed to read system trust store ({}); falling back to webpki-roots",
-                e
+                error
             );
+        } else {
+            warn!("TLS client: no system trust anchors found; falling back to webpki-roots");
         }
     }
 
     if !loaded_any_system {
-        root_store.add_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
-            OwnedTrustAnchor::from_subject_spki_name_constraints(
-                ta.subject,
-                ta.spki,
-                ta.name_constraints,
-            )
-        }));
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         debug!(
             "TLS client root store fell back to webpki-roots ({} anchors)",
             root_store.len()
@@ -800,7 +803,7 @@ pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig>
     if let Some(extra_path) = &cfg.extra_ca_path {
         let extras = load_certs(extra_path)?;
         for cert in extras {
-            root_store.add(&cert).map_err(|e| {
+            root_store.add(cert).map_err(|e| {
                 Error::TlsHandshakeFailed(format!(
                     "Failed to add extra CA from {}: {}",
                     extra_path.display(),
@@ -809,15 +812,13 @@ pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig>
             })?;
         }
         info!(
-            "TLS client added {} extra CA cert(s) from {}",
+            "TLS client root store has {} CA cert(s) after adding extras from {}",
             root_store.len(),
             extra_path.display()
         );
     }
 
-    let builder = ClientConfig::builder()
-        .with_safe_defaults()
-        .with_root_certificates(root_store);
+    let builder = ClientConfig::builder().with_root_certificates(root_store);
     match (&cfg.client_cert_path, &cfg.client_key_path) {
         (Some(cert_path), Some(key_path)) => {
             let certs = load_certs(cert_path)?;
@@ -837,53 +838,98 @@ pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig>
 /// behind the `dev-insecure-tls` Cargo feature so production builds
 /// physically cannot bypass TLS validation.
 #[cfg(feature = "dev-insecure-tls")]
+#[derive(Debug)]
 struct InsecureCertVerifier;
 
 #[cfg(feature = "dev-insecure-tls")]
-impl rustls::client::ServerCertVerifier for InsecureCertVerifier {
+impl ServerCertVerifier for InsecureCertVerifier {
     fn verify_server_cert(
         &self,
-        _end_entity: &Certificate,
-        _intermediates: &[Certificate],
-        _server_name: &ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
+        _now: UnixTime,
     ) -> std::result::Result<ServerCertVerified, rustls::Error> {
         Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ED25519,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+        ]
     }
 }
 
 /// Best-effort SNI server-name from a destination `SocketAddr`.
 /// Loopback maps to `"localhost"` so test certs that include the
 /// `localhost` SAN match.
-pub(crate) fn ip_to_server_name(addr: SocketAddr) -> ServerName {
+pub(crate) fn ip_to_server_name(addr: SocketAddr) -> ServerName<'static> {
     if addr.ip().is_loopback() {
-        if let Ok(name) = ServerName::try_from("localhost") {
+        if let Ok(name) = ServerName::try_from("localhost".to_string()) {
             return name;
         }
     }
-    ServerName::IpAddress(addr.ip())
+    ServerName::from(addr.ip()).to_owned()
 }
 
 /// Load PEM-encoded certificates from a file.
-pub(crate) fn load_certs(path: &Path) -> Result<Vec<Certificate>> {
+pub(crate) fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
     let mut cert_file = File::open(path)
         .map_err(|e| Error::Other(format!("Failed to open cert {}: {}", path.display(), e)))?;
     let mut cert_data = Vec::new();
     cert_file
         .read_to_end(&mut cert_data)
         .map_err(|e| Error::Other(format!("Failed to read cert {}: {}", path.display(), e)))?;
-    let certs = rustls_pemfile::certs(&mut cert_data.as_slice())
+    rustls_pemfile::certs(&mut cert_data.as_slice())
+        .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| {
             Error::TlsHandshakeFailed(format!("Failed to parse cert {}: {}", path.display(), e))
-        })?
-        .iter()
-        .map(|v| Certificate(v.clone()))
-        .collect();
-    Ok(certs)
+        })
 }
 
+/// Load a PEM-encoded private key from a file.
+pub(crate) fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
+    let mut key_file = File::open(path)
+        .map_err(|e| Error::Other(format!("Failed to open key {}: {}", path.display(), e)))?;
+    let mut key_data = Vec::new();
+    key_file
+        .read_to_end(&mut key_data)
+        .map_err(|e| Error::Other(format!("Failed to read key {}: {}", path.display(), e)))?;
+    rustls_pemfile::private_key(&mut key_data.as_slice())
+        .map_err(|e| {
+            Error::TlsHandshakeFailed(format!("Failed to parse key {}: {}", path.display(), e))
+        })?
+        .ok_or_else(|| {
+            Error::TlsHandshakeFailed(format!("No private keys found in {}", path.display()))
+        })
+}
 /// Try to parse a single complete SIP message off the front of
 /// `buffer`. Returns `Some(message)` (and removes those bytes) when a
 /// complete message is present per RFC 3261 §18.3 Content-Length
@@ -943,24 +989,4 @@ fn try_parse_one(buffer: &mut BytesMut) -> Option<(rvoip_sip_core::Message, byte
             None
         }
     }
-}
-
-/// Load a PEM-encoded PKCS#8 private key from a file.
-pub(crate) fn load_private_key(path: &Path) -> Result<PrivateKey> {
-    let mut key_file = File::open(path)
-        .map_err(|e| Error::Other(format!("Failed to open key {}: {}", path.display(), e)))?;
-    let mut key_data = Vec::new();
-    key_file
-        .read_to_end(&mut key_data)
-        .map_err(|e| Error::Other(format!("Failed to read key {}: {}", path.display(), e)))?;
-    let keys = rustls_pemfile::pkcs8_private_keys(&mut key_data.as_slice()).map_err(|e| {
-        Error::TlsHandshakeFailed(format!("Failed to parse key {}: {}", path.display(), e))
-    })?;
-    if keys.is_empty() {
-        return Err(Error::TlsHandshakeFailed(format!(
-            "No PKCS#8 private keys found in {}",
-            path.display()
-        )));
-    }
-    Ok(PrivateKey(keys[0].clone()))
 }

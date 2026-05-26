@@ -38,8 +38,8 @@ fn write_self_signed_cert_for_names(
     let key_path = dir.path().join("server.key");
 
     let cert = rcgen::generate_simple_self_signed(names).expect("rcgen self-signed");
-    let cert_pem = cert.serialize_pem().expect("cert PEM");
-    let key_pem = cert.serialize_private_key_pem();
+    let cert_pem = cert.cert.pem();
+    let key_pem = cert.signing_key.serialize_pem();
 
     std::fs::File::create(&cert_path)
         .and_then(|mut f| f.write_all(cert_pem.as_bytes()))

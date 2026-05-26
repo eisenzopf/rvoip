@@ -79,7 +79,6 @@ impl WebSocketListener {
             let certs = crate::transport::tls::load_certs(Path::new(cert_p))?;
             let key = crate::transport::tls::load_private_key(Path::new(key_p))?;
             let server_config = ServerConfig::builder()
-                .with_safe_defaults()
                 .with_no_client_auth()
                 .with_single_cert(certs, key)
                 .map_err(|e| Error::TlsHandshakeFailed(format!("WSS server config: {}", e)))?;
@@ -302,10 +301,10 @@ mod tests {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
             .expect("rcgen self-signed");
         std::fs::File::create(&cert_path)
-            .and_then(|mut f| f.write_all(cert.serialize_pem().unwrap().as_bytes()))
+            .and_then(|mut f| f.write_all(cert.cert.pem().as_bytes()))
             .expect("write cert");
         std::fs::File::create(&key_path)
-            .and_then(|mut f| f.write_all(cert.serialize_private_key_pem().as_bytes()))
+            .and_then(|mut f| f.write_all(cert.signing_key.serialize_pem().as_bytes()))
             .expect("write key");
 
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

@@ -15,7 +15,7 @@ fn create_test_config(db_url: String) -> UsersConfig {
             audience: vec!["test-api".to_string()],
             access_ttl_seconds: 300,   // 5 minutes for tests
             refresh_ttl_seconds: 3600, // 1 hour for tests
-            algorithm: "RS256".to_string(),
+            algorithm: "HS256".to_string(),
             signing_key: None, // Will be auto-generated
         },
         password: PasswordConfig {
@@ -320,18 +320,17 @@ async fn test_jwt_claims_content() {
         .await
         .unwrap();
 
-    // Get public key for validation
-    let public_key_pem = auth_service.jwt_issuer().public_key_pem().unwrap();
-    let decoding_key = DecodingKey::from_rsa_pem(public_key_pem.as_bytes()).unwrap();
-
     // Decode and verify claims
-    let mut validation = Validation::new(Algorithm::RS256);
+    let mut validation = Validation::new(auth_service.jwt_issuer().algorithm());
     validation.set_issuer(&["https://test.rvoip.local"]);
     validation.set_audience(&["test-api"]);
 
-    let token_data =
-        decode::<users_core::UserClaims>(&auth_result.access_token, &decoding_key, &validation)
-            .unwrap();
+    let token_data = decode::<users_core::UserClaims>(
+        &auth_result.access_token,
+        auth_service.jwt_issuer().decoding_key(),
+        &validation,
+    )
+    .unwrap();
 
     let claims = token_data.claims;
     assert_eq!(claims.sub, user.id);

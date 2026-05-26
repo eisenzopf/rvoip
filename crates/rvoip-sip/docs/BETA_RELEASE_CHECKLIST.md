@@ -119,9 +119,9 @@ Required release evidence from each interop/perf/security run:
 ## Final Release Blockers
 
 - Clean full beta gate with `0` failures, `0` skips, and `git_status: clean`.
-- Archived dependency audit with no unaccepted advisories. Current short audit
-  fails on unresolved dependency advisories that require either dependency-stack
-  upgrades, accepted exclusions, or an MSRV decision.
+- Archived dependency audit with no unaccepted advisories. Current Rust 1.88
+  short audit passes with zero vulnerabilities; allowed warnings remain
+  documented separately.
 - Archived parser fuzz smoke logs for all four parser targets.
 - 24-hour soak artifact, or a deliberate checklist change accepting the
   30-minute soak as sufficient for beta.

@@ -14,8 +14,10 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use hickory_resolver::proto::rr::RecordType;
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::net::{DnsError, NetError};
+use hickory_resolver::proto::rr::{RData, RecordType};
+use hickory_resolver::TokioResolver;
 use rvoip_sip_core::types::uri::{Host, Scheme};
 use rvoip_sip_core::Uri;
 use tracing::{debug, trace, warn};
@@ -33,7 +35,7 @@ use crate::transport::TransportType;
 /// or the OS resolver) or [`HickoryResolver::with_resolver`] for tests
 /// that need to point at a fixture DNS server.
 pub struct HickoryResolver {
-    inner: Arc<TokioAsyncResolver>,
+    inner: Arc<TokioResolver>,
 }
 
 impl std::fmt::Debug for HickoryResolver {
@@ -54,7 +56,7 @@ impl HickoryResolver {
         let (config, mut opts) = hickory_resolver::system_conf::read_system_conf()
             .map_err(|e| ResolverError::Dns(format!("system DNS config: {}", e)))?;
         opts.edns0 = true;
-        let inner = TokioAsyncResolver::tokio(config, opts);
+        let inner = build_tokio_resolver(config, opts)?;
         Ok(Self {
             inner: Arc::new(inner),
         })
@@ -64,7 +66,8 @@ impl HickoryResolver {
     /// pointing at a local `hickory-server` fixture.
     pub fn with_resolver(config: ResolverConfig, mut opts: ResolverOpts) -> Self {
         opts.edns0 = true;
-        let inner = TokioAsyncResolver::tokio(config, opts);
+        let inner = build_tokio_resolver(config, opts)
+            .expect("explicit Hickory resolver config should build");
         Self {
             inner: Arc::new(inner),
         }
@@ -72,7 +75,7 @@ impl HickoryResolver {
 
     /// Adopt an externally-built `TokioAsyncResolver`. Provided for the
     /// rare case a caller wants full control of hickory's config.
-    pub fn from_tokio(inner: TokioAsyncResolver) -> Self {
+    pub fn from_tokio(inner: TokioResolver) -> Self {
         Self {
             inner: Arc::new(inner),
         }
@@ -96,14 +99,18 @@ impl HickoryResolver {
     async fn lookup_srv(&self, name: &str) -> Result<Vec<(u16, u16, u16, String)>, ResolverError> {
         match self.inner.srv_lookup(name).await {
             Ok(lookup) => Ok(lookup
+                .answers()
                 .iter()
-                .map(|srv| {
-                    (
-                        srv.priority(),
-                        srv.weight(),
-                        srv.port(),
-                        srv.target().to_utf8().trim_end_matches('.').to_string(),
-                    )
+                .filter_map(|record| {
+                    let RData::SRV(srv) = &record.data else {
+                        return None;
+                    };
+                    Some((
+                        srv.priority,
+                        srv.weight,
+                        srv.port,
+                        srv.target.to_utf8().trim_end_matches('.').to_string(),
+                    ))
                 })
                 .collect()),
             Err(e) => {
@@ -126,24 +133,22 @@ impl HickoryResolver {
         };
 
         let mut out = Vec::new();
-        for record in lookup.record_iter() {
-            let Some(data) = record.data() else { continue };
-            let rdata_naptr = match data.as_naptr() {
-                Some(n) => n,
-                None => continue,
+        for record in lookup.answers() {
+            let RData::NAPTR(rdata_naptr) = &record.data else {
+                continue;
             };
-            let flags = std::str::from_utf8(rdata_naptr.flags())
+            let flags = std::str::from_utf8(&rdata_naptr.flags)
                 .unwrap_or("")
                 .to_string();
-            let service = std::str::from_utf8(rdata_naptr.services())
+            let service = std::str::from_utf8(&rdata_naptr.services)
                 .unwrap_or("")
                 .to_string();
             // RFC 3263 SIP NAPTRs use empty regexp + non-empty replacement.
-            let replacement = rdata_naptr.replacement().to_utf8();
+            let replacement = rdata_naptr.replacement.to_utf8();
             let replacement = replacement.trim_end_matches('.').to_string();
             out.push(NaptrRecord {
-                order: rdata_naptr.order(),
-                preference: rdata_naptr.preference(),
+                order: rdata_naptr.order,
+                preference: rdata_naptr.preference,
                 flags,
                 service,
                 replacement,
@@ -352,14 +357,24 @@ fn lookup_ttl_deadline(valid_until: Instant) -> Option<Instant> {
     Some(valid_until)
 }
 
-fn map_resolve_err(e: hickory_resolver::error::ResolveError) -> ResolverError {
+fn build_tokio_resolver(
+    config: ResolverConfig,
+    opts: ResolverOpts,
+) -> Result<TokioResolver, ResolverError> {
+    let mut builder = TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
+    *builder.options_mut() = opts;
+    builder
+        .build()
+        .map_err(|e| ResolverError::Dns(format!("hickory resolver config: {}", e)))
+}
+
+fn map_resolve_err(e: NetError) -> ResolverError {
     warn!("hickory resolve error: {}", e);
     ResolverError::Dns(format!("{}", e))
 }
 
-fn is_no_records_error(e: &hickory_resolver::error::ResolveError) -> bool {
-    use hickory_resolver::error::ResolveErrorKind;
-    matches!(e.kind(), ResolveErrorKind::NoRecordsFound { .. })
+fn is_no_records_error(e: &NetError) -> bool {
+    matches!(e, NetError::Dns(DnsError::NoRecordsFound(_)))
 }
 
 #[cfg(test)]
@@ -371,7 +386,7 @@ mod tests {
     //! `crates/rvoip-sip-transport/tests/resolver_hickory_e2e.rs`.
 
     use super::*;
-    use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig};
+    use hickory_resolver::config::{NameServerConfig, ResolverConfig};
     use std::str::FromStr;
 
     fn empty_resolver() -> HickoryResolver {
@@ -379,11 +394,7 @@ mod tests {
         // We never actually issue DNS queries against it for the
         // IP-literal / forbidden tests — the short-circuit paths return
         // before hitting hickory.
-        let ns = NameServerConfigGroup::from_ips_clear(
-            &["127.0.0.1".parse().unwrap()],
-            1, // intentionally invalid port — never reached
-            true,
-        );
+        let ns = vec![NameServerConfig::udp("127.0.0.1".parse().unwrap())];
         let config = ResolverConfig::from_parts(None, vec![], ns);
         HickoryResolver::with_resolver(config, ResolverOpts::default())
     }

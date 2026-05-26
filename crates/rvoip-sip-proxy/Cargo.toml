@@ -29,7 +29,6 @@ rvoip-sip-dialog.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 dashmap.workspace = true
-bytes.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 uuid.workspace = true

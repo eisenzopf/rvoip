@@ -54,10 +54,10 @@ fn write_self_signed_cert() -> (tempfile::TempDir, PathBuf, PathBuf) {
         rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])
             .expect("rcgen self-signed");
     std::fs::File::create(&cert_path)
-        .and_then(|mut f| f.write_all(cert.serialize_pem().expect("cert PEM").as_bytes()))
+        .and_then(|mut f| f.write_all(cert.cert.pem().as_bytes()))
         .expect("write cert");
     std::fs::File::create(&key_path)
-        .and_then(|mut f| f.write_all(cert.serialize_private_key_pem().as_bytes()))
+        .and_then(|mut f| f.write_all(cert.signing_key.serialize_pem().as_bytes()))
         .expect("write key");
     (dir, cert_path, key_path)
 }

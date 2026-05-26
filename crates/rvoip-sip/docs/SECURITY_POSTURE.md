@@ -43,15 +43,12 @@ crash blocks beta.
 
 Current short security run:
 
-- Summary: `target/beta-gate/20260526T070702Z/summary.md`
+- Summary: `target/beta-gate/20260526T194243Z/summary.md`
 - Fuzz smoke: passed for SIP message, URI, header, and SDP parsing with
   `BETA_FUZZ_SMOKE_RUNS=1`.
-- Dependency audit: failed. Several advisories were remediated by dependency
-  updates, but the release remains blocked by 7 unresolved vulnerabilities
-  across Hickory DNS,
-  rustls-webpki/rustls 0.21, ring 0.16 through DTLS/rcgen, `rsa`, and `time`
-  advisories. Hickory 0.26 and the fixed `time` release require Rust 1.88, so
-  final remediation needs an MSRV decision or documented accepted exclusions.
+- Dependency audit: passed with no vulnerabilities. Remaining advisory output
+  is limited to allowed/documented warnings for `async-std`, `audiopus_sys`,
+  `paste`, `rustls-pemfile`, `yaml-rust`, and `lru`.
 
 ## Explicit Non-Claims
 
@@ -68,7 +65,7 @@ Current short security run:
 
 | Check | Status |
 |-------|--------|
-| Dependency advisory audit archived with no unaccepted advisories | Blocking: current short run fails on unresolved dependency advisories. |
-| Parser fuzz smoke logs archived for SIP message, URI, header, and SDP parsing | Short smoke passed; final release-length smoke pending in clean report. |
+| Dependency advisory audit archived with no unaccepted advisories | Current Rust 1.88 short run passes; final clean report pending. |
+| Parser fuzz smoke logs archived for SIP message, URI, header, and SDP parsing | Current Rust 1.88 short smoke passed; final clean report pending. |
 | Final full beta gate run from clean commit | Pending. |
 | 24-hour soak evidence archived | Pending. |

@@ -428,7 +428,9 @@ impl WebSocketTransport {
     async fn connect_to(
         &self,
         addr: SocketAddr,
-        #[cfg(feature = "wss")] server_name_hint: Option<tokio_rustls::rustls::ServerName>,
+        #[cfg(feature = "wss")] server_name_hint: Option<
+            tokio_rustls::rustls::pki_types::ServerName<'static>,
+        >,
         #[cfg(not(feature = "wss"))] _server_name_hint: (),
     ) -> Result<Arc<WebSocketConnection>> {
         // Check if we already have an open connection
@@ -631,7 +633,9 @@ impl Transport for WebSocketTransport {
             // Raw-bytes send doesn't have a parsed message to derive
             // SNI from. Fall back to IP-derived ServerName.
             #[cfg(feature = "wss")]
-            let server_name: Option<tokio_rustls::rustls::ServerName> = None;
+            let server_name: Option<
+                tokio_rustls::rustls::pki_types::ServerName<'static>,
+            > = None;
             #[cfg(not(feature = "wss"))]
             let server_name = ();
 
@@ -714,10 +718,10 @@ mod tests {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
             .expect("rcgen self-signed");
         std::fs::File::create(&cert_path)
-            .and_then(|mut f| f.write_all(cert.serialize_pem().unwrap().as_bytes()))
+            .and_then(|mut f| f.write_all(cert.cert.pem().as_bytes()))
             .expect("write cert");
         std::fs::File::create(&key_path)
-            .and_then(|mut f| f.write_all(cert.serialize_private_key_pem().as_bytes()))
+            .and_then(|mut f| f.write_all(cert.signing_key.serialize_pem().as_bytes()))
             .expect("write key");
 
         let (transport, _rx) = WebSocketTransport::bind(
@@ -758,10 +762,10 @@ mod tests {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
             .expect("rcgen self-signed");
         std::fs::File::create(&cert_path)
-            .and_then(|mut f| f.write_all(cert.serialize_pem().unwrap().as_bytes()))
+            .and_then(|mut f| f.write_all(cert.cert.pem().as_bytes()))
             .expect("write cert");
         std::fs::File::create(&key_path)
-            .and_then(|mut f| f.write_all(cert.serialize_private_key_pem().as_bytes()))
+            .and_then(|mut f| f.write_all(cert.signing_key.serialize_pem().as_bytes()))
             .expect("write key");
 
         let (transport, _rx) = WebSocketTransport::bind(

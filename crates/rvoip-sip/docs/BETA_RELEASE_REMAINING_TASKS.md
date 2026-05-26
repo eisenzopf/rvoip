@@ -23,6 +23,11 @@ The beta gap-closing plan has been implemented in repository files:
   placeholder status toward evidence-linked release docs.
 - `README.md` documents MSRV, semver policy, and feature flag support.
 - `rvoip-sip` crate metadata declares the workspace Rust version.
+- The dependency audit remediation has been applied: hard RustSec blockers for
+  Hickory DNS, rustls-webpki/rustls, `rsa`, `time`, and DTLS/rcgen transitive
+  paths are cleared under the Rust 1.88 baseline.
+- Current short security gate passed with Rust 1.88:
+  `target/beta-gate/20260526T194243Z/summary.md`.
 
 The release is still not fully attested because the final clean report,
 security artifacts, and 24-hour soak have not been produced in this change.
@@ -60,8 +65,8 @@ These tasks block beta release feature completeness.
 |------|----------------|-------------------|
 | Release hygiene | Commit the current beta-gate, fuzz, redaction, metadata, docs, and report-packaging changes. | Clean git revision for the final attestation run. |
 | Release hygiene | Re-run the final full beta gate from a clean commit. | New `summary.md` with `0` failures, `0` skips, and `git_status: clean`. |
-| Security | Resolve or formally accept current dependency audit findings. | `security/cargo-audit.txt` and `security/cargo-audit.json` archived with no unaccepted advisories. Current blockers include Hickory DNS, rustls-webpki/rustls 0.21, ring 0.16 through DTLS/rcgen, `rsa`, and `time`; Hickory 0.26 and fixed `time` require Rust 1.88. |
-| Security | Run parser fuzz smoke coverage from the final gate. | `security/fuzz/sip_message.log`, `security/fuzz/uri.log`, `security/fuzz/header.log`, and `security/fuzz/sdp.log` archived with no crashes. Short smoke passed in `target/beta-gate/20260526T070702Z`. |
+| Security | Carry the audit-clean security run into the final clean report. | `security/cargo-audit.txt` and `security/cargo-audit.json` archived with no vulnerabilities or unaccepted advisories. Current Rust 1.88 short audit passes; remaining advisory output is limited to allowed/documented warnings (`async-std`, `audiopus_sys`, `paste`, `rustls-pemfile`, `yaml-rust`, `lru`). |
+| Security | Run parser fuzz smoke coverage from the final gate. | `security/fuzz/sip_message.log`, `security/fuzz/uri.log`, `security/fuzz/header.log`, and `security/fuzz/sdp.log` archived with no crashes. Short smoke passed in `target/beta-gate/20260526T194243Z`. |
 | Soak | Run the documented 24-hour release-candidate soak, or deliberately waive it for beta. | Soak artifact showing `duration_secs=86400`, RSS gate pass, retained objects `0`, and no stuck receivers/runners; or a checklist change accepting 30-minute evidence. |
 | Release notes | Finalize `RELEASE_NOTES_NEXT.md` against the clean report. | Release notes reference the final clean beta report and contain no broad readiness, WebRTC, DTLS-SRTP, ICE, TURN, WSS outbound, carrier SBC, or general 10,000 CPS full-media claim. |
 

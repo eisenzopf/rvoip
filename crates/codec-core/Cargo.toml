@@ -27,16 +27,13 @@ workspace = true
 # External dependencies from workspace
 thiserror.workspace = true
 tracing.workspace = true
-bytes.workspace = true
 
 # Crate-specific dependencies not in workspace
 tracing-subscriber = "0.3"   # Logging initialization
-once_cell = "1.19"           # Lazy static initialization for lookup tables
 
 [dev-dependencies]
 # Testing
 tokio.workspace = true       # Async runtime for tests
-temp-dir = "0.1"            # Temporary directories for WAV file tests
 
 [features]
 default = ["g711"]

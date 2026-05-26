@@ -4,7 +4,7 @@
 
 <div align="center">
 
-[![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.88+-orange.svg)](https://www.rust-lang.org)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/yourusername/rvoip#license)
 [![Build Status](https://img.shields.io/github/workflow/status/yourusername/rvoip/CI)](https://github.com/yourusername/rvoip/actions)
 [![Crates.io](https://img.shields.io/crates/v/rvoip.svg)](https://crates.io/crates/rvoip)

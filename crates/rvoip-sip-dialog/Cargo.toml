@@ -40,10 +40,8 @@ bytes.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-log.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
-chrono.workspace = true
 rand.workspace = true
 
 # Crate-specific dependencies not in workspace
@@ -53,9 +51,6 @@ http = "0.2"
 arc-swap = "1.7"
 
 [dev-dependencies]
-# Testing
-tokio-test = "0.4"
-
 # Logging for examples
 tracing-subscriber = "0.3"
 

@@ -10,7 +10,6 @@ async-trait = "0.1"
 
 # Data structures
 dashmap = "6.1"
-parking_lot = "0.12"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -26,11 +25,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Error handling
 thiserror = "2.0"
-anyhow = "1.0"
 
 # Internal dependencies
 rvoip-infra-common = { path = "../infra-common" }
-rvoip-sip-core = { path = "../rvoip-sip-core" }
 rvoip-sip-dialog = { path = "../rvoip-sip-dialog" }
 rvoip-auth-core = { path = "../auth-core" }
 
@@ -38,6 +35,3 @@ rvoip-auth-core = { path = "../auth-core" }
 uuid = { version = "1.5", features = ["v4", "serde"] }
 
 [dev-dependencies]
-tokio-test = "0.4"
-criterion = "0.5"
-pretty_assertions = "1.4"
