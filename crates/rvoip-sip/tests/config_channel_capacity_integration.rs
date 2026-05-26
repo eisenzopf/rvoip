@@ -46,6 +46,13 @@ fn incoming_call_channel_capacity_defaults_to_1000() {
         Config::DEFAULT_APP_EVENT_CHANNEL_CAPACITY
     );
     assert_eq!(Config::default().server_call_capacity, None);
+    assert_eq!(Config::default().server_call_admission_limit, None);
+    assert_eq!(Config::default().server_call_admission_soft_limit, None);
+    assert_eq!(
+        Config::default().server_call_admission_pacing_delay_ms,
+        None
+    );
+    assert_eq!(Config::default().server_overload_retry_after_secs, Some(1));
     assert!(!Config::default().sip_udp_diagnostics);
     assert!(!Config::default().sip_transaction_timing_diagnostics);
     assert!(!Config::default().sip_dialog_timing_diagnostics);
@@ -82,7 +89,11 @@ fn incoming_call_channel_capacity_is_configurable() {
         .with_sip_dialog_timing_diagnostics(true)
         .with_global_event_channel_capacity(20_000)
         .with_session_event_dispatcher_workers(4)
-        .with_session_event_dispatcher_channel_capacity(16_384);
+        .with_session_event_dispatcher_channel_capacity(16_384)
+        .with_server_call_admission_limit(8_192)
+        .with_server_call_admission_soft_limit(7_500)
+        .with_server_call_admission_pacing_delay_ms(2)
+        .with_server_overload_retry_after_secs(2);
 
     assert_eq!(config.incoming_call_channel_capacity, 4096);
     assert_eq!(config.state_event_channel_capacity, 2048);
@@ -109,6 +120,10 @@ fn incoming_call_channel_capacity_is_configurable() {
     assert_eq!(config.global_event_channel_capacity, 20_000);
     assert_eq!(config.session_event_dispatcher_workers, 4);
     assert_eq!(config.session_event_dispatcher_channel_capacity, 16_384);
+    assert_eq!(config.server_call_admission_limit, Some(8_192));
+    assert_eq!(config.server_call_admission_soft_limit, Some(7_500));
+    assert_eq!(config.server_call_admission_pacing_delay_ms, Some(2));
+    assert_eq!(config.server_overload_retry_after_secs, Some(2));
 }
 
 #[test]
@@ -132,6 +147,8 @@ fn channel_capacity_sets_related_signaling_queues() {
     assert_eq!(config.global_event_channel_capacity, 5120);
     assert_eq!(config.session_event_dispatcher_channel_capacity, 5120);
     assert_eq!(config.server_call_capacity, None);
+    assert_eq!(config.server_call_admission_limit, None);
+    assert_eq!(config.server_call_admission_soft_limit, None);
 }
 
 #[test]
@@ -467,6 +484,60 @@ fn zero_server_call_capacity_is_rejected_when_set() {
     assert!(
         err.to_string()
             .contains("server_call_capacity must be at least 1 when set"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
+fn zero_server_call_admission_limit_is_rejected_when_set() {
+    let mut config = Config::local("capacity-test", 5060);
+    config.server_call_admission_limit = Some(0);
+
+    let err = config.validate().expect_err("zero limit must fail");
+    assert!(
+        err.to_string()
+            .contains("server_call_admission_limit must be at least 1 when set"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
+fn zero_server_overload_retry_after_is_rejected_when_set() {
+    let mut config = Config::local("capacity-test", 5060);
+    config.server_overload_retry_after_secs = Some(0);
+
+    let err = config.validate().expect_err("zero retry-after must fail");
+    assert!(
+        err.to_string()
+            .contains("server_overload_retry_after_secs must be at least 1 when set"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
+fn invalid_server_call_admission_soft_limit_is_rejected() {
+    let mut config = Config::local("capacity-test", 5060);
+    config.server_call_admission_limit = Some(10);
+    config.server_call_admission_soft_limit = Some(11);
+
+    let err = config
+        .validate()
+        .expect_err("soft limit above hard must fail");
+    assert!(
+        err.to_string().contains("server_call_admission_soft_limit"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
+fn zero_server_call_admission_pacing_delay_is_rejected_when_set() {
+    let mut config = Config::local("capacity-test", 5060);
+    config.server_call_admission_pacing_delay_ms = Some(0);
+
+    let err = config.validate().expect_err("zero pacing delay must fail");
+    assert!(
+        err.to_string()
+            .contains("server_call_admission_pacing_delay_ms must be at least 1 when set"),
         "unexpected validation error: {err}"
     );
 }

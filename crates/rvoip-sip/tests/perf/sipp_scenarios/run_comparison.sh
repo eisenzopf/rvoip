@@ -63,6 +63,10 @@ capture_command() {
   } >"$output" 2>&1 || true
 }
 
+sipp_version() {
+  "$SIPP_BIN" -v 2>&1 | awk 'NF { print; found=1; exit } END { if (!found) print "unknown" }'
+}
+
 write_environment_report() {
   {
     echo "# SIPp Performance Environment"
@@ -80,7 +84,8 @@ write_environment_report() {
     echo "- rustc: $(rustc --version 2>/dev/null || echo unknown)"
     echo "- cargo: $(cargo --version 2>/dev/null || echo unknown)"
     echo "- host: $(uname -a 2>/dev/null || echo unknown)"
-    echo "- sipp: $("$SIPP_BIN" -v 2>&1 | head -1 || echo unknown)"
+    echo "- driver: local"
+    echo "- sipp: $(sipp_version)"
     if command -v tshark >/dev/null 2>&1; then
       echo "- tshark: $(tshark -v 2>&1 | head -1)"
     else

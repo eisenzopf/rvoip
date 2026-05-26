@@ -88,6 +88,9 @@ def default_supplemental() -> dict:
         "dead_200_by_cseq": Counter(),
         "sip_udp_diag": {},
         "sip_retrans_diag": {},
+        "cleanup_diag": {},
+        "media_setup_diag": {},
+        "listener_config": [],
         "sample_artifact": None,
         "samply_profile": None,
         "samply_log": None,
@@ -187,9 +190,52 @@ def parse_sip_retrans_diag(line: str | None) -> dict:
     return out
 
 
+def parse_cleanup_diag(line: str | None) -> dict:
+    if not line:
+        return {}
+    out = {
+        "raw": line,
+        "active_total": extract_int(line, "active_total"),
+        "started_total": extract_int(line, "started_total"),
+        "done_total": extract_int(line, "done_total"),
+        "failed_total": extract_int(line, "failed_total"),
+    }
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def parse_media_setup_diag(line: str | None) -> dict:
+    if not line:
+        return {}
+    keys = [
+        "start_media",
+        "start_done",
+        "start_fail",
+        "start_active",
+        "start_avg_us",
+        "start_max_us",
+        "stop_media",
+        "stop_done",
+        "stop_fail",
+        "stop_active",
+        "stop_avg_us",
+        "stop_max_us",
+        "port_alloc",
+        "port_release",
+    ]
+    out = {"raw": line}
+    for key in keys:
+        value = extract_int(line, key)
+        if value is not None:
+            out[key] = value
+    return out
+
+
 def parse_listener_log(path: Path) -> dict:
     last_udp_diag = None
     last_retrans_diag = None
+    last_cleanup_diag = None
+    last_media_setup_diag = None
+    listener_config = []
     accepted_total = None
     cleaned_total = None
     for line in path.read_text(errors="replace").splitlines():
@@ -197,6 +243,12 @@ def parse_listener_log(path: Path) -> dict:
             last_udp_diag = line
         elif "[sip_retrans_diag]" in line:
             last_retrans_diag = line
+        elif "[cleanup_diag]" in line:
+            last_cleanup_diag = line
+        elif "[media_setup_diag]" in line:
+            last_media_setup_diag = line
+        if line.startswith("rvoip-sip perf_listener: "):
+            listener_config.append(line.removeprefix("rvoip-sip perf_listener: "))
         if "[perf_listener]" in line and "accepted_total=" in line:
             match = re.search(r"accepted_total=(\d+).*cleaned_total=(\d+)", line)
             if match:
@@ -208,6 +260,9 @@ def parse_listener_log(path: Path) -> dict:
         "listener_cleaned_total": cleaned_total,
         "sip_udp_diag": parse_sip_udp_diag(last_udp_diag),
         "sip_retrans_diag": parse_sip_retrans_diag(last_retrans_diag),
+        "cleanup_diag": parse_cleanup_diag(last_cleanup_diag),
+        "media_setup_diag": parse_media_setup_diag(last_media_setup_diag),
+        "listener_config": listener_config,
     }
 
 
@@ -410,12 +465,14 @@ def render(data: dict) -> str:
     tags = sorted(data.keys())
     all_cps = sorted({c for t in tags for c in data[t].keys()})
 
-    lines = ["# rvoip vs Asterisk — sipp-driven performance comparison", ""]
+    lines = ["# SIPp-driven Performance Comparison", ""]
     lines.append(
-        "Driver: SIPp 3.7.3 from a sidecar Alpine container on the asterisk "
-        "docker bridge. Each scenario drives `uac_perf.xml` (INVITE → 200 → "
-        "ACK → 100 ms pause → BYE → 200). High-CPS points may be split across "
-        "parallel SIPp shards and aggregated by target."
+        "Driver: SIPp using `uac_perf.xml` (INVITE -> 200 -> ACK -> 100 ms "
+        "pause -> BYE -> 200). Runs may be local or containerized; see "
+        "`environment.md`, `run_matrix.tsv`, and `matrix_metadata.txt` in the "
+        "result directory for exact commands, topology, versions, and "
+        "environment values. High-CPS points may be split across parallel SIPp "
+        "shards and aggregated by target."
     )
     lines.append("")
     lines.append("## Summary table")
@@ -472,6 +529,8 @@ def render(data: dict) -> str:
                 continue
             udp_diag = d.get("sip_udp_diag", {})
             retrans_diag = d.get("sip_retrans_diag", {})
+            cleanup_diag = d.get("cleanup_diag", {})
+            media_setup_diag = d.get("media_setup_diag", {})
             lines.append(f"### {tag} @ {cps} CPS")
             lines.append("")
             lines.append(f"- Elapsed: **{d['elapsed_s']:.1f} s**")
@@ -499,6 +558,10 @@ def render(data: dict) -> str:
                 f"{fmt_optional(d.get('listener_accepted_total'))}, cleaned "
                 f"{fmt_optional(d.get('listener_cleaned_total'))}"
             )
+            if d.get("listener_config"):
+                lines.append("- Listener effective config:")
+                for line in d["listener_config"]:
+                    lines.append(f"  - `{line}`")
             lines.append(
                 f"- Dead-call 200 OK: {d.get('dead_200_total', 0)} "
                 f"({format_dead_counts(d)})"
@@ -540,6 +603,27 @@ def render(data: dict) -> str:
             ]:
                 if retrans_diag.get(metric_name):
                     lines.append(f"- {label}: [{retrans_diag[metric_name]}]")
+            if cleanup_diag:
+                lines.append(
+                    "- Final cleanup_diag: "
+                    f"active_total={fmt_optional(cleanup_diag.get('active_total'))}, "
+                    f"started_total={fmt_optional(cleanup_diag.get('started_total'))}, "
+                    f"done_total={fmt_optional(cleanup_diag.get('done_total'))}, "
+                    f"failed_total={fmt_optional(cleanup_diag.get('failed_total'))}"
+                )
+            if media_setup_diag:
+                lines.append(
+                    "- Final media_setup_diag: "
+                    f"start_done={fmt_optional(media_setup_diag.get('start_done'))}, "
+                    f"start_fail={fmt_optional(media_setup_diag.get('start_fail'))}, "
+                    f"start_active={fmt_optional(media_setup_diag.get('start_active'))}, "
+                    f"start_avg_us={fmt_optional(media_setup_diag.get('start_avg_us'))}, "
+                    f"stop_done={fmt_optional(media_setup_diag.get('stop_done'))}, "
+                    f"stop_fail={fmt_optional(media_setup_diag.get('stop_fail'))}, "
+                    f"stop_active={fmt_optional(media_setup_diag.get('stop_active'))}, "
+                    f"stop_avg_us={fmt_optional(media_setup_diag.get('stop_avg_us'))}, "
+                    f"port_release={fmt_optional(media_setup_diag.get('port_release'))}"
+                )
             lines.append(
                 f"- Profile artifacts: sample={format_artifact(d.get('sample_artifact'))}; "
                 f"samply_profile={format_artifact(d.get('samply_profile'))}; "

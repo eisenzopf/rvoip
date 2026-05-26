@@ -15,6 +15,7 @@
 #   RVOIP_SHARDING_TRANSACTION_WORKERS="1 2 4 8"
 #   RVOIP_SHARDING_DIALOG_WORKERS="1 2 4 8"
 #   RVOIP_SHARDING_CAPACITIES="20000 30000"
+#   RVOIP_SHARDING_PERF_PROFILE=signaling-only-server-high-performance
 #   RVOIP_SHARDING_SIP_UDP_RECV_BUFFER_SIZE=8388608
 #   RVOIP_SHARDING_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX=64
 #   RVOIP_SHARDING_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK=2048
@@ -70,6 +71,7 @@ TRANSPORT_WORKERS="${RVOIP_SHARDING_TRANSPORT_WORKERS:-1}"
 TRANSACTION_WORKERS="${RVOIP_SHARDING_TRANSACTION_WORKERS:-1 2 4 8}"
 DIALOG_WORKERS="${RVOIP_SHARDING_DIALOG_WORKERS:-1}"
 CAPACITIES="${RVOIP_SHARDING_CAPACITIES:-20000}"
+PERF_PROFILE="${RVOIP_SHARDING_PERF_PROFILE:-signaling-only-server-high-performance}"
 STEADY_SECS="${RVOIP_SHARDING_STEADY_SECS:-15}"
 SIPP_SHARD_CPS="${RVOIP_SHARDING_SIPP_SHARD_CPS:-1000}"
 LISTENER_WARMUP_SECS="${RVOIP_SHARDING_LISTENER_WARMUP_SECS:-2}"
@@ -247,6 +249,7 @@ trap 'cleanup; exit 143' TERM
   echo "transaction_workers=$TRANSACTION_WORKERS"
   echo "dialog_workers=$DIALOG_WORKERS"
   echo "capacities=$CAPACITIES"
+  echo "perf_profile=$PERF_PROFILE"
   echo "steady_secs=$STEADY_SECS"
   echo "sipp_shard_cps=$SIPP_SHARD_CPS"
   echo "transaction_timing=$TRANSACTION_TIMING"
@@ -281,21 +284,23 @@ for capacity in $CAPACITIES; do
           listener_args=(
             "$port"
             "$ADVERTISED_ADDR"
-            --fast-auto-accept
             --diagnostics
-            --signaling-only-media
+            --perf-profile "$PERF_PROFILE"
             --high-cps-capacity "$capacity"
             --udp-parse-workers "$udp_workers"
             --udp-parse-round-robin
           )
+          if [[ "$PERF_PROFILE" == "legacy" ]]; then
+            listener_args+=(--fast-auto-accept --signaling-only-media)
+          fi
 
           if [[ "$transport_workers" -gt 1 ]]; then
             listener_args+=(--sip-transport-dispatch-workers "$transport_workers")
           fi
-          if [[ "$tx_workers" -gt 1 ]]; then
+          if [[ "$tx_workers" -gt 1 || "$PERF_PROFILE" != "legacy" ]]; then
             listener_args+=(--transaction-dispatch-workers "$tx_workers")
           fi
-          if [[ "$dialog_workers" -gt 1 ]]; then
+          if [[ "$dialog_workers" -gt 1 || "$PERF_PROFILE" != "legacy" ]]; then
             listener_args+=(--sip-dialog-dispatch-workers "$dialog_workers")
           fi
           if [[ "$TRANSACTION_TIMING" == "1" || "$TRANSACTION_TIMING" == "true" ]]; then

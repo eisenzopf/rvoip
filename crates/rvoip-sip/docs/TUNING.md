@@ -13,16 +13,18 @@ client/default UA profile. They favor interoperability and predictable behavior:
 - ACK/BYE priority burst and INVITE 2xx resend pacing use transaction-layer
   defaults
 
-Server and benchmark tuning is opt-in. Use the deployment constructors and
-builder methods below to choose capacity, fanout, diagnostics, and stress-test
-behavior. Do not treat the 18k or 20k CPS recipes as universal defaults; they
-are reproducible starting points for a specific SIPp signaling-only workload.
+Server and benchmark tuning is opt-in. The preferred path is a YAML-backed
+`PerformanceConfig` recipe. The crate ships a default recipe book at
+`config/performance-recipes.yaml`, and applications can provide their own recipe
+file without changing library source. Do not treat high-CPS signaling-only
+recipes as universal defaults; they are reproducible starting points for a
+specific SIPp signaling-only workload.
 
 ## Profile Starting Points
 
 | Workload | Starting point | Notes |
 | --- | --- | --- |
-| Client / UA | `Config::local(...)` or `Config::on(...)` | Keep default auto `180`, Timer `100`, media, queue sizes, and socket buffers. |
+| Client / UA | `PerformanceConfig::endpoint()` or omitted performance config | Keep default auto `180`, Timer `100`, media, queue sizes, and socket buffers. |
 | Local examples/tests | `Config::local_lab(...)` | Alias for local loopback examples and integration tests. |
 | Normal LAN server / PBX | `Config::lan_pbx(...)` | Directly reachable SIP and media address. Add capacity sizing only when expected concurrency requires it. |
 | Asterisk TLS registered-flow client | `Config::asterisk_tls_registered_flow(...)` | TLS client mode, registered-flow reuse, mandatory SDES-SRTP. |
@@ -30,7 +32,9 @@ are reproducible starting points for a specific SIPp signaling-only workload.
 | FreeSWITCH TLS/SRTP | `Config::freeswitch_tls_srtp_reachable_contact(...)` | Directly reachable TLS Contact, mandatory SRTP, FreeSWITCH-compatible suite policy. |
 | Carrier/SBC | `Config::carrier_sbc(...)` | TLS client mode, registered-flow Contact, mandatory SRTP, public signaling/media address, outbound proxy route. |
 | SIP proxy plus RTPengine lab | `Config::proxy_rtpengine(...)` | Signaling route helper; RTPengine control remains above `rvoip-sip`. |
-| High-CPS UDP auto-answer | `Config::with_high_cps_udp_auto_answer(capacity)` | Conservative modifier for immediate-answer UDP servers and SIPp experiments. |
+| PBX media server | `PerformanceConfig::pbx_media_server(capacity)` | UDP auto-answer server profile with media allocation enabled. |
+| Signaling-only high-performance server | `PerformanceConfig::signaling_only_server_high_performance(capacity)` | SIP signaling throughput profile that intentionally skips RTP allocation. |
+| Legacy high-CPS UDP auto-answer | `Config::with_high_cps_udp_auto_answer(capacity)` | Conservative low-level modifier for immediate-answer UDP servers and SIPp experiments. |
 
 ## Recipe: Client / UA Default
 
@@ -42,6 +46,8 @@ use rvoip_sip::Config;
 
 let config = Config::local("alice", 5060);
 ```
+
+Equivalent YAML recipe name: `endpoint`.
 
 Keep these defaults unless a deployment needs a specific change:
 
@@ -83,7 +89,76 @@ Guidance:
   `sip_udp_diag`, transaction diagnostics, or dialog diagnostics point to a
   specific queue.
 
-## Recipe: High-CPS UDP Auto-Answer
+## Recipe: PBX Media Server
+
+Use this as the media-enabled server profile for PBX-style UDP auto-answer
+services. The beta gate validates this shape rather than using a beta-only
+profile.
+
+```rust
+use rvoip_sip::{Config, PerformanceConfig};
+
+let bind = "0.0.0.0:5060".parse().unwrap();
+let advertised = "192.168.1.50:5060".parse().unwrap();
+
+let config = Config::lan_pbx("answerer", bind, advertised)
+    .try_with_performance_config(PerformanceConfig::pbx_media_server(2_000))?;
+```
+
+The bundled `pbx-media-server` YAML recipe currently:
+
+- sets channel capacity and UDP parse queue capacity from `capacity`
+- disables automatic `180 Ringing`
+- disables automatic Timer `100 Trying`
+- enables fast auto accept
+- sets UDP receive/send socket buffers to `8_388_608`
+- sets UDP parse workers to `4`
+- sets UDP parse dispatch to round-robin
+- sets transaction dispatch workers to `2`
+- sets dialog dispatch workers to `4`
+- sets session event dispatcher workers to `4`
+- sets per-transaction command channel capacity to `128`
+- sets server lookup capacity to `capacity`
+- sets server admission limit to `capacity`
+- starts admission pacing at 90 percent of `capacity`
+- uses a `1ms` pacing delay while above the soft threshold
+- once the hard admission limit is reached, sends `503 Service Unavailable`
+  with `Retry-After: 1` until retained sessions drop below the soft threshold
+- sets media port capacity to `16_384..=65_535` (`49_152` ports)
+- sets media session capacity to `capacity`
+- keeps media enabled
+
+If validation shows command-channel pressure at 2,000 CPS, retest with
+`sipTransactionCommandChannelCapacity: 256` in a custom YAML recipe file and
+record the result before changing the bundled recipe default.
+
+## Recipe: Signaling-Only High-Performance Server
+
+Use this profile to isolate SIP signaling throughput from media allocation:
+
+```rust
+use rvoip_sip::{Config, PerformanceConfig};
+
+let config = Config::lan_pbx("answerer", bind, advertised)
+    .try_with_performance_config(
+        PerformanceConfig::signaling_only_server_high_performance(20_000)
+    )?;
+```
+
+The bundled `signaling-only-server-high-performance` YAML recipe applies the
+same worker/socket/queue profile as `pbx-media-server`, then switches to
+signaling-only SDP. Do not market high-CPS signaling-only results as the
+general-user full-media baseline.
+
+The server recipes own overload behavior through Config. At
+`serverCallAdmissionSoftLimit`, rvoip-sip paces inbound INVITE admission. At
+`serverCallAdmissionLimit`, rvoip-sip enters overload mode and rejects new
+inbound INVITEs with SIP `503 Service Unavailable` and the configured
+`Retry-After` value. It stays unavailable until retained sessions drop below the
+soft threshold. Load harnesses should report this as library overload evidence,
+not silently drop offered calls in the harness.
+
+## Recipe: Legacy High-CPS UDP Auto-Answer
 
 Use this when the service immediately answers inbound UDP INVITEs and the
 application can tolerate benchmark-oriented behavior.
@@ -109,9 +184,12 @@ let config = Config::lan_pbx("answerer", bind, advertised)
 - disables automatic Timer `100 Trying`
 - sets `sip_udp_parse_workers = Some(1)`
 - sets `sip_udp_parse_queue_capacity = Some(capacity)`
+- sets `sip_transaction_command_channel_capacity` to
+  `(capacity / 8).clamp(128, 1000)` unless already set
 - keeps media enabled
 - does not enable fast auto accept
 - does not set `server_call_capacity`
+- does not set `server_call_admission_limit`
 - does not size media port/session allocators
 - does not enlarge UDP socket buffers
 - does not set ACK/BYE priority burst or INVITE 2xx pacing overrides
@@ -218,11 +296,19 @@ Promotion requires repeated same-shape controls, not one profiled run.
 
 | Config API | `perf_listener` flag | SIPp matrix env | Default when unset | When to use |
 | --- | --- | --- | --- | --- |
+| `PerformanceConfig::endpoint()` / `profile: endpoint` | `--perf-profile endpoint` | `RVOIP_SHARDING_PERF_PROFILE=endpoint` | Omitted endpoint performance config is equivalent | Normal app endpoint/client/server defaults. |
+| `PerformanceConfig::pbx_media_server(N)` / `profile: pbx-media-server` | `--perf-profile pbx-media-server --high-cps-capacity N` | `RVOIP_SHARDING_PERF_PROFILE=pbx-media-server` | Profile off | PBX-style UDP auto-answer server with media allocation enabled. |
+| `PerformanceConfig::signaling_only_server_high_performance(N)` / `profile: signaling-only-server-high-performance` | `--perf-profile signaling-only-server-high-performance --high-cps-capacity N` | `RVOIP_SHARDING_PERF_PROFILE=signaling-only-server-high-performance` | Profile off | SIP signaling-only high-CPS profile; not a full-media claim. |
+| Custom YAML recipe | `--recipe-file path --perf-profile name` | `RVOIP_SHARDING_EXTRA_LISTENER_ARGS='--recipe-file path'` | Bundled recipe book | Deployment-specific tuning without source changes. |
 | `Config::with_high_cps_udp_auto_answer(N)` | `--high-cps-capacity N` | `RVOIP_SHARDING_CAPACITIES` | `perf_listener` uses `20000`; normal Config leaves profile off | Immediate-answer UDP server or SIPp matrix baseline. |
 | `Config::with_fast_auto_accept_incoming_calls(true)` | `--fast-auto-accept` | Always enabled by sharding runner | `false` | Benchmark or fixed service that accepts every INVITE immediately. |
 | `Config::with_signaling_only_media(9)` | `--signaling-only-media` | Always enabled by sharding runner | `MediaMode::Enabled` | Isolate SIP signaling from RTP allocation/socket bind cost. |
 | `Config::with_channel_capacity(N)` | Indirect through `--high-cps-capacity N` | `RVOIP_SHARDING_CAPACITIES` | Incoming/state `1000`, SIP/transaction/global/session queues `10000` | Size queues from expected active or burst-arriving calls. |
 | `Config::with_server_capacity(N)` | None | None | `None` | Reserve server dialog/transaction lookup capacity without changing queues. |
+| `Config::with_server_call_admission_limit(N)` | YAML recipe / app Config | YAML recipe / app Config | `None` | Enforce hard server overload admission. At capacity, new inbound INVITEs receive SIP `503` until the server drops below the soft threshold. |
+| `Config::with_server_call_admission_soft_limit(N)` | YAML recipe / app Config | YAML recipe / app Config | `None` | Start pacing inbound admission before the hard overload limit. |
+| `Config::with_server_call_admission_pacing_delay_ms(N)` | YAML recipe / app Config | YAML recipe / app Config | `None` | Delay applied to each inbound INVITE while above the soft threshold and below hard overload. |
+| `Config::with_server_overload_retry_after_secs(N)` | YAML recipe / app Config | YAML recipe / app Config | `Some(1)` | Set the `Retry-After` value on Config-owned overload rejections. |
 | `Config::with_sip_udp_parse_workers(N)` | `--udp-parse-workers N` | `RVOIP_SHARDING_UDP_WORKERS` | Transport default | Add UDP parse parallelism when parse/dispatch work backs up. |
 | `Config::with_sip_udp_parse_queue_capacity(N)` | `--udp-parse-queue-capacity N` | `RVOIP_SHARDING_UDP_QUEUE_CAPACITY` | SIP transport channel capacity | Bound per-worker UDP parse queue for bursty tests. |
 | `Config::with_sip_udp_parse_dispatch(UdpParseDispatch::RoundRobin)` | `--udp-parse-round-robin` | Always enabled by sharding runner | Source-hash | SIPp sidecar tests where all calls share one source socket. |

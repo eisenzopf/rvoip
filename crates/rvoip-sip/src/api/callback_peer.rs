@@ -64,6 +64,7 @@ use crate::api::events::{
 };
 use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::{IncomingCall, IncomingCallGuard};
+use crate::api::performance::PerformanceConfig;
 use crate::api::unified::{Config, MediaMode, RegistrationHandle, UnifiedCoordinator};
 use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result, SessionError};
@@ -312,6 +313,30 @@ impl CallbackPeerBuilder {
         self
     }
 
+    /// Apply a YAML-backed performance recipe.
+    pub fn performance_config(mut self, performance: PerformanceConfig) -> Result<Self> {
+        self.config = self.config.try_with_performance_config(performance)?;
+        Ok(self)
+    }
+
+    /// Apply the PBX media server performance recipe.
+    pub fn pbx_media_server_performance(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_pbx_media_server_performance(capacity);
+        self
+    }
+
+    /// Apply the signaling-only high-performance server recipe.
+    pub fn signaling_only_server_high_performance(
+        mut self,
+        capacity: usize,
+        sdp_rtp_port: u16,
+    ) -> Self {
+        self.config = self
+            .config
+            .with_signaling_only_server_high_performance(capacity, sdp_rtp_port);
+        self
+    }
+
     /// Set app-facing event buffer capacity.
     pub fn app_event_channel_capacity(mut self, capacity: usize) -> Self {
         self.config = self.config.with_app_event_channel_capacity(capacity);
@@ -335,6 +360,32 @@ impl CallbackPeerBuilder {
         self.config = self
             .config
             .with_sip_transaction_command_channel_capacity(capacity);
+        self
+    }
+
+    /// Set the server-side inbound call admission limit.
+    pub fn server_call_admission_limit(mut self, limit: usize) -> Self {
+        self.config = self.config.with_server_call_admission_limit(limit);
+        self
+    }
+
+    /// Set the soft threshold where server-side admission starts pacing.
+    pub fn server_call_admission_soft_limit(mut self, limit: usize) -> Self {
+        self.config = self.config.with_server_call_admission_soft_limit(limit);
+        self
+    }
+
+    /// Set the delay in milliseconds while above the soft admission threshold.
+    pub fn server_call_admission_pacing_delay_ms(mut self, delay_ms: u64) -> Self {
+        self.config = self
+            .config
+            .with_server_call_admission_pacing_delay_ms(delay_ms);
+        self
+    }
+
+    /// Set the `Retry-After` value used for server overload rejections.
+    pub fn server_overload_retry_after_secs(mut self, seconds: u32) -> Self {
+        self.config = self.config.with_server_overload_retry_after_secs(seconds);
         self
     }
 

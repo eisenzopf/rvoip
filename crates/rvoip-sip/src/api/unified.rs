@@ -784,6 +784,41 @@ pub struct Config {
     /// tying that memory reservation to the larger event-queue capacities.
     pub server_call_capacity: Option<usize>,
 
+    /// Server-side admission limit for concurrently retained SIP call sessions.
+    ///
+    /// This is an enforcement knob, not a preallocation hint. When set and the
+    /// session store is already at or above this limit, new inbound INVITEs are
+    /// rejected by the library with a SIP overload response instead of being
+    /// accepted into unbounded work. Server performance recipes should size
+    /// this high enough for the expected CPS multiplied by call lifetime.
+    /// `None` preserves endpoint/client behavior with no library admission cap.
+    pub server_call_admission_limit: Option<usize>,
+
+    /// Soft threshold for server-side admission pacing.
+    ///
+    /// When set and the active retained session count is at or above this
+    /// value but below [`Config::server_call_admission_limit`], inbound INVITE
+    /// processing is delayed by
+    /// [`Config::server_call_admission_pacing_delay_ms`]. This gives active
+    /// calls a chance to drain before the hard overload policy starts
+    /// rejecting. `None` disables soft pacing.
+    pub server_call_admission_soft_limit: Option<usize>,
+
+    /// Delay applied when the server admission soft threshold is reached.
+    ///
+    /// Applies only when [`Config::server_call_admission_soft_limit`] is set.
+    /// Values below `1` are rejected when set.
+    pub server_call_admission_pacing_delay_ms: Option<u64>,
+
+    /// `Retry-After` value in seconds for Config-owned server overload
+    /// rejections.
+    ///
+    /// Applies only when [`Config::server_call_admission_limit`] is set and an
+    /// inbound INVITE arrives while the server is at capacity. `Some(n)` adds
+    /// `Retry-After: n` to the default `503 Service Unavailable` response;
+    /// `None` omits the header. Default is `Some(1)`.
+    pub server_overload_retry_after_secs: Option<u32>,
+
     /// Enable SIP UDP transport and duplicate-recovery diagnostics.
     ///
     /// This is a Config-owned replacement for benchmark-only diagnostic env
@@ -967,6 +1002,10 @@ impl Config {
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: Self::DEFAULT_APP_EVENT_CHANNEL_CAPACITY,
             server_call_capacity: None,
+            server_call_admission_limit: None,
+            server_call_admission_soft_limit: None,
+            server_call_admission_pacing_delay_ms: None,
+            server_overload_retry_after_secs: Some(1),
             sip_udp_diagnostics: false,
             sip_transaction_timing_diagnostics: false,
             sip_dialog_timing_diagnostics: false,
@@ -1063,6 +1102,10 @@ impl Config {
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: Self::DEFAULT_APP_EVENT_CHANNEL_CAPACITY,
             server_call_capacity: None,
+            server_call_admission_limit: None,
+            server_call_admission_soft_limit: None,
+            server_call_admission_pacing_delay_ms: None,
+            server_overload_retry_after_secs: Some(1),
             sip_udp_diagnostics: false,
             sip_transaction_timing_diagnostics: false,
             sip_dialog_timing_diagnostics: false,
@@ -1325,6 +1368,49 @@ impl Config {
         self
     }
 
+    /// Set the server-side active-call admission limit.
+    ///
+    /// Unlike [`Config::with_server_capacity`], this is enforced at runtime for
+    /// inbound INVITEs. Once the session store reaches `limit`, additional
+    /// inbound calls are rejected with SIP `503 Service Unavailable` and the
+    /// configured `Retry-After` header.
+    pub fn with_server_call_admission_limit(mut self, limit: usize) -> Self {
+        self.server_call_admission_limit = Some(limit);
+        self
+    }
+
+    /// Set the soft threshold where server-side inbound admission starts
+    /// pacing instead of immediately admitting new calls.
+    pub fn with_server_call_admission_soft_limit(mut self, limit: usize) -> Self {
+        self.server_call_admission_soft_limit = Some(limit);
+        self
+    }
+
+    /// Set the delay used while server-side inbound admission is above the
+    /// soft threshold but below the hard limit.
+    pub fn with_server_call_admission_pacing_delay_ms(mut self, delay_ms: u64) -> Self {
+        self.server_call_admission_pacing_delay_ms = Some(delay_ms);
+        self
+    }
+
+    /// Remove the server-side active-call admission limit.
+    pub fn without_server_call_admission_limit(mut self) -> Self {
+        self.server_call_admission_limit = None;
+        self
+    }
+
+    /// Set the `Retry-After` value used for server overload rejections.
+    pub fn with_server_overload_retry_after_secs(mut self, seconds: u32) -> Self {
+        self.server_overload_retry_after_secs = Some(seconds);
+        self
+    }
+
+    /// Omit `Retry-After` from server overload rejections.
+    pub fn without_server_overload_retry_after(mut self) -> Self {
+        self.server_overload_retry_after_secs = None;
+        self
+    }
+
     /// Apply a high-CPS UDP auto-answer profile.
     ///
     /// This keeps media enabled, suppresses automatic provisional responses,
@@ -1335,7 +1421,10 @@ impl Config {
     /// 100 would fire, and avoiding the timer task/message reduces hot-path
     /// work. It does not enable the fused fast-auto-accept path yet; that
     /// remains an explicit opt-in until the 8000 CPS cleanup/retransmit target
-    /// is stable. It does not enlarge socket buffers and does not set
+    /// is stable. It raises
+    /// [`Config::sip_transaction_command_channel_capacity`] to
+    /// `(capacity / 8).clamp(128, 1000)` unless an earlier setter already set
+    /// an explicit value. It does not enlarge socket buffers and does not set
     /// [`Config::server_call_capacity`]. It also leaves
     /// [`Config::sip_transaction_dispatch_priority_burst_max`] and
     /// [`Config::sip_invite_2xx_retransmit_max_due_per_tick`] unset so load
@@ -1350,6 +1439,57 @@ impl Config {
             .get_or_insert_with(|| (capacity / 8).clamp(128, 1000));
         self.media_mode = MediaMode::Enabled;
         self
+    }
+
+    /// Apply a YAML-backed performance recipe to this config.
+    ///
+    /// When [`crate::PerformanceConfig::recipe_path`] is set, that YAML file
+    /// is loaded. Otherwise the bundled default recipe book is used.
+    pub fn try_with_performance_config(
+        self,
+        performance: crate::api::performance::PerformanceConfig,
+    ) -> Result<Self> {
+        let book = if let Some(path) = &performance.recipe_path {
+            crate::api::performance::PerformanceRecipeBook::from_path(path)?
+        } else {
+            crate::api::performance::PerformanceRecipeBook::bundled()?
+        };
+        book.apply(self, &performance)
+    }
+
+    /// Apply the bundled PBX media server performance recipe.
+    ///
+    /// This convenience helper applies the bundled
+    /// `pbx-media-server` YAML recipe. Use
+    /// [`Config::try_with_performance_config`] with a custom
+    /// [`crate::PerformanceConfig::recipe_path`] when deployments need a
+    /// modified recipe book.
+    pub fn with_pbx_media_server_performance(self, capacity: usize) -> Self {
+        self.try_with_performance_config(
+            crate::api::performance::PerformanceConfig::pbx_media_server(capacity),
+        )
+        .expect("bundled pbx-media-server performance recipe is valid")
+    }
+
+    /// Apply the bundled signaling-only high-performance server recipe.
+    ///
+    /// This convenience helper applies the bundled
+    /// `signaling-only-server-high-performance` YAML recipe. Use
+    /// [`Config::try_with_performance_config`] with a custom
+    /// [`crate::PerformanceConfig::recipe_path`] when deployments need a
+    /// modified recipe book.
+    pub fn with_signaling_only_server_high_performance(
+        self,
+        capacity: usize,
+        sdp_rtp_port: u16,
+    ) -> Self {
+        self.try_with_performance_config(
+            crate::api::performance::PerformanceConfig::signaling_only_server_high_performance(
+                capacity,
+            )
+            .with_signaling_only_rtp_port(sdp_rtp_port),
+        )
+        .expect("bundled signaling-only-server-high-performance performance recipe is valid")
     }
 
     fn dialog_index_capacity_hint(&self) -> usize {
@@ -2015,6 +2155,36 @@ impl Config {
                 "server_call_capacity must be at least 1 when set".to_string(),
             ));
         }
+        if matches!(self.server_call_admission_limit, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "server_call_admission_limit must be at least 1 when set".to_string(),
+            ));
+        }
+        if matches!(self.server_call_admission_soft_limit, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "server_call_admission_soft_limit must be at least 1 when set".to_string(),
+            ));
+        }
+        if let (Some(soft), Some(hard)) = (
+            self.server_call_admission_soft_limit,
+            self.server_call_admission_limit,
+        ) {
+            if soft > hard {
+                return Err(SessionError::ConfigError(format!(
+                    "server_call_admission_soft_limit ({soft}) must be <= server_call_admission_limit ({hard})"
+                )));
+            }
+        }
+        if matches!(self.server_call_admission_pacing_delay_ms, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "server_call_admission_pacing_delay_ms must be at least 1 when set".to_string(),
+            ));
+        }
+        if matches!(self.server_overload_retry_after_secs, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "server_overload_retry_after_secs must be at least 1 when set".to_string(),
+            ));
+        }
         if matches!(self.media_session_capacity, Some(0)) {
             return Err(SessionError::ConfigError(
                 "media_session_capacity must be at least 1 when set".to_string(),
@@ -2407,6 +2577,11 @@ impl UnifiedCoordinator {
                     .config
                     .sip_transaction_command_channel_capacity
                     .unwrap_or(Config::DEFAULT_SIP_TRANSACTION_COMMAND_CHANNEL_CAPACITY),
+                "server_call_capacity": self.config.server_call_capacity,
+                "server_call_admission_limit": self.config.server_call_admission_limit,
+                "server_call_admission_soft_limit": self.config.server_call_admission_soft_limit,
+                "server_call_admission_pacing_delay_ms": self.config.server_call_admission_pacing_delay_ms,
+                "server_overload_retry_after_secs": self.config.server_overload_retry_after_secs,
             },
             "session_store": {
                 "total": session_stats.total,
@@ -2969,6 +3144,10 @@ impl UnifiedCoordinator {
             .await;
         let fast_auto_accept_incoming_calls = config.fast_auto_accept_incoming_calls;
         let fast_auto_accept_queue_capacity = config.incoming_call_channel_capacity;
+        let server_call_admission_limit = config.server_call_admission_limit;
+        let server_call_admission_soft_limit = config.server_call_admission_soft_limit;
+        let server_call_admission_pacing_delay_ms = config.server_call_admission_pacing_delay_ms;
+        let server_overload_retry_after_secs = config.server_overload_retry_after_secs;
 
         let coordinator = Arc::new(Self {
             helpers,
@@ -3003,6 +3182,12 @@ impl UnifiedCoordinator {
             .with_fast_auto_accept_incoming_calls(
                 fast_auto_accept_incoming_calls,
                 fast_auto_accept_queue_capacity,
+            )
+            .with_server_call_admission(
+                server_call_admission_limit,
+                server_call_admission_soft_limit,
+                server_call_admission_pacing_delay_ms,
+                server_overload_retry_after_secs,
             );
 
         // SIP_API_DESIGN_2 Phase D — give the handler a weak handle

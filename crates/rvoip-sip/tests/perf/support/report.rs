@@ -226,6 +226,15 @@ impl ScenarioReport {
         for (k, v) in self.results.iter() {
             println!("   {:<22}  {}", k, v);
         }
+        if !self.diagnostics.is_empty() {
+            let keys = self
+                .diagnostics
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(" diagnostics: {keys}");
+        }
         println!(" latency:");
         for snap in &self.latencies {
             println!("{}", snap.format_row());

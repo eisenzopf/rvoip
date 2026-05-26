@@ -8,6 +8,7 @@
 //! cargo run -p rvoip-sip --release --example perf_listener -- 5060
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --diagnostics
+//! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --perf-profile pbx-media-server --diagnostics
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --fast-auto-accept --diagnostics
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --fast-auto-accept --diagnostics --transaction-dispatch-workers 4
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --fast-auto-accept --diagnostics --udp-parse-workers 4 --udp-parse-round-robin
@@ -26,7 +27,10 @@
 //! INVITE→200 OK path for validating it before making it a profile default.
 //! `--signaling-only-media` skips media-core RTP allocation while still
 //! emitting SDP, useful for isolating SIP signaling throughput from RTP bind
-//! cost.
+//! cost. `--perf-profile pbx-media-server` and
+//! `--perf-profile signaling-only-server-high-performance` apply YAML-backed
+//! performance recipes before any lower-level override flags. `--recipe-file`
+//! points at a custom YAML recipe book.
 //! `--transaction-timing-diagnostics` adds high-cardinality transaction
 //! manager timing histograms on top of `--diagnostics`.
 //! `--dialog-timing-diagnostics` adds high-cardinality dialog ingress and
@@ -49,6 +53,7 @@
 //! The process runs forever; SIGINT to terminate.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -59,6 +64,7 @@ use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPe
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::unified::Config;
 use rvoip_sip::cleanup_diag;
+use rvoip_sip::PerformanceConfig;
 use rvoip_sip_dialog::diagnostics as sip_retrans_diag;
 use rvoip_sip_transport::diagnostics as sip_udp_diag;
 use rvoip_sip_transport::UdpParseDispatch;
@@ -131,6 +137,8 @@ async fn main() {
     let mut advertised_arg = None;
     let mut diagnostics = PerfDiagnostics::default();
     let mut fast_auto_accept = false;
+    let mut perf_profile = "legacy".to_string();
+    let mut recipe_file: Option<PathBuf> = None;
     let mut high_cps_capacity = HIGH_CPS_CAPACITY;
     let mut udp_parse_workers = None;
     let mut udp_parse_queue_capacity = None;
@@ -172,6 +180,17 @@ async fn main() {
             }
             "--fast-auto-accept" => {
                 fast_auto_accept = true;
+            }
+            "--perf-profile" => {
+                perf_profile = args
+                    .next()
+                    .unwrap_or_else(|| panic!("--perf-profile requires a value"));
+            }
+            "--recipe-file" => {
+                let value = args
+                    .next()
+                    .unwrap_or_else(|| panic!("--recipe-file requires a value"));
+                recipe_file = Some(PathBuf::from(value));
             }
             "--high-cps-capacity" => {
                 high_cps_capacity = next_usize_arg(&mut args, "--high-cps-capacity");
@@ -328,6 +347,8 @@ async fn main() {
     let config = apply_perf_config(
         config,
         diagnostics,
+        perf_profile.clone(),
+        recipe_file.clone(),
         fast_auto_accept,
         high_cps_capacity,
         udp_parse_workers,
@@ -349,7 +370,12 @@ async fn main() {
         session_event_dispatcher_queue_capacity,
         signaling_only_media,
     );
-    print_effective_config(&config, high_cps_capacity);
+    print_effective_config(
+        &config,
+        high_cps_capacity,
+        &perf_profile,
+        recipe_file.as_deref(),
+    );
 
     let accepted = Arc::new(AtomicU64::new(0));
     let handler = CountingAccept {
@@ -466,6 +492,8 @@ fn print_sip_udp_diagnostics() {
 fn apply_perf_config(
     config: Config,
     diagnostics: PerfDiagnostics,
+    perf_profile: String,
+    recipe_file: Option<PathBuf>,
     fast_auto_accept: bool,
     high_cps_capacity: usize,
     udp_parse_workers: Option<usize>,
@@ -488,19 +516,33 @@ fn apply_perf_config(
     signaling_only_media: bool,
 ) -> Config {
     let media_session_capacity = high_cps_capacity.min(HIGH_CPS_RTP_PORT_CAPACITY);
-    let mut config = config
-        .with_high_cps_udp_auto_answer(high_cps_capacity)
-        .with_media_port_capacity(HIGH_CPS_RTP_PORT_START, HIGH_CPS_RTP_PORT_CAPACITY)
-        .with_media_session_capacity(media_session_capacity)
-        .with_sip_udp_diagnostics(diagnostics.summary)
-        .with_sip_transaction_timing_diagnostics(diagnostics.transaction_timing)
-        .with_sip_dialog_timing_diagnostics(diagnostics.dialog_timing)
-        .with_media_setup_diagnostics(diagnostics.summary)
-        .with_cleanup_diagnostics(diagnostics.summary)
-        .with_cleanup_diagnostic_events(diagnostics.cleanup_events)
-        .with_srtp_diagnostics(diagnostics.wire)
-        .with_rtp_diagnostics(diagnostics.wire)
-        .with_media_sdp_diagnostics(diagnostics.wire);
+    let mut config = if perf_profile == "legacy" {
+        config
+            .with_high_cps_udp_auto_answer(high_cps_capacity)
+            .with_media_port_capacity(HIGH_CPS_RTP_PORT_START, HIGH_CPS_RTP_PORT_CAPACITY)
+            .with_media_session_capacity(media_session_capacity)
+    } else {
+        let mut performance = PerformanceConfig::profile(perf_profile.clone())
+            .with_capacity(high_cps_capacity)
+            .with_signaling_only_rtp_port(9);
+        if let Some(path) = recipe_file {
+            performance = performance.with_recipe_path(path);
+        }
+        config
+            .try_with_performance_config(performance)
+            .unwrap_or_else(|e| {
+                panic!("perf_listener performance recipe '{perf_profile}' failed: {e}")
+            })
+    }
+    .with_sip_udp_diagnostics(diagnostics.summary)
+    .with_sip_transaction_timing_diagnostics(diagnostics.transaction_timing)
+    .with_sip_dialog_timing_diagnostics(diagnostics.dialog_timing)
+    .with_media_setup_diagnostics(diagnostics.summary)
+    .with_cleanup_diagnostics(diagnostics.summary)
+    .with_cleanup_diagnostic_events(diagnostics.cleanup_events)
+    .with_srtp_diagnostics(diagnostics.wire)
+    .with_rtp_diagnostics(diagnostics.wire)
+    .with_media_sdp_diagnostics(diagnostics.wire);
 
     if let Some(workers) = udp_parse_workers {
         config = config.with_sip_udp_parse_workers(workers);
@@ -562,9 +604,14 @@ fn apply_perf_config(
     }
 }
 
-fn print_effective_config(config: &Config, high_cps_capacity: usize) {
+fn print_effective_config(
+    config: &Config,
+    high_cps_capacity: usize,
+    perf_profile: &str,
+    recipe_file: Option<&std::path::Path>,
+) {
     println!(
-        "rvoip-sip perf_listener: high_cps_config capacity={} auto_180_ringing={} \
+        "rvoip-sip perf_listener: high_cps_config profile={} recipe_file={} capacity={} auto_180_ringing={} \
          auto_100_trying={} \
          fast_auto_accept_incoming_calls={} \
          sip_transport_dispatch_workers={:?} \
@@ -578,6 +625,10 @@ fn print_effective_config(config: &Config, high_cps_capacity: usize) {
          sip_invite_2xx_retransmit_max_due_per_tick={:?} \
          sip_dialog_dispatch_workers={:?} \
          sip_dialog_dispatch_queue_capacity={:?}",
+        perf_profile,
+        recipe_file
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "bundled".to_string()),
         high_cps_capacity,
         config.auto_180_ringing,
         config.auto_100_trying,
@@ -608,12 +659,18 @@ fn print_effective_config(config: &Config, high_cps_capacity: usize) {
     );
     println!(
         "rvoip-sip perf_listener: media range {}-{} requested_capacity={:?} \
-         media_session_capacity={:?} server_capacity={:?} mode={:?}",
+         media_session_capacity={:?} server_capacity={:?} \
+         server_admission_limit={:?} server_admission_soft_limit={:?} \
+         server_admission_pacing_delay_ms={:?} server_overload_retry_after_secs={:?} mode={:?}",
         config.media_port_start,
         config.media_port_end,
         config.media_port_capacity,
         config.media_session_capacity,
         config.server_call_capacity,
+        config.server_call_admission_limit,
+        config.server_call_admission_soft_limit,
+        config.server_call_admission_pacing_delay_ms,
+        config.server_overload_retry_after_secs,
         config.media_mode,
     );
     println!(

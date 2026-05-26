@@ -58,7 +58,11 @@ Environment:
   BETA_RUN_SIPP=1                Run SIPp. Defaults to a managed local rvoip target.
   BETA_SIPP_TARGET_HOST          SIPp target host. Defaults to managed local rvoip target.
   BETA_SIPP_TARGET_PORT          SIPp target port. Defaults to 35060 for managed target.
-  BETA_FULL_MEDIA_CPS            CPS list for full-media SIPp/perf profiles.
+  BETA_SIPP_CPS                  CPS list for standalone SIPp gate.
+  BETA_SIPP_PERF_PROFILE         Managed SIPp target recipe. Defaults to pbx-media-server.
+  BETA_PERF_PROFILE_MATRIX       Perf profile:CPS matrix. Defaults to endpoint, pbx-media-server,
+                                  and signaling-only-server-high-performance.
+  BETA_PERFORMANCE_RECIPE_FILE   Optional YAML recipe book path.
   RVOIP_PERF_MIN_SUCCESS_PCT     SIPp pass threshold. Defaults to 99.9.
   BETA_RUN_STRICT_UA=0           Disable the baresip strict-UA gate; fails with --require-external.
   BETA_RUN_LONG_SOAK=0           Disable the ignored soak test; fails with --require-external.
@@ -67,7 +71,7 @@ Environment:
                                   Soak RSS growth threshold. Defaults to Config's 10 MB/hr.
   RVOIP_PERF_APP_EVENT_CHANNEL_CAPACITY
                                   App-facing event buffer capacity for perf soaks.
-                                  Defaults to Config's beta profile value.
+                                  Defaults to Config's recipe value.
   RVOIP_PERF_RSS_TAIL_WINDOW_SECS
                                   Sustained RSS slope window. Defaults to 60.
 EOF
@@ -423,7 +427,8 @@ write_summary_gate_table_header() {
 - cargo: \`$(captured_first_line "$env_dir/cargo-version.txt")\`
 - host: \`$(captured_first_line "$env_dir/host-uname.txt")\`
 - docker: \`$(captured_first_line "$env_dir/docker-version.txt")\`
-- beta_full_media_cps: \`${BETA_FULL_MEDIA_CPS:-30 100 300 1000 2000}\`
+- beta_profile_matrix: \`${BETA_PERF_PROFILE_MATRIX:-endpoint:30 pbx-media-server:30,100,300,1000,2000 signaling-only-server-high-performance:30,100,300,1000,2000}\`
+- beta_performance_recipe_file: \`${BETA_PERFORMANCE_RECIPE_FILE:-bundled config/performance-recipes.yaml}\`
 - beta_pbx_provider: \`${BETA_PBX_PROVIDER:-both}\`
 - beta_pbx_api: \`${BETA_PBX_API:-all}\`
 - beta_pbx_scenario: \`${BETA_PBX_SCENARIO:-all}\`
@@ -480,10 +485,13 @@ write_report_manifest() {
 - \`sipp/run_summary.md\`
 - \`sipp/analysis.md\`
 - \`strict-ua/summary.md\`
+- \`perf-results/\`
 
-The report directory is a packaged copy of the beta-gate artifact tree. Logs,
-matrices, redacted environment evidence, PBX lifecycle snapshots, and scenario
-metadata are kept with their original relative paths.
+The report directory is a packaged copy of the beta-gate artifact tree plus
+the current raw \`target/perf-results\` files. Logs, matrices, redacted
+environment evidence, PBX lifecycle snapshots, scenario metadata, and perf
+JSON/markdown outputs are kept with their original relative paths where
+possible.
 EOF
 }
 
@@ -504,6 +512,12 @@ package_beta_report() {
 
   if [ "$artifact_abs" != "$report_abs" ]; then
     (cd "$ARTIFACT_DIR" && tar cf - .) | (cd "$report_dir" && tar xf -)
+  fi
+
+  if [ -d "$WORKSPACE_ROOT/target/perf-results" ]; then
+    mkdir -p "$report_dir/perf-results"
+    (cd "$WORKSPACE_ROOT/target/perf-results" && tar cf - .) | \
+      (cd "$report_dir/perf-results" && tar xf -)
   fi
 
   write_report_manifest "$report_dir"
@@ -619,14 +633,20 @@ start_managed_sipp_target() {
   echo "==> SIPp standalone target start"
   started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   start_epoch="$(date +%s)"
+  local perf_profile="${BETA_SIPP_PERF_PROFILE:-pbx-media-server}"
+  local recipe_file="${BETA_PERFORMANCE_RECIPE_FILE:-}"
+  local listener_cmd=("$WORKSPACE_ROOT/target/release/examples/perf_listener" "$port" "$host" --diagnostics --perf-profile "$perf_profile")
+  if [ -n "$recipe_file" ]; then
+    listener_cmd+=(--recipe-file "$recipe_file")
+  fi
   {
     echo "gate: SIPp standalone target start"
     echo "started_at_utc: $started_at"
     echo "workspace: $WORKSPACE_ROOT"
-    echo "command: target/release/examples/perf_listener $port $host --diagnostics"
+    echo "command: ${listener_cmd[*]}"
     echo
   } > "$log"
-  "$WORKSPACE_ROOT/target/release/examples/perf_listener" "$port" "$host" --diagnostics >> "$log" 2>&1 &
+  "${listener_cmd[@]}" >> "$log" 2>&1 &
   SIPP_LISTENER_PID=$!
   for _ in $(seq 1 100); do
     if grep -q 'listening on' "$log" 2>/dev/null; then
@@ -688,7 +708,7 @@ run_sipp_standalone_gate() {
     start_managed_sipp_target
   fi
 
-  local cps="${BETA_FULL_MEDIA_CPS:-30 100 300 1000 2000}"
+  local cps="${BETA_SIPP_CPS:-30 100 300 1000 2000}"
   run_gate "SIPp standalone matrix" env \
     RVOIP_PERF_RESULTS="$ARTIFACT_DIR/sipp" \
     RVOIP_PERF_CPS="$cps" \
@@ -760,7 +780,18 @@ run_interop_gates() {
 }
 
 run_perf_gates() {
-  run_gate "perf call setup CPS" cargo test -p rvoip-sip --release --features perf-tests --test perf_call_setup_cps -- --nocapture
+  local profile_spec
+  for profile_spec in ${BETA_PERF_PROFILE_MATRIX:-endpoint:30 pbx-media-server:30,100,300,1000,2000 signaling-only-server-high-performance:30,100,300,1000,2000}; do
+    local profile="${profile_spec%%:*}"
+    local cps="${profile_spec#*:}"
+    local perf_env=(RVOIP_PERF_PROFILE="$profile" RVOIP_PERF_SWEEP_CPS="$cps")
+    if [ -n "${BETA_PERFORMANCE_RECIPE_FILE:-}" ]; then
+      perf_env+=(RVOIP_PERF_RECIPE_FILE="$BETA_PERFORMANCE_RECIPE_FILE")
+    fi
+    run_gate "perf call setup CPS ($profile)" env \
+      "${perf_env[@]}" \
+      cargo test -p rvoip-sip --release --features perf-tests --test perf_call_setup_cps -- --nocapture
+  done
   run_gate "perf registration throughput" cargo test -p rvoip-sip --release --features perf-tests --test perf_registration_throughput -- --nocapture
   run_gate "perf concurrent active calls" cargo test -p rvoip-sip --release --features perf-tests --test perf_concurrent_active_calls -- --nocapture
   run_gate "perf RTP steady state" cargo test -p rvoip-sip --release --features perf-tests --test perf_rtp_steady_state -- --nocapture

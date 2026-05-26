@@ -24,7 +24,7 @@ use rvoip_infra_common::events::cross_crate::{
 use rvoip_infra_common::planes::routing::RoutableEvent;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
@@ -74,6 +74,24 @@ struct QueuedDialogToSessionEvent {
     queued_at: Instant,
     kind: &'static str,
     route_key: Option<String>,
+}
+
+struct ServerCallAdmissionGuard {
+    pending: Arc<AtomicUsize>,
+}
+
+impl Drop for ServerCallAdmissionGuard {
+    fn drop(&mut self) {
+        self.pending.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+enum ServerCallAdmissionDecision {
+    Admit(Option<ServerCallAdmissionGuard>),
+    Reject {
+        observed_sessions: usize,
+        hard_limit: usize,
+    },
 }
 
 #[derive(Clone)]
@@ -256,6 +274,28 @@ pub struct SessionCrossCrateEventHandler {
 
     /// Immediately accept inbound calls after the state machine records them.
     fast_auto_accept_incoming_calls: bool,
+
+    /// Config-owned cap for server-side inbound call admission.
+    server_call_admission_limit: Option<usize>,
+
+    /// Soft threshold where server-side admission starts pacing.
+    server_call_admission_soft_limit: Option<usize>,
+
+    /// Delay used while above the soft threshold and below hard overload.
+    server_call_admission_pacing_delay_ms: Option<u64>,
+
+    /// Retry-After seconds for SIP overload rejections.
+    server_overload_retry_after_secs: Option<u32>,
+
+    /// Hysteresis state: once hard overload is reached, reject until below soft.
+    server_call_admission_overloaded: Arc<AtomicBool>,
+
+    /// Inbound INVITEs admitted but not yet inserted into the session store.
+    server_call_admission_pending: Arc<AtomicUsize>,
+
+    /// Serializes admission check/reserve so the hard limit is meaningful with
+    /// multiple dialog-to-session workers.
+    server_call_admission_lock: Arc<Mutex<()>>,
 
     /// Total capacity for the direct dialog-to-session dispatcher queues.
     dialog_event_dispatch_queue_capacity: usize,
@@ -887,6 +927,13 @@ impl SessionCrossCrateEventHandler {
             registry,
             incoming_call_tx: None,
             fast_auto_accept_incoming_calls: false,
+            server_call_admission_limit: None,
+            server_call_admission_soft_limit: None,
+            server_call_admission_pacing_delay_ms: None,
+            server_overload_retry_after_secs: Some(1),
+            server_call_admission_overloaded: Arc::new(AtomicBool::new(false)),
+            server_call_admission_pending: Arc::new(AtomicUsize::new(0)),
+            server_call_admission_lock: Arc::new(Mutex::new(())),
             dialog_event_dispatch_queue_capacity: 1024,
             state_machine_event_rx: None,
             outbound_flow_last_refresh: Arc::new(DashMap::new()),
@@ -916,6 +963,13 @@ impl SessionCrossCrateEventHandler {
             registry,
             incoming_call_tx: Some(incoming_call_tx),
             fast_auto_accept_incoming_calls: false,
+            server_call_admission_limit: None,
+            server_call_admission_soft_limit: None,
+            server_call_admission_pacing_delay_ms: None,
+            server_overload_retry_after_secs: Some(1),
+            server_call_admission_overloaded: Arc::new(AtomicBool::new(false)),
+            server_call_admission_pending: Arc::new(AtomicUsize::new(0)),
+            server_call_admission_lock: Arc::new(Mutex::new(())),
             dialog_event_dispatch_queue_capacity: 1024,
             state_machine_event_rx: None,
             outbound_flow_last_refresh: Arc::new(DashMap::new()),
@@ -982,6 +1036,20 @@ impl SessionCrossCrateEventHandler {
     ) -> Self {
         self.fast_auto_accept_incoming_calls = enabled;
         self.dialog_event_dispatch_queue_capacity = queue_capacity.max(1);
+        self
+    }
+
+    pub(crate) fn with_server_call_admission(
+        mut self,
+        limit: Option<usize>,
+        soft_limit: Option<usize>,
+        pacing_delay_ms: Option<u64>,
+        retry_after_secs: Option<u32>,
+    ) -> Self {
+        self.server_call_admission_limit = limit;
+        self.server_call_admission_soft_limit = soft_limit;
+        self.server_call_admission_pacing_delay_ms = pacing_delay_ms;
+        self.server_overload_retry_after_secs = retry_after_secs;
         self
     }
 
@@ -1367,6 +1435,136 @@ impl SessionCrossCrateEventHandler {
         Ok(())
     }
 
+    async fn acquire_server_call_admission(&self) -> ServerCallAdmissionDecision {
+        let Some(hard_limit) = self.server_call_admission_limit else {
+            return ServerCallAdmissionDecision::Admit(None);
+        };
+        let soft_limit = self
+            .server_call_admission_soft_limit
+            .unwrap_or(hard_limit)
+            .min(hard_limit);
+        let pacing_delay = self
+            .server_call_admission_pacing_delay_ms
+            .map(Duration::from_millis);
+        let mut paced_once = false;
+
+        loop {
+            let _lock = self.server_call_admission_lock.lock().await;
+            let observed_sessions = self
+                .state_machine
+                .store
+                .sessions
+                .len()
+                .saturating_add(self.server_call_admission_pending.load(Ordering::Relaxed));
+
+            if self
+                .server_call_admission_overloaded
+                .load(Ordering::Relaxed)
+            {
+                if observed_sessions < soft_limit {
+                    self.server_call_admission_overloaded
+                        .store(false, Ordering::Relaxed);
+                } else {
+                    return ServerCallAdmissionDecision::Reject {
+                        observed_sessions,
+                        hard_limit,
+                    };
+                }
+            }
+
+            if observed_sessions >= hard_limit {
+                self.server_call_admission_overloaded
+                    .store(true, Ordering::Relaxed);
+                return ServerCallAdmissionDecision::Reject {
+                    observed_sessions,
+                    hard_limit,
+                };
+            }
+
+            if !paced_once {
+                if let (Some(delay), Some(configured_soft_limit)) =
+                    (pacing_delay, self.server_call_admission_soft_limit)
+                {
+                    if observed_sessions >= configured_soft_limit {
+                        drop(_lock);
+                        tokio::time::sleep(delay).await;
+                        paced_once = true;
+                        continue;
+                    }
+                }
+            }
+
+            self.server_call_admission_pending
+                .fetch_add(1, Ordering::Relaxed);
+            return ServerCallAdmissionDecision::Admit(Some(ServerCallAdmissionGuard {
+                pending: self.server_call_admission_pending.clone(),
+            }));
+        }
+    }
+
+    async fn reject_incoming_call_for_overload(
+        &self,
+        transaction_id: &str,
+        observed_sessions: usize,
+        limit: usize,
+    ) -> Result<()> {
+        let transaction_id = transaction_id
+            .parse::<rvoip_sip_dialog::transaction::TransactionKey>()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "server admission limit reached, but inbound transaction id '{}' is invalid: {}",
+                    transaction_id,
+                    e
+                )
+            })?;
+
+        let mut response = self
+            .dialog_adapter
+            .dialog_api
+            .build_response(
+                &transaction_id,
+                rvoip_sip_core::StatusCode::ServiceUnavailable,
+                None,
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to build server overload response for transaction {}: {}",
+                    transaction_id,
+                    e
+                )
+            })?;
+
+        if let Some(seconds) = self.server_overload_retry_after_secs {
+            response
+                .headers
+                .push(rvoip_sip_core::types::TypedHeader::RetryAfter(
+                    rvoip_sip_core::types::retry_after::RetryAfter::new(seconds),
+                ));
+        }
+
+        self.dialog_adapter
+            .dialog_api
+            .send_response(&transaction_id, response)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to send server overload response for transaction {}: {}",
+                    transaction_id,
+                    e
+                )
+            })?;
+
+        warn!(
+            observed_sessions,
+            limit,
+            soft_limit = ?self.server_call_admission_soft_limit,
+            retry_after_secs = ?self.server_overload_retry_after_secs,
+            "Rejected inbound INVITE with 503 because server_call_admission_limit was reached"
+        );
+        Ok(())
+    }
+
     async fn handle_incoming_call_parts(
         &self,
         session_id_str: String,
@@ -1418,11 +1616,29 @@ impl SessionCrossCrateEventHandler {
         let session_id = SessionId(session_id_str);
         let setup_guard = cleanup_diag::stage_guard(CleanupStage::IncomingCallSetup, &session_id.0);
 
+        let admission_guard = match self.acquire_server_call_admission().await {
+            ServerCallAdmissionDecision::Admit(guard) => guard,
+            ServerCallAdmissionDecision::Reject {
+                observed_sessions,
+                hard_limit,
+            } => {
+                self.reject_incoming_call_for_overload(
+                    transaction_id,
+                    observed_sessions,
+                    hard_limit,
+                )
+                .await?;
+                setup_guard.finish_success();
+                return Ok(());
+            }
+        };
+
         self.state_machine
             .store
             .create_session(session_id.clone(), Role::UAS, true)
             .await
             .map_err(|e| SessionError::InternalError(format!("Failed to create session: {}", e)))?;
+        drop(admission_guard);
 
         let mut session = self
             .state_machine

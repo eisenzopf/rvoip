@@ -466,6 +466,7 @@ pub use api::endpoint::{
     EndpointRegistrationInfo, EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode,
     EndpointTransport,
 };
+pub use api::performance::{PerformanceConfig, PerformanceRecipe, PerformanceRecipeBook};
 pub use api::stream_peer::{EventReceiver, PeerControl, StreamPeer, StreamPeerBuilder};
 
 // Built-in handlers
@@ -554,10 +555,11 @@ pub mod prelude {
         EndpointNetworkConfig, EndpointProfile, EndpointProfileName, EndpointRegistrationInfo,
         EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode, EndpointTransport, Event,
         EventReceiver, HeaderName, IncomingCall, IncomingCallGuard, MediaMode, MediaSecurityKeying,
-        MediaSecurityProfile, MediaSecurityState, PeerControl, Registration, RegistrationHandle,
-        RegistrationInfo, RegistrationStatus, Result, SessionError, SessionHandle, SipContactMode,
-        SipReason, SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection, SrtpSuitePolicy,
-        StreamPeer, StreamPeerBuilder, SubscriptionState, TransferDialogMatcher, TransferKind,
+        MediaSecurityProfile, MediaSecurityState, PeerControl, PerformanceConfig,
+        PerformanceRecipeBook, Registration, RegistrationHandle, RegistrationInfo,
+        RegistrationStatus, Result, SessionError, SessionHandle, SipContactMode, SipReason,
+        SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection, SrtpSuitePolicy, StreamPeer,
+        StreamPeerBuilder, SubscriptionState, TransferDialogMatcher, TransferKind,
         TransferLifecycleOptions, TransferOutcome, TransferTargetEvidence, TransferWaitMode,
         TypedHeader,
     };

@@ -3,6 +3,7 @@
 //! Just builds the UnifiedCoordinator with configuration.
 //! No complex setup - the state table handles everything.
 
+use crate::api::performance::PerformanceConfig;
 use crate::api::unified::{Config, MediaMode, UnifiedCoordinator};
 use crate::errors::Result;
 use std::net::{IpAddr, SocketAddr};
@@ -94,9 +95,59 @@ impl SessionBuilder {
         self
     }
 
+    /// Set the server-side inbound call admission limit.
+    pub fn with_server_call_admission_limit(mut self, limit: usize) -> Self {
+        self.config = self.config.with_server_call_admission_limit(limit);
+        self
+    }
+
+    /// Set the soft threshold where server-side admission starts pacing.
+    pub fn with_server_call_admission_soft_limit(mut self, limit: usize) -> Self {
+        self.config = self.config.with_server_call_admission_soft_limit(limit);
+        self
+    }
+
+    /// Set the delay in milliseconds while above the soft admission threshold.
+    pub fn with_server_call_admission_pacing_delay_ms(mut self, delay_ms: u64) -> Self {
+        self.config = self
+            .config
+            .with_server_call_admission_pacing_delay_ms(delay_ms);
+        self
+    }
+
+    /// Set the `Retry-After` value used for server overload rejections.
+    pub fn with_server_overload_retry_after_secs(mut self, seconds: u32) -> Self {
+        self.config = self.config.with_server_overload_retry_after_secs(seconds);
+        self
+    }
+
     /// Apply the high-CPS UDP auto-answer profile.
     pub fn with_high_cps_udp_auto_answer(mut self, capacity: usize) -> Self {
         self.config = self.config.with_high_cps_udp_auto_answer(capacity);
+        self
+    }
+
+    /// Apply a YAML-backed performance recipe.
+    pub fn with_performance_config(mut self, performance: PerformanceConfig) -> Result<Self> {
+        self.config = self.config.try_with_performance_config(performance)?;
+        Ok(self)
+    }
+
+    /// Apply the PBX media server performance recipe.
+    pub fn with_pbx_media_server_performance(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_pbx_media_server_performance(capacity);
+        self
+    }
+
+    /// Apply the signaling-only high-performance server recipe.
+    pub fn with_signaling_only_server_high_performance(
+        mut self,
+        capacity: usize,
+        sdp_rtp_port: u16,
+    ) -> Self {
+        self.config = self
+            .config
+            .with_signaling_only_server_high_performance(capacity, sdp_rtp_port);
         self
     }
 
@@ -356,6 +407,10 @@ mod tests {
         let builder = SessionBuilder::new()
             .with_channel_capacity(256)
             .with_server_capacity(128)
+            .with_server_call_admission_limit(512)
+            .with_server_call_admission_soft_limit(480)
+            .with_server_call_admission_pacing_delay_ms(2)
+            .with_server_overload_retry_after_secs(2)
             .with_sip_transport_dispatch_workers(2)
             .with_sip_transport_dispatch_queue_capacity(4096)
             .with_sip_udp_socket_buffers(Some(65_536), Some(32_768))
@@ -380,6 +435,13 @@ mod tests {
             Some(4096)
         );
         assert_eq!(builder.config.server_call_capacity, Some(128));
+        assert_eq!(builder.config.server_call_admission_limit, Some(512));
+        assert_eq!(builder.config.server_call_admission_soft_limit, Some(480));
+        assert_eq!(
+            builder.config.server_call_admission_pacing_delay_ms,
+            Some(2)
+        );
+        assert_eq!(builder.config.server_overload_retry_after_secs, Some(2));
         assert_eq!(builder.config.sip_udp_recv_buffer_size, Some(65_536));
         assert_eq!(builder.config.sip_udp_send_buffer_size, Some(32_768));
         assert_eq!(builder.config.sip_udp_parse_workers, Some(4));

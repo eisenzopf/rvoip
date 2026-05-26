@@ -28,6 +28,7 @@ use crate::api::audio::{AudioReceiver, AudioSender, AudioStream};
 use crate::api::events::Event;
 use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::{IncomingCall, IncomingCallGuard};
+use crate::api::performance::PerformanceConfig;
 use crate::api::stream_peer::{EventReceiver, PeerControl, StreamPeer};
 use crate::api::unified::{
     Config, MediaMode, Registration, RegistrationHandle, RegistrationInfo, RegistrationStatus,
@@ -1180,6 +1181,8 @@ pub struct EndpointConfig {
     pub network: Option<EndpointNetworkConfig>,
     /// Media settings.
     pub media: Option<EndpointMediaConfig>,
+    /// Performance profile settings.
+    pub performance: Option<PerformanceConfig>,
     /// Whether automatic `180 Ringing` is sent for inbound INVITEs.
     pub auto_180_ringing: Option<bool>,
     /// Whether automatic `100 Trying` timer tasks are armed for inbound INVITEs.
@@ -1194,6 +1197,14 @@ pub struct EndpointConfig {
     pub app_event_channel_capacity: Option<usize>,
     /// Per-transaction command channel capacity.
     pub sip_transaction_command_channel_capacity: Option<usize>,
+    /// Server-side inbound call admission limit.
+    pub server_call_admission_limit: Option<usize>,
+    /// Soft threshold where server-side admission starts pacing.
+    pub server_call_admission_soft_limit: Option<usize>,
+    /// Delay in milliseconds while above the soft admission threshold.
+    pub server_call_admission_pacing_delay_ms: Option<u64>,
+    /// Retry-After seconds for server overload rejections.
+    pub server_overload_retry_after_secs: Option<u32>,
     /// RSS growth threshold used by perf soak release gates.
     #[cfg(feature = "perf-tests")]
     pub perf_max_rss_growth_mb_per_hr: Option<f64>,
@@ -1410,6 +1421,7 @@ pub struct EndpointBuilder {
     transport: EndpointTransport,
     sip_udp_parse_workers: Option<usize>,
     sip_udp_parse_queue_capacity: Option<usize>,
+    performance: Option<PerformanceConfig>,
     srtp_mode: Option<EndpointSrtpMode>,
     auto_180_ringing: Option<bool>,
     auto_100_trying: Option<bool>,
@@ -1418,6 +1430,10 @@ pub struct EndpointBuilder {
     cleanup_diagnostic_events: Option<bool>,
     app_event_channel_capacity: Option<usize>,
     sip_transaction_command_channel_capacity: Option<usize>,
+    server_call_admission_limit: Option<usize>,
+    server_call_admission_soft_limit: Option<usize>,
+    server_call_admission_pacing_delay_ms: Option<u64>,
+    server_overload_retry_after_secs: Option<u32>,
     #[cfg(feature = "perf-tests")]
     perf_max_rss_growth_mb_per_hr: Option<f64>,
     srtp_diagnostics: Option<bool>,
@@ -1455,6 +1471,7 @@ impl EndpointBuilder {
             transport: EndpointTransport::Udp,
             sip_udp_parse_workers: None,
             sip_udp_parse_queue_capacity: None,
+            performance: None,
             srtp_mode: None,
             auto_180_ringing: None,
             auto_100_trying: None,
@@ -1463,6 +1480,10 @@ impl EndpointBuilder {
             cleanup_diagnostic_events: None,
             app_event_channel_capacity: None,
             sip_transaction_command_channel_capacity: None,
+            server_call_admission_limit: None,
+            server_call_admission_soft_limit: None,
+            server_call_admission_pacing_delay_ms: None,
+            server_overload_retry_after_secs: None,
             #[cfg(feature = "perf-tests")]
             perf_max_rss_growth_mb_per_hr: None,
             srtp_diagnostics: None,
@@ -1489,6 +1510,9 @@ impl EndpointBuilder {
         }
         if let Some(profile) = config.profile {
             builder = builder.profile(profile.into());
+        }
+        if let Some(performance) = config.performance {
+            builder = builder.performance_config(performance);
         }
         if let Some(bind) = config.bind.or(config.network.as_ref().and_then(|n| n.bind)) {
             builder = builder.bind_addr(bind);
@@ -1523,6 +1547,18 @@ impl EndpointBuilder {
         }
         if let Some(capacity) = config.sip_transaction_command_channel_capacity {
             builder = builder.sip_transaction_command_channel_capacity(capacity);
+        }
+        if let Some(limit) = config.server_call_admission_limit {
+            builder = builder.server_call_admission_limit(limit);
+        }
+        if let Some(limit) = config.server_call_admission_soft_limit {
+            builder = builder.server_call_admission_soft_limit(limit);
+        }
+        if let Some(delay_ms) = config.server_call_admission_pacing_delay_ms {
+            builder = builder.server_call_admission_pacing_delay_ms(delay_ms);
+        }
+        if let Some(seconds) = config.server_overload_retry_after_secs {
+            builder = builder.server_overload_retry_after_secs(seconds);
         }
         #[cfg(feature = "perf-tests")]
         if let Some(limit) = config.perf_max_rss_growth_mb_per_hr {
@@ -1762,6 +1798,39 @@ impl EndpointBuilder {
         self
     }
 
+    /// Apply a YAML-backed performance recipe.
+    pub fn performance_config(mut self, performance: PerformanceConfig) -> Self {
+        self.performance = Some(performance);
+        self
+    }
+
+    /// Apply the PBX media server performance recipe.
+    pub fn pbx_media_server_performance(mut self, capacity: usize) -> Self {
+        self.performance = Some(PerformanceConfig::pbx_media_server(capacity));
+        self
+    }
+
+    /// Apply the signaling-only high-performance server recipe.
+    pub fn signaling_only_server_high_performance(mut self, capacity: usize) -> Self {
+        self.performance = Some(PerformanceConfig::signaling_only_server_high_performance(
+            capacity,
+        ));
+        self
+    }
+
+    /// Apply the signaling-only high-performance server recipe with an explicit SDP RTP port.
+    pub fn signaling_only_server_high_performance_with_port(
+        mut self,
+        capacity: usize,
+        sdp_rtp_port: u16,
+    ) -> Self {
+        self.performance = Some(
+            PerformanceConfig::signaling_only_server_high_performance(capacity)
+                .with_signaling_only_rtp_port(sdp_rtp_port),
+        );
+        self
+    }
+
     /// Enable or disable automatic `180 Ringing` on inbound INVITEs.
     pub fn auto_180_ringing(mut self, enabled: bool) -> Self {
         self.auto_180_ringing = Some(enabled);
@@ -1801,6 +1870,30 @@ impl EndpointBuilder {
     /// Set the per-transaction command channel capacity.
     pub fn sip_transaction_command_channel_capacity(mut self, capacity: usize) -> Self {
         self.sip_transaction_command_channel_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the server-side inbound call admission limit.
+    pub fn server_call_admission_limit(mut self, limit: usize) -> Self {
+        self.server_call_admission_limit = Some(limit);
+        self
+    }
+
+    /// Set the soft threshold where server-side admission starts pacing.
+    pub fn server_call_admission_soft_limit(mut self, limit: usize) -> Self {
+        self.server_call_admission_soft_limit = Some(limit);
+        self
+    }
+
+    /// Set the delay in milliseconds while above the soft admission threshold.
+    pub fn server_call_admission_pacing_delay_ms(mut self, delay_ms: u64) -> Self {
+        self.server_call_admission_pacing_delay_ms = Some(delay_ms);
+        self
+    }
+
+    /// Set the `Retry-After` value used for server overload rejections.
+    pub fn server_overload_retry_after_secs(mut self, seconds: u32) -> Self {
+        self.server_overload_retry_after_secs = Some(seconds);
         self
     }
 
@@ -1891,9 +1984,15 @@ impl EndpointBuilder {
             config.credentials = Some(Credentials::new(auth_username, password));
         }
 
-        let media_port_start = self.media_port_start.unwrap_or(config.media_port_start);
-        let media_port_end = self.media_port_end.unwrap_or(config.media_port_end);
-        config = config.with_media_ports(media_port_start, media_port_end);
+        if let Some(performance) = self.performance {
+            config = config.try_with_performance_config(performance)?;
+        }
+
+        if self.media_port_start.is_some() || self.media_port_end.is_some() {
+            let media_port_start = self.media_port_start.unwrap_or(config.media_port_start);
+            let media_port_end = self.media_port_end.unwrap_or(config.media_port_end);
+            config = config.with_media_ports(media_port_start, media_port_end);
+        }
         if let Some(addr) = self.media_public_addr {
             config.media_public_addr = Some(addr);
         }
@@ -1952,6 +2051,18 @@ impl EndpointBuilder {
         }
         if let Some(capacity) = self.sip_transaction_command_channel_capacity {
             config = config.with_sip_transaction_command_channel_capacity(capacity);
+        }
+        if let Some(limit) = self.server_call_admission_limit {
+            config = config.with_server_call_admission_limit(limit);
+        }
+        if let Some(limit) = self.server_call_admission_soft_limit {
+            config = config.with_server_call_admission_soft_limit(limit);
+        }
+        if let Some(delay_ms) = self.server_call_admission_pacing_delay_ms {
+            config = config.with_server_call_admission_pacing_delay_ms(delay_ms);
+        }
+        if let Some(seconds) = self.server_overload_retry_after_secs {
+            config = config.with_server_overload_retry_after_secs(seconds);
         }
         #[cfg(feature = "perf-tests")]
         if let Some(limit) = self.perf_max_rss_growth_mb_per_hr {
@@ -2465,6 +2576,109 @@ mod tests {
             parts.registrar.as_deref(),
             Some("sip:pbx.example.test;transport=tcp")
         );
+    }
+
+    #[test]
+    fn endpoint_json_performance_profile_maps_into_config() {
+        let config = serde_json::from_str::<EndpointConfig>(
+            r#"{
+                "name": "perf",
+                "performance": {
+                    "profile": "pbx-media-server",
+                    "capacity": 2000
+                },
+                "network": {
+                    "udpParseWorkers": 2
+                },
+                "sipTransactionCommandChannelCapacity": 256,
+                "serverCallAdmissionLimit": 3000,
+                "serverCallAdmissionSoftLimit": 2500,
+                "serverCallAdmissionPacingDelayMs": 3,
+                "serverOverloadRetryAfterSecs": 2
+            }"#,
+        )
+        .unwrap();
+
+        let parts = EndpointBuilder::from_config(config)
+            .unwrap()
+            .build_parts()
+            .unwrap();
+        assert!(parts.config.fast_auto_accept_incoming_calls);
+        assert_eq!(parts.config.media_mode, MediaMode::Enabled);
+        assert_eq!(parts.config.media_port_start, 16_384);
+        assert_eq!(parts.config.media_port_capacity, Some(49_152));
+        assert_eq!(parts.config.media_session_capacity, Some(2_000));
+        assert_eq!(parts.config.sip_udp_parse_workers, Some(2));
+        assert_eq!(
+            parts.config.sip_udp_parse_dispatch,
+            Some(rvoip_sip_transport::UdpParseDispatch::RoundRobin)
+        );
+        assert_eq!(
+            parts.config.sip_transaction_command_channel_capacity,
+            Some(256)
+        );
+        assert_eq!(parts.config.server_call_capacity, Some(2_000));
+        assert_eq!(parts.config.server_call_admission_limit, Some(3_000));
+        assert_eq!(parts.config.server_call_admission_soft_limit, Some(2_500));
+        assert_eq!(parts.config.server_call_admission_pacing_delay_ms, Some(3));
+        assert_eq!(parts.config.server_overload_retry_after_secs, Some(2));
+    }
+
+    #[test]
+    fn endpoint_json_endpoint_performance_recipe_is_default_shape() {
+        let config = serde_json::from_str::<EndpointConfig>(
+            r#"{
+                "name": "softphone",
+                "performance": {
+                    "profile": "endpoint"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let parts = EndpointBuilder::from_config(config)
+            .unwrap()
+            .build_parts()
+            .unwrap();
+        assert!(parts.config.auto_180_ringing);
+        assert!(parts.config.auto_100_trying);
+        assert!(!parts.config.fast_auto_accept_incoming_calls);
+        assert_eq!(parts.config.media_mode, MediaMode::Enabled);
+        assert_eq!(parts.config.sip_udp_parse_workers, None);
+        assert_eq!(parts.config.sip_transaction_command_channel_capacity, None);
+    }
+
+    #[test]
+    fn endpoint_json_signaling_only_performance_profile_maps_into_config() {
+        let config = serde_json::from_str::<EndpointConfig>(
+            r#"{
+                "name": "perf",
+                "performance": {
+                    "profile": "signaling-only-server-high-performance",
+                    "capacity": 2000,
+                    "signalingOnlyRtpPort": 4000
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let parts = EndpointBuilder::from_config(config)
+            .unwrap()
+            .build_parts()
+            .unwrap();
+        assert_eq!(
+            parts.config.media_mode,
+            MediaMode::SignalingOnly { sdp_rtp_port: 4000 }
+        );
+        assert_eq!(parts.config.sip_udp_parse_workers, Some(4));
+        assert_eq!(
+            parts.config.sip_transaction_command_channel_capacity,
+            Some(128)
+        );
+        assert_eq!(parts.config.server_call_capacity, Some(2_000));
+        assert_eq!(parts.config.server_call_admission_limit, Some(2_000));
+        assert_eq!(parts.config.server_call_admission_soft_limit, Some(1_800));
+        assert_eq!(parts.config.server_call_admission_pacing_delay_ms, Some(1));
     }
 
     #[test]

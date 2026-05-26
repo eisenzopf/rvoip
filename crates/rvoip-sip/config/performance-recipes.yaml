@@ -1,0 +1,59 @@
+version: 1
+
+performanceProfiles:
+  endpoint:
+    description: "Default endpoint behavior with no high-CPS server tuning."
+    config: {}
+
+  pbx-media-server:
+    description: "PBX-style UDP auto-answer server profile with media allocation enabled."
+    requiresCapacity: true
+    config:
+      channelCapacity: "$capacity"
+      auto180Ringing: false
+      auto100Trying: false
+      fastAutoAcceptIncomingCalls: true
+      sipUdpRecvBufferSize: 8388608
+      sipUdpSendBufferSize: 8388608
+      sipUdpParseWorkers: 4
+      sipUdpParseQueueCapacity: "$capacity"
+      sipUdpParseDispatch: round-robin
+      sipTransactionDispatchWorkers: 2
+      sipDialogDispatchWorkers: 4
+      sessionEventDispatcherWorkers: 4
+      sipTransactionCommandChannelCapacity: 128
+      serverCallCapacity: "$capacity"
+      serverCallAdmissionLimit: "$capacity"
+      serverCallAdmissionSoftLimit: "$capacity90Percent"
+      serverCallAdmissionPacingDelayMs: 1
+      serverOverloadRetryAfterSecs: 1
+      mediaMode: enabled
+      mediaPortCapacity:
+        start: 16384
+        capacity: 49152
+      mediaSessionCapacity: "$capacity"
+
+  signaling-only-server-high-performance:
+    description: "High-performance UDP auto-answer server profile for SIP signaling-only runs."
+    requiresCapacity: true
+    config:
+      channelCapacity: "$capacity"
+      auto180Ringing: false
+      auto100Trying: false
+      fastAutoAcceptIncomingCalls: true
+      sipUdpRecvBufferSize: 8388608
+      sipUdpSendBufferSize: 8388608
+      sipUdpParseWorkers: 4
+      sipUdpParseQueueCapacity: "$capacity"
+      sipUdpParseDispatch: round-robin
+      sipTransactionDispatchWorkers: 2
+      sipDialogDispatchWorkers: 4
+      sessionEventDispatcherWorkers: 4
+      sipTransactionCommandChannelCapacity: 128
+      serverCallCapacity: "$capacity"
+      serverCallAdmissionLimit: "$capacity"
+      serverCallAdmissionSoftLimit: "$capacity90Percent"
+      serverCallAdmissionPacingDelayMs: 1
+      serverOverloadRetryAfterSecs: 1
+      mediaMode: signaling-only
+      signalingOnlyRtpPort: "$signalingOnlyRtpPort"
