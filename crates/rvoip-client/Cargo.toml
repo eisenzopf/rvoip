@@ -1,0 +1,51 @@
+[package]
+name = "rvoip-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+description = "Client-side SDK for mobile / web / desktop / embedded apps that speak the Universal Conversation Transport Protocol (UCTP). Wraps rvoip-uctp + rvoip-sip + rvoip-webrtc behind one Client / SessionHandle / InboundEvent surface."
+
+[lints]
+workspace = true
+
+# Per `INTERFACE_DESIGN.md` §15 the client SDK depends on the
+# `rvoip-core-traits` type surface (not `rvoip-core` itself — the
+# orchestrator implementation crate is server-side only). Enforced by
+# workspace `deny.toml` (`rvoip-client` is NOT in the
+# `rvoip-core` wrappers allow-list).
+[dependencies]
+rvoip-core-traits = { workspace = true }
+
+# Per-protocol native client surfaces. Each optional so consumers
+# compile in only what they need. The unifying `Client` dispatches
+# to the matching native client by URL scheme at `connect` time.
+rvoip-uctp        = { workspace = true, optional = true }
+rvoip-sip         = { workspace = true, optional = true }
+rvoip-webrtc      = { workspace = true, optional = true }
+
+tokio       = { workspace = true }
+async-trait = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+chrono      = { workspace = true }
+
+[features]
+# Default: UCTP-native client only. SIP / WebRTC are interop and
+# pulled in only when the consumer needs them (browser softphone
+# vs. SIP softphone vs. pure UCTP app).
+default = ["uctp"]
+uctp    = ["dep:rvoip-uctp"]
+sip     = ["dep:rvoip-sip"]
+webrtc  = ["dep:rvoip-webrtc"]
+full    = ["uctp", "sip", "webrtc"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

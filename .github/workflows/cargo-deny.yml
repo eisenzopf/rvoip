@@ -1,0 +1,28 @@
+# cargo-deny — enforces the dependency-direction guard in deny.toml.
+#
+# Specifically prevents adapter crates from regressing back to a
+# direct `rvoip-core` dep (they should consume the type / trait
+# surface from `rvoip-core-traits`). See GAP_PLAN.md V2.A.10.
+#
+# Runs on every push + PR. Cheap: cargo-deny is a single static
+# binary that operates on the lockfile.
+
+name: cargo-deny
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+  workflow_dispatch: {}
+
+jobs:
+  bans:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # Run only the bans check for now. Tighten with `advisories`
+          # and `licenses` checks once the workspace is closer to v1.
+          command: check bans sources

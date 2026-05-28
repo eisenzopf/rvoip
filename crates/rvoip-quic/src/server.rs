@@ -433,6 +433,15 @@ async fn spawn_peer_session(
                         connection_id: connid,
                         snapshot,
                     }),
+                    UctpSessionEvent::StepUpResponse {
+                        connid,
+                        method,
+                        credential,
+                    } => connid.map(|c| AdapterEvent::StepUpResponse {
+                        connection_id: c,
+                        method,
+                        credential,
+                    }),
                 };
                 if let Some(ev) = adapter_event {
                     let _ = events_tx.send(ev).await;

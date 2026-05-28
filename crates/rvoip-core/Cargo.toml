@@ -45,6 +45,15 @@ uuid.workspace = true
 # Examples — sip_only_orchestrator demonstrates the cross-transport seam by
 # registering rvoip-sip's SipAdapter against a rvoip-core Orchestrator.
 rvoip-sip = { path = "../rvoip-sip" }
+# cross_transport_bridge proves SIP + WebRTC + QUIC adapters all
+# register with one Orchestrator and exercises bridge_connections
+# across transport pairs.
+rvoip-webrtc = { path = "../rvoip-webrtc" }
+rvoip-quic = { path = "../rvoip-quic" }
+rvoip-uctp = { path = "../rvoip-uctp" }
+rvoip-auth-core = { path = "../auth-core" }
+quinn = { workspace = true }
+rustls = { workspace = true }
 # P5 tests use no-op providers + VecRecordingSink from rvoip-harness to
 # exercise the AI / recording dispatch.
 rvoip-harness = { path = "../rvoip-harness" }
@@ -53,6 +62,10 @@ tracing-subscriber.workspace = true
 [[example]]
 name = "sip_only_orchestrator"
 path = "examples/sip_only_orchestrator.rs"
+
+[[example]]
+name = "cross_transport_bridge"
+path = "examples/cross_transport_bridge.rs"
 
 [features]
 # P11 — feature flags per INTERFACE_DESIGN.md §2.2. The "shape" flags

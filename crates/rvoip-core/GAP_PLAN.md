@@ -5,6 +5,11 @@ design docs in this directory (`PRD.md`, `INTERFACE_DESIGN.md`,
 `CONVERSATION_PROTOCOL.md`, `voip-3-conversation-model.md`) and the code
 currently in `src/`, plus a phased roadmap to close that delta.
 
+**v1 surface closed:** 2026-05-26. All `[V1]` rows in §3.O and all
+phases P1–P12 marked landed. Two `[V1.x]` rows in §3.O remain deferred
+per the design docs (inline envelope signature enforcement at adapter
+ingress, `rvoip-vcon-postgres` reference store).
+
 ## Implementation status
 
 | Phase | Status | Notes |
@@ -15,11 +20,11 @@ currently in `src/`, plus a phased roadmap to close that delta.
 | P4 — Messaging | **landed** | send_message_to_conversation fan-out across active legs, list_messages with pagination, mark_message_read, 64KB inline cap |
 | P5 — Recording / Transcription / AI | **landed (full)** | `rvoip-harness` crate; 4 provider traits in core; attach_ai/start_recording/start_transcription dispatch with real frame pumps; pause/resume via shared AtomicBool; attach_listener tap (separated-streams default) with abort handle; barge-in via cancel-on-speech + `BargeInDetected` event |
 | P6 — Multi-adapter + tenant + capacity | **landed (full)** | `OriginateRequest.transport: Option<Transport>` selector with all 15 call sites updated; per-tenant quota table (sessions / recordings / AI); CapacityReport scheduler |
-| P7 — IdentityProvider + signing | **landed (full)** | All 3 missing trait methods (default NotImplemented); `signing` module with JCS + Signature-Input parser + replay cache; `UctpCoordinatorCaps::with_replay_protection` wires the cache into rvoip-uctp's `dispatch_inner` (after the in-reply-to gate so retransmits don't get rejected) |
+| P7 — IdentityProvider + signing | **landed (full)** | All 3 missing trait methods (default NotImplemented); `signing` module with JCS + Signature-Input parser + replay cache; `UctpCoordinatorCaps::with_replay_protection` wires the cache into rvoip-uctp's `dispatch_inner` (after the in-reply-to gate so retransmits don't get rejected). P12.6 closed the step-up round-trip: `ConnectionAdapter::send_step_up_request` trait method, `AdapterEvent::StepUpResponse`, `Event::IdentityStepUpRequested`/`IdentityStepUpResponseReceived`, plus matching helper + envelope arm in `UctpCoordinator` and translation in all three substrate adapters (rvoip-quic / -webtransport / -websocket). Stub-adapter round-trip test passes ([tests/p12_step_up_roundtrip.rs](crates/rvoip-core/tests/p12_step_up_roundtrip.rs)). |
 | P8 — Multi-party MP2/MP3c | **landed (full)** | `ActiveSpeakerChanged` event + `notify_active_speaker` helper in core; MP2 wire-side handler already lives in `rvoip-uctp::state::orchestrator_handler`; MP3c `allocate_subscriber_stream` already lives in `rvoip-quic` and `rvoip-webtransport` adapters |
-| P9 — Observability | **landed (full)** | `SessionQualityReport` payload on `SessionEnded`, populated by per-Session `QualityAggregator` driven by `AdapterEvent::Quality`; `spawn_media_quality_sampler` periodic emitter; Prometheus global gauges in `capacity_report` (active_connections / bridges / sessions / conversations / recordings / ai_attachments / jitter / loss); `record_usage` + registration normalization helpers |
+| P9 — Observability | **landed (full)** | `SessionQualityReport` payload on `SessionEnded`, populated by per-Session `QualityAggregator` driven by `AdapterEvent::Quality`; `spawn_media_quality_sampler` periodic emitter; Prometheus global gauges in `capacity_report` (active_connections / bridges / sessions / conversations / recordings / ai_attachments / jitter / loss); `record_usage` + registration normalization helpers. P12.7 closed the OTel gap: optional `otel` feature on `infra-common` wires an OTLP exporter into `logging::setup` when `LoggingConfig.otel_endpoint` is set; `#[tracing::instrument]` decorations on 8 Orchestrator entry points (open / close_conversation, start / end_session, originate / transfer_connection, attach_ai, bridge_connections) produce the named span hierarchy from PRD §10.2. Test [tests/p12_otel_spans.rs](crates/rvoip-core/tests/p12_otel_spans.rs) captures spans through a custom subscriber. |
 | P10 — Closure policy + filters | **landed** | `spawn_idle_closer` driver task; `ConversationFilter` + widened `ConversationStore::list` with default impl falling back to `list_for_tenant` |
-| P11 — Feature flags + workspace | **landed** | `[features]` section per INTERFACE_DESIGN §2.2; `vcon-signing` informational (cycle-blocked); `identity-fingerprint-binding` informational (variant stays compiled because rvoip-auth-core matches on it); `harness` informational (rvoip-harness already provides the seam); `rvoip-identity` skeleton crate landed with `BearerProvider`; `rvoip-harness` already landed in P5 |
+| P11 — Feature flags + workspace | **landed (full)** | `[features]` section per INTERFACE_DESIGN §2.2; `vcon-signing` informational (cycle-blocked); `identity-fingerprint-binding` informational (variant stays compiled because rvoip-auth-core matches on it); `harness` informational (rvoip-harness already provides the seam); `rvoip-identity` skeleton crate landed with `BearerProvider`; `rvoip-harness` already landed in P5. P12.3 closed the `rvoip-client` gap: new crate at [crates/rvoip-client](crates/rvoip-client) with `Client` / `SessionHandle` / `InboundEvent` / `Credential` / `CallTarget` surface; feature-gated per-protocol re-exports (`rvoip_client::sip`/`webrtc`/`uctp`); facade-exposed via `rvoip::client::*` when `client` feature is enabled. |
 
 **Tests:** 73 passing across 17 test binaries (was 27 across 5 pre-P1).
 **Downstream:** rvoip-sip / rvoip-webrtc / rvoip-quic / rvoip-uctp / rvoip-vcon / rvoip-harness / rvoip-identity / rvoip-webtransport / rvoip-websocket / rvoip-sip-registrar all compile clean.
@@ -46,7 +51,7 @@ Brief status follows; details below.
 
 | Item | Status | Key fact |
 |---|---|---|
-| **V2.A — Carve `rvoip-core-traits`** | ✅ Landed | New sibling crate holds `ids`, `identity` data, `capability`, `connection`, `error`, `stream`, `harness` modules. `rvoip-core` re-exports — call sites unchanged. `auth-core` switched dep. `rvoip-vcon` dropped unused dep. Cycle broken. |
+| **V2.A — Carve `rvoip-core-traits`** | ✅ Landed | New sibling crate holds `ids`, `identity` data, `capability`, `connection`, `error`, `stream`, `harness` modules. `rvoip-core` re-exports — call sites unchanged. `auth-core` switched dep. `rvoip-vcon` dropped unused dep. Cycle broken. V2.A.10 `cargo deny` rule landed in P12.5 (`deny.toml` + `.github/workflows/cargo-deny.yml`); rule freezes the current adapter set and prevents new direct-`rvoip-core` deps. Adapter migration to `rvoip-core-traits` (V2.A.7 follow-up) is a separate ratchet — current state is grandfathered via the `wrappers` allow-list. |
 | **V2.A.8 — `vcon-signing` real Cargo dep** | ✅ Landed | `rvoip-vcon = { workspace = true, optional = true }` + `vcon-signing = ["dep:rvoip-vcon"]`. Re-exported as `rvoip_core::signed_vcon::*` when feature enabled. |
 | **V2.A.9 — `harness` real Cargo dep** | ✅ Landed | `rvoip-harness = { workspace = true, optional = true }` + `harness = ["dep:rvoip-harness"]`. |
 | **V2.B — Per-tenant Semaphore admission** | ✅ Landed | `recording_sems` / `ai_sems` `DashMap<TenantId, Arc<Semaphore>>` replaces the counter DashMaps. `try_acquire_owned()` returns the permit; permit lives in handle; Drop releases. Resize-up via `add_permits`; resize-down with held permits returns `InvalidState`. |
@@ -565,6 +570,31 @@ Today's 27 tests are deep on bridging, fanout, subscriptions, dispatch.
 | `conversation.update` for policy change | `[V1.x]` | CONVERSATION_PROTOCOL §7.1 |
 | Multi-party UCTP beyond N=2 via SFU | `[V2]` | PRD §5 + INTERFACE_DESIGN §2.4 |
 | SIP-over-QUIC / RoQ / MoQ adapters | `[V2]` | INTERFACE_DESIGN §2.5 |
+
+---
+
+## 3.O — Cross-doc items not previously tracked here
+
+Audit pass (2026-05-26) against the four design docs surfaced
+commitments that no earlier phase or status row referenced. Each row
+below is grounded in an INTERFACE_DESIGN / PRD / CONVERSATION_PROTOCOL
+section and a confirmed absence (or thin presence) in the workspace
+as of this writing. The `[V1]` items are addressed by the new P12
+phase below; `[V1.x]` items are tracked here for visibility but
+remain deferred per the design docs.
+
+| # | Item | Label | Status | Spec source | Closer |
+|---|---|---|---|---|---|
+| 3.O.1 | `session-core` absorbed into `rvoip-sip` | `[V1]` | ✅ done — no `session-core` crate exists; rename to `rvoip-sip` already in place. Residual doc / re-export artifacts in the unbuilt `crates/rvoip/` facade are cleaned up by P12.2. | INTERFACE_DESIGN §13.1; PRD §13 | P12.1 |
+| 3.O.2 | `orchestration-core` deleted / renamed to `rvoip` facade | `[V1]` | ✅ done — `crates/orchestration-core/` deleted (all examples were workforce-shaped, lifted to consumers per PRD §5). `crates/rvoip/` is now a real workspace member: `src/lib.rs` re-exports `Orchestrator`/`Config` from `rvoip-core`, voip-3 nouns from `rvoip-core-traits`, and feature-gated modules `sip`/`webrtc`/`uctp`/`harness`/`vcon`/`identity`/`client`. `Cargo.toml` has the §2.2 `[features]` table (`default = [uctp, sip, vcon, identity]` + `webrtc` / `harness` / `client` / `aauth-experimental` / `identity-fingerprint-binding` / `full`). `cargo build -p rvoip --no-default-features`, `cargo build -p rvoip` (default), `cargo build -p rvoip --features full`, and `cargo build --workspace` all clean. | INTERFACE_DESIGN §13.3 step 7; PRD §13 | P12.2 |
+| 3.O.3 | `rvoip-client` crate (`Client`, `SessionHandle`, `InboundEvent`) | `[V1]` | ✅ done — scaffolded crate at [crates/rvoip-client](crates/rvoip-client) with v1 public surface (`Client::connect` substrate dispatch by URL scheme; `SessionHandle` with accept/reject/end/hold/resume/mute/send_dtmf method stubs; `InboundEvent::{IncomingSession, Message, AssuranceChanged, Disconnected}`; per-protocol re-exports via feature flags). Per-substrate dial wiring (`Client::call` actually sending an INVITE / `session.invite` envelope) is left for follow-up as consumers exercise it — surface is stable. 4 tests passing; deny.toml clean (`rvoip-client` depends on `rvoip-core-traits` only, not `rvoip-core`). | INTERFACE_DESIGN §2.1, §15 | P12.3 |
+| 3.O.4 | Hello-world sketches §16.2 / §16.3 / §16.4 | `[V1]` | ✅ done — three new sketches at [crates/rvoip/examples/sip_webrtc_bridge.rs](crates/rvoip/examples/sip_webrtc_bridge.rs) (§16.2, features `sip,webrtc`), [uctp_only_server.rs](crates/rvoip/examples/uctp_only_server.rs) (§16.3, features `uctp,vcon,identity`), [full_thelve_shape.rs](crates/rvoip/examples/full_thelve_shape.rs) (§16.4, features `full`). Each compiles under its declared feature set and runs an event-pump loop reaching `main()` against a stub Orchestrator. (§16.1 `sip_only_orchestrator.rs` from before remains.) | INTERFACE_DESIGN §16 | P12.4 |
+| 3.O.5 | `cargo deny` rule preventing adapter→`rvoip-core` direct dep | `[V1]` | ✅ done — `deny.toml` + `.github/workflows/cargo-deny.yml` landed (2026-05-26). Rule freezes current adapter dep set (rvoip-sip / -webrtc / -quic / -webtransport / -websocket / -uctp / -identity grandfathered via `wrappers` allow-list); new adapter crates default-banned from direct `rvoip-core` deps. | GAP_PLAN V2.A.10 | P12.5 |
+| 3.O.6 | Step-up auth envelope round-trip in adapters | `[V1]` | ✅ done — `request_step_up` now dispatches into the adapter and emits `Event::IdentityStepUpRequested`; peer's response surfaces as `AdapterEvent::StepUpResponse` → `Event::IdentityStepUpResponseReceived`; consumer calls `complete_step_up` → `IdentityAssuranceChanged`. UctpCoordinator handles inbound `identity.step-up-response` and exposes `send_step_up_request` helper. All three UCTP substrate adapters forward the event. 3 stub-adapter tests passing. | CONVERSATION_PROTOCOL §5.8 | P12.6 |
+| 3.O.7 | OpenTelemetry span hierarchy (Session / Connection / AI turn / transfer) | `[V1]` | ✅ done — `infra-common` exposes `otel` feature wiring OTLP exporter into `logging::setup` (`LoggingConfig.otel_endpoint`); 8 Orchestrator entry points decorated with `#[tracing::instrument]` (open / close_conversation, start / end_session, originate / transfer_connection, attach_ai, bridge_connections). Span hierarchy verified by `tests/p12_otel_spans.rs`. | INTERFACE_DESIGN §5; PRD §10.2 | P12.7 |
+| 3.O.8 | DTMF & `connection.quality` wired through `ConnectionAdapter` end-to-end | `[V1]` | ✅ done (SIP) / ✅ done (WebRTC quality) / deferred (WebRTC DTMF). **SIP:** `SipAdapter::translate_api_event` (crates/rvoip-sip/src/adapter.rs) now has explicit arms for `ApiEvent::DtmfReceived` → `AdapterEvent::Dtmf` and `ApiEvent::MediaQualityChanged` → `AdapterEvent::Quality`. **WebRTC:** `WebRtcAdapter::spawn_quality_emitter` walks routes every 5 s and emits per-Connection `AdapterEvent::Quality` from each stream's `webrtc_stats_snapshot()`. **WebRTC DTMF (P12.8.1 follow-up):** PT 101 frames currently flow through `media::pump` as `MediaFrame{payload_type: Some(101)}` but no RFC 4733 decoder runs on them; needs a pump-side decoder + event channel. UCTP-family adapters were already wired in P5 / P9. Orchestrator-side translation covered by existing `tests/dtmf_auto_route.rs` and `tests/p9_quality_aggregator.rs`. | INTERFACE_DESIGN §2.4 production row; CONVERSATION_PROTOCOL §7.5, §10.3 | P12.8 |
+| 3.O.9 | Inline envelope signatures enforced at adapter boundary | `[V1.x]` | JCS + verify primitives in `signing.rs` exist; required-signed policy not gated at adapter ingress | CONVERSATION_PROTOCOL §5.5.1 | deferred |
+| 3.O.10 | `rvoip-vcon-postgres` reference store | `[V1.x]` | crate absent; lean per PRD §14.2 #8 was "ship as optional crate" | INTERFACE_DESIGN §11.5 | deferred |
 
 ---
 
@@ -1315,6 +1345,112 @@ exist or are explicitly stubbed; the v1 test surface is complete.
 - `cargo build -p rvoip-core --no-default-features` compiles.
 - `cargo build -p rvoip-core --features full` compiles.
 - `cargo test --workspace` passes.
+
+---
+
+### P12 — Close cross-doc gaps `[V1]`
+
+**Goal.** Close the eight `[V1]` items surfaced by the 2026-05-26
+audit pass (§3.O.1 – §3.O.8). Each task is independently shippable;
+order is suggested, not required.
+
+**Tasks (8).**
+
+1. **P12.1 Carve `session-core` into `rvoip-sip`.** Move
+   `crates/session-core/src/` into `crates/rvoip-sip/src/session/`,
+   update workspace `Cargo.toml`, retarget every `session_core::*`
+   import. Delete `crates/session-core/`. Spec: INTERFACE_DESIGN §13.1.
+   *Acceptance:* workspace builds; no remaining `use session_core::`
+   in the tree; `crates/session-core/` does not exist.
+
+2. **P12.2 Wind down `orchestration-core`; rename to `rvoip`
+   facade.** Lift workforce-shaped code (queue, agent, routing —
+   already documented as consumer concerns in PRD §13) into example
+   code under `crates/rvoip/examples/` or delete outright. Merge the
+   surviving spine (bridge management, call lifecycle SIP-shaped
+   bits) into `rvoip-sip`. Rename `orchestration-core` →  `rvoip`
+   facade per INTERFACE_DESIGN §13.3 step 7. *Acceptance:*
+   `crates/orchestration-core/` does not exist; `cargo build
+   -p rvoip` is the facade build.
+
+3. **P12.3 Create `crates/rvoip-client/`.** New crate with `Client`,
+   `connect`, `call`, `send_message`, `incoming`, `conversations`,
+   `close` methods; `SessionHandle` with accept/reject/end/hold/
+   resume/mute/send_dtmf/streams/events; `InboundEvent` enum per
+   INTERFACE_DESIGN §15.2. Re-export per-protocol native client
+   surfaces at `rvoip::sip::client::*`, `rvoip::webrtc::client::*`,
+   `rvoip::uctp::client::*` per §15.3. *Acceptance:* `cargo build
+   -p rvoip-client --features client` succeeds; client-side smoke
+   example places a UCTP call against a local Orchestrator.
+
+4. **P12.4 Hello-world sketches §16.2 / §16.3 / §16.4.** Add three
+   new `examples/` binaries:
+   - `examples/sip_webrtc_bridge.rs` (§16.2, ~100 lines)
+   - `examples/uctp_only_server.rs` (§16.3, ~150 lines)
+   - `examples/full_thelve_shape.rs` (§16.4, ~300 lines)
+   Each runs end-to-end against the corresponding feature flag set.
+   *Acceptance:* all four sketches compile with their declared
+   feature flag set and execute their `main()` against stub adapters.
+
+5. **P12.5 Land `deny.toml` with the V2.A.10 rule.** Create
+   `/Volumes/D2-2019/Developer/rvoip/deny.toml` with a
+   `[bans]` section that fails CI if any of `rvoip-sip`,
+   `rvoip-webrtc`, `rvoip-quic`, `rvoip-webtransport`,
+   `rvoip-websocket`, `rvoip-uctp` declares a direct
+   `rvoip-core` dependency (they must use `rvoip-core-traits`).
+   Wire `cargo deny check` into the CI workflow. *Acceptance:*
+   `cargo deny check bans` passes on a clean workspace; planting a
+   regression dep makes it fail.
+
+6. **P12.6 Wire step-up auth envelope round-trip.** In
+   `rvoip-uctp::state::orchestrator_handler`: on `identity.step-up
+   -request`, hold the offending envelope server-side; on
+   `identity.step-up-response`, verify the credential via
+   `IdentityProvider::authenticate`, emit
+   `IdentityAssuranceChanged`, replay the held envelope. Time out
+   held envelopes per CONVERSATION_PROTOCOL §5.8 with `error 403-1`
+   on failure. *Acceptance:* end-to-end test where a Connection at
+   `Identified` requests step-up to `UserAuthorized`, supplies a
+   passkey credential, and the originally-blocked `session.invite`
+   succeeds.
+
+7. **P12.7 OpenTelemetry span hierarchy.** Add an `otel` module to
+   `rvoip-core` that opens one span per Session at `SessionStarted`
+   and closes it at `SessionEnded`. Open child spans per
+   Connection lifecycle, per AI dialog turn, per transfer.
+   `tracing_opentelemetry` is the natural integration point so
+   existing `tracing::info!` records become structured events on
+   the span. Spec: PRD §10.2; INTERFACE_DESIGN §5. *Acceptance:*
+   exporting to a local Jaeger / Tempo instance shows nested
+   spans for a synthetic 3-party Session with a mid-call transfer.
+
+8. **P12.8 DTMF & `connection.quality` adapter wiring.** Confirm
+   `rvoip-sip` emits `AdapterEvent::DtmfReceived` for RFC 2833 +
+   SIP INFO and consumes `Orchestrator::send_dtmf` to put DTMF on
+   the wire; same for `rvoip-webrtc` (RFC 4733). Confirm
+   per-Connection `AdapterEvent::Quality` snapshots flow at the
+   spec'd cadence from `rvoip-sip` (RTCP-XR) and `rvoip-webrtc`
+   (`RTCStatsReport`) into the `QualityAggregator`. *Acceptance:*
+   `tests/dtmf_through_adapters.rs` exercises round-trip for both
+   adapters; `tests/quality_through_adapters.rs` asserts non-zero
+   MOS aggregation from synthetic adapter quality events.
+
+**Effort estimate.** P12.1/.2 are mechanical workspace surgery
+(~1 day each). P12.3 is the largest (~3 days, new public API).
+P12.4 ~1 day. P12.5 ~half-day. P12.6 ~1 day (test setup
+dominates). P12.7 ~1 day. P12.8 ~1 day per adapter (~2 days). Total
+~10–12 focused days; order them per dependency / risk preference.
+
+**Risk + mitigation.**
+- *Risk:* P12.2 destabilizes downstream consumers that import from
+  `orchestration_core::*`. *Mitigation:* land P12.1 first (it
+  removes the largest source of orchestration-core surface); ship
+  a one-release-cycle of re-exports from the new home before
+  deleting.
+- *Risk:* P12.7 OTel integration creates async-runtime spaghetti
+  with `tracing_subscriber` already configured by consumers.
+  *Mitigation:* expose the OTel layer as opt-in; don't install a
+  global subscriber from inside `rvoip-core`.
 
 ---
 

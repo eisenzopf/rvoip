@@ -760,10 +760,74 @@ impl UctpCoordinator {
                     MessageType::DtmfSend => self.handle_dtmf_send(env).await,
                     MessageType::ConnectionQuality => self.handle_connection_quality(env).await,
                     MessageType::AuthRefresh => self.handle_auth_refresh(env).await,
+                    MessageType::IdentityStepUpResponse => {
+                        self.handle_step_up_response(env).await
+                    }
+                    // `identity.step-up-request` is server→client per
+                    // CONVERSATION_PROTOCOL.md §5.8 — silently drop on
+                    // the inbound dispatcher (the server does not
+                    // expect to receive its own request shape).
+                    MessageType::IdentityStepUpRequest => Ok(()),
                     _ => Ok(()),
                 }
             }
         }
+    }
+
+    /// P12.6 — handle an inbound `identity.step-up-response` envelope:
+    /// emit [`UctpSessionEvent::StepUpResponse`] so the substrate
+    /// adapter can forward it to the orchestrator as
+    /// `AdapterEvent::StepUpResponse`. The credential verification +
+    /// `IdentityAssuranceChanged` emission happen on the orchestrator
+    /// side via [`rvoip_core::Orchestrator::complete_step_up`].
+    async fn handle_step_up_response(&self, env: UctpEnvelope) -> Result<()> {
+        let payload: payloads::control::IdentityStepUpResponse =
+            match serde_json::from_value(env.payload.clone()) {
+                Ok(p) => p,
+                Err(_) => {
+                    return self
+                        .emit_error(env.id.clone(), 400, "protocol", "malformed-payload")
+                        .await
+                        .or_else(|_| Ok(()));
+                }
+            };
+        let connid = env
+            .connid
+            .as_ref()
+            .map(|c| crate::ids::ConnectionId::from_string(c.clone()));
+        self.emit_event(UctpSessionEvent::StepUpResponse {
+            connid,
+            method: payload.method,
+            credential: payload.credential,
+        })
+        .await
+    }
+
+    /// P12.6 — build and send an `identity.step-up-request` envelope
+    /// to the peer, asking them to re-auth at `required` assurance.
+    /// Public so substrate adapters (rvoip-quic, rvoip-webtransport,
+    /// rvoip-websocket) can wire `ConnectionAdapter::send_step_up_request`
+    /// straight through to the coordinator owning the connection.
+    pub async fn send_step_up_request(
+        &self,
+        connid: Option<String>,
+        required: &str,
+        allowed_methods: Vec<String>,
+        reason: Option<String>,
+    ) -> Result<()> {
+        let payload = payloads::control::IdentityStepUpRequest {
+            required: required.into(),
+            allowed_methods,
+            reason,
+        };
+        let mut env = UctpEnvelope::new(
+            MessageType::IdentityStepUpRequest,
+            serde_json::to_value(payload)?,
+        );
+        if let Some(c) = connid {
+            env = env.with_connid(c);
+        }
+        self.send_out(env).await
     }
 
     /// Returns `true` if the peer has completed the auth handshake.

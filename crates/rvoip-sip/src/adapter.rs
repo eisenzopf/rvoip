@@ -232,6 +232,42 @@ impl SipAdapter {
                     reason: EndReason::Cancelled,
                 });
             }
+            ApiEvent::DtmfReceived { call_id, digit } => {
+                // P12.8 — surface inbound DTMF (RFC 2833 + SIP INFO,
+                // decoded by media-core's DTMF detector) as an
+                // AdapterEvent the orchestrator translates to
+                // Event::DtmfReceived. Duration is the typical RFC
+                // 4733 default (100ms) — the underlying ApiEvent
+                // doesn't carry per-digit timing.
+                let conn_id = self.ensure_mapped(call_id);
+                self.try_send(AdapterEvent::Dtmf {
+                    connection_id: conn_id,
+                    digits: digit.to_string(),
+                    duration_ms: 100,
+                });
+            }
+            ApiEvent::MediaQualityChanged {
+                call_id,
+                packet_loss_percent,
+                jitter_ms,
+            } => {
+                // P12.8 — surface per-Connection media quality (RTCP
+                // RR / XR, distilled by media-core) into the
+                // orchestrator's `QualityAggregator` via
+                // `AdapterEvent::Quality`. MOS estimation lives in
+                // media-core and is not propagated through the
+                // current ApiEvent shape; leave as `None` until the
+                // ApiEvent grows a `mos` field.
+                let conn_id = self.ensure_mapped(call_id);
+                self.try_send(AdapterEvent::Quality {
+                    connection_id: conn_id,
+                    snapshot: rvoip_core::stream::QualitySnapshot {
+                        jitter_ms: jitter_ms as f32,
+                        packet_loss_pct: packet_loss_percent as f32,
+                        mos: None,
+                    },
+                });
+            }
             other => {
                 self.try_send(AdapterEvent::Native {
                     kind: "sip.api_event",

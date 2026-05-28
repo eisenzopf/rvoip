@@ -41,12 +41,34 @@ tokio-util = "0.7.16"
 # crates remain SIP-agnostic.
 bytes = { workspace = true }
 
+# P12.7 — OpenTelemetry span hierarchy. Optional, gated on the
+# `otel` feature so consumers that don't want the OTLP exporter
+# don't pay the dep cost. Pinned to the 0.27 line which matches
+# the current `tracing-opentelemetry` API surface.
+opentelemetry = { version = "0.27", default-features = false, features = ["trace"], optional = true }
+opentelemetry_sdk = { version = "0.27", default-features = false, features = ["trace", "rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.27", default-features = false, features = ["http-proto", "trace", "reqwest-blocking-client"], optional = true }
+tracing-opentelemetry = { version = "0.28", default-features = false, optional = true }
+
 [features]
 # Disable the mimalloc `#[global_allocator]` in `lib.rs`. Required by
 # profiling consumers (e.g. `rvoip-sip`'s `dhat` feature) that swap in
 # their own allocator and can't coexist with mimalloc. Off by default
 # so production binaries keep mimalloc's perf win.
 no-global-allocator = []
+
+# P12.7 — wire an OpenTelemetry OTLP exporter layer into
+# `logging::setup`. When this feature is on AND
+# `LoggingConfig.otel_endpoint` is `Some(_)`, spans flow to the
+# configured collector in addition to the local subscriber. Off by
+# default so consumers without an OTel collector don't pull the
+# extra deps or pay the runtime overhead.
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
 
 [dev-dependencies]
 criterion.workspace = true

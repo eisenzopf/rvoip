@@ -1,99 +1,175 @@
-//! # rvoip - A comprehensive VoIP library for Rust
+//! # rvoip — Universal real-time gateway library
 //!
-//! This crate provides a complete VoIP (Voice over IP) implementation in Rust,
-//! including SIP, RTP, media processing, and call management capabilities.
+//! `rvoip` is the facade crate for the rvoip workspace. It bundles
+//! the voip-3 substrate (`rvoip-core`, `rvoip-core-traits`), the
+//! Universal Conversation Transport Protocol (UCTP) family of
+//! substrates, the SIP and WebRTC interop adapters, the AI voice
+//! harness, and the vCon container builder — feature-gated so
+//! consumers pull only what they need.
 //!
-//! ## Overview
+//! See `crates/rvoip-core/PRD.md`, `INTERFACE_DESIGN.md`, and
+//! `CONVERSATION_PROTOCOL.md` for the architectural context.
 //!
-//! The rvoip library is composed of several core components:
+//! ## Quick start
 //!
-//! - **SIP Core**: SIP protocol implementation and message parsing
-//! - **SIP Transport**: Transport layer for SIP messages
-//! - **Transaction Core**: SIP transaction management
-//! - **Dialog Core**: SIP dialog state management
-//! - **RTP Core**: Real-time Transport Protocol implementation
-//! - **Media Core**: Audio/video processing and codec support
-//! - **Session Core**: Session management and coordination
-//! - **Client Core**: High-level client API
-//! - **Call Engine**: Call routing and business logic
-//! - **Infra Common**: Common infrastructure and utilities
+//! ```no_run
+//! use rvoip::{Orchestrator, Config};
 //!
-//! ## Quick Start
-//!
-//! ```rust
-//! use rvoip::client_core::*;
-//! use rvoip::session_core::*;
-//!
-//! // Your VoIP application code here
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut orchestrator = Orchestrator::new(Config::default());
+//! # #[cfg(feature = "sip")] {
+//! orchestrator.register(rvoip::sip::SipAdapter::new(Default::default()))?;
+//! # }
+//! let mut events = orchestrator.subscribe_events();
+//! while let Some(event) = events.recv().await {
+//!     // handle event
+//!     drop(event);
+//! }
+//! # Ok(()) }
 //! ```
 //!
-//! ## Module Structure
+//! ## Cargo features
 //!
-//! Each module corresponds to a specific aspect of VoIP functionality:
+//! Per `INTERFACE_DESIGN.md` §2.2:
 //!
-//! - [`sip_core`]: Core SIP protocol implementation
-//! - [`client_core`]: High-level client API
-//! - [`session_core`]: Session management
-//! - [`call_engine`]: Call routing and business logic
-//! - [`rtp_core`]: RTP implementation
-//! - [`media_core`]: Media processing
-//! - [`dialog_core`]: Dialog state management
-//! - [`transaction_core`]: Transaction management
-//! - [`sip_transport`]: SIP transport layer
+//! | Feature | Pulls in |
+//! |---|---|
+//! | `uctp` (default) | UCTP substrate adapters: quic, webtransport, websocket |
+//! | `sip` (default) | SIP interop adapter |
+//! | `webrtc` | WebRTC interop adapter (off by default) |
+//! | `vcon` (default) | vCon container builder + signing |
+//! | `identity` (default) | Identity provider backends |
+//! | `harness` | In-process AI voice harness |
+//! | `client` | Client-side API (`rvoip-client`) |
+//! | `aauth-experimental` | AAuth identity backend (experimental) |
+//! | `identity-fingerprint-binding` | DTLS-SRTP fingerprint binding |
+//! | `full` | All of the above |
+//!
+//! ## Module layout
+//!
+//! Per INTERFACE_DESIGN §15.3, per-protocol native surfaces live at
+//! `rvoip::sip`, `rvoip::webrtc`, `rvoip::uctp`. The unifying voip-3
+//! nouns (`Conversation`, `Session`, `Connection`, `Stream`,
+//! `Message`, `Participant`) are re-exported at the crate root from
+//! `rvoip-core-traits`.
 
 #![deny(missing_docs)]
 #![warn(rust_2018_idioms)]
 
-// Re-export all crates as modules
-pub use rvoip_sip_core as sip_core;
-pub use rvoip_sip_transport as sip_transport;
-pub use rvoip_transaction_core as transaction_core;
-pub use rvoip_dialog_core as dialog_core;
-pub use rvoip_rtp_core as rtp_core;
-pub use rvoip_media_core as media_core;
-pub use rvoip_sip as session_core;
-pub use rvoip_call_engine as call_engine;
-pub use rvoip_client_core as client_core;
-pub use rvoip_sip_client as sip_client;
+// ---------------------------------------------------------------------------
+// Top-level: voip-3 nouns + Orchestrator from rvoip-core / rvoip-core-traits
+// ---------------------------------------------------------------------------
 
-// Re-export commonly used items for convenience
-pub mod prelude {
-    //! Common imports for rvoip applications
-    //!
-    //! This module provides convenient access to the most commonly used types
-    //! from the rvoip ecosystem. Instead of importing everything with wildcards,
-    //! users can import specific types they need from the individual crates.
-    //!
-    //! # Usage Examples
-    //!
-    //! ```rust
-    //! // Import specific modules and types as needed
-    //! use rvoip::sip_core::prelude::*;
-    //! use rvoip::client_core::{Client, ClientBuilder};
-    //! use rvoip::session_core::{SessionManager, SessionId};
-    //!
-    //! // Use the types normally
-    //! // let client = ClientBuilder::new()...
-    //! ```
-    //!
-    //! # Available Modules
-    //!
-    //! - [`crate::sip_core`] - Core SIP protocol types and parsing
-    //! - [`crate::client_core`] - High-level client API
-    //! - [`crate::session_core`] - Session management
-    //! - [`crate::call_engine`] - Call routing and business logic
-    //! - [`crate::rtp_core`] - RTP implementation
-    //! - [`crate::media_core`] - Media processing
-    //! - [`crate::dialog_core`] - Dialog state management
-    //! - [`crate::transaction_core`] - Transaction management
-    //! - [`crate::sip_transport`] - SIP transport layer
+// The implementation crate. Always pulled in (the facade depends on
+// it directly per `[bans.wrappers]` in workspace `deny.toml`).
+pub use rvoip_core::{Config, Orchestrator};
 
-    // Note: We don't re-export specific types to avoid naming conflicts.
-    // Users should import from the specific crates they need.
+// The shared trait / data surface. Adapter crates depend on this
+// rather than on `rvoip-core` to avoid pulling in the orchestrator
+// implementation.
+pub use rvoip_core_traits as core_traits;
+
+// ---------------------------------------------------------------------------
+// SIP interop adapter
+// ---------------------------------------------------------------------------
+
+/// SIP interop adapter — bridges SIP/RTP into the UCTP `Session`
+/// abstraction. See `rvoip-sip` for the full surface.
+#[cfg(feature = "sip")]
+pub mod sip {
+    pub use rvoip_sip::*;
 }
 
-// Version information
-/// The version of the rvoip library
+// ---------------------------------------------------------------------------
+// WebRTC interop adapter
+// ---------------------------------------------------------------------------
+
+/// WebRTC interop adapter — bridges DTLS-SRTP / ICE peers into the
+/// UCTP `Session` abstraction. Off by default; enable the `webrtc`
+/// feature.
+#[cfg(feature = "webrtc")]
+pub mod webrtc {
+    pub use rvoip_webrtc::*;
+}
+
+// ---------------------------------------------------------------------------
+// UCTP substrates (umbrella module re-exporting all three substrate adapters)
+// ---------------------------------------------------------------------------
+
+/// UCTP substrate adapters and protocol primitives.
+///
+/// Per `CONVERSATION_PROTOCOL.md` §4, UCTP runs over QUIC,
+/// WebTransport, and WebSocket substrates. Each substrate has its
+/// own adapter crate; this module re-exports all three plus the
+/// wire-level protocol from `rvoip-uctp`.
+#[cfg(feature = "uctp")]
+pub mod uctp {
+    /// Envelope encode/decode, capability negotiation, session state
+    /// machine — protocol-level types shared across substrates.
+    pub use rvoip_uctp as protocol;
+
+    /// UCTP-over-QUIC substrate adapter.
+    pub use rvoip_quic as quic;
+
+    /// UCTP-over-WebTransport substrate adapter.
+    pub use rvoip_webtransport as webtransport;
+
+    /// UCTP-over-WebSocket substrate adapter (signaling on WebSocket,
+    /// media via co-located WebRTC PeerConnection per
+    /// `CONVERSATION_PROTOCOL.md` §4.3).
+    pub use rvoip_websocket as websocket;
+}
+
+// ---------------------------------------------------------------------------
+// AI voice harness
+// ---------------------------------------------------------------------------
+
+/// AI voice harness — in-process ASR / TTS / Dialog runtime that
+/// attaches to a `Connection` via `Orchestrator::attach_ai`. See
+/// `rvoip-harness`.
+#[cfg(feature = "harness")]
+pub mod harness {
+    pub use rvoip_harness::*;
+}
+
+// ---------------------------------------------------------------------------
+// vCon container builder + store
+// ---------------------------------------------------------------------------
+
+/// vCon (IETF Virtualized Conversations) container builder, signer,
+/// and store. Emitted at end-of-Session per
+/// `INTERFACE_DESIGN.md` §3.9.
+#[cfg(feature = "vcon")]
+pub mod vcon {
+    pub use rvoip_vcon::*;
+}
+
+// ---------------------------------------------------------------------------
+// Identity provider backends
+// ---------------------------------------------------------------------------
+
+/// `IdentityProvider` backends — bearer, OAuth 2.1 + DPoP, OIDC,
+/// passkeys, AAuth. See `rvoip-identity`.
+#[cfg(feature = "identity")]
+pub mod identity {
+    pub use rvoip_identity::*;
+}
+
+// ---------------------------------------------------------------------------
+// Client SDK (separate crate, created by P12.3)
+// ---------------------------------------------------------------------------
+//
+// When the `client` feature is enabled, the client-side `Client`
+// surface from `rvoip-client` becomes available as `rvoip::client::*`.
+// The crate is created by P12.3; until then this module is a stub
+// behind the feature flag.
+
+/// Client-side API for mobile / web / desktop / embedded apps. See
+/// `rvoip-client`.
+#[cfg(feature = "client")]
+pub mod client {
+    pub use rvoip_client::*;
+}
+
+/// The version of the rvoip facade crate.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-/// The description of the rvoip library
-pub const DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");

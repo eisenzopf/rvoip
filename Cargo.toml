@@ -29,17 +29,11 @@ members = [
     "crates/rvoip-harness",
     "crates/rvoip-identity",
     "crates/rvoip-core-traits",
+    "crates/rvoip",
+    "crates/rvoip-client",
 ]
 
-# orchestration-core is excluded from the workspace as part of the
-# SIP_API_DESIGN_2 migration: it still consumes legacy
-# `UnifiedCoordinator::reject_call` / `make_call` entries that have
-# been removed. The directory stays on disk; resume membership by
-# putting `crates/orchestration-core` back in `members` once the
-# orchestrator is migrated to the new builder API.
-#
 exclude = [
-    "crates/orchestration-core",
     # Gap plan §3.2 — Playwright browser smoke. Node.js project; lives
     # outside the Cargo workspace so `cargo` doesn't try to interpret
     # `package.json` or descend into `node_modules`.
@@ -163,8 +157,6 @@ rvoip-rtp-core = { path = "crates/rtp-core", version = "0.1.26" }
 rvoip-media-core = { path = "crates/media-core", version = "0.1.26" }
 rvoip-sip = { path = "crates/rvoip-sip", version = "0.2.0" }
 rvoip-core = { path = "crates/rvoip-core", version = "0.1.26" }
-# rvoip-orchestration-core excluded from workspace pending migration to
-# SIP_API_DESIGN_2 builder API; restore alongside `members` entry.
 rvoip-call-engine = { path = "crates/call-engine", version = "0.1.26" }
 rvoip-client-core = { path = "crates/client-core", version = "0.1.26" }
 rvoip-codec-core = { path = "crates/codec-core", version = "0.1.26" }
@@ -186,6 +178,7 @@ rvoip-vcon = { path = "crates/rvoip-vcon", version = "0.1.26" }
 rvoip-harness = { path = "crates/rvoip-harness", version = "0.1.26" }
 rvoip-identity = { path = "crates/rvoip-identity", version = "0.1.26" }
 rvoip-core-traits = { path = "crates/rvoip-core-traits", version = "0.1.26" }
+rvoip-client = { path = "crates/rvoip-client", version = "0.1.26" }
 rtc = "=0.20.0-alpha.1"
 
 # External dependencies

@@ -160,7 +160,67 @@ impl WebRtcAdapter {
             });
         }
 
+        // P12.8 — periodic per-Connection quality emitter. Walks the
+        // routes table every 5 seconds and emits one
+        // `AdapterEvent::Quality` per connection from the aggregated
+        // per-stream snapshots already collected by
+        // `crate::media::stats::spawn_webrtc_stats_collector`. The
+        // orchestrator feeds these into its `QualityAggregator` so
+        // `Event::SessionEnded` reports include WebRTC-side numbers.
+        Self::spawn_quality_emitter(
+            Arc::clone(&adapter.routes),
+            adapter.events_tx.clone(),
+        );
+
         adapter
+    }
+
+    fn spawn_quality_emitter(
+        routes: Arc<DashMap<ConnectionId, Route>>,
+        events_tx: mpsc::Sender<AdapterEvent>,
+    ) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                for entry in routes.iter() {
+                    let conn_id = entry.key().clone();
+                    // Per-Connection aggregate: average jitter / loss
+                    // across this connection's streams. MOS is dropped
+                    // for now — the orchestrator's QualityAggregator
+                    // only consumes jitter and loss fields. Skip
+                    // connections with no streams to avoid emitting
+                    // bogus zero snapshots.
+                    let streams = &entry.value().streams;
+                    if streams.is_empty() {
+                        continue;
+                    }
+                    let mut count = 0u32;
+                    let mut jitter_sum = 0.0f32;
+                    let mut loss_sum = 0.0f32;
+                    for stream in streams.iter() {
+                        let snap = stream.value().webrtc_stats_snapshot();
+                        jitter_sum += snap.jitter_ms;
+                        loss_sum += snap.packet_loss_pct;
+                        count += 1;
+                    }
+                    if count == 0 {
+                        continue;
+                    }
+                    let snapshot = rvoip_core::stream::QualitySnapshot {
+                        jitter_ms: jitter_sum / count as f32,
+                        packet_loss_pct: loss_sum / count as f32,
+                        mos: None,
+                    };
+                    let _ = events_tx
+                        .send(AdapterEvent::Quality {
+                            connection_id: conn_id,
+                            snapshot,
+                        })
+                        .await;
+                }
+            }
+        });
     }
 
     /// Snapshot of operational counters and live session count.

@@ -92,4 +92,17 @@ pub enum UctpSessionEvent {
         rtt_ms: u32,
         bitrate_bps: u32,
     },
+
+    /// P12.6 — peer sent `identity.step-up-response` answering a
+    /// previous `identity.step-up-request` we issued via
+    /// [`super::coordinator::UctpCoordinator::send_step_up_request`].
+    /// Adapters translate this into `AdapterEvent::StepUpResponse` so
+    /// the orchestrator surfaces it as
+    /// `Event::IdentityStepUpResponseReceived`. See
+    /// CONVERSATION_PROTOCOL.md §5.8.
+    StepUpResponse {
+        connid: Option<ConnectionId>,
+        method: String,
+        credential: String,
+    },
 }

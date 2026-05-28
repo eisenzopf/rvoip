@@ -1,0 +1,88 @@
+# cargo-deny configuration.
+#
+# Primary purpose for v1: codify the dependency-direction guard from
+# GAP_PLAN.md V2.A.10 — adapter crates should consume the
+# type/trait surface from `rvoip-core-traits`, not from `rvoip-core`,
+# so the implementation crate (`rvoip-core`) is free to evolve
+# without forcing downstream rebuilds. The `rvoip-core-traits` carve
+# (V2.A) broke the dep cycle by extracting types into the sibling
+# crate; this file prevents that work from regressing.
+#
+# Current state (2026-05-26): only `rvoip-harness` and `auth-core`
+# have actually been retargeted onto `rvoip-core-traits`. The other
+# adapter crates still consume `rvoip-core` directly; the
+# `[[bans.deny].wrappers]` allow-list below grandfathers them in.
+# Removing a crate from the wrappers list is the mechanical step in a
+# follow-up adapter-migration ticket.
+#
+# Newly created crates (notably `rvoip-client`, per P12.3) MUST NOT
+# be added to the wrappers list — they should depend on
+# `rvoip-core-traits` from day one.
+#
+# Run `cargo deny check bans` locally; CI runs it on every PR via
+# `.github/workflows/cargo-deny.yml`.
+
+# Lint advisories database (security advisories from RustSec).
+# Permissive in v1: we don't want CI red on advisories unrelated to
+# the bans guard while the workspace stabilizes. Tighten later.
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "warn"
+ignore = []
+
+# License compliance — permissive default; revisit when shipping
+# binary releases. The workspace uses MIT OR Apache-2.0 throughout.
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.8
+
+# The ban guard. This is the load-bearing part of the file.
+[bans]
+multiple-versions = "allow"   # workspace has legitimate version skew today
+wildcards         = "warn"
+
+# Direct dep on `rvoip-core` is permitted only from the listed
+# wrapper crates. Adding a new crate to the list requires an
+# explicit decision (the goal is to shrink this list over time).
+[[bans.deny]]
+name     = "rvoip-core"
+wrappers = [
+    # The facade crate legitimately re-exports `rvoip-core` types and
+    # the `Orchestrator` impl — that's its whole job.
+    "rvoip",
+
+    # Grandfathered adapter / surface crates. Each is a candidate for
+    # a future Cargo.toml swap to `rvoip-core-traits` (V2.A.7
+    # follow-up; tracked separately from P12).
+    "rvoip-sip",
+    "rvoip-webrtc",
+    "rvoip-quic",
+    "rvoip-webtransport",
+    "rvoip-websocket",
+    "rvoip-uctp",
+    "rvoip-identity",
+]
+reason = "Adapter crates should consume type/trait surface from `rvoip-core-traits`; the implementation crate `rvoip-core` is reserved for the facade. See GAP_PLAN.md V2.A.10."
+
+# Source registry policy — workspace + crates.io only.
+[sources]
+unknown-registry = "deny"
+unknown-git      = "deny"
+allow-registry   = ["https://github.com/rust-lang/crates.io-index"]
+allow-git        = []

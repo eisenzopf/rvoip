@@ -38,7 +38,7 @@ use rvoip_media_core::processing::format::FormatConverter;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::{broadcast, RwLock as TokioRwLock, Semaphore};
-use tracing::{debug, warn};
+use tracing::{debug, instrument, warn};
 
 /// Per-connection registration tracked by the orchestrator so subsequent
 /// commands (`end`, `hold`, `transfer`, `send_dtmf`, ...) can route to the
@@ -439,6 +439,7 @@ impl Orchestrator {
 
     /// Open a new Conversation. Emits `Event::ConversationOpened`.
     /// Returns the freshly-allocated `ConversationId`.
+    #[instrument(skip(self, metadata), fields(tenant = %tenant_id, conversation_id))]
     pub async fn open_conversation(
         &self,
         tenant_id: TenantId,
@@ -746,6 +747,7 @@ impl Orchestrator {
     /// transitions the Conversation to Closed and emits
     /// `Event::ConversationClosed`. Closing an already-Closed
     /// Conversation is a no-op (idempotent).
+    #[instrument(skip(self), fields(conversation_id = %id, force))]
     pub async fn close_conversation(
         &self,
         id: ConversationId,
@@ -809,6 +811,7 @@ impl Orchestrator {
     /// entries are added to the Conversation when each invitee actually
     /// joins via [`join_session`] (so identity_ref / kind / role land
     /// from a real join, not from the invite).
+    #[instrument(skip(self, invitees), fields(conversation_id = %conversation_id, medium = ?medium, session_id))]
     pub async fn start_session(
         &self,
         conversation_id: ConversationId,
@@ -872,6 +875,7 @@ impl Orchestrator {
     /// subscriptions, clears the reverse Connection→Session index, and
     /// emits `Event::SessionEnded`. Idempotent: ending an already-
     /// Ended or Failed Session returns `Ok(())`.
+    #[instrument(skip(self), fields(session_id = %session_id, reason = ?reason))]
     pub async fn end_session(
         &self,
         session_id: SessionId,
@@ -1522,6 +1526,25 @@ impl Orchestrator {
                     at: Utc::now(),
                 });
             }
+            AdapterEvent::StepUpResponse {
+                connection_id,
+                method,
+                credential,
+            } => {
+                // P12.6 — re-emit as a public event so the consumer
+                // can resolve `(method, credential)` to a real
+                // `Credential` and call `complete_step_up`. The
+                // orchestrator deliberately doesn't auto-call
+                // `complete_step_up` because that requires an
+                // `IdentityProvider`, which is consumer-owned per
+                // INTERFACE_DESIGN §8.
+                self.emit(Event::IdentityStepUpResponseReceived {
+                    connection_id,
+                    method,
+                    credential,
+                    at: Utc::now(),
+                });
+            }
             AdapterEvent::Native { kind, detail } => {
                 debug!(
                     ?transport,
@@ -1647,6 +1670,7 @@ impl Orchestrator {
         }
     }
 
+    #[instrument(skip(self, request), fields(target = %request.target, transport = ?request.transport, connection_id))]
     pub async fn originate_connection(
         &self,
         request: OriginateRequest,
@@ -1706,6 +1730,7 @@ impl Orchestrator {
         adapter.resume(connection_id).await
     }
 
+    #[instrument(skip(self), fields(connection_id = %connection_id, target = ?target))]
     pub async fn transfer_connection(
         &self,
         connection_id: ConnectionId,
@@ -1912,19 +1937,42 @@ impl Orchestrator {
 
     // --- P7 step-up auth ------------------------------------------------
 
-    /// P7 — request a step-up to a higher IdentityAssurance level on
-    /// an existing Connection. Emits
-    /// `Event::IdentityAssuranceChanged` once the peer completes the
-    /// step-up via [`Self::complete_step_up`].
+    /// Request a step-up to a higher IdentityAssurance level on an
+    /// existing Connection. P12.6 wires the full round-trip:
+    ///
+    /// 1. Dispatches an `identity.step-up-request` envelope through the
+    ///    Connection's adapter (`ConnectionAdapter::send_step_up_request`).
+    ///    UCTP-family adapters serialize the envelope per
+    ///    CONVERSATION_PROTOCOL.md §5.8; non-UCTP adapters
+    ///    (SIP / WebRTC) return `NotImplemented`.
+    /// 2. Emits [`Event::IdentityStepUpRequested`] so the consumer
+    ///    sees the request reached the wire.
+    /// 3. When the peer's `identity.step-up-response` arrives, the
+    ///    adapter forwards it as `AdapterEvent::StepUpResponse`; the
+    ///    orchestrator re-emits it as
+    ///    [`Event::IdentityStepUpResponseReceived`]. The consumer
+    ///    resolves the `(method, credential)` pair to a
+    ///    [`crate::identity::Credential`] and calls
+    ///    [`Self::complete_step_up`] to finalize the assurance change.
     pub async fn request_step_up(
         &self,
         connection_id: ConnectionId,
-        _required: crate::capability::IdentityAssuranceRequirement,
+        required: crate::capability::IdentityAssuranceRequirement,
     ) -> Result<()> {
-        // v1 — surface only; the actual envelope round-trip is the
-        // adapter's job (UCTP `identity.step-up-request` envelope).
-        // Adapter wiring is a P7.1 follow-up.
-        let _ = self.adapter_for(&connection_id)?;
+        let adapter = self.adapter_for(&connection_id)?;
+        adapter
+            .send_step_up_request(
+                connection_id.clone(),
+                required.clone(),
+                Vec::new(),
+                None,
+            )
+            .await?;
+        self.emit(Event::IdentityStepUpRequested {
+            connection_id,
+            required,
+            at: Utc::now(),
+        });
         Ok(())
     }
 
@@ -2308,6 +2356,7 @@ impl Orchestrator {
     /// TTS playback is in flight, the orchestrator cancels the
     /// playback and emits `Event::BargeInDetected` before continuing
     /// the dialog loop.
+    #[instrument(skip(self, provider_ref, config), fields(connection_id = %connection_id))]
     pub async fn attach_ai(
         self: &Arc<Self>,
         connection_id: ConnectionId,
@@ -2852,6 +2901,7 @@ impl Orchestrator {
     /// - `AdmissionRejected("no audio stream")` if either side still has no
     ///   audio `MediaStream` after the deadline.
     /// - `UnsupportedCodec(name)` if a negotiated codec has no PT mapping.
+    #[instrument(skip(self), fields(a = %a, b = %b, bridge_id))]
     pub async fn bridge_connections(&self, a: ConnectionId, b: ConnectionId) -> Result<BridgeId> {
         if a == b {
             return Err(RvoipError::AdmissionRejected(

@@ -397,6 +397,15 @@ async fn spawn_peer_session(
                         connection_id: connid,
                         snapshot,
                     }),
+                    UctpSessionEvent::StepUpResponse {
+                        connid,
+                        method,
+                        credential,
+                    } => connid.map(|c| AdapterEvent::StepUpResponse {
+                        connection_id: c,
+                        method,
+                        credential,
+                    }),
                     other => Some(AdapterEvent::Native {
                         kind: "uctp.internal",
                         detail: format!("{:?}", other),

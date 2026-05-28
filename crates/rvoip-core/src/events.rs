@@ -224,6 +224,28 @@ pub enum Event {
         at: DateTime<Utc>,
     },
 
+    /// P12.6 — emitted after `Orchestrator::request_step_up` has
+    /// pushed an `identity.step-up-request` to the peer's adapter. The
+    /// consumer can use this as a positive signal that the request
+    /// reached the wire. Carries the requested assurance for context.
+    IdentityStepUpRequested {
+        connection_id: ConnectionId,
+        required: crate::capability::IdentityAssuranceRequirement,
+        at: DateTime<Utc>,
+    },
+
+    /// P12.6 — peer sent an `identity.step-up-response`. Consumer
+    /// resolves the `(method, credential)` pair to a
+    /// [`crate::identity::Credential`] and calls
+    /// [`crate::Orchestrator::complete_step_up`] to finish the
+    /// round-trip (which emits `IdentityAssuranceChanged` on success).
+    IdentityStepUpResponseReceived {
+        connection_id: ConnectionId,
+        method: String,
+        credential: String,
+        at: DateTime<Utc>,
+    },
+
     // --- Registration (emitted by adapters that include a registrar) ---
     RegistrationChanged {
         aor: String,
@@ -631,6 +653,19 @@ impl Event {
                     jitter_ms: 0.0,
                     packet_loss_pct: 0.0,
                     mos: None,
+                }
+            }
+            IdentityStepUpRequested { connection_id, .. }
+            | IdentityStepUpResponseReceived { connection_id, .. } => {
+                // P12.6 — no dedicated cross-crate variant yet; surface
+                // as IdentityAssuranceChanged with None identity_id so
+                // downstream services see the round-trip on the bus.
+                // The actual assurance change still emits a separate
+                // IdentityAssuranceChanged event when the consumer calls
+                // `complete_step_up`.
+                RvoipCoreCrossCrateEvent::IdentityAssuranceChanged {
+                    connection_id: connection_id.to_string(),
+                    identity_id: None,
                 }
             }
         };

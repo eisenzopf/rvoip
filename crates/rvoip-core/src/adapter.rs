@@ -158,6 +158,17 @@ pub enum AdapterEvent {
         connection_id: ConnectionId,
         snapshot: crate::stream::QualitySnapshot,
     },
+    /// P12.6 — peer sent an `identity.step-up-response` envelope
+    /// answering a previous `identity.step-up-request` we issued via
+    /// [`ConnectionAdapter::send_step_up_request`]. The orchestrator
+    /// re-emits this as [`crate::events::Event::IdentityStepUpResponseReceived`]
+    /// so the consumer can resolve a credential and call
+    /// [`crate::Orchestrator::complete_step_up`].
+    StepUpResponse {
+        connection_id: ConnectionId,
+        method: String,
+        credential: String,
+    },
     Native {
         kind: &'static str,
         detail: String,
@@ -254,6 +265,26 @@ pub trait ConnectionAdapter: Send + Sync {
         _source: AudioSource,
     ) -> Result<PlaybackHandle> {
         Err(RvoipError::NotImplemented("ConnectionAdapter::play_audio"))
+    }
+
+    /// P12.6 — send an `identity.step-up-request` envelope to the peer
+    /// asking them to present higher-assurance credentials. The peer's
+    /// `identity.step-up-response` arrives as
+    /// [`AdapterEvent::StepUpResponse`] which the orchestrator
+    /// re-emits as [`crate::events::Event::IdentityStepUpResponseReceived`].
+    /// UCTP-family adapters override this; SIP / WebRTC default to
+    /// `NotImplemented` since step-up is a UCTP-native flow per
+    /// CONVERSATION_PROTOCOL.md §5.8.
+    async fn send_step_up_request(
+        &self,
+        _conn: ConnectionId,
+        _required: crate::capability::IdentityAssuranceRequirement,
+        _allowed_methods: Vec<String>,
+        _reason: Option<String>,
+    ) -> Result<()> {
+        Err(RvoipError::NotImplemented(
+            "ConnectionAdapter::send_step_up_request",
+        ))
     }
 
     fn subscribe_events(&self) -> mpsc::Receiver<AdapterEvent>;
