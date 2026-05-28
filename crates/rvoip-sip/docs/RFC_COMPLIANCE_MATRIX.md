@@ -5,8 +5,8 @@ Date: 2026-05-26
 This matrix records beta claim levels and links each claimed row to test,
 interop, generated-validation, report, or explicit non-claim evidence. The
 latest complete reference report is
-`crates/rvoip-sip/beta-report/20260526T032035Z`; final release notes must cite
-a clean successor report.
+`crates/rvoip-sip/beta-report/20260526T221457Z`, generated from clean git
+revision `865430d4`.
 
 | RFC | Area | Beta status | Evidence | Limits |
 |-----|------|-------------|----------|--------|
@@ -18,7 +18,7 @@ a clean successor report.
 | RFC 3515 | REFER | Supported | `crates/rvoip-sip/tests/refer_auth_retry.rs`, `crates/rvoip-sip/tests/transfer_notify_wiring_tests.rs`, blind-transfer PBX rows | Attended transfer orchestration remains primitives only. |
 | RFC 3581 | rport | Supported | `crates/rvoip-sip-dialog/tests/rport_restamp_response.rs`, PBX UDP/TLS rows | NAT traversal matrix is not complete; ICE/TURN are non-claims. |
 | RFC 4028 | Session timers | Partial | `crates/rvoip-sip/tests/session_timer_integration.rs`, `crates/rvoip-sip/tests/session_timer_failure_integration.rs` | Full edge-case production audit remains open. |
-| RFC 4475 | SIP torture tests | Supported with exclusions | `crates/rvoip-sip/beta-report/20260526T032035Z/sip-core_rfc_4475_torture_tests.log` | Exclusions must remain documented in the torture-test fixture. |
+| RFC 4475 | SIP torture tests | Supported with exclusions | `crates/rvoip-sip/beta-report/20260526T221457Z/sip-core_rfc_4475_torture_tests.log` | Exclusions must remain documented in the torture-test fixture. |
 | RFC 5626 | SIP outbound | Partial | TLS registered-flow APIs in `Config`, PBX registration/TLS rows, contact-mode validation tests | Multi-flow outbound behavior is not a beta claim. |
 | RFC 6086 | INFO | Supported | `crates/rvoip-sip/tests/info_auth_retry.rs`, DTMF/INFO tests, SIPp/PBX DTMF evidence | INFO package registry completeness is not claimed. |
 | RFC 7118 | SIP over WebSocket | Partial | `crates/rvoip-sip-transport/tests/ws_client_round_trip.rs` | Browser/WebRTC and WSS outbound are post-beta/non-claims. |

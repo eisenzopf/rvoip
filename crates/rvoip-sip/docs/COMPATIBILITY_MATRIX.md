@@ -8,8 +8,8 @@ entries have repeatable in-repo or external-peer evidence. `Partial`,
 as general beta capabilities.
 
 The latest full reference report is
-`crates/rvoip-sip/beta-report/20260526T032035Z`; final release notes must cite
-a clean successor report.
+`crates/rvoip-sip/beta-report/20260526T221457Z`, generated from clean git
+revision `865430d4`.
 
 ## Support Levels
 
@@ -88,6 +88,6 @@ a clean successor report.
 
 | Profile | Beta status | Target | Notes |
 |---------|-------------|--------|-------|
-| General full-media | Beta target | Up to 2,000 CPS | Default claim only after final clean report and 24-hour soak pass. |
+| General full-media | Beta target | Up to 2,000 CPS | Default claim is backed by the final clean report; 24-hour soak is waived for beta and the 30-minute soak is accepted as the beta bar. |
 | Signaling-only tuned | Experimental | Above 2,000 CPS | Requires explicit tuning docs and caveats. |
 | Tuned high-scale | Experimental | Near 10,000 CPS where proven | Not a general-user promise. |

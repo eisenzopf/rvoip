@@ -21,7 +21,7 @@ layer for bounded client, server, PBX, and gateway scenarios.
   load scenarios, and baresip strict-UA behavior in the current reference
   report.
 - General full-media performance claims are capped at the documented 2,000 CPS
-  beta profile until release evidence proves the exact setup.
+  beta profile backed by the final clean report.
 - Higher CPS results are advanced tuned profiles and must include tuning,
   hardware, topology, and caveats.
 - SIP trace output redacts authorization data, authentication challenges,
@@ -32,14 +32,13 @@ layer for bounded client, server, PBX, and gateway scenarios.
 ## Current Reference Evidence
 
 - Reference report:
-  `crates/rvoip-sip/beta-report/20260526T032035Z/summary.md`
+  `crates/rvoip-sip/beta-report/20260526T221457Z/summary.md`
 - Result: `0` failures, `0` skips
-- Git revision: `d6e8beaa`
-- Git status at run time: `dirty`
+- Git revision: `865430d4`
+- Git status at run time: `clean`
+- Rust/Cargo: `1.88.0`
 
-The dirty status means the reference report is not the final release
-attestation. The final notes must cite a clean report generated after the
-release-hardening changes are committed.
+This is the final clean beta release-candidate attestation.
 
 ## Must Not Claim Yet
 
@@ -52,7 +51,7 @@ release-hardening changes are committed.
 - PUBLISH end-to-end application support.
 - General-user 10,000 CPS full-media capability.
 
-## Release Evidence Required
+## Release Evidence Archived
 
 - `COMPATIBILITY_MATRIX.md` complete for claimed features.
 - `RFC_COMPLIANCE_MATRIX.md` complete for claimed RFCs.

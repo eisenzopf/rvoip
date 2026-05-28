@@ -33,7 +33,7 @@ SIPp, PBX, or strict-UA evidence fails the gate.
 | Local Asterisk/FreeSWITCH matrix | Scripted; manages `~/Developer/asterisk` and `~/Developer/freeswitch` sequentially | `BETA_RUN_LOCAL_PBX=1 crates/rvoip-sip/scripts/beta_gate.sh --interop` |
 | Already-running PBX matrix | Scripted; requires PBX containers already running | `BETA_RUN_PBX=1 crates/rvoip-sip/scripts/beta_gate.sh --interop` |
 | SIPp standalone | Scripted; requires SIPp and target host/port | `BETA_RUN_SIPP=1 BETA_SIPP_TARGET_HOST=<host> BETA_SIPP_TARGET_PORT=<port> crates/rvoip-sip/scripts/beta_gate.sh --interop` |
-| PJSIP/baresip | Required before beta claims strict-UA evidence | Add runner, then remove the gate skip. |
+| PJSIP/baresip | Scripted; final gate archived baresip strict-UA evidence | `BETA_RUN_STRICT_UA=1 crates/rvoip-sip/scripts/beta_gate.sh --interop` or the final full gate. |
 | Kamailio/OpenSIPS | Investigation only | Do not block beta unless release notes claim this topology. |
 
 The local PBX gate stops Asterisk and FreeSWITCH before switching providers
