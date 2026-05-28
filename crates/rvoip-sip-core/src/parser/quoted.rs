@@ -17,7 +17,7 @@ use super::whitespace::{crlf, lws, sws, wsp};
 pub type ParseResult<'a, O> = IResult<&'a [u8], O>;
 
 // quoted-pair = "\" (%x00-09 / %x0B-0C / %x0E-7F)
-pub fn quoted_pair(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn quoted_pair(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(pair(
         tag(b"\\"),
         map_res(take(1usize), |c: &[u8]| {
@@ -36,12 +36,12 @@ pub fn quoted_pair(input: &[u8]) -> ParseResult<&[u8]> {
 
 // RFC 3261 defines folded-line = 1*WSP CRLF 1*WSP
 // This is a specific parser for correctly handling line folding in quoted strings
-pub fn folded_line(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn folded_line(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(pair(preceded(many0(wsp), crlf), many0(wsp)))(input)
 }
 
 // qdtext = LWS / %x21 / %x23-5B / %x5D-7E / UTF8-NONASCII
-pub fn qdtext(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn qdtext(input: &[u8]) -> ParseResult<'_, &[u8]> {
     alt((
         // Use lws for proper line folding recognition
         lws,
@@ -64,7 +64,7 @@ pub fn qdtext(input: &[u8]) -> ParseResult<&[u8]> {
 
 // quoted-string = SWS DQUOTE *(qdtext / quoted-pair ) DQUOTE
 // Returns the raw content within the quotes, including escape sequences but without the surrounding quotes.
-pub fn quoted_string(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn quoted_string(input: &[u8]) -> ParseResult<'_, &[u8]> {
     preceded(
         sws,
         delimited(dquote, recognize(many0(alt((qdtext, quoted_pair)))), dquote),
@@ -101,12 +101,12 @@ pub fn unescape_quoted_string(input: &[u8]) -> Vec<u8> {
 /// High-level quoted string parser that both parses and unescapes the content,
 /// providing full RFC compliance for quoted strings.
 /// Returns the properly unescaped string content as Vec<u8>.
-pub fn parse_quoted_string(input: &[u8]) -> ParseResult<Vec<u8>> {
+pub fn parse_quoted_string(input: &[u8]) -> ParseResult<'_, Vec<u8>> {
     map(quoted_string, unescape_quoted_string)(input)
 }
 
 // ctext = %x21-27 / %x2A-5B / %x5D-7E / UTF8-NONASCII / LWS
-pub fn ctext(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn ctext(input: &[u8]) -> ParseResult<'_, &[u8]> {
     alt((
         // Use lws for proper line folding recognition
         lws,
@@ -129,7 +129,7 @@ pub fn ctext(input: &[u8]) -> ParseResult<&[u8]> {
 
 // comment = LPAREN *(ctext / quoted-pair / comment) RPAREN
 // Recursive parser. We return the content inside the parens.
-pub fn comment(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn comment(input: &[u8]) -> ParseResult<'_, &[u8]> {
     delimited(
         lparen,                                               // Consumes LPAREN and surrounding SWS
         recognize(many0(alt((ctext, quoted_pair, comment)))), // Recursive call
@@ -147,7 +147,7 @@ pub fn unescape_comment(input: &[u8]) -> Vec<u8> {
 /// High-level comment parser that both parses and unescapes the content,
 /// providing full RFC compliance for comments.
 /// Returns the properly unescaped comment content as Vec<u8>.
-pub fn parse_comment(input: &[u8]) -> ParseResult<Vec<u8>> {
+pub fn parse_comment(input: &[u8]) -> ParseResult<'_, Vec<u8>> {
     map(comment, unescape_comment)(input)
 }
 

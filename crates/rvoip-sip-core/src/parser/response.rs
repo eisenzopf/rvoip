@@ -57,7 +57,7 @@ pub fn parse_response_line(input: &str) -> IResult<&str, (Version, StatusCode, S
 }
 
 // Status-Code = 3DIGIT
-pub fn status_code(input: &[u8]) -> ParseResult<StatusCode> {
+pub fn status_code(input: &[u8]) -> ParseResult<'_, StatusCode> {
     map_res(digit1, |code_bytes: &[u8]| -> Result<StatusCode> {
         if code_bytes.len() != 3 {
             return Err(Error::ParseError(
@@ -75,13 +75,13 @@ pub fn status_code(input: &[u8]) -> ParseResult<StatusCode> {
 
 // Reason-Phrase = *(reserved / unreserved / escaped / UTF8-NONASCII / UTF8-CONT / SP / HTAB)
 // Simplified: take bytes until CRLF
-pub fn reason_phrase(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn reason_phrase(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // The reason phrase can be empty, so we use take_till instead of take_till1
     take_till(|c| c == b'\r' || c == b'\n')(input)
 }
 
 // Status-Line = SIP-Version SP Status-Code SP Reason-Phrase CRLF
-pub fn parse_status_line(input: &[u8]) -> ParseResult<(Version, StatusCode, &[u8])> {
+pub fn parse_status_line(input: &[u8]) -> ParseResult<'_, (Version, StatusCode, &[u8])> {
     terminated(
         tuple((
             terminated(sip_version, space1),

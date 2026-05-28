@@ -32,12 +32,12 @@ use super::server_val::ServerValComponent;
 use super::server_val::server_val;
 
 // Helper function to recognize whitespace including LWS
-fn ws(input: &[u8]) -> ParseResult<&[u8]> {
+fn ws(input: &[u8]) -> ParseResult<'_, &[u8]> {
     take_while(|c| c == b' ' || c == b'\t' || c == b'\r' || c == b'\n')(input)
 }
 
 // server-val *(LWS server-val)
-fn server_val_list(input: &[u8]) -> ParseResult<Vec<ServerVal>> {
+fn server_val_list(input: &[u8]) -> ParseResult<'_, Vec<ServerVal>> {
     let (input, first) = server_val(input)?;
     let (input, _) = ws(input)?;
 
@@ -61,7 +61,7 @@ fn server_val_list(input: &[u8]) -> ParseResult<Vec<ServerVal>> {
 
 // Server = "Server" HCOLON server-val *(LWS server-val)
 // Note: HCOLON handled elsewhere
-pub fn parse_server(input: &[u8]) -> ParseResult<Vec<ServerVal>> {
+pub fn parse_server(input: &[u8]) -> ParseResult<'_, Vec<ServerVal>> {
     server_val_list(input)
 }
 

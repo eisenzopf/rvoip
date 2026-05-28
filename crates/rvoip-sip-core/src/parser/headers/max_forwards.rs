@@ -19,7 +19,7 @@ use crate::parser::ParseResult;
 ///
 /// Returns a u8 for consistency with the MaxForwards type. Values exceeding u8::MAX
 /// will be rejected with an error as per SIP RFC 3261 implementation guidelines.
-pub fn parse_max_forwards(input: &[u8]) -> ParseResult<u8> {
+pub fn parse_max_forwards(input: &[u8]) -> ParseResult<'_, u8> {
     map_res(digit1, |bytes| {
         let s = str::from_utf8(bytes)
             .map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Digit)))?;

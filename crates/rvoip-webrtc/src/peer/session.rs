@@ -15,7 +15,7 @@ use webrtc::media_stream::track_local::TrackLocal;
 use webrtc::media_stream::track_remote::TrackRemote;
 use webrtc::peer_connection::PeerConnection;
 use webrtc::peer_connection::{
-    RTCIceCandidate, RTCIceCandidateInit, RTCSdpType, RTCSessionDescription,
+    RTCIceCandidate, RTCIceCandidateInit, RTCSdpType,
 };
 use webrtc::rtp_transceiver::{RtpTransceiver, RTCRtpTransceiverDirection};
 

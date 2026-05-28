@@ -30,7 +30,7 @@ use crate::config::WebRtcConfig;
 use crate::errors::{Result, WebRtcError};
 use crate::media::{from_tracks, WebRtcMediaStream};
 use crate::peer::{PeerRole, RvoipPeerConnection};
-use crate::sdp::{negotiate_audio, parse_sdp, sdp_to_string};
+use crate::sdp::{negotiate_audio, sdp_to_string};
 
 pub const ADAPTER_EVENT_CAP: usize = 256;
 

@@ -27,7 +27,7 @@ fn no_spaces(input: &[u8]) -> bool {
 
 // Unsupported = "Unsupported" HCOLON option-tag *(COMMA option-tag)
 // Note: HCOLON handled elsewhere.
-pub fn parse_unsupported(input: &[u8]) -> ParseResult<Vec<String>> {
+pub fn parse_unsupported(input: &[u8]) -> ParseResult<'_, Vec<String>> {
     // Check for line folding first (CRLF or LF followed by whitespace)
     let has_line_folding = input.windows(3).any(|w| {
         (w[0] == b'\r' && w[1] == b'\n' && (w[2] == b' ' || w[2] == b'\t'))

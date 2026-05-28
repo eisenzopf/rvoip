@@ -22,12 +22,12 @@ use crate::types::server::{Product, ServerVal};
 pub type ServerValComponent = ServerVal;
 
 // product-version = token
-fn product_version(input: &[u8]) -> ParseResult<String> {
+fn product_version(input: &[u8]) -> ParseResult<'_, String> {
     map_res(token, |bytes| str::from_utf8(bytes).map(String::from))(input)
 }
 
 // product = token [SLASH product-version]
-fn product(input: &[u8]) -> ParseResult<Product> {
+fn product(input: &[u8]) -> ParseResult<'_, Product> {
     map_res(
         pair(token, opt(preceded(slash, product_version))),
         |(name_bytes, version_opt)| {
@@ -41,7 +41,7 @@ fn product(input: &[u8]) -> ParseResult<Product> {
 }
 
 // server-val = product / comment
-pub fn server_val(input: &[u8]) -> ParseResult<ServerVal> {
+pub fn server_val(input: &[u8]) -> ParseResult<'_, ServerVal> {
     alt((
         map(product, ServerVal::Product),
         // Assuming comment parser returns the content as String
@@ -52,7 +52,7 @@ pub fn server_val(input: &[u8]) -> ParseResult<ServerVal> {
 }
 
 // Alias for function to help with migration
-pub fn server_val_parser(input: &[u8]) -> ParseResult<ServerVal> {
+pub fn server_val_parser(input: &[u8]) -> ParseResult<'_, ServerVal> {
     server_val(input)
 }
 

@@ -32,14 +32,14 @@ use std::str;
 /// Parses HCOLON [ token *(COMMA token) ]
 /// Requires at least one token if the value is present.
 /// Based on RFC 3261 Section 7.3
-fn token_list1(input: &[u8]) -> ParseResult<Vec<String>> {
+fn token_list1(input: &[u8]) -> ParseResult<'_, Vec<String>> {
     map(comma_separated_list1(token_string), |tokens| tokens)(input)
 }
 
 /// Parses HCOLON [ token *(COMMA token) ]
 /// Allows an empty list.
 /// Based on RFC 3261 Section 7.3
-fn token_list0(input: &[u8]) -> ParseResult<Vec<String>> {
+fn token_list0(input: &[u8]) -> ParseResult<'_, Vec<String>> {
     map(comma_separated_list0(token_string), |tokens| tokens)(input)
 }
 
@@ -100,17 +100,17 @@ pub fn parse_header_token_list0_short<'a>(
 pub struct TokenList(pub Vec<String>); // Use String to hold tokens
 
 // Parses a comma-separated list of tokens
-pub fn parse_token_list0(input: &[u8]) -> ParseResult<Vec<String>> {
+pub fn parse_token_list0(input: &[u8]) -> ParseResult<'_, Vec<String>> {
     comma_separated_list0(token_string)(input)
 }
 
-pub fn parse_token_list1(input: &[u8]) -> ParseResult<Vec<String>> {
+pub fn parse_token_list1(input: &[u8]) -> ParseResult<'_, Vec<String>> {
     comma_separated_list1(token_string)(input)
 }
 
 // Helper to parse a token into a String
 // Based on RFC 3261 Section 25.1 token definition
-pub fn token_string(input: &[u8]) -> ParseResult<String> {
+pub fn token_string(input: &[u8]) -> ParseResult<'_, String> {
     map_res(token, |b| str::from_utf8(b).map(String::from))(input)
 }
 

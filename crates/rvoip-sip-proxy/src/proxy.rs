@@ -19,7 +19,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use rvoip_sip_core::types::headers::header_name::HeaderName;
 use rvoip_sip_core::types::max_forwards::MaxForwards;
 use rvoip_sip_core::types::status::StatusCode;
 use rvoip_sip_core::types::uri::Uri;
@@ -260,7 +259,6 @@ struct ForkContext {
 
 struct Leg {
     downstream_client_tx: TransactionKey,
-    destination: SocketAddr,
     /// Final response received on this leg, if any. `None` while the
     /// leg is still pending; `Some(status)` once a final response has
     /// arrived. Forward-progress is tracked here so the aggregator can
@@ -688,7 +686,6 @@ impl StatefulProxy {
                 let mut legs = fork.legs.lock().await;
                 legs.push(Leg {
                     downstream_client_tx: downstream_tx_id.clone(),
-                    destination: *destination,
                     final_status: None,
                     cancelled: false,
                     last_response: None,

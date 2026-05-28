@@ -23,7 +23,7 @@ use std::str::FromStr;
 // RFC 7617: #auth-param BWS token68
 // token68 = 1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="
 // Simplified: Take everything until EOL or comma (as it's usually the only thing)
-fn basic_credentials_token(input: &[u8]) -> ParseResult<&[u8]> {
+fn basic_credentials_token(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // This might be too simple; a robust parser would check Base64 chars.
     recognize(take_till1(|c| c == b'\r' || c == b'\n' || c == b','))(input)
 }
@@ -34,7 +34,7 @@ fn basic_credentials_token(input: &[u8]) -> ParseResult<&[u8]> {
 // digest-response = digest-param *(COMMA digest-param)
 // basic-credentials = base64-user-pass (token68)
 // other-response = auth-scheme LWS auth-param *(COMMA auth-param)
-pub fn credentials(input: &[u8]) -> ParseResult<Credentials> {
+pub fn credentials(input: &[u8]) -> ParseResult<'_, Credentials> {
     // First check if the input is empty
     if input.is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(

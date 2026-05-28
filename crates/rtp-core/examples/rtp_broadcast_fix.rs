@@ -1,11 +1,5 @@
 use rvoip_rtp_core::api::common::error::MediaTransportError;
 use rvoip_rtp_core::api::common::frame::{MediaFrame, MediaFrameType};
-/// Testing the fixed implementation of `receive_frame` in the server transport
-///
-/// This minimal example shows how to fix the receive_frame implementation to use
-/// broadcast channel correctly.
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 

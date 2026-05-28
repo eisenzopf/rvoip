@@ -26,7 +26,7 @@ use chrono::Utc;
 use rvoip_auth_core::bearer_stub;
 use rvoip_core::adapter::ConnectionAdapter;
 use rvoip_core::events::Event;
-use rvoip_core::ids::{ConnectionId, SessionId};
+use rvoip_core::ids::SessionId;
 use rvoip_core::stream::{MediaFrame, MediaStream, StreamKind};
 use rvoip_core::{Config, Orchestrator};
 use rvoip_quic::{

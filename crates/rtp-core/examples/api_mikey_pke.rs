@@ -14,25 +14,20 @@
 //! Use Case: Enterprise multimedia communications with PKI infrastructure
 
 use rvoip_rtp_core::{
-    api::common::config::SecurityConfig,
-    api::common::unified_security::{MikeyMode, SecurityContextFactory},
     security::{
         mikey::{
             crypto::{
-                extract_certificate_info, generate_ca_certificate,
-                generate_key_pair_and_certificate, sign_certificate_with_ca, CertificateConfig,
+                extract_certificate_info, generate_ca_certificate, sign_certificate_with_ca, CertificateConfig,
             },
             Mikey, MikeyConfig, MikeyKeyExchangeMethod, MikeyRole,
         },
         SecurityKeyExchange,
     },
     srtp::{SrtpContext, SRTP_AES128_CM_SHA1_80},
-    Error,
 };
 
-use bytes::Bytes;
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -107,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let mut mikey_client = Mikey::new(client_config, MikeyRole::Responder);
+    let _mikey_client = Mikey::new(client_config, MikeyRole::Responder);
 
     info!("✅ Server configured as MIKEY initiator");
     info!("✅ Client configured as MIKEY responder");

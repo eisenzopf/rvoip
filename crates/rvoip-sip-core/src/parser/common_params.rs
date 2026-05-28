@@ -63,7 +63,7 @@ pub fn unquote_string(input: &[u8]) -> std::result::Result<String, Error> {
 }
 
 // gen-value = token / host / quoted-string
-fn gen_value(input: &[u8]) -> ParseResult<GenericValue> {
+fn gen_value(input: &[u8]) -> ParseResult<'_, GenericValue> {
     // IP address pattern check - if it looks like an IP, use host parser
     if input.len() >= 7 && // Min IP length (1.2.3.4)
        (input.iter().filter(|&&c| c == b'.').count() == 3 || // IPv4 has 3 dots
@@ -94,7 +94,7 @@ fn gen_value(input: &[u8]) -> ParseResult<GenericValue> {
 
 // generic-param = token [ EQUAL gen-value ]
 // Returns Param::Other(String, Option<GenericValue>)
-pub fn generic_param(input: &[u8]) -> ParseResult<Param> {
+pub fn generic_param(input: &[u8]) -> ParseResult<'_, Param> {
     map_res(
         pair(token, opt(preceded(equal, gen_value))),
         |(name_b, val_opt)| {
@@ -107,7 +107,7 @@ pub fn generic_param(input: &[u8]) -> ParseResult<Param> {
 }
 
 // accept-param = ("q" EQUAL qvalue) / generic-param
-pub fn accept_param(input: &[u8]) -> ParseResult<Param> {
+pub fn accept_param(input: &[u8]) -> ParseResult<'_, Param> {
     alt((
         map(preceded(pair(tag_no_case(b"q"), equal), qvalue), Param::Q),
         generic_param,
@@ -117,7 +117,7 @@ pub fn accept_param(input: &[u8]) -> ParseResult<Param> {
 /// Parses zero or more semicolon-preceded generic parameters.
 /// Input: b";name1=value1;name2;name3="value3""
 /// Output: A Vec containing Param::Other variants.
-pub fn semicolon_params0(input: &[u8]) -> ParseResult<Vec<Param>> {
+pub fn semicolon_params0(input: &[u8]) -> ParseResult<'_, Vec<Param>> {
     many0(preceded(
         semi,          // Use the semi parser which handles surrounding SWS
         generic_param, // Parse one generic parameter
@@ -125,7 +125,7 @@ pub fn semicolon_params0(input: &[u8]) -> ParseResult<Vec<Param>> {
 }
 
 /// Parses one or more semicolon-preceded generic parameters.
-pub fn semicolon_params1(input: &[u8]) -> ParseResult<Vec<Param>> {
+pub fn semicolon_params1(input: &[u8]) -> ParseResult<'_, Vec<Param>> {
     nom::multi::many1(preceded(
         semi,          // Use the semi parser which handles surrounding SWS
         generic_param, // Parse one generic parameter
@@ -136,9 +136,9 @@ pub fn semicolon_params1(input: &[u8]) -> ParseResult<Vec<Param>> {
 /// Useful for headers where parameters might not all be generic-param.
 pub fn semicolon_separated_params0<'a, O, F>(
     param_parser: F,
-) -> impl FnMut(&'a [u8]) -> ParseResult<Vec<O>>
+) -> impl FnMut(&'a [u8]) -> ParseResult<'_, Vec<O>>
 where
-    F: FnMut(&'a [u8]) -> ParseResult<O> + Copy,
+    F: FnMut(&'a [u8]) -> ParseResult<'_, O> + Copy,
 {
     many0(preceded(semi, param_parser))
 }
@@ -146,9 +146,9 @@ where
 /// Parses one or more semicolon-preceded parameters using a specific parameter parser function.
 pub fn semicolon_separated_params1<'a, O, F>(
     param_parser: F,
-) -> impl FnMut(&'a [u8]) -> ParseResult<Vec<O>>
+) -> impl FnMut(&'a [u8]) -> ParseResult<'_, Vec<O>>
 where
-    F: FnMut(&'a [u8]) -> ParseResult<O> + Copy,
+    F: FnMut(&'a [u8]) -> ParseResult<'_, O> + Copy,
 {
     nom::multi::many1(preceded(semi, param_parser))
 }
@@ -172,7 +172,7 @@ pub fn params_to_hashmap(params: Vec<Param>) -> HashMap<String, Option<String>> 
 }
 
 // tag-param = "tag" EQUAL token
-pub fn tag_param(input: &[u8]) -> ParseResult<Param> {
+pub fn tag_param(input: &[u8]) -> ParseResult<'_, Param> {
     // Add debug logging
     // eprintln!("Attempting to parse tag from: {:?}", input);
 
@@ -204,24 +204,24 @@ pub fn tag_param(input: &[u8]) -> ParseResult<Param> {
 
 // Specific param parser for From/To headers
 // from-param / to-param = tag-param / generic-param
-pub fn from_to_param(input: &[u8]) -> ParseResult<Param> {
+pub fn from_to_param(input: &[u8]) -> ParseResult<'_, Param> {
     alt((tag_param, generic_param))(input)
 }
 
 // c-p-q = "q" EQUAL qvalue
-fn cp_q(input: &[u8]) -> ParseResult<NotNan<f32>> {
+fn cp_q(input: &[u8]) -> ParseResult<'_, NotNan<f32>> {
     preceded(pair(tag_no_case(b"q"), equal), qvalue)(input)
 }
 
 // c-p-expires = "expires" EQUAL delta-seconds
-fn cp_expires(input: &[u8]) -> ParseResult<u32> {
+fn cp_expires(input: &[u8]) -> ParseResult<'_, u32> {
     preceded(pair(tag_no_case(b"expires"), equal), delta_seconds)(input)
 }
 
 // contact-params = c-p-q / c-p-expires / contact-extension
 // contact-extension = generic-param
 // Returns Param enum to capture the different types
-pub fn contact_param_item(input: &[u8]) -> ParseResult<Param> {
+pub fn contact_param_item(input: &[u8]) -> ParseResult<'_, Param> {
     alt((
         map(cp_q, Param::Q),
         map(cp_expires, Param::Expires),

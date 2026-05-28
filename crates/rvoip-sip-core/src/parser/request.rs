@@ -42,7 +42,7 @@ use crate::types::{Method, Uri, Version};
 /// The parser handles these components separately for more precise error detection.
 /// Parser for a SIP request line
 /// Changed signature to accept &[u8]
-pub fn parse_request_line(input: &[u8]) -> ParseResult<(Method, Uri, Version)> {
+pub fn parse_request_line(input: &[u8]) -> ParseResult<'_, (Method, Uri, Version)> {
     // First, parse the method and the first space
     let (input, method_bytes) = token(input)?;
     let (input, _) = space1(input)?;

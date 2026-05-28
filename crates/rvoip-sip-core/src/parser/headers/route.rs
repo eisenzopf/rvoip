@@ -40,7 +40,7 @@ impl std::fmt::Display for RouteEntry {
 
 // route-param = name-addr *( SEMI rr-param )
 // rr-param = generic-param
-fn route_param(input: &[u8]) -> ParseResult<Address> {
+fn route_param(input: &[u8]) -> ParseResult<'_, Address> {
     map(
         pair(
             name_addr,                                  // Requires name-addr format (must have < >)
@@ -54,7 +54,7 @@ fn route_param(input: &[u8]) -> ParseResult<Address> {
 }
 
 // Route = "Route" HCOLON route-param *(COMMA route-param)
-pub fn parse_route(input: &[u8]) -> ParseResult<RouteHeader> {
+pub fn parse_route(input: &[u8]) -> ParseResult<'_, RouteHeader> {
     map(
         comma_separated_list1(route_param), // Use route_param which strictly enforces name-addr format
         |addresses: Vec<Address>| {

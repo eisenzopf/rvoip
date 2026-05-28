@@ -35,17 +35,17 @@ use crate::types::uri::Uri; // Use specific type alias
 // Consider extracting to a shared address.rs module later.
 
 // display-name = *(token LWS)/ quoted-string
-fn display_name(input: &[u8]) -> ParseResult<&[u8]> {
+fn display_name(input: &[u8]) -> ParseResult<'_, &[u8]> {
     alt((quoted_string, recognize(many1(terminated(token, lws)))))(input)
 }
 
 // addr-spec = SIP-URI / SIPS-URI / absoluteURI
-fn addr_spec(input: &[u8]) -> ParseResult<Uri> {
+fn addr_spec(input: &[u8]) -> ParseResult<'_, Uri> {
     parse_uri(input)
 }
 
 // name-addr = [ display-name ] LAQUOT addr-spec RAQUOT
-fn name_addr(input: &[u8]) -> ParseResult<(Option<&[u8]>, Uri)> {
+fn name_addr(input: &[u8]) -> ParseResult<'_, (Option<&[u8]>, Uri)> {
     pair(
         opt(terminated(display_name, lws)),
         delimited(laquot, addr_spec, raquot),
@@ -53,7 +53,7 @@ fn name_addr(input: &[u8]) -> ParseResult<(Option<&[u8]>, Uri)> {
 }
 
 // tag-param = "tag" EQUAL token
-fn tag_param(input: &[u8]) -> ParseResult<Param> {
+fn tag_param(input: &[u8]) -> ParseResult<'_, Param> {
     map_res(
         preceded(tag_no_case(b"tag".as_slice()), preceded(equal, token)),
         |tag_bytes| match str::from_utf8(tag_bytes) {
@@ -64,12 +64,12 @@ fn tag_param(input: &[u8]) -> ParseResult<Param> {
 }
 
 // Special case for the "lr" flag parameter
-fn lr_param(input: &[u8]) -> ParseResult<Param> {
+fn lr_param(input: &[u8]) -> ParseResult<'_, Param> {
     value(Param::Lr, tag_no_case(b"lr"))(input)
 }
 
 // transport-param = "transport=" token
-fn transport_param(input: &[u8]) -> ParseResult<Param> {
+fn transport_param(input: &[u8]) -> ParseResult<'_, Param> {
     map_res(
         preceded(tag_no_case(b"transport".as_slice()), preceded(equal, token)),
         |transport_bytes| str::from_utf8(transport_bytes).map(|s| Param::Transport(s.to_string())),
@@ -77,13 +77,13 @@ fn transport_param(input: &[u8]) -> ParseResult<Param> {
 }
 
 // from-param = tag-param / generic-param
-fn from_param_item(input: &[u8]) -> ParseResult<Param> {
+fn from_param_item(input: &[u8]) -> ParseResult<'_, Param> {
     alt((tag_param, lr_param, transport_param, generic_param))(input)
 }
 
 // from-spec = ( name-addr / addr-spec ) *( SEMI from-param )
 // Returns Address struct with params included
-fn from_spec(input: &[u8]) -> ParseResult<Address> {
+fn from_spec(input: &[u8]) -> ParseResult<'_, Address> {
     map(
         pair(
             name_addr_or_addr_spec,                 // Returns Address{..., params: []}
@@ -101,7 +101,7 @@ fn from_spec(input: &[u8]) -> ParseResult<Address> {
 // From = "From" HCOLON from-spec
 // Note: HCOLON handled elsewhere
 // Make this function public
-pub fn parse_from(input: &[u8]) -> ParseResult<FromHeader> {
+pub fn parse_from(input: &[u8]) -> ParseResult<'_, FromHeader> {
     map(from_spec, FromHeader)(input)
 }
 

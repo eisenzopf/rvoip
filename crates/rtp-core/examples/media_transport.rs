@@ -6,11 +6,10 @@
 use bytes::Bytes;
 use rvoip_rtp_core::{
     MediaTransport, RtpMediaTransport, RtpSession, RtpSessionConfig, RtpSessionEvent,
-    UdpRtpTransport,
 };
 use std::time::Duration;
 use tokio::time;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Create RTP sessions
-    let mut sender_session = RtpSession::new(sender_config).await?;
+    let sender_session = RtpSession::new(sender_config).await?;
     let mut receiver_session = RtpSession::new(receiver_config).await?;
 
     // Get sender and receiver addresses

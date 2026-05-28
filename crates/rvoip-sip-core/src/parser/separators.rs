@@ -34,72 +34,72 @@ fn is_separator_char(c: u8) -> bool {
         || c == b'\t'
 }
 
-pub fn separators(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn separators(input: &[u8]) -> ParseResult<'_, &[u8]> {
     take_while1(is_separator_char)(input)
 }
 
-pub fn hcolon(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn hcolon(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // HCOLON = *( SP / HTAB ) ":" SWS
     recognize(tuple((many0(alt((tag(b" "), tag(b"\t")))), tag(b":"), sws)))(input)
 }
 
-pub fn dquote(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn dquote(input: &[u8]) -> ParseResult<'_, &[u8]> {
     tag(b"\"")(input)
 }
 
 // Separator wrappers with SWS
-pub fn star(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn star(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(tuple((sws, tag(b"*"), sws)))(input)
 }
 
-pub fn slash(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn slash(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(tuple((sws, tag(b"/"), sws)))(input)
 }
 
-pub fn equal(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn equal(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(tuple((sws, tag(b"="), sws)))(input)
 }
 
-pub fn lparen(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn lparen(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // LPAREN = SWS "("
     // RFC 3261 defines LPAREN as optional whitespace followed by open paren
     recognize(pair(sws, tag(b"(")))(input)
 }
 
-pub fn rparen(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn rparen(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // RPAREN = ")" SWS
     // RFC 3261 defines RPAREN as close paren followed by optional whitespace
     recognize(pair(tag(b")"), sws))(input)
 }
 
-pub fn raquot(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn raquot(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // RAQUOT = ">" SWS
     recognize(pair(tag(b">"), sws))(input)
 }
 
-pub fn laquot(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn laquot(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // LAQUOT = SWS "<"
     recognize(pair(sws, tag(b"<")))(input)
 }
 
-pub fn comma(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn comma(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(tuple((sws, tag(b","), sws)))(input)
 }
 
-pub fn semi(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn semi(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(tuple((sws, tag(b";"), sws)))(input)
 }
 
-pub fn colon(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn colon(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(tuple((sws, tag(b":"), sws)))(input)
 }
 
-pub fn ldquot(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn ldquot(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // LDQUOT = SWS DQUOTE
     recognize(pair(sws, dquote))(input)
 }
 
-pub fn rdquot(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn rdquot(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // RDQUOT = DQUOTE SWS
     recognize(pair(dquote, sws))(input)
 }

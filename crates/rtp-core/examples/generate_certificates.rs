@@ -6,7 +6,6 @@ use rvoip_rtp_core::dtls::crypto::verify::generate_self_signed_certificate;
 /// the secure media streaming example with DTLS-SRTP.
 use std::fs::File;
 use std::io::Write;
-use std::path::Path;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

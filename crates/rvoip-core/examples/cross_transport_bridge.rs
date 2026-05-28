@@ -74,7 +74,7 @@ use rvoip_uctp::substrate::{
 };
 use rvoip_uctp::types::MessageType;
 use rvoip_webrtc::config::WebRtcConfig;
-use rvoip_webrtc::media::{from_tracks, silent_rtp_payload_for_ssrc};
+use rvoip_webrtc::media::from_tracks;
 use rvoip_webrtc::peer::{PeerRole, RvoipPeerConnection};
 use rvoip_webrtc::WebRtcAdapter;
 
@@ -719,14 +719,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut sip_to_quic_ok = false;
     let mut quic_to_sip_ok = false;
     let mut frame_test_note = String::new();
-    let mut saved_peer_sid: Option<rvoip_sip::SessionId> = None;
 
     if cross_bridge_result.is_ok() && sip_conn_id.is_some() {
         // Wait for the peer's auto-acceptor to receive the inbound call
         // SessionId (peer-side analogue of the orchestrator's sip_conn_id).
         match tokio::time::timeout(Duration::from_secs(3), peer_sid_rx.recv()).await {
             Ok(Some(peer_sid)) => {
-                saved_peer_sid = Some(peer_sid.clone());
                 println!(
                     "\n[frame-test] peer accepted call → peer_sid={}",
                     peer_sid.0
@@ -926,12 +924,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut webrtc_quic_frame_ok = false;
     let mut quic_to_webrtc_frame_ok = false;
     let mut webrtc_test_note = String::new();
-    let mut wq_bridge_id: Option<rvoip_core::ids::BridgeId> = None;
-    // Hoist the offerer's MediaStream so Phase 6 can reuse it and avoid
-    // the SRTP duplicate-sequence issue that would arise if we built a
-    // second `from_tracks` on the same local_audio_track.
-    let mut offerer_stream_handle: Option<Arc<rvoip_webrtc::media::stream::WebRtcMediaStream>> =
-        None;
 
     // Subscribe BEFORE driving so we catch every event.
     let mut wq_events = orch_for_bridge.subscribe_events();
@@ -1051,7 +1043,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         bid
                     );
                     webrtc_quic_bridge_ok = true;
-                    wq_bridge_id = Some(bid.clone());
+                    let _ = bid; // bridge id intentionally unused; bridge lifetime is owned by webrtc_adapter
 
                     // The WebRtcMediaStream populates remote tracks lazily
                     // — webrtc-rs fires on_track only after the first
@@ -1106,7 +1098,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 /* Opus PT */ 111,
                                 None,
                             );
-                            offerer_stream_handle = Some(Arc::clone(&offerer_stream));
                             let offerer_out = offerer_stream.frames_out();
                             let mut client_d_in =
                                 MediaStream::frames_in(client_d_stream.as_ref());

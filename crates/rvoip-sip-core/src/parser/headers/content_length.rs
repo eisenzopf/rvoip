@@ -20,7 +20,7 @@ use crate::parser::ParseResult; // Import whitespace handling functions
 ///
 /// Note: This parser handles only the value part (1*DIGIT).
 /// The "Content-Length"/"l" token and HCOLON are parsed separately.
-pub fn parse_content_length(input: &[u8]) -> ParseResult<u32> {
+pub fn parse_content_length(input: &[u8]) -> ParseResult<'_, u32> {
     // Handle optional leading whitespace (which is technically not part of the ABNF
     // but commonly found in real-world messages)
     let (input, _) = opt(owsp)(input)?;
@@ -41,7 +41,7 @@ pub fn parse_content_length(input: &[u8]) -> ParseResult<u32> {
 
 /// A complete parser for Content-Length header, including the header name and value
 /// This is a more comprehensive parser that handles the entire header
-pub fn parse_full_content_length(input: &[u8]) -> ParseResult<u32> {
+pub fn parse_full_content_length(input: &[u8]) -> ParseResult<'_, u32> {
     // Parse the header name (case-insensitive)
     let (input, _) = nom::branch::alt((
         nom::bytes::complete::tag_no_case(b"Content-Length"),

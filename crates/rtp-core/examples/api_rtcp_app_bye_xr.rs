@@ -8,16 +8,16 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use rvoip_rtp_core::api::{
     client::{
-        config::{ClientConfig, ClientConfigBuilder},
+        config::ClientConfigBuilder,
         transport::{DefaultMediaTransportClient, MediaTransportClient, VoipMetrics},
     },
     common::{events::MediaTransportEvent, frame::MediaFrame, frame::MediaFrameType},
     server::{
-        config::{ServerConfig, ServerConfigBuilder},
+        config::ServerConfigBuilder,
         transport::{DefaultMediaTransportServer, MediaTransportServer},
     },
 };
@@ -190,7 +190,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("Sending RTCP XR VoIP metrics from client to server");
 
             // Create sample VoIP metrics
-            let mut metrics = VoipMetrics {
+            let metrics = VoipMetrics {
                 ssrc: 0x12345678,      // This will be replaced by actual SSRC
                 loss_rate: 5,          // 5% packet loss
                 discard_rate: 2,       // 2% discard rate

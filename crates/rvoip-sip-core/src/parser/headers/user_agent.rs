@@ -61,12 +61,12 @@ use crate::types::server::{Product, ServerVal};
 use super::server_val::ServerValComponent;
 
 // server-val *(LWS server-val)
-fn server_val_list(input: &[u8]) -> ParseResult<Vec<ServerVal>> {
+fn server_val_list(input: &[u8]) -> ParseResult<'_, Vec<ServerVal>> {
     // separated_list1 ensures at least one server_val, separated by LWS
     separated_list1(lws, server_val)(input)
 }
 
-pub fn parse_user_agent(input: &[u8]) -> ParseResult<Vec<ServerVal>> {
+pub fn parse_user_agent(input: &[u8]) -> ParseResult<'_, Vec<ServerVal>> {
     server_val_list(input)
 }
 

@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 // Set example timeout to force termination
 const MAX_RUNTIME_SECONDS: u64 = 10;

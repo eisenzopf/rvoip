@@ -46,13 +46,13 @@ use crate::types::param::Param;
 
 // m-type, m-subtype are just tokens
 // Note: These seem to be defined in media_type.rs now, potentially remove if unused locally
-// fn m_token(input: &[u8]) -> ParseResult<&[u8]> {
+// fn m_token(input: &[u8]) -> ParseResult<'_, &[u8]> {
 //     token(input)
 // }
 // Access m_type and m_subtype through imported media_type module functions if needed.
 
 // m-value = token / quoted-string
-fn m_value(input: &[u8]) -> ParseResult<&[u8]> {
+fn m_value(input: &[u8]) -> ParseResult<'_, &[u8]> {
     alt((token, quoted_string))(input)
 }
 
@@ -91,7 +91,7 @@ impl fmt::Display for ContentTypeValue {
 // Note: HCOLON and compact form handled elsewhere.
 // This parser needs to return ContentTypeValue, not ContentTypeHeader
 // Make this function public
-pub fn parse_content_type_value(input: &[u8]) -> ParseResult<ContentTypeValue> {
+pub fn parse_content_type_value(input: &[u8]) -> ParseResult<'_, ContentTypeValue> {
     // First check for empty input
     if input.is_empty() {
         return Err(nom::Err::Error(NomError::new(input, ErrorKind::TakeWhile1)));
@@ -125,7 +125,7 @@ pub fn parse_content_type_value(input: &[u8]) -> ParseResult<ContentTypeValue> {
 }
 
 // Parse the media type and subtype part (m-type SLASH m-subtype) with proper whitespace handling
-fn parse_media_type_with_whitespace(input: &[u8]) -> ParseResult<(String, String)> {
+fn parse_media_type_with_whitespace(input: &[u8]) -> ParseResult<'_, (String, String)> {
     // Parse type, slash, and subtype with proper whitespace handling
     let (input, (m_type_bytes, _, m_subtype_bytes)) = tuple((
         terminated(token, opt(lws)), // type token followed by optional whitespace
@@ -146,7 +146,7 @@ fn parse_media_type_with_whitespace(input: &[u8]) -> ParseResult<(String, String
 }
 
 // Parse the media parameters (*(SEMI m-parameter)) with proper whitespace handling
-fn parse_media_parameters(input: &[u8]) -> ParseResult<HashMap<String, String>> {
+fn parse_media_parameters(input: &[u8]) -> ParseResult<'_, HashMap<String, String>> {
     let (input, params) = many0(parse_media_parameter)(input)?;
 
     // Create a HashMap from the parameter pairs
@@ -156,7 +156,7 @@ fn parse_media_parameters(input: &[u8]) -> ParseResult<HashMap<String, String>> 
 }
 
 // Parse a single media parameter (SEMI m-parameter) with proper whitespace handling
-fn parse_media_parameter(input: &[u8]) -> ParseResult<(String, String)> {
+fn parse_media_parameter(input: &[u8]) -> ParseResult<'_, (String, String)> {
     // Parse a semicolon followed by a parameter
     let (input, _) = terminated(semi, opt(lws))(input)?;
 

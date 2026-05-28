@@ -10,17 +10,16 @@
 use rvoip_rtp_core::api::{
     client::security::srtp::{SdesClient, SdesClientConfig},
     common::{
-        config::{KeyExchangeMethod, SecurityConfig, SecurityProfile, SrtpProfile},
+        config::{KeyExchangeMethod, SecurityConfig, SrtpProfile},
         security_manager::{NegotiationStrategy, SecurityContextManager},
-        unified_security::{SecurityContextFactory, SecurityState},
+        unified_security::SecurityContextFactory,
     },
-    server::security::srtp::{SdesServer, SdesServerConfig, SdesServerSession},
+    server::security::srtp::{SdesServer, SdesServerConfig},
 };
 
 use std::fmt;
 use std::time::Duration;
-use tokio::time;
-use tracing::{debug, error, info, warn};
+use tracing::{info, warn};
 
 // Set example timeout
 const MAX_RUNTIME_SECONDS: u64 = 10;

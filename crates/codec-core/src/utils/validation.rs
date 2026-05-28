@@ -8,17 +8,8 @@ pub fn validate_samples(samples: &[i16]) -> Result<()> {
     if samples.is_empty() {
         return Err(CodecError::invalid_format("Input samples cannot be empty"));
     }
-
-    // Check for reasonable sample range
-    for (i, &sample) in samples.iter().enumerate() {
-        if sample.abs() > 32767 {
-            return Err(CodecError::invalid_format(format!(
-                "Sample at index {} out of range: {}",
-                i, sample
-            )));
-        }
-    }
-
+    // Per-sample range check removed: every `i16` is by definition
+    // within [-32768, 32767], and `i16::MIN.abs()` would overflow.
     Ok(())
 }
 

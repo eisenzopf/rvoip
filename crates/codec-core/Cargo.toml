@@ -40,3 +40,5 @@ default = ["g711"]
 
 # Codec features
 g711 = []                    # G.711 μ-law/A-law codec (always available)
+opus = []                    # Opus codec (real impl in src/codecs/opus.rs)
+opus-sim = []                # Opus codec simulator variant

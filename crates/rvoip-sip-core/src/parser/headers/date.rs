@@ -24,7 +24,7 @@ use chrono::{
 };
 
 // wkday = "Mon" / "Tue" / "Wed" / "Thu" / "Fri" / "Sat" / "Sun"
-fn wkday(input: &[u8]) -> ParseResult<&[u8]> {
+fn wkday(input: &[u8]) -> ParseResult<'_, &[u8]> {
     alt((
         tag_no_case("Mon"),
         tag_no_case("Tue"),
@@ -38,7 +38,7 @@ fn wkday(input: &[u8]) -> ParseResult<&[u8]> {
 
 // month = "Jan" / "Feb" / "Mar" / "Apr" / "May" / "Jun" /
 //         "Jul" / "Aug" / "Sep" / "Oct" / "Nov" / "Dec"
-fn month(input: &[u8]) -> ParseResult<&[u8]> {
+fn month(input: &[u8]) -> ParseResult<'_, &[u8]> {
     alt((
         tag_no_case("Jan"),
         tag_no_case("Feb"),
@@ -56,17 +56,17 @@ fn month(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // 2DIGIT helper
-fn two_digit(input: &[u8]) -> ParseResult<&[u8]> {
+fn two_digit(input: &[u8]) -> ParseResult<'_, &[u8]> {
     take_while_m_n(2, 2, |c: u8| c.is_ascii_digit())(input)
 }
 
 // 4DIGIT helper
-fn four_digit(input: &[u8]) -> ParseResult<&[u8]> {
+fn four_digit(input: &[u8]) -> ParseResult<'_, &[u8]> {
     take_while_m_n(4, 4, |c: u8| c.is_ascii_digit())(input)
 }
 
 // date1 = 2DIGIT SP month SP 4DIGIT
-fn date1(input: &[u8]) -> ParseResult<(&[u8], &[u8], &[u8])> {
+fn date1(input: &[u8]) -> ParseResult<'_, (&[u8], &[u8], &[u8])> {
     tuple((
         two_digit,
         preceded(space1, month),
@@ -75,7 +75,7 @@ fn date1(input: &[u8]) -> ParseResult<(&[u8], &[u8], &[u8])> {
 }
 
 // time = 2DIGIT ":" 2DIGIT ":" 2DIGIT
-fn time(input: &[u8]) -> ParseResult<(&[u8], &[u8], &[u8])> {
+fn time(input: &[u8]) -> ParseResult<'_, (&[u8], &[u8], &[u8])> {
     tuple((
         two_digit,
         preceded(char(':'), two_digit),
@@ -85,7 +85,7 @@ fn time(input: &[u8]) -> ParseResult<(&[u8], &[u8], &[u8])> {
 
 // rfc1123-date = wkday "," SP date1 SP time SP "GMT"
 // Returns DateTime<FixedOffset> assuming chrono is available
-pub fn sip_date(input: &[u8]) -> ParseResult<DateTime<FixedOffset>> {
+pub fn sip_date(input: &[u8]) -> ParseResult<'_, DateTime<FixedOffset>> {
     // First, parse the structured parts to ensure RFC compliance
     let (remaining, date_parts) = tuple((
         wkday,
@@ -266,7 +266,7 @@ pub fn sip_date(input: &[u8]) -> ParseResult<DateTime<FixedOffset>> {
 
 // Date = "Date" HCOLON SIP-date
 // Note: HCOLON handled by message_header
-pub fn parse_date(input: &[u8]) -> ParseResult<DateTime<FixedOffset>> {
+pub fn parse_date(input: &[u8]) -> ParseResult<'_, DateTime<FixedOffset>> {
     sip_date(input)
 }
 

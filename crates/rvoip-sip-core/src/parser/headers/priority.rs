@@ -22,7 +22,7 @@ use crate::types::Priority;
 
 // priority-value = "emergency" / "urgent" / "normal" / "non-urgent" / other-priority
 // other-priority = token
-fn priority_value(input: &[u8]) -> ParseResult<Priority> {
+fn priority_value(input: &[u8]) -> ParseResult<'_, Priority> {
     // Use all_consuming to ensure we don't accept any trailing content
     all_consuming(map_res(
         token, // Any token is valid per RFC 3261
@@ -50,7 +50,7 @@ fn priority_value(input: &[u8]) -> ParseResult<Priority> {
     ))(input)
 }
 
-pub fn parse_priority(input: &[u8]) -> ParseResult<Priority> {
+pub fn parse_priority(input: &[u8]) -> ParseResult<'_, Priority> {
     priority_value(input)
 }
 

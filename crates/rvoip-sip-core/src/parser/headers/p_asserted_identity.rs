@@ -18,17 +18,17 @@ use crate::types::p_asserted_identity::{PAssertedIdentity, PPreferredIdentity};
 /// Parse the value of a `P-Asserted-Identity` (or `P-Preferred-Identity`)
 /// header — a comma-separated list of name-addr / addr-spec entries with no
 /// trailing parameters per RFC 3325.
-pub fn parse_p_asserted_identity_value(input: &[u8]) -> ParseResult<Vec<Address>> {
+pub fn parse_p_asserted_identity_value(input: &[u8]) -> ParseResult<'_, Vec<Address>> {
     comma_separated_list1(name_addr_or_addr_spec)(input)
 }
 
 /// Parse a `P-Asserted-Identity` header value into the typed wrapper.
-pub fn parse_p_asserted_identity(input: &[u8]) -> ParseResult<PAssertedIdentity> {
+pub fn parse_p_asserted_identity(input: &[u8]) -> ParseResult<'_, PAssertedIdentity> {
     map(parse_p_asserted_identity_value, PAssertedIdentity)(input)
 }
 
 /// Parse a `P-Preferred-Identity` header value into the typed wrapper.
-pub fn parse_p_preferred_identity(input: &[u8]) -> ParseResult<PPreferredIdentity> {
+pub fn parse_p_preferred_identity(input: &[u8]) -> ParseResult<'_, PPreferredIdentity> {
     map(parse_p_asserted_identity_value, PPreferredIdentity)(input)
 }
 

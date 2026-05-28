@@ -224,11 +224,10 @@ mod tests {
 
             // Test μ-law doesn't panic on boundary values
             let ulaw_encoded = ulaw_compress(sample);
-            let ulaw_decoded = ulaw_expand(ulaw_encoded);
-
-            // Basic sanity check - decoded values should be in reasonable range
-            assert!(alaw_decoded >= -32768 && alaw_decoded <= 32767);
-            assert!(ulaw_decoded >= -32768 && ulaw_decoded <= 32767);
+            let _ulaw_decoded = ulaw_expand(ulaw_encoded);
+            // The decoded values are `i16`, so the [-32768, 32767]
+            // range is enforced by the type system.
+            let _ = alaw_decoded;
         }
     }
 

@@ -5,7 +5,7 @@
 //!
 //! Standalone test to verify our G.191 vs G.711 format difference understanding
 
-use crate::codecs::g711::{alaw_compress, alaw_expand, ulaw_compress, ulaw_expand};
+use crate::codecs::g711::{alaw_compress, ulaw_compress};
 use std::path::Path;
 
 /// Load binary test data from file

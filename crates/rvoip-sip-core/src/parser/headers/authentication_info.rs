@@ -46,7 +46,7 @@ fn auth_info_error(input: &[u8], error: AuthInfoError) -> nom::Err<NomError<&[u8
 // Per RFC 3261 section 22.5:
 // The Authentication-Info header field provides authentication maintenance functions (future
 // nonce generation) and message authentication. It typically provides mutual authentication.
-pub fn parse_authentication_info(input: &[u8]) -> ParseResult<Vec<AuthenticationInfoParam>> {
+pub fn parse_authentication_info(input: &[u8]) -> ParseResult<'_, Vec<AuthenticationInfoParam>> {
     // Handle any leading whitespace, including line folding with lws (which handles CRLF + whitespace)
     let (input, _) = sws(input)?;
 

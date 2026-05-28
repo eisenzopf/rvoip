@@ -13,7 +13,7 @@ use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, 
 use rvoip_core::conversation::ConversationPolicy;
 use rvoip_core::error::{Result as RvResult, RvoipError};
 use rvoip_core::identity::IdentityAssurance;
-use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId, TenantId};
+use rvoip_core::ids::{ConnectionId, ParticipantId, StreamId, TenantId};
 use rvoip_core::message::Message;
 use rvoip_core::orchestrator::Orchestrator;
 use rvoip_core::session::SessionMedium;

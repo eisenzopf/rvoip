@@ -21,7 +21,7 @@ use crate::parser::ParseResult;
 
 // Parses a float-like sequence of digits: 1*(DIGIT) [ "." *(DIGIT) ]
 // Returns the raw byte slice representing the float string.
-fn float_digits(input: &[u8]) -> ParseResult<&[u8]> {
+fn float_digits(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(pair(
         digit1, // Must have at least one digit before decimal
         opt(pair(tag(b"."), take_while(|c: u8| c.is_ascii_digit()))),
@@ -30,7 +30,7 @@ fn float_digits(input: &[u8]) -> ParseResult<&[u8]> {
 
 // Parses a delay value according to ABNF: *(DIGIT) [ "." *(DIGIT) ]
 // This allows formats like ".456" (no leading digits) per RFC 3261
-fn delay_digits(input: &[u8]) -> ParseResult<&[u8]> {
+fn delay_digits(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(alt((
         // Case 1: With decimal point - can have optional digits before
         recognize(tuple((
@@ -51,7 +51,7 @@ pub struct TimestampValue {
 }
 
 // Parses 1*(DIGIT) [ "." *(DIGIT) ] into NotNan<f32>
-pub fn parse_timestamp_value(input: &[u8]) -> ParseResult<NotNan<f32>> {
+pub fn parse_timestamp_value(input: &[u8]) -> ParseResult<'_, NotNan<f32>> {
     // RFC 3261 doesn't allow negative values (no minus sign in grammar)
     // Check if input starts with a minus sign and reject
     if !input.is_empty() && input[0] == b'-' {
@@ -79,7 +79,7 @@ pub fn parse_timestamp_value(input: &[u8]) -> ParseResult<NotNan<f32>> {
 }
 
 // Parses delay value: *(DIGIT) [ "." *(DIGIT) ] into NotNan<f32>
-pub fn parse_delay_value(input: &[u8]) -> ParseResult<NotNan<f32>> {
+pub fn parse_delay_value(input: &[u8]) -> ParseResult<'_, NotNan<f32>> {
     // RFC 3261 doesn't allow negative values (no minus sign in grammar)
     // Check if input starts with a minus sign and reject
     if !input.is_empty() && input[0] == b'-' {
@@ -116,7 +116,7 @@ pub fn parse_delay_value(input: &[u8]) -> ParseResult<NotNan<f32>> {
 // delay = *(DIGIT) [ "." *(DIGIT) ]
 // Note: HCOLON handled elsewhere
 // Returns (timestamp: f32, delay: Option<f32>)
-pub fn parse_timestamp(input: &[u8]) -> ParseResult<(NotNan<f32>, Option<NotNan<f32>>)> {
+pub fn parse_timestamp(input: &[u8]) -> ParseResult<'_, (NotNan<f32>, Option<NotNan<f32>>)> {
     // First parse the timestamp value, which must have at least one digit
     let (remaining, timestamp) = parse_timestamp_value(input)?;
 

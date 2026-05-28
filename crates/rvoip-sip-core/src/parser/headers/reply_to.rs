@@ -37,7 +37,7 @@ pub struct ReplyToValue {
 // rplyto-spec = ( name-addr / addr-spec ) *( SEMI rplyto-param )
 // rplyto-param = generic-param
 // Returns Address struct with params included
-fn rplyto_spec(input: &[u8]) -> ParseResult<Address> {
+fn rplyto_spec(input: &[u8]) -> ParseResult<'_, Address> {
     // Verify we have input to parse
     if input.is_empty() {
         return Err(nom::Err::Error(Error::new(
@@ -60,13 +60,13 @@ fn rplyto_spec(input: &[u8]) -> ParseResult<Address> {
 
 // Reply-To = "Reply-To" HCOLON rplyto-spec
 // Note: HCOLON handled elsewhere
-pub fn parse_reply_to(input: &[u8]) -> ParseResult<ReplyToHeader> {
+pub fn parse_reply_to(input: &[u8]) -> ParseResult<'_, ReplyToHeader> {
     // Validate that the input can be parsed as a Reply-To header
     map(rplyto_spec, ReplyToHeader)(input)
 }
 
 /// Parses a Reply-To header value.
-pub fn parse_reply_to_public(input: &[u8]) -> ParseResult<Address> {
+pub fn parse_reply_to_public(input: &[u8]) -> ParseResult<'_, Address> {
     rplyto_spec(input)
 }
 

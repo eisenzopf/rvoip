@@ -21,7 +21,7 @@ use crate::parser::ParseResult;
 use std::str;
 
 // content-coding = token
-fn content_coding(input: &[u8]) -> ParseResult<String> {
+fn content_coding(input: &[u8]) -> ParseResult<'_, String> {
     // Handle any leading whitespace, including line folding
     let (input, _) = opt(lws)(input)?;
 
@@ -42,7 +42,7 @@ fn content_coding(input: &[u8]) -> ParseResult<String> {
 /// Parses the Content-Encoding header value.
 /// Content-Encoding = ( "Content-Encoding" / "e" ) HCOLON content-coding *(COMMA content-coding)
 /// Note: The header name and HCOLON are handled by the main message parser.
-pub fn parse_content_encoding(input: &[u8]) -> ParseResult<Vec<String>> {
+pub fn parse_content_encoding(input: &[u8]) -> ParseResult<'_, Vec<String>> {
     // First check for empty input
     if input.is_empty() {
         return Err(nom::Err::Error(NomError::new(input, ErrorKind::TakeWhile1)));

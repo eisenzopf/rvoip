@@ -20,7 +20,7 @@ use crate::types::subject::Subject;
 /// Parses the value portion of a Subject header.
 /// Returns a Subject type with the parsed text, or an empty Subject if no content.
 /// This complies with the ABNF [TEXT-UTF8-TRIM] which is optional.
-pub fn parse_subject(input: &[u8]) -> ParseResult<Subject> {
+pub fn parse_subject(input: &[u8]) -> ParseResult<'_, Subject> {
     // Handle the case where input is completely empty (which is valid for optional value)
     if input.is_empty() {
         return Ok((input, Subject::new("")));
@@ -43,7 +43,7 @@ pub fn parse_subject(input: &[u8]) -> ParseResult<Subject> {
 
 /// Parse a complete Subject header line including the header name and colon.
 /// This handles both the standard "Subject:" form and the compact "s:" form.
-pub fn parse_subject_header(input: &[u8]) -> ParseResult<Subject> {
+pub fn parse_subject_header(input: &[u8]) -> ParseResult<'_, Subject> {
     preceded(
         terminated(alt((tag_no_case(b"Subject"), tag_no_case(b"s"))), hcolon),
         parse_subject,

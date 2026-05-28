@@ -22,32 +22,32 @@ fn is_pchar_char(c: u8) -> bool {
 }
 
 // pchar parser that matches a single path character
-fn pchar(input: &[u8]) -> ParseResult<&[u8]> {
+fn pchar(input: &[u8]) -> ParseResult<'_, &[u8]> {
     alt((escaped, take_while1(is_pchar_char)))(input)
 }
 
 // param = *pchar
-pub fn param(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn param(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(many0(pchar))(input)
 }
 
 // segment = *pchar *( ";" param )
-pub fn segment(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn segment(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(pair(many0(pchar), many0(preceded(tag(b";"), param))))(input)
 }
 
 // path-segments = segment *( "/" segment )
-pub fn path_segments(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn path_segments(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(pair(segment, many0(preceded(tag(b"/"), segment))))(input)
 }
 
 // abs-path = "/" path-segments
-pub fn abs_path(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn abs_path(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(preceded(tag(b"/"), path_segments))(input)
 }
 
 // Parse the entire path component of a URI
-pub fn parse_path(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn parse_path(input: &[u8]) -> ParseResult<'_, &[u8]> {
     abs_path(input)
 }
 

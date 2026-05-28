@@ -8,15 +8,14 @@
 //! - Different key exchange methods (PSK, SDES setup)
 
 use rvoip_rtp_core::api::common::{
-    config::{KeyExchangeMethod, SecurityConfig, SecurityMode, SecurityProfile, SrtpProfile},
+    config::{KeyExchangeMethod, SecurityConfig, SecurityMode},
     security_manager::{NegotiationStrategy, SecurityContextManager},
-    unified_security::{SecurityContextFactory, SecurityState},
+    unified_security::SecurityContextFactory,
 };
 
 use std::fmt;
 use std::time::Duration;
-use tokio::time;
-use tracing::{debug, error, info, warn};
+use tracing::{info, warn};
 
 // Set example timeout
 const MAX_RUNTIME_SECONDS: u64 = 8;
@@ -270,7 +269,7 @@ async fn demo_security_context_manager() -> Result<(), ExampleError> {
         ("Unknown", b"random signaling data"),
     ];
 
-    for (name, signal) in test_signals {
+    for (name, _signal) in test_signals {
         // We can't call the private method directly, but we can show what the manager would detect
         info!(
             "  {}: Would be auto-detected as SDES/MIKEY/ZRTP based on content",

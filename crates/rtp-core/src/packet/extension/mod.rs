@@ -463,8 +463,11 @@ pub mod ids {
     pub const SDES: u8 = 6;
 }
 
-// Re-export common extension IDs
-pub use ids::*;
+// `ids` and `uris` both define `AUDIO_LEVEL`, `TIMESTAMP_OFFSET`,
+// `VIDEO_ORIENTATION`, `TRANSPORT_CC`, `FRAME_MARKING`. Glob-importing
+// both at this level made the names ambiguous from `extension::` and
+// `packet::`. Callers should reach in via `ids::AUDIO_LEVEL` (numeric)
+// or `uris::AUDIO_LEVEL` (string) so the intent is unambiguous.
 
 /// Common extension URI constants
 pub mod uris {
@@ -510,8 +513,8 @@ pub mod uris {
     pub const PLAYOUT_DELAY: &str = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay";
 }
 
-// Re-export common extension URIs
-pub use uris::*;
+// Same reasoning as above for `ids::*` — keep the URI constants
+// reachable only through the `uris` submodule.
 
 #[cfg(test)]
 mod tests {

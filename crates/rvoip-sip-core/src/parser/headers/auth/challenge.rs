@@ -23,7 +23,7 @@ use std::str::FromStr;
 // digest-challenge-params = digest-param *(COMMA digest-param)
 // basic-challenge-params = auth-param *(COMMA auth-param) ; Usually just realm
 // other-challenge = auth-scheme LWS auth-param *(COMMA auth-param)
-pub fn challenge(input: &[u8]) -> ParseResult<Challenge> {
+pub fn challenge(input: &[u8]) -> ParseResult<'_, Challenge> {
     // Parse the auth scheme and any whitespace after it
     let (rem, scheme_str) = auth_scheme(input)?;
     let (rem, _) = lws(rem)?;

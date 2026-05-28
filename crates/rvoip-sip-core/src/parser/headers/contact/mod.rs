@@ -31,7 +31,7 @@ use crate::types::uri::{Scheme, Uri};
 
 // contact-param = (name-addr / addr-spec) *(SEMI contact-params)
 // contact-params = c-p-q / c-p-expires / contact-extension
-fn contact_param(input: &[u8]) -> ParseResult<ContactParamInfo> {
+fn contact_param(input: &[u8]) -> ParseResult<'_, ContactParamInfo> {
     map(
         pair(
             name_addr_or_addr_spec,
@@ -50,7 +50,7 @@ fn contact_param(input: &[u8]) -> ParseResult<ContactParamInfo> {
 
 // Contact = ("Contact" / "m") HCOLON (STAR / (contact-param *(COMMA contact-param)))
 // Note: HCOLON and compact form handled elsewhere.
-pub fn parse_contact(input: &[u8]) -> ParseResult<ContactValue> {
+pub fn parse_contact(input: &[u8]) -> ParseResult<'_, ContactValue> {
     alt((
         // Handle the STAR case
         value(ContactValue::Star, star), // Use star parser which handles SWS * SWS

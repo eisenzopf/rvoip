@@ -25,7 +25,7 @@ use crate::parser::ParseResult;
 ///
 /// RFC 3261 does not specify a maximum value, but excessively large values
 /// should be used with caution. Values of 0 are allowed by the specification.
-pub fn parse_min_expires(input: &[u8]) -> ParseResult<u32> {
+pub fn parse_min_expires(input: &[u8]) -> ParseResult<'_, u32> {
     // Use delimited to handle optional whitespace around the value
     // sws = [LWS] (optional linear whitespace) - RFC 3261 Section 25.1
     delimited(sws, delta_seconds, sws)(input)

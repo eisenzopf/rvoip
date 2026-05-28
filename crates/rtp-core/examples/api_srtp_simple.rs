@@ -4,18 +4,14 @@
 //! the security features rather than complex network transport.
 
 use rvoip_rtp_core::{
-    api::{
-        common::config::SrtpProfile,
-        common::frame::{MediaFrame, MediaFrameType},
-    },
+    api::common::frame::{MediaFrame, MediaFrameType},
     packet::{RtpHeader, RtpPacket},
-    srtp::{SrtpContext, SrtpCryptoKey, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_80},
+    srtp::{SrtpContext, SrtpCryptoKey, SRTP_AES128_CM_SHA1_80},
 };
 
 use bytes::Bytes;
-use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -88,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         let payload = Bytes::from(test_message.clone().into_bytes());
-        let mut rtp_packet = RtpPacket::new(rtp_header, payload);
+        let rtp_packet = RtpPacket::new(rtp_header, payload);
 
         info!("🔤 Original message {}: '{}'", i, test_message);
         info!(

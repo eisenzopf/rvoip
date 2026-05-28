@@ -115,7 +115,7 @@ pub struct AlertInfoValue {
 }
 
 // alert-param = LAQUOT absoluteURI RAQUOT *( SEMI generic-param )
-fn alert_param(input: &[u8]) -> ParseResult<AlertInfoValue> {
+fn alert_param(input: &[u8]) -> ParseResult<'_, AlertInfoValue> {
     // Simple implementation that extracts the URI between angle brackets
     // and any parameters that follow
     let (input, uri_bytes) = delimited(
@@ -171,7 +171,7 @@ fn create_alert_info_uri(uri_str: &str) -> Result<AlertInfoUri, CrateError> {
 /// Alert-Info: <http://www.example.com/sounds/moo.wav>
 /// Alert-Info: <http://www.example.com/sounds/moo.wav>;level=10
 /// ```
-pub fn parse_alert_info(input: &[u8]) -> ParseResult<Vec<AlertInfoValue>> {
+pub fn parse_alert_info(input: &[u8]) -> ParseResult<'_, Vec<AlertInfoValue>> {
     // Per RFC 3261, the Alert-Info header must contain at least one alert-param
     comma_separated_list1(alert_param)(input)
 }
@@ -179,7 +179,7 @@ pub fn parse_alert_info(input: &[u8]) -> ParseResult<Vec<AlertInfoValue>> {
 /// Parses a complete Alert-Info header including the header name
 ///
 /// This function parses the full header including the "Alert-Info:" prefix.
-pub fn parse_alert_info_header(input: &[u8]) -> ParseResult<Vec<AlertInfoValue>> {
+pub fn parse_alert_info_header(input: &[u8]) -> ParseResult<'_, Vec<AlertInfoValue>> {
     preceded(pair(tag_no_case(b"Alert-Info"), hcolon), parse_alert_info)(input)
 }
 

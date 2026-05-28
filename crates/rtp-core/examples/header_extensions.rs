@@ -5,7 +5,7 @@
 //! add, parse, and manipulate header extensions.
 
 use bytes::Bytes;
-use tracing::{debug, info};
+use tracing::info;
 
 use rvoip_rtp_core::{
     packet::extension::{

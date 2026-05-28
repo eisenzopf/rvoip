@@ -137,7 +137,7 @@ fn no_underscore(input: &[u8]) -> bool {
 
 // primary-tag = 1*8ALPHA
 // Per RFC 5646, the primary tag must be alphabetic
-fn primary_tag_part(input: &[u8]) -> ParseResult<&[u8]> {
+fn primary_tag_part(input: &[u8]) -> ParseResult<'_, &[u8]> {
     verify(
         take_while_m_n(1, 8, |c: u8| c.is_ascii_alphabetic()),
         no_underscore, // Explicitly disallow underscores
@@ -146,7 +146,7 @@ fn primary_tag_part(input: &[u8]) -> ParseResult<&[u8]> {
 
 // subtag = 1*8ALPHANUM
 // Per RFC 5646, subtags can be alphanumeric
-fn subtag_part(input: &[u8]) -> ParseResult<&[u8]> {
+fn subtag_part(input: &[u8]) -> ParseResult<'_, &[u8]> {
     verify(
         take_while_m_n(1, 8, |c: u8| c.is_ascii_alphanumeric()),
         no_underscore, // Explicitly disallow underscores
@@ -154,7 +154,7 @@ fn subtag_part(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // Extended language subtag: 3 ALPHA characters per RFC 5646
-fn ext_lang_subtag(input: &[u8]) -> ParseResult<&[u8]> {
+fn ext_lang_subtag(input: &[u8]) -> ParseResult<'_, &[u8]> {
     verify(
         take_while_m_n(3, 3, |c: u8| c.is_ascii_alphabetic()),
         no_underscore,
@@ -162,7 +162,7 @@ fn ext_lang_subtag(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // Script subtag: 4 ALPHA characters per RFC 5646
-fn script_subtag(input: &[u8]) -> ParseResult<&[u8]> {
+fn script_subtag(input: &[u8]) -> ParseResult<'_, &[u8]> {
     verify(
         take_while_m_n(4, 4, |c: u8| c.is_ascii_alphabetic()),
         no_underscore,
@@ -170,7 +170,7 @@ fn script_subtag(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // Region subtag: 2 ALPHA or 3 DIGIT per RFC 5646
-fn region_subtag(input: &[u8]) -> ParseResult<&[u8]> {
+fn region_subtag(input: &[u8]) -> ParseResult<'_, &[u8]> {
     verify(
         alt((
             take_while_m_n(2, 2, |c: u8| c.is_ascii_alphabetic()),
@@ -181,7 +181,7 @@ fn region_subtag(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // Variant subtag: 5-8 alphanum or 4 if starts with digit
-fn variant_subtag(input: &[u8]) -> ParseResult<&[u8]> {
+fn variant_subtag(input: &[u8]) -> ParseResult<'_, &[u8]> {
     verify(
         alt((
             take_while_m_n(5, 8, |c: u8| c.is_ascii_alphanumeric()),
@@ -196,7 +196,7 @@ fn variant_subtag(input: &[u8]) -> ParseResult<&[u8]> {
 
 // language-range = ( ( 1*8ALPHA *( "-" 1*8ALPHA ) ) / "*" )
 // Returns range as String (converted to lowercase as per RFC 5646)
-fn language_range(input: &[u8]) -> ParseResult<String> {
+fn language_range(input: &[u8]) -> ParseResult<'_, String> {
     // Reject inputs containing underscores immediately
     if input.contains(&b'_') {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -290,7 +290,7 @@ fn validate_qvalue(q: NotNan<f32>) -> Option<NotNan<f32>> {
 
 // language = language-range *(SEMI accept-param)
 // Returns LanguageInfo { range: String, q: Option<NotNan<f32>>, params: Vec<Param> }
-fn language(input: &[u8]) -> ParseResult<LanguageInfo> {
+fn language(input: &[u8]) -> ParseResult<'_, LanguageInfo> {
     map(
         pair(language_range, many0(preceded(semi, accept_param))),
         |(range_str, raw_params)| {
@@ -326,7 +326,7 @@ pub struct AcceptLanguageValue {
 }
 
 // Accept-Language = "Accept-Language" HCOLON [ language *(COMMA language) ]
-pub fn parse_accept_language(input: &[u8]) -> ParseResult<Vec<LanguageInfo>> {
+pub fn parse_accept_language(input: &[u8]) -> ParseResult<'_, Vec<LanguageInfo>> {
     // First parse the header name and HCOLON (case-insensitive)
     preceded(
         pair(tag_no_case(b"Accept-Language"), hcolon),
@@ -342,13 +342,13 @@ pub fn parse_accept_language(input: &[u8]) -> ParseResult<Vec<LanguageInfo>> {
 }
 
 // Parse the AcceptLanguage type directly
-pub fn parse_accept_language_header(input: &[u8]) -> ParseResult<AcceptLanguage> {
+pub fn parse_accept_language_header(input: &[u8]) -> ParseResult<'_, AcceptLanguage> {
     parse_accept_language(input).map(|(rem, languages)| (rem, AcceptLanguage(languages)))
 }
 
 // Test-only function that directly parses language list content without header name
 #[cfg(test)]
-pub(crate) fn parse_languages(input: &[u8]) -> ParseResult<Vec<LanguageInfo>> {
+pub(crate) fn parse_languages(input: &[u8]) -> ParseResult<'_, Vec<LanguageInfo>> {
     comma_separated_list0(language)(input).map(|(rem, mut langs)| {
         // Sort languages by q-value (highest first) per RFC 2616
         langs.sort();

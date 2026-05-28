@@ -7,7 +7,6 @@
 //! `dangerous_no_verify` skips verification entirely; it's gated behind
 //! the `dev-dangerous` feature so production builds can't depend on it.
 
-use std::sync::Arc;
 
 use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};

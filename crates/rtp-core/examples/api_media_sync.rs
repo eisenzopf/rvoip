@@ -3,20 +3,18 @@
 //! This example demonstrates using the Media Synchronization API
 //! to synchronize audio and video streams with the client/server architecture.
 
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
 use tokio::time;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use rvoip_rtp_core::api::{
     client::{
-        config::{ClientConfig, ClientConfigBuilder},
-        transport::{MediaSyncInfo, MediaTransportClient},
+        config::ClientConfigBuilder,
+        transport::MediaTransportClient,
     },
-    common::{events::MediaTransportEvent, frame::MediaFrame, frame::MediaFrameType},
+    common::{frame::MediaFrame, frame::MediaFrameType},
     server::{
-        config::{ServerConfig, ServerConfigBuilder},
+        config::ServerConfigBuilder,
         transport::MediaTransportServer,
     },
 };

@@ -29,7 +29,7 @@ use crate::types::method::Method;
 /// - Returns an error if the method is not a valid token
 /// - Standard method names are recognized in uppercase form (INVITE, BYE, etc.)
 /// - Lowercase or non-standard method names are parsed as Method::Extension
-fn cseq_value_method(input: &[u8]) -> ParseResult<(u32, Method)> {
+fn cseq_value_method(input: &[u8]) -> ParseResult<'_, (u32, Method)> {
     map_res(
         pair(
             digit1,               // 1*DIGIT
@@ -75,7 +75,7 @@ fn cseq_value_method(input: &[u8]) -> ParseResult<(u32, Method)> {
 /// assert_eq!(cseq.sequence(), 101);
 /// assert_eq!(cseq.method(), &Method::Invite);
 /// ```
-pub fn parse_cseq(input: &[u8]) -> ParseResult<CSeq> {
+pub fn parse_cseq(input: &[u8]) -> ParseResult<'_, CSeq> {
     map(cseq_value_method, |(seq, method)| CSeq::new(seq, method))(input)
 }
 
@@ -97,7 +97,7 @@ pub fn parse_cseq(input: &[u8]) -> ParseResult<CSeq> {
 /// assert_eq!(cseq.sequence(), 101);
 /// assert_eq!(cseq.method(), &Method::Invite);
 /// ```
-pub fn full_parse_cseq(input: &[u8]) -> ParseResult<CSeq> {
+pub fn full_parse_cseq(input: &[u8]) -> ParseResult<'_, CSeq> {
     preceded(pair(tag_no_case(b"CSeq"), hcolon), parse_cseq)(input)
 }
 

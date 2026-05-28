@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use std::str::{self, FromStr};
 
 // Helper to parse an optional display name
-fn parse_display_name(input: &[u8]) -> ParseResult<Option<String>> {
+fn parse_display_name(input: &[u8]) -> ParseResult<'_, Option<String>> {
     let (input, display_name_opt) = opt(alt((
         // Quoted string path
         map_res(quoted_string, |bytes| {
@@ -59,7 +59,7 @@ fn parse_display_name(input: &[u8]) -> ParseResult<Option<String>> {
 }
 
 // Parse a URI with parameters inside angle brackets
-fn parse_uri_with_params(input: &[u8]) -> ParseResult<(Uri, Vec<Param>)> {
+fn parse_uri_with_params(input: &[u8]) -> ParseResult<'_, (Uri, Vec<Param>)> {
     // Check for opening angle bracket
     let (input, _) = tag(b"<")(input)?;
 
@@ -101,7 +101,7 @@ fn parse_uri_with_params(input: &[u8]) -> ParseResult<(Uri, Vec<Param>)> {
 }
 
 // Parse a single record-route entry
-fn parse_record_route_address(input: &[u8]) -> ParseResult<Address> {
+fn parse_record_route_address(input: &[u8]) -> ParseResult<'_, Address> {
     // Try to parse a display name
     let (input, display_name) = parse_display_name(input)?;
 
@@ -123,7 +123,7 @@ fn parse_record_route_address(input: &[u8]) -> ParseResult<Address> {
 
 /// Parse a Record-Route header value as defined in RFC 3261 Section 20.31
 /// Record-Route = "Record-Route" HCOLON rec-route *(COMMA rec-route)
-pub fn parse_record_route(input: &[u8]) -> ParseResult<RecordRouteHeader> {
+pub fn parse_record_route(input: &[u8]) -> ParseResult<'_, RecordRouteHeader> {
     map(
         comma_separated_list1(parse_record_route_address),
         |addresses: Vec<Address>| {

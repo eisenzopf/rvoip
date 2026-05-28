@@ -11,18 +11,18 @@ use nom::{
 pub type ParseResult<'a, O> = IResult<&'a [u8], O>;
 
 /// Parses a single whitespace character (SP or HTAB)
-pub fn wsp(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn wsp(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(alt((tag(b" "), tag(b"\t"))))(input)
 }
 
 /// Parses optional whitespace (0 or more SP or HTAB)
-pub fn owsp(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn owsp(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(many0(wsp))(input)
 }
 
 /// Parses CRLF (accepts \r\n or just \n)
 /// This is more lenient than strict RFC 3261 but common in practice.
-pub fn crlf(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn crlf(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(alt((tag(b"\r\n"), tag(b"\n"))))(input)
 }
 
@@ -30,7 +30,7 @@ pub fn crlf(input: &[u8]) -> ParseResult<&[u8]> {
 /// LWS = [*WSP CRLF] 1*WSP ; linear whitespace
 /// This includes handling line folding, where CRLF followed by whitespace
 /// is treated as a continuation of the same line.
-pub fn lws(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn lws(input: &[u8]) -> ParseResult<'_, &[u8]> {
     alt((
         // Case 1: Folded line - *WSP CRLF 1*WSP
         recognize(pair(pair(owsp, crlf), many1(wsp))),
@@ -41,7 +41,7 @@ pub fn lws(input: &[u8]) -> ParseResult<&[u8]> {
 
 /// Parses optional whitespace (SWS) according to RFC 3261
 /// SWS = [LWS] ; optional linear whitespace
-pub fn sws(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn sws(input: &[u8]) -> ParseResult<'_, &[u8]> {
     opt(lws)(input).map(|(rem, opt_val)| (rem, opt_val.unwrap_or(&[])))
 }
 

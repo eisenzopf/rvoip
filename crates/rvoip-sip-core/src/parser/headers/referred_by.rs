@@ -27,7 +27,7 @@ use std::str::{self, FromStr};
 
 // cid parameter parser for Referred-By header
 // cid-param = "cid" EQUAL token
-fn cid_param(input: &[u8]) -> ParseResult<Param> {
+fn cid_param(input: &[u8]) -> ParseResult<'_, Param> {
     map_res(
         preceded(
             pair(tag_no_case(b"cid"), equal),
@@ -41,7 +41,7 @@ fn cid_param(input: &[u8]) -> ParseResult<Param> {
 }
 
 // referredby-param parser that handles specific params before falling back to generic
-fn referredby_param(input: &[u8]) -> ParseResult<Param> {
+fn referredby_param(input: &[u8]) -> ParseResult<'_, Param> {
     alt((
         cid_param,     // First try cid parameter
         generic_param, // Then generic parameters
@@ -55,7 +55,7 @@ fn referredby_param(input: &[u8]) -> ParseResult<Param> {
 /// referredby-param = generic-param / "cid" EQUAL token
 ///
 /// Returns an Address struct with parameters
-fn referred_by_spec(input: &[u8]) -> ParseResult<Address> {
+fn referred_by_spec(input: &[u8]) -> ParseResult<'_, Address> {
     map(
         pair(
             name_addr_or_addr_spec, // Parse the address part (with or without display name)
@@ -69,14 +69,14 @@ fn referred_by_spec(input: &[u8]) -> ParseResult<Address> {
 }
 
 /// Parse a complete Referred-By header value
-pub fn parse_referred_by(input: &[u8]) -> ParseResult<Address> {
+pub fn parse_referred_by(input: &[u8]) -> ParseResult<'_, Address> {
     referred_by_spec(input)
 }
 
 /// Public API for parsing a Referred-By header value.
 /// This properly handles both name-addr and addr-spec formats,
 /// and includes any parameters that follow.
-pub fn parse_referred_by_public(input: &[u8]) -> ParseResult<Address> {
+pub fn parse_referred_by_public(input: &[u8]) -> ParseResult<'_, Address> {
     referred_by_spec(input)
 }
 

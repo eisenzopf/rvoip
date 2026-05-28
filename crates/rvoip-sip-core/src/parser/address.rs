@@ -29,7 +29,7 @@ use crate::types::uri::Uri;
 
 // display-name = *(token LWS) / quoted-string
 // RFC 3261 compliant: Parses either quoted strings or multiple tokens with whitespace.
-fn display_name(input: &[u8]) -> ParseResult<String> {
+fn display_name(input: &[u8]) -> ParseResult<'_, String> {
     alt((
         // Quoted string path (handles unquoting)
         map_res(quoted_string, unquote_string),
@@ -43,7 +43,7 @@ fn display_name(input: &[u8]) -> ParseResult<String> {
 // addr-spec = SIP-URI / SIPS-URI / absoluteURI
 // Modified: For headers like From/To/Contact, only parse SIP/SIPS URIs for now.
 // Returns Uri struct directly.
-pub fn addr_spec(input: &[u8]) -> ParseResult<Uri> {
+pub fn addr_spec(input: &[u8]) -> ParseResult<'_, Uri> {
     parse_uri(input)
     // If absoluteURI support is needed later, this needs adjustment, perhaps returning an enum.
 }
@@ -51,7 +51,7 @@ pub fn addr_spec(input: &[u8]) -> ParseResult<Uri> {
 /// Parse name-addr format (SIP RFC 3261 section 25.1)
 /// name-addr = [ display-name ] LAQUOT addr-spec RAQUOT
 /// where LAQUOT = SWS "<" SWS and RAQUOT = SWS ">" SWS
-pub fn name_addr(input: &[u8]) -> ParseResult<Address> {
+pub fn name_addr(input: &[u8]) -> ParseResult<'_, Address> {
     // Parse display name followed by optional whitespace
     let (input, display_opt) = opt(terminated(display_name, opt(lws)))(input)?;
 
@@ -85,7 +85,7 @@ pub fn name_addr(input: &[u8]) -> ParseResult<Address> {
 
 // Helper to parse either name-addr or addr-spec, used by From/To/etc.
 // Returns Address struct (params added by caller)
-pub fn name_addr_or_addr_spec(input: &[u8]) -> ParseResult<Address> {
+pub fn name_addr_or_addr_spec(input: &[u8]) -> ParseResult<'_, Address> {
     alt((
         name_addr, // Try name-addr first (<> required)
         // If just addr-spec (URI directly), map it into an Address struct

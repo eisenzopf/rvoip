@@ -27,9 +27,9 @@ pub type ParseResult<'a, O> = IResult<&'a [u8], O, NomError<&'a [u8]>>;
 /// Returns a Vec of the parsed items.
 pub fn comma_separated_list0<'a, O, F>(
     item_parser: F,
-) -> impl FnMut(&'a [u8]) -> ParseResult<Vec<O>>
+) -> impl FnMut(&'a [u8]) -> ParseResult<'_, Vec<O>>
 where
-    F: FnMut(&'a [u8]) -> ParseResult<O> + Copy,
+    F: FnMut(&'a [u8]) -> ParseResult<'_, O> + Copy,
 {
     separated_list0(
         comma, // Uses the comma parser which handles surrounding SWS
@@ -42,9 +42,9 @@ where
 /// Returns a Vec of the parsed items.
 pub fn comma_separated_list1<'a, O, F>(
     item_parser: F,
-) -> impl FnMut(&'a [u8]) -> ParseResult<Vec<O>>
+) -> impl FnMut(&'a [u8]) -> ParseResult<'_, Vec<O>>
 where
-    F: FnMut(&'a [u8]) -> ParseResult<O> + Copy,
+    F: FnMut(&'a [u8]) -> ParseResult<'_, O> + Copy,
 {
     nom::multi::separated_list1(
         comma, // Uses the comma parser which handles surrounding SWS
@@ -53,7 +53,7 @@ where
 }
 
 // SIP-Version = "SIP" "/" 1*DIGIT "." 1*DIGIT
-pub fn sip_version(input: &[u8]) -> ParseResult<Version> {
+pub fn sip_version(input: &[u8]) -> ParseResult<'_, Version> {
     map_res(
         recognize(tuple((tag(b"SIP"), tag(b"/"), digit1, tag(b"."), digit1))),
         // This closure must return Result<Version, E> where E can be handled by map_res.
@@ -109,7 +109,7 @@ mod tests {
     }
 
     // Simple parser for tokens for our list tests
-    fn parse_token(input: &[u8]) -> ParseResult<&[u8]> {
+    fn parse_token(input: &[u8]) -> ParseResult<'_, &[u8]> {
         token(input)
     }
 
@@ -175,7 +175,7 @@ mod tests {
     }
 
     // Test with a more complex parser that handles quoted strings
-    fn parse_simple_or_quoted(input: &[u8]) -> ParseResult<String> {
+    fn parse_simple_or_quoted(input: &[u8]) -> ParseResult<'_, String> {
         let (rem, value) = nom::branch::alt((quoted_string, token))(input)?;
 
         let result = if value.starts_with(b"\"") && value.ends_with(b"\"") {

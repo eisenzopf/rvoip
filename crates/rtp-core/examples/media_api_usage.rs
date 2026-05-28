@@ -5,26 +5,22 @@
 /// 2. Sending and receiving media frames with broadcast channel
 /// 3. Monitoring statistics
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
 use std::time::Duration;
 
 use rvoip_rtp_core::api::common::config::SecurityMode;
 use rvoip_rtp_core::api::common::frame::{MediaFrame, MediaFrameType};
-use rvoip_rtp_core::api::common::stats::QualityLevel;
 
-use rvoip_rtp_core::api::client::config::{ClientConfig, ClientConfigBuilder};
+use rvoip_rtp_core::api::client::config::ClientConfigBuilder;
 use rvoip_rtp_core::api::client::security::ClientSecurityConfig;
 use rvoip_rtp_core::api::client::transport::DefaultMediaTransportClient;
 use rvoip_rtp_core::api::client::transport::MediaTransportClient;
 
-use rvoip_rtp_core::api::server::config::{ServerConfig, ServerConfigBuilder};
+use rvoip_rtp_core::api::server::config::ServerConfigBuilder;
 use rvoip_rtp_core::api::server::security::ServerSecurityConfig;
 use rvoip_rtp_core::api::server::transport::DefaultMediaTransportServer;
 use rvoip_rtp_core::api::server::transport::MediaTransportServer;
 
 // Add direct access to these for debugging
-use rvoip_rtp_core::traits::RtpEvent;
-use rvoip_rtp_core::transport::RtpTransport;
 
 async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging with more verbose output for debugging

@@ -4,7 +4,7 @@ use rvoip_sip_core::{
     error::Error as SipError,
     parse_message, parse_message_with_mode,
     parser::message::ParseMode,
-    types::{header::HeaderName, ContentLength, Message, Request, Response, TypedHeader},
+    types::{header::HeaderName, ContentLength, Message},
 };
 use std::env;
 use std::fs;

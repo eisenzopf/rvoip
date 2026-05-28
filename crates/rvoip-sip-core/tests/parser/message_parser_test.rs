@@ -1,14 +1,11 @@
 // Message parser tests for SIP messages
 // This file tests full SIP message parsing functionality
 
-use std::str::FromStr;
 
 // Import common test utilities
-use crate::common::*;
 
 // Import SIP Core types with specific imports
 use rvoip_sip_core::{
-    error::Error,
     parse_message,
     types::{header::HeaderName, Message, Method, StatusCode},
 };

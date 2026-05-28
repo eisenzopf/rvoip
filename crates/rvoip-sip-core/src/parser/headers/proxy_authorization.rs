@@ -40,7 +40,7 @@ use nom::IResult;
 ///
 /// The Proxy-Authorization header is used by clients to provide authentication
 /// credentials to a proxy that has challenged them with a Proxy-Authenticate header.
-pub fn parse_proxy_authorization(input: &[u8]) -> ParseResult<Credentials> {
+pub fn parse_proxy_authorization(input: &[u8]) -> ParseResult<'_, Credentials> {
     // The Proxy-Authorization header follows the same format as Authorization,
     // so we can directly use the credentials parser from the auth module.
     credentials(input)

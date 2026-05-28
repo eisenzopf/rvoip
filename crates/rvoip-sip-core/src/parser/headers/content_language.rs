@@ -133,7 +133,7 @@ pub fn language_tag(input: &[u8]) -> IResult<&[u8], String> {
 }
 
 // Parse a comma-separated list of language tags with proper whitespace handling
-fn language_tag_list(input: &[u8]) -> ParseResult<Vec<String>> {
+fn language_tag_list(input: &[u8]) -> ParseResult<'_, Vec<String>> {
     // Reject empty input
     if input.is_empty() || input.iter().all(|&c| c.is_ascii_whitespace()) {
         return Err(Err::Error(nom::error::Error::new(input, ErrorKind::Tag)));
@@ -226,7 +226,7 @@ fn language_tag_list(input: &[u8]) -> ParseResult<Vec<String>> {
 }
 
 // Parse Content-Language header
-pub fn parse_content_language(input: &[u8]) -> ParseResult<Vec<String>> {
+pub fn parse_content_language(input: &[u8]) -> ParseResult<'_, Vec<String>> {
     // Skip header name and colon
     if let Some(idx) = input.windows(2).position(|w| w == b": " || w == b":") {
         let (header_part, value_part) = input.split_at(idx);

@@ -25,7 +25,7 @@ use crate::parser::ParseResult;
 ///
 /// This implementation validates all edge cases required by the RFC
 /// and handles percent-encoded sequences properly.
-pub fn parse_authority(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn parse_authority(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // Empty input is invalid
     if input.is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -86,7 +86,7 @@ fn is_reg_name_char(c: u8) -> bool {
 }
 
 // userinfo_bytes = use userinfo parser but return matched bytes instead
-fn userinfo_bytes(input: &[u8]) -> ParseResult<&[u8]> {
+fn userinfo_bytes(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(terminated(
         pair(
             crate::parser::uri::userinfo::user,
@@ -97,7 +97,7 @@ fn userinfo_bytes(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // srvr = [ [ userinfo "@" ] hostport ]
-fn srvr(input: &[u8]) -> ParseResult<&[u8]> {
+fn srvr(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(pair(opt(userinfo_bytes), hostport))(input)
 }
 

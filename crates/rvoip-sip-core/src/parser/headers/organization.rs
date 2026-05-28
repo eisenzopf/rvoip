@@ -25,7 +25,7 @@ use std::str;
 ///
 /// The value is optional - an empty value is valid per the RFC.
 /// Handles whitespace and line folding according to RFC 3261 Section 7.3.1.
-pub fn parse_organization(input: &[u8]) -> ParseResult<Organization> {
+pub fn parse_organization(input: &[u8]) -> ParseResult<'_, Organization> {
     // Handle the empty case first
     if input.is_empty() {
         return Ok((input, Organization::new("")));

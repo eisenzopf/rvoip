@@ -187,13 +187,10 @@ mod tests {
         let edge_cases = vec![0u8, 127, 128, 255];
 
         for encoded in edge_cases {
-            // Test μ-law decode
-            let decoded = decode_mulaw_table(encoded);
-            assert!(decoded.abs() <= 32767);
-
-            // Test A-law decode
-            let decoded = decode_alaw_table(encoded);
-            assert!(decoded.abs() <= 32767);
+            // Decoders return `i16`; the value range is guaranteed by
+            // the type. We only need to assert they don't panic.
+            let _ = decode_mulaw_table(encoded);
+            let _ = decode_alaw_table(encoded);
         }
     }
 }

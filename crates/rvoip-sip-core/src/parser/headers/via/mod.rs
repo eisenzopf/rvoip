@@ -39,7 +39,7 @@ use crate::types::via::{SentProtocol, ViaHeader}; // Use the main Param enum
 // protocol-version = token
 // transport = "UDP" / "TCP" / "TLS" / "SCTP" / other-transport
 // RFC 3261 Section 20.42
-fn sent_protocol(input: &[u8]) -> ParseResult<SentProtocol> {
+fn sent_protocol(input: &[u8]) -> ParseResult<'_, SentProtocol> {
     map_res(
         tuple((
             alt((tag_no_case(b"SIP"), token)), // name
@@ -77,13 +77,13 @@ fn sent_protocol(input: &[u8]) -> ParseResult<SentProtocol> {
 
 // sent-by = host [ COLON port ]
 // Uses hostport parser from uri module
-fn sent_by(input: &[u8]) -> ParseResult<(Host, Option<u16>)> {
+fn sent_by(input: &[u8]) -> ParseResult<'_, (Host, Option<u16>)> {
     hostport(input)
 }
 
 // via-parm = sent-protocol LWS sent-by *( SEMI via-params )
 // RFC 3261 Section 20.42
-fn via_param_parser(input: &[u8]) -> ParseResult<ViaHeader> {
+fn via_param_parser(input: &[u8]) -> ParseResult<'_, ViaHeader> {
     map_res(
         tuple((
             sent_protocol,
@@ -106,7 +106,7 @@ fn via_param_parser(input: &[u8]) -> ParseResult<ViaHeader> {
 
 // Via = ( "Via" / "v" ) HCOLON via-parm *(COMMA via-parm)
 // RFC 3261 Section 20.42
-pub fn parse_via(input: &[u8]) -> ParseResult<Vec<ViaHeader>> {
+pub fn parse_via(input: &[u8]) -> ParseResult<'_, Vec<ViaHeader>> {
     // This is the strict RFC-compliant parser that requires the header name
     preceded(
         pair(alt((tag_no_case(b"Via"), tag_no_case(b"v"))), hcolon),
@@ -117,12 +117,12 @@ pub fn parse_via(input: &[u8]) -> ParseResult<Vec<ViaHeader>> {
 // Test-only function that directly parses via-parm content without requiring the header name
 // This makes tests easier to write when focusing on the content part only
 #[cfg(test)]
-pub(crate) fn parse_via_params(input: &[u8]) -> ParseResult<Vec<ViaHeader>> {
+pub(crate) fn parse_via_params(input: &[u8]) -> ParseResult<'_, Vec<ViaHeader>> {
     comma_separated_list1(via_param_parser)(input)
 }
 
 // For use with external modules
-pub fn parse_via_params_public(input: &[u8]) -> ParseResult<Vec<ViaHeader>> {
+pub fn parse_via_params_public(input: &[u8]) -> ParseResult<'_, Vec<ViaHeader>> {
     comma_separated_list1(via_param_parser)(input)
 }
 

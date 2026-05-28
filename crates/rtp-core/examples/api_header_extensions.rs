@@ -2,8 +2,6 @@
 //!
 //! This example shows how to configure and use RTP header extensions.
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use rvoip_rtp_core::api::{
@@ -12,7 +10,7 @@ use rvoip_rtp_core::api::{
 };
 
 use tokio::time;
-use tracing::{debug, error, info};
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

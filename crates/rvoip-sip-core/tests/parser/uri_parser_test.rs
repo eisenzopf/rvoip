@@ -4,11 +4,7 @@
 use std::str::FromStr;
 
 // Import SIP Core types with specific imports
-use rvoip_sip_core::{
-    error::Error,
-    types::uri::{Scheme, Uri},
-    types::Param,
-};
+use rvoip_sip_core::types::uri::{Scheme, Uri};
 
 #[test]
 fn test_parse_sip_uri() {

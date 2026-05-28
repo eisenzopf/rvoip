@@ -27,14 +27,14 @@ use std::str::{self, FromStr};
 
 // Method parameter parser for Refer-To header
 // method-param = "method=" Method (Method token)
-fn method_param(input: &[u8]) -> ParseResult<Param> {
+fn method_param(input: &[u8]) -> ParseResult<'_, Param> {
     map_res(preceded(tag_no_case(b"method="), token), |method_bytes| {
         str::from_utf8(method_bytes).map(|s| Param::Method(s.to_string()))
     })(input)
 }
 
 // refer-param parser that handles specific params before falling back to generic
-fn refer_param(input: &[u8]) -> ParseResult<Param> {
+fn refer_param(input: &[u8]) -> ParseResult<'_, Param> {
     alt((
         method_param,  // First try method parameter
         generic_param, // Then generic parameters
@@ -48,7 +48,7 @@ fn refer_param(input: &[u8]) -> ParseResult<Param> {
 /// refer-param = generic-param
 ///
 /// Returns an Address struct with parameters
-fn refer_to_spec(input: &[u8]) -> ParseResult<Address> {
+fn refer_to_spec(input: &[u8]) -> ParseResult<'_, Address> {
     map(
         pair(
             name_addr_or_addr_spec, // Parse the address part (with or without display name)
@@ -62,14 +62,14 @@ fn refer_to_spec(input: &[u8]) -> ParseResult<Address> {
 }
 
 /// Parse a complete Refer-To header value
-pub fn parse_refer_to(input: &[u8]) -> ParseResult<Address> {
+pub fn parse_refer_to(input: &[u8]) -> ParseResult<'_, Address> {
     refer_to_spec(input)
 }
 
 /// Public API for parsing a Refer-To header value.
 /// This properly handles both name-addr and addr-spec formats,
 /// and includes any parameters that follow.
-pub fn parse_refer_to_public(input: &[u8]) -> ParseResult<Address> {
+pub fn parse_refer_to_public(input: &[u8]) -> ParseResult<'_, Address> {
     refer_to_spec(input)
 }
 

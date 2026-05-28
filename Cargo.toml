@@ -71,25 +71,33 @@ rust-version = "1.88"  # Minimum supported Rust version
 categories = ["network-programming", "multimedia", "web-programming"]
 keywords = ["sip", "voip", "rtp", "communication", "telephony"]
 
-# Silence all Rust warnings
+# Lints — post-merge cleanup left these enabled as warnings so future
+# code rot stays visible. CI must not promote them to `deny` without
+# first walking the remaining residual warnings (mostly tracing-macro
+# imports that look unused to rustc but feed `error!`/`warn!`/etc.).
 [workspace.lints.rust]
-warnings = "allow"
-unused_imports = "allow"
-unused_variables = "allow"
-unused_mut = "allow"
-dead_code = "allow"
-unused_comparisons = "allow"
-elided_named_lifetimes = "allow"
-ambiguous_glob_reexports = "allow"
+# IMPORTANT: do NOT add `warnings = "allow"` here — the `warnings` group
+# overrides any per-lint setting below it (this bit us during Phase 3
+# and silently disabled every per-lint warn for the whole workspace).
+unused_imports = "warn"
+unused_variables = "warn"
+unused_mut = "warn"
+dead_code = "warn"
+unused_comparisons = "warn"
+# `elided_named_lifetimes` was renamed to `mismatched_lifetime_syntaxes`
+# in recent Rust toolchains; the parser-wide `'_,` cleanup in Phase 4
+# brought the workspace count to zero.
+mismatched_lifetime_syntaxes = "warn"
+ambiguous_glob_reexports = "warn"
 # SIP_API_DESIGN_2 migration (2026-05-18): legacy methods were removed
 # outright rather than `#[deprecated]`-wrapped. There are no remaining
 # `#[deprecated]` annotations in the workspace, so this lint is no
 # longer load-bearing. Surfacing deprecation warnings makes future
 # migrations easier — the previous setting was hiding the gap.
-unexpected_cfgs = "allow"
+unexpected_cfgs = "warn"
 unreachable_patterns = "allow"
 irrefutable_let_patterns = "allow"
-unused_assignments = "allow"
+unused_assignments = "warn"
 async_fn_in_trait = "allow"
 
 [workspace.lints.clippy]

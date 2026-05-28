@@ -320,6 +320,10 @@ serial_test = { workspace = true }
 tempfile = "3.14"
 # Self-signed cert generation for the TLS-call integration test.
 rcgen = "0.14"
+# Tests that exercise SIP TLS need to install the rustls default crypto
+# provider before the TLS code path runs (rustls 0.23 no longer picks one
+# automatically when more than one provider feature is reachable).
+rustls = { workspace = true }
 clap = { workspace = true }
 cpal = "0.15"
 crossterm = "0.27"

@@ -11,11 +11,8 @@ use rvoip_sip_core::{
     prelude::{Message, Request, RequestBuilder, Response},
     sip_request, sip_response,
     types::{
-        address::Address,
-        header::{HeaderName, HeaderValue},
-        param::Param,
-        uri::Uri,
-        Method, StatusCode, TypedHeader,
+        header::HeaderName,
+        Method, StatusCode,
     },
 };
 use std::env;
@@ -120,7 +117,7 @@ fn extract_message_info(
         Message::Response(resp) => {
             // For responses, extract status code and reason
             let status_code = resp.status.clone();
-            let reason = resp.reason.clone().unwrap_or_default();
+            let _reason = resp.reason.clone().unwrap_or_default();
 
             // For simplicity, we'll just convert the status code to a string
             // as the "URI" position in our return type
@@ -161,7 +158,7 @@ fn build_request_with_macro(
     // Extract header values we need
     let from_tuple = extract_from_header(headers)?;
     let to_tuple = extract_to_header(headers)?;
-    let call_id = extract_header_value(headers, "Call-ID")?;
+    let _call_id = extract_header_value(headers, "Call-ID")?;
     let cseq_info = extract_cseq(headers)?;
     let via_tuple = extract_via(headers)?;
 
@@ -170,7 +167,7 @@ fn build_request_with_macro(
 
     // Get optional content type and body
     let content_type_opt = extract_header_value(headers, "Content-Type").ok();
-    let body = extract_body(headers).unwrap_or_default();
+    let _body = extract_body(headers).unwrap_or_default();
 
     // Add debug logging to identify problematic URIs
     println!("Processing URI: {}", uri);
@@ -217,7 +214,7 @@ fn build_request_with_macro(
     let request = match method {
         Method::Register => {
             // For REGISTER
-            let request = if let Some(content_type) = content_type_opt {
+            let request = if let Some(_content_type) = content_type_opt {
                 sip_request! {
                     method: Method::Register,
                     uri: uri_to_use,
@@ -256,7 +253,7 @@ fn build_request_with_macro(
         }
         Method::Invite => {
             // For INVITE
-            let request = if let Some(content_type) = content_type_opt {
+            let request = if let Some(_content_type) = content_type_opt {
                 sip_request! {
                     method: Method::Invite,
                     uri: uri_to_use,
@@ -295,7 +292,7 @@ fn build_request_with_macro(
         }
         _ => {
             // For other methods (OPTIONS, etc.)
-            let request = if let Some(content_type) = content_type_opt {
+            let request = if let Some(_content_type) = content_type_opt {
                 sip_request! {
                     method: method,
                     uri: uri_to_use,

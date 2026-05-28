@@ -44,7 +44,7 @@ use crate::types::uri::{Host, Uri};
 use authority::parse_authority;
 
 // SIP-URI = "sip:" [ userinfo ] hostport uri-parameters [ headers ]
-pub fn parse_sip_uri(bytes: &[u8]) -> ParseResult<Uri> {
+pub fn parse_sip_uri(bytes: &[u8]) -> ParseResult<'_, Uri> {
     let bytes_slice = bytes;
     let res = tuple((
         tag_no_case(b"sip:"),
@@ -78,7 +78,7 @@ pub fn parse_sip_uri(bytes: &[u8]) -> ParseResult<Uri> {
 }
 
 // SIPS-URI = "sips:" [ userinfo ] hostport uri-parameters [ headers ]
-pub fn parse_sips_uri(bytes: &[u8]) -> ParseResult<Uri> {
+pub fn parse_sips_uri(bytes: &[u8]) -> ParseResult<'_, Uri> {
     let bytes_slice = bytes;
     let res = tuple((
         tag_no_case(b"sips:"),
@@ -113,7 +113,7 @@ pub fn parse_sips_uri(bytes: &[u8]) -> ParseResult<Uri> {
 
 /// Public entry point for parsing a SIP or SIPS URI
 /// Can be re-exported by the main parser mod.rs
-pub fn parse_uri(input: &[u8]) -> ParseResult<Uri> {
+pub fn parse_uri(input: &[u8]) -> ParseResult<'_, Uri> {
     // Use alt to try each parser
     alt((parse_sip_uri_fixed, parse_sips_uri_fixed, parse_tel_uri))(input)
 }
@@ -121,7 +121,7 @@ pub fn parse_uri(input: &[u8]) -> ParseResult<Uri> {
 /// Special version of parse_uri that allows for non-standard schemes
 /// This should only be used in contexts where we need to handle arbitrary URIs,
 /// such as in the macro builder or when processing messages from other systems
-pub fn parse_uri_lenient(input: &[u8]) -> ParseResult<Uri> {
+pub fn parse_uri_lenient(input: &[u8]) -> ParseResult<'_, Uri> {
     // First try the standard parsers (SIP, SIPS, TEL)
     let result = alt((parse_sip_uri_fixed, parse_sips_uri_fixed, parse_tel_uri))(input);
 
@@ -134,7 +134,7 @@ pub fn parse_uri_lenient(input: &[u8]) -> ParseResult<Uri> {
 }
 
 /// Fallback parser for non-standard URI schemes (RFC 3986 compliant)
-fn parse_generic_uri(input: &[u8]) -> ParseResult<Uri> {
+fn parse_generic_uri(input: &[u8]) -> ParseResult<'_, Uri> {
     // Try to extract the scheme part (up to the ':')
     if let Some(colon_pos) = input.iter().position(|&c| c == b':') {
         // Convert the raw input to a string for the Uri struct
@@ -178,7 +178,7 @@ fn parse_generic_uri(input: &[u8]) -> ParseResult<Uri> {
 }
 
 // Fixed implementation of SIP URI parser that correctly handles params and headers
-fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
+fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
     let (input, _) = tag_no_case(b"sip:")(input)?;
 
     // Get the user info (if any)
@@ -347,7 +347,7 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
 }
 
 // Fixed implementation of SIPS URI parser that correctly handles params and headers
-fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
+fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
     let (input, _) = tag_no_case(b"sips:")(input)?;
 
     // Get the user info (if any)
@@ -517,7 +517,7 @@ fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
 // Parse tel URI (RFC 3966)
 // tel:telephone-subscriber
 // telephone-subscriber = global-number / local-number
-fn parse_tel_uri(input: &[u8]) -> ParseResult<Uri> {
+fn parse_tel_uri(input: &[u8]) -> ParseResult<'_, Uri> {
     // Tag for "tel:"
     let (input, _) = tag_no_case(b"tel:")(input)?;
 

@@ -37,7 +37,7 @@ pub struct ErrorInfoValue {
 }
 
 /// Parse a URI enclosed in angle brackets with optional whitespace before and after.
-fn enclosed_uri(input: &[u8]) -> ParseResult<String> {
+fn enclosed_uri(input: &[u8]) -> ParseResult<'_, String> {
     // Verify that there's a closing bracket
     if !input.contains(&b'>') {
         return Err(Err::Error(nom::error::Error::new(
@@ -98,7 +98,7 @@ fn enclosed_uri(input: &[u8]) -> ParseResult<String> {
 }
 
 /// Parses a parameter (;name=value or ;name)
-fn param(input: &[u8]) -> ParseResult<Param> {
+fn param(input: &[u8]) -> ParseResult<'_, Param> {
     preceded(
         pair(semi, space0), // Allow whitespace after semicolon
         generic_param,
@@ -156,7 +156,7 @@ fn verify_no_trailing_chars(input: &[u8]) -> bool {
 }
 
 /// Parse a comment enclosed in parentheses
-fn error_info_comment(input: &[u8]) -> ParseResult<&[u8]> {
+fn error_info_comment(input: &[u8]) -> ParseResult<'_, &[u8]> {
     delimited(
         tuple((space0, tag(b"("))), // Allow whitespace before opening parenthesis
         take_until(")"),
@@ -166,7 +166,7 @@ fn error_info_comment(input: &[u8]) -> ParseResult<&[u8]> {
 
 /// Parses an error-info-value, which is an error-uri followed by optional parameters and an optional comment.
 /// error-info-value = error-uri *( SEMI generic-param ) [COMMENT]
-fn error_info_value(input: &[u8]) -> ParseResult<ErrorInfoValue> {
+fn error_info_value(input: &[u8]) -> ParseResult<'_, ErrorInfoValue> {
     let (input, _) = space0(input)?;
 
     // Parse URI
@@ -234,7 +234,7 @@ fn create_safe_uri(uri_str: &str) -> Result<Uri, CrateError> {
 }
 
 /// Handles trailing commas in the list
-fn trailing_comma_check(input: &[u8]) -> ParseResult<&[u8]> {
+fn trailing_comma_check(input: &[u8]) -> ParseResult<'_, &[u8]> {
     let (input, _) = space0(input)?;
 
     // If there's nothing left after whitespace, we're done
@@ -261,7 +261,7 @@ fn trailing_comma_check(input: &[u8]) -> ParseResult<&[u8]> {
 
 /// Parses the value part of an Error-Info header (without the "Error-Info:" prefix).
 /// Example: `<sip:error@example.com>;reason=busy, <http://error.org>`
-pub fn parse_error_info(input: &[u8]) -> ParseResult<Vec<ErrorInfoValue>> {
+pub fn parse_error_info(input: &[u8]) -> ParseResult<'_, Vec<ErrorInfoValue>> {
     // Trim leading whitespace
     let (input, _) = space0(input)?;
 
@@ -288,7 +288,7 @@ pub fn parse_error_info(input: &[u8]) -> ParseResult<Vec<ErrorInfoValue>> {
 
 /// Parses a complete Error-Info header, including the "Error-Info:" prefix.
 /// Example: `Error-Info: <sip:busy@example.com>;reason=busy`
-pub fn full_parse_error_info(input: &[u8]) -> ParseResult<Vec<ErrorInfoValue>> {
+pub fn full_parse_error_info(input: &[u8]) -> ParseResult<'_, Vec<ErrorInfoValue>> {
     preceded(
         pair(tag_no_case(b"Error-Info"), tuple((hcolon, space0))), // Allow whitespace after colon
         parse_error_info,

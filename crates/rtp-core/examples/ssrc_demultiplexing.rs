@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 // Import necessary components from RTP core
-use rvoip_rtp_core::{RtpSession, RtpSessionConfig, RtpSessionEvent, RtpSsrc, RtpTimestamp};
+use rvoip_rtp_core::{RtpSession, RtpSessionConfig, RtpSessionEvent, RtpSsrc};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -168,7 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {
                     // Periodically check all SSRCs directly using the new method
-                    let mut receiver_guard = receiver_clone.lock().await;
+                    let receiver_guard = receiver_clone.lock().await;
                     let all_ssrcs = receiver_guard.get_all_ssrcs().await;
                     info!("Currently detected {} SSRCs via get_all_ssrcs()", all_ssrcs.len());
 

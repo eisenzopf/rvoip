@@ -6,11 +6,11 @@
 use rvoip_rtp_core::{
     packet::{RtpHeader, RtpPacket},
     srtp::crypto::SrtpCryptoKey,
-    srtp::{SrtpContext, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_80},
+    srtp::{SrtpContext, SRTP_AES128_CM_SHA1_80},
 };
 
 use bytes::Bytes;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

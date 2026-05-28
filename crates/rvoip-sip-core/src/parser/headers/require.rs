@@ -19,12 +19,12 @@ use crate::parser::ParseResult;
 ///
 /// RFC 3261 defines option-tag as a token, which cannot contain whitespace
 /// This function ensures we only parse valid tokens and strips any surrounding whitespace
-fn option_tag(input: &[u8]) -> ParseResult<&[u8]> {
+fn option_tag(input: &[u8]) -> ParseResult<'_, &[u8]> {
     delimited(sws, token, sws)(input)
 }
 
 /// Parses an option-tag and converts it to a String
-fn option_tag_string(input: &[u8]) -> ParseResult<String> {
+fn option_tag_string(input: &[u8]) -> ParseResult<'_, String> {
     map_res(option_tag, |tag| str::from_utf8(tag).map(String::from))(input)
 }
 
@@ -34,7 +34,7 @@ fn option_tag_string(input: &[u8]) -> ParseResult<String> {
 /// - Ensures at least one option-tag
 /// - Ensures no empty elements (e.g., rejects "foo,,bar")
 /// - Handles whitespace around tokens and commas
-fn option_tag_list(input: &[u8]) -> ParseResult<Vec<String>> {
+fn option_tag_list(input: &[u8]) -> ParseResult<'_, Vec<String>> {
     // Parse first token (required)
     let (mut remaining, first_tag) = option_tag_string(input)?;
     let mut tags = vec![first_tag];
@@ -80,7 +80,7 @@ fn option_tag_list(input: &[u8]) -> ParseResult<Vec<String>> {
 
 // Require = "Require" HCOLON option-tag *(COMMA option-tag)
 // Note: HCOLON handled elsewhere. option-tag is token.
-pub fn parse_require(input: &[u8]) -> ParseResult<Vec<String>> {
+pub fn parse_require(input: &[u8]) -> ParseResult<'_, Vec<String>> {
     // Use our custom option_tag_list parser
     option_tag_list(input)
 }

@@ -30,7 +30,7 @@ use std::str::FromStr;
 /// `raw` form intact), and only consume the whole input here so the
 /// nom-driven dispatcher in `parser/headers/mod.rs` can use it
 /// uniformly with the other typed-header parsers.
-pub fn parse_identity(input: &[u8]) -> ParseResult<Identity> {
+pub fn parse_identity(input: &[u8]) -> ParseResult<'_, Identity> {
     let s = match std::str::from_utf8(input) {
         Ok(s) => s,
         Err(_) => {

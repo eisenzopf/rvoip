@@ -34,7 +34,7 @@ use crate::types::session_expires::Refresher;
 use std::str::{self, FromStr};
 
 /// Parse delta-seconds (non-negative decimal integer)
-fn delta_seconds(input: &[u8]) -> ParseResult<u32> {
+fn delta_seconds(input: &[u8]) -> ParseResult<'_, u32> {
     map_res(digit1, |digits: &[u8]| {
         let s = str::from_utf8(digits).map_err(|_| "UTF-8 error")?;
         s.parse::<u32>().map_err(|_| "Invalid delta-seconds")
@@ -42,7 +42,7 @@ fn delta_seconds(input: &[u8]) -> ParseResult<u32> {
 }
 
 // Parse refresher parameter (refresher=uac|uas)
-fn refresher_param(input: &[u8]) -> ParseResult<Refresher> {
+fn refresher_param(input: &[u8]) -> ParseResult<'_, Refresher> {
     map_res(
         preceded(
             pair(tag_no_case(b"refresher"), equal),
@@ -61,7 +61,7 @@ fn refresher_param(input: &[u8]) -> ParseResult<Refresher> {
 }
 
 // Parse a session-expires parameter (either refresher or generic)
-fn se_param(input: &[u8]) -> ParseResult<(Option<Refresher>, Option<Param>)> {
+fn se_param(input: &[u8]) -> ParseResult<'_, (Option<Refresher>, Option<Param>)> {
     alt((
         // Try to parse refresher parameter first
         map(refresher_param, |refresher| (Some(refresher), None)),
@@ -78,7 +78,7 @@ fn se_param(input: &[u8]) -> ParseResult<(Option<Refresher>, Option<Param>)> {
 /// refresher-param = "refresher" EQUAL ("uas" / "uac")
 ///
 /// Returns a tuple with (expires_value, refresher, params)
-pub fn parse_session_expires(input: &[u8]) -> ParseResult<(u32, Option<Refresher>, Vec<Param>)> {
+pub fn parse_session_expires(input: &[u8]) -> ParseResult<'_, (u32, Option<Refresher>, Vec<Param>)> {
     let (remaining_input, expires) = delta_seconds(input)?;
 
     // Parse any parameters
@@ -115,7 +115,7 @@ pub fn parse_session_expires(input: &[u8]) -> ParseResult<(u32, Option<Refresher
 /// Parse the Session-Expires header, including the header name
 pub fn parse_session_expires_header(
     input: &[u8],
-) -> ParseResult<(u32, Option<Refresher>, Vec<Param>)> {
+) -> ParseResult<'_, (u32, Option<Refresher>, Vec<Param>)> {
     preceded(
         pair(
             alt((

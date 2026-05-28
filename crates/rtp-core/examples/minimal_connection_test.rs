@@ -5,21 +5,16 @@
 /// 2. Sending raw UDP packets to the server
 /// 3. Extensive logging of what happens at each stage
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
-use tokio::sync::broadcast;
 use tracing::Level;
 
 use rvoip_rtp_core::api::common::config::SecurityMode;
-use rvoip_rtp_core::api::common::events::MediaEventCallback;
-use rvoip_rtp_core::api::common::frame::{MediaFrame, MediaFrameType};
-use rvoip_rtp_core::api::server::config::{ServerConfig, ServerConfigBuilder};
+use rvoip_rtp_core::api::server::config::ServerConfigBuilder;
 use rvoip_rtp_core::api::server::security::ServerSecurityConfig;
 use rvoip_rtp_core::api::server::transport::DefaultMediaTransportServer;
 use rvoip_rtp_core::api::server::transport::MediaTransportServer;
-use rvoip_rtp_core::traits::RtpEvent;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

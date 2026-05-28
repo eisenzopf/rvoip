@@ -6,21 +6,19 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 // Direct DTLS imports
 use rvoip_rtp_core::dtls::connection::DtlsConnection;
-use rvoip_rtp_core::dtls::crypto::verify::{generate_self_signed_certificate, Certificate};
+use rvoip_rtp_core::dtls::crypto::verify::generate_self_signed_certificate;
 use rvoip_rtp_core::dtls::transport::udp::UdpTransport;
 use rvoip_rtp_core::dtls::{DtlsConfig, DtlsRole, DtlsVersion};
 
 // Media transport imports
 use rvoip_rtp_core::api::client::config::ClientConfigBuilder;
 use rvoip_rtp_core::api::client::transport::{DefaultMediaTransportClient, MediaTransportClient};
-use rvoip_rtp_core::api::common::config::SecurityMode;
 use rvoip_rtp_core::api::common::events::MediaTransportEvent;
 use rvoip_rtp_core::api::common::frame::{MediaFrame, MediaFrameType};
 use rvoip_rtp_core::api::server::config::ServerConfigBuilder;
@@ -208,9 +206,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Wait for both tasks to complete
     println!("Waiting for DTLS handshake to complete...");
-    let server_result = server_task.await??;
+    let _server_result = server_task.await??;
     println!("Server task completed");
-    let client_result = client_task.await??;
+    let _client_result = client_task.await??;
     println!("Client task completed");
 
     println!("\nDTLS handshake completed successfully!");
@@ -267,7 +265,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         sleep(Duration::from_millis(500)).await;
 
         // Configure client
-        let media_client_addr = SocketAddr::new(client_addr.ip(), client_addr.port() + 100);
+        let _media_client_addr = SocketAddr::new(client_addr.ip(), client_addr.port() + 100);
 
         // Create client config without security (we handled it separately)
         let client_config = ClientConfigBuilder::new()

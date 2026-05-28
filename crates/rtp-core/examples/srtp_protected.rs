@@ -1,8 +1,8 @@
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use rvoip_rtp_core::{
     packet::RtpPacket,
     srtp::{
-        ProtectedRtpPacket, SrtpAuthenticationAlgorithm, SrtpContext, SrtpCryptoKey,
+        SrtpAuthenticationAlgorithm, SrtpContext, SrtpCryptoKey,
         SrtpCryptoSuite, SrtpEncryptionAlgorithm, SRTP_AES128_CM_SHA1_80, SRTP_NULL_NULL,
     },
     Result,

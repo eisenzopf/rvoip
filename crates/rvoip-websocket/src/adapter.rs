@@ -133,7 +133,14 @@ impl UctpWsConfig {
 }
 
 pub struct UctpWsAdapter {
+    // These two maps are populated and consulted by the spawned server
+    // accept loop; the adapter only retains its clones to keep the
+    // backing Arcs alive if `_server` is ever dropped first. Marked
+    // dead_code because the adapter API doesn't expose lookups on
+    // them — the lookups happen inside the server task.
+    #[allow(dead_code)]
     by_connection: Arc<DashMap<ConnectionId, String>>,
+    #[allow(dead_code)]
     by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
     routes: Arc<DashMap<ConnectionId, Route>>,
     _server: Arc<UctpWsServer>,

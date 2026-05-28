@@ -20,13 +20,13 @@ use crate::parser::ParseResult;
 use crate::types::media_type::MediaType;
 
 // m-attribute = token
-fn m_attribute(input: &[u8]) -> ParseResult<&[u8]> {
+fn m_attribute(input: &[u8]) -> ParseResult<'_, &[u8]> {
     token(input)
 }
 
 // m-value = token / quoted-string
 // Returns unquoted string
-fn m_value(input: &[u8]) -> ParseResult<String> {
+fn m_value(input: &[u8]) -> ParseResult<'_, String> {
     alt((
         map_res(quoted_string, unquote_string),
         map_res(token, |bytes| str::from_utf8(bytes).map(String::from)),
@@ -35,7 +35,7 @@ fn m_value(input: &[u8]) -> ParseResult<String> {
 
 // m-parameter = m-attribute EQUAL m-value
 // Returns (String, String)
-fn m_parameter(input: &[u8]) -> ParseResult<(String, String)> {
+fn m_parameter(input: &[u8]) -> ParseResult<'_, (String, String)> {
     map_res(
         separated_pair(m_attribute, equal, m_value),
         |(attr_bytes, value_string)| {
@@ -47,13 +47,13 @@ fn m_parameter(input: &[u8]) -> ParseResult<(String, String)> {
 // ietf-token = token
 // extension-token = ietf-token / x-token
 // x-token = "x-" token
-fn extension_token(input: &[u8]) -> ParseResult<&[u8]> {
+fn extension_token(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(alt((token, preceded(tag_no_case(b"x-"), token))))(input)
 }
 
 // m-subtype = extension-token / iana-token
 // iana-token = token
-fn m_subtype(input: &[u8]) -> ParseResult<&[u8]> {
+fn m_subtype(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // Both alternatives resolve to token or x-token
     extension_token(input)
 }
@@ -62,7 +62,7 @@ fn m_subtype(input: &[u8]) -> ParseResult<&[u8]> {
 //                 / "application" / extension-token
 // composite-type = "message" / "multipart" / extension-token
 // m-type = discrete-type / composite-type
-fn m_type(input: &[u8]) -> ParseResult<&[u8]> {
+fn m_type(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // Using tag_no_case for known types, fallback to extension_token
     alt((
         // discrete
@@ -81,7 +81,7 @@ fn m_type(input: &[u8]) -> ParseResult<&[u8]> {
 
 // media-type = m-type SLASH m-subtype *(SEMI m-parameter)
 // Returns MediaType struct
-pub fn media_type(input: &[u8]) -> ParseResult<MediaType> {
+pub fn media_type(input: &[u8]) -> ParseResult<'_, MediaType> {
     map_res(
         tuple((
             m_type,

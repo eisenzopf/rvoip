@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use rvoip_rtp_core::api::common::frame::{MediaFrame, MediaFrameType};
 use rvoip_rtp_core::transport::{RtpTransportConfig, UdpRtpTransport};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::broadcast;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

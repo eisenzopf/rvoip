@@ -228,11 +228,7 @@ mod tests {
             assert!(SUPPORTED_CODECS.contains(&"PCMA"));
         }
 
-        #[cfg(feature = "g722")]
-        // G.722 support removed - only G.711 variants now supported
-        #[cfg(any(feature = "g729", feature = "g729-sim"))]
-        assert!(SUPPORTED_CODECS.contains(&"G729"));
-
+        // G.722 support removed; G.729 lives in media-core, not here.
         #[cfg(any(feature = "opus", feature = "opus-sim"))]
         assert!(SUPPORTED_CODECS.contains(&"opus"));
     }

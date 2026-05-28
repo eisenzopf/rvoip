@@ -36,7 +36,7 @@ use std::str::FromStr;
 // WarningValue struct is now imported from types/warning.rs
 
 // warn-code = 3DIGIT
-fn warn_code(input: &[u8]) -> ParseResult<u16> {
+fn warn_code(input: &[u8]) -> ParseResult<'_, u16> {
     // Return u16 directly
     map_res(take_while_m_n(3, 3, |c: u8| c.is_ascii_digit()), |bytes| {
         let s = str::from_utf8(bytes)
@@ -48,7 +48,7 @@ fn warn_code(input: &[u8]) -> ParseResult<u16> {
 }
 
 // warn-agent = hostport / pseudonym (token)
-fn warn_agent(input: &[u8]) -> ParseResult<WarnAgent> {
+fn warn_agent(input: &[u8]) -> ParseResult<'_, WarnAgent> {
     alt((
         // First try to parse as a hostport (which includes IP addresses)
         map(hostport, |(host, port)| WarnAgent::HostPort(host, port)),
@@ -62,13 +62,13 @@ fn warn_agent(input: &[u8]) -> ParseResult<WarnAgent> {
 }
 
 // warn-text = quoted-string
-fn warn_text(input: &[u8]) -> ParseResult<&[u8]> {
+fn warn_text(input: &[u8]) -> ParseResult<'_, &[u8]> {
     quoted_string(input) // Returns bytes within quotes
 }
 
 // warning-value = warn-code SP warn-agent SP warn-text
-// Changed return type to ParseResult<WarningValue>
-fn warning_value(input: &[u8]) -> ParseResult<WarningValue> {
+// Changed return type to ParseResult<'_, WarningValue>
+fn warning_value(input: &[u8]) -> ParseResult<'_, WarningValue> {
     map(
         tuple((
             warn_code,
@@ -88,7 +88,7 @@ fn warning_value(input: &[u8]) -> ParseResult<WarningValue> {
 /// Parses a Warning header value (list of warning-values).
 // Warning = "Warning" HCOLON warning-value *(COMMA warning-value)
 // Note: HCOLON handled elsewhere if parsing just the value part
-pub fn parse_warning_value_list(input: &[u8]) -> ParseResult<Vec<WarningValue>> {
+pub fn parse_warning_value_list(input: &[u8]) -> ParseResult<'_, Vec<WarningValue>> {
     separated_list1(comma, warning_value)(input)
 }
 

@@ -24,7 +24,7 @@ use crate::parser::uri::scheme::parse_scheme_raw;
 // --- URI Character Sets (RFC 2396 / 3261) ---
 
 // uric = reserved / unreserved / escaped
-fn uric(input: &[u8]) -> ParseResult<&[u8]> {
+fn uric(input: &[u8]) -> ParseResult<'_, &[u8]> {
     alt((reserved, unreserved, escaped))(input)
 }
 
@@ -36,14 +36,14 @@ fn is_uric_no_slash_char(c: u8) -> bool {
     matches!(c, b';' | b'?' | b':' | b'@' | b'&' | b'=' | b'+' | b'$' | b',')
 }
 
-fn uric_no_slash(input: &[u8]) -> ParseResult<&[u8]> {
+fn uric_no_slash(input: &[u8]) -> ParseResult<'_, &[u8]> {
     alt((escaped, take_while1(is_uric_no_slash_char)))(input)
 }
 
 // --- URI Components ---
 
 // net-path = "//" authority [ abs-path ]
-fn net_path(input: &[u8]) -> ParseResult<&[u8]> {
+fn net_path(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(pair(
         preceded(
             tag(b"//"),
@@ -54,7 +54,7 @@ fn net_path(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // hier-part = ( net-path / abs-path ) [ "?" query ]
-fn hier_part(input: &[u8]) -> ParseResult<&[u8]> {
+fn hier_part(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(pair(
         alt((net_path, abs_path)),
         opt(preceded(tag(b"?"), query_raw)),
@@ -62,7 +62,7 @@ fn hier_part(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // opaque-part = uric-no-slash *uric
-fn opaque_part(input: &[u8]) -> ParseResult<&[u8]> {
+fn opaque_part(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(pair(uric_no_slash, many0(uric)))(input)
 }
 
@@ -144,7 +144,7 @@ fn find_uri_end(input: &[u8]) -> usize {
 }
 
 // absoluteURI = scheme ":" ( hier-part / opaque-part )
-pub fn parse_absolute_uri(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn parse_absolute_uri(input: &[u8]) -> ParseResult<'_, &[u8]> {
     if input.is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,

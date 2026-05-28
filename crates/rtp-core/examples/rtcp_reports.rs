@@ -5,12 +5,11 @@
 
 use bytes::Bytes;
 use rvoip_rtp_core::{
-    packet::rtcp::{NtpTimestamp, RtcpPacket, RtcpReceiverReport, RtcpSenderReport},
     RtpSession, RtpSessionConfig, RtpSessionEvent,
 };
 use std::time::Duration;
 use tokio::time;
-use tracing::{debug, error, info, warn};
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

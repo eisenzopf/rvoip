@@ -34,7 +34,7 @@ use crate::types::uri::{Host, Scheme};
 // to-spec = ( name-addr / addr-spec ) *( SEMI to-param )
 // to-param = tag-param / generic-param
 // Returns Address struct with params included
-fn to_spec(input: &[u8]) -> ParseResult<Address> {
+fn to_spec(input: &[u8]) -> ParseResult<'_, Address> {
     map(
         pair(
             name_addr_or_addr_spec, // Returns Address{..., params: []}
@@ -51,13 +51,13 @@ fn to_spec(input: &[u8]) -> ParseResult<Address> {
 // To = "To" / "t" HCOLON to-spec
 // Note: HCOLON handled elsewhere
 // Make this function public
-pub fn parse_to(input: &[u8]) -> ParseResult<ToHeader> {
+pub fn parse_to(input: &[u8]) -> ParseResult<'_, ToHeader> {
     map(to_spec, ToHeader)(input)
 }
 
 /// Parse a complete To header, including the header name and colon
 /// To = ( "To" / "t" ) HCOLON to-spec
-pub fn to_header(input: &[u8]) -> ParseResult<ToHeader> {
+pub fn to_header(input: &[u8]) -> ParseResult<'_, ToHeader> {
     preceded(
         terminated(alt((tag_no_case(b"To"), tag_no_case(b"t"))), hcolon),
         parse_to,

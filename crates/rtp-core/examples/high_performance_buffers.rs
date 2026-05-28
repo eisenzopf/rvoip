@@ -6,7 +6,7 @@
 use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use rvoip_rtp_core::{
@@ -102,7 +102,7 @@ impl StreamReceiver {
             // Add to jitter buffer
             if self.jitter_buffer.add_packet(packet) {
                 // Try to get packets out of the jitter buffer
-                while let Some(packet) = self.jitter_buffer.get_next_packet() {
+                while let Some(_packet) = self.jitter_buffer.get_next_packet() {
                     packets_played += 1;
 
                     // Process the packet (in a real application)
@@ -203,7 +203,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stream_handles = Vec::new();
 
     // Spawn tasks for each stream
-    for i in 0..NUM_STREAMS {
+    for _i in 0..NUM_STREAMS {
         let ssrc = rand::random::<u32>();
         let (mut sender, mut receiver) =
             create_stream_pair(ssrc, buffer_manager.clone(), packet_pool.clone());

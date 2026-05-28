@@ -20,7 +20,7 @@ use rvoip_rtp_core::{
         },
         SecurityKeyExchange,
     },
-    srtp::{SrtpContext, SRTP_AES128_CM_SHA1_80},
+    srtp::SRTP_AES128_CM_SHA1_80,
     Error,
 };
 use std::time::{Duration, Instant};
@@ -183,8 +183,8 @@ async fn demonstrate_zrtp_p2p_calling() -> Result<(), Error> {
     let high_sec_caller_config = create_high_security_zrtp_config();
     let high_sec_callee_config = create_high_security_zrtp_config();
 
-    let high_sec_caller = Zrtp::new(high_sec_caller_config, ZrtpRole::Initiator);
-    let high_sec_callee = Zrtp::new(high_sec_callee_config, ZrtpRole::Responder);
+    let _high_sec_caller = Zrtp::new(high_sec_caller_config, ZrtpRole::Initiator);
+    let _high_sec_callee = Zrtp::new(high_sec_callee_config, ZrtpRole::Responder);
 
     println!("🔑 High-Security ZRTP Configuration:");
     println!("├─ Cipher: AES-256 preferred, AES-128 fallback");

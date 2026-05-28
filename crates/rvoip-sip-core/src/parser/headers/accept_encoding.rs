@@ -97,7 +97,7 @@ impl std::cmp::PartialOrd for EncodingInfo {
 // codings = content-coding / "*"
 // content-coding = token
 // Returns coding as String
-fn codings(input: &[u8]) -> ParseResult<String> {
+fn codings(input: &[u8]) -> ParseResult<'_, String> {
     map(alt((token, tag("*"))), |bytes| {
         String::from_utf8_lossy(bytes).to_string()
     })(input)
@@ -108,7 +108,7 @@ fn codings(input: &[u8]) -> ParseResult<String> {
 
 // encoding = codings *(SEMI accept-param)
 // Returns EncodingInfo { coding: String, params: Vec<Param> }
-fn encoding(input: &[u8]) -> ParseResult<EncodingInfo> {
+fn encoding(input: &[u8]) -> ParseResult<'_, EncodingInfo> {
     map(
         pair(codings, many0(preceded(semi, accept_param))),
         |(coding_str, params_vec)| EncodingInfo {
@@ -128,12 +128,12 @@ pub struct AcceptEncodingValue {
 
 // Accept-Encoding = "Accept-Encoding" HCOLON [ encoding *(COMMA encoding) ]
 /// Parses an Accept-Encoding header value.
-// pub fn parse_accept_encoding(input: &[u8]) -> ParseResult<Vec<EncodingInfo>> { // Uncommented function
+// pub fn parse_accept_encoding(input: &[u8]) -> ParseResult<'_, Vec<EncodingInfo>> { // Uncommented function
 //     separated_list1(comma, encoding)(input)
 // }
 // Let's adjust the parser to handle the optional nature: [ encoding *(COMMA encoding) ]
-// It should return ParseResult<Vec<EncodingInfo>> , empty Vec if header value is empty
-pub fn parse_accept_encoding(input: &[u8]) -> ParseResult<Vec<EncodingInfo>> {
+// It should return ParseResult<'_, Vec<EncodingInfo>> , empty Vec if header value is empty
+pub fn parse_accept_encoding(input: &[u8]) -> ParseResult<'_, Vec<EncodingInfo>> {
     // Use separated_list0 to allow an empty list if the input is empty or just whitespace
     separated_list0(comma, encoding)(input)
 }

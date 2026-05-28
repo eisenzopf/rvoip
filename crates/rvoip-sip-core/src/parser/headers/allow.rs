@@ -22,7 +22,7 @@ use crate::types::method::Method;
 use std::str::{self, FromStr}; // Import self for FromStr
 
 // Parse a single method token with proper whitespace handling
-fn parse_method_token(input: &[u8]) -> ParseResult<Method> {
+fn parse_method_token(input: &[u8]) -> ParseResult<'_, Method> {
     // Verify the input contains a valid token (method name)
     // Per RFC 3261, method tokens must be valid tokens
     let (input, token_bytes) = delimited(
@@ -60,7 +60,7 @@ fn parse_method_token(input: &[u8]) -> ParseResult<Method> {
 }
 
 // Parse a comma-separated list of methods with proper whitespace handling
-fn parse_methods(input: &[u8]) -> ParseResult<Vec<Method>> {
+fn parse_methods(input: &[u8]) -> ParseResult<'_, Vec<Method>> {
     // Special case: detect specific invalid inputs from tests
 
     // Check for trailing comma after whitespace
@@ -139,7 +139,7 @@ fn parse_methods(input: &[u8]) -> ParseResult<Vec<Method>> {
 }
 
 // Validate no trailing comma or other invalid syntax
-fn validate_method_list(input: &[u8], methods: Vec<Method>) -> ParseResult<Vec<Method>> {
+fn validate_method_list(input: &[u8], methods: Vec<Method>) -> ParseResult<'_, Vec<Method>> {
     // Detect trailing comma by looking for a comma at the end
     let (after_ws, _) = sws(input)?;
 
@@ -166,7 +166,7 @@ fn validate_method_list(input: &[u8], methods: Vec<Method>) -> ParseResult<Vec<M
 
 // Allow = "Allow" HCOLON [ Method *(COMMA Method) ]
 // Note: HCOLON handled elsewhere
-pub fn parse_allow(input: &[u8]) -> ParseResult<Allow> {
+pub fn parse_allow(input: &[u8]) -> ParseResult<'_, Allow> {
     // Hardcoded check for the specific test cases that are failing
 
     // Case 1: Test for trailing comma "INVITE, ACK,"

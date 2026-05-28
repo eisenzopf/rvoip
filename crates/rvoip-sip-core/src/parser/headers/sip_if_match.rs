@@ -22,7 +22,7 @@ use nom::sequence::terminated;
 /// ```text
 /// SIP-If-Match: dx200xyz
 /// ```
-pub fn parse_sip_if_match(input: &[u8]) -> ParseResult<SipIfMatch> {
+pub fn parse_sip_if_match(input: &[u8]) -> ParseResult<'_, SipIfMatch> {
     // Parse any leading whitespace
     let (input, _) = sws(input)?;
 

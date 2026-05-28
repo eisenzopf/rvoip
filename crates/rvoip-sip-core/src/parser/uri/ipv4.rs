@@ -44,7 +44,7 @@ fn parse_decimal_octet(input: &[u8]) -> Result<u8, nom::Err<nom::error::Error<&[
 
 // IPv4address = 1*3DIGIT "." 1*3DIGIT "." 1*3DIGIT "." 1*3DIGIT
 // Parse as decimal integer regardless of leading zeros
-pub fn ipv4_address(input: &[u8]) -> ParseResult<Host> {
+pub fn ipv4_address(input: &[u8]) -> ParseResult<'_, Host> {
     // First try to match the pattern exactly with our constraints
     let (remaining, ip_bytes) = recognize(tuple((
         take_while_m_n(1, 3, |c: u8| c.is_ascii_digit()),

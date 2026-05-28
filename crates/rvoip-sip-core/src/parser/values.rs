@@ -18,7 +18,7 @@ use super::whitespace::lws;
 pub type ParseResult<'a, O> = IResult<&'a [u8], O>;
 
 // delta-seconds = 1*DIGIT
-pub fn delta_seconds(input: &[u8]) -> ParseResult<u32> {
+pub fn delta_seconds(input: &[u8]) -> ParseResult<'_, u32> {
     // First ensure there's no decimal point in the input
     if input.iter().any(|&b| b == b'.') {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -39,7 +39,7 @@ pub fn delta_seconds(input: &[u8]) -> ParseResult<u32> {
 }
 
 // qvalue = ( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] )
-pub fn qvalue(input: &[u8]) -> ParseResult<NotNan<f32>> {
+pub fn qvalue(input: &[u8]) -> ParseResult<'_, NotNan<f32>> {
     // First check for inputs explicitly forbidden by test
     if input.len() >= 3 && input[0] == b'0' && input[1] == b',' {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -62,7 +62,7 @@ pub fn qvalue(input: &[u8]) -> ParseResult<NotNan<f32>> {
 }
 
 // Parse the "0" [ "." 0*3DIGIT ] form
-fn zero_qvalue(input: &[u8]) -> ParseResult<NotNan<f32>> {
+fn zero_qvalue(input: &[u8]) -> ParseResult<'_, NotNan<f32>> {
     if input.is_empty() || input[0] != b'0' {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -114,7 +114,7 @@ fn zero_qvalue(input: &[u8]) -> ParseResult<NotNan<f32>> {
 }
 
 // Parse the "1" [ "." 0*3("0") ] form
-fn one_qvalue(input: &[u8]) -> ParseResult<NotNan<f32>> {
+fn one_qvalue(input: &[u8]) -> ParseResult<'_, NotNan<f32>> {
     if input.is_empty() || input[0] != b'1' {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -167,7 +167,7 @@ fn one_qvalue(input: &[u8]) -> ParseResult<NotNan<f32>> {
 // For proper RFC 3261 handling of line folding (CRLF + WSP -> SP),
 // apply the utils::unfold_lws function to the parsed result.
 // Uses text_utf8_char from the utf8 module.
-pub fn text_utf8_trim(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn text_utf8_trim(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // We need to recognize the complete expression to capture the entire match
     recognize(tuple((
         // First part: 1*TEXT-UTF8char - at least one UTF-8 character
@@ -182,7 +182,7 @@ pub fn text_utf8_trim(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // ttl = 1*3DIGIT ; 0-255
-pub fn ttl_value(input: &[u8]) -> ParseResult<u8> {
+pub fn ttl_value(input: &[u8]) -> ParseResult<'_, u8> {
     // Ensure there's no decimal point in the input
     if input.iter().any(|&b| b == b'.') {
         return Err(nom::Err::Error(nom::error::Error::new(

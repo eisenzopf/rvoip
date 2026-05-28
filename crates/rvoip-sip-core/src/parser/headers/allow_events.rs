@@ -27,13 +27,13 @@ fn is_token_nodot_char(c: u8) -> bool {
 }
 
 /// Parse a token-nodot
-fn token_nodot(input: &[u8]) -> ParseResult<&[u8]> {
+fn token_nodot(input: &[u8]) -> ParseResult<'_, &[u8]> {
     take_while1(is_token_nodot_char)(input)
 }
 
 /// Parse an event-type (event-package with optional dot-separated templates)
 /// event-type = event-package *( "." event-template )
-fn event_type(input: &[u8]) -> ParseResult<String> {
+fn event_type(input: &[u8]) -> ParseResult<'_, String> {
     map(
         recognize(tuple((
             token_nodot,
@@ -55,7 +55,7 @@ fn event_type(input: &[u8]) -> ParseResult<String> {
 /// Allow-Events: presence, message-summary, dialog
 /// Allow-Events: presence.winfo, conference
 /// ```
-pub fn parse_allow_events(input: &[u8]) -> ParseResult<AllowEvents> {
+pub fn parse_allow_events(input: &[u8]) -> ParseResult<'_, AllowEvents> {
     // Parse any leading whitespace
     let (input, _) = sws(input)?;
 

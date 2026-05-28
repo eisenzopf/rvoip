@@ -5,9 +5,8 @@
 
 use rvoip_rtp_core::{
     api::common::{
-        config::{KeyExchangeMethod, SecurityConfig},
         frame::{MediaFrame, MediaFrameType},
-        unified_security::{SecurityContextFactory, SecurityState, UnifiedSecurityContext},
+        unified_security::SecurityContextFactory,
     },
     packet::{RtpHeader, RtpPacket},
     security::{
@@ -19,8 +18,7 @@ use rvoip_rtp_core::{
 };
 
 use bytes::Bytes;
-use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

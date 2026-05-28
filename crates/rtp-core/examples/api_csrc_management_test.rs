@@ -36,12 +36,10 @@
 //! through the high-level API interfaces rather than requiring direct use of core components.
 
 use rand::Rng;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info};
 
 use rvoip_rtp_core::api::{
     client::{

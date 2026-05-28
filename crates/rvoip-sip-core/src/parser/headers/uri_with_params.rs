@@ -18,7 +18,7 @@ use crate::parser::ParseResult;
 use crate::types::param::Param;
 // Returns (URI String, Vec<Param>)
 
-pub fn uri_with_generic_params(input: &[u8]) -> ParseResult<(String, Vec<Param>)> {
+pub fn uri_with_generic_params(input: &[u8]) -> ParseResult<'_, (String, Vec<Param>)> {
     map(
         pair(
             // LAQUOT absoluteURI RAQUOT
@@ -35,7 +35,7 @@ pub fn uri_with_generic_params(input: &[u8]) -> ParseResult<(String, Vec<Param>)
 }
 
 // Helper function to extract the URI content between angle brackets
-fn take_until_raquot(input: &[u8]) -> ParseResult<&[u8]> {
+fn take_until_raquot(input: &[u8]) -> ParseResult<'_, &[u8]> {
     if input.is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,

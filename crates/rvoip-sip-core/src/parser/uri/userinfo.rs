@@ -29,7 +29,7 @@ fn is_ipv6_char(c: u8) -> bool {
 
 // Specialized version of IPv6 reference parser that returns the raw bytes
 // This adapts the existing ipv6_reference parser for use in userinfo
-fn ipv6_reference_raw(input: &[u8]) -> ParseResult<&[u8]> {
+fn ipv6_reference_raw(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(delimited(
         tag(b"["),
         take_while1(|c: u8| c.is_ascii_hexdigit() || c == b':' || c == b'.' || c == b'%'),
@@ -40,7 +40,7 @@ fn ipv6_reference_raw(input: &[u8]) -> ParseResult<&[u8]> {
 // user = 1*( unreserved / escaped / user-unreserved )
 // Returns raw bytes, unescaping happens in userinfo
 // Extended to handle IPv6 references (RFC 5118)
-pub fn user(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn user(input: &[u8]) -> ParseResult<'_, &[u8]> {
     alt((
         // Handle IPv6 reference as a special case
         ipv6_reference_raw,
@@ -59,13 +59,13 @@ fn is_password_char(c: u8) -> bool {
     matches!(c, b'&' | b'=' | b'+' | b'$' | b',')
 }
 
-fn password_char(input: &[u8]) -> ParseResult<&[u8]> {
+fn password_char(input: &[u8]) -> ParseResult<'_, &[u8]> {
     alt((escaped, take_while1(is_password_char)))(input)
 }
 
 // password = *( unreserved / escaped / "&" / "=" / "+" / "$" / "," )
 // Returns raw bytes, unescaping happens in userinfo
-pub fn password(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn password(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(many0(password_char))(input)
 }
 
@@ -73,7 +73,7 @@ pub fn password(input: &[u8]) -> ParseResult<&[u8]> {
 // Returns (unescaped_user_string, Option<unescaped_password_string>)
 // Corrected structure: Parses user and optional password, terminated by '@'
 // Extended to support IPv6 references in userinfo (RFC 5118)
-pub fn userinfo(input: &[u8]) -> ParseResult<(String, Option<String>)> {
+pub fn userinfo(input: &[u8]) -> ParseResult<'_, (String, Option<String>)> {
     // First, validate the input to ensure there's no more than one colon
     // before the '@' symbol (excluding IPv6 references which are handled separately)
     let at_pos = match input.iter().position(|&c| c == b'@') {

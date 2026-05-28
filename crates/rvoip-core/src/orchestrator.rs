@@ -11,8 +11,7 @@
 //! (CARVE_PLAN §3) land in subsequent steps.
 
 use crate::adapter::{
-    AdapterEvent, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest, PlaybackHandle,
-    RejectReason, TransferTarget,
+    AdapterEvent, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest, PlaybackHandle, TransferTarget,
 };
 use crate::bridge::{codec_to_pt, frame_pump, BridgeManager, CrossBridgeHandle};
 use crate::capability::{CapabilityDescriptor, CapabilityIntersection};
@@ -244,9 +243,16 @@ pub(crate) struct AiAttachmentHandle {
     /// P5 — flips to `true` when a TTS playback is in flight and to
     /// `false` when it isn't. Barge-in inspects this to decide
     /// whether an incoming ASR partial should cancel a playback.
+    /// Stored here only to keep the Arc alive at the orchestrator
+    /// level; the dialog task holds its own clone and does all the
+    /// reads. Retained so a future external "is speaking?" / "stop
+    /// speaking" API can hook into it without re-plumbing the task.
+    #[allow(dead_code)]
     pub speaking: Arc<std::sync::atomic::AtomicBool>,
     /// P5 — current playback cancel signal. When barge-in fires, the
     /// orchestrator sends `()` to abort the in-flight TTS pipe.
+    /// Same lifetime/retention rationale as `speaking` above.
+    #[allow(dead_code)]
     pub speak_cancel: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     /// V2.B — admission permit; released on detach via Drop.
     pub _permit: Option<tokio::sync::OwnedSemaphorePermit>,

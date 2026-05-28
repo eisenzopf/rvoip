@@ -13,7 +13,7 @@ use crate::types::uri::Host;
 // IPv6reference = "[" IPv6address "]"
 // Improved IPv6address parser that properly validates both the content and ensures
 // the closing bracket is present, otherwise returns an error.
-pub fn ipv6_reference(input: &[u8]) -> ParseResult<Host> {
+pub fn ipv6_reference(input: &[u8]) -> ParseResult<'_, Host> {
     // First check if there's an opening bracket but no closing bracket
     if input.starts_with(b"[") && !input.contains(&b']') {
         return Err(Err::Error(nom::error::Error::new(

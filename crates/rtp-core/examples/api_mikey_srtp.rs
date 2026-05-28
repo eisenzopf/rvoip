@@ -4,7 +4,6 @@
 //! for enterprise-grade SRTP key management with pre-shared keys.
 
 use rvoip_rtp_core::{
-    api::common::frame::{MediaFrame, MediaFrameType},
     packet::{RtpHeader, RtpPacket},
     security::{
         mikey::{Mikey, MikeyConfig, MikeyKeyExchangeMethod, MikeyRole},
@@ -15,7 +14,7 @@ use rvoip_rtp_core::{
 
 use bytes::Bytes;
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -67,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let mut mikey_responder = Mikey::new(responder_config, MikeyRole::Responder);
+    let mikey_responder = Mikey::new(responder_config, MikeyRole::Responder);
 
     info!("✅ MIKEY initiator configured (acts as SIP client)");
     info!("✅ MIKEY responder configured (acts as SIP server)");

@@ -20,9 +20,9 @@ mod tests {
         let test_values = vec![0i16, 128, 256, 512, 1024, -128, -256, -512, -1024];
 
         for &sample in &test_values {
-            let encoded = alaw_compress(sample);
-            // Should produce valid 8-bit encoded values
-            assert!(encoded <= 255u8);
+            // Smoke test: encoder returns a `u8` (range guaranteed by
+            // the type) and does not panic on these inputs.
+            let _encoded = alaw_compress(sample);
         }
     }
 
@@ -32,9 +32,7 @@ mod tests {
         let test_values = vec![0i16, 128, 256, 512, 1024, -128, -256, -512, -1024];
 
         for &sample in &test_values {
-            let encoded = ulaw_compress(sample);
-            // Should produce valid 8-bit encoded values
-            assert!(encoded <= 255u8);
+            let _encoded = ulaw_compress(sample);
         }
     }
 
@@ -55,9 +53,9 @@ mod tests {
             let alaw_encoded = alaw_compress(sample);
             let mulaw_encoded = ulaw_compress(sample);
 
-            // G.711 encoded values are always in 0-255 range
-            assert!(alaw_encoded <= 255);
-            assert!(mulaw_encoded <= 255);
+            // Encoded values are `u8`, so the 0-255 range is guaranteed
+            // by the type. We only need to assert the encoders don't
+            // panic on boundary samples.
 
             println!(
                 "Sample {}: A-law=0x{:02x}, μ-law=0x{:02x}",
@@ -265,11 +263,9 @@ mod tests {
             let alaw_encoded = alaw_compress(sample);
             let mulaw_encoded = ulaw_compress(sample);
 
-            // Should always produce valid 8-bit values
-            assert!(alaw_encoded <= 255);
-            assert!(mulaw_encoded <= 255);
-
-            // Verify we can decode without panic
+            // Encoded values are `u8` (0-255 by type). The point of this
+            // test is that encoding+decoding round-trips don't panic on
+            // i16 extremes.
             let _alaw_decoded = alaw_expand(alaw_encoded);
             let _mulaw_decoded = ulaw_expand(mulaw_encoded);
         }

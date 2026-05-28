@@ -65,7 +65,7 @@ pub fn trim_bytes(bytes: &[u8]) -> &[u8] {
 /// Parses a block of header lines terminated by an empty line (CRLF).
 /// Uses the `message_header` parser for each line.
 /// Returns a Vec of raw Headers.
-fn parse_header_block(input: &[u8]) -> ParseResult<Vec<Header>> {
+fn parse_header_block(input: &[u8]) -> ParseResult<'_, Vec<Header>> {
     // Hand-rolled equivalent of `many_till(message_header, crlf)` that
     // pre-sizes the Vec. The previous `many_till` started from
     // `Vec::with_capacity(0)` and grew via doubling — a typical 8–12
@@ -93,7 +93,7 @@ fn parse_header_block(input: &[u8]) -> ParseResult<Vec<Header>> {
 ///
 /// This parser correctly handles these folded lines and returns a slice that includes
 /// the entire logical header value across multiple physical lines.
-pub fn header_value_better(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn header_value_better(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // Find the next non-continuation line ending (i.e., CRLF not followed by SP/HTAB)
     let mut i = 0;
     let len = input.len();
@@ -355,20 +355,20 @@ pub fn parse_message_bytes(input: &[u8]) -> Result<Message> {
 }
 
 // header-name = token
-fn header_name(input: &[u8]) -> ParseResult<&[u8]> {
+fn header_name(input: &[u8]) -> ParseResult<'_, &[u8]> {
     token(input)
 }
 
 // header-value = *(TEXT-UTF8char / UTF8-CONT / LWS)
 // Simplified: Takes bytes until CRLF. Actual unfolding/validation happens later.
-pub fn header_value(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn header_value(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(take_till(|c| c == b'\r' || c == b'\n'))(input)
 }
 
 // message-header = header-name HCOLON header-value CRLF
 // Parses a single logical header line including folded lines
 // Returns a raw Header struct with the value already unfolded
-fn message_header(input: &[u8]) -> ParseResult<Header> {
+fn message_header(input: &[u8]) -> ParseResult<'_, Header> {
     map_res(
         tuple((
             header_name,

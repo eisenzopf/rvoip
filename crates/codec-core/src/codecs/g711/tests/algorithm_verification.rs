@@ -312,19 +312,10 @@ fn test_edge_cases() {
         let mulaw_encoded = ulaw_compress(value);
         let mulaw_decoded = ulaw_expand(mulaw_encoded);
 
-        // Verify outputs are in valid ranges
-        assert!(
-            alaw_decoded >= -32768 && alaw_decoded <= 32767,
-            "A-law decoded value {} out of range for input {}",
-            alaw_decoded,
-            value
-        );
-        assert!(
-            mulaw_decoded >= -32768 && mulaw_decoded <= 32767,
-            "μ-law decoded value {} out of range for input {}",
-            mulaw_decoded,
-            value
-        );
+        // Range is enforced by `i16`; the decoders return an `i16`, so
+        // they cannot produce a value outside [-32768, 32767]. Use the
+        // values to keep the call alive for the panic-free check.
+        let _ = (alaw_decoded, mulaw_decoded, value);
 
         println!(
             "  ✅ Edge case {}: A-law=0x{:02x}→{}, μ-law=0x{:02x}→{}",

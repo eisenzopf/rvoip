@@ -3,14 +3,12 @@
 //! This example demonstrates how to synchronize multiple RTP streams
 //! (audio and video) with different clock rates.
 
-use bytes::Bytes;
 use rvoip_rtp_core::{
-    packet::rtcp::{NtpTimestamp, RtcpPacket, RtcpSenderReport},
-    MediaClock, MediaSync, RtpSession, RtpSessionConfig, RtpSessionEvent, TimestampMapper,
+    packet::rtcp::NtpTimestamp, MediaSync, TimestampMapper,
 };
 use std::time::Duration;
 use tokio::time;
-use tracing::{debug, error, info, warn};
+use tracing::info;
 
 const AUDIO_SSRC: u32 = 0x1234ABCD;
 const VIDEO_SSRC: u32 = 0x5678DCBA;

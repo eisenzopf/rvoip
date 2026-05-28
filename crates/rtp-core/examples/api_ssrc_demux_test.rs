@@ -8,16 +8,16 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time;
-use tracing::{debug, error, info, warn, Level};
+use tracing::{error, info, warn, Level};
 
 use rvoip_rtp_core::api::{
     client::{
-        config::{ClientConfig, ClientConfigBuilder},
+        config::ClientConfigBuilder,
         transport::{DefaultMediaTransportClient, MediaTransportClient},
     },
     common::{frame::MediaFrame, frame::MediaFrameType},
     server::{
-        config::{ServerConfig, ServerConfigBuilder},
+        config::ServerConfigBuilder,
         transport::{DefaultMediaTransportServer, MediaTransportServer},
     },
 };

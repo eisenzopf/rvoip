@@ -9,17 +9,16 @@
 //! 3. Different port allocation strategies (Sequential, Random, Adjacent pairs)
 //! 4. How port reuse works
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
+use tracing::info;
 
 use rvoip_rtp_core::{
     transport::{
         AllocationStrategy, GlobalPortAllocator, PairingStrategy, PlatformType,
         PortAllocatorConfig, RtpTransportConfig, UdpRtpTransport,
-    },
-    RtpSession, RtpSessionConfig, RtpSessionEvent, RtpTransport,
+    }, RtpTransport,
 };
 
 const SESSION_COUNT: usize = 5;
@@ -36,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Running on platform: {:?}", platform);
 
     // Get the global port allocator
-    let allocator = GlobalPortAllocator::instance().await;
+    let _allocator = GlobalPortAllocator::instance().await;
 
     // Demonstrate port allocation with different strategies
     info!("\n=== Testing Individual Port Allocation ===");
@@ -220,7 +219,7 @@ async fn test_multiple_sessions() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Test port reuse after closing sessions
 async fn test_port_reuse() -> Result<(), Box<dyn std::error::Error>> {
-    let session_id = "test-reuse-session";
+    let _session_id = "test-reuse-session";
 
     // Create custom allocator
     let mut config = PortAllocatorConfig::default();

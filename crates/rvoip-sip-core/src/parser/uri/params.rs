@@ -28,25 +28,25 @@ fn is_param_unreserved(c: u8) -> bool {
 
 // paramchar = param-unreserved / unreserved / escaped
 // Returns raw bytes
-pub fn paramchar(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn paramchar(input: &[u8]) -> ParseResult<'_, &[u8]> {
     alt((take_while1(is_param_unreserved), unreserved, escaped))(input)
 }
 
 // pname = 1*paramchar
 // Returns raw bytes, unescaping happens in other_param
-pub fn pname(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn pname(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(many1(paramchar))(input)
 }
 
 // pvalue = 1*paramchar
 // Returns raw bytes, unescaping happens in other_param
-pub fn pvalue(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn pvalue(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(many1(paramchar))(input)
 }
 
 // other-param = pname [ "=" pvalue ]
 // Updated to unescape name and value
-fn other_param(input: &[u8]) -> ParseResult<Param> {
+fn other_param(input: &[u8]) -> ParseResult<'_, Param> {
     // If the input starts with an equals sign, this is a parameter with no name
     // which should be rejected according to RFC 3261
     if !input.is_empty() && input[0] == b'=' {
@@ -79,7 +79,7 @@ fn other_param(input: &[u8]) -> ParseResult<Param> {
 // transport-param = "transport=" ( "udp" / "tcp" / "sctp" / "tls" / other-transport)
 // other-transport = token
 // RFC 3261 specifies parameter names are case-insensitive
-fn transport_param(input: &[u8]) -> ParseResult<Param> {
+fn transport_param(input: &[u8]) -> ParseResult<'_, Param> {
     map_res(preceded(tag_no_case(b"transport="), token), |t_bytes| {
         str::from_utf8(t_bytes).map(|s| Param::Transport(s.to_string()))
     })(input)
@@ -88,7 +88,7 @@ fn transport_param(input: &[u8]) -> ParseResult<Param> {
 // user-param = "user=" ( "phone" / "ip" / other-user)
 // other-user = token
 // RFC 3261 specifies parameter names are case-insensitive
-fn user_param(input: &[u8]) -> ParseResult<Param> {
+fn user_param(input: &[u8]) -> ParseResult<'_, Param> {
     map_res(preceded(tag_no_case(b"user="), token), |u_bytes| {
         str::from_utf8(u_bytes).map(|s| Param::User(s.to_string()))
     })(input)
@@ -97,7 +97,7 @@ fn user_param(input: &[u8]) -> ParseResult<Param> {
 // method-param = "method=" Method (Method from request line)
 // For URI context, Method is just a token.
 // RFC 3261 specifies parameter names are case-insensitive
-fn method_param(input: &[u8]) -> ParseResult<Param> {
+fn method_param(input: &[u8]) -> ParseResult<'_, Param> {
     map_res(preceded(tag_no_case(b"method="), token), |m_bytes| {
         str::from_utf8(m_bytes).map(|s| Param::Method(s.to_string()))
     })(input)
@@ -106,7 +106,7 @@ fn method_param(input: &[u8]) -> ParseResult<Param> {
 // ttl-param = "ttl=" ttl (1*3 DIGIT)
 // RFC 3261 limits TTL to 1*3DIGIT (max 255)
 // RFC 3261 specifies parameter names are case-insensitive
-fn ttl_param(input: &[u8]) -> ParseResult<Param> {
+fn ttl_param(input: &[u8]) -> ParseResult<'_, Param> {
     let original_input = input; // Store original input for error handling
 
     // First check for exactly 1-3 digits after "ttl="
@@ -145,7 +145,7 @@ fn ttl_param(input: &[u8]) -> ParseResult<Param> {
 // maddr-param = "maddr=" host
 // RFC 3261 specifies parameter names are case-insensitive
 // Need to handle invalid hosts by propagating errors
-fn maddr_param(input: &[u8]) -> ParseResult<Param> {
+fn maddr_param(input: &[u8]) -> ParseResult<'_, Param> {
     // Parse "maddr=" prefix (case-insensitive)
     let (remaining, _) = tag_no_case(b"maddr=")(input)?;
 
@@ -177,12 +177,12 @@ fn maddr_param(input: &[u8]) -> ParseResult<Param> {
 
 // lr-param = "lr"
 // RFC 3261 specifies parameter names are case-insensitive
-fn lr_param(input: &[u8]) -> ParseResult<Param> {
+fn lr_param(input: &[u8]) -> ParseResult<'_, Param> {
     map(tag_no_case(b"lr"), |_| Param::Lr)(input)
 }
 
 // uri-parameter = transport-param / user-param / method-param / ttl-param / maddr-param / lr-param / other-param
-fn uri_parameter(input: &[u8]) -> ParseResult<Param> {
+fn uri_parameter(input: &[u8]) -> ParseResult<'_, Param> {
     // Order matters: check specific params before generic 'other_param'
     alt((
         transport_param,
@@ -196,7 +196,7 @@ fn uri_parameter(input: &[u8]) -> ParseResult<Param> {
 }
 
 // uri-parameters = *( ";" uri-parameter)
-pub fn uri_parameters(input: &[u8]) -> ParseResult<Vec<Param>> {
+pub fn uri_parameters(input: &[u8]) -> ParseResult<'_, Vec<Param>> {
     many0(preceded(semi, uri_parameter))(input)
 }
 

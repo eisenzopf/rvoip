@@ -26,7 +26,7 @@ fn is_label_char(c: u8) -> bool {
 
 // Parse a single valid domain label (without dots)
 // Cannot start or end with a hyphen per RFC 1034
-fn domain_label(input: &[u8]) -> ParseResult<&[u8]> {
+fn domain_label(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // Verify the label doesn't start or end with hyphen
     verify(
         // Must have at least one character, all of which are valid label chars
@@ -36,7 +36,7 @@ fn domain_label(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // Parse a hostname including handling of trailing dot for FQDN
-fn parse_hostname(input: &[u8]) -> ParseResult<&[u8]> {
+fn parse_hostname(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // Find the position of a colon, semicolon, or question mark if it exists (for port, params, or headers)
     let port_position = input.iter().position(|&c| c == b':');
     let param_position = input.iter().position(|&c| c == b';');
@@ -204,7 +204,7 @@ fn is_likely_actual_ipv4(input: &[u8]) -> bool {
 }
 
 // Public hostname parser function
-pub fn hostname(input: &[u8]) -> ParseResult<Host> {
+pub fn hostname(input: &[u8]) -> ParseResult<'_, Host> {
     // Handle the case where the input is a single dot
     if input == b"." {
         return Err(nom::Err::Error(nom::error::Error::new(

@@ -2,13 +2,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 use rvoip_rtp_core::dtls::connection::DtlsConnection;
-use rvoip_rtp_core::dtls::crypto::verify::{generate_self_signed_certificate, Certificate};
+use rvoip_rtp_core::dtls::crypto::verify::generate_self_signed_certificate;
 use rvoip_rtp_core::dtls::transport::udp::UdpTransport;
 use rvoip_rtp_core::dtls::{DtlsConfig, DtlsRole, DtlsVersion};
 

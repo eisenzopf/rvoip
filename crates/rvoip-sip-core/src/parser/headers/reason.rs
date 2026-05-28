@@ -28,7 +28,7 @@ use crate::types::param::Param;
 use crate::types::reason::Reason;
 
 // Define parser for the protocol field
-fn protocol(input: &[u8]) -> ParseResult<String> {
+fn protocol(input: &[u8]) -> ParseResult<'_, String> {
     map_res(
         take_while1(|c| {
             // Token characters per RFC 3261
@@ -43,7 +43,7 @@ fn protocol(input: &[u8]) -> ParseResult<String> {
 }
 
 // Define parser for the cause parameter
-fn cause_param(input: &[u8]) -> ParseResult<u16> {
+fn cause_param(input: &[u8]) -> ParseResult<'_, u16> {
     preceded(
         pair(tag_no_case(b"cause"), equal),
         map_res(digit1, |b: &[u8]| {
@@ -58,7 +58,7 @@ fn cause_param(input: &[u8]) -> ParseResult<u16> {
 }
 
 // Define parser for the text parameter
-fn text_param(input: &[u8]) -> ParseResult<String> {
+fn text_param(input: &[u8]) -> ParseResult<'_, String> {
     preceded(
         pair(tag_no_case(b"text"), equal),
         map_res(quoted_string, |b: &[u8]| {
@@ -70,7 +70,7 @@ fn text_param(input: &[u8]) -> ParseResult<String> {
 }
 
 // Define parser for reason parameters (cause, text, or generic)
-fn reason_param(input: &[u8]) -> ParseResult<ReasonParam> {
+fn reason_param(input: &[u8]) -> ParseResult<'_, ReasonParam> {
     alt((
         map(cause_param, ReasonParam::Cause),
         map(text_param, ReasonParam::Text),
@@ -97,7 +97,7 @@ enum ReasonParam {
 /// let result = parse_reason(input);
 /// assert!(result.is_ok());
 /// ```
-pub fn parse_reason(input: &[u8]) -> ParseResult<Reason> {
+pub fn parse_reason(input: &[u8]) -> ParseResult<'_, Reason> {
     map_res(
         tuple((protocol, many0(preceded(semi, reason_param)))),
         |(protocol_str, params)| {

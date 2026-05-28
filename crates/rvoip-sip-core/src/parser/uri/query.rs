@@ -18,29 +18,29 @@ use crate::parser::utils::unescape_uri_component;
 use crate::parser::ParseResult;
 
 // uric = reserved / unreserved / escaped
-fn uric(input: &[u8]) -> ParseResult<&[u8]> {
+fn uric(input: &[u8]) -> ParseResult<'_, &[u8]> {
     alt((reserved, unreserved, escaped))(input)
 }
 
 // Parse a single query parameter name or value
-fn query_param_part(input: &[u8]) -> ParseResult<&[u8]> {
+fn query_param_part(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(many0(uric))(input)
 }
 
 // Parse a name=value pair in the query string
-fn query_param(input: &[u8]) -> ParseResult<(&[u8], &[u8])> {
+fn query_param(input: &[u8]) -> ParseResult<'_, (&[u8], &[u8])> {
     separated_pair(query_param_part, tag(b"="), query_param_part)(input)
 }
 
 // query = *uric
 // Returns raw query string as bytes
-pub fn query_raw(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn query_raw(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(many0(uric))(input)
 }
 
 // Parse a query string with key-value pairs into a HashMap
 // Transforms byte sequences into proper strings with URI unescaping
-pub fn parse_query_params(input: &[u8]) -> ParseResult<HashMap<String, String>> {
+pub fn parse_query_params(input: &[u8]) -> ParseResult<'_, HashMap<String, String>> {
     // First use query_raw to consume the entire input
     let (rem, raw_query) = query_raw(input)?;
 
@@ -86,7 +86,7 @@ pub fn parse_query_params(input: &[u8]) -> ParseResult<HashMap<String, String>> 
 
 // Parse the entire query component of a URI, which may be preceded by '?'
 // Returns the raw bytes or optionally nothing if there is no query
-pub fn parse_query(input: &[u8]) -> ParseResult<Option<&[u8]>> {
+pub fn parse_query(input: &[u8]) -> ParseResult<'_, Option<&[u8]>> {
     opt(preceded(tag(b"?"), query_raw))(input)
 }
 

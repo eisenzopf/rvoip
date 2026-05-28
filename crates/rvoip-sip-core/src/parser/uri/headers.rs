@@ -23,7 +23,7 @@ fn is_hnv_unreserved(c: u8) -> bool {
 
 // hname = 1*( hnv-unreserved / unreserved / escaped )
 // Return an unescaped string
-pub fn hname(input: &[u8]) -> ParseResult<String> {
+pub fn hname(input: &[u8]) -> ParseResult<'_, String> {
     let mut i = 0;
     let mut found_valid_char = false;
 
@@ -100,7 +100,7 @@ pub fn hname(input: &[u8]) -> ParseResult<String> {
 
 // hvalue = *( hnv-unreserved / unreserved / escaped )
 // Return an unescaped string
-pub fn hvalue(input: &[u8]) -> ParseResult<String> {
+pub fn hvalue(input: &[u8]) -> ParseResult<'_, String> {
     let mut i = 0;
 
     while i < input.len() {
@@ -187,7 +187,7 @@ fn parse_hex_digit(c: u8) -> u8 {
 }
 
 // header = hname "=" hvalue
-pub fn header(input: &[u8]) -> ParseResult<(String, String)> {
+pub fn header(input: &[u8]) -> ParseResult<'_, (String, String)> {
     // Reject headers with no name (looking specifically for a starting equals sign)
     if input.is_empty() || input[0] == b'=' {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -220,7 +220,7 @@ pub fn header(input: &[u8]) -> ParseResult<(String, String)> {
 }
 
 // uri-headers = "?" header *( "&" header )
-pub fn uri_headers(input: &[u8]) -> ParseResult<HashMap<String, String>> {
+pub fn uri_headers(input: &[u8]) -> ParseResult<'_, HashMap<String, String>> {
     if input.is_empty() || input[0] != b'?' {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,

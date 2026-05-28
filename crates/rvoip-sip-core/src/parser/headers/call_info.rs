@@ -34,7 +34,7 @@ enum InfoParam {
 }
 
 // info-param = ( "purpose" EQUAL ( "icon" / "info" / "card" / token ) ) / generic-param
-fn info_param(input: &[u8]) -> ParseResult<InfoParam> {
+fn info_param(input: &[u8]) -> ParseResult<'_, InfoParam> {
     alt((
         map(
             preceded(
@@ -115,7 +115,7 @@ fn trim_uri_whitespace(s: &str) -> &str {
 
 // info = LAQUOT absoluteURI RAQUOT *( SEMI info-param)
 // Returns (Uri, Vec<Param>)
-fn info(input: &[u8]) -> ParseResult<CallInfoValue> {
+fn info(input: &[u8]) -> ParseResult<'_, CallInfoValue> {
     map(
         // Consume trailing whitespace after parameters
         terminated(
@@ -183,9 +183,9 @@ fn trim_ws(input: &[u8]) -> &[u8] {
 
 // Call-Info = "Call-Info" HCOLON info *(COMMA info)
 /// Parses a Call-Info header value.
-pub fn parse_call_info(input: &[u8]) -> ParseResult<Vec<CallInfoValue>> {
+pub fn parse_call_info(input: &[u8]) -> ParseResult<'_, Vec<CallInfoValue>> {
     // First, use a custom comma_separator that handles various whitespace including line breaks
-    fn comma_separator(input: &[u8]) -> ParseResult<&[u8]> {
+    fn comma_separator(input: &[u8]) -> ParseResult<'_, &[u8]> {
         // Skip any leading whitespace including newlines
         let (input, _) = crate::parser::whitespace::sws(input)?;
         // Match a comma
@@ -199,7 +199,7 @@ pub fn parse_call_info(input: &[u8]) -> ParseResult<Vec<CallInfoValue>> {
 }
 
 /// Parses a complete Call-Info header, including the header name
-pub fn parse_call_info_header(input: &[u8]) -> ParseResult<CallInfo> {
+pub fn parse_call_info_header(input: &[u8]) -> ParseResult<'_, CallInfo> {
     map(
         preceded(pair(tag_no_case(b"Call-Info"), hcolon), parse_call_info),
         CallInfo::new,

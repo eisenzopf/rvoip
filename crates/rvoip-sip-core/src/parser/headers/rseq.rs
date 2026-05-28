@@ -15,11 +15,11 @@ use crate::parser::whitespace::owsp;
 use crate::parser::ParseResult;
 
 /// Parse an RSeq value, which is a non-negative integer
-pub fn parse_rseq(input: &[u8]) -> ParseResult<u32> {
+pub fn parse_rseq(input: &[u8]) -> ParseResult<'_, u32> {
     let (input, _) = owsp(input)?;
 
     // Define parse_digit as a function rather than a variable
-    fn parse_digit(input: &[u8]) -> ParseResult<u32> {
+    fn parse_digit(input: &[u8]) -> ParseResult<'_, u32> {
         map_res(recognize(digit1), |digits: &[u8]| {
             let digits_str = str::from_utf8(digits)
                 .map_err(|_| nom::Err::Error(nom::error::Error::new(digits, ErrorKind::Digit)))?;
@@ -37,7 +37,7 @@ pub fn parse_rseq(input: &[u8]) -> ParseResult<u32> {
 }
 
 /// Parse a complete RSeq header, including the header name and colon
-pub fn parse_rseq_header(input: &[u8]) -> ParseResult<u32> {
+pub fn parse_rseq_header(input: &[u8]) -> ParseResult<'_, u32> {
     let (input, _) = nom::bytes::complete::tag_no_case(b"RSeq")(input)?;
     let (input, _) = hcolon(input)?;
     parse_rseq(input)

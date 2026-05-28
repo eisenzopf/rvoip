@@ -14,7 +14,7 @@ use nom::IResult;
 // Note: HCOLON is handled by the top-level message_header parser.
 // This parser receives the value *after* HCOLON.
 // Make this function public
-pub fn parse_authorization(input: &[u8]) -> ParseResult<AuthorizationHeader> {
+pub fn parse_authorization(input: &[u8]) -> ParseResult<'_, AuthorizationHeader> {
     // Handle any leading whitespace, including line folding
     let (input, _) = opt(lws)(input)?;
 

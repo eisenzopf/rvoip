@@ -6,7 +6,6 @@
 ///
 /// Expected runtime: ~5-10 seconds
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
 use std::time::Duration;
 
 use rvoip_rtp_core::api::client::config::ClientConfigBuilder;

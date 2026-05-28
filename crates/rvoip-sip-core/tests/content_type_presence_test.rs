@@ -55,7 +55,7 @@ fn test_add_parameter() {
 #[test]
 fn test_content_type_in_builder() {
     use rvoip_sip_core::builder::SimpleRequestBuilder;
-    use rvoip_sip_core::types::Method;
+    
 
     // NOTIFY with PIDF body
     let notify = SimpleRequestBuilder::notify(

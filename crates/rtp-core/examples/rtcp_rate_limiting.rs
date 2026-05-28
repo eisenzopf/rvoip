@@ -6,15 +6,11 @@
 //! are calculated differently.
 
 use bytes::Bytes;
-use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
 use tokio::time::sleep;
-use tracing::{debug, error, info, warn, Level};
+use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use rvoip_rtp_core::session::RtpSessionSender;
 use rvoip_rtp_core::{RtpSession, RtpSessionConfig, RtpSessionEvent};
 
 #[tokio::main]

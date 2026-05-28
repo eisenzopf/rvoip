@@ -11,7 +11,7 @@ use crate::parser::ParseResult;
 
 // Expires = "Expires" HCOLON delta-seconds
 // Note: HCOLON handled elsewhere
-pub fn parse_expires(input: &[u8]) -> ParseResult<u32> {
+pub fn parse_expires(input: &[u8]) -> ParseResult<'_, u32> {
     // Handle optional leading whitespace
     let (input, _) = opt(owsp)(input)?;
 
@@ -23,7 +23,7 @@ pub fn parse_expires(input: &[u8]) -> ParseResult<u32> {
 }
 
 /// Full parser for the Expires header, including header name and whitespace handling
-pub fn parse_full_expires(input: &[u8]) -> ParseResult<u32> {
+pub fn parse_full_expires(input: &[u8]) -> ParseResult<'_, u32> {
     // Parse the header name (case-insensitive)
     let (input, _) = tag_no_case(b"Expires")(input)?;
 

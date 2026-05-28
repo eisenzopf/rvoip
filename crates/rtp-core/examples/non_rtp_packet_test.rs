@@ -3,11 +3,9 @@
 /// It demonstrates that even malformed or non-RTP formatted packets are properly
 /// processed and generate MediaReceived events.
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
-use tokio::sync::broadcast;
 
 use rvoip_rtp_core::traits::RtpEvent;
 use rvoip_rtp_core::transport::{RtpTransportConfig, UdpRtpTransport};
@@ -113,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Packet 2: Almost RTP but wrong version (should fail RTP parsing)
     // First byte: 0x00 (version 0, no padding, no extension, no CSRC)
-    let mut almost_rtp = vec![
+    let almost_rtp = vec![
         0x00, 0x08, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x00, 0x01,
     ];
     client_socket.send_to(&almost_rtp, server_addr).await?;

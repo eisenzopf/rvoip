@@ -33,7 +33,7 @@ pub enum RetryParam {
 }
 
 // retry-param = ("duration" EQUAL delta-seconds) / generic-param
-pub fn retry_param(input: &[u8]) -> ParseResult<RetryParam> {
+pub fn retry_param(input: &[u8]) -> ParseResult<'_, RetryParam> {
     // First check if it's a duration parameter
     if input.len() >= 9 && // "duration=" is 9 bytes
        (&input[0..9]).eq_ignore_ascii_case(b"duration=")
@@ -57,8 +57,8 @@ pub struct RetryAfterValue {
 }
 
 /// Parses a Retry-After header value.
-// pub fn parse_retry_after(input: &[u8]) -> ParseResult<(u32, Option<&[u8]>, Vec<Param>)> { // Old signature
-pub fn parse_retry_after(input: &[u8]) -> ParseResult<RetryAfterValue> {
+// pub fn parse_retry_after(input: &[u8]) -> ParseResult<'_, (u32, Option<&[u8]>, Vec<Param>)> { // Old signature
+pub fn parse_retry_after(input: &[u8]) -> ParseResult<'_, RetryAfterValue> {
     // New signature
     map_res(
         tuple((

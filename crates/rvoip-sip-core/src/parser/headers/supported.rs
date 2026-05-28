@@ -22,14 +22,14 @@ use crate::parser::whitespace::{owsp, sws};
 use crate::parser::ParseResult;
 
 /// Parses optional whitespace followed by a comma and more whitespace
-fn ws_comma_ws(input: &[u8]) -> ParseResult<&[u8]> {
+fn ws_comma_ws(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(delimited(owsp, char(','), owsp))(input)
 }
 
 /// Parses a list of option-tags (tokens) separated by commas,
 /// handling whitespace, empty elements, and trailing commas.
 /// Returns a Vec<String> containing the parsed option-tags.
-pub fn parse_supported(input: &[u8]) -> ParseResult<Vec<String>> {
+pub fn parse_supported(input: &[u8]) -> ParseResult<'_, Vec<String>> {
     // Handle empty input explicitly
     if input.is_empty() {
         return Ok((input, Vec::new()));
@@ -91,7 +91,7 @@ pub fn parse_supported(input: &[u8]) -> ParseResult<Vec<String>> {
 
 /// Parses a complete Supported header, including the header name and colon.
 /// Handles both the standard "Supported:" form and the compact "k:" form.
-pub fn parse_supported_header(input: &[u8]) -> ParseResult<Vec<String>> {
+pub fn parse_supported_header(input: &[u8]) -> ParseResult<'_, Vec<String>> {
     preceded(
         terminated(alt((tag_no_case(b"Supported"), tag_no_case(b"k"))), hcolon),
         parse_supported,

@@ -33,6 +33,12 @@ async fn test_create_coordinator() {
 
 #[tokio::test]
 async fn tls_client_only_config_does_not_require_endpoint_certificates() {
+    // rustls 0.23 requires the process to have a default CryptoProvider
+    // installed before any TLS code path runs. install_default returns
+    // Err if one is already installed, which is fine when tests run in
+    // the same process — ignore the result.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let mut config = test_config(15229);
     config.sip_tls_mode = SipTlsMode::ClientOnly;
     config.local_uri = "sips:test@127.0.0.1".to_string();

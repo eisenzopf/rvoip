@@ -7,7 +7,7 @@ use bytes::Bytes;
 use rvoip_rtp_core::{
     packet::rtcp::{RtcpApplicationDefined, RtcpPacket},
     transport::RtpTransport,
-    RtpEvent, RtpSession, RtpSessionConfig, RtpSessionEvent,
+    RtpEvent, RtpSession, RtpSessionConfig,
 };
 use std::time::Duration;
 use tokio::time;
@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         while let Ok(event) = receiver_transport_events.recv().await {
             match event {
-                RtpEvent::RtcpReceived { data, source } => match RtcpPacket::parse(&data) {
+                RtpEvent::RtcpReceived { data, source: _ } => match RtcpPacket::parse(&data) {
                     Ok(packet) => match packet {
                         RtcpPacket::ApplicationDefined(app) => {
                             info!("Received APP packet:");

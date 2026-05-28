@@ -114,6 +114,12 @@ enum PeerAuthState {
     Authenticated {
         identity_id: String,
         participant_id: String,
+        /// Captured at auth time so a future assurance-gated check
+        /// (e.g. `require_authenticated_at_least(AAL2)`) can consult it
+        /// without re-issuing an `auth.refresh`. Today's
+        /// `require_authenticated` only checks variant presence, so the
+        /// field is intentionally retained but unread.
+        #[allow(dead_code)]
         assurance: IdentityAssurance,
     },
 }

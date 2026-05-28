@@ -39,7 +39,7 @@ type ParseResult<'a, T> = IResult<&'a [u8], T, Error<&'a [u8]>>;
 /// Parse linear whitespace (LWS) according to RFC 3261
 /// LWS = [*WSP CRLF] 1*WSP
 /// This function handles line folding as specified in RFC 3261 Section 7.3.1
-fn parse_lws(input: &[u8]) -> ParseResult<()> {
+fn parse_lws(input: &[u8]) -> ParseResult<'_, ()> {
     // Handle whitespace followed by optional CRLF followed by whitespace
     let (input, _) = multispace0::<&[u8], Error<&[u8]>>(input)?;
 
@@ -54,7 +54,7 @@ fn parse_lws(input: &[u8]) -> ParseResult<()> {
 
 /// Parse a token according to RFC 3261 Section 25.1
 /// token = 1*(alphanum / "-" / "." / "!" / "%" / "*" / "_" / "+" / "`" / "'" / "~" )
-fn parse_token(input: &[u8]) -> ParseResult<&[u8]> {
+fn parse_token(input: &[u8]) -> ParseResult<'_, &[u8]> {
     let (input, _) = parse_lws(input)?;
     take_while1(|c: u8| {
         c.is_ascii_alphanumeric()
@@ -67,7 +67,7 @@ fn parse_token(input: &[u8]) -> ParseResult<&[u8]> {
 
 /// Parse a quoted string according to RFC 3261 Section 25.1
 /// quoted-string = SWS DQUOTE *(qdtext / quoted-pair) DQUOTE
-fn parse_quoted_string(input: &[u8]) -> ParseResult<&[u8]> {
+fn parse_quoted_string(input: &[u8]) -> ParseResult<'_, &[u8]> {
     let (input, _) = parse_lws(input)?;
     delimited(
         char::<&[u8], Error<&[u8]>>('"'),
@@ -78,7 +78,7 @@ fn parse_quoted_string(input: &[u8]) -> ParseResult<&[u8]> {
 
 /// Parse an auth-param according to RFC 2617 Section 1.2
 /// auth-param = token "=" (token / quoted-string)
-fn parse_auth_param(input: &[u8]) -> ParseResult<AuthParam> {
+fn parse_auth_param(input: &[u8]) -> ParseResult<'_, AuthParam> {
     let (input, _) = parse_lws(input)?;
     let (input, name) = parse_token(input)?;
     let (input, _) = parse_lws(input)?;
@@ -105,7 +105,7 @@ fn parse_auth_param(input: &[u8]) -> ParseResult<AuthParam> {
 
 /// Parse a comma-separated list of auth-params according to RFC 2617
 /// auth-param *(COMMA auth-param)
-fn parse_auth_params(input: &[u8]) -> ParseResult<Vec<AuthParam>> {
+fn parse_auth_params(input: &[u8]) -> ParseResult<'_, Vec<AuthParam>> {
     let (input, first) = parse_auth_param(input)?;
     let mut params = vec![first];
     let mut current_input = input;
@@ -128,7 +128,7 @@ fn parse_auth_params(input: &[u8]) -> ParseResult<Vec<AuthParam>> {
 
 /// Parse an authentication scheme according to RFC 3261
 /// Only Digest and Basic schemes are supported according to RFC 3261
-fn parse_scheme(input: &[u8]) -> ParseResult<&[u8]> {
+fn parse_scheme(input: &[u8]) -> ParseResult<'_, &[u8]> {
     let (input, _) = parse_lws(input)?;
     let (input, scheme) = parse_token(input)?;
     let scheme_str = std::str::from_utf8(scheme).unwrap_or("");
@@ -144,7 +144,7 @@ fn parse_scheme(input: &[u8]) -> ParseResult<&[u8]> {
 /// Parse a challenge according to RFC 3261 Section 22.3
 /// challenge = ("Digest" LWS digest-cln *(COMMA digest-cln)) /
 ///             ("Basic" LWS realm) / other-challenge
-fn parse_challenge(input: &[u8]) -> ParseResult<Challenge> {
+fn parse_challenge(input: &[u8]) -> ParseResult<'_, Challenge> {
     let (input, scheme) = parse_scheme(input)?;
     let (input, _) = parse_lws(input)?;
     let (input, params) = parse_auth_params(input)?;
@@ -258,7 +258,7 @@ pub fn parse_proxy_authenticate(input: &[u8]) -> ParseResult<'_, Vec<Challenge>>
 }
 
 /// Parse a complete Proxy-Authenticate header according to RFC 3261
-pub fn proxy_authenticate_header(input: &[u8]) -> ParseResult<Vec<Challenge>> {
+pub fn proxy_authenticate_header(input: &[u8]) -> ParseResult<'_, Vec<Challenge>> {
     preceded(
         terminated(
             tag_no_case(b"Proxy-Authenticate"),

@@ -22,7 +22,6 @@ fn beta_release_docs_exist_and_archived_docs_are_out_of_active_set() {
         "SECURITY_POSTURE.md",
         "BETA_PERFORMANCE_REPORT.md",
         "RELEASE_NOTES_NEXT.md",
-        "PRODUCTION_READINESS_GAP_PLAN.md",
         "TUNING.md",
     ];
 

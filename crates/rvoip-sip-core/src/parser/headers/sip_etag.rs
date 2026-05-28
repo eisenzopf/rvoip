@@ -22,7 +22,7 @@ use nom::sequence::terminated;
 /// ```text
 /// SIP-ETag: dx200xyz
 /// ```
-pub fn parse_sip_etag(input: &[u8]) -> ParseResult<SipETag> {
+pub fn parse_sip_etag(input: &[u8]) -> ParseResult<'_, SipETag> {
     // Parse any leading whitespace
     let (input, _) = sws(input)?;
 

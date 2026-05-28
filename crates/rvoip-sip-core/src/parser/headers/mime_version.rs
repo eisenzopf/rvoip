@@ -22,7 +22,7 @@ use crate::types::version::Version as MimeVersion; // Alias to avoid confusion
 ///
 /// Note: This parser handles only the value part (1*DIGIT "." 1*DIGIT).
 /// The "MIME-Version" token and HCOLON are parsed separately.
-pub fn parse_mime_version(input: &[u8]) -> ParseResult<MimeVersion> {
+pub fn parse_mime_version(input: &[u8]) -> ParseResult<'_, MimeVersion> {
     // Wrap the parser in delimited() to handle optional whitespace
     delimited(
         space0,

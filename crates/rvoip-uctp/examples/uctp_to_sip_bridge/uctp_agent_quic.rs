@@ -12,7 +12,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use rvoip_quic::UctpQuicClient;
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads::{auth, session};

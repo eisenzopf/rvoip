@@ -4,14 +4,13 @@
 /// from both client and server transport APIs. This shows how session-core
 /// would obtain this information for SDP signaling.
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_rtp_core::api::client::config::{ClientConfig, ClientConfigBuilder};
+use rvoip_rtp_core::api::client::config::ClientConfigBuilder;
 use rvoip_rtp_core::api::client::security::ClientSecurityConfig;
 use rvoip_rtp_core::api::client::transport::{DefaultMediaTransportClient, MediaTransportClient};
 use rvoip_rtp_core::api::common::config::SecurityMode;
-use rvoip_rtp_core::api::server::config::{ServerConfig, ServerConfigBuilder};
+use rvoip_rtp_core::api::server::config::ServerConfigBuilder;
 use rvoip_rtp_core::api::server::security::ServerSecurityConfig;
 use rvoip_rtp_core::api::server::transport::{DefaultMediaTransportServer, MediaTransportServer};
 use tokio::time::timeout;

@@ -26,11 +26,11 @@ use std::collections::HashMap;
 use std::str;
 
 // Define m_type and m_subtype functions since they're not available
-fn m_type(input: &[u8]) -> ParseResult<&[u8]> {
+fn m_type(input: &[u8]) -> ParseResult<'_, &[u8]> {
     token(input)
 }
 
-fn m_subtype(input: &[u8]) -> ParseResult<&[u8]> {
+fn m_subtype(input: &[u8]) -> ParseResult<'_, &[u8]> {
     token(input)
 }
 
@@ -72,7 +72,7 @@ fn process_accept_value(t: String, s: String, params: Vec<Param>) -> AcceptValue
 
 // Parse qvalue according to RFC 3261:
 // qvalue = ( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] )
-fn qvalue(input: &[u8]) -> ParseResult<NotNan<f32>> {
+fn qvalue(input: &[u8]) -> ParseResult<'_, NotNan<f32>> {
     // Strictly enforce the ABNF format
 
     // Check for length after decimal point to ensure we don't exceed 3 digits
@@ -133,7 +133,7 @@ fn qvalue(input: &[u8]) -> ParseResult<NotNan<f32>> {
 }
 
 // accept-param = ( "q" EQUAL qvalue ) / generic-param
-fn accept_param(input: &[u8]) -> ParseResult<Param> {
+fn accept_param(input: &[u8]) -> ParseResult<'_, Param> {
     alt((
         // "q" EQUAL qvalue
         map(tuple((tag_no_case(b"q"), equal, qvalue)), |(_, _, q)| {
@@ -145,7 +145,7 @@ fn accept_param(input: &[u8]) -> ParseResult<Param> {
 }
 
 // accept-range = media-range [ accept-params ]
-fn accept_range(input: &[u8]) -> ParseResult<(String, String, Vec<Param>)> {
+fn accept_range(input: &[u8]) -> ParseResult<'_, (String, String, Vec<Param>)> {
     map(
         pair(
             media_range,                               // (type, subtype)
@@ -163,7 +163,7 @@ fn accept_range(input: &[u8]) -> ParseResult<(String, String, Vec<Param>)> {
 }
 
 // media-range = ( "*/*" / ( m-type SLASH "*" ) / ( m-type SLASH m-subtype ) )
-fn media_range(input: &[u8]) -> ParseResult<(&[u8], &[u8])> {
+fn media_range(input: &[u8]) -> ParseResult<'_, (&[u8], &[u8])> {
     alt((
         value((b"*" as &[u8], b"*" as &[u8]), tag(b"*/*")),
         pair(m_type, preceded(slash, tag(b"*"))),
@@ -173,7 +173,7 @@ fn media_range(input: &[u8]) -> ParseResult<(&[u8], &[u8])> {
 
 // Accept = "Accept" HCOLON [ accept-value *(COMMA accept-value) ]
 // Note: HCOLON handled elsewhere.
-pub fn parse_accept(input: &[u8]) -> ParseResult<AcceptHeader> {
+pub fn parse_accept(input: &[u8]) -> ParseResult<'_, AcceptHeader> {
     // Use comma_separated_list0 as the list can be empty
     map(comma_separated_list0(accept_range), |values| {
         let mut accept_values = values

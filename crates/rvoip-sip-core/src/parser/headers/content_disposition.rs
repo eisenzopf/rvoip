@@ -29,7 +29,7 @@ use crate::types::param::Param;
 
 // disp-type = "render" / "session" / "icon" / "alert" / disp-extension-token
 // disp-extension-token = token
-fn disp_type(input: &[u8]) -> ParseResult<DispositionType> {
+fn disp_type(input: &[u8]) -> ParseResult<'_, DispositionType> {
     // Handle any leading whitespace including line folding
     let (input, _) = opt(lws)(input)?;
 
@@ -60,7 +60,7 @@ fn disp_type(input: &[u8]) -> ParseResult<DispositionType> {
 }
 
 /// Parses the Content-Disposition header value.
-pub fn parse_content_disposition(input: &[u8]) -> ParseResult<(String, Vec<DispositionParam>)> {
+pub fn parse_content_disposition(input: &[u8]) -> ParseResult<'_, (String, Vec<DispositionParam>)> {
     // First check for empty input
     if input.is_empty() {
         return Err(nom::Err::Error(NomError::from_error_kind(
@@ -98,7 +98,7 @@ pub fn parse_content_disposition(input: &[u8]) -> ParseResult<(String, Vec<Dispo
 }
 
 // handling-param parser
-fn handling_param(input: &[u8]) -> ParseResult<Handling> {
+fn handling_param(input: &[u8]) -> ParseResult<'_, Handling> {
     // Handle any leading whitespace including line folding for parameter name
     let (input, _) = opt(lws)(input)?;
 
@@ -126,7 +126,7 @@ fn handling_param(input: &[u8]) -> ParseResult<Handling> {
 }
 
 // Define the disp_param parser function
-fn disp_param(input: &[u8]) -> ParseResult<DispositionParam> {
+fn disp_param(input: &[u8]) -> ParseResult<'_, DispositionParam> {
     // Handle any leading whitespace for the parameter
     let (input, _) = opt(lws)(input)?;
 

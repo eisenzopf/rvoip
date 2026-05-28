@@ -33,7 +33,7 @@ use nom::IResult;
 /// let input = b"Digest realm=\"example.com\", nonce=\"1234567890\"";
 /// let (_, challenge) = parse_www_authenticate(input).unwrap();
 /// ```
-pub fn parse_www_authenticate(input: &[u8]) -> ParseResult<Vec<Challenge>> {
+pub fn parse_www_authenticate(input: &[u8]) -> ParseResult<'_, Vec<Challenge>> {
     // Handle an empty input case
     if input.is_empty() {
         return Err(Err::Error(make_error(input, ErrorKind::TakeWhile1)));
@@ -137,7 +137,7 @@ pub fn parse_www_authenticate(input: &[u8]) -> ParseResult<Vec<Challenge>> {
 /// let input = b"WWW-Authenticate: Digest realm=\"example.com\", nonce=\"1234567890\"";
 /// let (_, challenges) = www_authenticate_header(input).unwrap();
 /// ```
-pub fn www_authenticate_header(input: &[u8]) -> ParseResult<Vec<Challenge>> {
+pub fn www_authenticate_header(input: &[u8]) -> ParseResult<'_, Vec<Challenge>> {
     preceded(
         terminated(
             tag_no_case(b"WWW-Authenticate"),

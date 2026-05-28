@@ -7,10 +7,9 @@
 
 use std::time::Duration;
 
-use base64::Engine;
 use chrono::Utc;
 use jsonwebtoken::{encode, jwk::Jwk, Algorithm, EncodingKey, Header};
-use rvoip_auth_core::dpop::{DpopError, DpopProof, DpopValidator};
+use rvoip_auth_core::dpop::{DpopError, DpopValidator};
 use rvoip_auth_core::jwk_thumbprint;
 use serde::Serialize;
 use serde_json::json;

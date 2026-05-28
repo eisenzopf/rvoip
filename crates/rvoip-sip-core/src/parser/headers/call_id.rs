@@ -20,7 +20,7 @@ use std::str; // Import the specific type
 
 // callid = word [ "@" word ]
 // Returns String representation
-pub fn callid(input: &[u8]) -> ParseResult<String> {
+pub fn callid(input: &[u8]) -> ParseResult<'_, String> {
     map_res(
         pair(word, opt(preceded(tag(b"@"), word))),
         |(word1, opt_word2)| {
@@ -36,7 +36,7 @@ pub fn callid(input: &[u8]) -> ParseResult<String> {
 }
 
 // Call-ID = ( "Call-ID" / "i" ) HCOLON callid
-pub fn parse_call_id(input: &[u8]) -> ParseResult<CallId> {
+pub fn parse_call_id(input: &[u8]) -> ParseResult<'_, CallId> {
     // Return CallId
     preceded(
         pair(alt((tag_no_case(b"Call-ID"), tag_no_case(b"i"))), hcolon),

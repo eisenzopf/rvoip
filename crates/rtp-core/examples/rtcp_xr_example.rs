@@ -3,16 +3,11 @@
 //! This example shows how to create, serialize, and parse RTCP XR
 //! packets with VoIP metrics and include them in compound RTCP packets.
 
-use bytes::{Bytes, BytesMut};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::{debug, info};
+use tracing::info;
 
 use rvoip_rtp_core::{
-    session::{RtpSession, RtpSessionConfig},
-    transport::UdpRtpTransport,
-    NtpTimestamp, RtcpCompoundPacket, RtcpExtendedReport, RtcpGoodbye, RtcpPacket,
-    RtcpReceiverReport, RtcpReportBlock, RtcpSenderReport, RtcpXrBlock, RtpSsrc, VoipMetricsBlock,
+    NtpTimestamp, RtcpCompoundPacket, RtcpExtendedReport, RtcpGoodbye, RtcpPacket, RtcpSenderReport, RtcpXrBlock, VoipMetricsBlock,
 };
 
 fn calculate_ntp_timestamp() -> NtpTimestamp {

@@ -17,7 +17,7 @@ pub fn is_token_char(c: u8) -> bool {
         || c == b'~'
 }
 
-pub fn token(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn token(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // token = 1*(alphanum / "-" / "." / "!" / "%" / "*" / "_" / "+" / "`" / "'" / "~")
     take_while1(is_token_char)(input)
 }
@@ -50,7 +50,7 @@ fn is_word_char(c: u8) -> bool {
         || c == b'='
 }
 
-pub fn word(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn word(input: &[u8]) -> ParseResult<'_, &[u8]> {
     take_while1(is_word_char)(input)
 }
 

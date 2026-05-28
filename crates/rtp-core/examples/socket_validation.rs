@@ -7,7 +7,7 @@ use rvoip_rtp_core::transport::{PlatformSocketStrategy, PlatformType, RtpSocketV
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -172,7 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rebind_data = b"Socket rebind test successful";
     socket3.send_to(rebind_data, addr2).await?;
 
-    let (len, from) = socket2.recv_from(&mut buf).await?;
+    let (len, _from) = socket2.recv_from(&mut buf).await?;
     info!("Socket 2 received {} bytes from rebinded socket", len);
 
     if &buf[..len] == rebind_data {

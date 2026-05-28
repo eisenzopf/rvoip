@@ -13,28 +13,28 @@ pub type ParseResult<'a, O> = IResult<&'a [u8], O>;
 
 // Core Rules (RFC 2234) & Basic Rules (RFC 3261) Character Sets
 
-pub fn alpha(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn alpha(input: &[u8]) -> ParseResult<'_, &[u8]> {
     take_while1(nom::character::is_alphabetic)(input)
 }
 
-pub fn digit(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn digit(input: &[u8]) -> ParseResult<'_, &[u8]> {
     take_while1(nom::character::is_digit)(input)
 }
 
-pub fn alphanum(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn alphanum(input: &[u8]) -> ParseResult<'_, &[u8]> {
     take_while1(nom::character::is_alphanumeric)(input)
 }
 
-pub fn hex_digit(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn hex_digit(input: &[u8]) -> ParseResult<'_, &[u8]> {
     hex_digit1(input)
 }
 
-pub fn lhex(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn lhex(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // LHEX = DIGIT / %x61-66 ;lowercase a-f
     take_while1(|c: u8| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))(input)
 }
 
-pub fn mark(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn mark(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // mark = "-" / "_" / "." / "!" / "~" / "*" / "'" / "(" / ")"
     recognize(alt((
         tag(b"-"),
@@ -49,12 +49,12 @@ pub fn mark(input: &[u8]) -> ParseResult<&[u8]> {
     )))(input)
 }
 
-pub fn unreserved(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn unreserved(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // unreserved = alphanum / mark
     alt((alphanum, mark))(input)
 }
 
-pub fn reserved(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn reserved(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // reserved = ";" / "/" / "?" / ":" / "@" / "&" / "=" / "+" / "$" / ","
     recognize(alt((
         tag(b";"),
@@ -74,22 +74,22 @@ fn is_hex_digit_byte(c: u8) -> bool {
     c.is_ascii_digit() || (b'A'..=b'F').contains(&c) || (b'a'..=b'f').contains(&c)
 }
 
-pub fn escaped(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn escaped(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // escaped = "%" HEXDIG HEXDIG
     recognize(tuple((tag(b"%"), take_while_m_n(2, 2, is_hex_digit_byte))))(input)
 }
 
-pub fn lalpha(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn lalpha(input: &[u8]) -> ParseResult<'_, &[u8]> {
     take_while1(|c: u8| c.is_ascii_lowercase())(input)
 }
 
-pub fn ualpha(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn ualpha(input: &[u8]) -> ParseResult<'_, &[u8]> {
     take_while1(|c: u8| c.is_ascii_uppercase())(input)
 }
 
 // Takes all bytes until a CRLF sequence (\r\n) is found
 // Useful for parsing header values that extend to the end of a line
-pub fn take_till_crlf(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn take_till_crlf(input: &[u8]) -> ParseResult<'_, &[u8]> {
     take_till(|c| c == b'\r' || c == b'\n')(input)
 }
 

@@ -10,22 +10,20 @@
 use rvoip_rtp_core::api::common::{
     advanced_security::{
         error_recovery::{
-            ErrorRecoveryManager, FailureStatistics, FailureType, FallbackConfig, RecoveryState,
-            RecoveryStrategy,
+            ErrorRecoveryManager, FailureType, FallbackConfig,
         },
         key_management::{
-            KeyManager, KeyManagerStatistics, KeyRotationPolicy, KeySyndicationConfig,
+            KeyManager, KeyRotationPolicy, KeySyndicationConfig,
             SecurityPolicy, StreamType,
         },
     },
-    config::{KeyExchangeMethod, SecurityConfig, SrtpProfile},
+    config::{KeyExchangeMethod, SecurityConfig},
     error::SecurityError,
-    unified_security::{SecurityContextFactory, SecurityState},
+    unified_security::SecurityContextFactory,
 };
 
 use std::fmt;
 use std::time::Duration;
-use tokio::time;
 use tracing::{debug, error, info, warn};
 
 // Set example timeout

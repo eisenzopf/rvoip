@@ -40,7 +40,7 @@ fn is_token_char(c: u8) -> bool {
 
 // auth-scheme = token
 // Returns the scheme as String (case-insensitive comparison happens elsewhere)
-pub fn auth_scheme(input: &[u8]) -> ParseResult<String> {
+pub fn auth_scheme(input: &[u8]) -> ParseResult<'_, String> {
     // First check if the input contains '@' which is not a valid token character
     if input.iter().any(|&c| c == b'@') {
         return Err(nom::Err::Error(NomError::new(input, ErrorKind::TakeWhile1)));
@@ -75,18 +75,18 @@ pub fn auth_scheme(input: &[u8]) -> ParseResult<String> {
 }
 
 // auth-param-name = token
-fn auth_param_name(input: &[u8]) -> ParseResult<&[u8]> {
+fn auth_param_name(input: &[u8]) -> ParseResult<'_, &[u8]> {
     token(input)
 }
 
 // auth-value = token / quoted-string
-fn auth_value(input: &[u8]) -> ParseResult<&[u8]> {
+fn auth_value(input: &[u8]) -> ParseResult<'_, &[u8]> {
     alt((token, quoted_string))(input)
 }
 
 // auth-param = auth-param-name EQUAL auth-value
 // Returns AuthParam struct { name: String, value: String }
-pub fn auth_param(input: &[u8]) -> ParseResult<AuthParam> {
+pub fn auth_param(input: &[u8]) -> ParseResult<'_, AuthParam> {
     map_res(
         separated_pair(auth_param_name, equal, auth_value),
         |(name_bytes, value_bytes)| {
@@ -115,13 +115,13 @@ fn is_quoted_string(input: &[u8]) -> bool {
 }
 
 // realm-value = quoted-string
-fn realm_value(input: &[u8]) -> ParseResult<&[u8]> {
+fn realm_value(input: &[u8]) -> ParseResult<'_, &[u8]> {
     quoted_string(input)
 }
 
 // realm = "realm" EQUAL realm-value
 // Returns String
-pub fn realm(input: &[u8]) -> ParseResult<String> {
+pub fn realm(input: &[u8]) -> ParseResult<'_, String> {
     map_res(
         preceded(bytes::tag_no_case("realm"), preceded(equal, realm_value)),
         |bytes| str::from_utf8(bytes).map(String::from), // Assuming realm_value returns content
@@ -129,13 +129,13 @@ pub fn realm(input: &[u8]) -> ParseResult<String> {
 }
 
 // nonce-value = quoted-string
-pub fn nonce_value(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn nonce_value(input: &[u8]) -> ParseResult<'_, &[u8]> {
     quoted_string(input)
 }
 
 // nonce = "nonce" EQUAL nonce-value
 // Returns String
-pub fn nonce(input: &[u8]) -> ParseResult<String> {
+pub fn nonce(input: &[u8]) -> ParseResult<'_, String> {
     map_res(
         preceded(bytes::tag_no_case("nonce"), preceded(equal, nonce_value)),
         |bytes| str::from_utf8(bytes).map(String::from),
@@ -144,7 +144,7 @@ pub fn nonce(input: &[u8]) -> ParseResult<String> {
 
 // opaque = "opaque" EQUAL quoted-string
 // Returns String
-pub fn opaque(input: &[u8]) -> ParseResult<String> {
+pub fn opaque(input: &[u8]) -> ParseResult<'_, String> {
     map_res(
         preceded(bytes::tag_no_case("opaque"), preceded(equal, quoted_string)),
         |bytes| str::from_utf8(bytes).map(String::from),
@@ -155,7 +155,7 @@ pub fn opaque(input: &[u8]) -> ParseResult<String> {
 // RFC 3261 says domain is a quoted string containing a space-separated list of URIs.
 // Let's simplify for now and parse as a single quoted string.
 // Returns String
-pub fn domain(input: &[u8]) -> ParseResult<String> {
+pub fn domain(input: &[u8]) -> ParseResult<'_, String> {
     map_res(
         preceded(bytes::tag_no_case("domain"), preceded(equal, quoted_string)),
         |bytes| str::from_utf8(bytes).map(String::from),
@@ -165,7 +165,7 @@ pub fn domain(input: &[u8]) -> ParseResult<String> {
 
 // stale = "stale" EQUAL ( "true" / "false" )
 // Returns bool
-pub fn stale(input: &[u8]) -> ParseResult<bool> {
+pub fn stale(input: &[u8]) -> ParseResult<'_, bool> {
     preceded(
         bytes::tag_no_case("stale"),
         preceded(
@@ -181,7 +181,7 @@ pub fn stale(input: &[u8]) -> ParseResult<bool> {
 // algorithm_tag = "MD5" / "MD5-sess" / token ; RFC uses just `token` but specifies known values
 // algorithm = "algorithm" EQUAL algorithm_tag
 // Returns Algorithm enum
-pub fn algorithm(input: &[u8]) -> ParseResult<Algorithm> {
+pub fn algorithm(input: &[u8]) -> ParseResult<'_, Algorithm> {
     let (input, _) = tag_no_case(b"algorithm")(input)?;
     let (input, _) = tag(b"=")(input)?;
 
@@ -226,13 +226,13 @@ pub fn algorithm(input: &[u8]) -> ParseResult<Algorithm> {
 
 // qop-value = "auth" / "auth-int" / token
 // Returns Qop enum
-fn qop_value(input: &[u8]) -> ParseResult<Qop> {
+fn qop_value(input: &[u8]) -> ParseResult<'_, Qop> {
     map_res(token, |bytes| Qop::from_str(str::from_utf8(bytes)?))(input)
 }
 
 // qop-options = "qop" EQUAL LDQUOT qop-value *("," qop-value) RDQUOT
 // Returns Vec<Qop>
-pub fn qop_options(input: &[u8]) -> ParseResult<Vec<Qop>> {
+pub fn qop_options(input: &[u8]) -> ParseResult<'_, Vec<Qop>> {
     preceded(
         pair(bytes::tag_no_case(b"qop"), equal),
         delimited(
@@ -244,13 +244,13 @@ pub fn qop_options(input: &[u8]) -> ParseResult<Vec<Qop>> {
 }
 
 // username-value = quoted-string
-fn username_value(input: &[u8]) -> ParseResult<&[u8]> {
+fn username_value(input: &[u8]) -> ParseResult<'_, &[u8]> {
     quoted_string(input)
 }
 
 // username = "username" EQUAL username-value
 // Returns String
-pub fn username(input: &[u8]) -> ParseResult<String> {
+pub fn username(input: &[u8]) -> ParseResult<'_, String> {
     map_res(
         preceded(
             bytes::tag_no_case("username"),
@@ -262,7 +262,7 @@ pub fn username(input: &[u8]) -> ParseResult<String> {
 
 // digest-uri-value = Request-URI (SIP-URI / SIPS-URI / absoluteURI)
 // Parses the content of the quoted string.
-fn digest_uri_value_content(input: &[u8]) -> ParseResult<&[u8]> {
+fn digest_uri_value_content(input: &[u8]) -> ParseResult<'_, &[u8]> {
     quoted_string(input)
 }
 
@@ -286,13 +286,13 @@ fn is_hex_digit(c: u8) -> bool {
 
 // request-digest = LDQUOT 32LHEX RDQUOT ; RFC 2617 specifies 32 hex digits
 // However, we'll allow other lengths as some implementations don't adhere strictly to 32
-fn request_digest(input: &[u8]) -> ParseResult<&[u8]> {
+fn request_digest(input: &[u8]) -> ParseResult<'_, &[u8]> {
     delimited(ldquot, take_while1(is_hex_digit), rdquot)(input)
 }
 
 // dresponse = "response" EQUAL request-digest
 // Returns String (hex digest)
-pub fn dresponse(input: &[u8]) -> ParseResult<String> {
+pub fn dresponse(input: &[u8]) -> ParseResult<'_, String> {
     map_res(
         preceded(
             bytes::tag_no_case("response"),
@@ -303,13 +303,13 @@ pub fn dresponse(input: &[u8]) -> ParseResult<String> {
 }
 
 // cnonce-value = nonce-value (quoted-string)
-fn cnonce_value(input: &[u8]) -> ParseResult<&[u8]> {
+fn cnonce_value(input: &[u8]) -> ParseResult<'_, &[u8]> {
     nonce_value(input)
 }
 
 // cnonce = "cnonce" EQUAL cnonce-value
 // Returns String
-pub fn cnonce(input: &[u8]) -> ParseResult<String> {
+pub fn cnonce(input: &[u8]) -> ParseResult<'_, String> {
     map_res(
         preceded(bytes::tag_no_case("cnonce"), preceded(equal, cnonce_value)),
         |bytes| str::from_utf8(bytes).map(String::from),
@@ -319,13 +319,13 @@ pub fn cnonce(input: &[u8]) -> ParseResult<String> {
 // message-qop = "qop" EQUAL qop-value
 // Note: This is different from qop-options in challenge, value is not quoted
 // Returns Qop enum
-pub fn message_qop(input: &[u8]) -> ParseResult<Qop> {
+pub fn message_qop(input: &[u8]) -> ParseResult<'_, Qop> {
     preceded(bytes::tag_no_case("qop"), preceded(equal, qop_value))(input)
 }
 
 // nc-value = 8LHEX
 // Returns &[u8] hex digits
-fn nc_value(input: &[u8]) -> ParseResult<&[u8]> {
+fn nc_value(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // Ensure we get exactly 8 hex digits (uppercase or lowercase)
     if input.len() < 8 {
         return Err(nom::Err::Error(NomError::new(input, ErrorKind::TakeWhile1)));
@@ -344,7 +344,7 @@ fn nc_value(input: &[u8]) -> ParseResult<&[u8]> {
 
 // nonce-count = "nc" EQUAL nc-value
 // Returns u32 (parsed hex)
-pub fn nonce_count(input: &[u8]) -> ParseResult<u32> {
+pub fn nonce_count(input: &[u8]) -> ParseResult<'_, u32> {
     let (rem, nc_bytes) = preceded(bytes::tag_no_case("nc"), preceded(equal, nc_value))(input)?;
 
     // Convert Utf8Error and ParseIntError into nom::Err::Failure
@@ -359,7 +359,7 @@ pub fn nonce_count(input: &[u8]) -> ParseResult<u32> {
 
 // nextnonce = "nextnonce" EQUAL nonce-value
 // Returns String
-pub fn nextnonce(input: &[u8]) -> ParseResult<String> {
+pub fn nextnonce(input: &[u8]) -> ParseResult<'_, String> {
     map_res(
         preceded(
             bytes::tag_no_case("nextnonce"),
@@ -370,13 +370,13 @@ pub fn nextnonce(input: &[u8]) -> ParseResult<String> {
 }
 
 // response-digest = LDQUOT *LHEX RDQUOT
-fn response_digest(input: &[u8]) -> ParseResult<&[u8]> {
+fn response_digest(input: &[u8]) -> ParseResult<'_, &[u8]> {
     delimited(ldquot, recognize(many0(lhex)), rdquot)(input)
 }
 
 // response-auth = "rspauth" EQUAL response-digest
 // Returns String (hex digest)
-pub fn response_auth(input: &[u8]) -> ParseResult<String> {
+pub fn response_auth(input: &[u8]) -> ParseResult<'_, String> {
     map_res(
         preceded(
             bytes::tag_no_case("rspauth"),
@@ -389,7 +389,7 @@ pub fn response_auth(input: &[u8]) -> ParseResult<String> {
 // ainfo = nextnonce / message-qop / response-auth / cnonce / nonce-count
 // Used by Authentication-Info parser
 // Returns AuthenticationInfoParam enum variant
-pub fn ainfo(input: &[u8]) -> ParseResult<AuthenticationInfoParam> {
+pub fn ainfo(input: &[u8]) -> ParseResult<'_, AuthenticationInfoParam> {
     alt((
         map(nextnonce, AuthenticationInfoParam::NextNonce),
         map(message_qop, AuthenticationInfoParam::Qop), // message_qop returns Qop
@@ -403,7 +403,7 @@ pub fn ainfo(input: &[u8]) -> ParseResult<AuthenticationInfoParam> {
 //              / username / digest-uri / dresponse / cnonce / message-qop / nonce-count ; Credentials params
 //              / auth-param ; Fallback for others
 // Returns DigestParam enum variant
-pub fn digest_param(input: &[u8]) -> ParseResult<DigestParam> {
+pub fn digest_param(input: &[u8]) -> ParseResult<'_, DigestParam> {
     alt((
         // Challenge & Credentials params first (most specific tags)
         map(realm, DigestParam::Realm),
@@ -428,7 +428,7 @@ pub fn digest_param(input: &[u8]) -> ParseResult<DigestParam> {
 
 // digest-credential = digest-param *(COMMA digest-param)
 // Returns a list of DigestParam enum variants
-pub fn digest_credential(input: &[u8]) -> ParseResult<Vec<DigestParam>> {
+pub fn digest_credential(input: &[u8]) -> ParseResult<'_, Vec<DigestParam>> {
     crate::parser::common::comma_separated_list1(digest_param)(input)
 }
 

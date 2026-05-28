@@ -5,7 +5,7 @@
 
 use bytes::Bytes;
 use rvoip_rtp_core::{
-    packet::rtcp::{RtcpGoodbye, RtcpPacket},
+    packet::rtcp::RtcpPacket,
     transport::RtpTransport,
     RtpEvent, RtpSession, RtpSessionConfig, RtpSessionEvent,
 };
@@ -115,17 +115,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 RtpSessionEvent::RtcpSenderReport {
                     ssrc,
-                    ntp_timestamp,
-                    rtp_timestamp,
-                    packet_count,
-                    octet_count,
-                    report_blocks,
+                    ntp_timestamp: _,
+                    rtp_timestamp: _,
+                    packet_count: _,
+                    octet_count: _,
+                    report_blocks: _,
                 } => {
                     debug!("Receiver got RTCP SR from SSRC={:08x}", ssrc);
                 }
                 RtpSessionEvent::RtcpReceiverReport {
                     ssrc,
-                    report_blocks,
+                    report_blocks: _,
                 } => {
                     debug!("Receiver got RTCP RR from SSRC={:08x}", ssrc);
                 }
@@ -181,7 +181,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Create a task to listen for events on the sender side
-    let sender_task = tokio::spawn(async move {
+    let _sender_task = tokio::spawn(async move {
         while let Ok(event) = sender_events.recv().await {
             match event {
                 RtpSessionEvent::PacketReceived(packet) => {
@@ -206,17 +206,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 RtpSessionEvent::RtcpSenderReport {
                     ssrc,
-                    ntp_timestamp,
-                    rtp_timestamp,
-                    packet_count,
-                    octet_count,
-                    report_blocks,
+                    ntp_timestamp: _,
+                    rtp_timestamp: _,
+                    packet_count: _,
+                    octet_count: _,
+                    report_blocks: _,
                 } => {
                     debug!("Sender got RTCP SR from SSRC={:08x}", ssrc);
                 }
                 RtpSessionEvent::RtcpReceiverReport {
                     ssrc,
-                    report_blocks,
+                    report_blocks: _,
                 } => {
                     debug!("Sender got RTCP RR from SSRC={:08x}", ssrc);
                 }

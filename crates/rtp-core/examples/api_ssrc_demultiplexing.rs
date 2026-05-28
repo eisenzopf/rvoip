@@ -3,22 +3,16 @@
 //! This example demonstrates using the SSRC demultiplexing API
 //! to handle multiple streams with different SSRCs.
 
-use rand::Rng;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
-use rvoip_rtp_core::api::client::config::{ClientConfig, ClientConfigBuilder};
-use rvoip_rtp_core::api::client::security::ClientSecurityConfig;
-use rvoip_rtp_core::api::client::transport::DefaultMediaTransportClient;
+use rvoip_rtp_core::api::client::config::ClientConfigBuilder;
 use rvoip_rtp_core::api::client::transport::MediaTransportClient;
-use rvoip_rtp_core::api::common::config::SecurityMode;
 use rvoip_rtp_core::api::common::frame::{MediaFrame, MediaFrameType};
-use rvoip_rtp_core::api::server::config::{ServerConfig, ServerConfigBuilder};
-use rvoip_rtp_core::api::server::security::ServerSecurityConfig;
-use rvoip_rtp_core::api::server::transport::DefaultMediaTransportServer;
+use rvoip_rtp_core::api::server::config::ServerConfigBuilder;
 use rvoip_rtp_core::api::server::transport::MediaTransportServer;
 
 // Constants for our streams

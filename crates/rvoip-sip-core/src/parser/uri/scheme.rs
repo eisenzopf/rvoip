@@ -26,7 +26,7 @@ fn is_scheme_char(c: u8) -> bool {
 
 // scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
 // Return the raw bytes of the scheme
-pub fn scheme_raw(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn scheme_raw(input: &[u8]) -> ParseResult<'_, &[u8]> {
     let (rem, scheme) = recognize(pair(alpha1, take_while(is_scheme_char)))(input)?;
 
     // Explicit check for invalid characters
@@ -48,7 +48,7 @@ pub fn scheme_raw(input: &[u8]) -> ParseResult<&[u8]> {
 }
 
 // Parse a scheme and convert it into a Scheme enum
-pub fn parse_scheme(input: &[u8]) -> ParseResult<Scheme> {
+pub fn parse_scheme(input: &[u8]) -> ParseResult<'_, Scheme> {
     let (rem, scheme_bytes) = scheme_raw(input)?;
 
     // Convert to lowercase string for case-insensitive matching
@@ -73,7 +73,7 @@ pub fn parse_scheme(input: &[u8]) -> ParseResult<Scheme> {
 
 // Parse a scheme string followed by a colon
 // Returns the raw bytes of the scheme without the colon
-pub fn parse_scheme_raw(input: &[u8]) -> ParseResult<&[u8]> {
+pub fn parse_scheme_raw(input: &[u8]) -> ParseResult<'_, &[u8]> {
     scheme_raw(input)
 }
 

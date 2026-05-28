@@ -1,21 +1,16 @@
 // Modern parser tests for SIP headers
 // This file tests the current implementation of the SIP header parsers
 
-use std::collections::HashMap;
 use std::str::FromStr;
 
 // Import common test utilities
-use crate::common::*;
 
 // Import SIP Core types with specific imports instead of wildcards
-use rvoip_sip_core::{
-    error::Error,
-    types::{
+use rvoip_sip_core::types::{
         address::Address, allow::Allow, call_id::CallId, content_length::ContentLength,
         content_type::ContentType, cseq::CSeq, from::From, method::Method, param::Param,
         retry_after::RetryAfter, to::To, uri::Uri, via::Via,
-    },
-};
+    };
 
 #[test]
 fn test_parse_content_type() {
@@ -69,7 +64,7 @@ fn test_parse_cseq() {
 #[test]
 fn test_parse_via() {
     // Parse a simple Via header
-    let via_str = "SIP/2.0/UDP server.example.com:5060;branch=z9hG4bKkjshdyff";
+    let _via_str = "SIP/2.0/UDP server.example.com:5060;branch=z9hG4bKkjshdyff";
 
     // Use Via::new instead of from_str
     let via = Via::new(

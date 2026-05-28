@@ -45,7 +45,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     info!("Creating transport manager on 0.0.0.0:5060");
-    let (transport, transport_rx) = TransportManager::new(transport_config).await?;
+    let (mut transport, transport_rx) = TransportManager::new(transport_config).await?;
+    // TransportManager::new only allocates state; sockets are not bound
+    // and the default transport is not selected until initialize() runs.
+    // Without this, downstream code (e.g. build_multiplexed_transport)
+    // fails with "TransportManager has no default transport".
+    transport.initialize().await?;
 
     info!("Creating transaction manager");
     let (transaction_manager, global_rx) =
