@@ -52,8 +52,10 @@ rvoip-webrtc = { path = "../rvoip-webrtc" }
 rvoip-quic = { path = "../rvoip-quic" }
 rvoip-uctp = { path = "../rvoip-uctp" }
 rvoip-auth-core = { path = "../auth-core" }
+rvoip-media-core = { path = "../media-core", features = ["opus"] }
 quinn = { workspace = true }
 rustls = { workspace = true }
+parking_lot = { workspace = true }
 # P5 tests use no-op providers + VecRecordingSink from rvoip-harness to
 # exercise the AI / recording dispatch.
 rvoip-harness = { path = "../rvoip-harness" }

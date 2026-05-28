@@ -66,31 +66,40 @@ impl Resampler {
         })
     }
 
-    /// Resample audio samples
+    /// Resample audio samples.
+    ///
+    /// The deterministic output count is `round(input_len * ratio)`. Using
+    /// `floor((i+1) * input_len / output_len)` for the integer step avoids
+    /// floating-point drift that previously caused off-by-one output sizes
+    /// for integer-ratio cases (e.g. 8 kHz → 48 kHz: 160 in → 960 out, not
+    /// 961). The fixed count is what downstream codecs (Opus 20 ms = 960
+    /// samples @ 48 kHz) require to avoid `InvalidFrameSize` errors.
     pub fn resample(&mut self, input_samples: &[i16]) -> Result<Vec<i16>> {
         if input_samples.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Calculate expected output length
-        let expected_output_len = ((input_samples.len() as f64) * self.ratio).ceil() as usize;
-        let mut output_samples = Vec::with_capacity(expected_output_len);
+        // Deterministic output length. Use round() not ceil() so that
+        // exact integer ratios (6.0×) don't pick up a phantom extra
+        // sample from floating-point representation drift.
+        let output_len =
+            ((input_samples.len() as f64) * self.ratio).round() as usize;
+        let mut output_samples = Vec::with_capacity(output_len);
 
-        // Reset position for each new frame (simple approach)
-        self.position = 0.0;
-
-        // Generate output samples
-        while self.position < input_samples.len() as f64 {
+        // Generate exactly `output_len` samples. Index the input by a
+        // ratio-derived float position; the loop bound (an integer)
+        // never drifts.
+        let input_len = input_samples.len();
+        for i in 0..output_len {
+            // Position in source frame for output sample `i`.
+            self.position = (i as f64) / self.ratio;
             let sample = self.interpolate_sample(input_samples)?;
             output_samples.push(sample);
-
-            // Advance position
-            self.position += 1.0 / self.ratio;
         }
 
         // Update state for next frame
         if !input_samples.is_empty() {
-            self.prev_sample = input_samples[input_samples.len() - 1];
+            self.prev_sample = input_samples[input_len - 1];
             self.first_sample = false;
         }
 
