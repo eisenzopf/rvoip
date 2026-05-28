@@ -1,4 +1,5 @@
 use crate::state_table::{CallId, DialogId, MediaSessionId, SessionId};
+use rvoip_sip_dialog::transaction::TransactionKey;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -78,6 +79,11 @@ pub struct SessionState {
     pub dialog_id: Option<DialogId>,
     pub media_session_id: Option<MediaSessionId>,
     pub call_id: Option<CallId>,
+    /// Inbound INVITE server transaction captured during UAS setup so the
+    /// final 200 OK can avoid rediscovering the pending transaction.
+    pub pending_inbound_invite_transaction_id: Option<TransactionKey>,
+    /// Session-layer receive timestamp for Config-owned first-response timing.
+    pub incoming_invite_received_at: Option<Instant>,
 
     // SIP URIs
     pub local_uri: Option<String>,  // From URI for UAC, To URI for UAS
@@ -302,6 +308,8 @@ impl SessionState {
             dialog_id: None,
             media_session_id: None,
             call_id: None,
+            pending_inbound_invite_transaction_id: None,
+            incoming_invite_received_at: None,
             local_uri: None,
             remote_uri: None,
             last_200_ok: None,

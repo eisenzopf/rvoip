@@ -1114,6 +1114,60 @@ impl UnifiedDialogApi {
             .await
     }
 
+    /// Send a response for a session using a known server transaction.
+    ///
+    /// This is the hot-path variant used when session-core already captured the
+    /// inbound INVITE transaction while constructing the UAS session. It avoids
+    /// scanning dialog-core's transaction indexes before sending the response.
+    pub async fn send_response_for_session_transaction(
+        &self,
+        session_id: &str,
+        transaction_id: &TransactionKey,
+        status_code: u16,
+        body: Option<String>,
+    ) -> ApiResult<()> {
+        self.send_response_with_extras_for_session_transaction(
+            session_id,
+            transaction_id,
+            status_code,
+            body,
+            Vec::new(),
+        )
+        .await
+    }
+
+    pub async fn send_response_with_extras_for_session_transaction(
+        &self,
+        session_id: &str,
+        transaction_id: &TransactionKey,
+        status_code: u16,
+        body: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> ApiResult<()> {
+        let dialog_id = self
+            .manager
+            .core()
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| {
+                error!("No dialog found for session {}", session_id);
+                ApiError::Dialog {
+                    message: format!("No dialog found for session {}", session_id),
+                }
+            })?
+            .clone();
+
+        self.send_response_for_known_transaction(
+            session_id,
+            &dialog_id,
+            transaction_id,
+            status_code,
+            body,
+            extra_headers,
+        )
+        .await
+    }
+
     /// Internal implementation backing both the legacy
     /// `send_response_for_session` and the new
     /// `send_response_with_extras_for_session`.
@@ -1217,30 +1271,52 @@ impl UnifiedDialogApi {
                     message: format!("No transaction found for dialog {}", dialog_id),
                 }
             })?;
+        self.send_response_for_known_transaction(
+            session_id,
+            &dialog_id,
+            &transaction_id,
+            status_code,
+            body,
+            extra_headers,
+        )
+        .await
+    }
+
+    async fn send_response_for_known_transaction(
+        &self,
+        session_id: &str,
+        dialog_id: &DialogId,
+        transaction_id: &TransactionKey,
+        status_code: u16,
+        body: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> ApiResult<()> {
         self.manager
             .core()
-            .clear_pending_response_transaction(&dialog_id, &transaction_id);
+            .clear_pending_response_transaction(dialog_id, transaction_id);
 
         debug!(
-            "Found transaction {} for dialog {}",
-            transaction_id, dialog_id
+            "Sending response for dialog {} using transaction {}",
+            dialog_id, transaction_id
         );
+
+        let original_request = self
+            .manager
+            .core()
+            .transaction_manager()
+            .original_request(transaction_id)
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("Failed to get original request: {}", e),
+            })?;
 
         // Build the response. Only dialog-creating INVITEs need a freshly
         // generated To tag. In-dialog re-INVITEs already carry the dialog's To
         // tag; regenerating it forks the dialog identity and breaks the next
         // mid-call request.
         let mut response = if status_code == 200 {
-            // Get original request to check if it's an INVITE
-            let original_request = self
-                .manager
-                .core()
-                .transaction_manager()
-                .original_request(&transaction_id)
-                .await
-                .map_err(|e| ApiError::Internal {
-                    message: format!("Failed to get original request: {}", e),
-                })?
+            let original_request = original_request
+                .as_ref()
                 .ok_or_else(|| ApiError::Internal {
                     message: "No original request found for transaction".to_string(),
                 })?;
@@ -1251,7 +1327,7 @@ impl UnifiedDialogApi {
 
             if is_dialog_creating_invite {
                 let mut response = self
-                    .build_response(&transaction_id, StatusCode::Ok, body)
+                    .build_response(transaction_id, StatusCode::Ok, body)
                     .await?;
                 let local_addr = self
                     .manager
@@ -1269,7 +1345,7 @@ impl UnifiedDialogApi {
                 // Not a dialog-creating INVITE; preserve existing request
                 // headers, including the To tag on re-INVITEs.
                 self.build_response(
-                    &transaction_id,
+                    transaction_id,
                     StatusCode::from_u16(status_code).unwrap_or(StatusCode::Ok),
                     body,
                 )
@@ -1278,7 +1354,7 @@ impl UnifiedDialogApi {
         } else {
             // Not a 200 OK, use regular response building
             self.build_response(
-                &transaction_id,
+                transaction_id,
                 StatusCode::from_u16(status_code).unwrap_or(StatusCode::Ok),
                 body,
             )
@@ -1314,20 +1390,14 @@ impl UnifiedDialogApi {
             extra_headers.len()
         );
 
-        // Call pre-send lifecycle hook for dialog state management
-        // This handles UAS dialog confirmation when sending 200 OK to INVITE
-        if let Ok(Some(original_request)) = self
-            .manager
-            .core()
-            .transaction_manager()
-            .original_request(&transaction_id)
-            .await
-        {
+        // Call pre-send lifecycle hook for dialog state management.
+        // This handles UAS dialog confirmation when sending 200 OK to INVITE.
+        if let Some(original_request) = original_request.as_ref() {
             use crate::manager::ResponseLifecycle;
             if let Err(e) = self
                 .manager
                 .core()
-                .pre_send_response(&dialog_id, &response, &transaction_id, &original_request)
+                .pre_send_response(dialog_id, &response, transaction_id, original_request)
                 .await
             {
                 error!(
@@ -1338,7 +1408,7 @@ impl UnifiedDialogApi {
             }
         }
 
-        self.send_response(&transaction_id, response).await
+        self.send_response(transaction_id, response).await
     }
 
     // ========================================

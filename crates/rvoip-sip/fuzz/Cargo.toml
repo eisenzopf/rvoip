@@ -1,0 +1,43 @@
+[package]
+name = "rvoip-sip-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+bytes = "1"
+libfuzzer-sys = "0.4"
+rvoip-sip-core = { path = "../../rvoip-sip-core" }
+
+[[bin]]
+name = "sip_message"
+path = "fuzz_targets/sip_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "uri"
+path = "fuzz_targets/uri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "header"
+path = "fuzz_targets/header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sdp"
+path = "fuzz_targets/sdp.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

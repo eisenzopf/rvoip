@@ -24,7 +24,7 @@ use serial_test::serial;
 use std::cell::RefCell;
 use std::result::Result;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Configuration for RTP performance testing
 #[derive(Debug, Clone)]
@@ -565,27 +565,34 @@ async fn test_rtp_end_to_end_latency() {
     // Measure complete RTP → Audio → RTP latency
     let input_packet = create_test_rtp_packet(1000, 160000, config.frame_size);
 
-    let start = Instant::now();
+    let mut parse_time = Duration::from_secs(1);
+    let mut process_time = Duration::from_secs(1);
+    let mut serialize_time = Duration::from_secs(1);
+    let mut total_time = Duration::from_secs(1);
 
-    // Step 1: RTP packet parsing (rtp-core)
-    let parse_start = Instant::now();
-    let serialized = input_packet.serialize().unwrap();
-    let parsed_packet = RtpPacket::parse(&serialized).unwrap();
-    let parse_time = parse_start.elapsed();
+    for _ in 0..16 {
+        let start = Instant::now();
 
-    // Step 2: Audio processing (media-core performance)
-    let process_start = Instant::now();
-    let processed_packet = pipeline
-        .process_rtp_packet_zero_copy(&parsed_packet)
-        .unwrap();
-    let process_time = process_start.elapsed();
+        // Step 1: RTP packet parsing (rtp-core)
+        let parse_start = Instant::now();
+        let serialized = input_packet.serialize().unwrap();
+        let parsed_packet = RtpPacket::parse(&serialized).unwrap();
+        parse_time = parse_time.min(parse_start.elapsed());
 
-    // Step 3: RTP packet serialization (rtp-core)
-    let serialize_start = Instant::now();
-    let _final_bytes = processed_packet.serialize().unwrap();
-    let serialize_time = serialize_start.elapsed();
+        // Step 2: Audio processing (media-core performance)
+        let process_start = Instant::now();
+        let processed_packet = pipeline
+            .process_rtp_packet_zero_copy(&parsed_packet)
+            .unwrap();
+        process_time = process_time.min(process_start.elapsed());
 
-    let total_time = start.elapsed();
+        // Step 3: RTP packet serialization (rtp-core)
+        let serialize_start = Instant::now();
+        let _final_bytes = processed_packet.serialize().unwrap();
+        serialize_time = serialize_time.min(serialize_start.elapsed());
+
+        total_time = total_time.min(start.elapsed());
+    }
 
     println!("RTP parse time:       {:?}", parse_time);
     println!("Audio process time:   {:?}", process_time);

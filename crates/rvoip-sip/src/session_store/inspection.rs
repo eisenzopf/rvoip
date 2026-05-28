@@ -403,6 +403,7 @@ impl SessionStore {
         vec![
             EventType::MakeCall { target: String::new() },
             EventType::IncomingCall { from: String::new(), sdp: None },
+            EventType::IncomingCallAutoAccept { from: String::new(), sdp: None },
             EventType::AcceptCall,
             EventType::RejectCall { status: 0, reason: String::new() },
             EventType::HangupCall,
@@ -472,6 +473,7 @@ impl SessionStore {
         match event {
             EventType::MakeCall { .. } => "MakeCall".to_string(),
             EventType::IncomingCall { .. } => "IncomingCall".to_string(),
+            EventType::IncomingCallAutoAccept { .. } => "IncomingCallAutoAccept".to_string(),
             EventType::AcceptCall => "Accept".to_string(),
             EventType::RejectCall { .. } => "Reject".to_string(),
             EventType::HangupCall => "Hangup".to_string(),

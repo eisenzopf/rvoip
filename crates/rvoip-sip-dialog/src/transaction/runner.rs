@@ -38,6 +38,7 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, trace, warn};
 
+use crate::diagnostics;
 use crate::transaction::error::{Error, Result};
 use crate::transaction::logic::TransactionLogic;
 use crate::transaction::state::TransactionLifecycle;
@@ -109,6 +110,7 @@ pub async fn run_transaction_loop<D, TH, L>(
 
     let mut timer_handles = TH::default();
     let tx_id = data.as_ref_key().clone();
+    diagnostics::record_transaction_runner_started();
 
     tracing::trace!("Transaction loop starting for {}", tx_id);
     tracing::trace!("Initial state: {:?}", data.as_ref_state().get());
@@ -232,6 +234,7 @@ pub async fn run_transaction_loop<D, TH, L>(
                     debug!(id=%tx_id_clone, "Starting grace period for terminated transaction");
                     let data_clone = data.clone();
                     let tx_id_for_timer = tx_id_clone.clone();
+                    let destroy_wake_tx = data.get_self_command_sender();
 
                     tokio::spawn(async move {
                         // Wait for grace period
@@ -243,6 +246,19 @@ pub async fn run_transaction_loop<D, TH, L>(
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         debug!(id=%tx_id_for_timer, "Draining period complete, ready for cleanup");
                         data_clone.set_lifecycle(TransactionLifecycle::Destroyed);
+
+                        match destroy_wake_tx.try_send(InternalTransactionCommand::Terminate) {
+                            Ok(()) => {
+                                diagnostics::record_transaction_runner_destroy_wake_sent();
+                            }
+                            Err(TrySendError::Full(_)) => {
+                                debug!(id=%tx_id_for_timer, "Transaction command channel full after Destroyed lifecycle; existing queued command will wake runner");
+                            }
+                            Err(TrySendError::Closed(_)) => {
+                                diagnostics::record_transaction_runner_destroy_wake_failed();
+                                debug!(id=%tx_id_for_timer, "Transaction command channel already closed after Destroyed lifecycle");
+                            }
+                        }
                     });
                 }
 
@@ -408,6 +424,7 @@ pub async fn run_transaction_loop<D, TH, L>(
                 debug!(id=%tx_id_clone, "Received Terminate command, shutting down transaction");
                 logic.cancel_all_specific_timers(&mut timer_handles);
                 data.as_ref_state().set(TransactionState::Terminated);
+                data.set_lifecycle(TransactionLifecycle::Destroyed);
                 break;
             }
 
@@ -444,13 +461,17 @@ pub async fn run_transaction_loop<D, TH, L>(
     debug!(id = %data.as_ref_key().branch, final_state=?final_state, "Generic transaction loop ended.");
 
     if final_state == TransactionState::Terminated {
-        // Best effort only: teardown bookkeeping must not block transaction
-        // runner shutdown when the shared TU event queue is congested.
+        // TransactionTerminated drives manager cleanup. Unlike diagnostic
+        // StateChanged events, this must be delivered when the manager is still
+        // alive; otherwise active transaction maps can retain completed calls.
         let sender = data.get_tu_event_sender();
-        let _ = sender.try_send(TransactionEvent::TransactionTerminated {
-            transaction_id: data.as_ref_key().clone(),
-        });
+        let _ = sender
+            .send(TransactionEvent::TransactionTerminated {
+                transaction_id: data.as_ref_key().clone(),
+            })
+            .await;
     }
+    diagnostics::record_transaction_runner_exited();
 }
 
 /// Trait for accessing a transaction's state.

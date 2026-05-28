@@ -34,8 +34,21 @@ Options:
 - `--api endpoint|stream_peer|callback|all`
 - `--scenario registration|basic_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all`
 
-The runner builds the PBX Cargo examples and stores logs/WAV evidence
-under `examples/pbx/output/<provider>/<api>/<scenario>/<transport>/`.
+The runner builds the PBX Cargo examples and stores logs/WAV evidence under
+`examples/pbx/output/<provider>/<api>/<scenario>/<transport>/` by default. Set
+`PBX_OUT_ROOT=/path/to/artifacts` to write the same evidence tree somewhere
+else, which is what the beta gate does.
+
+Each run also writes release-audit artifacts at the output root:
+
+- `environment-*.md`: host, toolchain, git revision, SIPp/tshark availability,
+  selected runner arguments, and redacted runtime environment.
+- `matrix.tsv`: one row per provider/API/scenario/transport/role command with
+  pass/fail status, duration, exit code, log path, and output directory.
+- `summary.md`: markdown summary of the matrix suitable for attaching to beta
+  release evidence.
+- `<provider>/<api>/<scenario>/<transport>/*_metadata.md`: per-cell command and
+  redacted environment details next to the raw logs and media artifacts.
 
 ## Cargo Examples
 
@@ -82,7 +95,9 @@ flags, not duplicated scenario code:
 
 - Asterisk defaults to `SIP_PORT=5060`, `SIP_TLS_PORT=5061`,
   `SIP_PASSWORD=password123`, longer registration settle/retry windows, and
-  optional registered-flow operation.
+  optional registered-flow operation. Asterisk TLS blind-transfer tests use a
+  longer default REFER settle window; override with
+  `ASTERISK_TLS_TRANSFER_SETTLE_SECS` when needed.
 - FreeSWITCH defaults to `FREESWITCH_UDP_ADDR=127.0.0.1:5062`,
   `FREESWITCH_TLS_ADDR=127.0.0.1:5063`, `FREESWITCH_PASSWORD=1234`,
   `15070/15080` local SIP ports, and `SrtpSuitePolicy::FreeSwitchCompatible`.

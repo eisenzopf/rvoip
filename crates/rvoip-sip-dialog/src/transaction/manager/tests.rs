@@ -1,6 +1,12 @@
 #[cfg(test)]
 mod tests {
     use super::super::RFC3261_BRANCH_MAGIC_COOKIE;
+    use super::super::{
+        recv_transaction_dispatch_event, transaction_dispatch_lane,
+        transaction_dispatch_worker_index, transaction_ingress_kind, Invite2xxDueEntry,
+        Invite2xxResponseCacheEntry, QueuedTransactionDispatch, TransactionDispatchLane,
+        TransactionIngressKind, TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
+    };
     use crate::transaction::client::builders::{ByeBuilder, InviteBuilder, RegisterBuilder};
     use crate::transaction::client::{ClientInviteTransaction, ClientNonInviteTransaction};
     use crate::transaction::error::{Error, Result};
@@ -16,14 +22,16 @@ mod tests {
     use rvoip_sip_core::types::Address;
     use rvoip_sip_core::types::Contact;
     use rvoip_sip_core::types::ContactParamInfo;
-    use rvoip_sip_transport::Transport;
+    use rvoip_sip_transport::transport::TransportType;
+    use rvoip_sip_transport::{Transport, TransportEvent};
     use std::collections::HashMap;
     use std::fs::File;
     use std::io::Write;
     use std::net::SocketAddr;
     use std::str::FromStr;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
     use tokio::sync::mpsc;
     use tokio::sync::Mutex;
     use tracing::{debug, info};
@@ -34,6 +42,7 @@ mod tests {
         local_addr: SocketAddr,
         sent_messages: Arc<Mutex<Vec<(Message, SocketAddr)>>>,
         should_fail_send: Arc<AtomicBool>,
+        raw_send_count: Arc<AtomicUsize>,
     }
 
     impl MockTransport {
@@ -42,6 +51,7 @@ mod tests {
                 local_addr: SocketAddr::from_str(addr).unwrap(),
                 sent_messages: Arc::new(Mutex::new(Vec::new())),
                 should_fail_send: Arc::new(AtomicBool::new(false)),
+                raw_send_count: Arc::new(AtomicUsize::new(0)),
             }
         }
 
@@ -50,6 +60,7 @@ mod tests {
                 local_addr: SocketAddr::from_str(addr).unwrap(),
                 sent_messages: Arc::new(Mutex::new(Vec::new())),
                 should_fail_send: Arc::new(AtomicBool::new(should_fail)),
+                raw_send_count: Arc::new(AtomicUsize::new(0)),
             }
         }
 
@@ -59,6 +70,10 @@ mod tests {
 
         async fn get_sent_messages(&self) -> Vec<(Message, SocketAddr)> {
             self.sent_messages.lock().await.clone()
+        }
+
+        fn raw_send_count(&self) -> usize {
+            self.raw_send_count.load(Ordering::SeqCst)
         }
     }
 
@@ -89,6 +104,28 @@ mod tests {
                 destination
             );
             messages.push((message, destination));
+            Ok(())
+        }
+
+        async fn send_message_raw(
+            &self,
+            bytes: bytes::Bytes,
+            destination: SocketAddr,
+        ) -> std::result::Result<(), rvoip_sip_transport::Error> {
+            if self.should_fail_send.load(Ordering::SeqCst) {
+                println!("MockTransport::send_message_raw - Simulating failure");
+                return Err(rvoip_sip_transport::error::Error::ProtocolError(
+                    "Simulated network failure for testing".into(),
+                ));
+            }
+
+            let message = rvoip_sip_core::parse_message(&bytes).map_err(|e| {
+                rvoip_sip_transport::error::Error::ProtocolError(format!(
+                    "Failed to parse raw SIP message in mock transport: {e}"
+                ))
+            })?;
+            self.raw_send_count.fetch_add(1, Ordering::SeqCst);
+            self.sent_messages.lock().await.push((message, destination));
             Ok(())
         }
 
@@ -134,6 +171,376 @@ mod tests {
             .build())
     }
 
+    fn create_dispatch_request(
+        method: Method,
+        branch: &str,
+        cseq: u32,
+    ) -> std::result::Result<Request, Box<dyn std::error::Error>> {
+        Ok(
+            SimpleRequestBuilder::new(method.clone(), "sip:bob@example.com")?
+                .from("Alice", "sip:alice@example.com", Some("alice-dispatch-tag"))
+                .to("Bob", "sip:bob@example.com", Some("bob-dispatch-tag"))
+                .contact("sip:alice@127.0.0.1:5060", None)
+                .call_id("dispatch-call-id-1234")
+                .cseq(cseq)
+                .via("127.0.0.1:5060", "UDP", Some(branch))
+                .max_forwards(70)
+                .build(),
+        )
+    }
+
+    fn dispatch_event(message: Message) -> TransportEvent {
+        TransportEvent::MessageReceived {
+            message,
+            source: "127.0.0.1:5060".parse().unwrap(),
+            destination: "127.0.0.1:5061".parse().unwrap(),
+            transport_type: TransportType::Udp,
+            raw_bytes: None,
+            timing: None,
+        }
+    }
+
+    fn queued_dispatch_request(
+        method: Method,
+        branch: &str,
+        cseq: u32,
+    ) -> std::result::Result<QueuedTransactionDispatch, Box<dyn std::error::Error>> {
+        let event = dispatch_event(Message::Request(create_dispatch_request(
+            method, branch, cseq,
+        )?));
+        Ok(QueuedTransactionDispatch {
+            kind: transaction_ingress_kind(&event),
+            event,
+            queued_at: None,
+            worker_id: 0,
+        })
+    }
+
+    #[test]
+    fn transaction_dispatch_routes_dialog_requests_to_same_worker(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let fallback_worker = AtomicUsize::new(0);
+        let worker_count = 4;
+
+        let invite = dispatch_event(Message::Request(create_dispatch_request(
+            Method::Invite,
+            "z9hG4bK.dispatch-invite",
+            101,
+        )?));
+        let ack = dispatch_event(Message::Request(create_dispatch_request(
+            Method::Ack,
+            "z9hG4bK.dispatch-ack",
+            101,
+        )?));
+        let bye = dispatch_event(Message::Request(create_dispatch_request(
+            Method::Bye,
+            "z9hG4bK.dispatch-bye",
+            102,
+        )?));
+        let cancel = dispatch_event(Message::Request(create_dispatch_request(
+            Method::Cancel,
+            "z9hG4bK.dispatch-cancel",
+            101,
+        )?));
+
+        let expected = transaction_dispatch_worker_index(&invite, worker_count, &fallback_worker);
+        assert_eq!(
+            transaction_dispatch_worker_index(&ack, worker_count, &fallback_worker),
+            expected
+        );
+        assert_eq!(
+            transaction_dispatch_worker_index(&bye, worker_count, &fallback_worker),
+            expected
+        );
+        assert_eq!(
+            transaction_dispatch_worker_index(&cancel, worker_count, &fallback_worker),
+            expected
+        );
+        assert_eq!(fallback_worker.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            transaction_ingress_kind(&invite),
+            TransactionIngressKind::Invite
+        );
+        assert_eq!(transaction_ingress_kind(&ack), TransactionIngressKind::Ack);
+        assert_eq!(transaction_ingress_kind(&bye), TransactionIngressKind::Bye);
+        assert_eq!(
+            transaction_ingress_kind(&cancel),
+            TransactionIngressKind::Cancel
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_dispatch_routes_responses_by_transaction_key(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let fallback_worker = AtomicUsize::new(0);
+        let worker_count = 4;
+        let invite_request =
+            create_dispatch_request(Method::Invite, "z9hG4bK.dispatch-response", 101)?;
+        let response = create_test_response(&invite_request, StatusCode::Ok, None);
+        let response_event = dispatch_event(Message::Response(response));
+
+        let first =
+            transaction_dispatch_worker_index(&response_event, worker_count, &fallback_worker);
+        let second =
+            transaction_dispatch_worker_index(&response_event, worker_count, &fallback_worker);
+
+        assert_eq!(first, second);
+        assert_eq!(fallback_worker.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            transaction_ingress_kind(&response_event),
+            TransactionIngressKind::Other
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_dispatch_routes_ack_and_bye_to_high_priority_lane(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let invite = dispatch_event(Message::Request(create_dispatch_request(
+            Method::Invite,
+            "z9hG4bK.priority-invite",
+            101,
+        )?));
+        let ack = dispatch_event(Message::Request(create_dispatch_request(
+            Method::Ack,
+            "z9hG4bK.priority-ack",
+            101,
+        )?));
+        let bye = dispatch_event(Message::Request(create_dispatch_request(
+            Method::Bye,
+            "z9hG4bK.priority-bye",
+            102,
+        )?));
+        let cancel = dispatch_event(Message::Request(create_dispatch_request(
+            Method::Cancel,
+            "z9hG4bK.priority-cancel",
+            101,
+        )?));
+        let response = dispatch_event(Message::Response(create_test_response(
+            &create_dispatch_request(Method::Invite, "z9hG4bK.priority-response", 101)?,
+            StatusCode::Ok,
+            None,
+        )));
+
+        assert_eq!(
+            transaction_dispatch_lane(transaction_ingress_kind(&bye)),
+            TransactionDispatchLane::High
+        );
+        assert_eq!(
+            transaction_dispatch_lane(transaction_ingress_kind(&invite)),
+            TransactionDispatchLane::Normal
+        );
+        assert_eq!(
+            transaction_dispatch_lane(transaction_ingress_kind(&ack)),
+            TransactionDispatchLane::High
+        );
+        assert_eq!(
+            transaction_dispatch_lane(transaction_ingress_kind(&cancel)),
+            TransactionDispatchLane::Normal
+        );
+        assert_eq!(
+            transaction_dispatch_lane(transaction_ingress_kind(&response)),
+            TransactionDispatchLane::Normal
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transaction_dispatch_preserves_ack_before_bye_in_high_priority_lane(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (high_tx, mut high_rx) = mpsc::channel(4);
+        let (_normal_tx, mut normal_rx) = mpsc::channel(4);
+        high_tx
+            .send(queued_dispatch_request(
+                Method::Ack,
+                "z9hG4bK.priority-high-ack",
+                101,
+            )?)
+            .await
+            .unwrap();
+        high_tx
+            .send(queued_dispatch_request(
+                Method::Bye,
+                "z9hG4bK.priority-high-bye",
+                102,
+            )?)
+            .await
+            .unwrap();
+
+        let mut high_burst_count = 0;
+        let first = recv_transaction_dispatch_event(
+            &mut high_rx,
+            &mut normal_rx,
+            &mut high_burst_count,
+            TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
+        )
+        .await
+        .unwrap();
+        let second = recv_transaction_dispatch_event(
+            &mut high_rx,
+            &mut normal_rx,
+            &mut high_burst_count,
+            TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(first.kind, TransactionIngressKind::Ack);
+        assert_eq!(second.kind, TransactionIngressKind::Bye);
+        assert_eq!(high_burst_count, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transaction_dispatch_processes_bye_before_older_normal_event(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (high_tx, mut high_rx) = mpsc::channel(4);
+        let (normal_tx, mut normal_rx) = mpsc::channel(4);
+        normal_tx
+            .send(queued_dispatch_request(
+                Method::Invite,
+                "z9hG4bK.priority-order-invite",
+                101,
+            )?)
+            .await
+            .unwrap();
+        high_tx
+            .send(queued_dispatch_request(
+                Method::Bye,
+                "z9hG4bK.priority-order-bye",
+                102,
+            )?)
+            .await
+            .unwrap();
+
+        let mut high_burst_count = 0;
+        let first = recv_transaction_dispatch_event(
+            &mut high_rx,
+            &mut normal_rx,
+            &mut high_burst_count,
+            TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
+        )
+        .await
+        .unwrap();
+        let second = recv_transaction_dispatch_event(
+            &mut high_rx,
+            &mut normal_rx,
+            &mut high_burst_count,
+            TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(first.kind, TransactionIngressKind::Bye);
+        assert_eq!(second.kind, TransactionIngressKind::Invite);
+        assert_eq!(high_burst_count, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transaction_dispatch_starvation_guard_processes_normal_after_bye_burst(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let burst_max = 2;
+        let (high_tx, mut high_rx) = mpsc::channel(burst_max + 1);
+        let (normal_tx, mut normal_rx) = mpsc::channel(1);
+        normal_tx
+            .send(queued_dispatch_request(
+                Method::Invite,
+                "z9hG4bK.priority-fairness-invite",
+                101,
+            )?)
+            .await
+            .unwrap();
+        for idx in 0..=burst_max {
+            high_tx
+                .send(queued_dispatch_request(
+                    Method::Bye,
+                    &format!("z9hG4bK.priority-fairness-bye-{idx}"),
+                    200 + idx as u32,
+                )?)
+                .await
+                .unwrap();
+        }
+
+        let mut high_burst_count = 0;
+        for _ in 0..burst_max {
+            let queued = recv_transaction_dispatch_event(
+                &mut high_rx,
+                &mut normal_rx,
+                &mut high_burst_count,
+                burst_max,
+            )
+            .await
+            .unwrap();
+            assert_eq!(queued.kind, TransactionIngressKind::Bye);
+        }
+
+        let queued = recv_transaction_dispatch_event(
+            &mut high_rx,
+            &mut normal_rx,
+            &mut high_burst_count,
+            burst_max,
+        )
+        .await
+        .unwrap();
+        assert_eq!(queued.kind, TransactionIngressKind::Invite);
+        assert_eq!(high_burst_count, 0);
+
+        let queued = recv_transaction_dispatch_event(
+            &mut high_rx,
+            &mut normal_rx,
+            &mut high_burst_count,
+            burst_max,
+        )
+        .await
+        .unwrap();
+        assert_eq!(queued.kind, TransactionIngressKind::Bye);
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_dispatch_round_robins_unkeyed_events() {
+        let fallback_worker = AtomicUsize::new(0);
+        let worker_count = 3;
+
+        assert_eq!(
+            transaction_dispatch_worker_index(
+                &TransportEvent::Closed,
+                worker_count,
+                &fallback_worker
+            ),
+            0
+        );
+        assert_eq!(
+            transaction_dispatch_worker_index(
+                &TransportEvent::Closed,
+                worker_count,
+                &fallback_worker
+            ),
+            1
+        );
+        assert_eq!(
+            transaction_dispatch_worker_index(
+                &TransportEvent::Closed,
+                worker_count,
+                &fallback_worker
+            ),
+            2
+        );
+        assert_eq!(
+            transaction_dispatch_worker_index(
+                &TransportEvent::Closed,
+                worker_count,
+                &fallback_worker
+            ),
+            0
+        );
+    }
+
     /// Helper to create a simple 200 OK response for testing
     fn create_test_response(
         request: &Request,
@@ -145,6 +552,26 @@ mod tests {
         SimpleResponseBuilder::response_from_request(request, status, reason)
             .to("Bob", "sip:bob@example.com", Some("bob-tag-resp"))
             .build()
+    }
+
+    fn cached_invite_2xx_entry(
+        response: Response,
+        destination: SocketAddr,
+        created_at: Instant,
+        next_retransmit_at: Instant,
+    ) -> Invite2xxResponseCacheEntry {
+        let wire_bytes =
+            bytes::Bytes::from(rvoip_sip_core::Message::Response(response.clone()).to_bytes());
+        Invite2xxResponseCacheEntry {
+            response,
+            wire_bytes,
+            destination,
+            created_at,
+            acked_at: None,
+            expires_at: created_at + Duration::from_secs(90),
+            next_retransmit_at,
+            retransmit_interval: Duration::from_millis(500),
+        }
     }
 
     async fn send_through_client_transaction(request: Request) -> Result<Request> {
@@ -482,6 +909,7 @@ mod tests {
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
+                timing: None,
             })
             .await
             .unwrap();
@@ -823,6 +1251,7 @@ mod tests {
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
+                timing: None,
             })
             .await
             .unwrap();
@@ -849,6 +1278,7 @@ mod tests {
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
+                timing: None,
             })
             .await
             .unwrap();
@@ -977,6 +1407,7 @@ mod tests {
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
+                timing: None,
             })
             .await
             .unwrap();
@@ -1213,6 +1644,7 @@ mod tests {
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
+                timing: None,
             })
             .await
             .unwrap();
@@ -1236,6 +1668,10 @@ mod tests {
         assert!(
             retransmitted,
             "retransmitted INVITE should resend cached 2xx"
+        );
+        assert!(
+            transport.raw_send_count() > 0,
+            "cached INVITE 2xx retransmission should use pre-built wire bytes"
         );
 
         manager.shutdown().await;
@@ -1285,8 +1721,200 @@ mod tests {
             "proactive retransmission should resend cached 200 OK"
         );
         assert_eq!(last_msg.1, source);
+        assert!(
+            transport.raw_send_count() > 0,
+            "proactive INVITE 2xx retransmission should use pre-built wire bytes"
+        );
 
         manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn acked_invite_2xx_cache_stops_proactive_retransmit_but_serves_duplicates() -> Result<()>
+    {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+        manager.shutdown().await;
+
+        let invite_request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let response = create_test_response(&invite_request, StatusCode::Ok, Some("OK"));
+        let source: SocketAddr = "192.0.2.100:5060".parse().unwrap();
+        let transaction_id =
+            TransactionKey::new("z9hG4bK.acked-cache-test".to_string(), Method::Invite, true);
+        let now = Instant::now();
+        manager.insert_invite_2xx_response_cache_entry(
+            transaction_id.clone(),
+            cached_invite_2xx_entry(
+                response,
+                source,
+                now - Duration::from_millis(10),
+                now - Duration::from_millis(1),
+            ),
+        );
+
+        manager.mark_invite_2xx_response_cache_acked(&transaction_id);
+
+        let proactive = manager.retransmit_due_invite_2xx_responses().await;
+        assert_eq!(
+            proactive, 0,
+            "ACKed 2xx cache entries should not proactively retransmit"
+        );
+        assert!(
+            transport.get_sent_messages().await.is_empty(),
+            "proactive maintenance should not send ACKed entries"
+        );
+
+        let retransmitted = manager
+            .retransmit_cached_invite_2xx_response(&transaction_id, source)
+            .await?;
+        assert!(
+            retransmitted,
+            "duplicate INVITE should still hit the ACK-retained cache"
+        );
+        let sent_messages = transport.get_sent_messages().await;
+        assert_eq!(sent_messages.len(), 1);
+        assert!(
+            matches!(sent_messages[0].0, Message::Response(ref resp) if resp.status_code() == 200)
+        );
+        assert_eq!(sent_messages[0].1, source);
+        assert_eq!(
+            transport.raw_send_count(),
+            1,
+            "ACK-retained duplicate response should use pre-built wire bytes"
+        );
+
+        {
+            let mut entry = manager
+                .invite_2xx_response_cache
+                .get_mut(&transaction_id)
+                .expect("ACK-retained entry should still exist");
+            entry.expires_at = Instant::now() - Duration::from_millis(1);
+        }
+        manager.prune_invite_2xx_response_cache();
+        assert!(
+            !manager
+                .invite_2xx_response_cache
+                .contains_key(&transaction_id),
+            "ACK-retained entry should prune once its retention expires"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invite_2xx_due_queue_processing_is_capped_per_tick() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+        manager.shutdown().await;
+
+        let invite_request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let response = create_test_response(&invite_request, StatusCode::Ok, Some("OK"));
+        let destination: SocketAddr = "192.0.2.100:5060".parse().unwrap();
+        let now = Instant::now();
+        let max_due_per_tick = 2;
+        manager.set_invite_2xx_retransmit_max_due_per_tick(max_due_per_tick);
+        let total_entries = max_due_per_tick + 3;
+
+        for idx in 0..total_entries {
+            manager.insert_invite_2xx_response_cache_entry(
+                TransactionKey::new(format!("z9hG4bK.due-queue-cap-{idx}"), Method::Invite, true),
+                cached_invite_2xx_entry(
+                    response.clone(),
+                    destination,
+                    now - Duration::from_millis(10),
+                    now - Duration::from_millis(1),
+                ),
+            );
+        }
+
+        let first_tick = manager.retransmit_due_invite_2xx_responses().await;
+        assert_eq!(first_tick, max_due_per_tick);
+        let after_first_tick = transport.get_sent_messages().await.len();
+        assert!(
+            after_first_tick >= max_due_per_tick,
+            "first explicit maintenance tick should send at least its capped batch"
+        );
+        assert!(
+            after_first_tick <= total_entries,
+            "background maintenance should not send more than the queued entries"
+        );
+
+        let second_tick = manager.retransmit_due_invite_2xx_responses().await;
+        assert!(
+            first_tick + second_tick <= total_entries,
+            "explicit maintenance ticks must not retransmit more entries than were queued"
+        );
+        assert!(
+            transport.get_sent_messages().await.len() <= total_entries,
+            "cached retransmission should not duplicate a due entry"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invite_2xx_due_queue_compaction_drops_stale_entries() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+        manager.shutdown().await;
+
+        let invite_request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let response = create_test_response(&invite_request, StatusCode::Ok, Some("OK"));
+        let destination: SocketAddr = "192.0.2.100:5060".parse().unwrap();
+        let now = Instant::now();
+        let transaction_id = TransactionKey::new(
+            "z9hG4bK.due-queue-compact".to_string(),
+            Method::Invite,
+            true,
+        );
+        let current_due = now + Duration::from_secs(10);
+
+        manager.insert_invite_2xx_response_cache_entry(
+            transaction_id.clone(),
+            cached_invite_2xx_entry(response, destination, now, current_due),
+        );
+
+        {
+            let mut queue = manager
+                .invite_2xx_response_due_queue
+                .lock()
+                .expect("due queue lock");
+            queue.push(Invite2xxDueEntry {
+                due_at: now - Duration::from_secs(1),
+                sequence: 999,
+                transaction_id: transaction_id.clone(),
+            });
+            queue.push(Invite2xxDueEntry {
+                due_at: now + Duration::from_secs(5),
+                sequence: 1000,
+                transaction_id: TransactionKey::new(
+                    "z9hG4bK.missing-cache".to_string(),
+                    Method::Invite,
+                    true,
+                ),
+            });
+            assert_eq!(queue.len(), 3);
+        }
+
+        manager.compact_invite_2xx_response_due_queue();
+
+        let queue = manager
+            .invite_2xx_response_due_queue
+            .lock()
+            .expect("due queue lock");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue.peek().map(|entry| entry.transaction_id.clone()),
+            Some(transaction_id)
+        );
+
         Ok(())
     }
 
@@ -1390,18 +2018,7 @@ mod tests {
 
         // Custom subscriber that forwards events to our test channel
         {
-            // Create a subscription directly
-            let (hook_tx, mut hook_rx) = mpsc::channel(20);
-
-            // Register our subscription manually for more control.
-            // ArcSwap RCU (was a Mutex<Vec<Sender>> before the perf pass).
-            let subscribers = manager.event_subscribers.clone();
-            subscribers.rcu(|current| {
-                let mut next = Vec::with_capacity(current.len() + 1);
-                next.extend(current.iter().cloned());
-                next.push(hook_tx.clone());
-                next
-            });
+            let mut hook_rx = manager.subscribe();
 
             // Create a background task to forward events
             tokio::spawn(async move {
@@ -1495,6 +2112,65 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn retention_counts_prunes_closed_event_subscribers() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(10)).await?;
+
+        let global_rx = manager.subscribe();
+        assert_eq!(manager.retention_counts().event_subscribers, 1);
+
+        drop(global_rx);
+        let counts = manager.retention_counts();
+        assert_eq!(counts.event_subscribers, 0);
+
+        let invite_request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let destination = SocketAddr::from_str("192.168.1.100:5060").unwrap();
+        let tx_id = manager
+            .create_client_transaction(invite_request, destination)
+            .await?;
+        let tx_rx = manager.subscribe_to_transaction(&tx_id).await?;
+        assert_eq!(manager.retention_counts().event_subscribers, 1);
+        assert_eq!(manager.retention_counts().subscriber_to_transactions, 1);
+        assert_eq!(manager.retention_counts().transaction_to_subscribers, 1);
+
+        drop(tx_rx);
+        let counts = manager.retention_counts();
+        assert_eq!(counts.event_subscribers, 0);
+        assert_eq!(counts.subscriber_to_transactions, 0);
+        assert_eq!(counts.transaction_to_subscribers, 0);
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retention_counts_prunes_stale_pending_inbound_bytes() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(10)).await?;
+        let tx_id = TransactionKey::new("z9hG4bK-stale-pending".to_string(), Method::Invite, true);
+
+        manager.pending_inbound_bytes.insert(
+            tx_id.clone(),
+            bytes::Bytes::from_static(b"INVITE sip:bob SIP/2.0\r\n\r\n"),
+        );
+        manager.pending_inbound_inserted_at.insert(
+            tx_id.clone(),
+            Instant::now() - super::super::PENDING_INBOUND_BYTES_TTL - Duration::from_secs(1),
+        );
+
+        let counts = manager.retention_counts();
+        assert_eq!(counts.pending_inbound_bytes, 0);
+        assert!(manager.pending_inbound_inserted_at.get(&tx_id).is_none());
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
     /// Test wait_for_final_response function
     #[tokio::test]
     async fn test_wait_for_final_response() -> Result<()> {
@@ -1550,6 +2226,7 @@ mod tests {
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
+                timing: None,
             })
             .await
             .unwrap();

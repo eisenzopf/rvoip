@@ -16,6 +16,8 @@ performance problem with samply / dhat / criterion; this one tells you
 how to produce **absolute numbers** a VoIP engineer can cite when
 evaluating the library's maturity (calls per second, concurrent active
 calls, p99 setup latency, REGs/sec, memory per call).
+For workload-specific `Config` recipes and SIPp matrix knobs, start with
+[`TUNING.md`](TUNING.md).
 
 The numbers are produced by integration tests gated behind the
 Cargo feature `perf-tests`. Default `cargo build` / `cargo test` are

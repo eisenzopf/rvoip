@@ -21,9 +21,9 @@ pub use error::{Error, Result};
 pub use resolver::{select_transport_for_uri, ResolvedTarget, Resolver, ResolverError};
 pub use transport::tcp::TcpTransport;
 pub use transport::tls::TlsTransport;
-pub use transport::udp::{UdpParseConfig, UdpSocketOptions, UdpTransport};
+pub use transport::udp::{UdpParseConfig, UdpParseDispatch, UdpSocketOptions, UdpTransport};
 pub use transport::ws::WebSocketTransport;
-pub use transport::{Transport, TransportEvent};
+pub use transport::{Transport, TransportEvent, TransportReceiveTiming};
 
 // Simplified helper functions
 /// Bind a UDP transport to the specified address
@@ -45,6 +45,7 @@ pub mod prelude {
     pub use crate::{
         bind_tcp, bind_udp, events::TransportEventAdapter, factory::TransportFactory,
         manager::TransportManager, Error, Result, TcpTransport, TlsTransport, Transport,
-        TransportEvent, UdpSocketOptions, UdpTransport, WebSocketTransport,
+        TransportEvent, TransportReceiveTiming, UdpParseDispatch, UdpSocketOptions, UdpTransport,
+        WebSocketTransport,
     };
 }

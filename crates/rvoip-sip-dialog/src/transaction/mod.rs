@@ -115,8 +115,17 @@ pub use event::*;
 pub use key::*;
 pub use state::*;
 
+/// Default capacity for each transaction runner's private command channel.
+///
+/// Transaction command channels carry timer/state-machine commands for one
+/// transaction, not call-volume bursts for the whole endpoint. Keeping this
+/// small prevents completed-call churn from retaining large per-transaction
+/// queue allocations while still allowing high-CPS server profiles to opt into
+/// larger values through `rvoip-sip::Config`.
+pub const DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY: usize = 32;
+
 // Re-export manager
-pub use manager::TransactionManager;
+pub use manager::{TransactionManager, MAX_TRANSACTION_DISPATCH_WORKERS};
 
 /// Defines the core traits, types, and machinery for SIP transactions.
 ///

@@ -16,8 +16,8 @@ use rvoip_webrtc::{WebRtcConfig, WebRtcServerBuilder};
 fn self_signed_pem() -> (Vec<u8>, Vec<u8>) {
     let cert =
         generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()]).expect("cert");
-    let cert_pem = cert.serialize_pem().expect("cert pem").into_bytes();
-    let key_pem = cert.serialize_private_key_pem().into_bytes();
+    let cert_pem = cert.cert.pem().into_bytes();
+    let key_pem = cert.signing_key.serialize_pem().into_bytes();
     (cert_pem, key_pem)
 }
 

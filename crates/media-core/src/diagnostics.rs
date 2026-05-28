@@ -1,10 +1,8 @@
 //! Media setup diagnostics used by high-CPS SIP benchmarks.
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-static ENABLED: OnceLock<bool> = OnceLock::new();
 static ENABLED_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
 static MEDIA_START_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -99,18 +97,18 @@ impl Drop for MediaStartGuard {
 
 pub fn enabled() -> bool {
     match ENABLED_OVERRIDE.load(Ordering::Relaxed) {
-        1 => return false,
-        2 => return true,
-        _ => {}
+        2 => true,
+        _ => false,
     }
-    *ENABLED.get_or_init(|| {
-        env_flag("RVOIP_MEDIA_SETUP_DIAGNOSTICS") || env_flag("RVOIP_SIP_UDP_DIAGNOSTICS")
-    })
+}
+
+pub fn set_enabled(enabled: bool) {
+    ENABLED_OVERRIDE.store(if enabled { 2 } else { 1 }, Ordering::Relaxed);
 }
 
 #[cfg(test)]
 fn set_enabled_for_tests(enabled: bool) {
-    ENABLED_OVERRIDE.store(if enabled { 2 } else { 1 }, Ordering::Relaxed);
+    set_enabled(enabled);
 }
 
 pub fn reset() {
@@ -286,18 +284,6 @@ fn update_max(counter: &AtomicU64, value: u64) {
             Err(next) => current = next,
         }
     }
-}
-
-fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
 }
 
 fn avg_us(total_ns: u64, count: u64) -> f64 {

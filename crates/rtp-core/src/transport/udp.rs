@@ -32,6 +32,9 @@ const RTP_DROP_LOG_INITIAL: u64 = 5;
 const RTP_DROP_LOG_EVERY: u64 = 1_000;
 const RTP_MALFORMED_WARN_EVERY: u64 = 10_000;
 
+static SRTP_DIAGNOSTICS_ENABLED: AtomicBool = AtomicBool::new(false);
+static RTP_DIAGNOSTICS_ENABLED: AtomicBool = AtomicBool::new(false);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RtpMuxPacketClass {
     Rtp,
@@ -63,23 +66,17 @@ impl RtpMuxPacketClass {
     }
 }
 
-fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+pub fn set_diagnostics(srtp_enabled: bool, rtp_enabled: bool) {
+    SRTP_DIAGNOSTICS_ENABLED.store(srtp_enabled, Ordering::Relaxed);
+    RTP_DIAGNOSTICS_ENABLED.store(rtp_enabled, Ordering::Relaxed);
 }
 
 fn srtp_diagnostics_enabled() -> bool {
-    env_flag("RVOIP_SRTP_DIAGNOSTICS")
+    SRTP_DIAGNOSTICS_ENABLED.load(Ordering::Relaxed)
 }
 
 fn rtp_diagnostics_enabled() -> bool {
-    env_flag("RVOIP_RTP_DIAGNOSTICS")
+    RTP_DIAGNOSTICS_ENABLED.load(Ordering::Relaxed)
 }
 
 fn classify_rtp_mux_packet(buffer: &[u8]) -> RtpMuxPacketClass {
@@ -797,6 +794,7 @@ impl UdpRtpTransport {
         let mut receiver_task = self.receiver_task.lock().await;
         if let Some(task) = receiver_task.take() {
             task.abort();
+            let _ = task.await;
         }
 
         Ok(())

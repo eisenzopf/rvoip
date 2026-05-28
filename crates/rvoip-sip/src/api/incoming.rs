@@ -396,6 +396,9 @@ impl IncomingCall {
     /// ```
     pub fn defer(mut self, timeout: Duration) -> IncomingCallGuard {
         self.resolved = true; // prevent Drop from also rejecting
+        if self.coordinator.fast_auto_accept_incoming_calls() {
+            return IncomingCallGuard::resolved(self.call_id.clone(), self.coordinator.clone());
+        }
         IncomingCallGuard::new(self.call_id.clone(), self.coordinator.clone(), timeout)
     }
 
@@ -590,6 +593,15 @@ impl IncomingCallGuard {
         }
     }
 
+    fn resolved(call_id: CallId, coordinator: Arc<UnifiedCoordinator>) -> Self {
+        Self {
+            call_id,
+            coordinator,
+            deadline: Instant::now(),
+            resolved: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
     /// The call identifier for this deferred call (use as queue key).
     ///
     /// This accessor is trivial and can be used to index a queue or map.
@@ -623,6 +635,14 @@ impl IncomingCallGuard {
     /// # }
     /// ```
     pub async fn accept(self) -> Result<SessionHandle> {
+        if self.coordinator.fast_auto_accept_incoming_calls() {
+            self.resolved.store(true, Ordering::SeqCst);
+            return Ok(SessionHandle::new(
+                self.call_id.clone(),
+                self.coordinator.clone(),
+            ));
+        }
+
         if Instant::now() >= self.deadline {
             return Err(SessionError::Timeout(
                 "IncomingCallGuard deadline exceeded before accept".to_string(),
@@ -652,6 +672,9 @@ impl IncomingCallGuard {
     /// ```
     pub fn reject(self, status: u16, reason: &str) {
         if self.resolved.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if self.coordinator.fast_auto_accept_incoming_calls() {
             return;
         }
         let coordinator = self.coordinator.clone();
@@ -700,6 +723,13 @@ impl IncomingCallGuard {
         reason: &str,
         timeout: Option<Duration>,
     ) -> Result<Event> {
+        if self.coordinator.fast_auto_accept_incoming_calls() {
+            self.resolved.store(true, Ordering::SeqCst);
+            return Ok(Event::CallAnswered {
+                call_id: self.call_id.clone(),
+                sdp: None,
+            });
+        }
         if self.resolved.swap(true, Ordering::SeqCst) {
             return Err(SessionError::InvalidTransition(format!(
                 "IncomingCallGuard for {} is already resolved",
@@ -1506,40 +1536,13 @@ impl SipHeaderView for IncomingRegister {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::SessionApiCrossCrateEvent;
     use crate::api::unified::Config;
 
-    /// Publish an event through the global event singleton. Used by
-    /// tests that don't have a UnifiedCoordinator handle. NOTE:
-    /// UnifiedCoordinator::new constructs its own private coordinator,
-    /// so this helper won't reach subscribers attached to a specific
-    /// UnifiedCoordinator instance — use `publish_via` for that.
-    #[allow(dead_code)]
-    async fn publish_synthetic(event: Event) {
-        let wrapped = SessionApiCrossCrateEvent::new(event);
-        let coord = rvoip_infra_common::events::global_coordinator()
-            .await
-            .clone();
-        coord
-            .publish(wrapped)
+    async fn publish_synthetic(coordinator: &UnifiedCoordinator, event: Event) {
+        coordinator
+            .publish_app_event_for_test(event)
             .await
             .expect("publish synthetic event");
-    }
-
-    /// B1 — publish a synthetic event through the supplied
-    /// UnifiedCoordinator's private global_coordinator. This is the
-    /// path the `wait_for_cancelled` tests need because they
-    /// construct a fresh UnifiedCoordinator per test (each with its
-    /// own private coordinator instance) and subscribe through that
-    /// instance — publishing via the cross-test singleton would land
-    /// on a different bus.
-    async fn publish_via(coordinator: &UnifiedCoordinator, event: Event) {
-        let wrapped = SessionApiCrossCrateEvent::new(event);
-        coordinator
-            .global_coordinator
-            .publish(wrapped)
-            .await
-            .expect("publish via coordinator");
     }
 
     #[tokio::test]
@@ -1597,9 +1600,7 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // B1 — publish through this UnifiedCoordinator's private
-        // event bus, not the cross-test singleton.
-        publish_via(&coordinator, Event::CallCancelled { call_id }).await;
+        publish_synthetic(&coordinator, Event::CallCancelled { call_id }).await;
 
         waiter.await.unwrap().unwrap();
         assert!(resolved.load(Ordering::SeqCst));
@@ -1622,8 +1623,7 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // B1 — publish through this UnifiedCoordinator's private bus.
-        publish_via(&coordinator, Event::CallAnswered { call_id, sdp: None }).await;
+        publish_synthetic(&coordinator, Event::CallAnswered { call_id, sdp: None }).await;
 
         let err = waiter.await.unwrap().unwrap_err();
         assert!(err.to_string().contains("answered before cancellation"));

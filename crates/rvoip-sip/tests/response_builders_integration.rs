@@ -7,7 +7,7 @@
 //! Alice's `SipTraceConfig` captures the inbound response and asserts
 //! the application headers landed on the wire.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer};
 use rvoip_sip::api::events::Event;
@@ -121,6 +121,235 @@ async fn reject_builder_stamps_retry_after_and_warning_on_wire() {
         "expected Warning: 307 ... on the wire; got:\n{raw}"
     );
 
+    bob_shutdown.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+struct AcceptAll;
+#[async_trait::async_trait]
+impl CallHandler for AcceptAll {
+    async fn on_incoming_call(&self, _call: IncomingCall) -> CallHandlerDecision {
+        CallHandlerDecision::Accept
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_call_admission_limit_rejects_with_503_retry_after_on_wire() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let alice_port = 17920;
+    let bob_port = 17921;
+
+    let bob_cfg = cfg("bob-admission", bob_port)
+        .with_server_call_admission_limit(1)
+        .with_server_overload_retry_after_secs(2);
+    let bob = CallbackPeer::new(AcceptAll, bob_cfg).await.expect("bob");
+    let bob_shutdown = bob.shutdown_handle();
+    let bob_task = tokio::spawn(async move {
+        let _ = bob.run().await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let alice = UnifiedCoordinator::new(cfg("alice-admission", alice_port))
+        .await
+        .expect("alice");
+    let mut alice_events = alice.events().await.expect("alice events");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let target = format!("sip:bob@127.0.0.1:{bob_port}");
+    let first = alice
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target.clone())
+        .send()
+        .await
+        .expect("first invite");
+    alice
+        .session(&first)
+        .wait_for_answered(Some(Duration::from_secs(8)))
+        .await
+        .expect("first call should be active");
+
+    let _ = alice
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target)
+        .send()
+        .await;
+
+    let raw = wait_for_inbound_response_status(&mut alice_events, "503", Duration::from_secs(8))
+        .await
+        .expect("alice did not see an overload 503");
+
+    assert!(
+        raw.contains("Retry-After: 2"),
+        "expected overload Retry-After: 2 on the wire; got:\n{raw}"
+    );
+
+    let _ = alice
+        .session(&first)
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await;
+    bob_shutdown.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_call_admission_hysteresis_recovers_below_soft_limit() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let alice_port = 17922;
+    let bob_port = 17923;
+
+    let bob_cfg = cfg("bob-hysteresis", bob_port)
+        .with_server_call_admission_limit(2)
+        .with_server_call_admission_soft_limit(1)
+        .with_server_call_admission_pacing_delay_ms(1)
+        .with_server_overload_retry_after_secs(2);
+    let bob = CallbackPeer::new(AcceptAll, bob_cfg).await.expect("bob");
+    let bob_shutdown = bob.shutdown_handle();
+    let bob_task = tokio::spawn(async move {
+        let _ = bob.run().await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let alice = UnifiedCoordinator::new(cfg("alice-hysteresis", alice_port))
+        .await
+        .expect("alice");
+    let mut alice_events = alice.events().await.expect("alice events");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let target = format!("sip:bob@127.0.0.1:{bob_port}");
+    let first = alice
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target.clone())
+        .send()
+        .await
+        .expect("first invite");
+    alice
+        .session(&first)
+        .wait_for_answered(Some(Duration::from_secs(8)))
+        .await
+        .expect("first call should be active");
+
+    let second = alice
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target.clone())
+        .send()
+        .await
+        .expect("second invite");
+    alice
+        .session(&second)
+        .wait_for_answered(Some(Duration::from_secs(8)))
+        .await
+        .expect("second call should be admitted while at soft threshold");
+
+    let _ = alice
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target.clone())
+        .send()
+        .await;
+    let raw = wait_for_inbound_response_status(&mut alice_events, "503", Duration::from_secs(8))
+        .await
+        .expect("alice did not see hard-overload 503");
+    assert!(
+        raw.contains("Retry-After: 2"),
+        "expected overload Retry-After: 2 on the wire; got:\n{raw}"
+    );
+
+    let _ = alice
+        .session(&first)
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let _ = alice
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target.clone())
+        .send()
+        .await;
+    let _ = wait_for_inbound_response_status(&mut alice_events, "503", Duration::from_secs(8))
+        .await
+        .expect("server should remain unavailable until below soft threshold");
+
+    let _ = alice
+        .session(&second)
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let recovered = alice
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target)
+        .send()
+        .await
+        .expect("recovered invite");
+    alice
+        .session(&recovered)
+        .wait_for_answered(Some(Duration::from_secs(8)))
+        .await
+        .expect("server should recover once below soft threshold");
+    let _ = alice
+        .session(&recovered)
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await;
+
+    bob_shutdown.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_call_admission_soft_limit_paces_before_hard_limit() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let alice_port = 17924;
+    let bob_port = 17925;
+
+    let bob_cfg = cfg("bob-soft-pace", bob_port)
+        .with_server_call_admission_limit(3)
+        .with_server_call_admission_soft_limit(1)
+        .with_server_call_admission_pacing_delay_ms(150)
+        .with_server_overload_retry_after_secs(2);
+    let bob = CallbackPeer::new(AcceptAll, bob_cfg).await.expect("bob");
+    let bob_shutdown = bob.shutdown_handle();
+    let bob_task = tokio::spawn(async move {
+        let _ = bob.run().await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let alice = UnifiedCoordinator::new(cfg("alice-soft-pace", alice_port))
+        .await
+        .expect("alice");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let target = format!("sip:bob@127.0.0.1:{bob_port}");
+    let first = alice
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target.clone())
+        .send()
+        .await
+        .expect("first invite");
+    alice
+        .session(&first)
+        .wait_for_answered(Some(Duration::from_secs(8)))
+        .await
+        .expect("first call should be active");
+
+    let started = Instant::now();
+    let second = alice
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target)
+        .send()
+        .await
+        .expect("second invite");
+    alice
+        .session(&second)
+        .wait_for_answered(Some(Duration::from_secs(8)))
+        .await
+        .expect("second call should be admitted after pacing");
+
+    assert!(
+        started.elapsed() >= Duration::from_millis(100),
+        "expected soft-limit pacing before admitting the second call"
+    );
+
+    let _ = alice
+        .session(&first)
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await;
+    let _ = alice
+        .session(&second)
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await;
     bob_shutdown.shutdown();
     let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
     tokio::time::sleep(Duration::from_millis(100)).await;

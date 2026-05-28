@@ -55,7 +55,7 @@ pub async fn start_test_server() -> anyhow::Result<TestServer> {
             audience: vec!["rvoip-api".to_string()],
             access_ttl_seconds: 300,  // 5 minutes for testing
             refresh_ttl_seconds: 600, // 10 minutes for testing
-            algorithm: "RS256".to_string(),
+            algorithm: "HS256".to_string(),
             signing_key: None, // Will generate a key
         },
         password: PasswordConfig {

@@ -1,6 +1,7 @@
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::error::Result;
 use bytes::Bytes;
@@ -13,7 +14,7 @@ pub mod ws;
 
 pub use tcp::TcpTransport;
 pub use tls::TlsTransport;
-pub use udp::{UdpParseConfig, UdpSocketOptions, UdpTransport};
+pub use udp::{UdpParseConfig, UdpParseDispatch, UdpSocketOptions, UdpTransport};
 pub use ws::WebSocketTransport;
 
 /// Represents the transport type/protocol
@@ -36,6 +37,25 @@ impl fmt::Display for TransportType {
             TransportType::Wss => write!(f, "WSS"),
         }
     }
+}
+
+/// Optional receive-side timing stamps carried with an inbound message.
+///
+/// These timestamps are only populated by transports when diagnostics are
+/// enabled. Keeping the field optional lets production paths avoid the extra
+/// `Instant::now()` calls and downstream atomic accounting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TransportReceiveTiming {
+    /// UDP datagram read completed in the socket task.
+    pub received_at: Option<Instant>,
+    /// Parse worker dequeued the datagram.
+    pub parse_worker_dequeued_at: Option<Instant>,
+    /// SIP parsing completed successfully.
+    pub parse_completed_at: Option<Instant>,
+    /// Transport manager forwarded the event to the transaction manager queue.
+    pub transport_manager_forwarded_at: Option<Instant>,
+    /// Transaction manager received the event from its queue.
+    pub transaction_manager_received_at: Option<Instant>,
 }
 
 /// Events emitted by a transport
@@ -65,6 +85,8 @@ pub enum TransportEvent {
         /// internally Arc-managed; the outer `Arc` was a per-packet
         /// heap allocation with no functional benefit.
         raw_bytes: Option<Bytes>,
+        /// Optional receive timing diagnostics for UDP fast-path analysis.
+        timing: Option<TransportReceiveTiming>,
     },
 
     /// Error occurred in the transport

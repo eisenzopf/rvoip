@@ -16,13 +16,21 @@ use dashmap::DashMap;
 use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch};
+use tokio::time::MissedTickBehavior;
 
 const TERMINAL_EVENT_TTL: Duration = Duration::from_secs(60);
 const MAX_PROGRESS_EVENTS: usize = 8;
+
+fn unix_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 
 /// Provisional call-progress evidence observed for a call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,11 +190,41 @@ impl Default for LifecycleEntry {
     }
 }
 
+impl LifecycleEntry {
+    fn drop_retained_media_payloads(&mut self) {
+        for progress in &mut self.progress {
+            progress.sdp = None;
+        }
+        if let Some(answered) = &mut self.answered {
+            answered.sdp = None;
+        }
+    }
+
+    #[cfg(feature = "perf-tests")]
+    fn retained_sdp_bytes(&self) -> usize {
+        let progress_bytes: usize = self
+            .progress
+            .iter()
+            .filter_map(|progress| progress.sdp.as_ref())
+            .map(String::len)
+            .sum();
+        let answered_bytes = self
+            .answered
+            .as_ref()
+            .and_then(|answered| answered.sdp.as_ref())
+            .map(String::len)
+            .unwrap_or(0);
+        progress_bytes + answered_bytes
+    }
+}
+
 /// Internal lifecycle index keyed by session id.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LifecycleIndex {
     entries: Arc<DashMap<SessionId, LifecycleEntry>>,
     waiters: Arc<DashMap<SessionId, watch::Sender<u64>>>,
+    last_prune_unix_ms: Arc<AtomicU64>,
+    pruner_started: Arc<AtomicBool>,
 }
 
 impl LifecycleIndex {
@@ -198,10 +236,46 @@ impl LifecycleIndex {
         Self {
             entries: Arc::new(DashMap::with_capacity(capacity)),
             waiters: Arc::new(DashMap::with_capacity(capacity)),
+            last_prune_unix_ms: Arc::new(AtomicU64::new(0)),
+            pruner_started: Arc::new(AtomicBool::new(false)),
         }
     }
 
+    fn start_background_pruner(&self) {
+        if self
+            .pruner_started
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            self.pruner_started.store(false, Ordering::Relaxed);
+            return;
+        };
+
+        let entries = Arc::downgrade(&self.entries);
+        let waiters = Arc::downgrade(&self.waiters);
+        handle.spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let Some(entries) = entries.upgrade() else {
+                    break;
+                };
+                let Some(waiters) = waiters.upgrade() else {
+                    break;
+                };
+                prune_expired_terminal_entries_from(&entries, &waiters);
+            }
+        });
+    }
+
     pub(crate) fn record_event(&self, event: &Event) {
+        self.prune_expired_terminal_entries_throttled();
+
         let Some(call_id) = event.call_id().cloned() else {
             return;
         };
@@ -240,6 +314,7 @@ impl LifecycleIndex {
         }
 
         let is_terminal = if let Some((_, terminal)) = CallTerminalInfo::from_event(event) {
+            entry.drop_retained_media_payloads();
             entry.terminal = Some((terminal, Instant::now()));
             true
         } else {
@@ -247,6 +322,63 @@ impl LifecycleIndex {
         };
 
         self.notify_waiters(&call_id, is_terminal);
+    }
+
+    fn prune_expired_terminal_entries_throttled(&self) {
+        const PRUNE_INTERVAL_MS: u64 = 1_000;
+
+        let now = unix_time_millis();
+        let last = self.last_prune_unix_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < PRUNE_INTERVAL_MS {
+            return;
+        }
+        if self
+            .last_prune_unix_ms
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.prune_expired_terminal_entries();
+        }
+    }
+
+    fn prune_expired_terminal_entries(&self) -> usize {
+        prune_expired_terminal_entries_from(&self.entries, &self.waiters)
+    }
+
+    /// Feature-gated retained-object counts for perf leak investigations.
+    #[cfg(feature = "perf-tests")]
+    pub(crate) fn perf_diagnostic_counts(&self) -> serde_json::Value {
+        let pruned_expired_terminal_entries = self.prune_expired_terminal_entries();
+        let mut terminal_entries = 0_u64;
+        let mut expired_terminal_entries = 0_u64;
+        let mut progress_events = 0_u64;
+        let mut answered_entries = 0_u64;
+        let mut retained_sdp_bytes = 0_u64;
+        for entry in self.entries.iter() {
+            progress_events += entry.value().progress.len() as u64;
+            if entry.value().answered.is_some() {
+                answered_entries += 1;
+            }
+            retained_sdp_bytes += entry.value().retained_sdp_bytes() as u64;
+            if let Some((_, stored_at)) = &entry.value().terminal {
+                terminal_entries += 1;
+                if stored_at.elapsed() > TERMINAL_EVENT_TTL {
+                    expired_terminal_entries += 1;
+                }
+            }
+        }
+
+        serde_json::json!({
+            "entries": self.entries.len(),
+            "waiters": self.waiters.len(),
+            "terminal_entries": terminal_entries,
+            "expired_terminal_entries": expired_terminal_entries,
+            "progress_events": progress_events,
+            "answered_entries": answered_entries,
+            "retained_sdp_bytes": retained_sdp_bytes,
+            "terminal_ttl_secs": TERMINAL_EVENT_TTL.as_secs(),
+            "pruned_expired_terminal_entries": pruned_expired_terminal_entries,
+        })
     }
 
     pub(crate) fn watcher(&self, call_id: &SessionId) -> watch::Receiver<u64> {
@@ -313,6 +445,30 @@ impl LifecycleIndex {
 
         snapshot
     }
+}
+
+fn prune_expired_terminal_entries_from(
+    entries: &DashMap<SessionId, LifecycleEntry>,
+    waiters: &DashMap<SessionId, watch::Sender<u64>>,
+) -> usize {
+    let expired: Vec<SessionId> = entries
+        .iter()
+        .filter_map(|entry| {
+            entry.value().terminal.as_ref().and_then(|(_, stored_at)| {
+                if stored_at.elapsed() > TERMINAL_EVENT_TTL {
+                    Some(entry.key().clone())
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+    let removed = expired.len();
+    for call_id in expired {
+        entries.remove(&call_id);
+        waiters.remove(&call_id);
+    }
+    removed
 }
 
 #[derive(Clone)]
@@ -419,6 +575,7 @@ impl SessionEventPublisher {
     ) -> Self {
         let dispatcher =
             SessionEventDispatcher::new(coordinator.clone(), worker_count, channel_capacity);
+        lifecycle.start_background_pruner();
         Self {
             coordinator,
             lifecycle,
@@ -501,6 +658,7 @@ mod tests {
         let snapshot = index.snapshot(&call_id, Some(CallState::Cancelled));
         assert_eq!(snapshot.progress.len(), 1);
         assert_eq!(snapshot.progress[0].status_code, 183);
+        assert_eq!(snapshot.progress[0].sdp, None);
         assert_eq!(snapshot.terminal, Some(CallTerminalInfo::Cancelled));
         assert_eq!(
             snapshot.terminal.as_ref().map(CallTerminalInfo::reason),

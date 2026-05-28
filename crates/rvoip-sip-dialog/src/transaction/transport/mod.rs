@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -12,8 +14,8 @@ use rvoip_sip_transport::factory::{TransportFactory, TransportFactoryConfig};
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{
     error::{Error as TransportError, Result as TransportResult},
-    TcpTransport, Transport, TransportEvent, UdpParseConfig, UdpSocketOptions, UdpTransport,
-    WebSocketTransport,
+    TcpTransport, Transport, TransportEvent, UdpParseConfig, UdpParseDispatch, UdpSocketOptions,
+    UdpTransport, WebSocketTransport,
 };
 
 use crate::transaction::error::{Error, Result};
@@ -24,6 +26,9 @@ pub use multiplexed::MultiplexedTransport;
 pub use rvoip_sip_transport::transport::tls::TlsRole;
 pub(crate) use trace::SipTraceRuntime;
 pub use trace::TraceRedactorFn;
+
+const DEFAULT_TRANSPORT_EVENT_DISPATCH_WORKERS: usize = 1;
+pub const MAX_TRANSPORT_EVENT_DISPATCH_WORKERS: usize = 64;
 
 /// Configuration options for the TransportManager
 #[derive(Debug, Clone)]
@@ -55,6 +60,19 @@ pub struct TransportManagerConfig {
     pub udp_parse_workers: Option<usize>,
     /// Optional per-worker UDP parse queue capacity.
     pub udp_parse_queue_capacity: Option<usize>,
+    /// Optional UDP parse worker dispatch strategy.
+    pub udp_parse_dispatch: Option<UdpParseDispatch>,
+    /// Optional transport-manager event forwarding worker count.
+    ///
+    /// Values above `1` enable keyed sharding between each concrete transport
+    /// event stream and the transaction manager ingress channel.
+    pub transport_event_dispatch_workers: Option<usize>,
+    /// Optional transport-manager event forwarding queue capacity.
+    ///
+    /// `None` uses [`TransportManagerConfig::default_channel_capacity`].
+    /// When dispatch workers are enabled, this capacity is divided across
+    /// workers.
+    pub transport_event_dispatch_queue_capacity: Option<usize>,
     /// TLS certificate path
     pub tls_cert_path: Option<String>,
     /// TLS key path
@@ -99,12 +117,157 @@ impl Default for TransportManagerConfig {
             udp_send_buffer_size: None,
             udp_parse_workers: None,
             udp_parse_queue_capacity: None,
+            udp_parse_dispatch: None,
+            transport_event_dispatch_workers: None,
+            transport_event_dispatch_queue_capacity: None,
             tls_cert_path: None,
             tls_key_path: None,
             tls_extra_ca_path: None,
             tls_client_cert_path: None,
             tls_client_key_path: None,
             tls_insecure_skip_verify: false,
+        }
+    }
+}
+
+fn transport_event_dispatch_worker_count(workers: Option<usize>) -> usize {
+    workers
+        .unwrap_or(DEFAULT_TRANSPORT_EVENT_DISPATCH_WORKERS)
+        .clamp(1, MAX_TRANSPORT_EVENT_DISPATCH_WORKERS)
+}
+
+fn transport_event_dispatch_queue_capacity(
+    capacity: Option<usize>,
+    default_capacity: usize,
+) -> usize {
+    capacity.unwrap_or(default_capacity).max(1)
+}
+
+fn transport_event_route_hash(event: &TransportEvent) -> Option<u64> {
+    let TransportEvent::MessageReceived { message, .. } = event else {
+        return None;
+    };
+
+    let mut hasher = DefaultHasher::new();
+    match message {
+        Message::Request(request) => {
+            let call_id = request.call_id()?;
+            call_id.value().hash(&mut hasher);
+            if let Some(from_tag) = request.from_tag() {
+                from_tag.hash(&mut hasher);
+            }
+        }
+        Message::Response(response) => {
+            let call_id = response.call_id()?;
+            call_id.value().hash(&mut hasher);
+            if let Some(from_tag) = response.from().and_then(|from| from.tag()) {
+                from_tag.hash(&mut hasher);
+            }
+            if let Some(cseq) = response.cseq() {
+                cseq.method().hash(&mut hasher);
+            }
+        }
+    }
+    Some(hasher.finish())
+}
+
+fn transport_event_dispatch_worker_index(
+    event: &TransportEvent,
+    worker_count: usize,
+    fallback_worker: &AtomicUsize,
+) -> usize {
+    if worker_count <= 1 {
+        return 0;
+    }
+
+    if let Some(hash) = transport_event_route_hash(event) {
+        return (hash as usize) % worker_count;
+    }
+
+    fallback_worker.fetch_add(1, Ordering::Relaxed) % worker_count
+}
+
+fn start_transport_event_dispatch_workers(
+    event_tx: mpsc::Sender<TransportEvent>,
+    worker_count: usize,
+    queue_capacity: usize,
+) -> Arc<Vec<mpsc::Sender<TransportEvent>>> {
+    let worker_count = worker_count.clamp(1, MAX_TRANSPORT_EVENT_DISPATCH_WORKERS);
+    let per_worker_capacity = (queue_capacity / worker_count).max(1);
+    let mut senders = Vec::with_capacity(worker_count);
+
+    for worker_id in 0..worker_count {
+        let (tx, mut rx) = mpsc::channel::<TransportEvent>(per_worker_capacity);
+        let event_tx = event_tx.clone();
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                if !forward_transport_event(&event_tx, event).await {
+                    break;
+                }
+            }
+            debug!(worker_id, "Transport event dispatch worker terminated");
+        });
+        senders.push(tx);
+    }
+
+    info!(
+        workers = worker_count,
+        per_worker_capacity, "Transport event dispatch workers enabled"
+    );
+
+    Arc::new(senders)
+}
+
+async fn forward_transport_event(
+    event_tx: &mpsc::Sender<TransportEvent>,
+    event: TransportEvent,
+) -> bool {
+    match event_tx.try_send(event) {
+        Ok(()) => true,
+        Err(TrySendError::Full(event)) => {
+            let started = Instant::now();
+            if let Err(e) = event_tx.send(event).await {
+                error!("Failed to forward transport event: {}", e);
+                false
+            } else {
+                udp_diagnostics::record_manager_channel_backpressure(started.elapsed());
+                true
+            }
+        }
+        Err(TrySendError::Closed(_)) => {
+            error!("Failed to forward transport event: receiver closed");
+            false
+        }
+    }
+}
+
+async fn dispatch_transport_event(
+    event: TransportEvent,
+    dispatch_senders: &Arc<Vec<mpsc::Sender<TransportEvent>>>,
+    fallback_worker: &AtomicUsize,
+) {
+    let worker_index =
+        transport_event_dispatch_worker_index(&event, dispatch_senders.len(), fallback_worker);
+
+    match dispatch_senders[worker_index].try_send(event) {
+        Ok(()) => {}
+        Err(TrySendError::Full(event)) => {
+            warn!(
+                worker_index,
+                "Transport event dispatch worker queue full; applying backpressure"
+            );
+            if dispatch_senders[worker_index].send(event).await.is_err() {
+                warn!(
+                    worker_index,
+                    "Transport event dispatch worker channel closed"
+                );
+            }
+        }
+        Err(TrySendError::Closed(_)) => {
+            warn!(
+                worker_index,
+                "Transport event dispatch worker channel closed"
+            );
         }
     }
 }
@@ -144,6 +307,7 @@ impl TransportManager {
             udp_send_buffer_size: config.udp_send_buffer_size,
             udp_parse_workers: config.udp_parse_workers,
             udp_parse_queue_capacity: config.udp_parse_queue_capacity,
+            udp_parse_dispatch: config.udp_parse_dispatch,
             ..Default::default()
         }));
 
@@ -169,6 +333,7 @@ impl TransportManager {
     /// Initializes the transport manager with configured transport types
     pub async fn initialize(&mut self) -> Result<()> {
         let mut initialized = false;
+        let mut initialization_errors = Vec::new();
 
         // Initialize UDP transport if enabled
         if self.config.enable_udp {
@@ -191,6 +356,8 @@ impl TransportManager {
                     }
                     Err(e) => {
                         error!("Failed to initialize UDP transport on {}: {}", addr, e);
+                        initialization_errors
+                            .push(format!("UDP transport on {} failed: {}", addr, e));
                     }
                 }
             }
@@ -211,6 +378,8 @@ impl TransportManager {
                     }
                     Err(e) => {
                         error!("Failed to initialize TCP transport on {}: {}", addr, e);
+                        initialization_errors
+                            .push(format!("TCP transport on {} failed: {}", addr, e));
                     }
                 }
             }
@@ -262,6 +431,8 @@ impl TransportManager {
                         }
                         Err(e) => {
                             error!("Failed to initialize TLS transport on {}: {}", addr, e);
+                            initialization_errors
+                                .push(format!("TLS transport on {} failed: {}", addr, e));
                         }
                     }
                 }
@@ -286,6 +457,8 @@ impl TransportManager {
                             "Failed to initialize WebSocket transport on {}: {}",
                             addr, e
                         );
+                        initialization_errors
+                            .push(format!("WebSocket transport on {} failed: {}", addr, e));
                     }
                 }
             }
@@ -308,6 +481,8 @@ impl TransportManager {
                             }
                             Err(e) => {
                                 error!("Failed to initialize WSS transport on {}: {}", addr, e);
+                                initialization_errors
+                                    .push(format!("WSS transport on {} failed: {}", addr, e));
                             }
                         }
                     }
@@ -317,9 +492,15 @@ impl TransportManager {
 
         // Return error if no transports were initialized
         if !initialized {
-            return Err(Error::Transport(
-                "Failed to initialize any transport".into(),
-            ));
+            let detail = if initialization_errors.is_empty() {
+                "no transport initialization attempts were made".to_string()
+            } else {
+                initialization_errors.join("; ")
+            };
+            return Err(Error::Transport(format!(
+                "Failed to initialize any transport: {}",
+                detail
+            )));
         }
 
         // Start event processing
@@ -365,9 +546,10 @@ impl TransportManager {
             self.config.udp_recv_buffer_size,
             self.config.udp_send_buffer_size,
         );
-        let parse_config = UdpParseConfig::from_optional(
+        let parse_config = UdpParseConfig::from_optional_with_dispatch(
             self.config.udp_parse_workers,
             self.config.udp_parse_queue_capacity,
+            self.config.udp_parse_dispatch,
             self.config.default_channel_capacity,
         );
         let (transport, rx) = UdpTransport::bind_with_mtu_socket_options_and_parse_config(
@@ -670,28 +852,37 @@ impl TransportManager {
     ) {
         tokio::spawn(async move {
             let transport_name = format!("{:?}", transport);
+            let dispatch_workers =
+                transport_event_dispatch_worker_count(self.config.transport_event_dispatch_workers);
+            let dispatch_queue_capacity = transport_event_dispatch_queue_capacity(
+                self.config.transport_event_dispatch_queue_capacity,
+                self.config.default_channel_capacity,
+            );
+            let dispatch_senders = if dispatch_workers > DEFAULT_TRANSPORT_EVENT_DISPATCH_WORKERS {
+                Some(start_transport_event_dispatch_workers(
+                    self.event_tx.clone(),
+                    dispatch_workers,
+                    dispatch_queue_capacity,
+                ))
+            } else {
+                None
+            };
+            let fallback_dispatch_worker = Arc::new(AtomicUsize::new(0));
 
             while let Some(event) = rx.recv().await {
                 trace!("Received event from {}: {:?}", transport_name, event);
+                let mut event = event;
+                mark_transport_manager_forwarded(&mut event, Instant::now());
 
                 // Forward the event to the main event channel. Avoid the
                 // async send fast path unless the channel is actually full so
                 // the per-transport event bridge does not add scheduler churn
                 // to every UDP datagram under load.
-                match self.event_tx.try_send(event) {
-                    Ok(()) => {}
-                    Err(TrySendError::Full(event)) => {
-                        let started = Instant::now();
-                        if let Err(e) = self.event_tx.send(event).await {
-                            error!("Failed to forward transport event: {}", e);
-                            break;
-                        }
-                        udp_diagnostics::record_manager_channel_backpressure(started.elapsed());
-                    }
-                    Err(TrySendError::Closed(_)) => {
-                        error!("Failed to forward transport event: receiver closed");
-                        break;
-                    }
+                if let Some(dispatch_senders) = dispatch_senders.as_ref() {
+                    dispatch_transport_event(event, dispatch_senders, &fallback_dispatch_worker)
+                        .await;
+                } else if !forward_transport_event(&self.event_tx, event).await {
+                    break;
                 }
             }
 
@@ -730,6 +921,23 @@ impl TransportManager {
 
         Ok(())
     }
+}
+
+fn mark_transport_manager_forwarded(event: &mut TransportEvent, forwarded_at: Instant) {
+    let TransportEvent::MessageReceived {
+        timing: Some(timing),
+        ..
+    } = event
+    else {
+        return;
+    };
+
+    if let Some(parse_completed_at) = timing.parse_completed_at {
+        udp_diagnostics::record_parse_to_transport_manager(
+            forwarded_at.duration_since(parse_completed_at),
+        );
+    }
+    timing.transport_manager_forwarded_at = Some(forwarded_at);
 }
 
 /// Information about available transport types and capabilities
@@ -880,7 +1088,106 @@ impl<T: rvoip_sip_transport::Transport + ?Sized> TransportCapabilitiesExt for T 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rvoip_sip_core::Method;
+    use rvoip_sip_transport::transport::TransportType;
     use std::net::SocketAddr;
+
+    fn dispatch_request(
+        method: Method,
+        branch: &str,
+        cseq: u32,
+    ) -> std::result::Result<TransportEvent, Box<dyn std::error::Error>> {
+        let request = rvoip_sip_core::builder::SimpleRequestBuilder::new(
+            method.clone(),
+            "sip:bob@example.com",
+        )?
+        .from("Alice", "sip:alice@example.com", Some("alice-dispatch-tag"))
+        .to("Bob", "sip:bob@example.com", Some("bob-dispatch-tag"))
+        .contact("sip:alice@127.0.0.1:5060", None)
+        .call_id("dispatch-call-id-1234")
+        .cseq(cseq)
+        .via("127.0.0.1:5060", "UDP", Some(branch))
+        .max_forwards(70)
+        .build();
+
+        Ok(TransportEvent::MessageReceived {
+            message: Message::Request(request),
+            source: "127.0.0.1:5060".parse().unwrap(),
+            destination: "127.0.0.1:5061".parse().unwrap(),
+            transport_type: TransportType::Udp,
+            raw_bytes: None,
+            timing: None,
+        })
+    }
+
+    #[test]
+    fn transport_event_dispatch_routes_dialog_requests_to_same_worker(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let fallback_worker = AtomicUsize::new(0);
+        let worker_count = 4;
+
+        let invite = dispatch_request(Method::Invite, "z9hG4bK.dispatch-invite", 101)?;
+        let ack = dispatch_request(Method::Ack, "z9hG4bK.dispatch-ack", 101)?;
+        let bye = dispatch_request(Method::Bye, "z9hG4bK.dispatch-bye", 102)?;
+        let cancel = dispatch_request(Method::Cancel, "z9hG4bK.dispatch-cancel", 101)?;
+
+        let expected =
+            transport_event_dispatch_worker_index(&invite, worker_count, &fallback_worker);
+        assert_eq!(
+            transport_event_dispatch_worker_index(&ack, worker_count, &fallback_worker),
+            expected
+        );
+        assert_eq!(
+            transport_event_dispatch_worker_index(&bye, worker_count, &fallback_worker),
+            expected
+        );
+        assert_eq!(
+            transport_event_dispatch_worker_index(&cancel, worker_count, &fallback_worker),
+            expected
+        );
+        assert_eq!(fallback_worker.load(Ordering::Relaxed), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn transport_event_dispatch_round_robins_unkeyed_events() {
+        let fallback_worker = AtomicUsize::new(0);
+        let worker_count = 3;
+
+        assert_eq!(
+            transport_event_dispatch_worker_index(
+                &TransportEvent::Closed,
+                worker_count,
+                &fallback_worker
+            ),
+            0
+        );
+        assert_eq!(
+            transport_event_dispatch_worker_index(
+                &TransportEvent::Closed,
+                worker_count,
+                &fallback_worker
+            ),
+            1
+        );
+        assert_eq!(
+            transport_event_dispatch_worker_index(
+                &TransportEvent::Closed,
+                worker_count,
+                &fallback_worker
+            ),
+            2
+        );
+        assert_eq!(
+            transport_event_dispatch_worker_index(
+                &TransportEvent::Closed,
+                worker_count,
+                &fallback_worker
+            ),
+            0
+        );
+    }
 
     #[tokio::test]
     async fn test_transport_manager_creation() {

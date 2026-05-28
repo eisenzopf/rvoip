@@ -2,7 +2,16 @@
 
 **Comprehensive Guide to Real-World VoIP Applications**
 
-RVOIP is a production-ready, modular VoIP communication platform built in Rust. This document outlines the primary use cases, target markets, and deployment scenarios across the complete RVOIP ecosystem.
+> **Status notice:** this file is aspirational and is being reconciled with the
+> beta release plan. The beta contract is narrower than many examples below:
+> bounded SIP client/server/PBX scenarios, PCMU/PCMA full-media support, and a
+> general full-media performance target up to 2,000 CPS. WebRTC-grade media,
+> DTLS-SRTP, ICE/TURN, carrier certification, and broad production claims are
+> post-beta unless linked from `crates/rvoip-sip/docs/COMPATIBILITY_MATRIX.md`.
+
+RVOIP is a modular VoIP communication platform built in Rust. This document
+outlines intended use cases, target markets, and deployment scenarios across
+the RVOIP ecosystem; it should not be treated as a release-claim matrix.
 
 ---
 
@@ -520,8 +529,8 @@ let platform = CloudPlatform::new()
 ### **Complete Platform**
 - ✅ **Full VoIP Stack**: Everything from SIP to media processing
 - ✅ **Modular Architecture**: Use only what you need
-- ✅ **Production Ready**: Battle-tested in enterprise environments
-- ✅ **Standards Compliant**: Full RFC compliance for interoperability
+- ✅ **Beta Target**: Production-candidate hardening for bounded SIP/PBX scenarios
+- ✅ **Standards Tracked**: RFC compliance matrix in progress for interoperability
 
 ### **Modern Technology**
 - ✅ **Rust Performance**: Memory safety with C-level performance
@@ -557,4 +566,4 @@ let platform = CloudPlatform::new()
 - **Community**: Join our developer community for support
 - **Commercial**: Contact us for enterprise support and consulting
 
-**🚀 Build the future of communication with RVOIP!** 
+**🚀 Build the future of communication with RVOIP!**

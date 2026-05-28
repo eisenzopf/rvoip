@@ -4,7 +4,7 @@
 //! and extract user context for session-core-v2
 
 use anyhow::Result;
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use users_core::{init, CreateUserRequest, UserClaims, UsersConfig};
@@ -61,8 +61,10 @@ async fn main() -> Result<()> {
     // Simulate auth-core validation
     println!("\n🔐 Auth-core validates the token...");
 
-    let public_key = auth_service.jwt_issuer().public_key_pem()?;
-    let user_context = validate_and_extract_context(&auth_result.access_token, &public_key)?;
+    let decoding_key = auth_service.jwt_issuer().decoding_key().clone();
+    let algorithm = auth_service.jwt_issuer().algorithm();
+    let user_context =
+        validate_and_extract_context(&auth_result.access_token, &decoding_key, algorithm)?;
 
     println!("✅ Token validated successfully!");
     println!("   User Context:");
@@ -81,7 +83,7 @@ async fn main() -> Result<()> {
 
     // Demonstrate token introspection
     println!("\n📊 Token introspection...");
-    let introspection = introspect_token(&auth_result.access_token, &public_key)?;
+    let introspection = introspect_token(&auth_result.access_token, &decoding_key, algorithm)?;
     println!("   Active: {}", introspection.active);
     println!("   Scope: {}", introspection.scope);
     println!("   Username: {}", introspection.username);
@@ -100,7 +102,7 @@ async fn main() -> Result<()> {
     // Simulate OAuth2 token (for comparison)
     let oauth2_token = simulate_oauth2_token();
     println!("   OAuth2 token would be validated against provider's endpoint");
-    println!("   Users-core tokens are validated locally with public key");
+    println!("   Users-core tokens are validated locally with the issuer verification key");
 
     // Demonstrate token caching strategy
     println!("\n💾 Token caching strategy for auth-core...");
@@ -117,14 +119,14 @@ async fn main() -> Result<()> {
 
     // Expired token
     let expired_token = create_expired_token(&auth_service)?;
-    match validate_and_extract_context(&expired_token, &public_key) {
+    match validate_and_extract_context(&expired_token, &decoding_key, algorithm) {
         Ok(_) => println!("   ⚠️ Expired token validated - unexpected!"),
         Err(e) => println!("   ✓ Expired token rejected: {}", e),
     }
 
     // Invalid signature
     let tampered_token = auth_result.access_token.replace("a", "b");
-    match validate_and_extract_context(&tampered_token, &public_key) {
+    match validate_and_extract_context(&tampered_token, &decoding_key, algorithm) {
         Ok(_) => println!("   ⚠️ Tampered token validated - unexpected!"),
         Err(e) => println!("   ✓ Tampered token rejected: {}", e),
     }
@@ -136,14 +138,16 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn validate_and_extract_context(token: &str, public_key_pem: &str) -> Result<UserContext> {
-    let decoding_key = DecodingKey::from_rsa_pem(public_key_pem.as_bytes())?;
-
-    let mut validation = Validation::new(Algorithm::RS256);
+fn validate_and_extract_context(
+    token: &str,
+    decoding_key: &DecodingKey,
+    algorithm: Algorithm,
+) -> Result<UserContext> {
+    let mut validation = Validation::new(algorithm);
     validation.set_issuer(&["https://users.rvoip.local"]);
     validation.set_audience(&["rvoip-api", "rvoip-sip"]);
 
-    let token_data = decode::<UserClaims>(token, &decoding_key, &validation)?;
+    let token_data = decode::<UserClaims>(token, decoding_key, &validation)?;
     let claims = token_data.claims;
 
     Ok(UserContext {
@@ -181,9 +185,9 @@ fn simulate_jwks_endpoint(
             kty: "RSA".to_string(),
             use_: "sig".to_string(),
             kid: "users-core-2024".to_string(),
-            alg: "RS256".to_string(),
-            n: "base64url_encoded_modulus_would_go_here".to_string(),
-            e: "AQAB".to_string(),
+            alg: format!("{:?}", auth_service.jwt_issuer().algorithm()),
+            n: String::new(),
+            e: String::new(),
         }],
     })
 }
@@ -196,13 +200,16 @@ struct TokenIntrospection {
     exp: u64,
 }
 
-fn introspect_token(token: &str, public_key_pem: &str) -> Result<TokenIntrospection> {
-    let decoding_key = DecodingKey::from_rsa_pem(public_key_pem.as_bytes())?;
-    let mut validation = Validation::new(Algorithm::RS256);
+fn introspect_token(
+    token: &str,
+    decoding_key: &DecodingKey,
+    algorithm: Algorithm,
+) -> Result<TokenIntrospection> {
+    let mut validation = Validation::new(algorithm);
     validation.set_issuer(&["https://users.rvoip.local"]);
     validation.set_audience(&["rvoip-api", "rvoip-sip"]);
 
-    match decode::<UserClaims>(token, &decoding_key, &validation) {
+    match decode::<UserClaims>(token, decoding_key, &validation) {
         Ok(token_data) => {
             let claims = token_data.claims;
             Ok(TokenIntrospection {

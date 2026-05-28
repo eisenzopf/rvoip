@@ -321,20 +321,30 @@ impl DialogEventAdapter {
                 // `try_read` avoids blocking the sync conversion path;
                 // when the manager is not wired or the lock is busy we
                 // fall back to re-serialising the parsed Request.
-                let raw_bytes = self
+                let (timing, raw_bytes) = self
                     .dialog_manager
                     .try_read()
                     .ok()
                     .and_then(|guard| {
-                        guard.as_ref().and_then(|m| {
-                            m.transaction_manager().take_inbound_bytes(transaction_id)
+                        guard.as_ref().map(|m| {
+                            let transaction_manager = m.transaction_manager();
+                            (
+                                transaction_manager.peek_inbound_timing(transaction_id),
+                                transaction_manager.take_inbound_bytes(transaction_id),
+                            )
                         })
                     })
-                    .unwrap_or_else(|| {
-                        bytes::Bytes::from(
-                            rvoip_sip_core::Message::Request(request.clone()).to_bytes(),
-                        )
-                    });
+                    .unwrap_or((None, None));
+                if let Some(timing) = timing {
+                    if let Some(received_at) = timing.received_at {
+                        crate::diagnostics::record_udp_receive_to_incoming_call_emit(
+                            received_at.elapsed(),
+                        );
+                    }
+                }
+                let raw_bytes = raw_bytes.unwrap_or_else(|| {
+                    bytes::Bytes::from(rvoip_sip_core::Message::Request(request.clone()).to_bytes())
+                });
                 Some(RvoipCrossCrateEvent::DialogToSession(
                     DialogToSessionEvent::IncomingCall {
                         session_id: dialog_id.to_string(),

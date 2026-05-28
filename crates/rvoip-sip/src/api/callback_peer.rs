@@ -52,10 +52,11 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::api::dialog_package::{DialogInfo, DialogInfoDocument};
 use crate::api::events::{
@@ -63,6 +64,7 @@ use crate::api::events::{
 };
 use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::{IncomingCall, IncomingCallGuard};
+use crate::api::performance::PerformanceConfig;
 use crate::api::unified::{Config, MediaMode, RegistrationHandle, UnifiedCoordinator};
 use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result, SessionError};
@@ -267,6 +269,18 @@ impl CallbackPeerBuilder {
         self
     }
 
+    /// Enable or disable automatic `100 Trying` timer tasks on inbound INVITEs.
+    pub fn auto_100_trying(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_auto_100_trying(enabled);
+        self
+    }
+
+    /// Enable or disable immediate session-path accept for inbound INVITEs.
+    pub fn fast_auto_accept_incoming_calls(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_fast_auto_accept_incoming_calls(enabled);
+        self
+    }
+
     /// Enable or disable real media-core RTP allocation.
     pub fn media_enabled(mut self, enabled: bool) -> Self {
         self.config = self.config.with_media_enabled(enabled);
@@ -281,6 +295,54 @@ impl CallbackPeerBuilder {
         self
     }
 
+    /// Set the RTP media port range by start port and requested capacity.
+    pub fn media_port_capacity(mut self, start: u16, capacity: usize) -> Self {
+        self.config = self.config.with_media_port_capacity(start, capacity);
+        self
+    }
+
+    /// Set the media-core session and RTP allocator capacity hint.
+    pub fn media_session_capacity(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_media_session_capacity(capacity);
+        self
+    }
+
+    /// Apply the high-CPS UDP auto-answer profile.
+    pub fn high_cps_udp_auto_answer(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_high_cps_udp_auto_answer(capacity);
+        self
+    }
+
+    /// Apply a YAML-backed performance recipe.
+    pub fn performance_config(mut self, performance: PerformanceConfig) -> Result<Self> {
+        self.config = self.config.try_with_performance_config(performance)?;
+        Ok(self)
+    }
+
+    /// Apply the PBX media server performance recipe.
+    pub fn pbx_media_server_performance(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_pbx_media_server_performance(capacity);
+        self
+    }
+
+    /// Apply the signaling-only high-performance server recipe.
+    pub fn signaling_only_server_high_performance(
+        mut self,
+        capacity: usize,
+        sdp_rtp_port: u16,
+    ) -> Self {
+        self.config = self
+            .config
+            .with_signaling_only_server_high_performance(capacity, sdp_rtp_port);
+        self
+    }
+
+    /// Set app-facing event buffer capacity.
+    pub fn app_event_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_app_event_channel_capacity(capacity);
+        self
+    }
+
     /// Set the UDP parse worker count.
     pub fn sip_udp_parse_workers(mut self, workers: usize) -> Self {
         self.config = self.config.with_sip_udp_parse_workers(workers);
@@ -290,6 +352,89 @@ impl CallbackPeerBuilder {
     /// Set the per-worker UDP parse queue capacity.
     pub fn sip_udp_parse_queue_capacity(mut self, capacity: usize) -> Self {
         self.config = self.config.with_sip_udp_parse_queue_capacity(capacity);
+        self
+    }
+
+    /// Set the per-transaction command channel capacity.
+    pub fn sip_transaction_command_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config = self
+            .config
+            .with_sip_transaction_command_channel_capacity(capacity);
+        self
+    }
+
+    /// Set the server-side inbound call admission limit.
+    pub fn server_call_admission_limit(mut self, limit: usize) -> Self {
+        self.config = self.config.with_server_call_admission_limit(limit);
+        self
+    }
+
+    /// Set the soft threshold where server-side admission starts pacing.
+    pub fn server_call_admission_soft_limit(mut self, limit: usize) -> Self {
+        self.config = self.config.with_server_call_admission_soft_limit(limit);
+        self
+    }
+
+    /// Set the delay in milliseconds while above the soft admission threshold.
+    pub fn server_call_admission_pacing_delay_ms(mut self, delay_ms: u64) -> Self {
+        self.config = self
+            .config
+            .with_server_call_admission_pacing_delay_ms(delay_ms);
+        self
+    }
+
+    /// Set the `Retry-After` value used for server overload rejections.
+    pub fn server_overload_retry_after_secs(mut self, seconds: u32) -> Self {
+        self.config = self.config.with_server_overload_retry_after_secs(seconds);
+        self
+    }
+
+    /// Enable or disable SIP UDP transport and duplicate-recovery diagnostics.
+    pub fn sip_udp_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_sip_udp_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable media setup/teardown timing diagnostics.
+    pub fn media_setup_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_media_setup_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable cleanup-stage timing diagnostics.
+    pub fn cleanup_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_cleanup_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable per-operation cleanup diagnostic event logs.
+    pub fn cleanup_diagnostic_events(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_cleanup_diagnostic_events(enabled);
+        self
+    }
+
+    /// Set the RSS growth threshold used by perf soak release gates.
+    #[cfg(feature = "perf-tests")]
+    pub fn perf_max_rss_growth_mb_per_hr(mut self, limit: f64) -> Self {
+        self.config = self.config.with_perf_max_rss_growth_mb_per_hr(limit);
+        self
+    }
+
+    /// Enable or disable SRTP negotiation diagnostic log lines.
+    pub fn srtp_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_srtp_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable RTP packet diagnostic log lines.
+    pub fn rtp_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_rtp_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable SDP media diagnostic log lines.
+    pub fn media_sdp_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_media_sdp_diagnostics(enabled);
         self
     }
 
@@ -1277,8 +1422,48 @@ pub struct CallbackPeer<H: CallHandler> {
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     established_callbacks: Arc<tokio::sync::Mutex<HashSet<CallId>>>,
-    terminal_callbacks: Arc<tokio::sync::Mutex<HashSet<CallId>>>,
+    terminal_callbacks: Arc<tokio::sync::Mutex<BoundedCallDedupe>>,
     deferred_calls: Arc<tokio::sync::Mutex<HashMap<CallId, IncomingCallGuard>>>,
+}
+
+const TERMINAL_CALLBACK_DEDUPE_CAPACITY: usize = 8192;
+
+struct BoundedCallDedupe {
+    set: HashSet<CallId>,
+    order: VecDeque<CallId>,
+    capacity: usize,
+}
+
+impl BoundedCallDedupe {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            set: HashSet::with_capacity(capacity),
+            order: VecDeque::with_capacity(capacity),
+            capacity: capacity.max(1),
+        }
+    }
+
+    fn insert(&mut self, call_id: CallId) -> bool {
+        if self.set.contains(&call_id) {
+            return false;
+        }
+
+        self.set.insert(call_id.clone());
+        self.order.push_back(call_id);
+
+        while self.order.len() > self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.set.remove(&oldest);
+            }
+        }
+
+        true
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.set.len()
+    }
 }
 
 impl CallbackPeer<CallbackBuilderHandler> {
@@ -1338,7 +1523,9 @@ impl<H: CallHandler> CallbackPeer<H> {
             shutdown_tx,
             shutdown_rx,
             established_callbacks: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
-            terminal_callbacks: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            terminal_callbacks: Arc::new(tokio::sync::Mutex::new(
+                BoundedCallDedupe::with_capacity(TERMINAL_CALLBACK_DEDUPE_CAPACITY),
+            )),
             deferred_calls: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         })
     }
@@ -1538,6 +1725,7 @@ impl<H: CallHandler> CallbackPeer<H> {
         let mut handlers: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
         loop {
+            reap_ready_handlers(&mut handlers, "completed");
             tokio::select! {
                 // Check for shutdown signal
                 _ = shutdown_rx.changed() => {
@@ -1573,6 +1761,7 @@ impl<H: CallHandler> CallbackPeer<H> {
 
                     let event = session_event.event.clone();
                     self.dispatch(event, &mut handlers).await;
+                    reap_ready_handlers(&mut handlers, "post-dispatch");
                 }
             }
         }
@@ -1599,8 +1788,17 @@ impl<H: CallHandler> CallbackPeer<H> {
             deferred.clear();
         }
 
-        // Shut down the coordinator's background tasks too
-        self.coordinator.shutdown();
+        // Shut down the coordinator and wait for dialog/transaction
+        // transports to close before `run()` returns. Tests and services may
+        // immediately restart a peer on the same port after this future
+        // resolves.
+        if let Err(e) = self
+            .coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+        {
+            tracing::warn!("[CallbackPeer] Coordinator shutdown failed: {}", e);
+        }
         Ok(())
     }
 
@@ -1612,6 +1810,7 @@ impl<H: CallHandler> CallbackPeer<H> {
         let established_callbacks = self.established_callbacks.clone();
         let terminal_callbacks = self.terminal_callbacks.clone();
         let deferred_calls = self.deferred_calls.clone();
+        let fast_auto_accept_incoming_calls = coordinator.fast_auto_accept_incoming_calls();
 
         handlers.spawn(async move {
             let dispatch_guard = cleanup_diag::stage_guard(
@@ -1661,6 +1860,14 @@ impl<H: CallHandler> CallbackPeer<H> {
                     // out of Ringing and the call becomes a no-op error we ignore.
                     match decision {
                         CallHandlerDecision::Accept => {
+                            if fast_auto_accept_incoming_calls {
+                                tracing::debug!(
+                                    "Callback accept decision for {} already handled by fast auto-accept",
+                                    call_id
+                                );
+                                return;
+                            }
+
                             let accept_guard = cleanup_diag::stage_guard(
                                 CleanupStage::CallbackAcceptCall,
                                 call_id.to_string(),
@@ -1689,6 +1896,14 @@ impl<H: CallHandler> CallbackPeer<H> {
                             }
                         }
                         CallHandlerDecision::AcceptWithSdp(sdp) => {
+                            if fast_auto_accept_incoming_calls {
+                                tracing::debug!(
+                                    "Callback accept-with-SDP decision for {} already handled by fast auto-accept",
+                                    call_id
+                                );
+                                return;
+                            }
+
                             let accept_guard = cleanup_diag::stage_guard(
                                 CleanupStage::CallbackAcceptCall,
                                 call_id.to_string(),
@@ -1717,6 +1932,14 @@ impl<H: CallHandler> CallbackPeer<H> {
                             }
                         }
                         CallHandlerDecision::Reject { status, reason } => {
+                            if fast_auto_accept_incoming_calls {
+                                tracing::debug!(
+                                    "Callback reject decision for {} ignored because fast auto-accept already answered the call",
+                                    call_id
+                                );
+                                return;
+                            }
+
                             let _ = coordinator
                                 .reject(&call_id)
                                 .with_status(status)
@@ -1725,6 +1948,14 @@ impl<H: CallHandler> CallbackPeer<H> {
                                 .await;
                         }
                         CallHandlerDecision::Redirect(target) => {
+                            if fast_auto_accept_incoming_calls {
+                                tracing::debug!(
+                                    "Callback redirect decision for {} ignored because fast auto-accept already answered the call",
+                                    call_id
+                                );
+                                return;
+                            }
+
                             let _ = coordinator
                                 .redirect(&call_id)
                                 .with_status(302)
@@ -1733,6 +1964,15 @@ impl<H: CallHandler> CallbackPeer<H> {
                                 .await;
                         }
                         CallHandlerDecision::Defer(guard) => {
+                            if fast_auto_accept_incoming_calls {
+                                guard.resolve_without_response();
+                                tracing::debug!(
+                                    "Callback defer decision for {} ignored because fast auto-accept already answered the call",
+                                    call_id
+                                );
+                                return;
+                            }
+
                             deferred_calls.lock().await.insert(call_id, guard);
                         }
                     }
@@ -2078,6 +2318,16 @@ impl<H: CallHandler> CallbackPeer<H> {
     }
 }
 
+fn reap_ready_handlers(handlers: &mut tokio::task::JoinSet<()>, context: &str) {
+    while let Some(join_result) = handlers.try_join_next() {
+        if let Err(e) = join_result {
+            if !e.is_cancelled() {
+                tracing::warn!("[CallbackPeer] Handler task panicked or errored ({context}): {e}");
+            }
+        }
+    }
+}
+
 fn callback_stage_for_event(event: &Event) -> CleanupStage {
     match event {
         Event::IncomingCall { .. } => CleanupStage::CallbackIncomingDispatch,
@@ -2237,6 +2487,18 @@ mod tests {
     use rvoip_sip_core::types::sdp::CryptoSuite;
     use std::sync::Mutex;
     use tokio::task::JoinSet;
+
+    #[test]
+    fn bounded_terminal_callback_dedupe_evicts_oldest_entries() {
+        let mut dedupe = BoundedCallDedupe::with_capacity(2);
+        assert!(dedupe.insert(SessionId("call-1".to_string())));
+        assert!(!dedupe.insert(SessionId("call-1".to_string())));
+        assert!(dedupe.insert(SessionId("call-2".to_string())));
+        assert_eq!(dedupe.len(), 2);
+        assert!(dedupe.insert(SessionId("call-3".to_string())));
+        assert_eq!(dedupe.len(), 2);
+        assert!(dedupe.insert(SessionId("call-1".to_string())));
+    }
 
     #[derive(Default)]
     struct RecordingHandler {

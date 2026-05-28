@@ -25,7 +25,7 @@ echo "Running examples..."
 declare -a results=()
 
 # Run each example
-for example in basic_usage api_key_service sip_register_flow token_validation multi_device_presence session_core_v2_integration; do
+for example in users_core_basic_usage api_key_service sip_register_flow token_validation multi_device_presence session_core_v2_integration; do
     echo -n "  $example... "
     cleanup
     if cargo run --example "$example" --quiet > /dev/null 2>&1; then

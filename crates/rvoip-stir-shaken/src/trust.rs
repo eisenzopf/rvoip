@@ -8,13 +8,14 @@
 //! application supplies them via [`TrustStore`], either as DER blobs
 //! or a PEM bundle file.
 //!
-//! `TrustStore` is opaque: it stores DER bytes and produces borrowed
-//! `webpki::TrustAnchor` views on demand, so the `webpki` types never
-//! leak into the public API.
+//! `TrustStore` is opaque: it stores DER bytes and produces
+//! `rustls_pki_types::TrustAnchor` views on demand, so the webpki
+//! types never leak into the public API.
 
 use crate::errors::VerifierError;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
+use rustls_pki_types::{CertificateDer, TrustAnchor};
 
 /// A collection of trusted STI-CA root certificates in DER form.
 ///
@@ -76,16 +77,19 @@ impl TrustStore {
         self.anchors_der.len()
     }
 
-    /// Build borrowed `webpki::TrustAnchor` views over the stored
-    /// DER blobs. Errors if any anchor fails to parse — caller maps
-    /// that to a configuration-time fatal.
-    pub(crate) fn as_trust_anchors(&self) -> Result<Vec<webpki::TrustAnchor<'_>>, VerifierError> {
+    /// Build owned `TrustAnchor` views over the stored DER blobs.
+    /// Errors if any anchor fails to parse — caller maps that to a
+    /// configuration-time fatal.
+    pub(crate) fn as_trust_anchors(&self) -> Result<Vec<TrustAnchor<'static>>, VerifierError> {
         self.anchors_der
             .iter()
             .map(|der| {
-                webpki::TrustAnchor::try_from_cert_der(der).map_err(|e| {
-                    VerifierError::CertChain(format!("trust anchor cert parse failed: {}", e))
-                })
+                let cert_der = CertificateDer::from(der.as_slice());
+                webpki::anchor_from_trusted_cert(&cert_der)
+                    .map(|anchor| anchor.to_owned())
+                    .map_err(|e| {
+                        VerifierError::CertChain(format!("trust anchor cert parse failed: {}", e))
+                    })
             })
             .collect()
     }

@@ -4,6 +4,12 @@
 [![Documentation](https://docs.rs/rvoip-dialog-core/badge.svg)](https://docs.rs/rvoip-dialog-core)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 
+> **Beta scope notice:** this README still contains older package names and
+> broad completion language. For the `rvoip-sip` beta, dialog-layer claims are
+> governed by `crates/rvoip-sip/docs/COMPATIBILITY_MATRIX.md` and
+> `crates/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md` until this README is fully
+> rewritten.
+
 RFC 3261 SIP Dialog Management Layer for the [rvoip](../README.md) VoIP stack, providing clean separation between session coordination and SIP protocol operations.
 
 ## Overview
@@ -590,7 +596,7 @@ Contributions are welcome! Please see the main [rvoip contributing guidelines](.
 When contributing to dialog-core:
 1. Ensure proper RFC 3261 compliance
 2. Maintain clean layer separation
-3. Add comprehensive tests for new functionality  
+3. Add comprehensive tests for new functionality
 4. Update documentation and examples
 5. Follow the existing API patterns
 
@@ -601,4 +607,4 @@ This project is licensed under either of
 - Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
 - MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
-at your option. 
+at your option.

@@ -3,6 +3,7 @@
 //! Just builds the UnifiedCoordinator with configuration.
 //! No complex setup - the state table handles everything.
 
+use crate::api::performance::PerformanceConfig;
 use crate::api::unified::{Config, MediaMode, UnifiedCoordinator};
 use crate::errors::Result;
 use std::net::{IpAddr, SocketAddr};
@@ -40,6 +41,18 @@ impl SessionBuilder {
         self
     }
 
+    /// Enable or disable automatic `100 Trying` timer tasks on inbound INVITEs.
+    pub fn with_auto_100_trying(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_auto_100_trying(enabled);
+        self
+    }
+
+    /// Enable or disable immediate session-path accept for inbound INVITEs.
+    pub fn with_fast_auto_accept_incoming_calls(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_fast_auto_accept_incoming_calls(enabled);
+        self
+    }
+
     /// Enable or disable real media-core RTP allocation.
     pub fn with_media_enabled(mut self, enabled: bool) -> Self {
         self.config = self.config.with_media_enabled(enabled);
@@ -70,9 +83,83 @@ impl SessionBuilder {
         self
     }
 
+    /// Set app-facing event buffer capacity.
+    pub fn with_app_event_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_app_event_channel_capacity(capacity);
+        self
+    }
+
     /// Set a server-side active-call capacity profile.
     pub fn with_server_capacity(mut self, capacity: usize) -> Self {
         self.config = self.config.with_server_capacity(capacity);
+        self
+    }
+
+    /// Set the server-side inbound call admission limit.
+    pub fn with_server_call_admission_limit(mut self, limit: usize) -> Self {
+        self.config = self.config.with_server_call_admission_limit(limit);
+        self
+    }
+
+    /// Set the soft threshold where server-side admission starts pacing.
+    pub fn with_server_call_admission_soft_limit(mut self, limit: usize) -> Self {
+        self.config = self.config.with_server_call_admission_soft_limit(limit);
+        self
+    }
+
+    /// Set the delay in milliseconds while above the soft admission threshold.
+    pub fn with_server_call_admission_pacing_delay_ms(mut self, delay_ms: u64) -> Self {
+        self.config = self
+            .config
+            .with_server_call_admission_pacing_delay_ms(delay_ms);
+        self
+    }
+
+    /// Set the `Retry-After` value used for server overload rejections.
+    pub fn with_server_overload_retry_after_secs(mut self, seconds: u32) -> Self {
+        self.config = self.config.with_server_overload_retry_after_secs(seconds);
+        self
+    }
+
+    /// Apply the high-CPS UDP auto-answer profile.
+    pub fn with_high_cps_udp_auto_answer(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_high_cps_udp_auto_answer(capacity);
+        self
+    }
+
+    /// Apply a YAML-backed performance recipe.
+    pub fn with_performance_config(mut self, performance: PerformanceConfig) -> Result<Self> {
+        self.config = self.config.try_with_performance_config(performance)?;
+        Ok(self)
+    }
+
+    /// Apply the PBX media server performance recipe.
+    pub fn with_pbx_media_server_performance(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_pbx_media_server_performance(capacity);
+        self
+    }
+
+    /// Apply the signaling-only high-performance server recipe.
+    pub fn with_signaling_only_server_high_performance(
+        mut self,
+        capacity: usize,
+        sdp_rtp_port: u16,
+    ) -> Self {
+        self.config = self
+            .config
+            .with_signaling_only_server_high_performance(capacity, sdp_rtp_port);
+        self
+    }
+
+    /// Set the RTP media port range by start port and requested capacity.
+    pub fn with_media_port_capacity(mut self, start: u16, capacity: usize) -> Self {
+        self.config = self.config.with_media_port_capacity(start, capacity);
+        self
+    }
+
+    /// Set the media-core session and RTP allocator capacity hint.
+    pub fn with_media_session_capacity(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_media_session_capacity(capacity);
         self
     }
 
@@ -85,6 +172,18 @@ impl SessionBuilder {
     /// Set the SIP transport event channel capacity.
     pub fn with_sip_transport_channel_capacity(mut self, capacity: usize) -> Self {
         self.config.sip_transport_channel_capacity = capacity;
+        self
+    }
+
+    /// Set the SIP transport-manager forwarding worker count.
+    pub fn with_sip_transport_dispatch_workers(mut self, workers: usize) -> Self {
+        self.config.sip_transport_dispatch_workers = Some(workers);
+        self
+    }
+
+    /// Set the SIP transport-manager forwarding queue capacity.
+    pub fn with_sip_transport_dispatch_queue_capacity(mut self, capacity: usize) -> Self {
+        self.config.sip_transport_dispatch_queue_capacity = Some(capacity);
         self
     }
 
@@ -124,9 +223,126 @@ impl SessionBuilder {
         self
     }
 
+    /// Set the UDP parse worker dispatch strategy.
+    pub fn with_sip_udp_parse_dispatch(
+        mut self,
+        dispatch: rvoip_sip_transport::UdpParseDispatch,
+    ) -> Self {
+        self.config.sip_udp_parse_dispatch = Some(dispatch);
+        self
+    }
+
+    /// Enable or disable SIP UDP transport and duplicate-recovery diagnostics.
+    pub fn with_sip_udp_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_sip_udp_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable high-cardinality transaction timing diagnostics.
+    pub fn with_sip_transaction_timing_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_sip_transaction_timing_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable media setup/teardown timing diagnostics.
+    pub fn with_media_setup_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_media_setup_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable cleanup-stage timing diagnostics.
+    pub fn with_cleanup_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_cleanup_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable per-operation cleanup diagnostic event logs.
+    pub fn with_cleanup_diagnostic_events(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_cleanup_diagnostic_events(enabled);
+        self
+    }
+
+    /// Set the RSS growth threshold used by perf soak release gates.
+    #[cfg(feature = "perf-tests")]
+    pub fn with_perf_max_rss_growth_mb_per_hr(mut self, limit: f64) -> Self {
+        self.config = self.config.with_perf_max_rss_growth_mb_per_hr(limit);
+        self
+    }
+
+    /// Enable or disable SRTP negotiation diagnostic log lines.
+    pub fn with_srtp_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_srtp_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable RTP packet diagnostic log lines.
+    pub fn with_rtp_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_rtp_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable SDP media diagnostic log lines.
+    pub fn with_media_sdp_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_media_sdp_diagnostics(enabled);
+        self
+    }
+
     /// Set the transaction-manager event channel capacity.
     pub fn with_transaction_event_channel_capacity(mut self, capacity: usize) -> Self {
         self.config.transaction_event_channel_capacity = capacity;
+        self
+    }
+
+    /// Set the transaction-manager ingress dispatch worker count.
+    pub fn with_sip_transaction_dispatch_workers(mut self, workers: usize) -> Self {
+        self.config.sip_transaction_dispatch_workers = Some(workers);
+        self
+    }
+
+    /// Set the transaction-manager ingress dispatch queue capacity.
+    pub fn with_sip_transaction_dispatch_queue_capacity(mut self, capacity: usize) -> Self {
+        self.config.sip_transaction_dispatch_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the per-transaction command channel capacity.
+    pub fn with_sip_transaction_command_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config = self
+            .config
+            .with_sip_transaction_command_channel_capacity(capacity);
+        self
+    }
+
+    /// Set the transaction-manager ACK/BYE priority burst limit.
+    pub fn with_sip_transaction_dispatch_priority_burst_max(mut self, max_burst: usize) -> Self {
+        self.config.sip_transaction_dispatch_priority_burst_max = Some(max_burst);
+        self
+    }
+
+    /// Set the cached INVITE `2xx` retransmission maintenance budget.
+    pub fn with_sip_invite_2xx_retransmit_max_due_per_tick(
+        mut self,
+        max_due_per_tick: usize,
+    ) -> Self {
+        self.config.sip_invite_2xx_retransmit_max_due_per_tick = Some(max_due_per_tick);
+        self
+    }
+
+    /// Set the dialog-core transaction-event dispatch worker count.
+    pub fn with_sip_dialog_dispatch_workers(mut self, workers: usize) -> Self {
+        self.config.sip_dialog_dispatch_workers = Some(workers);
+        self
+    }
+
+    /// Set the dialog-core transaction-event dispatch queue capacity.
+    pub fn with_sip_dialog_dispatch_queue_capacity(mut self, capacity: usize) -> Self {
+        self.config.sip_dialog_dispatch_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Enable or disable high-cardinality dialog timing diagnostics.
+    pub fn with_sip_dialog_timing_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_sip_dialog_timing_diagnostics(enabled);
         self
     }
 
@@ -191,18 +407,73 @@ mod tests {
         let builder = SessionBuilder::new()
             .with_channel_capacity(256)
             .with_server_capacity(128)
-            .with_sip_udp_socket_buffers(Some(65_536), Some(32_768));
+            .with_server_call_admission_limit(512)
+            .with_server_call_admission_soft_limit(480)
+            .with_server_call_admission_pacing_delay_ms(2)
+            .with_server_overload_retry_after_secs(2)
+            .with_sip_transport_dispatch_workers(2)
+            .with_sip_transport_dispatch_queue_capacity(4096)
+            .with_sip_udp_socket_buffers(Some(65_536), Some(32_768))
+            .with_sip_udp_parse_workers(4)
+            .with_sip_udp_parse_queue_capacity(8192)
+            .with_sip_udp_parse_dispatch(rvoip_sip_transport::UdpParseDispatch::RoundRobin)
+            .with_sip_transaction_dispatch_workers(4)
+            .with_sip_transaction_dispatch_queue_capacity(8192)
+            .with_sip_transaction_dispatch_priority_burst_max(32)
+            .with_sip_invite_2xx_retransmit_max_due_per_tick(512)
+            .with_sip_dialog_dispatch_workers(4)
+            .with_sip_dialog_dispatch_queue_capacity(8192)
+            .with_app_event_channel_capacity(2048)
+            .with_sip_dialog_timing_diagnostics(true);
 
         assert_eq!(builder.config.incoming_call_channel_capacity, 256);
         assert_eq!(builder.config.state_event_channel_capacity, 256);
         assert_eq!(builder.config.sip_transport_channel_capacity, 2560);
+        assert_eq!(builder.config.sip_transport_dispatch_workers, Some(2));
+        assert_eq!(
+            builder.config.sip_transport_dispatch_queue_capacity,
+            Some(4096)
+        );
         assert_eq!(builder.config.server_call_capacity, Some(128));
+        assert_eq!(builder.config.server_call_admission_limit, Some(512));
+        assert_eq!(builder.config.server_call_admission_soft_limit, Some(480));
+        assert_eq!(
+            builder.config.server_call_admission_pacing_delay_ms,
+            Some(2)
+        );
+        assert_eq!(builder.config.server_overload_retry_after_secs, Some(2));
         assert_eq!(builder.config.sip_udp_recv_buffer_size, Some(65_536));
         assert_eq!(builder.config.sip_udp_send_buffer_size, Some(32_768));
+        assert_eq!(builder.config.sip_udp_parse_workers, Some(4));
+        assert_eq!(builder.config.sip_udp_parse_queue_capacity, Some(8192));
+        assert_eq!(
+            builder.config.sip_udp_parse_dispatch,
+            Some(rvoip_sip_transport::UdpParseDispatch::RoundRobin)
+        );
         assert_eq!(builder.config.transaction_event_channel_capacity, 2560);
+        assert_eq!(builder.config.sip_transaction_dispatch_workers, Some(4));
+        assert_eq!(
+            builder.config.sip_transaction_dispatch_queue_capacity,
+            Some(8192)
+        );
+        assert_eq!(
+            builder.config.sip_transaction_dispatch_priority_burst_max,
+            Some(32)
+        );
+        assert_eq!(
+            builder.config.sip_invite_2xx_retransmit_max_due_per_tick,
+            Some(512)
+        );
+        assert_eq!(builder.config.sip_dialog_dispatch_workers, Some(4));
+        assert_eq!(
+            builder.config.sip_dialog_dispatch_queue_capacity,
+            Some(8192)
+        );
+        assert!(builder.config.sip_dialog_timing_diagnostics);
         assert_eq!(
             builder.config.session_event_dispatcher_channel_capacity,
-            2560
+            2048
         );
+        assert_eq!(builder.config.global_event_channel_capacity, 2048);
     }
 }

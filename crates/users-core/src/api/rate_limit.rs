@@ -252,18 +252,15 @@ pub async fn rate_limit_middleware(
         .and_then(|value| value.to_str().ok())
     {
         if let Some(token) = auth_header.strip_prefix("Bearer ") {
-            // Try to decode the JWT to get the user ID
-            if let Ok(public_key) = state.auth_service.jwt_issuer().public_key_pem() {
-                if let Ok(decoding_key) = DecodingKey::from_rsa_pem(public_key.as_bytes()) {
-                    let mut validation = Validation::new(Algorithm::RS256);
-                    validation.set_issuer(&["https://users.rvoip.local"]);
-                    validation.set_audience(&["rvoip-api", "rvoip-sip"]);
+            // Try to decode the JWT to get the user ID.
+            let issuer = state.auth_service.jwt_issuer();
+            let mut validation = Validation::new(issuer.algorithm());
+            validation.set_issuer(&["https://users.rvoip.local"]);
+            validation.set_audience(&["rvoip-api", "rvoip-sip"]);
 
-                    if let Ok(token_data) = decode::<UserClaims>(token, &decoding_key, &validation)
-                    {
-                        user_id = Some(token_data.claims.sub);
-                    }
-                }
+            if let Ok(token_data) = decode::<UserClaims>(token, issuer.decoding_key(), &validation)
+            {
+                user_id = Some(token_data.claims.sub);
             }
         }
     }

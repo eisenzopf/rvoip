@@ -108,8 +108,9 @@ impl DialogManager {
         // back to *this* UPDATE, not to the stale INVITE-server-tx kept
         // around for retransmission. Required because UPDATE responses must
         // echo the UPDATE's Via/branch per RFC 3261 §17.2.
-        self.transaction_to_dialog
-            .insert(transaction_id.clone(), dialog_id.clone());
+        self.link_transaction_to_dialog_indexed(&transaction_id, &dialog_id);
+        self.pending_response_transaction_by_dialog
+            .insert(dialog_id.clone(), transaction_id.clone());
 
         let event = SessionCoordinationEvent::ReInvite {
             dialog_id: dialog_id.clone(),

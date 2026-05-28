@@ -654,7 +654,7 @@ impl YamlTableLoader {
                             .to_string();
                         Ok(EventType::MakeCall { target })
                     }
-                    "IncomingCall" => {
+                    "IncomingCall" | "IncomingCallAutoAccept" => {
                         let from = parameters
                             .get("from")
                             .and_then(|v| v.as_str())
@@ -664,7 +664,11 @@ impl YamlTableLoader {
                             .get("sdp")
                             .and_then(|v| v.as_str())
                             .map(String::from);
-                        Ok(EventType::IncomingCall { from, sdp })
+                        if event_type == "IncomingCallAutoAccept" {
+                            Ok(EventType::IncomingCallAutoAccept { from, sdp })
+                        } else {
+                            Ok(EventType::IncomingCall { from, sdp })
+                        }
                     }
                     "SendEarlyMedia" => {
                         let sdp = parameters
@@ -770,6 +774,10 @@ impl YamlTableLoader {
             // Gateway-specific BYE events
             "InboundBYE" | "OutboundBYE" => Ok(EventType::DialogBYE),
             "IncomingCall" => Ok(EventType::IncomingCall {
+                from: String::new(),
+                sdp: None,
+            }),
+            "IncomingCallAutoAccept" => Ok(EventType::IncomingCallAutoAccept {
                 from: String::new(),
                 sdp: None,
             }),

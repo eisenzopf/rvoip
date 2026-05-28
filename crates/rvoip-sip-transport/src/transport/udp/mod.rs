@@ -8,7 +8,7 @@ pub use socket::UdpSocketOptions;
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -19,7 +19,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::diagnostics;
 use crate::error::{Error, Result};
-use crate::transport::{Transport, TransportEvent, TransportType};
+use crate::transport::{Transport, TransportEvent, TransportReceiveTiming, TransportType};
 use rvoip_sip_core::Message;
 
 // Default channel capacity
@@ -33,6 +33,21 @@ const MAX_PARSE_WORKERS: usize = 64;
 /// with known path MTU can override via [`UdpTransport::bind_with_mtu`].
 pub const UDP_SAFE_MAX_BYTES: usize = 1300;
 
+/// UDP parse worker dispatch strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UdpParseDispatch {
+    /// Preserve per-source ordering by consistently hashing source IP:port.
+    SourceHash,
+    /// Spread datagrams across workers in receive order.
+    RoundRobin,
+}
+
+impl Default for UdpParseDispatch {
+    fn default() -> Self {
+        Self::SourceHash
+    }
+}
+
 /// UDP receive-side SIP parse worker configuration.
 ///
 /// The socket receive loop drains kernel UDP packets into a bounded worker
@@ -45,6 +60,8 @@ pub struct UdpParseConfig {
     pub worker_count: usize,
     /// Per-worker datagram queue capacity.
     pub queue_capacity: usize,
+    /// How the socket task selects parse workers.
+    pub dispatch: UdpParseDispatch,
 }
 
 impl UdpParseConfig {
@@ -55,10 +72,27 @@ impl UdpParseConfig {
 
     /// Create a parse config, clamping invalid values to safe bounds.
     pub fn new(worker_count: usize, queue_capacity: usize) -> Self {
+        Self::new_with_dispatch(worker_count, queue_capacity, UdpParseDispatch::default())
+    }
+
+    /// Create a parse config with an explicit dispatch mode, clamping invalid
+    /// values to safe bounds.
+    pub fn new_with_dispatch(
+        worker_count: usize,
+        queue_capacity: usize,
+        dispatch: UdpParseDispatch,
+    ) -> Self {
         Self {
             worker_count: worker_count.clamp(1, MAX_PARSE_WORKERS),
             queue_capacity: queue_capacity.max(1),
+            dispatch,
         }
+    }
+
+    /// Return this config with a different dispatch mode.
+    pub fn with_dispatch(mut self, dispatch: UdpParseDispatch) -> Self {
+        self.dispatch = dispatch;
+        self
     }
 
     /// Build a parse config only when at least one optional override is set.
@@ -67,13 +101,29 @@ impl UdpParseConfig {
         queue_capacity: Option<usize>,
         default_queue_capacity: usize,
     ) -> Option<Self> {
-        if worker_count.is_none() && queue_capacity.is_none() {
+        Self::from_optional_with_dispatch(
+            worker_count,
+            queue_capacity,
+            None,
+            default_queue_capacity,
+        )
+    }
+
+    /// Build a parse config only when at least one optional override is set.
+    pub fn from_optional_with_dispatch(
+        worker_count: Option<usize>,
+        queue_capacity: Option<usize>,
+        dispatch: Option<UdpParseDispatch>,
+        default_queue_capacity: usize,
+    ) -> Option<Self> {
+        if worker_count.is_none() && queue_capacity.is_none() && dispatch.is_none() {
             return None;
         }
 
-        Some(Self::new(
+        Some(Self::new_with_dispatch(
             worker_count.unwrap_or(DEFAULT_PARSE_WORKERS),
             queue_capacity.unwrap_or(default_queue_capacity),
+            dispatch.unwrap_or_default(),
         ))
     }
 
@@ -106,6 +156,7 @@ struct UdpTransportInner {
     socket_options: UdpSocketOptions,
     parse_worker_count: usize,
     parse_worker_queue_capacity: usize,
+    parse_dispatch: UdpParseDispatch,
 }
 
 #[derive(Debug)]
@@ -113,6 +164,7 @@ struct UdpDatagram {
     packet: Bytes,
     source: SocketAddr,
     local_addr: SocketAddr,
+    timing: Option<TransportReceiveTiming>,
 }
 
 impl UdpTransport {
@@ -191,6 +243,7 @@ impl UdpTransport {
         let parse_config = UdpParseConfig::effective(parse_config, capacity);
         let parse_worker_count = parse_config.worker_count;
         let parse_worker_queue_capacity = parse_config.queue_capacity;
+        let parse_dispatch = parse_config.dispatch;
 
         // Create the UDP listener
         let listener = UdpListener::bind_with_socket_options(addr, socket_options).await?;
@@ -221,6 +274,7 @@ impl UdpTransport {
                 socket_options,
                 parse_worker_count,
                 parse_worker_queue_capacity,
+                parse_dispatch,
             }),
         };
 
@@ -259,6 +313,7 @@ impl UdpTransport {
                 socket_options: UdpSocketOptions::default(),
                 parse_worker_count: 1,
                 parse_worker_queue_capacity: DEFAULT_CHANNEL_CAPACITY,
+                parse_dispatch: UdpParseDispatch::SourceHash,
             }),
         }
     }
@@ -270,9 +325,10 @@ impl UdpTransport {
 
     /// Returns the parse worker configuration requested at bind time.
     pub fn parse_config(&self) -> UdpParseConfig {
-        UdpParseConfig::new(
+        UdpParseConfig::new_with_dispatch(
             self.inner.parse_worker_count,
             self.inner.parse_worker_queue_capacity,
+            self.inner.parse_dispatch,
         )
     }
 
@@ -280,6 +336,8 @@ impl UdpTransport {
     async fn spawn_receive_loop(&self) {
         let worker_count = self.inner.parse_worker_count;
         let queue_capacity = self.inner.parse_worker_queue_capacity;
+        let dispatch = self.inner.parse_dispatch;
+        let round_robin_worker = Arc::new(AtomicUsize::new(0));
         let mut worker_senders = Vec::with_capacity(worker_count);
         let mut worker_handles = Vec::with_capacity(worker_count);
 
@@ -302,6 +360,7 @@ impl UdpTransport {
         let mut shutdown_rx = self.inner.shutdown_rx.clone();
         let listener_clone = self.inner.listener.clone();
         let events_tx = self.inner.events_tx.clone();
+        let round_robin_worker = Arc::clone(&round_robin_worker);
 
         let handle = tokio::spawn(async move {
             loop {
@@ -322,11 +381,21 @@ impl UdpTransport {
                             Ok((packet, src, local_addr)) => {
                                 diagnostics::record_udp_datagram_received();
                                 trace!("Received UDP datagram from {}", src);
-                                let worker_index = udp_worker_index(src, worker_senders.len());
+                                let received_at = diagnostics::enabled().then(Instant::now);
+                                let worker_index = udp_worker_index(
+                                    src,
+                                    worker_senders.len(),
+                                    dispatch,
+                                    &round_robin_worker,
+                                );
                                 let datagram = UdpDatagram {
                                     packet,
                                     source: src,
                                     local_addr,
+                                    timing: received_at.map(|received_at| TransportReceiveTiming {
+                                        received_at: Some(received_at),
+                                        ..Default::default()
+                                    }),
                                 };
                                 match worker_senders[worker_index].try_send(datagram) {
                                     Ok(()) => diagnostics::record_udp_worker_queue_enqueued(),
@@ -394,11 +463,27 @@ async fn udp_parse_worker(
 
 async fn process_udp_datagram(
     worker_id: usize,
-    datagram: UdpDatagram,
+    mut datagram: UdpDatagram,
     events_tx: &mpsc::Sender<TransportEvent>,
 ) {
     debug!("Received SIP message from {}", datagram.source);
-    let event = match rvoip_sip_core::parse_message(&datagram.packet) {
+    if let Some(timing) = datagram.timing.as_mut() {
+        let now = Instant::now();
+        if let Some(received_at) = timing.received_at {
+            diagnostics::record_udp_read_to_worker_queue(now.duration_since(received_at));
+        }
+        timing.parse_worker_dequeued_at = Some(now);
+    }
+
+    let parse_started = datagram.timing.as_ref().map(|_| Instant::now());
+    let parsed = rvoip_sip_core::parse_message(&datagram.packet);
+    if let (Some(started), Some(timing)) = (parse_started, datagram.timing.as_mut()) {
+        let now = Instant::now();
+        diagnostics::record_udp_parse(now.duration_since(started));
+        timing.parse_completed_at = Some(now);
+    }
+
+    let event = match parsed {
         Ok(message) => {
             diagnostics::record_udp_parse_ok();
             TransportEvent::MessageReceived {
@@ -407,6 +492,7 @@ async fn process_udp_datagram(
                 destination: datagram.local_addr,
                 transport_type: TransportType::Udp,
                 raw_bytes: Some(datagram.packet),
+                timing: datagram.timing,
             }
         }
         Err(e) => {
@@ -434,9 +520,17 @@ async fn process_udp_datagram(
     }
 }
 
-fn udp_worker_index(source: SocketAddr, worker_count: usize) -> usize {
+fn udp_worker_index(
+    source: SocketAddr,
+    worker_count: usize,
+    dispatch: UdpParseDispatch,
+    round_robin_worker: &AtomicUsize,
+) -> usize {
     if worker_count <= 1 {
         return 0;
+    }
+    if dispatch == UdpParseDispatch::RoundRobin {
+        return round_robin_worker.fetch_add(1, Ordering::Relaxed) % worker_count;
     }
     let ip_hash = match source.ip() {
         std::net::IpAddr::V4(ip) => u32::from(ip) as usize,
@@ -596,7 +690,7 @@ mod tests {
 
     #[tokio::test]
     async fn bind_with_parse_config_preserves_requested_values() {
-        let parse_config = UdpParseConfig::new(4, 2048);
+        let parse_config = UdpParseConfig::new(4, 2048).with_dispatch(UdpParseDispatch::RoundRobin);
         let (transport, _rx) = UdpTransport::bind_with_mtu_socket_options_and_parse_config(
             "127.0.0.1:0".parse().unwrap(),
             None,
@@ -608,5 +702,31 @@ mod tests {
         .expect("bind_with_parse_config");
         assert_eq!(transport.parse_config(), parse_config);
         transport.close().await.ok();
+    }
+
+    #[test]
+    fn round_robin_worker_index_cycles_across_workers() {
+        let round_robin = AtomicUsize::new(0);
+        let source = "127.0.0.1:5060".parse().unwrap();
+
+        let observed: Vec<usize> = (0..8)
+            .map(|_| udp_worker_index(source, 4, UdpParseDispatch::RoundRobin, &round_robin))
+            .collect();
+
+        assert_eq!(observed, vec![0, 1, 2, 3, 0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn source_hash_worker_index_is_stable_for_same_source() {
+        let round_robin = AtomicUsize::new(0);
+        let source = "127.0.0.1:5060".parse().unwrap();
+
+        let first = udp_worker_index(source, 4, UdpParseDispatch::SourceHash, &round_robin);
+        for _ in 0..8 {
+            assert_eq!(
+                udp_worker_index(source, 4, UdpParseDispatch::SourceHash, &round_robin),
+                first
+            );
+        }
     }
 }

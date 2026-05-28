@@ -268,6 +268,24 @@ transitions:
       - "IncomingCallReceived"
     description: "Incoming call received and event published to SimplePeer"
 
+  # UAS receives incoming call for config-owned immediate answer.
+  # This path sends the final response before app observation callbacks run.
+  - role: "UAS"
+    state: "Idle"
+    event:
+      type: "IncomingCallAutoAccept"
+    next_state: "Answering"
+    actions:
+      - type: "CreateDialog"
+      - type: "CreateMediaSession"
+      - type: "StoreRemoteSDP"
+      - type: "GenerateLocalSDP"
+      - type: "NegotiateSDPAsUAS"
+      - type: "SendSIPResponse"
+        code: 200
+        reason: "OK"
+    description: "Incoming call immediately answered by Config fast path"
+
   # UAS accepts call
   - role: "UAS"
     state: "Ringing"

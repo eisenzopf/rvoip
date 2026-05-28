@@ -56,6 +56,19 @@ fn test_default_state_table_loads() {
         table.has_transition(&incoming_call_key),
         "Missing IncomingCall transition from Idle state"
     );
+
+    let incoming_call_auto_accept_key = StateKey {
+        role: Role::UAS,
+        state: CallState::Idle,
+        event: EventType::IncomingCallAutoAccept {
+            from: String::new(),
+            sdp: None,
+        },
+    };
+    assert!(
+        table.has_transition(&incoming_call_auto_accept_key),
+        "Missing IncomingCallAutoAccept transition from Idle state"
+    );
 }
 
 #[test]

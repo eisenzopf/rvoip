@@ -24,6 +24,7 @@ use rvoip_infra_common::events::cross_crate::{
 use rvoip_infra_common::planes::routing::RoutableEvent;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
@@ -68,6 +69,187 @@ fn session_dispatch_shard(session_id: &str, shard_count: usize) -> usize {
     (hasher.finish() as usize) % shard_count.max(1)
 }
 
+struct QueuedDialogToSessionEvent {
+    event: Arc<dyn CrossCrateEvent>,
+    queued_at: Instant,
+    kind: &'static str,
+    route_key: Option<String>,
+}
+
+struct ServerCallAdmissionGuard {
+    pending: Arc<AtomicUsize>,
+}
+
+impl Drop for ServerCallAdmissionGuard {
+    fn drop(&mut self) {
+        self.pending.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+enum ServerCallAdmissionDecision {
+    Admit(Option<ServerCallAdmissionGuard>),
+    Reject {
+        observed_sessions: usize,
+        hard_limit: usize,
+    },
+}
+
+#[derive(Clone)]
+struct DialogToSessionDirectRouter {
+    shard_senders: Arc<Vec<mpsc::Sender<QueuedDialogToSessionEvent>>>,
+    fallback_shard: Arc<AtomicUsize>,
+}
+
+impl DialogToSessionDirectRouter {
+    fn new(
+        handler: SessionCrossCrateEventHandler,
+        worker_count: usize,
+        queue_capacity: usize,
+        shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> Self {
+        let per_shard_capacity = (queue_capacity / worker_count.max(1)).max(1);
+        let mut shard_senders = Vec::with_capacity(worker_count);
+
+        for shard in 0..worker_count {
+            let (tx, mut rx) = mpsc::channel::<QueuedDialogToSessionEvent>(per_shard_capacity);
+            let handler_for_shard = handler.clone();
+            let mut shutdown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = shutdown.changed() => {
+                            if *shutdown.borrow() {
+                                info!(
+                                    shard,
+                                    "🔔 [session_event_handler] Direct dialog-to-session shard shutting down"
+                                );
+                                break;
+                            }
+                        }
+                        queued = rx.recv() => {
+                            let Some(queued) = queued else { break };
+                            let queue_delay = queued.queued_at.elapsed();
+                            cleanup_diag::record_queue_depth(
+                                CleanupStage::SessionEventDispatch,
+                                rx.len(),
+                            );
+                            rvoip_sip_dialog::diagnostics::record_dialog_to_session_queue_delay(
+                                queued.kind,
+                                queue_delay,
+                            );
+
+                            let label = queued
+                                .route_key
+                                .as_deref()
+                                .unwrap_or(queued.kind);
+                            let dispatch_guard =
+                                cleanup_diag::stage_guard(CleanupStage::SessionEventDispatch, label);
+                            match handler_for_shard.handle(queued.event).await {
+                                Ok(()) => dispatch_guard.finish_success(),
+                                Err(e) => {
+                                    error!(
+                                        shard,
+                                        kind = queued.kind,
+                                        "Error handling direct dialog-to-session event: {}",
+                                        e
+                                    );
+                                    dispatch_guard.finish_failure();
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            shard_senders.push(tx);
+        }
+
+        info!(
+            workers = worker_count,
+            per_shard_capacity,
+            "🔔 [session_event_handler] Registered direct dialog-to-session dispatcher"
+        );
+
+        Self {
+            shard_senders: Arc::new(shard_senders),
+            fallback_shard: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn shard_for(&self, route_key: Option<&str>) -> usize {
+        match route_key {
+            Some(session_id) => session_dispatch_shard(session_id, self.shard_senders.len()),
+            None => self.fallback_shard.fetch_add(1, Ordering::Relaxed) % self.shard_senders.len(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CrossCrateEventHandler for DialogToSessionDirectRouter {
+    async fn handle(&self, event: Arc<dyn CrossCrateEvent>) -> Result<()> {
+        let kind = dialog_to_session_event_kind(&event);
+        let route_key = event
+            .as_any()
+            .downcast_ref::<RvoipCrossCrateEvent>()
+            .and_then(RoutableEvent::session_id)
+            .map(ToOwned::to_owned);
+        let shard = self.shard_for(route_key.as_deref());
+        let queued = QueuedDialogToSessionEvent {
+            event,
+            queued_at: Instant::now(),
+            kind,
+            route_key,
+        };
+
+        match self.shard_senders[shard].try_send(queued) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(queued)) => {
+                warn!(
+                    shard,
+                    kind,
+                    route_key = queued.route_key.as_deref().unwrap_or("<none>"),
+                    "Direct dialog-to-session shard is full; applying backpressure"
+                );
+                cleanup_diag::record_queue_depth(
+                    CleanupStage::SessionEventDispatch,
+                    self.shard_senders[shard].max_capacity(),
+                );
+                self.shard_senders[shard]
+                    .send(queued)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("dialog-to-session shard closed: {}", e))
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(anyhow::anyhow!("dialog-to-session shard is closed"))
+            }
+        }
+    }
+}
+
+fn dialog_to_session_event_kind(event: &Arc<dyn CrossCrateEvent>) -> &'static str {
+    match event.as_any().downcast_ref::<RvoipCrossCrateEvent>() {
+        Some(RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::IncomingCall {
+            ..
+        })) => "incoming_call",
+        Some(RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::AckReceived {
+            ..
+        })) => "ack_received",
+        Some(RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::ByeReceived {
+            ..
+        })) => "bye_received",
+        Some(RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::CallTerminated {
+            ..
+        })) => "call_terminated",
+        Some(RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::CallFailed {
+            ..
+        })) => "call_failed",
+        Some(RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::CallCancelled {
+            ..
+        })) => "call_cancelled",
+        Some(RvoipCrossCrateEvent::DialogToSession(_)) => "dialog_to_session_other",
+        _ => "non_dialog_to_session",
+    }
+}
+
 /// Handler for processing cross-crate events in rvoip-sip
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -89,6 +271,34 @@ pub struct SessionCrossCrateEventHandler {
 
     /// Channel to send incoming call notifications
     incoming_call_tx: Option<mpsc::Sender<crate::types::IncomingCallInfo>>,
+
+    /// Immediately accept inbound calls after the state machine records them.
+    fast_auto_accept_incoming_calls: bool,
+
+    /// Config-owned cap for server-side inbound call admission.
+    server_call_admission_limit: Option<usize>,
+
+    /// Soft threshold where server-side admission starts pacing.
+    server_call_admission_soft_limit: Option<usize>,
+
+    /// Delay used while above the soft threshold and below hard overload.
+    server_call_admission_pacing_delay_ms: Option<u64>,
+
+    /// Retry-After seconds for SIP overload rejections.
+    server_overload_retry_after_secs: Option<u32>,
+
+    /// Hysteresis state: once hard overload is reached, reject until below soft.
+    server_call_admission_overloaded: Arc<AtomicBool>,
+
+    /// Inbound INVITEs admitted but not yet inserted into the session store.
+    server_call_admission_pending: Arc<AtomicUsize>,
+
+    /// Serializes admission check/reserve so the hard limit is meaningful with
+    /// multiple dialog-to-session workers.
+    server_call_admission_lock: Arc<Mutex<()>>,
+
+    /// Total capacity for the direct dialog-to-session dispatcher queues.
+    dialog_event_dispatch_queue_capacity: usize,
 
     /// Internal state-machine event stream owned by rvoip-sip.
     state_machine_event_rx:
@@ -716,6 +926,15 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx: None,
+            fast_auto_accept_incoming_calls: false,
+            server_call_admission_limit: None,
+            server_call_admission_soft_limit: None,
+            server_call_admission_pacing_delay_ms: None,
+            server_overload_retry_after_secs: Some(1),
+            server_call_admission_overloaded: Arc::new(AtomicBool::new(false)),
+            server_call_admission_pending: Arc::new(AtomicUsize::new(0)),
+            server_call_admission_lock: Arc::new(Mutex::new(())),
+            dialog_event_dispatch_queue_capacity: 1024,
             state_machine_event_rx: None,
             outbound_flow_last_refresh: Arc::new(DashMap::new()),
             app_event_publisher: SessionEventPublisher::new(
@@ -743,6 +962,15 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx: Some(incoming_call_tx),
+            fast_auto_accept_incoming_calls: false,
+            server_call_admission_limit: None,
+            server_call_admission_soft_limit: None,
+            server_call_admission_pacing_delay_ms: None,
+            server_overload_retry_after_secs: Some(1),
+            server_call_admission_overloaded: Arc::new(AtomicBool::new(false)),
+            server_call_admission_pending: Arc::new(AtomicUsize::new(0)),
+            server_call_admission_lock: Arc::new(Mutex::new(())),
+            dialog_event_dispatch_queue_capacity: 1024,
             state_machine_event_rx: None,
             outbound_flow_last_refresh: Arc::new(DashMap::new()),
             app_event_publisher,
@@ -801,6 +1029,30 @@ impl SessionCrossCrateEventHandler {
         handler
     }
 
+    pub(crate) fn with_fast_auto_accept_incoming_calls(
+        mut self,
+        enabled: bool,
+        queue_capacity: usize,
+    ) -> Self {
+        self.fast_auto_accept_incoming_calls = enabled;
+        self.dialog_event_dispatch_queue_capacity = queue_capacity.max(1);
+        self
+    }
+
+    pub(crate) fn with_server_call_admission(
+        mut self,
+        limit: Option<usize>,
+        soft_limit: Option<usize>,
+        pacing_delay_ms: Option<u64>,
+        retry_after_secs: Option<u32>,
+    ) -> Self {
+        self.server_call_admission_limit = limit;
+        self.server_call_admission_soft_limit = soft_limit;
+        self.server_call_admission_pacing_delay_ms = pacing_delay_ms;
+        self.server_overload_retry_after_secs = retry_after_secs;
+        self
+    }
+
     /// SIP_API_DESIGN_2 Phase D — pin the coordinator handle so the
     /// bus-path `IncomingRegister` branch can build a
     /// `RegisterResponseBuilder` that can publish responses back to
@@ -829,12 +1081,28 @@ impl SessionCrossCrateEventHandler {
         let publisher = self.app_event_publisher.clone();
         let store = self.state_machine.store.clone();
         let registry = self.registry.clone();
+        let dialog_adapter = self.dialog_adapter.clone();
+        let media_adapter = self.media_adapter.clone();
         tokio::spawn(async move {
             let release_guard =
                 cleanup_diag::stage_guard(CleanupStage::TerminalRelease, &session_id.0);
             if let Err(e) = publisher.publish_now(api_event).await {
                 tracing::warn!(
                     "Failed to publish terminal event to global coordinator: {}",
+                    e
+                );
+            }
+            if let Err(e) = dialog_adapter.cleanup_session(&session_id).await {
+                tracing::debug!(
+                    "dialog cleanup during terminal release for {}: {}",
+                    session_id,
+                    e
+                );
+            }
+            if let Err(e) = media_adapter.cleanup_session(&session_id).await {
+                tracing::debug!(
+                    "media cleanup during terminal release for {}: {}",
+                    session_id,
                     e
                 );
             }
@@ -868,73 +1136,24 @@ impl SessionCrossCrateEventHandler {
         &self,
         shutdown_rx: tokio::sync::watch::Receiver<bool>,
     ) -> SessionResult<()> {
-        // Subscribe to dialog-to-session events
-        let mut dialog_sub = self
-            .global_coordinator
-            .subscribe("dialog_to_session")
+        // Session lifecycle correctness must not depend on broadcast delivery.
+        // Register a direct handler that only enqueues into bounded sharded
+        // workers; the global broadcast remains available for observers.
+        let dialog_router = DialogToSessionDirectRouter::new(
+            self.clone(),
+            dialog_dispatch_worker_count(),
+            self.dialog_event_dispatch_queue_capacity,
+            shutdown_rx.clone(),
+        );
+        self.global_coordinator
+            .register_handler("dialog_to_session", dialog_router)
             .await
             .map_err(|e| {
-                SessionError::InternalError(format!("Failed to subscribe to dialog events: {}", e))
+                SessionError::InternalError(format!(
+                    "Failed to register direct dialog event handler: {}",
+                    e
+                ))
             })?;
-
-        let handler = self.clone();
-        let mut shutdown = shutdown_rx.clone();
-        tokio::spawn(async move {
-            info!("🔔 [session_event_handler] Started dialog-to-session event loop");
-            // Sharded dispatch preserves per-session ordering without creating
-            // one task/channel per short-lived call.
-            let worker_count = dialog_dispatch_worker_count();
-            let mut shard_senders = Vec::with_capacity(worker_count);
-            for shard in 0..worker_count {
-                let (tx, mut rx) = mpsc::unbounded_channel::<Arc<dyn CrossCrateEvent>>();
-                let handler_for_shard = handler.clone();
-                tokio::spawn(async move {
-                    while let Some(ev) = rx.recv().await {
-                        if let Err(e) = handler_for_shard.handle(ev).await {
-                            error!(shard, "Error handling dialog-to-session event: {}", e);
-                        }
-                    }
-                });
-                shard_senders.push(tx);
-            }
-
-            loop {
-                tokio::select! {
-                    _ = shutdown.changed() => {
-                        if *shutdown.borrow() {
-                            info!("🔔 [session_event_handler] Dialog event loop shutting down");
-                            break;
-                        }
-                    }
-                    event = dialog_sub.recv() => {
-                        let Some(event) = event else { break };
-                        let session_key = event
-                            .as_any()
-                            .downcast_ref::<RvoipCrossCrateEvent>()
-                            .and_then(RoutableEvent::session_id)
-                            .map(|s| s.to_string());
-                        match session_key {
-                            Some(sid) => {
-                                let shard = session_dispatch_shard(&sid, shard_senders.len());
-                                if shard_senders[shard].send(event).is_err() {
-                                    error!(shard, session = %sid, "Dialog event shard stopped");
-                                }
-                            }
-                            None => {
-                                // Events without session context — process on a one-shot task.
-                                let handler = handler.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = handler.handle(event).await {
-                                        error!("Error handling dialog-to-session event: {}", e);
-                                    }
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            info!("🔔 [session_event_handler] Dialog-to-session event loop ended");
-        });
 
         // Subscribe to transport-to-session diagnostics such as SIP trace.
         let mut transport_sub = self
@@ -1216,6 +1435,136 @@ impl SessionCrossCrateEventHandler {
         Ok(())
     }
 
+    async fn acquire_server_call_admission(&self) -> ServerCallAdmissionDecision {
+        let Some(hard_limit) = self.server_call_admission_limit else {
+            return ServerCallAdmissionDecision::Admit(None);
+        };
+        let soft_limit = self
+            .server_call_admission_soft_limit
+            .unwrap_or(hard_limit)
+            .min(hard_limit);
+        let pacing_delay = self
+            .server_call_admission_pacing_delay_ms
+            .map(Duration::from_millis);
+        let mut paced_once = false;
+
+        loop {
+            let _lock = self.server_call_admission_lock.lock().await;
+            let observed_sessions = self
+                .state_machine
+                .store
+                .sessions
+                .len()
+                .saturating_add(self.server_call_admission_pending.load(Ordering::Relaxed));
+
+            if self
+                .server_call_admission_overloaded
+                .load(Ordering::Relaxed)
+            {
+                if observed_sessions < soft_limit {
+                    self.server_call_admission_overloaded
+                        .store(false, Ordering::Relaxed);
+                } else {
+                    return ServerCallAdmissionDecision::Reject {
+                        observed_sessions,
+                        hard_limit,
+                    };
+                }
+            }
+
+            if observed_sessions >= hard_limit {
+                self.server_call_admission_overloaded
+                    .store(true, Ordering::Relaxed);
+                return ServerCallAdmissionDecision::Reject {
+                    observed_sessions,
+                    hard_limit,
+                };
+            }
+
+            if !paced_once {
+                if let (Some(delay), Some(configured_soft_limit)) =
+                    (pacing_delay, self.server_call_admission_soft_limit)
+                {
+                    if observed_sessions >= configured_soft_limit {
+                        drop(_lock);
+                        tokio::time::sleep(delay).await;
+                        paced_once = true;
+                        continue;
+                    }
+                }
+            }
+
+            self.server_call_admission_pending
+                .fetch_add(1, Ordering::Relaxed);
+            return ServerCallAdmissionDecision::Admit(Some(ServerCallAdmissionGuard {
+                pending: self.server_call_admission_pending.clone(),
+            }));
+        }
+    }
+
+    async fn reject_incoming_call_for_overload(
+        &self,
+        transaction_id: &str,
+        observed_sessions: usize,
+        limit: usize,
+    ) -> Result<()> {
+        let transaction_id = transaction_id
+            .parse::<rvoip_sip_dialog::transaction::TransactionKey>()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "server admission limit reached, but inbound transaction id '{}' is invalid: {}",
+                    transaction_id,
+                    e
+                )
+            })?;
+
+        let mut response = self
+            .dialog_adapter
+            .dialog_api
+            .build_response(
+                &transaction_id,
+                rvoip_sip_core::StatusCode::ServiceUnavailable,
+                None,
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to build server overload response for transaction {}: {}",
+                    transaction_id,
+                    e
+                )
+            })?;
+
+        if let Some(seconds) = self.server_overload_retry_after_secs {
+            response
+                .headers
+                .push(rvoip_sip_core::types::TypedHeader::RetryAfter(
+                    rvoip_sip_core::types::retry_after::RetryAfter::new(seconds),
+                ));
+        }
+
+        self.dialog_adapter
+            .dialog_api
+            .send_response(&transaction_id, response)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to send server overload response for transaction {}: {}",
+                    transaction_id,
+                    e
+                )
+            })?;
+
+        warn!(
+            observed_sessions,
+            limit,
+            soft_limit = ?self.server_call_admission_soft_limit,
+            retry_after_secs = ?self.server_overload_retry_after_secs,
+            "Rejected inbound INVITE with 503 because server_call_admission_limit was reached"
+        );
+        Ok(())
+    }
+
     async fn handle_incoming_call_parts(
         &self,
         session_id_str: String,
@@ -1224,7 +1573,7 @@ impl SessionCrossCrateEventHandler {
         to: String,
         sdp: Option<String>,
         headers: &std::collections::HashMap<String, String>,
-        _transaction_id: &str,
+        transaction_id: &str,
         _source_addr: &str,
         raw_request: Option<bytes::Bytes>,
     ) -> Result<()> {
@@ -1267,11 +1616,29 @@ impl SessionCrossCrateEventHandler {
         let session_id = SessionId(session_id_str);
         let setup_guard = cleanup_diag::stage_guard(CleanupStage::IncomingCallSetup, &session_id.0);
 
+        let admission_guard = match self.acquire_server_call_admission().await {
+            ServerCallAdmissionDecision::Admit(guard) => guard,
+            ServerCallAdmissionDecision::Reject {
+                observed_sessions,
+                hard_limit,
+            } => {
+                self.reject_incoming_call_for_overload(
+                    transaction_id,
+                    observed_sessions,
+                    hard_limit,
+                )
+                .await?;
+                setup_guard.finish_success();
+                return Ok(());
+            }
+        };
+
         self.state_machine
             .store
             .create_session(session_id.clone(), Role::UAS, true)
             .await
             .map_err(|e| SessionError::InternalError(format!("Failed to create session: {}", e)))?;
+        drop(admission_guard);
 
         let mut session = self
             .state_machine
@@ -1283,6 +1650,18 @@ impl SessionCrossCrateEventHandler {
             })?;
         session.local_uri = Some(to.clone());
         session.remote_uri = Some(from.clone());
+        session.incoming_invite_received_at = Some(Instant::now());
+        match transaction_id.parse::<rvoip_sip_dialog::transaction::TransactionKey>() {
+            Ok(transaction_id) => {
+                session.pending_inbound_invite_transaction_id = Some(transaction_id);
+            }
+            Err(e) => {
+                debug!(
+                    "IncomingCall for session {} carried unparsable transaction id {}: {}",
+                    session_id, transaction_id, e
+                );
+            }
+        }
         let session_remote_sdp = session.remote_sdp.clone();
 
         self.state_machine
@@ -1312,34 +1691,6 @@ impl SessionCrossCrateEventHandler {
                 },
             )
             .await;
-
-        // SIP_API_DESIGN_2 Phase A: re-parse the inbound INVITE bytes
-        // forwarded across the bus so `IncomingCall::raw_request()`
-        // can expose the typed `Arc<Request>`. Failure to parse is
-        // never fatal — we fall back to the legacy headers-only path.
-        if let Some(bytes) = raw_request.as_ref() {
-            match rvoip_sip_core::parse_message(bytes.as_ref()) {
-                Ok(rvoip_sip_core::Message::Request(req)) => {
-                    self.registry
-                        .store_pending_incoming_request(Arc::new(req))
-                        .await;
-                }
-                Ok(_) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        "IncomingCall raw_request was not a SIP request"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        error = %e,
-                        "Failed to re-parse inbound INVITE bytes; \
-                         IncomingCall.raw_request() will be None"
-                    );
-                }
-            }
-        }
 
         let our_dialog_id = DialogId(dialog_uuid);
         let rvoip_dialog_id = rvoip_sip_dialog::DialogId::from(our_dialog_id.clone());
@@ -1371,21 +1722,59 @@ impl SessionCrossCrateEventHandler {
             error!("Failed to publish StoreDialogMapping for UAS: {}", e);
         }
 
+        let event_type = if self.fast_auto_accept_incoming_calls {
+            EventType::IncomingCallAutoAccept {
+                from: from.clone(),
+                sdp,
+            }
+        } else {
+            EventType::IncomingCall {
+                from: from.clone(),
+                sdp,
+            }
+        };
+
         if let Err(e) = self
             .state_machine
-            .process_event(
-                &session_id,
-                EventType::IncomingCall {
-                    from: from.clone(),
-                    sdp,
-                },
-            )
+            .process_event(&session_id, event_type)
             .await
         {
             error!("Failed to process incoming call event: {}", e);
             let _ = self.state_machine.store.remove_session(&session_id).await;
             self.registry.remove_session(&session_id).await;
         } else {
+            if self.fast_auto_accept_incoming_calls {
+                debug!("Fast auto-accepted inbound call {}", session_id);
+            }
+
+            // SIP_API_DESIGN_2 Phase A: re-parse the inbound INVITE bytes
+            // after the fast 200 OK path has completed, but before app
+            // observation events are published. Failure to parse is never
+            // fatal — we fall back to the legacy headers-only path.
+            if let Some(bytes) = raw_request.as_ref() {
+                match rvoip_sip_core::parse_message(bytes.as_ref()) {
+                    Ok(rvoip_sip_core::Message::Request(req)) => {
+                        self.registry
+                            .store_pending_incoming_request(Arc::new(req))
+                            .await;
+                    }
+                    Ok(_) => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            "IncomingCall raw_request was not a SIP request"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to re-parse inbound INVITE bytes; \
+                             IncomingCall.raw_request() will be None"
+                        );
+                    }
+                }
+            }
+
             publish_api_event(
                 &self.app_event_publisher,
                 crate::api::events::Event::IncomingCall {
@@ -1691,7 +2080,7 @@ impl SessionCrossCrateEventHandler {
                     .replace("\\n", "\n")
                     .replace("\\\"", "\"")
             });
-        let _transaction_id = self
+        let transaction_id = self
             .extract_field(event_str, "transaction_id: \"")
             .unwrap_or_else(|| "unknown".to_string());
         let _source_addr = self
@@ -1720,6 +2109,18 @@ impl SessionCrossCrateEventHandler {
             })?;
         session.local_uri = Some(to.clone()); // The "To" header is us (answerer)
         session.remote_uri = Some(from.clone()); // The "From" header is the caller
+        session.incoming_invite_received_at = Some(Instant::now());
+        match transaction_id.parse::<rvoip_sip_dialog::transaction::TransactionKey>() {
+            Ok(transaction_id) => {
+                session.pending_inbound_invite_transaction_id = Some(transaction_id);
+            }
+            Err(e) => {
+                debug!(
+                    "IncomingCall for session {} carried unparsable transaction id {}: {}",
+                    session_id, transaction_id, e
+                );
+            }
+        }
 
         // Store session data for SimplePeer event
         let session_remote_sdp = session.remote_sdp.clone();
@@ -1786,9 +2187,16 @@ impl SessionCrossCrateEventHandler {
         }
 
         // Process the event - state machine will handle the rest
-        let event_type = EventType::IncomingCall {
-            from: from.clone(),
-            sdp,
+        let event_type = if self.fast_auto_accept_incoming_calls {
+            EventType::IncomingCallAutoAccept {
+                from: from.clone(),
+                sdp,
+            }
+        } else {
+            EventType::IncomingCall {
+                from: from.clone(),
+                sdp,
+            }
         };
 
         if let Err(e) = self
@@ -3049,6 +3457,7 @@ impl SessionCrossCrateEventHandler {
             .await
             .is_err()
         {
+            rvoip_sip_dialog::diagnostics::record_bye_cleanup_session_missing();
             debug!(
                 "Ignoring ByeReceived for session {} - not in our store",
                 session_id
@@ -3056,6 +3465,7 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         }
 
+        rvoip_sip_dialog::diagnostics::record_bye_cleanup_delivered();
         let bye_guard = cleanup_diag::stage_guard(CleanupStage::ByeReceivedHandling, &session_id.0);
         match self
             .state_machine
@@ -3630,6 +4040,7 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         }
 
+        rvoip_sip_dialog::diagnostics::record_ack_event_delivered();
         if let Err(e) = self
             .state_machine
             .process_event(&session_id, EventType::DialogACK)

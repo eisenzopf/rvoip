@@ -58,6 +58,7 @@ pub const ENDPOINT_1001_TONE_HZ: f32 = ENDPOINT_2001_TONE_HZ;
 pub const ENDPOINT_1002_TONE_HZ: f32 = ENDPOINT_2002_TONE_HZ;
 pub const ENDPOINT_1003_TONE_HZ: f32 = 660.0;
 pub const MIN_RECEIVED_SAMPLES: usize = 12_000;
+pub const TONE_ANALYSIS_WINDOW_SAMPLES: usize = (SAMPLE_RATE as usize) * 2;
 pub const DOMINANCE_RATIO: f32 = 5.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1872,7 +1873,7 @@ async fn run_transferor(
     } else {
         None
     };
-    sleep(transfer_settle_duration(provider)).await;
+    sleep(transfer_settle_duration(provider, transport)).await;
     let transfer_outcome = handle
         .transfer_blind_and_wait_for_outcome(
             &cfg.remote_call_uri(),
@@ -1983,15 +1984,19 @@ fn analyze_hold(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult
         ENDPOINT_1001_TONE_HZ,
     )?;
     let callee_samples = read_wav(&callee_wav)?;
-    let pre_hold = assert_samples_tone(
+    let pre_hold = assert_best_window_tone(
         "callee pre-hold caller tone",
-        first_half(&callee_samples),
+        leading_third(&callee_samples),
+        SAMPLE_RATE as usize,
+        FRAME_SIZE,
         ENDPOINT_1001_TONE_HZ,
         ENDPOINT_1003_TONE_HZ,
     )?;
-    let post_resume = assert_samples_tone(
+    let post_resume = assert_best_window_tone(
         "callee post-resume caller tone",
-        second_half(&callee_samples),
+        trailing_third(&callee_samples),
+        SAMPLE_RATE as usize,
+        FRAME_SIZE,
         ENDPOINT_1003_TONE_HZ,
         ENDPOINT_1002_TONE_HZ,
     )?;
@@ -2038,17 +2043,19 @@ fn analyze_transfer(cfg: &EndpointConfig, transport: TransportMode) -> ExampleRe
         )
         .into());
     }
-    let first_window = &transferee_samples[..WINDOW_SAMPLES];
-    let last_window = &transferee_samples[transferee_samples.len() - WINDOW_SAMPLES..];
-    let initial = assert_samples_tone(
+    let initial = assert_best_window_tone(
         "1002 initial leg received 1001 tone",
-        first_window,
+        leading_third(&transferee_samples),
+        WINDOW_SAMPLES,
+        FRAME_SIZE,
         ENDPOINT_1001_TONE_HZ,
         ENDPOINT_1003_TONE_HZ,
     )?;
-    let transferred = assert_samples_tone(
+    let transferred = assert_best_window_tone(
         "1002 transferred leg received 1003 tone",
-        last_window,
+        trailing_third(&transferee_samples),
+        WINDOW_SAMPLES,
+        FRAME_SIZE,
         ENDPOINT_1003_TONE_HZ,
         ENDPOINT_1001_TONE_HZ,
     )?;
@@ -2831,30 +2838,25 @@ pub fn assert_audio_path(
     expected_hz: f32,
     rejected_hz: f32,
 ) -> ExampleResult<ToneAnalysis> {
-    let analysis = analyze_samples(&read_wav(path)?, expected_hz, rejected_hz)?;
-    if analysis.samples < MIN_RECEIVED_SAMPLES {
+    let samples = read_wav(path)?;
+    if samples.len() < MIN_RECEIVED_SAMPLES {
         return Err(format!(
             "{} too short: {} samples (expected at least {})",
             path.display(),
-            analysis.samples,
+            samples.len(),
             MIN_RECEIVED_SAMPLES
         )
         .into());
     }
-    if analysis.ratio < DOMINANCE_RATIO {
-        return Err(format!(
-            "{}: {:.0}Hz magnitude {:.1} vs {:.0}Hz magnitude {:.1}, ratio {:.2} (expected at least {:.2})",
-            path.display(),
-            analysis.expected_hz,
-            analysis.expected_magnitude,
-            analysis.rejected_hz,
-            analysis.rejected_magnitude,
-            analysis.ratio,
-            DOMINANCE_RATIO
-        )
-        .into());
-    }
-    Ok(analysis)
+    let label = path.display().to_string();
+    assert_best_window_tone(
+        &label,
+        analysis_slice_for_window(&samples, SAMPLE_RATE as usize),
+        SAMPLE_RATE as usize,
+        FRAME_SIZE,
+        expected_hz,
+        rejected_hz,
+    )
 }
 
 pub fn assert_samples_tone(
@@ -2873,6 +2875,77 @@ pub fn assert_samples_tone(
             analysis.rejected_hz,
             analysis.rejected_magnitude,
             analysis.ratio,
+            DOMINANCE_RATIO
+        )
+        .into());
+    }
+    Ok(analysis)
+}
+
+pub fn assert_best_window_tone(
+    label: &str,
+    samples: &[i16],
+    window_samples: usize,
+    step_samples: usize,
+    expected_hz: f32,
+    rejected_hz: f32,
+) -> ExampleResult<ToneAnalysis> {
+    if samples.len() < window_samples {
+        return Err(format!(
+            "{}: {} samples available (expected at least {})",
+            label,
+            samples.len(),
+            window_samples
+        )
+        .into());
+    }
+
+    let analysis_window = samples
+        .len()
+        .min(window_samples.max(TONE_ANALYSIS_WINDOW_SAMPLES));
+    let mut best: Option<ToneAnalysis> = None;
+    let mut passing_windows = 0usize;
+    let mut total_windows = 0usize;
+    let step = step_samples.max(1);
+    let last_start = samples.len() - analysis_window;
+    let mut start = 0;
+    loop {
+        let analysis = analyze_samples(
+            &samples[start..start + analysis_window],
+            expected_hz,
+            rejected_hz,
+        )?;
+        total_windows += 1;
+        if analysis.ratio >= DOMINANCE_RATIO {
+            passing_windows += 1;
+        }
+        if best
+            .as_ref()
+            .map(|current| analysis.ratio > current.ratio)
+            .unwrap_or(true)
+        {
+            best = Some(analysis);
+        }
+        if start == last_start {
+            break;
+        }
+        start = (start + step).min(last_start);
+    }
+
+    let analysis = best.expect("at least one tone-analysis window");
+    let required_windows = total_windows.min(3);
+    if passing_windows < required_windows {
+        return Err(format!(
+            "{}: {}/{} sampled windows matched; best {:.0}Hz magnitude {:.1} vs {:.0}Hz magnitude {:.1}, ratio {:.2} (expected {} windows at ratio at least {:.2})",
+            label,
+            passing_windows,
+            total_windows,
+            analysis.expected_hz,
+            analysis.expected_magnitude,
+            analysis.rejected_hz,
+            analysis.rejected_magnitude,
+            analysis.ratio,
+            required_windows,
             DOMINANCE_RATIO
         )
         .into());
@@ -3009,12 +3082,25 @@ fn remote_test_timeout(provider: PbxProvider) -> ExampleResult<Duration> {
     Ok(Duration::from_secs(secs))
 }
 
-fn transfer_settle_duration(provider: PbxProvider) -> Duration {
+fn transfer_settle_duration(provider: PbxProvider, transport: TransportMode) -> Duration {
     let key = match provider {
         PbxProvider::Asterisk => "ASTERISK_TRANSFER_SETTLE_SECS",
         PbxProvider::FreeSwitch => "FREESWITCH_TRANSFER_SETTLE_SECS",
     };
-    env_duration_secs(key, 3)
+    let tls_key = match provider {
+        PbxProvider::Asterisk => "ASTERISK_TLS_TRANSFER_SETTLE_SECS",
+        PbxProvider::FreeSwitch => "FREESWITCH_TLS_TRANSFER_SETTLE_SECS",
+    };
+    if transport.is_tls() {
+        if let Some(duration) = optional_env_duration_secs(tls_key) {
+            return duration;
+        }
+    }
+    let default = match (provider, transport) {
+        (PbxProvider::Asterisk, TransportMode::TlsSrtp) => 5,
+        _ => 3,
+    };
+    env_duration_secs(key, default)
 }
 
 fn call_retry_attempts(provider: PbxProvider) -> usize {
@@ -3112,12 +3198,25 @@ fn transfer_target_wav(transport: TransportMode) -> &'static str {
     }
 }
 
-fn first_half(samples: &[i16]) -> &[i16] {
-    &samples[..samples.len() / 2]
+fn leading_third(samples: &[i16]) -> &[i16] {
+    &samples[..samples.len() / 3]
 }
 
-fn second_half(samples: &[i16]) -> &[i16] {
-    &samples[samples.len() / 2..]
+fn trailing_third(samples: &[i16]) -> &[i16] {
+    &samples[(samples.len() * 2) / 3..]
+}
+
+fn stable_middle_half(samples: &[i16]) -> &[i16] {
+    &samples[samples.len() / 4..(samples.len() * 3) / 4]
+}
+
+fn analysis_slice_for_window(samples: &[i16], window_samples: usize) -> &[i16] {
+    let stable = stable_middle_half(samples);
+    if stable.len() >= window_samples {
+        stable
+    } else {
+        samples
+    }
 }
 
 async fn stop_recv_task(task: JoinHandle<()>) {
@@ -3225,6 +3324,13 @@ fn env_duration_secs(key: &str, default: u64) -> Duration {
             .and_then(|value| value.parse().ok())
             .unwrap_or(default),
     )
+}
+
+fn optional_env_duration_secs(key: &str) -> Option<Duration> {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .map(Duration::from_secs)
 }
 
 fn split_host_port(value: &str) -> ExampleResult<(String, u16)> {

@@ -21,7 +21,7 @@ async fn example_sip_register_flow() {
             audience: vec!["rvoip-api".to_string(), "rvoip-sip".to_string()],
             access_ttl_seconds: 900,
             refresh_ttl_seconds: 2592000,
-            algorithm: "RS256".to_string(),
+            algorithm: "HS256".to_string(),
             signing_key: None,
         },
         password: PasswordConfig {
@@ -82,15 +82,16 @@ async fn example_sip_register_flow() {
     // For this example, we'll demonstrate by decoding the JWT
 
     use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
-    let public_key = auth_service.jwt_issuer().public_key_pem().unwrap();
-    let decoding_key = DecodingKey::from_rsa_pem(public_key.as_bytes()).unwrap();
-
-    let mut validation = Validation::new(Algorithm::RS256);
+    let mut validation = Validation::new(auth_service.jwt_issuer().algorithm());
     validation.set_issuer(&["https://users.rvoip.local"]);
     validation.set_audience(&["rvoip-sip"]);
 
-    let token_data =
-        decode::<users_core::UserClaims>(bearer_token, &decoding_key, &validation).unwrap();
+    let token_data = decode::<users_core::UserClaims>(
+        bearer_token,
+        auth_service.jwt_issuer().decoding_key(),
+        &validation,
+    )
+    .unwrap();
 
     println!("\nValidated token claims:");
     println!("  User ID: {}", token_data.claims.sub);

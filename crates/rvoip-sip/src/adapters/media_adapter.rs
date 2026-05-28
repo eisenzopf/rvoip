@@ -24,8 +24,15 @@ use rvoip_sip_core::sdp::SdpBuilder;
 use rvoip_sip_core::types::sdp::{CryptoAttribute, CryptoSuite, ParsedAttribute, SdpSession};
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+const DIAG_OFF: u8 = 1;
+const DIAG_ON: u8 = 2;
+
+static SRTP_DIAGNOSTICS: AtomicU8 = AtomicU8::new(DIAG_OFF);
+static MEDIA_SDP_DIAGNOSTICS: AtomicU8 = AtomicU8::new(DIAG_OFF);
 
 /// NEXT_STEPS B.1 diag — process-global cleanup counter so external
 /// observers (the `perf_listener` example, integration tests) can read
@@ -131,26 +138,26 @@ fn local_direction_from_remote_answer(
 }
 
 fn srtp_diagnostics_enabled() -> bool {
-    env_flag("RVOIP_SRTP_DIAGNOSTICS")
+    SRTP_DIAGNOSTICS.load(Ordering::Relaxed) == DIAG_ON
 }
 
 fn media_diagnostics_enabled() -> bool {
-    env_flag("RVOIP_MEDIA_DIAGNOSTICS")
+    MEDIA_SDP_DIAGNOSTICS.load(Ordering::Relaxed) == DIAG_ON
 }
 
 fn sdp_diagnostics_enabled() -> bool {
     srtp_diagnostics_enabled() || media_diagnostics_enabled()
 }
 
-fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+pub(crate) fn set_sdp_diagnostics(srtp_enabled: bool, media_enabled: bool) {
+    SRTP_DIAGNOSTICS.store(
+        if srtp_enabled { DIAG_ON } else { DIAG_OFF },
+        Ordering::Relaxed,
+    );
+    MEDIA_SDP_DIAGNOSTICS.store(
+        if media_enabled { DIAG_ON } else { DIAG_OFF },
+        Ordering::Relaxed,
+    );
 }
 
 fn emit_srtp_diag(line: String) {
@@ -404,14 +411,15 @@ pub struct MediaAdapter {
     /// coordinator boot from `Config::strict_codec_matching`.
     strict_codec_matching: bool,
 
-    /// NEXT_STEPS C2 — RTP payload types to advertise in outgoing
-    /// offers and to accept on inbound matching. Default
-    /// `[0, 8, 101]` (PCMU + PCMA + telephone-event) preserves the
-    /// pre-C2 wire shape. Add `111` to advertise Opus (`opus/48000/2`,
-    /// PT 111 by convention); add `9` for G.722; add `18` for G.729.
-    /// Comfort Noise (PT 13) is independently controlled by
-    /// `comfort_noise_enabled` for back-compat with existing callers,
-    /// and is inserted into the list automatically when enabled.
+    /// RTP payload types to advertise in outgoing offers and accept on inbound
+    /// matching. Default `[0, 8, 101]` (PCMU + PCMA + telephone-event) is the
+    /// beta full-media set. Comfort Noise (PT 13) is independently controlled
+    /// by `comfort_noise_enabled` for back-compat with existing callers and is
+    /// inserted into the list automatically when enabled.
+    ///
+    /// This low-level adapter can still render SDP metadata for additional
+    /// payload types in tests, but `Config::validate` rejects codec sets that
+    /// media-core cannot encode/decode for beta full-media operation.
     offered_codecs: Vec<u8>,
 }
 
@@ -482,17 +490,27 @@ impl MediaAdapter {
         self.strict_codec_matching = strict;
     }
 
-    /// NEXT_STEPS C2 — set the list of RTP payload types this UA
-    /// advertises in offers and accepts in answers. The list MUST
-    /// contain at least one audio codec (PCMU/PCMA/Opus/G.722/G.729);
-    /// DTMF (PT 101) is recommended for any voice-AI workload. The
-    /// adapter does not validate that media-core actually implements
-    /// every advertised codec — emitting `a=rtpmap:111 opus/48000/2`
-    /// without media-core's `opus` feature enabled produces an answer
-    /// that negotiates Opus but cannot encode it. Wired from
-    /// `Config::offered_codecs` at coordinator boot.
+    /// Set the list of RTP payload types this UA advertises in offers and
+    /// accepts in answers. The adapter assumes the caller already ran
+    /// `Config::validate`; tests may still use this setter directly for
+    /// parser/SDP coverage outside the beta full-media contract.
     pub fn set_offered_codecs(&mut self, codecs: Vec<u8>) {
         self.offered_codecs = codecs;
+    }
+
+    /// Feature-gated retained-object counts for perf leak investigations.
+    #[cfg(feature = "perf-tests")]
+    pub(crate) fn perf_diagnostic_counts(&self) -> serde_json::Value {
+        serde_json::json!({
+            "session_to_dialog": self.session_to_dialog.len(),
+            "dialog_to_session": self.dialog_to_session.len(),
+            "media_sessions": self.media_sessions.len(),
+            "audio_receivers": self.audio_receivers.len(),
+            "pending_srtp_offerers": self.pending_srtp_offerers.len(),
+            "negotiated_srtp": self.negotiated_srtp.len(),
+            "audio_mixers": self.audio_mixers.len(),
+            "controller": self.controller.diagnostic_counts(),
+        })
     }
 
     /// Compose the effective offer-format list: configured

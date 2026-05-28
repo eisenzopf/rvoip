@@ -20,7 +20,8 @@ struct AuthCore {
 
 struct TrustedIssuer {
     issuer: String,
-    public_key_pem: String,
+    algorithm: Algorithm,
+    decoding_key: DecodingKey,
     audiences: Vec<String>,
 }
 
@@ -46,12 +47,11 @@ impl AuthCore {
             .get(issuer)
             .ok_or_else(|| anyhow::anyhow!("Unknown issuer"))?;
 
-        let decoding_key = DecodingKey::from_rsa_pem(trusted.public_key_pem.as_bytes())?;
-        let mut validation = Validation::new(Algorithm::RS256);
+        let mut validation = Validation::new(trusted.algorithm);
         validation.set_issuer(&[&trusted.issuer]);
         validation.set_audience(&trusted.audiences);
 
-        let token_data = decode::<UserClaims>(token, &decoding_key, &validation)?;
+        let token_data = decode::<UserClaims>(token, &trusted.decoding_key, &validation)?;
 
         Ok(ValidatedToken {
             user_id: token_data.claims.sub,
@@ -159,13 +159,11 @@ async fn main() -> Result<()> {
     println!("\n📦 Step 2: Configure auth-core...");
     let mut auth_core = AuthCore::new();
 
-    // Get users-core public key
-    let public_key = users_core.jwt_issuer().public_key_pem()?;
-
     // Add users-core as trusted issuer
     auth_core.add_trusted_issuer(TrustedIssuer {
         issuer: "https://users.rvoip.local".to_string(),
-        public_key_pem: public_key,
+        algorithm: users_core.jwt_issuer().algorithm(),
+        decoding_key: users_core.jwt_issuer().decoding_key().clone(),
         audiences: vec!["rvoip-api".to_string(), "rvoip-sip".to_string()],
     });
 
@@ -270,7 +268,10 @@ async fn main() -> Result<()> {
     println!("\n⚙️ Step 8: Configuration Summary");
     println!("\n[users-core]");
     println!("   - Database: SQLite");
-    println!("   - JWT Algorithm: RS256");
+    println!(
+        "   - JWT Algorithm: {:?}",
+        users_core.jwt_issuer().algorithm()
+    );
     println!("   - Token TTL: 15 minutes");
     println!("   - Issuer: https://users.rvoip.local");
 

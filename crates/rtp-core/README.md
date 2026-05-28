@@ -4,9 +4,19 @@
 [![Documentation](https://docs.rs/rvoip-rtp-core/badge.svg)](https://docs.rs/rvoip-rtp-core)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 
+> **Beta scope notice:** for the `rvoip-sip` beta, RTP-layer production claims
+> are limited to RTP/RTCP basics and tested SDES-SRTP paths. DTLS-SRTP, ICE,
+> TURN, WebRTC browser interop, ZRTP, MIKEY, and TCP RTP transport are post-beta
+> unless separately audited, completed, and linked from the beta compatibility
+> matrix.
+
 ## Overview
 
-The `rtp-core` library provides comprehensive RTP/RTCP implementation and secure media transport capabilities for the [rvoip](../../README.md) VoIP stack. It handles all packet-level operations in the media transport layer, including RTP/RTCP packet processing, network transport, security (DTLS-SRTP), buffer management, and statistics collection.
+The `rtp-core` library provides RTP/RTCP packet processing, UDP media
+transport, SRTP primitives, buffer management, and statistics collection for
+the [rvoip](../../README.md) VoIP stack. Some additional security and transport
+modules exist in this crate, but they are not `rvoip-sip` beta claims unless
+the beta compatibility matrix links test evidence for them.
 
 ## Architecture
 
@@ -26,16 +36,17 @@ The RTP Core sits at the foundation of the media transport stack, providing reli
 
 ### Key Components
 
-1. **RTP/RTCP Processing**: Complete RFC 3550 implementation with all packet types
-2. **Security Layer**: DTLS-SRTP, SDES-SRTP, MIKEY (PSK/PKE), and ZRTP implementations
-3. **Transport Management**: UDP, TCP with multiplexing and connection management
+1. **RTP/RTCP Processing**: RFC 3550 packet processing with beta evidence requirements tracked by `rvoip-sip`
+2. **Security Layer**: SDES-SRTP/SRTP paths are beta candidates; DTLS-SRTP, MIKEY, and ZRTP are post-beta unless separately audited
+3. **Transport Management**: UDP is the beta media transport; TCP transport is not a `rvoip-sip` beta claim
 4. **Buffer Management**: Adaptive jitter buffer and high-performance memory pooling
 5. **Statistics & Monitoring**: Comprehensive quality metrics and network analysis
 6. **Payload Formats**: Support for audio/video codecs (G.711, G.722, Opus, VP8/VP9)
 
 ### Security Architecture
 
-The library provides a complete multimedia security ecosystem with multiple protocols:
+The library contains multiple security protocol modules. For the `rvoip-sip`
+beta, only tested SDES-SRTP/SRTP paths may be claimed.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -54,7 +65,7 @@ The library provides a complete multimedia security ecosystem with multiple prot
 
 ## Features
 
-### ✅ Completed Features
+### Implementation Inventory
 
 #### **RTP/RTCP Implementation**
 - ✅ Complete RFC 3550 compliant RTP/RTCP packet processing
@@ -72,17 +83,17 @@ The library provides a complete multimedia security ecosystem with multiple prot
   - ✅ Key derivation functions and IV generation
   - ✅ Replay protection and tamper detection
   - ✅ Multiple cipher suite support
-- ✅ **DTLS-SRTP**: WebRTC-compatible secure transport
+- ⚠️ **DTLS-SRTP**: low-level implementation exists, but it is post-beta for `rvoip-sip`
   - ✅ DTLS 1.2 handshake protocol with cookie exchange
   - ✅ ECDHE key exchange using P-256 curve
   - ✅ Certificate-based authentication
   - ✅ SRTP key derivation from DTLS handshake
-- ✅ **ZRTP**: Zero-configuration peer-to-peer security
+- ⚠️ **ZRTP**: module exists, but it is post-beta for `rvoip-sip`
   - ✅ Diffie-Hellman key exchange without PKI
   - ✅ SAS (Short Authentication String) verification
   - ✅ Perfect forward secrecy
   - ✅ Voice path authentication
-- ✅ **MIKEY Protocols**: Enterprise key management
+- ⚠️ **MIKEY Protocols**: modules exist, but they are post-beta for `rvoip-sip`
   - ✅ **MIKEY-PSK**: Pre-shared key mode for corporate environments
   - ✅ **MIKEY-PKE**: Public key encryption with X.509 certificates
   - ✅ Certificate Authority (CA) support
@@ -91,7 +102,7 @@ The library provides a complete multimedia security ecosystem with multiple prot
 
 #### **Transport and Network**
 - ✅ UDP transport with symmetric RTP support
-- ✅ TCP transport for reliable delivery
+- ⚠️ TCP transport implementation exists, but TCP RTP transport is not a `rvoip-sip` beta claim
 - ✅ RTCP multiplexing (RFC 5761) on single port
 - ✅ Smart port allocation strategies (Sequential, Random, Incremental)
 - ✅ Cross-platform socket validation (Windows, macOS, Linux)
@@ -205,7 +216,10 @@ async fn main() -> Result<()> {
 }
 ```
 
-### Secure RTP with DTLS-SRTP
+### Experimental Low-Level DTLS-SRTP
+
+This example demonstrates a lower-level module. It is not a `rvoip-sip` beta
+claim for browser/WebRTC interop.
 
 ```rust
 use rvoip_rtp_core::prelude::*;
@@ -465,7 +479,7 @@ The library includes comprehensive examples demonstrating all features:
 # Basic RTP communication
 cargo run --example api_basic
 
-# Secure DTLS-SRTP session
+# Experimental low-level DTLS-SRTP session
 cargo run --example direct_dtls_media_streaming
 
 # ZRTP peer-to-peer security
@@ -499,7 +513,7 @@ cargo run --example socket_validation
 - **Security Context**: Minimal overhead for established sessions
 
 ### Optimization Recommendations
-- **Security Protocol Selection**: ZRTP for P2P, MIKEY for enterprise, DTLS for WebRTC
+- **Security Protocol Selection**: for `rvoip-sip` beta, use plaintext RTP or tested SDES-SRTP; ZRTP, MIKEY, and DTLS-SRTP require separate audit
 - **Buffer Configuration**: Tune based on network RTT and jitter characteristics
 - **Memory Management**: Use memory pooling for high-volume applications
 - **Transport Selection**: UDP for low latency, TCP for reliability
@@ -571,4 +585,4 @@ This project is licensed under either of
 - Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
 - MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
-at your option. 
+at your option.

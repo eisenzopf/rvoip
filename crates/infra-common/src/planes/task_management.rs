@@ -85,7 +85,7 @@ pub struct LayerTaskManager {
     cancel_token: CancellationToken,
 
     /// Number of active tasks
-    active_count: AtomicUsize,
+    active_count: Arc<AtomicUsize>,
 
     /// Layer name for logging
     layer_name: String,
@@ -97,6 +97,22 @@ pub struct LayerTaskManager {
     shutdown_timeout: Duration,
 }
 
+struct ActiveTaskGuard {
+    active_count: Arc<AtomicUsize>,
+}
+
+impl ActiveTaskGuard {
+    fn new(active_count: Arc<AtomicUsize>) -> Self {
+        Self { active_count }
+    }
+}
+
+impl Drop for ActiveTaskGuard {
+    fn drop(&mut self) {
+        self.active_count.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 impl LayerTaskManager {
     /// Create a new task manager for a layer
     pub fn new(layer_name: impl Into<String>) -> Self {
@@ -104,7 +120,7 @@ impl LayerTaskManager {
             next_task_id: AtomicUsize::new(0),
             tasks: Arc::new(Mutex::new(Vec::new())),
             cancel_token: CancellationToken::new(),
-            active_count: AtomicUsize::new(0),
+            active_count: Arc::new(AtomicUsize::new(0)),
             layer_name: layer_name.into(),
             max_tasks: 1000,
             shutdown_timeout: Duration::from_secs(5),
@@ -121,7 +137,7 @@ impl LayerTaskManager {
             next_task_id: AtomicUsize::new(0),
             tasks: Arc::new(Mutex::new(Vec::new())),
             cancel_token: CancellationToken::new(),
-            active_count: AtomicUsize::new(0),
+            active_count: Arc::new(AtomicUsize::new(0)),
             layer_name: layer_name.into(),
             max_tasks,
             shutdown_timeout,
@@ -156,11 +172,10 @@ impl LayerTaskManager {
         let layer_name = self.layer_name.clone();
         let task_name_clone = task_name.clone();
 
-        // Clone the atomic counter to move into the future
-        let active_count_clone = Arc::new(AtomicUsize::new(0));
+        let active_guard = ActiveTaskGuard::new(Arc::clone(&self.active_count));
 
         let wrapped_future = async move {
-            active_count_clone.fetch_add(1, Ordering::Relaxed);
+            let _active_guard = active_guard;
             debug!(
                 "Task started: {} [{}] in layer {}",
                 task_name_clone, task_id, layer_name
@@ -180,8 +195,6 @@ impl LayerTaskManager {
                     );
                 }
             }
-
-            active_count_clone.fetch_sub(1, Ordering::Relaxed);
         };
 
         // Update the main counter

@@ -4,6 +4,11 @@
 [![Documentation](https://docs.rs/rvoip-sip-transport/badge.svg)](https://docs.rs/rvoip-sip-transport)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 
+> **Beta scope notice:** for the `rvoip-sip` beta, transport claims are limited
+> to the paths covered by the beta compatibility matrix. UDP is the primary
+> release-gated transport; TCP/TLS/WS require their listed tests; WSS outbound
+> remains a non-claim until the known incomplete path is finished and tested.
+
 SIP transport layer implementation for the [rvoip](../README.md) VoIP stack, providing reliable and efficient transport mechanisms for SIP messages across different network protocols.
 
 ## Overview
@@ -19,7 +24,7 @@ SIP transport layer implementation for the [rvoip](../README.md) VoIP stack, pro
   - ✅ TCP transport with connection management and message framing
   - ✅ TLS transport with secure encrypted communication
   - ✅ WebSocket transport with RFC 7118 compliance
-  - ✅ Secure WebSocket (WSS) support
+  - ⚠️ Secure WebSocket (WSS) listener/lower-level support where tests pass; outbound WSS dialing is not a beta claim
 
 - **Transport Management**
   - ✅ Unified `Transport` trait for all transport types
@@ -302,4 +307,4 @@ This project is licensed under either of
 - Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
 - MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
-at your option. 
+at your option.

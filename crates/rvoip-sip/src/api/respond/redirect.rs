@@ -42,6 +42,10 @@ impl RedirectBuilder {
     }
 
     pub async fn send(mut self) -> Result<()> {
+        if self.coord.fast_auto_accept_incoming_calls() {
+            return Ok(());
+        }
+
         let extras = take_staged(&mut self.state);
         if extras.is_empty() {
             return self

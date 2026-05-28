@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, CustomExtension, DistinguishedName, DnType,
-    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
+    ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
     PKCS_ECDSA_P384_SHA384,
 };
 use rvoip_stir_shaken::{CertResolver, VerifierError};
@@ -103,6 +103,7 @@ impl TestPki {
         root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let root_cert = root_params.self_signed(&root_kp).expect("self-sign root");
+        let root_issuer = Issuer::from_params(&root_params, &root_kp);
 
         // --- Leaf (always P-256, regardless of root alg) ---
         let leaf_kp = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("leaf keypair");
@@ -130,7 +131,7 @@ impl TestPki {
         }
 
         let leaf_cert = leaf_params
-            .signed_by(&leaf_kp, &root_cert, &root_kp)
+            .signed_by(&leaf_kp, &root_issuer)
             .expect("sign leaf");
 
         Self {

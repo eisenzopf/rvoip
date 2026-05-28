@@ -23,10 +23,8 @@ pub fn self_signed_for_dev(
     let cert = generate_simple_self_signed(domains.to_vec()).map_err(|e| {
         SubstrateError::Tls(rustls::Error::General(format!("rcgen: {}", e)))
     })?;
-    let der = CertificateDer::from(cert.serialize_der().map_err(|e| {
-        SubstrateError::Tls(rustls::Error::General(format!("serialize_der: {}", e)))
-    })?);
-    let key = PrivateKeyDer::Pkcs8(cert.serialize_private_key_der().into());
+    let der = cert.cert.der().clone();
+    let key = PrivateKeyDer::Pkcs8(cert.signing_key.serialize_der().into());
     Ok((der, key))
 }
 

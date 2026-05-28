@@ -336,28 +336,13 @@ impl FingerprintVerifier {
 
 /// Generate a self-signed certificate for testing
 pub fn generate_self_signed_certificate() -> Result<Certificate> {
-    use rcgen::{Certificate as RcGenCertificate, CertificateParams, PKCS_ECDSA_P256_SHA256};
-
-    // Create certificate parameters
-    let mut params = CertificateParams::new(vec!["localhost".to_string()]);
-    params.alg = &PKCS_ECDSA_P256_SHA256;
-
-    // Generate the certificate
-    let cert = RcGenCertificate::from_params(params).map_err(|e| {
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).map_err(|e| {
         crate::error::Error::CertificateValidationError(format!(
             "Failed to generate certificate: {}",
             e
         ))
     })?;
 
-    // Get the DER-encoded certificate
-    let der = cert.serialize_der().map_err(|e| {
-        crate::error::Error::CertificateValidationError(format!(
-            "Failed to serialize certificate: {}",
-            e
-        ))
-    })?;
-
     // Create a Certificate from the DER data
-    Ok(Certificate::new(Bytes::from(der)))
+    Ok(Certificate::new(Bytes::from(cert.cert.der().to_vec())))
 }

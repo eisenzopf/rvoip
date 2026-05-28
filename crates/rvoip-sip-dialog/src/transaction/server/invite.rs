@@ -90,6 +90,7 @@ use crate::transaction::validators;
 use crate::transaction::{
     AtomicTransactionState, InternalTransactionCommand, Transaction, TransactionAsync,
     TransactionEvent, TransactionKey, TransactionKind, TransactionState,
+    DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
 };
 
 /// Server INVITE transaction implementation as defined in RFC 3261 Section 17.2.1.
@@ -161,6 +162,10 @@ impl ServerInviteLogic {
 
         // Start Timer 100 with 200ms interval
         let interval_100 = timer_config.timer_100_interval;
+        if interval_100.is_zero() {
+            trace!(id=%tx_id, "Timer 100 disabled by transaction timer settings");
+            return;
+        }
 
         // Keep Timer 100 off the transaction command queue. Under high CPS,
         // enqueuing one timer command per INVITE adds avoidable command-loop
@@ -875,6 +880,28 @@ impl ServerInviteTransaction {
         events_tx: mpsc::Sender<TransactionEvent>,
         timer_config_override: Option<TimerSettings>,
     ) -> Result<Self> {
+        Self::new_with_command_channel_capacity(
+            id,
+            request,
+            remote_addr,
+            transport,
+            events_tx,
+            timer_config_override,
+            DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
+        )
+    }
+
+    /// Create a new server INVITE transaction with a configured command-channel
+    /// capacity.
+    pub fn new_with_command_channel_capacity(
+        id: TransactionKey,
+        request: Request,
+        remote_addr: SocketAddr,
+        transport: Arc<dyn Transport>,
+        events_tx: mpsc::Sender<TransactionEvent>,
+        timer_config_override: Option<TimerSettings>,
+        command_channel_capacity: usize,
+    ) -> Result<Self> {
         if request.method() != Method::Invite {
             return Err(Error::Other(
                 "Request must be INVITE for INVITE server transaction".to_string(),
@@ -882,8 +909,7 @@ impl ServerInviteTransaction {
         }
 
         let timer_config = timer_config_override.unwrap_or_default();
-        // Use larger channel capacity for high-concurrency scenarios (e.g., 500+ concurrent calls)
-        let (cmd_tx, local_cmd_rx) = mpsc::channel(1000); // Increased from 32 for high-concurrency support
+        let (cmd_tx, local_cmd_rx) = mpsc::channel(command_channel_capacity.max(1));
 
         let data = Arc::new(ServerTransactionData {
             id: id.clone(),
@@ -908,20 +934,20 @@ impl ServerInviteTransaction {
         let data_for_runner = data.clone();
         let logic_for_runner = logic.clone();
 
-        // **RFC 3261 COMPLIANCE FIX**: Start Timer 100 for initial Proceeding state
-        // Timer 100 must be started when the transaction begins in Proceeding state
-        let initial_cmd_tx = data.cmd_tx.clone();
-        let initial_data = data.clone();
-        let initial_logic = logic.clone();
+        if !timer_config.timer_100_interval.is_zero() {
+            // **RFC 3261 COMPLIANCE FIX**: Start Timer 100 for initial Proceeding state.
+            let initial_cmd_tx = data.cmd_tx.clone();
+            let initial_data = data.clone();
+            let initial_logic = logic.clone();
 
-        // Start Timer 100 immediately for the initial Proceeding state
-        tokio::spawn(async move {
-            let mut temp_timer_handles = ServerInviteTimerHandles::default();
-            initial_logic
-                .start_timer_100(&initial_data, &mut temp_timer_handles, initial_cmd_tx)
-                .await;
-            // Timer handles will be managed by the main transaction loop
-        });
+            tokio::spawn(async move {
+                let mut temp_timer_handles = ServerInviteTimerHandles::default();
+                initial_logic
+                    .start_timer_100(&initial_data, &mut temp_timer_handles, initial_cmd_tx)
+                    .await;
+                // Timer handles will be managed by the main transaction loop
+            });
+        }
 
         // Spawn the generic event loop runner - get the receiver from the data first in a separate tokio task
         let event_loop_handle = tokio::spawn(async move {

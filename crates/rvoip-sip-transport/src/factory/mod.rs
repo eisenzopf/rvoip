@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::transport::tcp::pool::PoolConfig;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::tls::{TlsRole, TlsTransport};
-use crate::transport::udp::{UdpParseConfig, UdpSocketOptions, UdpTransport};
+use crate::transport::udp::{UdpParseConfig, UdpParseDispatch, UdpSocketOptions, UdpTransport};
 use crate::transport::ws::WebSocketTransport;
 use crate::transport::{Transport, TransportEvent};
 
@@ -103,6 +103,8 @@ pub struct TransportFactoryConfig {
     pub udp_parse_workers: Option<usize>,
     /// Optional per-worker UDP parse queue capacity.
     pub udp_parse_queue_capacity: Option<usize>,
+    /// Optional UDP parse worker dispatch strategy.
+    pub udp_parse_dispatch: Option<UdpParseDispatch>,
 }
 
 impl Default for TransportFactoryConfig {
@@ -121,6 +123,7 @@ impl Default for TransportFactoryConfig {
             udp_send_buffer_size: None,
             udp_parse_workers: None,
             udp_parse_queue_capacity: None,
+            udp_parse_dispatch: None,
         }
     }
 }
@@ -154,9 +157,10 @@ impl TransportFactory {
                     self.config.udp_recv_buffer_size,
                     self.config.udp_send_buffer_size,
                 );
-                let parse_config = UdpParseConfig::from_optional(
+                let parse_config = UdpParseConfig::from_optional_with_dispatch(
                     self.config.udp_parse_workers,
                     self.config.udp_parse_queue_capacity,
+                    self.config.udp_parse_dispatch,
                     self.config.channel_capacity,
                 );
                 let (transport, rx) = UdpTransport::bind_with_mtu_socket_options_and_parse_config(

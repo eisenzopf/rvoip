@@ -89,8 +89,11 @@ async fn main() -> Result<()> {
     println!("   ✓ Extracted bearer token");
 
     // 2. Validate token (normally done by auth-core)
-    let public_key = auth_service.jwt_issuer().public_key_pem()?;
-    let claims = validate_token(token, &public_key)?;
+    let claims = validate_token(
+        token,
+        auth_service.jwt_issuer().decoding_key(),
+        auth_service.jwt_issuer().algorithm(),
+    )?;
     println!("   ✓ Token validated successfully");
     println!("     - User ID: {}", claims.sub);
     println!("     - Username: {}", claims.username);
@@ -149,7 +152,11 @@ async fn main() -> Result<()> {
     };
 
     let mobile_token = extract_bearer_token(&mobile_register.authorization)?;
-    let mobile_claims = validate_token(mobile_token, &public_key)?;
+    let mobile_claims = validate_token(
+        mobile_token,
+        auth_service.jwt_issuer().decoding_key(),
+        auth_service.jwt_issuer().algorithm(),
+    )?;
 
     println!("✅ Alice registered from second device");
     println!("   - Desktop: sip:alice@192.168.1.100:5060");
@@ -179,14 +186,16 @@ fn extract_bearer_token(auth_header: &Option<String>) -> Result<&str> {
         .ok_or_else(|| anyhow::anyhow!("Invalid Authorization header format"))
 }
 
-fn validate_token(token: &str, public_key_pem: &str) -> Result<UserClaims> {
-    let decoding_key = DecodingKey::from_rsa_pem(public_key_pem.as_bytes())?;
-
-    let mut validation = Validation::new(Algorithm::RS256);
+fn validate_token(
+    token: &str,
+    decoding_key: &DecodingKey,
+    algorithm: Algorithm,
+) -> Result<UserClaims> {
+    let mut validation = Validation::new(algorithm);
     validation.set_issuer(&["https://users.rvoip.local"]);
     validation.set_audience(&["rvoip-api", "rvoip-sip"]);
 
-    let token_data = decode::<UserClaims>(token, &decoding_key, &validation)?;
+    let token_data = decode::<UserClaims>(token, decoding_key, &validation)?;
 
     Ok(token_data.claims)
 }

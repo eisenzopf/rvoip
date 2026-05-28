@@ -29,10 +29,13 @@ pub struct ScenarioReport {
     environment: EnvironmentBlock,
     load: LoadProfile,
     results: Map<String, Value>,
+    diagnostics: Map<String, Value>,
     latencies: Vec<LatencySnapshot>,
     baseline_rss_mb: Option<f64>,
     peak_rss_mb: Option<f64>,
     rss_growth_mb_per_min: Option<f64>,
+    rss_tail_growth_mb_per_min: Option<f64>,
+    rss_tail_window_secs: Option<f64>,
     avg_cpu_pct: Option<f64>,
     rss_samples: Vec<ResourceSample>,
     started: std::time::Instant,
@@ -47,10 +50,13 @@ impl ScenarioReport {
             environment,
             load,
             results: Map::new(),
+            diagnostics: Map::new(),
             latencies: Vec::new(),
             baseline_rss_mb: None,
             peak_rss_mb: None,
             rss_growth_mb_per_min: None,
+            rss_tail_growth_mb_per_min: None,
+            rss_tail_window_secs: None,
             avg_cpu_pct: None,
             rss_samples: Vec::new(),
             started: std::time::Instant::now(),
@@ -70,6 +76,8 @@ impl ScenarioReport {
         self.baseline_rss_mb = Some(summary.baseline_rss_mb);
         self.peak_rss_mb = Some(summary.peak_rss_mb);
         self.rss_growth_mb_per_min = Some(summary.rss_growth_mb_per_min);
+        self.rss_tail_growth_mb_per_min = Some(summary.rss_tail_growth_mb_per_min);
+        self.rss_tail_window_secs = Some(summary.rss_tail_window_secs);
         self.avg_cpu_pct = Some(summary.avg_cpu_pct);
         self.rss_samples = summary.samples;
         self
@@ -84,6 +92,13 @@ impl ScenarioReport {
     /// Record a structured (nested) result block.
     pub fn result_block(&mut self, key: &str, value: Value) -> &mut Self {
         self.results.insert(key.to_string(), value);
+        self
+    }
+
+    /// Record verbose diagnostic data in the JSON report without dumping it
+    /// into the human-readable stdout summary.
+    pub fn diagnostic_block(&mut self, key: &str, value: Value) -> &mut Self {
+        self.diagnostics.insert(key.to_string(), value);
         self
     }
 
@@ -131,6 +146,8 @@ impl ScenarioReport {
             "baseline_rss_mb": self.baseline_rss_mb,
             "peak_rss_mb": self.peak_rss_mb,
             "rss_growth_mb_per_min": self.rss_growth_mb_per_min,
+            "rss_tail_growth_mb_per_min": self.rss_tail_growth_mb_per_min,
+            "rss_tail_window_secs": self.rss_tail_window_secs,
             "avg_cpu_pct": self.avg_cpu_pct,
             "rss_samples_mb": self.rss_samples,
         });
@@ -141,6 +158,7 @@ impl ScenarioReport {
             "environment": self.environment,
             "load":       self.load,
             "results":    Value::Object(self.results.clone()),
+            "diagnostics": Value::Object(self.diagnostics.clone()),
             "latency_ns": Value::Object(latency_obj),
             "resources":  resources,
         });
@@ -208,6 +226,15 @@ impl ScenarioReport {
         for (k, v) in self.results.iter() {
             println!("   {:<22}  {}", k, v);
         }
+        if !self.diagnostics.is_empty() {
+            let keys = self
+                .diagnostics
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(" diagnostics: {keys}");
+        }
         println!(" latency:");
         for snap in &self.latencies {
             println!("{}", snap.format_row());
@@ -229,7 +256,15 @@ impl ScenarioReport {
             // Highlight any non-trivial growth — the "no leaks" pitch
             // wants this near zero for short runs.
             let marker = if growth.abs() > 1.0 { "  ⚠" } else { "" };
-            println!(" RSS growth  : {:+.2} MB/min{marker}", growth);
+            println!(" RSS growth  : {:+.2} MB/min full-run{marker}", growth);
+        }
+        if let Some(growth) = self.rss_tail_growth_mb_per_min {
+            let marker = if growth.abs() > 1.0 { "  ⚠" } else { "" };
+            let window = self.rss_tail_window_secs.unwrap_or_default();
+            println!(
+                " RSS tail    : {:+.2} MB/min over last {:.0}s{marker}",
+                growth, window
+            );
         }
         if let Some(cpu) = self.avg_cpu_pct {
             println!(" avg CPU     : {:.1}%", cpu);

@@ -2,7 +2,8 @@
 //!
 //! Tests Config constructors, defaults, and field values.
 
-use rvoip_sip::{Config, MediaMode, SipContactMode, SipTlsMode};
+use rvoip_sip::{Config, MediaMode, PerformanceConfig, SipContactMode, SipTlsMode};
+use rvoip_sip_transport::UdpParseDispatch;
 use std::net::{IpAddr, SocketAddr};
 
 // ── Config::local ───────────────────────────────────────────────────────────
@@ -76,6 +77,13 @@ fn test_config_default() {
     assert_eq!(c.sip_port, 5060);
     assert_eq!(c.local_uri, "sip:user@127.0.0.1:5060");
     assert!(c.auto_180_ringing);
+    assert!(c.auto_100_trying);
+    assert!(!c.fast_auto_accept_incoming_calls);
+    assert!(!c.cleanup_diagnostics);
+    assert!(!c.cleanup_diagnostic_events);
+    assert!(!c.srtp_diagnostics);
+    assert!(!c.rtp_diagnostics);
+    assert!(!c.media_sdp_diagnostics);
     assert_eq!(c.media_mode, MediaMode::Enabled);
 }
 
@@ -95,16 +103,159 @@ fn test_config_media_port_validation() {
 fn test_config_graduated_perf_knobs_are_configurable() {
     let c = Config::local("alice", 5060)
         .with_auto_180_ringing(false)
+        .with_auto_100_trying(false)
+        .with_fast_auto_accept_incoming_calls(true)
         .with_sip_udp_parse_workers(4)
         .with_sip_udp_parse_queue_capacity(8192)
         .with_global_event_channel_capacity(16_384)
+        .with_media_session_capacity(4096)
+        .with_media_port_capacity(16_384, 1024)
+        .with_sip_udp_diagnostics(true)
+        .with_media_setup_diagnostics(true)
+        .with_cleanup_diagnostics(true)
+        .with_cleanup_diagnostic_events(true)
+        .with_srtp_diagnostics(true)
+        .with_rtp_diagnostics(true)
+        .with_media_sdp_diagnostics(true)
         .with_signaling_only_media(9);
 
     assert!(!c.auto_180_ringing);
+    assert!(!c.auto_100_trying);
+    assert!(c.fast_auto_accept_incoming_calls);
     assert_eq!(c.sip_udp_parse_workers, Some(4));
     assert_eq!(c.sip_udp_parse_queue_capacity, Some(8192));
     assert_eq!(c.global_event_channel_capacity, 16_384);
+    assert_eq!(c.media_session_capacity, Some(4096));
+    assert_eq!(c.media_port_start, 16_384);
+    assert_eq!(c.media_port_end, 17_407);
+    assert_eq!(c.media_port_capacity, Some(1024));
+    assert!(c.sip_udp_diagnostics);
+    assert!(c.media_setup_diagnostics);
+    assert!(c.cleanup_diagnostics);
+    assert!(c.cleanup_diagnostic_events);
+    assert!(c.srtp_diagnostics);
+    assert!(c.rtp_diagnostics);
+    assert!(c.media_sdp_diagnostics);
     assert_eq!(c.media_mode, MediaMode::SignalingOnly { sdp_rtp_port: 9 });
+}
+
+#[test]
+fn test_config_pbx_media_server_performance_recipe() {
+    let c = Config::local("alice", 5060).with_pbx_media_server_performance(2_000);
+
+    assert!(!c.auto_180_ringing);
+    assert!(!c.auto_100_trying);
+    assert!(c.fast_auto_accept_incoming_calls);
+    assert_eq!(c.sip_udp_recv_buffer_size, Some(8_388_608));
+    assert_eq!(c.sip_udp_send_buffer_size, Some(8_388_608));
+    assert_eq!(c.sip_udp_parse_workers, Some(4));
+    assert_eq!(c.sip_udp_parse_queue_capacity, Some(2_000));
+    assert_eq!(c.sip_udp_parse_dispatch, Some(UdpParseDispatch::RoundRobin));
+    assert_eq!(c.sip_transaction_dispatch_workers, Some(2));
+    assert_eq!(c.sip_dialog_dispatch_workers, Some(4));
+    assert_eq!(c.session_event_dispatcher_workers, 4);
+    assert_eq!(c.sip_transaction_command_channel_capacity, Some(128));
+    assert_eq!(c.server_call_capacity, Some(2_000));
+    assert_eq!(c.server_call_admission_limit, Some(2_000));
+    assert_eq!(c.server_call_admission_soft_limit, Some(1_800));
+    assert_eq!(c.server_call_admission_pacing_delay_ms, Some(1));
+    assert_eq!(c.server_overload_retry_after_secs, Some(1));
+    assert_eq!(c.media_port_start, 16_384);
+    assert_eq!(c.media_port_end, 65_535);
+    assert_eq!(c.media_port_capacity, Some(49_152));
+    assert_eq!(c.media_session_capacity, Some(2_000));
+    assert_eq!(c.media_mode, MediaMode::Enabled);
+}
+
+#[test]
+fn test_config_signaling_only_server_high_performance_recipe() {
+    let c = Config::local("alice", 5060).with_signaling_only_server_high_performance(2_000, 9);
+
+    assert!(c.fast_auto_accept_incoming_calls);
+    assert_eq!(c.sip_udp_parse_workers, Some(4));
+    assert_eq!(c.sip_udp_parse_dispatch, Some(UdpParseDispatch::RoundRobin));
+    assert_eq!(c.sip_transaction_dispatch_workers, Some(2));
+    assert_eq!(c.sip_dialog_dispatch_workers, Some(4));
+    assert_eq!(c.sip_transaction_command_channel_capacity, Some(128));
+    assert_eq!(c.server_call_capacity, Some(2_000));
+    assert_eq!(c.server_call_admission_limit, Some(2_000));
+    assert_eq!(c.server_call_admission_soft_limit, Some(1_800));
+    assert_eq!(c.server_call_admission_pacing_delay_ms, Some(1));
+    assert_eq!(c.server_overload_retry_after_secs, Some(1));
+    assert_eq!(c.media_mode, MediaMode::SignalingOnly { sdp_rtp_port: 9 });
+}
+
+#[test]
+fn test_config_profile_defaults_can_be_overridden_after_profile() {
+    let c = Config::local("alice", 5060)
+        .with_pbx_media_server_performance(2_000)
+        .with_sip_transaction_command_channel_capacity(256)
+        .with_sip_udp_parse_workers(2)
+        .with_sip_udp_parse_dispatch(UdpParseDispatch::SourceHash);
+
+    assert_eq!(c.sip_transaction_command_channel_capacity, Some(256));
+    assert_eq!(c.sip_udp_parse_workers, Some(2));
+    assert_eq!(c.sip_udp_parse_dispatch, Some(UdpParseDispatch::SourceHash));
+}
+
+#[test]
+fn test_config_profile_rejects_invalid_capacity() {
+    let err = Config::local("alice", 5060)
+        .try_with_performance_config(PerformanceConfig::pbx_media_server(0))
+        .unwrap_err();
+    assert!(err.to_string().contains("capacity"));
+}
+
+#[test]
+fn test_config_can_load_custom_performance_recipe_yaml() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("recipes.yaml");
+    std::fs::write(
+        &path,
+        r#"
+version: 1
+performanceProfiles:
+  custom-pbx:
+    requiresCapacity: true
+    config:
+      channelCapacity: "$capacity"
+      auto180Ringing: false
+      auto100Trying: false
+      fastAutoAcceptIncomingCalls: true
+      sipUdpParseWorkers: 2
+      sipUdpParseDispatch: round-robin
+      sipTransactionCommandChannelCapacity: 64
+      serverCallAdmissionLimit: "$capacity"
+      serverCallAdmissionSoftLimit: "$capacity90Percent"
+      serverCallAdmissionPacingDelayMs: 3
+      serverOverloadRetryAfterSecs: 2
+      mediaMode: enabled
+      mediaSessionCapacity: "$capacity"
+"#,
+    )
+    .unwrap();
+
+    let c = Config::local("alice", 5060)
+        .try_with_performance_config(
+            PerformanceConfig::profile("custom-pbx")
+                .with_capacity(321)
+                .with_recipe_path(&path),
+        )
+        .unwrap();
+
+    assert_eq!(c.incoming_call_channel_capacity, 321);
+    assert!(!c.auto_180_ringing);
+    assert!(!c.auto_100_trying);
+    assert!(c.fast_auto_accept_incoming_calls);
+    assert_eq!(c.sip_udp_parse_workers, Some(2));
+    assert_eq!(c.sip_udp_parse_dispatch, Some(UdpParseDispatch::RoundRobin));
+    assert_eq!(c.sip_transaction_command_channel_capacity, Some(64));
+    assert_eq!(c.server_call_admission_limit, Some(321));
+    assert_eq!(c.server_call_admission_soft_limit, Some(289));
+    assert_eq!(c.server_call_admission_pacing_delay_ms, Some(3));
+    assert_eq!(c.server_overload_retry_after_secs, Some(2));
+    assert_eq!(c.media_session_capacity, Some(321));
+    assert_eq!(c.media_mode, MediaMode::Enabled);
 }
 
 // ── Different names ─────────────────────────────────────────────────────────

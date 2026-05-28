@@ -35,8 +35,8 @@ fn write_self_signed_localhost_cert() -> (tempfile::TempDir, PathBuf, PathBuf) {
 
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
         .expect("rcgen self-signed");
-    let cert_pem = cert.serialize_pem().expect("cert PEM");
-    let key_pem = cert.serialize_private_key_pem();
+    let cert_pem = cert.cert.pem();
+    let key_pem = cert.signing_key.serialize_pem();
 
     std::fs::File::create(&cert_path)
         .and_then(|mut f| f.write_all(cert_pem.as_bytes()))

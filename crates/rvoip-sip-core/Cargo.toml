@@ -29,7 +29,6 @@ sdp = []  # Session Description Protocol support
 [dependencies]
 # Workspace dependencies
 thiserror.workspace = true
-anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 bytes.workspace = true
@@ -40,16 +39,11 @@ rand.workspace = true
 log.workspace = true
 
 # Crate-specific dependencies not in workspace
-serde_bytes.workspace = true
 base64.workspace = true
 nom.workspace = true
 ordered-float.workspace = true
 
 [dev-dependencies]
-proptest.workspace = true
-tokio.workspace = true
-tracing-subscriber.workspace = true
-async-trait.workspace = true
 criterion.workspace = true
 
 # Integration tests configuration

@@ -79,6 +79,7 @@ fn every_yaml_event_is_manifested_or_marked_internal() {
         "DialogTimeout",
         "HoldCall",
         "IncomingCall",
+        "IncomingCallAutoAccept",
         "RedirectCall",
         "Registration200OK",
         "RegistrationFailed",

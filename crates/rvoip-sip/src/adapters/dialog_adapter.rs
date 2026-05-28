@@ -221,6 +221,18 @@ impl DialogAdapter {
         guard.finish_success();
     }
 
+    /// Feature-gated retained-object counts for perf leak investigations.
+    #[cfg(feature = "perf-tests")]
+    pub(crate) fn perf_diagnostic_counts(&self) -> serde_json::Value {
+        serde_json::json!({
+            "session_to_dialog": self.session_to_dialog.len(),
+            "dialog_to_session": self.dialog_to_session.len(),
+            "callid_to_session": self.callid_to_session.len(),
+            "outgoing_invite_tx": self.outgoing_invite_tx.len(),
+            "registration_refresh_tasks": self.registration_refresh_tasks.len(),
+        })
+    }
+
     pub(crate) fn abort_all_registration_refreshes(&self) {
         let guard = cleanup_diag::stage_guard(CleanupStage::TimerTaskShutdown, "all");
         let handles: Vec<_> = self
@@ -1323,6 +1335,36 @@ impl DialogAdapter {
             })
     }
 
+    /// Send a UAS response through a known inbound server transaction.
+    pub async fn send_response_for_transaction(
+        &self,
+        session_id: &SessionId,
+        transaction_id: &TransactionKey,
+        code: u16,
+        sdp: Option<String>,
+    ) -> Result<()> {
+        tracing::info!(
+            "DialogAdapter sending {} response for session {} via transaction {} with SDP: {}",
+            code,
+            session_id.0,
+            transaction_id,
+            sdp.is_some()
+        );
+
+        self.dialog_api
+            .send_response_for_session_transaction(&session_id.0, transaction_id, code, sdp)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to send response for session {} via transaction {}: {}",
+                    session_id.0,
+                    transaction_id,
+                    e
+                );
+                SessionError::DialogError(format!("Failed to send response: {}", e))
+            })
+    }
+
     /// Send ACK (for UAC after 200 OK)
     pub async fn send_ack(&self, session_id: &SessionId, response: &Response) -> Result<()> {
         // Get the dialog ID for this session
@@ -2011,6 +2053,10 @@ impl DialogAdapter {
         // Remove from all mappings
         if let Some(dialog_id) = self.session_to_dialog.remove(session_id) {
             self.dialog_to_session.remove(&dialog_id.1);
+            self.dialog_api
+                .dialog_manager()
+                .core()
+                .cleanup_dialog_storage(&dialog_id.1);
         }
 
         let call_ids_to_remove: Vec<_> = self
@@ -2542,6 +2588,16 @@ impl DialogAdapter {
             .start()
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to start dialog API: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Stop the dialog API and release its transaction transports.
+    pub async fn stop(&self) -> Result<()> {
+        self.dialog_api
+            .stop()
+            .await
+            .map_err(|e| SessionError::DialogError(format!("Failed to stop dialog API: {}", e)))?;
 
         Ok(())
     }
