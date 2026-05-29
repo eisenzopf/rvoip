@@ -17,21 +17,19 @@
 use nom::{
     branch::alt,
     bytes::complete::tag_no_case,
-    combinator::{map, map_res, opt, recognize},
-    error::{Error as NomError, ErrorKind, ParseError},
+    combinator::{map, map_res, opt},
+    error::{Error as NomError, ErrorKind},
     multi::many0,
     sequence::{pair, preceded},
-    IResult,
 };
 use std::collections::HashMap;
 use std::str;
 
 // Import specific parsers from the new modules
-use super::quoted::{quoted_pair, quoted_string};
+use super::quoted::quoted_string;
 use super::separators::{equal, semi};
 use super::token::token;
 use super::uri::host::host;
-use super::utils::unescape_uri_component;
 use super::values::{delta_seconds, qvalue};
 use super::ParseResult;
 use crate::error::Error;
@@ -124,13 +122,6 @@ pub fn semicolon_params0(input: &[u8]) -> ParseResult<'_, Vec<Param>> {
     ))(input)
 }
 
-/// Parses one or more semicolon-preceded generic parameters.
-pub fn semicolon_params1(input: &[u8]) -> ParseResult<'_, Vec<Param>> {
-    nom::multi::many1(preceded(
-        semi,          // Use the semi parser which handles surrounding SWS
-        generic_param, // Parse one generic parameter
-    ))(input)
-}
 
 /// Parses zero or more semicolon-preceded parameters using a specific parameter parser function.
 /// Useful for headers where parameters might not all be generic-param.
@@ -143,33 +134,10 @@ where
     many0(preceded(semi, param_parser))
 }
 
-/// Parses one or more semicolon-preceded parameters using a specific parameter parser function.
-pub fn semicolon_separated_params1<'a, O, F>(
-    param_parser: F,
-) -> impl FnMut(&'a [u8]) -> ParseResult<'_, Vec<O>>
-where
-    F: FnMut(&'a [u8]) -> ParseResult<'_, O> + Copy,
-{
-    nom::multi::many1(preceded(semi, param_parser))
-}
 
 // Helper to convert a Vec<Param> (like from semicolon_params0) to a HashMap for easier lookup.
 // Note: This assumes parameter names are unique, last one wins if not.
 // Quoted values have their quotes removed, per RFC 3261 Sections 7.3.1 and 25.1.
-pub fn params_to_hashmap(params: Vec<Param>) -> HashMap<String, Option<String>> {
-    params.into_iter().fold(HashMap::new(), |mut acc, param| {
-        if let Param::Other(name, value) = param {
-            // Convert Option<GenericValue> to Option<String>
-            let string_value = value.map(|v| match v {
-                GenericValue::Quoted(s) => s, // No quotes for quoted values per RFC
-                _ => v.to_string(),
-            });
-            acc.insert(name, string_value);
-        }
-        // TODO: Handle other Param variants like Q if needed in the HashMap?
-        acc
-    })
-}
 
 // tag-param = "tag" EQUAL token
 pub fn tag_param(input: &[u8]) -> ParseResult<'_, Param> {
@@ -231,20 +199,6 @@ pub fn contact_param_item(input: &[u8]) -> ParseResult<'_, Param> {
 }
 
 // Function to parse a semicolon-separated list of key-value parameters into a HashMap<String, Option<String>>
-pub fn hashmap_param_list<'a>(
-    param_parser: impl Fn(&'a [u8]) -> ParseResult<'a, (String, Option<GenericValue>)>,
-) -> impl FnMut(&'a [u8]) -> ParseResult<'a, HashMap<String, Option<String>>> {
-    map(many0(preceded(semi, param_parser)), |params| {
-        params
-            .into_iter()
-            .map(|(name, value)| {
-                // Convert Option<GenericValue> to Option<String>
-                let string_value = value.map(|v| v.to_string());
-                (name, string_value)
-            })
-            .collect()
-    })
-}
 
 #[cfg(test)]
 mod tests {

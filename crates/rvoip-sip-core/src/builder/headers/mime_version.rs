@@ -1,9 +1,9 @@
-use crate::builder::headers::HeaderSetter;
+#[cfg(test)]
+use crate::types::headers::HeaderName;
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::types::{
-    headers::HeaderName, mime_version::MimeVersion as MimeVersionType, TypedHeader,
+    mime_version::MimeVersion as MimeVersionType, TypedHeader,
 };
-use bytes::Bytes;
 
 /// # MIME-Version Header Builder Extension
 ///
@@ -276,7 +276,7 @@ impl MimeVersionBuilderExt for SimpleResponseBuilder {
 mod tests {
     use super::*;
     use crate::types::headers::HeaderAccess;
-    use crate::types::{mime_version::MimeVersion as MimeVersionType, Method, StatusCode};
+    use crate::types::{Method, StatusCode};
 
     #[test]
     fn test_request_mime_version_1_0() {

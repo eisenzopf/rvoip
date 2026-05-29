@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use nom::{
     character::complete::{digit1, space0},
     combinator::{all_consuming, map_res, opt, recognize},
-    sequence::{preceded, tuple},
+    sequence::preceded,
     IResult,
 };
 

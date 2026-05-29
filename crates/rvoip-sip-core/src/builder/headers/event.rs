@@ -1,10 +1,7 @@
-use crate::builder::headers::expires::ExpiresExt;
+#[cfg(test)]
+use crate::types::headers::TypedHeader;
 use crate::builder::headers::HeaderSetter;
-use crate::types::{
-    event::{Event, EventType, ParamValue, Params},
-    headers::TypedHeader,
-};
-use std::collections::BTreeMap;
+use crate::types::event::{Event, EventType, ParamValue, Params};
 
 /// # SIP Event Header Builder
 ///
@@ -363,12 +360,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::headers::{header_access::HeaderAccess, HeaderName};
+    use crate::types::headers::HeaderName;
     use crate::types::method::Method;
-    use crate::types::uri::Uri;
+    
     use crate::types::StatusCode;
     use crate::{RequestBuilder, ResponseBuilder}; // Assuming these are your primary builders
-    use std::str::FromStr;
+    
 
     #[test]
     fn test_set_full_event_object() {

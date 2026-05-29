@@ -12,7 +12,6 @@
 //! [Session Description Protocol](https://datatracker.ietf.org/doc/html/rfc8866).
 
 use crate::error::{Error, Result};
-use crate::sdp::session::validation as session_validation;
 use crate::types::sdp::SdpSession;
 
 // Re-export validation functions from session module

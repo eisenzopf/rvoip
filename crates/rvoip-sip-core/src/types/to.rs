@@ -41,8 +41,7 @@ use crate::error::{Error, Result};
 use crate::parser::parse_address; // For FromStr
 use crate::types::address::Address;
 use crate::types::header::Header;
-use crate::types::{HeaderName, HeaderValue, Param, TypedHeader, TypedHeaderTrait};
-use nom::combinator;
+use crate::types::{HeaderName, HeaderValue, TypedHeaderTrait};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::Deref;

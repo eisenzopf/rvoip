@@ -1,4 +1,3 @@
-use crate::builder::headers::HeaderSetter;
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::types::{cseq::CSeq, Method, TypedHeader};
 
@@ -208,7 +207,7 @@ impl CSeqBuilderExt for SimpleResponseBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::StatusCode;
+    
 
     #[test]
     fn test_request_cseq_header() {

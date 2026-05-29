@@ -1,7 +1,6 @@
-use crate::builder::headers::HeaderSetter;
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::types::{
-    via::{SentProtocol, Via, ViaHeader},
+    via::Via,
     Param, TypedHeader,
 };
 
@@ -335,7 +334,7 @@ impl ViaBuilderExt for SimpleResponseBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Method, StatusCode};
+    use crate::types::Method;
 
     #[test]
     fn test_request_via_header() {

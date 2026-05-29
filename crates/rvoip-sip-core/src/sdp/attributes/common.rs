@@ -7,12 +7,10 @@ use crate::error::{Error, Result};
 use crate::parser::token::is_token_char;
 use crate::types::sdp::ParsedAttribute;
 use nom::{
-    branch::alt,
-    bytes::complete::{tag, take_till1, take_while1},
-    character::complete::{char, digit1, hex_digit1, space0, space1},
-    combinator::{map, map_res, opt, recognize, verify},
-    multi::{many0, many1, separated_list0, separated_list1},
-    sequence::{delimited, pair, separated_pair, tuple},
+    bytes::complete::{take_till1, take_while1},
+    character::complete::{char, digit1},
+    combinator::map_res,
+    sequence::separated_pair,
     IResult,
 };
 

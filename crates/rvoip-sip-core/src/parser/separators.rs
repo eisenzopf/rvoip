@@ -3,7 +3,7 @@ use nom::{
     bytes::complete::{tag, take_while1},
     combinator::recognize,
     multi::many0,
-    sequence::{delimited, pair, preceded, terminated, tuple},
+    sequence::{pair, tuple},
     IResult,
 };
 
@@ -107,7 +107,7 @@ pub fn rdquot(input: &[u8]) -> ParseResult<'_, &[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nom::error::ErrorKind;
+    
 
     #[test]
     fn test_is_separator_char() {

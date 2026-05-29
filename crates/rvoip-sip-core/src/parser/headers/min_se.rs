@@ -38,7 +38,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nom::error::{Error as NomError, VerboseError};
+    use nom::error::VerboseError;
 
     #[test]
     fn test_parse_min_se_value_valid() {

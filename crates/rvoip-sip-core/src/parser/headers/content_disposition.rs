@@ -6,26 +6,24 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case},
-    combinator::{map, map_res, opt, value},
+    bytes::complete::tag_no_case,
+    combinator::{map, map_res, opt},
     error::{Error as NomError, ErrorKind, ParseError},
     multi::many0,
     sequence::{pair, preceded, terminated},
-    IResult,
 };
 use std::str;
 
 // Import from base parser modules
 use crate::parser::common_params::generic_param;
-use crate::parser::separators::{equal, hcolon, semi};
+use crate::parser::separators::{equal, semi};
 use crate::parser::token::token;
-use crate::parser::whitespace::{lws, owsp, sws};
+use crate::parser::whitespace::{lws, sws};
 use crate::parser::ParseResult;
 
 use crate::types::content_disposition::{
-    ContentDisposition, DispositionParam, DispositionType, Handling,
+    DispositionParam, DispositionType, Handling,
 };
-use crate::types::param::Param;
 
 // disp-type = "render" / "session" / "icon" / "alert" / disp-extension-token
 // disp-extension-token = token

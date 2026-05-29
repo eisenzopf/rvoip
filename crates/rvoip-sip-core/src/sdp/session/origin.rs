@@ -3,13 +3,12 @@
 // Functions for parsing the o= line in SDP messages.
 
 use crate::error::{Error, Result};
-use crate::sdp::session::validation::is_valid_hostname;
 use crate::types::sdp::Origin;
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_till, take_while},
+    bytes::complete::{tag, take_till},
     character::complete::{digit1, space1},
-    combinator::{map, opt},
+    combinator::opt,
     sequence::tuple,
     IResult,
 };

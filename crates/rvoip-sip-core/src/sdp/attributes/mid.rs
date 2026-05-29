@@ -6,8 +6,7 @@
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::{to_result, token};
 use nom::{
-    bytes::complete::take_while1,
-    combinator::{all_consuming, verify},
+    combinator::verify,
     IResult,
 };
 

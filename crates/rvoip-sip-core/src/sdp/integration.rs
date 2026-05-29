@@ -4,14 +4,19 @@
 //! It includes helper functions to create SDP from SIP message information and vice versa,
 //! as well as common media profile helpers for typical use cases.
 
-use crate::sdp::{attributes::MediaDirection, SdpBuilder};
-use crate::types::sdp::SdpSession;
-use crate::types::{
-    address::Address, contact::Contact, from::From, sip_message::Message, sip_request::Request,
-    sip_response::Response, to::To, uri::Uri, via::Via,
-};
+#[cfg(test)]
 use crate::RequestBuilder;
+#[cfg(test)]
 use crate::ResponseBuilder;
+#[cfg(test)]
+use crate::types::address::Address;
+#[cfg(test)]
+use crate::types::via::Via;
+use crate::sdp::{attributes::MediaDirection, SdpBuilder};
+use crate::types::{
+    contact::Contact, from::From, sip_request::Request,
+    sip_response::Response, to::To, uri::Uri,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Helper for extracting host and IP information from SIP URIs and headers
@@ -318,9 +323,7 @@ pub fn add_webrtc_profile(
 mod tests {
     use super::*;
     use crate::types::{
-        call_id::CallId, contact::ContactParamInfo, content_length::ContentLength,
-        content_type::ContentType, cseq::CSeq, headers::TypedHeader, max_forwards::MaxForwards,
-        param::Param, Method, StatusCode, Uri,
+        call_id::CallId, contact::ContactParamInfo, cseq::CSeq, headers::TypedHeader, Method, StatusCode, Uri,
     };
     use std::str::FromStr;
 

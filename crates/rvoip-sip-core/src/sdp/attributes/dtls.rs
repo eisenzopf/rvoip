@@ -4,9 +4,8 @@
 //! These attributes are used in DTLS-SRTP for secure media transport.
 
 use crate::error::{Error, Result};
-use crate::sdp::attributes::common::{to_result, token};
+use crate::sdp::attributes::common::token;
 use nom::{
-    bytes::complete::{tag, take_while1},
     character::complete::{char, hex_digit1, space1},
     combinator::{map, verify},
     multi::separated_list1,

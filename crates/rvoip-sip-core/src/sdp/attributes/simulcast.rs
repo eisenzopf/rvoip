@@ -8,10 +8,9 @@ use crate::error::{Error, Result};
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_while1},
-    character::complete::{alphanumeric1, char, space0, space1},
-    combinator::{all_consuming, eof, map, opt, value},
-    multi::{many0, separated_list1},
-    sequence::{delimited, pair, preceded, tuple},
+    character::complete::{char, space1},
+    combinator::{map, opt, value},
+    multi::separated_list1,
     IResult,
 };
 
@@ -58,13 +57,6 @@ pub struct SimulcastAttribute {
     pub stream_versions: Vec<SimulcastVersion>,
 }
 
-/// Parse a simulcast direction
-fn parse_simulcast_direction(input: &str) -> IResult<&str, SimulcastDirection> {
-    alt((
-        value(SimulcastDirection::Send, tag("send")),
-        value(SimulcastDirection::Recv, tag("recv")),
-    ))(input)
-}
 
 /// Parse a RID identifier according to RFC 8851
 /// A RID identifier is a token defined in RFC 8851 as
@@ -120,20 +112,6 @@ fn parse_simulcast_stream_versions(input: &str) -> IResult<&str, Vec<SimulcastVe
     separated_list1(char(';'), parse_simulcast_version)(input)
 }
 
-/// Parse a complete simulcast description
-fn simulcast_parser(input: &str) -> IResult<&str, SimulcastAttribute> {
-    let (input, direction) = parse_simulcast_direction(input)?;
-    let (input, _) = space1(input)?;
-    let (input, stream_versions) = parse_simulcast_stream_versions(input)?;
-
-    Ok((
-        input,
-        SimulcastAttribute {
-            direction,
-            stream_versions,
-        },
-    ))
-}
 
 /// Parse simulcast attribute as per RFC 8853
 ///

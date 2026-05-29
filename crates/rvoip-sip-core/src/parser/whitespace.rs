@@ -1,9 +1,9 @@
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_while_m_n},
+    bytes::complete::tag,
     combinator::{opt, recognize},
     multi::{many0, many1},
-    sequence::{pair, preceded},
+    sequence::pair,
     IResult,
 };
 
@@ -48,7 +48,7 @@ pub fn sws(input: &[u8]) -> ParseResult<'_, &[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nom::error::ErrorKind;
+    
 
     #[test]
     fn test_wsp() {

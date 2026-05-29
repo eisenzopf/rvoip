@@ -3,15 +3,13 @@
 
 use nom::{
     bytes::complete::tag_no_case,
-    combinator::map,
     sequence::{pair, preceded},
-    IResult,
 };
 
 // Import from new modules
 use super::call_id::callid; // Reuse callid parser logic
 use crate::parser::common::comma_separated_list1;
-use crate::parser::separators::{comma, hcolon};
+use crate::parser::separators::hcolon;
 use crate::parser::ParseResult;
 
 // Return Vec<String> - each string is a call-id

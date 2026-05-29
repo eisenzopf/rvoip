@@ -2,19 +2,14 @@
 // scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
 
 use nom::{
-    branch::alt,
-    bytes::complete::{tag, take_while, take_while1},
-    character::complete::{alpha1, alphanumeric1},
-    combinator::{map, map_res, recognize, verify},
+    bytes::complete::take_while,
+    character::complete::alpha1,
+    combinator::recognize,
     error::{Error as NomError, ErrorKind},
-    multi::many0,
-    sequence::{pair, preceded, terminated},
-    IResult,
+    sequence::pair,
 };
 use std::str;
 
-use crate::error::Error;
-use crate::parser::common_chars::{alpha, digit};
 use crate::parser::ParseResult;
 use crate::types::uri::Scheme;
 

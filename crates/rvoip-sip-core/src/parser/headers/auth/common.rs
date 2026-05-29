@@ -1,12 +1,11 @@
 // RFC 3261 Section 25.1 & Authentication Sections
 // Common components for challenge/credentials parsing
 
-use crate::parser::common_chars::{digit, lhex};
+use crate::parser::common_chars::lhex;
 use crate::parser::quoted::quoted_string;
 use crate::parser::separators::{comma, equal, ldquot, rdquot};
 use crate::parser::token::token;
 use crate::parser::uri::parse_uri;
-use crate::parser::whitespace::lws;
 use crate::parser::ParseResult;
 // Keep types used internally or returned by base parsers
 use crate::types::auth::{Algorithm, AuthParam, AuthenticationInfoParam, DigestParam, Qop};
@@ -14,14 +13,13 @@ use crate::types::Uri;
 use nom::{
     branch::alt,
     bytes::complete::{self as bytes, tag, tag_no_case, take_while, take_while1},
-    character::complete::char,
-    combinator::{map, map_res, opt, recognize, value, verify},
-    error::{make_error, Error as NomError, ErrorKind, ParseError},
-    multi::{many0, many_m_n, separated_list0, separated_list1},
+    combinator::{map, map_res, recognize, value},
+    error::{make_error, Error as NomError, ErrorKind},
+    multi::{many0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair},
-    Err, IResult,
+    Err,
 };
-use std::str::{self, FromStr, Utf8Error}; // Add Utf8Error
+use std::str::{self, FromStr}; // Add Utf8Error
 
 // Helper function to check if a byte is a valid token character
 fn is_token_char(c: u8) -> bool {
@@ -107,12 +105,6 @@ pub fn auth_param(input: &[u8]) -> ParseResult<'_, AuthParam> {
 }
 
 // Helper to check if a value is a quoted string
-fn is_quoted_string(input: &[u8]) -> bool {
-    if input.len() < 2 {
-        return false;
-    }
-    input[0] == b'"' && input[input.len() - 1] == b'"'
-}
 
 // realm-value = quoted-string
 fn realm_value(input: &[u8]) -> ParseResult<'_, &[u8]> {
@@ -262,9 +254,6 @@ pub fn username(input: &[u8]) -> ParseResult<'_, String> {
 
 // digest-uri-value = Request-URI (SIP-URI / SIPS-URI / absoluteURI)
 // Parses the content of the quoted string.
-fn digest_uri_value_content(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    quoted_string(input)
-}
 
 // digest-uri = "uri" EQUAL LDQUOT digest-uri-value RDQUOT ; Corrected grammar
 // Returns Uri struct

@@ -4,13 +4,13 @@
 //! Format: a=ssrc:<ssrc-id> <attribute>[:<value>]
 
 use crate::error::{Error, Result};
-use crate::sdp::attributes::common::{positive_integer, to_result, token};
+use crate::sdp::attributes::common::{positive_integer, token};
 use crate::types::sdp::{ParsedAttribute, SsrcAttribute};
 use nom::{
-    bytes::complete::{tag, take_till1},
+    bytes::complete::take_till1,
     character::complete::{char, space1},
     combinator::{map, opt},
-    sequence::{pair, preceded, separated_pair, tuple},
+    sequence::preceded,
     IResult,
 };
 

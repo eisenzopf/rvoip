@@ -1,6 +1,6 @@
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take, take_while1},
+    bytes::complete::{tag, take},
     combinator::{map, map_res, recognize},
     error::ErrorKind,
     multi::many0,

@@ -1,8 +1,8 @@
 use nom::{
     bytes::complete::{tag, take_while1},
-    combinator::{map_res, verify},
-    sequence::{delimited, tuple},
-    Err, IResult,
+    combinator::map_res,
+    sequence::delimited,
+    Err,
 };
 use std::net::IpAddr;
 use std::str;

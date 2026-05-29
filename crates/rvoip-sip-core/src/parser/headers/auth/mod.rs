@@ -6,7 +6,7 @@ pub mod credentials;
 mod tests {
     use super::*;
     use crate::types::auth::{
-        Algorithm, AuthParam, AuthScheme, Challenge, Credentials, DigestParam, Qop,
+        Algorithm, Challenge, Credentials, DigestParam, Qop,
     };
 
     #[test]

@@ -1,6 +1,5 @@
 use std::str::FromStr;
 
-use crate::builder::headers::HeaderSetter;
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::types::{from::From, uri::Uri, Address, Param, TypedHeader};
 
@@ -201,7 +200,7 @@ impl FromBuilderExt for SimpleResponseBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Method, StatusCode};
+    use crate::types::Method;
 
     #[test]
     fn test_request_from_header() {

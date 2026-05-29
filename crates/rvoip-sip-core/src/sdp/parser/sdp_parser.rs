@@ -53,16 +53,18 @@
 //! 2. Media-level sections must follow all session-level fields,
 //!    and each media-level section begins with an m= line.
 
-use crate::error::{Error, Result};
+#[cfg(test)]
 use crate::sdp::attributes::MediaDirection;
+#[cfg(test)]
+use crate::types::sdp::Origin;
+use crate::error::{Error, Result};
 use crate::sdp::parser::attribute_parser;
 use crate::sdp::parser::validation;
 use crate::types::sdp::{
-    ConnectionData, MediaDescription, Origin, ParsedAttribute, RepeatTime, SdpSession,
-    TimeDescription,
+    MediaDescription, ParsedAttribute, SdpSession,
 };
 use bytes::Bytes;
-use std::str::{self, FromStr};
+use std::str::{self};
 
 use super::line_parser::parse_sdp_line;
 use super::media_parser::parse_media_description_line;

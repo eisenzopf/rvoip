@@ -2,12 +2,10 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case, take_while1},
-    character::complete::char,
-    combinator::{map, map_res, opt, recognize, value},
-    multi::{many0, separated_list0},
-    sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
-    IResult,
+    bytes::complete::tag_no_case,
+    combinator::{map_res, recognize},
+    multi::many0,
+    sequence::{preceded, separated_pair, tuple},
 };
 use std::collections::HashMap;
 use std::str;

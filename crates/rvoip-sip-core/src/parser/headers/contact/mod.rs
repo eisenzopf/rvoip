@@ -3,18 +3,16 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case},
-    combinator::{map, opt, value},
-    multi::{many0, separated_list0},
+    combinator::{map, value},
+    multi::many0,
     sequence::{pair, preceded},
-    IResult,
 };
 
 // Import from new modules
 use crate::parser::address::name_addr_or_addr_spec;
-use crate::parser::common::{comma_separated_list0, comma_separated_list1};
+use crate::parser::common::comma_separated_list1;
 use crate::parser::common_params::contact_param_item;
-use crate::parser::separators::{comma, hcolon, semi, star};
+use crate::parser::separators::{semi, star};
 use crate::parser::ParseResult;
 
 // Import local submodules
@@ -23,10 +21,7 @@ use crate::parser::ParseResult;
 
 // Import types
 // use crate::types::contact::{ContactHeader, ContactValue, ContactParams}; // Old import
-use crate::types::address::Address;
 use crate::types::contact::{ContactParamInfo, ContactValue}; // Corrected import
-use crate::types::param::Param;
-use crate::types::uri::{Scheme, Uri};
 // use crate::types::contact::ContactParamInfo; // Already included above
 
 // contact-param = (name-addr / addr-spec) *(SEMI contact-params)
@@ -65,9 +60,9 @@ pub fn parse_contact(input: &[u8]) -> ParseResult<'_, ContactValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::address::Address;
-    use crate::types::param::{GenericValue, Param};
-    use crate::types::uri::{Scheme, Uri};
+    
+    use crate::types::param::Param;
+    use crate::types::uri::Scheme;
     use ordered_float::NotNan;
 
     #[test]

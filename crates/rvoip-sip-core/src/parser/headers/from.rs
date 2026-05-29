@@ -11,19 +11,18 @@ use nom::{
     error::{Error as NomError, ErrorKind},
     multi::{many0, many1},
     sequence::{delimited, pair, preceded, terminated},
-    IResult,
 };
 use std::str;
 
 // Import from base parser modules
 use crate::parser::address::name_addr_or_addr_spec; // Use shared address parser
 use crate::parser::quoted::quoted_string; // Added quoted_string
-use crate::parser::separators::{equal, hcolon, laquot, raquot, semi};
+use crate::parser::separators::{equal, laquot, raquot, semi};
 use crate::parser::token::token; // Added token
 use crate::parser::uri::parse_uri;
 use crate::parser::whitespace::lws; // Added lws // Added parse_uri
                                     // Import specific param parser and list helper
-use crate::parser::common_params::{from_to_param, generic_param, semicolon_separated_params0}; // Added generic_param
+use crate::parser::common_params::generic_param; // Added generic_param
 use crate::parser::ParseResult;
 
 use crate::types::address::Address;
@@ -35,22 +34,10 @@ use crate::types::uri::Uri; // Use specific type alias
 // Consider extracting to a shared address.rs module later.
 
 // display-name = *(token LWS)/ quoted-string
-fn display_name(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    alt((quoted_string, recognize(many1(terminated(token, lws)))))(input)
-}
 
 // addr-spec = SIP-URI / SIPS-URI / absoluteURI
-fn addr_spec(input: &[u8]) -> ParseResult<'_, Uri> {
-    parse_uri(input)
-}
 
 // name-addr = [ display-name ] LAQUOT addr-spec RAQUOT
-fn name_addr(input: &[u8]) -> ParseResult<'_, (Option<&[u8]>, Uri)> {
-    pair(
-        opt(terminated(display_name, lws)),
-        delimited(laquot, addr_spec, raquot),
-    )(input)
-}
 
 // tag-param = "tag" EQUAL token
 fn tag_param(input: &[u8]) -> ParseResult<'_, Param> {
@@ -108,10 +95,10 @@ pub fn parse_from(input: &[u8]) -> ParseResult<'_, FromHeader> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::address::Address;
+    
     use crate::types::param::{GenericValue, Param};
-    use crate::types::uri::{Host, Scheme, Uri};
-    use std::collections::HashMap;
+    use crate::types::uri::{Host, Scheme};
+    
 
     #[test]
     fn test_parse_from_simple_addr_spec() {

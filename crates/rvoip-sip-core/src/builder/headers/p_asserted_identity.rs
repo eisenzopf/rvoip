@@ -154,7 +154,7 @@ mod tests {
     use super::*;
     use crate::builder::SimpleRequestBuilder;
     use crate::types::{
-        headers::{HeaderName, TypedHeader},
+        headers::TypedHeader,
         method::Method,
     };
 

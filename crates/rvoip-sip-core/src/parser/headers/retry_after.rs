@@ -3,26 +3,22 @@
 // retry-param = ("duration" EQUAL delta-seconds) / generic-param
 
 use nom::{
-    branch::alt,
-    bytes::complete::{tag, tag_no_case, take_while},
     combinator::{map, map_res, opt},
     error::{Error as NomError, ErrorKind, ParseError},
-    multi::{many0, separated_list0},
-    sequence::{delimited, pair, preceded, tuple},
-    IResult,
+    multi::many0,
+    sequence::{preceded, tuple},
 };
 use std::str;
 
 // Import from base parser modules
 use crate::parser::common_params::generic_param;
 use crate::parser::quoted::comment;
-use crate::parser::separators::{equal, hcolon, semi};
+use crate::parser::separators::semi;
 use crate::parser::values::delta_seconds;
 use crate::parser::whitespace::lws;
 
 use crate::types::param::Param;
 // use crate::types::retry_after::{RetryAfter as RetryAfterHeader, RetryAfterValue, RetryParam}; // Removed unused import
-use crate::parser::common::*;
 use crate::parser::ParseResult;
 
 // Define public RetryParam enum for use in types module

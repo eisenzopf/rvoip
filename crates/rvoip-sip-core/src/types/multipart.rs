@@ -40,14 +40,9 @@
 //! body.add_part(part);
 //! ```
 
-use crate::error::{Error, Result};
-use crate::parser;
-use crate::types::content_type::ContentType;
 use crate::types::header::{Header, HeaderName, HeaderValue};
 use crate::SdpSession;
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
-use std::fmt;
 
 /// Represents a parsed MIME part.
 ///

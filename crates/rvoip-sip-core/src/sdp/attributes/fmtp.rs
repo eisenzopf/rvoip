@@ -4,7 +4,7 @@
 //! Format: a=fmtp:<format> <format specific parameters>
 
 use crate::error::{Error, Result};
-use crate::sdp::attributes::common::{to_result, token};
+use crate::sdp::attributes::common::token;
 use crate::types::sdp::{FmtpAttribute, ParsedAttribute};
 use nom::{
     bytes::complete::take_till1,

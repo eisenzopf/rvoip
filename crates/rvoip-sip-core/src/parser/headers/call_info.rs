@@ -7,24 +7,21 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while1},
     combinator::{map, map_res},
-    error::{Error as NomError, ErrorKind, ParseError},
+    error::ParseError,
     multi::{many0, separated_list1},
-    sequence::{delimited, pair, preceded, terminated, tuple},
-    IResult,
+    sequence::{delimited, pair, preceded, terminated},
 };
 use std::str;
 
 // Import from base parser modules
 use crate::parser::common_params::generic_param;
-use crate::parser::separators::{comma, equal, hcolon, laquot, raquot, semi};
+use crate::parser::separators::{equal, hcolon, laquot, raquot, semi};
 use crate::parser::token::token;
 use crate::parser::ParseResult;
 
 use crate::types::call_info::{CallInfo, CallInfoValue, InfoPurpose};
-use crate::types::header::TypedHeaderTrait;
 use crate::types::param::Param;
-use crate::types::uri::{Host, Scheme, Uri};
-use serde::{Deserialize, Serialize};
+use crate::types::uri::Uri;
 use std::str::FromStr;
 
 // Define a local enum for parser internal use
@@ -154,32 +151,6 @@ fn info(input: &[u8]) -> ParseResult<'_, CallInfoValue> {
 }
 
 // Helper function to trim leading and trailing whitespace
-fn trim_ws(input: &[u8]) -> &[u8] {
-    let mut start = 0;
-    let mut end = input.len();
-
-    // Trim leading whitespace
-    while start < end
-        && (input[start] == b' '
-            || input[start] == b'\t'
-            || input[start] == b'\r'
-            || input[start] == b'\n')
-    {
-        start += 1;
-    }
-
-    // Trim trailing whitespace
-    while end > start
-        && (input[end - 1] == b' '
-            || input[end - 1] == b'\t'
-            || input[end - 1] == b'\r'
-            || input[end - 1] == b'\n')
-    {
-        end -= 1;
-    }
-
-    &input[start..end]
-}
 
 // Call-Info = "Call-Info" HCOLON info *(COMMA info)
 /// Parses a Call-Info header value.
@@ -211,7 +182,7 @@ mod tests {
     use super::*;
     use crate::types::header::TypedHeaderTrait;
     use crate::types::param::{GenericValue, Param};
-    use crate::types::uri::{Host, Scheme};
+    
 
     #[test]
     fn test_info_param() {

@@ -3,20 +3,17 @@
 // content-coding = token
 
 use nom::{
-    branch::alt,
-    bytes::complete::tag_no_case,
-    combinator::{map, map_res, opt},
-    error::{Error as NomError, ErrorKind, ParseError},
+    combinator::opt,
+    error::{Error as NomError, ErrorKind},
     multi::separated_list1,
-    sequence::{pair, preceded, terminated},
-    IResult,
+    sequence::{preceded, terminated},
 };
 
 // Import from new modules
-use crate::parser::common::comma_separated_list1; // Requires at least one
-use crate::parser::separators::{comma, hcolon};
+ // Requires at least one
+use crate::parser::separators::comma;
 use crate::parser::token::token;
-use crate::parser::whitespace::{lws, owsp, sws};
+use crate::parser::whitespace::{lws, sws};
 use crate::parser::ParseResult;
 use std::str;
 

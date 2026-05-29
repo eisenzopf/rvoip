@@ -56,15 +56,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
-use nom::{
-    branch::alt,
-    bytes::complete::{tag, take_till, take_until, take_while, take_while1},
-    character::complete::{char, digit1, hex_digit1},
-    combinator::{all_consuming, map, map_res, opt, recognize, verify},
-    multi::{many0, separated_list0},
-    sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
-    IResult,
-};
+use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -873,48 +865,6 @@ fn escape_user_info(s: &str) -> String {
     result
 }
 
-/// Unescape URI user info component
-fn unescape_user_info(s: &str) -> Result<String> {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let mut hex = String::with_capacity(2);
-
-            if let Some(h1) = chars.next() {
-                hex.push(h1);
-            } else {
-                return Err(Error::MalformedUriComponent {
-                    component: "user info".to_string(),
-                    message: "Incomplete percent encoding".to_string(),
-                });
-            }
-
-            if let Some(h2) = chars.next() {
-                hex.push(h2);
-            } else {
-                return Err(Error::MalformedUriComponent {
-                    component: "user info".to_string(),
-                    message: "Incomplete percent encoding".to_string(),
-                });
-            }
-
-            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                result.push(byte as char);
-            } else {
-                return Err(Error::MalformedUriComponent {
-                    component: "user info".to_string(),
-                    message: format!("Invalid percent encoding: %{}", hex),
-                });
-            }
-        } else {
-            result.push(c);
-        }
-    }
-
-    Ok(result)
-}
 
 /// Escape URI parameters and headers
 fn escape_param(s: &str) -> String {
@@ -950,65 +900,5 @@ fn escape_param(s: &str) -> String {
     result
 }
 
-/// Unescape URI parameters and headers
-fn unescape_param(s: &str) -> Result<String> {
-    unescape_user_info(s) // Same algorithm
-}
 
-/// Check if a string is a valid IPv4 address
-fn is_valid_ipv4(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('.').collect();
 
-    if parts.len() != 4 {
-        return false;
-    }
-
-    for part in parts {
-        match part.parse::<u8>() {
-            Ok(_) => continue,
-            Err(_) => return false,
-        }
-    }
-
-    true
-}
-
-/// Check if a string is a valid IPv6 address (simplified validation)
-fn is_valid_ipv6(s: &str) -> bool {
-    // Check for basic IPv6 format
-    let parts = s.split(':').collect::<Vec<&str>>();
-
-    // IPv6 has 8 parts max, or fewer if contains ::
-    if parts.len() > 8 {
-        return false;
-    }
-
-    // Check for empty parts (::)
-    let empty_parts = parts.iter().filter(|p| p.is_empty()).count();
-
-    // Handle :: (consecutive colons)
-    if empty_parts > 0 {
-        if empty_parts > 2 || (empty_parts == 2 && !s.contains("::")) {
-            return false;
-        }
-    }
-
-    // Validate each part
-    for part in parts {
-        if part.is_empty() {
-            continue; // Empty part due to ::
-        }
-
-        // Check if it's an IPv4 address in the last part (IPv4-mapped IPv6)
-        if part.contains('.') {
-            return is_valid_ipv4(part);
-        }
-
-        // Each part should be a valid hex number with at most 4 digits
-        if part.len() > 4 || !part.chars().all(|c| c.is_ascii_hexdigit()) {
-            return false;
-        }
-    }
-
-    true
-}

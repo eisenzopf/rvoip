@@ -4,22 +4,18 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case, take_while_m_n},
-    character::complete::{digit1, space1},
-    combinator::{map, map_res, opt, recognize, value},
-    error::{Error as NomError, ErrorKind, ParseError},
-    multi::{many0, separated_list1},
+    bytes::complete::tag_no_case,
+    combinator::{map_res, opt},
+    error::{Error as NomError, ErrorKind},
     sequence::{pair, preceded, tuple},
-    IResult,
 };
-use serde::{Deserialize, Serialize};
-use std::fmt; // Import fmt
+ // Import fmt
 use std::str;
 
 // Import from new modules
 use crate::parser::common::comma_separated_list1;
 use crate::parser::common_params::semicolon_separated_params0;
-use crate::parser::separators::{comma, hcolon, slash};
+use crate::parser::separators::{hcolon, slash};
 use crate::parser::token::token;
 use crate::parser::uri::host::hostport;
 use crate::parser::whitespace::lws;
@@ -170,7 +166,7 @@ pub fn validate_via_headers(vias: &[ViaHeader]) -> bool {
 mod tests {
     use super::*;
     use crate::types::param::GenericValue;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
     fn test_sent_protocol() {

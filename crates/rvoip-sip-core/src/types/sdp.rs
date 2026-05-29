@@ -1,29 +1,11 @@
 use crate::error::{Error, Result};
 #[cfg(feature = "sdp")]
-use crate::sdp::attributes;
-#[cfg(feature = "sdp")]
 use crate::sdp::attributes::rid::{RidAttribute, RidDirection};
 #[cfg(feature = "sdp")]
 use crate::sdp::attributes::MediaDirection;
 #[cfg(feature = "sdp")]
 use crate::sdp::parser::parse_sdp;
-use crate::types::param::Param;
-use crate::types::uri::Uri;
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-/// SDP (Session Description Protocol) module implements RFC 4566 for creating, parsing,
-/// and manipulating SDP messages used in SIP (Session Initiation Protocol) communications.
-///
-/// This module provides a complete implementation for working with SDP, including:
-/// - Parsing SDP text into structured data
-/// - Representing SDP sessions, media descriptions, and attributes
-/// - Serializing SDP data back to standard format
-///
-/// # References
-/// - [RFC 4566: Session Description Protocol](https://tools.ietf.org/html/rfc4566)
-/// - [RFC 5245: ICE](https://tools.ietf.org/html/rfc5245) (for ICE candidates)
-/// - [RFC 5576: Source-Specific Media Attributes](https://tools.ietf.org/html/rfc5576) (for SSRC)
-use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 

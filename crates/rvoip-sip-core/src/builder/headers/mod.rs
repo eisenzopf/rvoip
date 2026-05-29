@@ -1,5 +1,4 @@
-use crate::types::header::{Header, TypedHeaderTrait};
-use crate::types::headers::header_name::HeaderName;
+use crate::types::header::TypedHeaderTrait;
 use crate::types::TypedHeader;
 use std::convert::TryFrom;
 

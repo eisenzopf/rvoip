@@ -9,24 +9,15 @@
 // 2. Properly processes whitespace between components, including LWS
 // 3. Supports all token formats and comment structures as defined in the RFC
 
-use nom::{
-    bytes::complete::{tag, tag_no_case, take_while},
-    combinator::{map, opt, recognize},
-    multi::{many0, many1, separated_list1},
-    sequence::{pair, preceded, tuple},
-    IResult,
-};
+use nom::bytes::complete::take_while;
 
 // Import from new modules
-use super::server_val::server_val_parser; // Use the shared server_val parser
-use crate::parser::separators::hcolon;
-use crate::parser::whitespace::lws;
+ // Use the shared server_val parser
 use crate::parser::ParseResult;
 
 // Import the types from the types module
-use crate::types::server::{Product, ServerInfo, ServerVal};
+use crate::types::server::ServerVal;
 // Import the alias for backward compatibility
-use super::server_val::ServerValComponent;
 
 // Import shared parsers
 use super::server_val::server_val;
@@ -68,7 +59,7 @@ pub fn parse_server(input: &[u8]) -> ParseResult<'_, Vec<ServerVal>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::server::{ServerInfo, ServerProduct};
+    use crate::types::server::ServerInfo;
 
     #[test]
     fn test_parse_server_single_product() {

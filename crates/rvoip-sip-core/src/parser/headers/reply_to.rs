@@ -4,22 +4,18 @@
 // rplyto-param = generic-param
 
 use nom::{
-    bytes::complete::tag_no_case,
-    combinator::{map, map_res, verify},
+    combinator::map,
     error::Error,
     multi::many0,
     sequence::{pair, preceded},
-    IResult,
 };
 
 // Import from base parser modules
 use crate::parser::address::name_addr_or_addr_spec;
-use crate::parser::common_params::{generic_param, semicolon_separated_params0};
-use crate::parser::quoted;
-use crate::parser::separators::{hcolon, semi};
+use crate::parser::common_params::generic_param;
+use crate::parser::separators::semi;
 use crate::parser::ParseResult;
 
-use crate::parser::address::name_addr;
 use crate::types::address::Address;
 use crate::types::param::Param;
 use crate::types::reply_to::ReplyTo as ReplyToHeader;
@@ -73,11 +69,11 @@ pub fn parse_reply_to_public(input: &[u8]) -> ParseResult<'_, Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::address::Address;
+    
     use crate::types::param::{GenericValue, Param};
     use crate::types::uri::{Host, Scheme};
-    use std::collections::HashMap;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    
+    use std::net::{IpAddr, Ipv6Addr};
     use std::str::FromStr;
 
     #[test]

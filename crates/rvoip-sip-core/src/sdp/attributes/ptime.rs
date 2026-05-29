@@ -6,10 +6,8 @@
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::{positive_integer, to_result};
-use crate::types::sdp::ParsedAttribute;
 use nom::{
     combinator::{all_consuming, verify},
-    sequence::terminated,
     IResult,
 };
 

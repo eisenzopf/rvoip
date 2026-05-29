@@ -1,6 +1,5 @@
 use std::str::FromStr;
 
-use crate::builder::headers::HeaderSetter;
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::types::{
     contact::{Contact, ContactParamInfo},
@@ -199,7 +198,7 @@ impl ContactBuilderExt for SimpleResponseBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Method, StatusCode};
+    use crate::types::Method;
 
     #[test]
     fn test_request_contact_header() {

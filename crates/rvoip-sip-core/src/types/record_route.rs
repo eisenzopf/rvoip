@@ -51,10 +51,9 @@
 use crate::error::{Error, Result};
 use crate::parser::headers::parse_record_route;
 use crate::types::header::Header;
-use crate::types::param::Param;
 use crate::types::uri::Uri;
 use crate::types::Address;
-use crate::types::{HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
+use crate::types::{HeaderName, TypedHeaderTrait};
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -442,7 +441,7 @@ impl TypedHeaderTrait for RecordRoute {
 mod tests {
     use super::*;
     use crate::types::address::Address;
-    use crate::types::param::Param;
+    
     use crate::types::uri::Uri;
     use std::str::FromStr;
 

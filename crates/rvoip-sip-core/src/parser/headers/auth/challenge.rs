@@ -4,16 +4,13 @@
 // Use the new digest_param parser from common
 use super::common::{auth_param, auth_scheme, digest_param};
 use crate::parser::common::comma_separated_list1;
-use crate::parser::whitespace::{lws, owsp};
+use crate::parser::whitespace::lws;
 use crate::parser::ParseResult;
 // Import the necessary types from types::auth
-use crate::types::auth::{AuthParam, AuthScheme, Challenge, DigestParam};
+use crate::types::auth::{AuthScheme, Challenge};
 use nom::{
-    branch::alt,
-    bytes::complete::{tag_no_case, take_while},
-    combinator::{map, map_res, opt},
-    sequence::{pair, preceded, terminated},
-    IResult,
+    bytes::complete::take_while,
+    combinator::opt,
 };
 use std::str::FromStr;
 
@@ -73,7 +70,7 @@ pub fn challenge(input: &[u8]) -> ParseResult<'_, Challenge> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::auth::{Algorithm, AuthScheme, DigestParam, Qop};
+    use crate::types::auth::{Algorithm, DigestParam, Qop};
 
     #[test]
     fn test_digest_challenge() {

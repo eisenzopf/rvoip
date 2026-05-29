@@ -4,14 +4,14 @@
 //! Format: a=rtpmap:<payload type> <encoding name>/<clock rate>[/<encoding parameters>]
 
 use crate::error::{Error, Result};
-use crate::sdp::attributes::common::{positive_integer, to_result, token};
+use crate::sdp::attributes::common::{positive_integer, token};
 use crate::types::sdp::ParsedAttribute;
 use crate::types::sdp::RtpMapAttribute;
 use nom::{
     bytes::complete::take_while1,
     character::complete::{char, space1},
-    combinator::{map, map_res, not, opt, peek, verify},
-    sequence::{preceded, separated_pair, tuple},
+    combinator::{map, map_res, verify},
+    sequence::{preceded, tuple},
     IResult,
 };
 
@@ -117,7 +117,7 @@ pub fn parse_rtpmap(value: &str) -> Result<ParsedAttribute> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::sdp::RtpMapAttribute;
+    
 
     #[test]
     fn test_rtpmap_attribute_comprehensive() {

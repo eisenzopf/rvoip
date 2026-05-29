@@ -51,13 +51,11 @@
 use crate::types::address::Address;
 // use crate::types::Param; // Removed duplicate import
 use crate::error::{Error, Result};
-use crate::parser::headers::parse_contact; // For FromStr
-use crate::types::param::Param;
-use crate::types::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
+ // For FromStr
+use crate::types::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use ordered_float::NotNan;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::ops::Deref;
 use std::str::FromStr;
 
 /// Represents a single parsed contact-param item (address + params)

@@ -1,14 +1,13 @@
 // RFC 3261 Section 22.2 Authorization
 
-use super::auth::common::auth_scheme;
+#[cfg(test)]
+use crate::types::auth::Credentials;
 use super::auth::credentials::credentials;
-use crate::parser::whitespace::{lws, owsp, sws};
+use crate::parser::whitespace::{lws, sws};
 use crate::parser::ParseResult;
-use crate::types::auth::{Authorization as AuthorizationHeader, Credentials};
-use nom::combinator::{map, opt};
+use crate::types::auth::Authorization as AuthorizationHeader;
+use nom::combinator::opt;
 use nom::error::{Error as NomError, ErrorKind};
-use nom::sequence::{pair, preceded};
-use nom::IResult;
 
 // Authorization = "Authorization" HCOLON credentials
 // Note: HCOLON is handled by the top-level message_header parser.
@@ -40,8 +39,8 @@ pub fn parse_authorization(input: &[u8]) -> ParseResult<'_, AuthorizationHeader>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::auth::{Algorithm, AuthParam, DigestParam as DigestRespParam, Qop};
-    use crate::types::Uri;
+    use crate::types::auth::{Algorithm, DigestParam as DigestRespParam, Qop};
+    
 
     #[test]
     fn test_parse_authorization_digest() {

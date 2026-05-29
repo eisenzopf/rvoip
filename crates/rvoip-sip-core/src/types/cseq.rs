@@ -48,11 +48,10 @@
 //! ```
 
 use crate::error::{Error, Result};
-use crate::parser;
 use crate::parser::headers::cseq::{full_parse_cseq, parse_cseq};
 use crate::types::header::Header;
 use crate::types::method::Method;
-use crate::types::{HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
+use crate::types::{HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 use std::fmt;

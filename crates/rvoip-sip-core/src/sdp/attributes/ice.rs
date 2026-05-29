@@ -8,10 +8,9 @@ use crate::error::{Error, Result};
 use crate::sdp::attributes::common::{to_result, token};
 use nom::{
     bytes::complete::take_while1,
-    character::complete::{space0, space1},
+    character::complete::space1,
     combinator::{map, verify},
     multi::separated_list1,
-    sequence::preceded,
     IResult,
 };
 
@@ -33,14 +32,6 @@ fn ice_pwd_parser(input: &str) -> IResult<&str, &str> {
     )(input)
 }
 
-/// Parser for ICE options (a list of tokens)
-fn ice_options_parser(input: &str) -> IResult<&str, Vec<String>> {
-    if input.is_empty() {
-        return Ok((input, Vec::new()));
-    }
-
-    separated_list1(space1, map(token, |s: &str| s.to_string()))(input)
-}
 
 /// Parses ice-ufrag attribute: a=ice-ufrag:<ufrag>
 pub fn parse_ice_ufrag(value: &str) -> Result<String> {

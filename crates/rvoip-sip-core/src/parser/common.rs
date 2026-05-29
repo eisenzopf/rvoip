@@ -1,22 +1,16 @@
 // Placeholder for common parsing utilities
 use super::separators::comma;
-use nom::{multi::separated_list0, sequence::preceded, IResult};
+use nom::{multi::separated_list0, IResult};
 use std::str;
 
-use crate::parser::quoted::quoted_string;
-use crate::parser::token::token;
-use crate::types::param::{GenericValue, Param};
 use crate::types::Version;
-use nom::character::complete::char;
-use nom::sequence::{delimited, separated_pair};
 use nom::{
     bytes::complete::tag,
     character::complete::digit1,
     combinator::{map_res, recognize},
-    error::{Error as NomError, ErrorKind, ParseError},
+    error::{Error as NomError, ErrorKind},
     sequence::tuple,
 };
-use ordered_float::NotNan;
 use serde::{Deserialize, Serialize};
 
 // Type alias for parser result - Added NomError back

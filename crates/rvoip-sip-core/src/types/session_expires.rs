@@ -216,7 +216,7 @@ impl fmt::Display for SessionExpires {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::headers::typed_header::TypedHeader;
+    
 
     #[test]
     fn test_session_expires_new() {

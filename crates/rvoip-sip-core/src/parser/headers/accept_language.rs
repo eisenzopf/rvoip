@@ -21,11 +21,9 @@
 use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while_m_n},
-    character::complete::alpha1,
-    combinator::{map, map_res, opt, recognize, value, verify},
-    multi::{many0, separated_list0, separated_list1},
-    sequence::{delimited, pair, preceded},
-    IResult,
+    combinator::{map, map_res, opt, recognize, verify},
+    multi::many0,
+    sequence::{pair, preceded},
 };
 use ordered_float::NotNan;
 use serde::{Deserialize, Serialize};
@@ -36,10 +34,8 @@ use std::str;
 
 // Import from base parser modules
 use crate::parser::common::comma_separated_list0;
-use crate::parser::common_chars::alpha;
 use crate::parser::common_params::accept_param; // Reuses generic_param, qvalue
-use crate::parser::separators::{comma, equal, hcolon, semi};
-use crate::parser::token::token;
+use crate::parser::separators::{hcolon, semi};
 use crate::parser::ParseResult;
 
 use crate::types::accept_language::AcceptLanguage;
@@ -154,45 +150,12 @@ fn subtag_part(input: &[u8]) -> ParseResult<'_, &[u8]> {
 }
 
 // Extended language subtag: 3 ALPHA characters per RFC 5646
-fn ext_lang_subtag(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    verify(
-        take_while_m_n(3, 3, |c: u8| c.is_ascii_alphabetic()),
-        no_underscore,
-    )(input)
-}
 
 // Script subtag: 4 ALPHA characters per RFC 5646
-fn script_subtag(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    verify(
-        take_while_m_n(4, 4, |c: u8| c.is_ascii_alphabetic()),
-        no_underscore,
-    )(input)
-}
 
 // Region subtag: 2 ALPHA or 3 DIGIT per RFC 5646
-fn region_subtag(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    verify(
-        alt((
-            take_while_m_n(2, 2, |c: u8| c.is_ascii_alphabetic()),
-            take_while_m_n(3, 3, |c: u8| c.is_ascii_digit()),
-        )),
-        no_underscore,
-    )(input)
-}
 
 // Variant subtag: 5-8 alphanum or 4 if starts with digit
-fn variant_subtag(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    verify(
-        alt((
-            take_while_m_n(5, 8, |c: u8| c.is_ascii_alphanumeric()),
-            verify(
-                take_while_m_n(4, 4, |c: u8| c.is_ascii_alphanumeric()),
-                |s: &[u8]| !s.is_empty() && s[0].is_ascii_digit(),
-            ),
-        )),
-        no_underscore,
-    )(input)
-}
 
 // language-range = ( ( 1*8ALPHA *( "-" 1*8ALPHA ) ) / "*" )
 // Returns range as String (converted to lowercase as per RFC 5646)

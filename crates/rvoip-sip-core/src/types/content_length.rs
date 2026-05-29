@@ -40,10 +40,7 @@
 //! ```
 
 use crate::error::{Error, Result};
-use crate::parser;
-use crate::parser::headers::parse_content_length;
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
-use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::Deref;

@@ -7,8 +7,6 @@ pub mod value;
 pub use ext::SipJsonExt;
 pub use value::SipValue;
 
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use std::error::Error;
 use std::fmt;
 

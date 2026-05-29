@@ -2,7 +2,7 @@
 //
 // Common utilities and helper functions for session-level parsing.
 
-use crate::types::sdp::{Origin, ParsedAttribute, SdpSession};
+use crate::types::sdp::{Origin, SdpSession};
 use nom::{bytes::complete::take_while1, IResult};
 
 /// Parse a token (alphanumeric and certain safe symbols) using nom

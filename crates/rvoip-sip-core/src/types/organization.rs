@@ -38,7 +38,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use super::header::{Header, HeaderName, TypedHeaderTrait};
 use crate::parser::headers::organization::parse_organization;
 
 /// Represents the Organization header field as defined in RFC 3261 Section 20.27

@@ -36,8 +36,6 @@
 
 use crate::error::{Error, Result};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
-use nom::combinator::all_consuming;
-use nom::error::ErrorKind as NomErrorKind;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;

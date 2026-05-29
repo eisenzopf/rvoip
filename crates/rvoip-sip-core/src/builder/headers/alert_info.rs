@@ -1,10 +1,10 @@
+#[cfg(test)]
+use crate::types::headers::HeaderName;
+#[cfg(test)]
+use crate::types::headers::TypedHeader;
 use super::HeaderSetter;
-use crate::error::{Error, Result};
 use crate::types::{
-    alert_info::{AlertInfo, AlertInfoHeader, AlertInfoList},
-    headers::header_access::HeaderAccess,
-    headers::HeaderName,
-    headers::TypedHeader,
+    alert_info::{AlertInfo, AlertInfoHeader},
     uri::Uri,
 };
 use std::str::FromStr;
@@ -295,7 +295,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{method::Method, uri::Uri, version::Version, StatusCode};
+    use crate::types::{method::Method, uri::Uri, StatusCode};
     use crate::{RequestBuilder, ResponseBuilder};
     use std::str::FromStr;
 

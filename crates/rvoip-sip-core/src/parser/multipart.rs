@@ -1,33 +1,23 @@
 // Parser for multipart MIME bodies (RFC 2046)
 
-use std::borrow::Cow;
-use std::collections::HashMap;
 use std::str;
 
 use bytes::Bytes;
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_until, take_while},
-    character::complete::{crlf, space0, space1},
-    combinator::{all_consuming, eof, map, map_res, opt, recognize},
+    bytes::complete::{tag, take_while},
+    character::complete::space0,
+    combinator::eof,
     error::{Error as NomError, ErrorKind, ParseError},
-    multi::{many0, many1},
-    sequence::{delimited, pair, preceded, terminated},
     IResult,
 };
 
 use crate::error::{Error, Result};
 use crate::types::header::{Header, HeaderName, HeaderValue};
-use crate::types::sdp::SdpSession;
 // Import the structures from the types module
 use crate::parser::common_chars::take_till_crlf;
 use crate::parser::message::trim_bytes;
-use crate::parser::quoted::quoted_string;
-use crate::parser::separators::{comma, equal, semi};
-use crate::parser::token::{is_token_char, token};
-use crate::parser::utils::unfold_lws;
-use crate::parser::whitespace::{crlf as parse_crlf, lws, sws};
-use crate::parser::ParseResult;
+use crate::parser::whitespace::crlf as parse_crlf;
 use crate::types::multipart::{MimePart, MultipartBody, ParsedBody};
 
 /// Parses headers for a MIME part until a blank line (CRLF) is encountered.
@@ -183,14 +173,6 @@ fn parse_header_line(input: &[u8]) -> IResult<&[u8], (HeaderName, Vec<u8>)> {
     }
 }
 
-/// Parse a continuation line (folded header)
-fn parse_continuation_line(input: &[u8]) -> IResult<&[u8], Vec<u8>> {
-    let (input, _) = take_while(|c| c == b' ' || c == b'\t')(input)?;
-    let (input, line) = take_till_crlf(input)?;
-    let (input, _) = alt((tag(b"\r\n"), tag(b"\n"), eof))(input)?;
-
-    Ok((input, line.to_vec()))
-}
 
 /// Parse a single line including its terminator
 fn parse_line(input: &[u8]) -> IResult<&[u8], &[u8]> {
@@ -777,8 +759,8 @@ pub fn parse_multipart(content: &[u8], boundary: &str) -> Result<MultipartBody> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ContentType;
-    use std::collections::HashMap;
+    
+    
 
     #[test]
     fn test_parse_simple_multipart() {

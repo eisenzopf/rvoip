@@ -10,10 +10,9 @@ use nom::{
     branch::alt,
     bytes::complete::{tag_no_case, take_while_m_n},
     character::complete::digit1,
-    combinator::{map, map_res, opt},
+    combinator::{map_res, opt},
     error::{Error as NomError, ErrorKind, ParseError},
     sequence::{pair, preceded},
-    IResult,
 };
 use std::str;
 

@@ -4,11 +4,10 @@
 //! Format: b=<bwtype>:<bandwidth>
 
 use crate::error::{Error, Result};
-use crate::sdp::attributes::common::{positive_integer, to_result, token};
+use crate::sdp::attributes::common::{positive_integer, token};
 use nom::{
-    bytes::complete::tag,
     character::complete::char,
-    combinator::{map, verify},
+    combinator::map,
     sequence::separated_pair,
     IResult,
 };

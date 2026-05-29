@@ -5,7 +5,7 @@
 // This header is used in SIP REGISTER responses (423 Interval Too Brief)
 // to indicate the minimum registration period accepted by the server.
 
-use nom::{sequence::delimited, IResult};
+use nom::sequence::delimited;
 
 // Import delta_seconds parser
 use crate::parser::values::delta_seconds;

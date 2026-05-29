@@ -53,7 +53,6 @@ use crate::types::via::Via;
 use crate::types::StatusCode;
 // Import the request and response types directly
 use crate::types::from::From;
-use crate::types::param::Param;
 use crate::types::sip_request::Request;
 use crate::types::sip_response::Response;
 use crate::types::to::To;

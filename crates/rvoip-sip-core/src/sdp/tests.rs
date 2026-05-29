@@ -6,13 +6,10 @@
 //! - Edge cases that test parsing limits
 //! - Round-trip tests (parse -> serialize -> parse)
 
-use crate::error::Error;
 use crate::sdp::attributes::MediaDirection;
-use crate::sdp::parser::parse_sdp;
 use crate::types::sdp::{
     ConnectionData, MediaDescription, Origin, ParsedAttribute, SdpSession, TimeDescription,
 };
-use bytes::Bytes;
 
 use std::str::FromStr;
 
@@ -861,7 +858,7 @@ mod api_tests {
     use crate::error::Result;
     use crate::sdp;
     use crate::sdp::builder::SdpBuilder;
-    use crate::sdp::macros::*; // Import the macros explicitly
+     // Import the macros explicitly
     use crate::types::sdp::{
         ConnectionData, FmtpAttribute, MediaDescription, Origin, ParsedAttribute, RtpMapAttribute,
         SdpSession, TimeDescription,

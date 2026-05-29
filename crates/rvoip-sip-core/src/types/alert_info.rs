@@ -40,7 +40,6 @@ use crate::parser::headers::alert_info::{parse_alert_info, AlertInfoUri, AlertIn
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::types::param::Param;
 use crate::types::uri::Uri;
-use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;

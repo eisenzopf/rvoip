@@ -13,16 +13,23 @@
 // generic-param    = token [ EQUAL ( token / host / quoted-string ) ]
 
 // Adjusted imports based on parser module structure
+#[cfg(test)]
+use crate::Error;
+#[cfg(test)]
+use crate::types::header::Header;
+#[cfg(test)]
+use crate::types::header::HeaderValue;
+#[cfg(test)]
+use crate::types::header::TypedHeaderTrait;
+#[cfg(test)]
+use crate::types::headers::HeaderName;
 use crate::parser::common_params::semicolon_params0;
 use crate::parser::separators::{hcolon, laquot, raquot}; // CHANGED to hcolon
 use crate::parser::token::token;
-use crate::types::param::{GenericValue as RichGenericValue, Param as RichParam}; // For processing semicolon_params0 output
+use crate::types::param::Param as RichParam; // For processing semicolon_params0 output
 
 // Import main Error type for the crate and Hdr (HeaderName, TypedHeader) + Event types
 use crate::types::event::{Event, EventType, ParamValue, Params};
-use crate::types::header::{Header, HeaderValue, TypedHeaderTrait};
-use crate::types::headers::HeaderName;
-use crate::Error;
 
 use nom::{
     branch::alt,
@@ -33,8 +40,6 @@ use nom::{
     sequence::{delimited, pair, preceded, terminated, tuple},
     IResult,
 };
-use std::collections::BTreeMap;
-use std::fmt;
 
 // EventType enum, Event struct, and their impls are MOVED to types/headers/event.rs
 

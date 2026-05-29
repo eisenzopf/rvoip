@@ -7,8 +7,6 @@ use crate::parser::token::token;
 use crate::parser::whitespace::sws;
 use crate::parser::ParseResult;
 use crate::types::sip_if_match::SipIfMatch;
-use nom::combinator::{map, opt};
-use nom::sequence::terminated;
 
 /// Parse a SIP-If-Match header value
 ///

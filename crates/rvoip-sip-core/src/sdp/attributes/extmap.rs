@@ -4,106 +4,21 @@
 //! Format: a=extmap:<id>[/<direction>] <uri> [<extension parameters>]
 
 use crate::error::{Error, Result};
-use crate::sdp::attributes::common::{positive_integer, to_result, token};
+use crate::sdp::attributes::common::positive_integer;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_till1, take_while1},
-    character::complete::{char, space1},
+    character::complete::space1,
     combinator::{map, opt, verify},
-    sequence::{pair, preceded, separated_pair, tuple},
+    sequence::{preceded, tuple},
     IResult,
 };
 
-/// Parser for extension ID (1-14 for one-byte header, 15-255 for two-byte header)
-fn extension_id_parser(input: &str) -> IResult<&str, u16> {
-    verify(map(positive_integer, |n| n as u16), |&id| {
-        (1..=255).contains(&id)
-    })(input)
-}
 
-/// Parser for extension direction
-fn direction_parser(input: &str) -> IResult<&str, &str> {
-    alt((
-        tag("sendonly"),
-        tag("recvonly"),
-        tag("sendrecv"),
-        tag("inactive"),
-    ))(input)
-}
 
-/// Parser for ID/direction part
-fn id_direction_parser(input: &str) -> IResult<&str, (u16, Option<String>)> {
-    // First try to parse a section containing digits and potentially a slash
-    let (input, id_part) = take_while1(|c: char| c.is_ascii_digit() || c == '/')(input)?;
 
-    // Check if there's a direction part
-    if id_part.contains('/') {
-        let parts: Vec<&str> = id_part.split('/').collect();
-        if parts.len() != 2 {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Tag,
-            )));
-        }
 
-        let id = match parts[0].parse::<u16>() {
-            Ok(id) => id,
-            Err(_) => {
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    input,
-                    nom::error::ErrorKind::Digit,
-                )))
-            }
-        };
 
-        let direction = parts[1].to_string();
-
-        // Validate direction
-        if !["sendonly", "recvonly", "sendrecv", "inactive"].contains(&direction.as_str()) {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Tag,
-            )));
-        }
-
-        Ok((input, (id, Some(direction))))
-    } else {
-        // Just ID
-        match id_part.parse::<u16>() {
-            Ok(id) => Ok((input, (id, None))),
-            Err(_) => Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Digit,
-            ))),
-        }
-    }
-}
-
-/// Parser for URI
-fn uri_parser(input: &str) -> IResult<&str, &str> {
-    take_while1(|c: char| !c.is_ascii_whitespace())(input)
-}
-
-/// Parser for extension parameters
-fn extension_params_parser(input: &str) -> IResult<&str, &str> {
-    take_till1(|_| false)(input) // Take everything until the end
-}
-
-/// Main parser for extmap attribute
-fn extmap_parser(input: &str) -> IResult<&str, (u16, Option<String>, String, Option<String>)> {
-    tuple((
-        // ID and optional direction
-        id_direction_parser,
-        // Space + URI
-        preceded(space1, map(uri_parser, |s: &str| s.to_string())),
-        // Optional space + parameters
-        opt(preceded(
-            space1,
-            map(extension_params_parser, |s: &str| s.trim().to_string()),
-        )),
-    ))(input)
-    .map(|(remaining, ((id, direction), uri, params))| (remaining, (id, direction, uri, params)))
-}
 
 /// Parses extmap attribute: a=extmap:<id>[/<direction>] <uri> [<extension parameters>]
 pub fn parse_extmap(value: &str) -> Result<(u16, Option<String>, String, Option<String>)> {

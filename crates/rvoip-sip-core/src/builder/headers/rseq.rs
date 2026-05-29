@@ -1,8 +1,9 @@
+#[cfg(test)]
+use crate::types::headers::HeaderName;
+#[cfg(test)]
+use crate::types::headers::TypedHeader;
 use super::HeaderSetter;
-use crate::error::{Error, Result};
-use crate::types::{
-    headers::header_access::HeaderAccess, headers::HeaderName, headers::TypedHeader, rseq::RSeq,
-};
+use crate::types::rseq::RSeq;
 
 /// RSeq header builder
 ///
@@ -213,9 +214,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{method::Method, uri::Uri, version::Version, StatusCode};
-    use crate::{RequestBuilder, ResponseBuilder};
-    use std::str::FromStr;
+    use crate::types::StatusCode;
+    use crate::ResponseBuilder;
+    
 
     #[test]
     fn test_response_rseq() {

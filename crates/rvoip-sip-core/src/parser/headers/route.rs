@@ -4,26 +4,18 @@
 // rr-param     =  generic-param
 
 use nom::{
-    branch::alt,
     combinator::map,
-    multi::{many0, separated_list1},
-    sequence::{pair, preceded},
-    IResult,
+    sequence::pair,
 };
 
 // Import from base parser modules
 use crate::parser::address::name_addr; // Route uses name-addr strictly
 use crate::parser::common::comma_separated_list1; // Route requires at least one
 use crate::parser::common_params::{generic_param, semicolon_separated_params0};
-use crate::parser::separators::{comma, hcolon};
 use crate::parser::ParseResult;
 
-use crate::types::param::Param;
-use crate::types::uri::Uri;
 
 // Import types (assuming)
-use crate::parser::address::name_addr_or_addr_spec;
-use crate::parser::parse_address;
 use crate::types::address::Address;
 use crate::types::route::Route as RouteHeader; // Use the specific header type
 use serde::{Deserialize, Serialize}; // Added serde
@@ -70,7 +62,7 @@ pub fn parse_route(input: &[u8]) -> ParseResult<'_, RouteHeader> {
 mod tests {
     use super::*;
     use crate::types::param::Param;
-    use crate::types::uri::{Scheme, Uri};
+    use crate::types::uri::Scheme;
 
     #[test]
     fn test_parse_route_single() {

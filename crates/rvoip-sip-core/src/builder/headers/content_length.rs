@@ -1,4 +1,3 @@
-use crate::builder::headers::HeaderSetter;
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::types::{content_length::ContentLength, TypedHeader};
 
@@ -296,10 +295,8 @@ impl ContentLengthBuilderExt for SimpleResponseBuilder {
 mod tests {
     use super::*;
     use crate::builder::headers::cseq::CSeqBuilderExt;
-    use crate::builder::headers::from::FromBuilderExt;
-    use crate::builder::headers::to::ToBuilderExt;
-    use crate::types::headers::HeaderAccess;
-    use crate::types::{Method, StatusCode};
+    
+    use crate::types::Method;
 
     #[test]
     fn test_request_content_length() {

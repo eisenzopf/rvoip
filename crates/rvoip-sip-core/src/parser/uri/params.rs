@@ -1,12 +1,10 @@
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case, take_while1, take_while_m_n},
-    character::complete::digit1,
+    bytes::complete::{tag_no_case, take_while1, take_while_m_n},
     combinator::{map, map_res, opt, recognize},
-    error::{Error as NomError, ErrorKind, ParseError},
+    error::{Error as NomError, ErrorKind},
     multi::{many0, many1},
-    sequence::{pair, preceded, separated_pair},
-    IResult,
+    sequence::{pair, preceded},
 };
 use std::str;
 
@@ -203,8 +201,8 @@ pub fn uri_parameters(input: &[u8]) -> ParseResult<'_, Vec<Param>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::uri::Host;
-    use std::net::{IpAddr, Ipv4Addr};
+    
+    
 
     #[test]
     fn test_other_param_unescaped() {

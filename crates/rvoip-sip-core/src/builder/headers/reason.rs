@@ -1,9 +1,7 @@
+#[cfg(test)]
+use crate::types::headers::TypedHeader;
 use super::HeaderSetter;
-use crate::error::{Error, Result};
-use crate::types::StatusCode;
-use crate::types::{
-    headers::header_access::HeaderAccess, headers::HeaderName, headers::TypedHeader, reason::Reason,
-};
+use crate::types::reason::Reason;
 
 /// Reason header builder
 ///
@@ -377,7 +375,7 @@ mod tests {
     use crate::types::Method;
     use crate::types::StatusCode;
     use crate::{RequestBuilder, ResponseBuilder};
-    use std::str::FromStr;
+    
 
     #[test]
     fn test_request_reason() {

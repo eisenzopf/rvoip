@@ -9,9 +9,9 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while1},
     character::complete::{alpha1, alphanumeric1, char, digit1, space0, space1},
-    combinator::{all_consuming, map, map_res, opt, recognize, value},
-    multi::{many0, many1, separated_list0, separated_list1},
-    sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
+    combinator::{map, recognize},
+    multi::{many0, separated_list0, separated_list1},
+    sequence::{pair, preceded},
     IResult,
 };
 use serde::{Deserialize, Serialize};
@@ -39,186 +39,12 @@ pub struct RidAttribute {
     pub restrictions: HashMap<String, String>,
 }
 
-/// Parse token (alphanumeric with limited special chars)
-fn parse_token(input: &str) -> IResult<&str, &str> {
-    take_while1(|c: char| c.is_alphanumeric() || "!#$%&'*+-.^_`{|}~".contains(c))(input)
-}
 
-/// Parse RID identifier
-/// Per RFC 8851: The first character MUST be a letter (a-z or A-Z)
-/// or an underscore (_). The remaining characters MUST be alphanumeric
-/// or dash (-) or underscore (_).
-fn parse_rid_id(input: &str) -> IResult<&str, String> {
-    map(
-        recognize(pair(
-            alt((alpha1, tag("_"))),
-            many0(alt((alphanumeric1, tag("-"), tag("_")))),
-        )),
-        |s: &str| s.to_string(),
-    )(input)
-}
 
-/// Parse the direction of a RID attribute (send or recv)
-fn parse_direction(input: &str) -> IResult<&str, RidDirection> {
-    alt((
-        map(tag_no_case("send"), |_| RidDirection::Send),
-        map(tag_no_case("recv"), |_| RidDirection::Recv),
-    ))(input)
-}
 
-/// Parse a list of formats (e.g., "pt=96,97,98")
-fn parse_format_list(input: &str) -> IResult<&str, Vec<String>> {
-    preceded(
-        tag("pt="),
-        separated_list1(
-            pair(char(','), space0),
-            map(digit1, |s: &str| s.to_string()),
-        ),
-    )(input)
-}
 
-/// Parse a single restriction (e.g., "max-width=1280")
-fn parse_restriction(input: &str) -> IResult<&str, (String, String)> {
-    let (input, name) = take_while1(|c: char| c.is_alphanumeric() || c == '-')(input)?;
-    let (input, _) = char('=')(input)?;
-    let (input, value) = take_while1(|c: char| c != ';' && c != ' ')(input)?;
-    Ok((input, (name.to_string(), value.to_string())))
-}
 
-/// Parse a list of restrictions (e.g., "max-width=1280;max-height=720")
-/// This allows the input to either start with a semicolon or not
-fn parse_restrictions_list(input: &str) -> IResult<&str, HashMap<String, String>> {
-    // Try with leading semicolon
-    let with_semicolon = map(
-        preceded(char(';'), separated_list0(char(';'), parse_restriction)),
-        |restrictions| restrictions.into_iter().collect(),
-    );
 
-    // Without leading semicolon
-    let without_semicolon = map(
-        separated_list0(char(';'), parse_restriction),
-        |restrictions| restrictions.into_iter().collect(),
-    );
-
-    // Try both patterns
-    alt((with_semicolon, without_semicolon))(input)
-}
-
-/// Parse an RID attribute according to RFC 8851 ABNF but with flexibility:
-/// rid-attribute = "a=rid:" rid-id SP rid-dir
-///                [ SP rid-pt-param-list ]
-///                [ SP rid-param-list ]
-fn rid_parser(input: &str) -> IResult<&str, RidAttribute> {
-    // Parse the RID ID
-    let (input, id) = parse_rid_id(input)?;
-
-    // Parse whitespace
-    let (input, _) = space1(input)?;
-
-    // Parse the direction
-    let (input, direction) = parse_direction(input)?;
-
-    let (mut remaining, _) = space0(input)?;
-
-    // Initialize with empty values
-    let mut formats = Vec::new();
-    let mut restrictions = HashMap::new();
-
-    // Handle the case where we're done
-    if remaining.is_empty() {
-        return Ok((
-            remaining,
-            RidAttribute {
-                id,
-                direction,
-                formats,
-                restrictions,
-            },
-        ));
-    }
-
-    // Split the rest by whitespace
-    let parts: Vec<&str> = remaining.split_whitespace().collect();
-
-    for part in parts {
-        // Handle format list (pt=...)
-        if let Some(formats_str) = part.strip_prefix("pt=") {
-            let formats_part = if let Some(idx) = formats_str.find(',') {
-                // Multiple formats separated by commas
-                let formats_str = &formats_str[3..]; // Skip "pt="
-                formats_str
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect()
-            } else {
-                // Single format
-                vec![formats_str.to_string()]
-            };
-            formats = formats_part;
-        }
-        // Handle restriction key-value pair (key=value)
-        else if part.contains('=') {
-            // If it starts with a semicolon, remove it
-            let clean_part = if part.starts_with(';') {
-                &part[1..]
-            } else {
-                part
-            };
-
-            // Split on = to get key and value
-            if let Some(idx) = clean_part.find('=') {
-                let (key, value) = clean_part.split_at(idx);
-                // Skip the '='
-                let value = &value[1..];
-                restrictions.insert(key.to_string(), value.to_string());
-            }
-        }
-        // Handle a pattern like ";key=value;key2=value2"
-        else if part.starts_with(';') {
-            let restrictions_parts = part.split(';').filter(|s| !s.is_empty());
-
-            for restriction_part in restrictions_parts {
-                if let Some(idx) = restriction_part.find('=') {
-                    let (key, value) = restriction_part.split_at(idx);
-                    // Skip the '='
-                    let value = &value[1..];
-                    restrictions.insert(key.to_string(), value.to_string());
-                }
-            }
-        }
-    }
-
-    // Also attempt to parse any trailing parts that might be left
-    if !remaining.trim().is_empty() {
-        // Handle restrictions/parameters that might use semicolons
-        if remaining.contains(';') {
-            // Split on semicolons
-            let parts = remaining.split(';').collect::<Vec<&str>>();
-
-            for part in parts {
-                if let Some(idx) = part.find('=') {
-                    let (key, value) = part.split_at(idx);
-                    // Skip the '='
-                    let value = &value[1..];
-                    let key = key.trim();
-                    if !key.is_empty() {
-                        restrictions.insert(key.to_string(), value.trim().to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    Ok((
-        "",
-        RidAttribute {
-            id,
-            direction,
-            formats,
-            restrictions,
-        },
-    ))
-}
 
 /// Parse a RID (Restriction IDentifier) attribute as defined in RFC 8851.
 ///

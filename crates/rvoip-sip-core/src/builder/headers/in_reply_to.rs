@@ -1,11 +1,9 @@
+#[cfg(test)]
+use crate::types::header::HeaderName;
+#[cfg(test)]
+use crate::types::headers::TypedHeader;
 use crate::builder::headers::HeaderSetter;
-use crate::error::{Error, Result};
-use crate::types::{
-    call_id::CallId,
-    header::{Header, HeaderName},
-    headers::TypedHeader,
-    in_reply_to::InReplyTo,
-};
+use crate::types::in_reply_to::InReplyTo;
 
 /// In-Reply-To header builder
 ///
@@ -191,10 +189,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::headers::HeaderAccess;
     use crate::types::{method::Method, StatusCode};
     use crate::{RequestBuilder, ResponseBuilder};
-    use std::str::FromStr;
+    
 
     #[test]
     fn test_request_with_single_in_reply_to() {

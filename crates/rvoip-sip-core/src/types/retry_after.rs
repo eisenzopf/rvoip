@@ -53,7 +53,7 @@
 use crate::error::{Error, Result};
 use crate::parser::headers::retry_after::{parse_retry_after, RetryParam};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
-use crate::types::param::{GenericValue, Param};
+use crate::types::param::Param;
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -570,7 +570,7 @@ impl TypedHeaderTrait for RetryAfter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::param::{GenericValue, Param};
+    use crate::types::param::Param;
 
     #[test]
     fn test_retry_after_display_simple() {

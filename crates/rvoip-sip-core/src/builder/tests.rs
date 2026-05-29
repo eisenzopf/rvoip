@@ -6,10 +6,8 @@ use crate::types::{
     },
     content_length::ContentLength,
     content_type::ContentType,
-    header::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait},
-    headers::header_access::HeaderAccess,
+    header::{HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait},
     max_forwards::MaxForwards,
-    uri::Uri,
     Method, StatusCode,
 };
 use std::str::FromStr;

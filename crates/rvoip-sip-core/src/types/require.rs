@@ -39,8 +39,10 @@
 //! }
 //! ```
 
+#[cfg(test)]
+use crate::types::HeaderValue;
 use crate::error::Result;
-use crate::types::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use crate::types::{Header, HeaderName, TypedHeaderTrait};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

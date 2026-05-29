@@ -1,6 +1,11 @@
+#[cfg(test)]
+use crate::builder::SimpleRequestBuilder;
+#[cfg(test)]
+use crate::builder::SimpleResponseBuilder;
+#[cfg(test)]
+use crate::types::headers::TypedHeader;
 use crate::builder::headers::HeaderSetter;
-use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
-use crate::types::{headers::TypedHeader, min_se::MinSE};
+use crate::types::min_se::MinSE;
 
 /// Min-SE Header Builder Extension
 ///

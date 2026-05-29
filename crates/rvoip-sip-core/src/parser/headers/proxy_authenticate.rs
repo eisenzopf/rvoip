@@ -24,14 +24,12 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while, take_while1},
     character::complete::{char, multispace0, multispace1},
-    combinator::{map, opt, verify},
-    error::{Error, ErrorKind, ParseError},
-    multi::separated_list0,
+    combinator::opt,
+    error::{Error, ErrorKind},
     sequence::{delimited, preceded, terminated, tuple},
     IResult,
 };
 
-use crate::parser::utils::unfold_lws;
 use crate::types::auth::{Algorithm, AuthParam, Challenge, DigestParam, Qop};
 
 type ParseResult<'a, T> = IResult<&'a [u8], T, Error<&'a [u8]>>;

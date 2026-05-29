@@ -1,16 +1,9 @@
 use nom::{
-    branch::alt,
-    bytes::complete::{tag, take_while1},
-    character::complete::{alpha1, alphanumeric1},
-    combinator::{map_res, recognize, verify},
-    error::{Error as NomError, ErrorKind, ParseError},
-    multi::{many0, many1},
-    sequence::{pair, preceded, tuple},
-    IResult,
+    bytes::complete::take_while1,
+    combinator::verify,
 };
 use std::str;
 
-use crate::error::{Error, Result};
 use crate::parser::ParseResult;
 use crate::types::uri::Host;
 

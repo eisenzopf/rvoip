@@ -1,25 +1,11 @@
-use nom::{
-    branch::alt,
-    bytes::complete::{tag, take_while1},
-    combinator::{map, map_res, opt, recognize},
-    error::{Error as NomError, ErrorKind},
-    multi::{many0, many1, separated_list1},
-    sequence::{pair, preceded, separated_pair},
-    IResult,
-};
+use nom::bytes::complete::tag;
 use std::collections::HashMap;
-use std::str;
 
 // Import from new modules
-use crate::error::Error;
-use crate::parser::common_chars::{escaped, unreserved};
 use crate::parser::utils::unescape_uri_component;
 use crate::parser::ParseResult;
 
 // hnv-unreserved = "[" / "]" / "/" / "?" / ":" / "+" / "$"
-fn is_hnv_unreserved(c: u8) -> bool {
-    matches!(c, b'[' | b']' | b'/' | b'?' | b':' | b'+' | b'$')
-}
 
 // hname = 1*( hnv-unreserved / unreserved / escaped )
 // Return an unescaped string

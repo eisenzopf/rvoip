@@ -2,20 +2,22 @@
 // Parser for the credentials part of Authorization headers
 
 // Use the new digest_param parser from common
-use super::common::{auth_param, auth_scheme, digest_credential, digest_param};
+#[cfg(test)]
+use crate::types::auth::Algorithm;
+#[cfg(test)]
+use crate::types::auth::DigestParam;
+#[cfg(test)]
+use crate::types::auth::Qop;
+use super::common::{auth_param, auth_scheme, digest_credential};
 use crate::parser::common::comma_separated_list1;
-use crate::parser::token::token;
 use crate::parser::whitespace::lws;
 use crate::parser::ParseResult;
 // Import the necessary types from types::auth
-use crate::types::auth::{Algorithm, AuthParam, AuthScheme, Credentials, DigestParam, Qop};
+use crate::types::auth::{AuthScheme, Credentials};
 use nom::{
-    branch::alt,
     bytes::complete::{tag_no_case, take_till1},
-    character::complete::{char, digit1},
-    combinator::{map, map_res, opt, recognize},
+    combinator::recognize,
     sequence::{pair, preceded},
-    IResult,
 };
 use std::str::FromStr;
 

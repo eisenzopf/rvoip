@@ -1,31 +1,24 @@
-use crate::types::version::Version;
-use crate::types::{Message, Method, Request, Response, StatusCode};
+#[cfg(test)]
+use crate::types::StatusCode;
+use crate::types::{Message, Request, Response};
 
 // Update imports to use available modules
 // use crate::parser::headers::{parse_header as parse_header_value, parse_headers, header_parser as single_nom_header_parser, headers_parser as nom_headers_parser};
 use crate::parser::request::parse_request_line;
-use crate::parser::response::parse_response_line;
 // use crate::parser::utils::crlf;
 use crate::error::{Error, Result};
-use crate::parser::common::sip_version;
 use crate::parser::common::ParseResult;
-use crate::parser::headers::{parse_content_length, parse_cseq, parse_expires, parse_max_forwards};
 use crate::parser::response::parse_status_line;
 use crate::parser::separators::hcolon;
 use crate::parser::token::token;
-use crate::parser::utf8::text_utf8_char;
 use crate::parser::utils::unfold_lws;
-use crate::parser::whitespace::{crlf, lws};
-use crate::types::uri::Host;
-use crate::types::{CSeq, ContentLength, Expires, MaxForwards};
+use crate::parser::whitespace::crlf;
 use crate::types::{Header, HeaderName, HeaderValue, TypedHeader};
 use bytes::Bytes;
 use nom::branch::alt;
 use nom::bytes::complete::{take, take_till};
-use nom::character::complete::multispace0;
-use nom::combinator::{all_consuming, map, map_res, recognize};
+use nom::combinator::{map, map_res, recognize};
 use nom::error::{Error as NomError, ErrorKind};
-use nom::multi::many_till;
 use nom::sequence::tuple;
 use nom::IResult;
 use nom::Needed;
@@ -398,10 +391,10 @@ fn message_header(input: &[u8]) -> ParseResult<'_, Header> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::uri::Host;
-    use crate::types::{CSeq, HeaderName, HeaderValue, Method, Request, Response, Version};
-    use bytes::Bytes;
-    use std::collections::HashMap;
+    
+    use crate::types::{HeaderName, HeaderValue, Method};
+    
+    
 
     // RFC 3261 Section 7.3 - Headers
     // Test parsing of message headers according to the ABNF grammar:

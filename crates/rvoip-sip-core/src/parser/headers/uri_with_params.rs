@@ -4,14 +4,13 @@ use nom::{
     combinator::{map, map_res},
     multi::many0,
     sequence::{delimited, pair, preceded},
-    IResult,
 };
 use std::str;
 
 // Import shared parsers
 use crate::parser::common_params::generic_param;
 use crate::parser::separators::{laquot, raquot, semi};
-use crate::parser::uri::parse_absolute_uri; // Using stub absolute URI parser
+ // Using stub absolute URI parser
 use crate::parser::ParseResult;
 
 // Import types

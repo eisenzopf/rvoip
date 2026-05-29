@@ -4,11 +4,7 @@
 //! It defines the `HeaderAccess` trait that provides a consistent API
 //! for accessing headers across different message types.
 
-use crate::error::{Error, Result};
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
-use std::any::TypeId;
-use std::collections::HashSet;
-use std::str::FromStr;
+use crate::types::header::{HeaderName, TypedHeader, TypedHeaderTrait};
 
 /// Trait for consistent header access across SIP message types.
 ///

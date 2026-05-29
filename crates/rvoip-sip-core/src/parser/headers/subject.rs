@@ -4,16 +4,13 @@
 use nom::{
     branch::alt,
     bytes::complete::tag_no_case,
-    combinator::{all_consuming, map, map_res, opt},
-    sequence::{pair, preceded, terminated},
-    IResult,
+    sequence::{preceded, terminated},
 };
 use std::str;
 
 // Import from other modules
 use crate::parser::separators::hcolon;
 use crate::parser::utils::unfold_lws;
-use crate::parser::values::text_utf8_trim;
 use crate::parser::ParseResult;
 use crate::types::subject::Subject;
 

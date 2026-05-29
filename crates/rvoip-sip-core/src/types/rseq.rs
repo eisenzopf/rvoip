@@ -43,10 +43,7 @@
 //! ```
 
 use crate::error::Result;
-use crate::types::headers::header_access::HeaderAccess;
 use crate::types::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
-use crate::types::{Method, Require, StatusCode, TypedHeader};
-use crate::types::{Response, Version};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -288,9 +285,8 @@ impl TypedHeaderTrait for RSeq {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::headers::header_access::HeaderAccess;
     use crate::types::{Header, Response, Version};
-    use crate::types::{Method, Require, StatusCode, TypedHeader};
+    use crate::types::{Require, StatusCode, TypedHeader};
 
     #[test]
     fn test_rseq_creation() {

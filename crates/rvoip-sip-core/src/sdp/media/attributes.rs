@@ -2,7 +2,7 @@
 //
 // Functions for working with media-level attributes
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::sdp::attributes::MediaDirection;
 use crate::types::sdp::{MediaDescription, ParsedAttribute};
 
@@ -73,15 +73,11 @@ pub fn is_media_level_attribute(attribute: &str) -> bool {
     )
 }
 
-/// Get media direction from attributes if set
-pub fn get_media_direction(media: &MediaDescription) -> Option<MediaDirection> {
-    media.direction
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::sdp::{RtpMapAttribute, SsrcAttribute};
+    use crate::types::sdp::SsrcAttribute;
 
     #[test]
     fn test_update_media_with_direction_attribute() {

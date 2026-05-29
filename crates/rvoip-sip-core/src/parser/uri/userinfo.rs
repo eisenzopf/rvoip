@@ -1,18 +1,14 @@
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_while1},
-    character::complete::char,
-    combinator::{map_res, opt, recognize, value},
+    combinator::{map_res, opt, recognize},
     multi::{many0, many1},
     sequence::{delimited, pair, preceded, terminated},
-    IResult,
 };
-use std::str;
 
 // Import from new modules
 use crate::error::Error; // For error type
-use crate::parser::common_chars::{alphanum, escaped, hex_digit, unreserved};
-use crate::parser::uri::ipv6;
+use crate::parser::common_chars::{escaped, unreserved};
 use crate::parser::utils::unescape_uri_component; // Import unescape helper
 use crate::parser::ParseResult; // Import ipv6 parser
 
@@ -23,9 +19,6 @@ fn is_user_unreserved(c: u8) -> bool {
 
 // For IPv6 references in userinfo (RFC 5118 Section 4.1)
 // This checks if a character is valid in IPv6 references: hex digits, colons, and brackets
-fn is_ipv6_char(c: u8) -> bool {
-    c.is_ascii_hexdigit() || matches!(c, b':' | b'[' | b']' | b'.')
-}
 
 // Specialized version of IPv6 reference parser that returns the raw bytes
 // This adapts the existing ipv6_reference parser for use in userinfo

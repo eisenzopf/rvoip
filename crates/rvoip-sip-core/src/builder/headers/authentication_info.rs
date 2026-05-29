@@ -1,11 +1,7 @@
+#[cfg(test)]
+use crate::types::TypedHeader;
 use super::HeaderSetter;
-use crate::error::{Error, Result};
-use crate::types::{
-    auth::{AuthenticationInfo, AuthenticationInfoParam, Qop},
-    header::TypedHeaderTrait,
-    headers::header_access::HeaderAccess,
-    TypedHeader,
-};
+use crate::types::auth::{AuthenticationInfo, AuthenticationInfoParam, Qop};
 
 /// Extension trait for adding Authentication-Info header building capabilities
 ///
@@ -327,7 +323,7 @@ mod tests {
     use super::*;
     use crate::builder::SimpleResponseBuilder;
     use crate::types::header::HeaderName;
-    use crate::types::{Method, StatusCode};
+    use crate::types::StatusCode;
 
     #[test]
     fn test_authentication_info() {

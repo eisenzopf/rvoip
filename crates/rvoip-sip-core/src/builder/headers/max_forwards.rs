@@ -1,4 +1,5 @@
-use crate::builder::headers::{cseq::CSeqBuilderExt, HeaderSetter};
+#[cfg(test)]
+use crate::builder::headers::cseq::CSeqBuilderExt;
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::types::{max_forwards::MaxForwards, TypedHeader};
 
@@ -213,7 +214,7 @@ impl MaxForwardsBuilderExt for SimpleResponseBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Method, StatusCode};
+    use crate::types::Method;
 
     #[test]
     fn test_request_max_forwards_header() {

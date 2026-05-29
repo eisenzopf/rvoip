@@ -4,20 +4,19 @@
 
 use crate::parser::common::comma_separated_list0;
 use crate::parser::common_params::{
-    contact_param_item, generic_param, semicolon_separated_params0,
+    generic_param, semicolon_separated_params0,
 };
-use crate::parser::separators::{equal, semi, slash};
+use crate::parser::separators::{equal, slash};
 use crate::parser::token::token; // Use the token parser instead
 use crate::parser::ParseResult;
 use crate::types::accept::Accept as AcceptHeader; // Specific header type
-use crate::types::media_type::MediaType;
 use crate::types::param::Param;
 use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while_m_n},
-    character::complete::{char, digit1},
+    character::complete::char,
     combinator::{map, map_res, opt, recognize, value},
-    error::{ErrorKind, ParseError},
+    error::ErrorKind,
     sequence::{pair, preceded, tuple},
 };
 use ordered_float::NotNan;
@@ -220,9 +219,9 @@ pub fn parse_accept(input: &[u8]) -> ParseResult<'_, AcceptHeader> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::param::GenericValue;
+    
     use crate::types::param::Param;
-    use std::str::FromStr;
+    
 
     // Helper function to test q-value parsing directly
     fn test_q_param(input: &[u8]) -> Option<NotNan<f32>> {

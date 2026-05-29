@@ -24,10 +24,6 @@
 use super::auth::credentials::credentials;
 use crate::parser::ParseResult;
 use crate::types::auth::Credentials;
-use crate::types::auth::{Algorithm, DigestParam, Qop};
-use crate::types::uri::Uri;
-use nom::combinator::map;
-use nom::IResult;
 
 /// Parses the value of a Proxy-Authorization header.
 ///
@@ -50,7 +46,7 @@ pub fn parse_proxy_authorization(input: &[u8]) -> ParseResult<'_, Credentials> {
 mod tests {
     use super::*;
     use crate::types::auth::{Algorithm, DigestParam, Qop};
-    use crate::types::uri::Uri;
+    
 
     #[test]
     fn test_parse_proxy_authorization_digest() {

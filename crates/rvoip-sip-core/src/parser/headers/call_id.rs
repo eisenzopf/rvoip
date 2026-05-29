@@ -5,10 +5,8 @@
 use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case},
-    character::complete::char,
     combinator::{map, map_res, opt},
     sequence::{pair, preceded},
-    IResult,
 };
 
 // Import from new modules
@@ -47,8 +45,8 @@ pub fn parse_call_id(input: &[u8]) -> ParseResult<'_, CallId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nom::error::ErrorKind;
-    use nom::Err;
+    
+    
 
     // Test the callid function directly (without header name)
     #[test]

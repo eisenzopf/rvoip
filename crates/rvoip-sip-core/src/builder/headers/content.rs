@@ -1,18 +1,8 @@
+#[cfg(test)]
+use crate::types::TypedHeader;
 use crate::builder::headers::content_type::ContentTypeBuilderExt;
-use crate::builder::headers::HeaderSetter;
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
-use crate::error::{Error, Result};
-use crate::parser::headers::content_type::ContentTypeValue;
-#[cfg(feature = "sdp")]
-use crate::sdp::{integration, SdpBuilder};
-use crate::types::{
-    content_length::ContentLength,
-    content_type::ContentType,
-    header::Header,
-    headers::{typed_header::TypedHeaderTrait, HeaderName},
-    sdp::SdpSession,
-    TypedHeader,
-};
+use crate::types::sdp::SdpSession;
 use bytes::Bytes;
 
 /// Content Body Builder for SIP Messages
@@ -412,12 +402,9 @@ impl ContentBuilderExt for SimpleResponseBuilder {
 mod tests {
     use super::*;
     use crate::builder::request::SimpleRequestBuilder;
-    use crate::builder::response::SimpleResponseBuilder;
-    use crate::types::headers::HeaderAccess;
-    use crate::types::{
-        address::Address, call_id::CallId, contact::Contact, contact::ContactParamInfo, cseq::CSeq,
-        from::From, method::Method, to::To, uri::Uri, via::Via, StatusCode,
-    };
+    
+    
+    use crate::types::method::Method;
     use std::str::FromStr;
 
     #[test]

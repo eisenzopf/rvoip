@@ -1,7 +1,6 @@
 use super::HeaderSetter;
-use crate::error::{Error, Result};
-use crate::types::content_disposition::{ContentDisposition, DispositionType, Handling};
-use crate::types::{header::TypedHeaderTrait, headers::header_access::HeaderAccess, TypedHeader};
+use crate::types::content_disposition::{ContentDisposition, DispositionType};
+use crate::types::header::TypedHeaderTrait;
 use std::collections::HashMap;
 use std::str::FromStr;
 

@@ -41,11 +41,11 @@
 use crate::error::{Error, Result};
 use crate::types::sdp::{RepeatTime, TimeDescription};
 use nom::{
-    bytes::complete::{tag, take_while, take_while1},
-    character::complete::{char, digit1, space0, space1},
-    combinator::{map, map_res, opt, recognize},
+    bytes::complete::{tag, take_while1},
+    character::complete::{digit1, space1},
+    combinator::{map_res, opt, recognize},
     multi::separated_list1,
-    sequence::{preceded, tuple},
+    sequence::tuple,
     IResult,
 };
 
@@ -226,18 +226,6 @@ pub fn parse_time_with_unit(value: &str) -> Result<u64> {
     Ok(seconds)
 }
 
-/// Parse time field which is either a numeric timestamp or 0 (internal nom parser)
-///
-/// # Parameters
-///
-/// * `input` - The input string to parse
-///
-/// # Returns
-///
-/// A nom IResult containing the remaining input and the parsed time value
-fn parse_time_field(input: &str) -> IResult<&str, u64> {
-    map_res(digit1, |s: &str| s.parse::<u64>())(input)
-}
 
 /// Parse a time description using nom (internal implementation)
 ///

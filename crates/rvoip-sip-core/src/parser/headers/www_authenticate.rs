@@ -11,16 +11,13 @@
 use crate::parser::headers::auth::challenge::challenge; // Use the challenge parser from headers::auth
 use crate::parser::separators::comma;
 use crate::parser::utils::unfold_lws;
-use crate::parser::whitespace::owsp;
 use crate::parser::ParseResult;
 use crate::types::auth::Challenge;
-use nom::bytes::complete::{tag, tag_no_case, take_while};
-use nom::combinator::{all_consuming, not, opt, recognize, verify};
-use nom::error::{make_error, ErrorKind, ParseError};
-use nom::multi::{many0, many1};
-use nom::sequence::{delimited, preceded, terminated, tuple};
+use nom::bytes::complete::{tag_no_case, take_while};
+use nom::combinator::opt;
+use nom::error::{make_error, ErrorKind};
+use nom::sequence::{preceded, terminated};
 use nom::Err;
-use nom::IResult;
 
 /// Parse a WWW-Authenticate header value (everything after the header name and HCOLON)
 ///

@@ -8,16 +8,14 @@
 use nom::{
     branch::alt,
     bytes::complete::tag_no_case,
-    combinator::{map, map_res, opt},
-    multi::separated_list1,
+    combinator::{map, map_res},
     sequence::{pair, preceded},
-    IResult,
 };
 
 // Import from new modules
 use crate::parser::common::comma_separated_list0;
 use crate::parser::common::comma_separated_list1;
-use crate::parser::separators::{comma, hcolon};
+use crate::parser::separators::hcolon;
 use crate::parser::token::token;
 use crate::parser::ParseResult;
 
@@ -29,84 +27,17 @@ use crate::parser::ParseResult;
 
 use std::str;
 
-/// Parses HCOLON [ token *(COMMA token) ]
-/// Requires at least one token if the value is present.
-/// Based on RFC 3261 Section 7.3
-fn token_list1(input: &[u8]) -> ParseResult<'_, Vec<String>> {
-    map(comma_separated_list1(token_string), |tokens| tokens)(input)
-}
 
-/// Parses HCOLON [ token *(COMMA token) ]
-/// Allows an empty list.
-/// Based on RFC 3261 Section 7.3
-fn token_list0(input: &[u8]) -> ParseResult<'_, Vec<String>> {
-    map(comma_separated_list0(token_string), |tokens| tokens)(input)
-}
 
-/// Parses a header (long form only) with a comma-separated list of tokens (at least one required).
-/// Example: "HeaderName: token1, token2"
-/// Based on RFC 3261 Section 7.3
-pub fn parse_header_token_list1<'a>(
-    name: &'a [u8],
-    input: &'a [u8],
-) -> ParseResult<'a, Vec<String>> {
-    preceded(pair(tag_no_case(name), hcolon), token_list1)(input)
-}
 
-/// Parses a header (long form only) with an optional comma-separated list of tokens.
-/// Example: "HeaderName: token1, token2" or "HeaderName:"
-/// Based on RFC 3261 Section 7.3
-pub fn parse_header_token_list0<'a>(
-    name: &'a [u8],
-    input: &'a [u8],
-) -> ParseResult<'a, Vec<String>> {
-    preceded(pair(tag_no_case(name), hcolon), token_list0)(input)
-}
 
-/// Parses a header (long or short form) with a comma-separated list of tokens (at least one required).
-/// Based on RFC 3261 Section 7.3.3 (compact form headers)
-pub fn parse_header_token_list1_short<'a>(
-    long_name: &'a [u8],
-    short_name: &'a [u8],
-    input: &'a [u8],
-) -> ParseResult<'a, Vec<String>> {
-    preceded(
-        pair(
-            alt((tag_no_case(long_name), tag_no_case(short_name))),
-            hcolon,
-        ),
-        token_list1,
-    )(input)
-}
 
-/// Parses a header (long or short form) with an optional comma-separated list of tokens.
-/// Based on RFC 3261 Section 7.3.3 (compact form headers)
-pub fn parse_header_token_list0_short<'a>(
-    long_name: &'a [u8],
-    short_name: &'a [u8],
-    input: &'a [u8],
-) -> ParseResult<'a, Vec<String>> {
-    preceded(
-        pair(
-            alt((tag_no_case(long_name), tag_no_case(short_name))),
-            hcolon,
-        ),
-        token_list0,
-    )(input)
-}
 
 // Define structure for a list of tokens
-#[derive(Debug, PartialEq, Clone)]
-pub struct TokenList(pub Vec<String>); // Use String to hold tokens
+ // Use String to hold tokens
 
 // Parses a comma-separated list of tokens
-pub fn parse_token_list0(input: &[u8]) -> ParseResult<'_, Vec<String>> {
-    comma_separated_list0(token_string)(input)
-}
 
-pub fn parse_token_list1(input: &[u8]) -> ParseResult<'_, Vec<String>> {
-    comma_separated_list1(token_string)(input)
-}
 
 // Helper to parse a token into a String
 // Based on RFC 3261 Section 25.1 token definition

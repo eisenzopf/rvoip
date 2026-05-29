@@ -4,16 +4,13 @@
 use nom::{
     bytes::complete as bytes,
     character::complete::{digit1, space0},
-    combinator::{map_res, verify},
+    combinator::map_res,
     error::{Error as NomError, ErrorKind, ParseError},
     sequence::{delimited, separated_pair},
-    IResult,
 };
 use std::str;
 
 // Import from new modules
-use crate::error::{Error, Result};
-use crate::parser::separators::hcolon;
 use crate::parser::ParseResult;
 use crate::types::version::Version as MimeVersion; // Alias to avoid confusion
 

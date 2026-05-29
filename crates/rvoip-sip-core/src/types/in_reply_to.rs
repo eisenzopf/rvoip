@@ -46,7 +46,6 @@ use std::ops::Deref;
 use std::str::FromStr;
 
 use crate::error::{Error, Result};
-use crate::parser::headers::in_reply_to::parse_in_reply_to;
 use crate::types::{CallId, Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents an In-Reply-To header field (RFC 3261 Section 20.22).

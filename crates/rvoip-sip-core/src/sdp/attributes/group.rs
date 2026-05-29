@@ -4,7 +4,7 @@
 //! Format: a=group:<semantics> <identification-tag> ...
 
 use crate::error::{Error, Result};
-use crate::sdp::attributes::common::{to_result, token};
+use crate::sdp::attributes::common::token;
 use nom::{
     bytes::complete::take_while1,
     character::complete::space1,
@@ -14,31 +14,8 @@ use nom::{
     IResult,
 };
 
-/// Parser for semantics values (like BUNDLE, LS, etc.)
-fn semantics_parser(input: &str) -> IResult<&str, &str> {
-    take_while1(|c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_')(input)
-}
 
-/// Parser for identification tags list (mids)
-fn identification_tags_parser(input: &str) -> IResult<&str, Vec<String>> {
-    preceded(
-        space1,
-        separated_list0(
-            space1,
-            map(verify(token, |s: &str| !s.is_empty()), |s: &str| {
-                s.to_string()
-            }),
-        ),
-    )(input)
-}
 
-/// Main parser for group attribute
-fn group_parser(input: &str) -> IResult<&str, (String, Vec<String>)> {
-    pair(
-        map(semantics_parser, |s: &str| s.to_string()),
-        identification_tags_parser,
-    )(input)
-}
 
 /// Parser for the SDP Group Attribute
 /// Follows RFC 5888

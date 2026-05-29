@@ -44,9 +44,7 @@ use serde::{Deserialize, Serialize};
 use std::default::Default;
 use std::fmt;
 use std::net::IpAddr;
-use std::str::FromStr;
 
-use crate::error::{Error, Result};
 use crate::types::uri::Host; // Assuming Host type exists
 
 // TODO: Add more specific parameter types (like rsip NewTypes)

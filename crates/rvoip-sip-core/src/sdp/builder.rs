@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::sdp::attributes::{
     rid::{RidAttribute, RidDirection},
     MediaDirection,
@@ -109,8 +109,6 @@ use crate::types::sdp::{
     CandidateAttribute, ConnectionData, FmtpAttribute, MediaDescription, Origin, ParsedAttribute,
     RepeatTime, RtpMapAttribute, SdpSession, SsrcAttribute, TimeDescription,
 };
-use std::collections::HashMap;
-use std::str::FromStr;
 
 /// Builder for SDP sessions with a fluent interface
 ///

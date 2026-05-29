@@ -1,7 +1,7 @@
 use crate::json::path::PathAccessor;
 use crate::json::query;
 use crate::json::{SipJson, SipJsonError, SipJsonResult, SipValue};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Serialize};
 
 /// # Extension Traits for SIP JSON Access
 ///
@@ -769,9 +769,9 @@ where
 mod tests {
     use super::*;
     use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
-    use crate::types::method::Method;
+    
     use crate::types::sip_request::Request;
-    use crate::types::sip_response::Response;
+    
     use crate::types::status::StatusCode;
     use std::collections::HashMap;
 

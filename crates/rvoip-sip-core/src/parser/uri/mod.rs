@@ -24,24 +24,16 @@ pub use userinfo::userinfo;
 // Add imports for combinators and types
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case, take_while},
-    character::complete::{char, digit1, one_of},
-    combinator::{all_consuming, eof, map, map_res, opt, recognize, value, verify},
-    error::{Error as NomError, ErrorKind},
-    multi::{many0, many1},
-    sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
-    IResult,
+    bytes::complete::{tag_no_case, take_while},
+    combinator::{opt, recognize},
+    sequence::tuple,
 };
 use std::collections::HashMap;
-use std::str;
 
-use crate::error::Error;
 use crate::parser::ParseResult;
-use crate::types::param::Param;
 use crate::types::uri::Scheme;
 use crate::types::uri::{Host, Uri};
 
-use authority::parse_authority;
 
 // SIP-URI = "sip:" [ userinfo ] hostport uri-parameters [ headers ]
 pub fn parse_sip_uri(bytes: &[u8]) -> ParseResult<'_, Uri> {
@@ -570,7 +562,7 @@ mod tests {
     use crate::types::param::Param;
     use crate::types::uri::Host;
     use crate::types::uri::Scheme;
-    use nom::error::ErrorKind;
+    
     use std::net::{IpAddr, Ipv4Addr};
 
     #[test]

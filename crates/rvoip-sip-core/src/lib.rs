@@ -218,7 +218,6 @@ pub use builder::{
     SimpleRequestBuilder as RequestBuilder, SimpleResponseBuilder as ResponseBuilder,
 };
 pub use error::{Error, Result};
-pub use macros::*;
 pub use parser::message::parse_message_with_mode;
 pub use parser::message::ParseMode;
 pub use parser::parse_message;

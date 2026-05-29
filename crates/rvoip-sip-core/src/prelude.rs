@@ -105,4 +105,3 @@ pub use crate::json::SipJsonExt;
 pub use crate::json::SipValue;
 
 // Also add the macros
-pub use crate::macros::*;

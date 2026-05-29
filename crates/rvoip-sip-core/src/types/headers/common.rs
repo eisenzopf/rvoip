@@ -1,10 +1,9 @@
 // Common header functionality shared across header types
 
 use crate::error::{Error, Result};
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
+use crate::types::header::{Header, HeaderValue};
 use crate::types::param::Param;
 
-use std::str::FromStr;
 
 /// Utility function to extract string field from a Header value
 pub fn header_value_to_string(header: &Header) -> Result<String> {

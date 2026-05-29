@@ -1,7 +1,7 @@
+#[cfg(test)]
+use crate::types::TypedHeader;
 use super::HeaderSetter;
-use crate::error::{Error, Result};
 use crate::types::content_encoding::ContentEncoding;
-use crate::types::{header::TypedHeaderTrait, headers::header_access::HeaderAccess, TypedHeader};
 
 /// Content-Encoding Header Builder for SIP Messages
 ///
@@ -278,7 +278,7 @@ mod tests {
     use super::*;
     use crate::builder::SimpleRequestBuilder;
     use crate::types::header::HeaderName;
-    use crate::types::ContentEncoding; // Import the actual type
+     // Import the actual type
 
     #[test]
     fn test_content_encoding_single() {

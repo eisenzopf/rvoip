@@ -40,7 +40,7 @@
 
 use crate::error::{Error, Result};
 use crate::parser::headers::parse_allow;
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use crate::types::header::{Header, HeaderName, TypedHeaderTrait};
 use crate::types::Method;
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};

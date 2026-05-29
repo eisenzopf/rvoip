@@ -40,25 +40,16 @@
 // Parser for User-Agent header (RFC 3261 Section 20.41)
 // User-Agent = "User-Agent" HCOLON server-val *(LWS server-val)
 
-use nom::{
-    bytes::complete::tag_no_case,
-    combinator::{map, opt},
-    multi::{many0, separated_list1},
-    sequence::{pair, preceded},
-    IResult,
-};
-use std::fmt;
+use nom::multi::separated_list1;
 
 // Import from new modules
 use super::server_val::server_val; // Use the shared server_val parser
-use crate::parser::separators::hcolon;
 use crate::parser::whitespace::lws;
 use crate::parser::ParseResult;
 
 // Import the types from the types module
-use crate::types::server::{Product, ServerVal};
+use crate::types::server::ServerVal;
 // Import the alias for backward compatibility
-use super::server_val::ServerValComponent;
 
 // server-val *(LWS server-val)
 fn server_val_list(input: &[u8]) -> ParseResult<'_, Vec<ServerVal>> {

@@ -3,17 +3,10 @@
 // priority-value = "emergency" / "urgent" / "normal" / "non-urgent" / other-priority
 // other-priority = token
 
-use nom::{
-    branch::alt,
-    bytes::complete::{tag_no_case, take_while1},
-    combinator::{all_consuming, map, map_res, verify},
-    sequence::{pair, preceded},
-    IResult,
-};
+use nom::combinator::{all_consuming, map_res};
 use std::str;
 
 // Import from new modules
-use crate::parser::separators::hcolon;
 use crate::parser::token::token;
 use crate::parser::ParseResult;
 

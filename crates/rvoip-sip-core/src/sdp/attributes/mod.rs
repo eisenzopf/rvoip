@@ -60,7 +60,6 @@ pub use rid::*;
 pub use rtcp::*;
 pub use rtpmap::*;
 pub use scalability::*;
-pub use sctp::*;
 pub use sctpmap::*;
 pub use simulcast::*;
 pub use ssrc::*;

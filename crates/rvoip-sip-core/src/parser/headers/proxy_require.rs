@@ -13,20 +13,15 @@
 // Proxy-Require: sec-agree, precondition
 
 use nom::{
-    branch::alt,
     bytes::complete::tag,
-    character::complete::space0,
-    combinator::{all_consuming, fail, map, map_res, not, peek, recognize, verify},
-    multi::separated_list1,
-    sequence::{delimited, preceded, terminated},
-    IResult,
+    combinator::map_res,
+    sequence::delimited,
 };
 use std::str;
 
 // Import from new modules
-use crate::parser::separators::comma;
 use crate::parser::token::token;
-use crate::parser::whitespace::{lws, owsp, sws};
+use crate::parser::whitespace::sws;
 use crate::parser::ParseResult;
 
 /// Parses an option-tag (token) with surrounding whitespace
@@ -111,7 +106,7 @@ pub fn parse_proxy_require(input: &[u8]) -> ParseResult<'_, Vec<String>> {
 mod tests {
     use super::*;
     use nom::combinator::all_consuming;
-    use nom::error::ErrorKind;
+    
 
     #[test]
     fn test_parse_proxy_require() {

@@ -1,21 +1,13 @@
 use bytes::Bytes;
 use std::str::FromStr;
 
-use crate::error::{Error, Result};
 use crate::types::{
-    call_id::CallId,
-    contact::{Contact, ContactParamInfo, ContactValue},
     content_length::ContentLength,
     content_type::ContentType,
-    cseq::CSeq,
-    from::From,
     headers::header_access::HeaderAccess,
     sip_request::Request,
     sip_response::Response,
-    to::To,
-    uri::{Host, Scheme, Uri},
-    via::{SentProtocol, Via, ViaHeader},
-    Address, HeaderName, HeaderValue, Method, Param, StatusCode, TypedHeader, Version,
+    via::Via, HeaderName, HeaderValue, Method, StatusCode, TypedHeader,
 };
 
 /// # SIP Response Builder

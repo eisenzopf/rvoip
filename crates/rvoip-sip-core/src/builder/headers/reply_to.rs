@@ -1,9 +1,11 @@
+#[cfg(test)]
+use crate::types::header::HeaderName;
+#[cfg(test)]
+use crate::types::headers::TypedHeader;
 use crate::builder::headers::HeaderSetter;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::types::{
     address::Address,
-    header::{Header, HeaderName},
-    headers::TypedHeader,
     reply_to::ReplyTo,
     uri::Uri,
 };
@@ -283,7 +285,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::headers::HeaderAccess;
     use crate::types::{method::Method, StatusCode};
     use crate::{RequestBuilder, ResponseBuilder};
     use std::str::FromStr;

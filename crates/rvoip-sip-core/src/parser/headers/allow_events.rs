@@ -7,15 +7,14 @@
 // token-nodot = 1*( alphanum / "-" / "!" / "%" / "*" / "_" / "+" / "`" / "'" / "~" )
 
 // Remove unused import - we're using separated_list1 directly
-use crate::parser::token::token;
-use crate::parser::whitespace::{lws, sws};
+use crate::parser::whitespace::sws;
 use crate::parser::ParseResult;
 use crate::types::allow_events::AllowEvents;
-use nom::bytes::complete::{is_not, take_while1};
+use nom::bytes::complete::take_while1;
 use nom::character::complete::char;
-use nom::combinator::{map, opt, recognize};
+use nom::combinator::{map, recognize};
 use nom::multi::separated_list1;
-use nom::sequence::{preceded, separated_pair, tuple};
+use nom::sequence::{preceded, tuple};
 
 /// Check if a byte is valid for token-nodot (excludes '.')
 fn is_token_nodot_char(c: u8) -> bool {

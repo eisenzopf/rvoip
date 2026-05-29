@@ -286,6 +286,12 @@
 //! assert!(from.to_string().contains("Alice"));
 //! ```
 
+// Macro-definition module: bare paths inside `macro_rules!` bodies resolve at
+// this definition site, and `$crate::`-prefixed imports get per-expansion-site
+// lint passes — so several imports below are used only by macro expansions that
+// the per-crate lib analysis can't see. Allow the resulting false positives.
+#![allow(unused_imports)]
+
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::types::{uri::Uri, Method, StatusCode, TypedHeader};
 use std::str::FromStr;

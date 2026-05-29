@@ -1,8 +1,8 @@
-use super::HeaderSetter;
-use crate::error::{Error, Result};
+#[cfg(test)]
+use crate::types::headers::HeaderName;
 use crate::parser::headers::route::RouteEntry;
 use crate::types::{
-    address::Address, headers::header_access::HeaderAccess, headers::HeaderName,
+    address::Address,
     headers::TypedHeader, route::Route, uri::Uri,
 };
 use crate::{RequestBuilder, ResponseBuilder};
@@ -313,7 +313,7 @@ impl RouteBuilderExt for ResponseBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{method::Method, uri::Uri, version::Version, StatusCode};
+    use crate::types::{method::Method, uri::Uri, StatusCode};
     use crate::{RequestBuilder, ResponseBuilder};
     use std::str::FromStr;
 

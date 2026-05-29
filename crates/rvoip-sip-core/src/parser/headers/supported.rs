@@ -4,21 +4,18 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case, take_while},
+    bytes::complete::{tag, tag_no_case},
     character::complete::char,
-    combinator::{all_consuming, eof, map, opt, recognize, value},
-    error::ErrorKind,
+    combinator::{opt, recognize, value},
     multi::separated_list0,
     sequence::{delimited, preceded, terminated},
-    IResult,
 };
 use std::str;
 
 // Import from other modules
-use crate::parser::common::comma_separated_list0;
-use crate::parser::separators::{comma, hcolon};
+use crate::parser::separators::hcolon;
 use crate::parser::token::token;
-use crate::parser::whitespace::{owsp, sws};
+use crate::parser::whitespace::owsp;
 use crate::parser::ParseResult;
 
 /// Parses optional whitespace followed by a comma and more whitespace

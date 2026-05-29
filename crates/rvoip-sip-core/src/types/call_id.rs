@@ -49,7 +49,6 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
-use std::string::FromUtf8Error;
 use uuid::Uuid;
 
 /// Represents the Call-ID header field (RFC 3261 Section 8.1.1.6).

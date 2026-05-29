@@ -1,11 +1,11 @@
+#[cfg(test)]
+use crate::types::TypedHeader;
+#[cfg(test)]
+use crate::types::header::HeaderName;
+#[cfg(test)]
+use crate::types::headers::header_access::HeaderAccess;
 use super::HeaderSetter;
-use crate::error::Result;
-use crate::types::{
-    auth::{Algorithm, AuthParam, Authorization, Challenge, Credentials, DigestParam, Qop},
-    header::{Header, HeaderName, TypedHeaderTrait},
-    headers::header_access::HeaderAccess,
-    TypedHeader,
-};
+use crate::types::auth::{Algorithm, AuthParam, Authorization, Credentials, DigestParam, Qop};
 use base64::{engine::general_purpose, Engine as _};
 
 /// Authorization header builder

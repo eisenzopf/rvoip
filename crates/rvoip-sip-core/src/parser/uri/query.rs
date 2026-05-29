@@ -3,16 +3,13 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_while1},
-    combinator::{map, map_res, opt, recognize},
-    multi::{many0, separated_list0},
-    sequence::{pair, preceded, separated_pair},
-    IResult,
+    bytes::complete::tag,
+    combinator::{opt, recognize},
+    multi::many0,
+    sequence::{preceded, separated_pair},
 };
 use std::collections::HashMap;
-use std::str;
 
-use crate::error::Error;
 use crate::parser::common_chars::{escaped, reserved, unreserved};
 use crate::parser::utils::unescape_uri_component;
 use crate::parser::ParseResult;
@@ -23,14 +20,8 @@ fn uric(input: &[u8]) -> ParseResult<'_, &[u8]> {
 }
 
 // Parse a single query parameter name or value
-fn query_param_part(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize(many0(uric))(input)
-}
 
 // Parse a name=value pair in the query string
-fn query_param(input: &[u8]) -> ParseResult<'_, (&[u8], &[u8])> {
-    separated_pair(query_param_part, tag(b"="), query_param_part)(input)
-}
 
 // query = *uric
 // Returns raw query string as bytes

@@ -11,25 +11,20 @@
 use nom::{
     branch::alt,
     bytes::complete::tag_no_case,
-    combinator::{map, map_res},
+    combinator::map,
     multi::many0,
     sequence::{pair, preceded, terminated},
-    IResult,
 };
-use std::str;
 
 // Import parsers from other modules
 use crate::parser::address::name_addr_or_addr_spec;
-use crate::parser::common_params::{from_to_param, semicolon_separated_params0};
+use crate::parser::common_params::from_to_param;
 use crate::parser::separators::{hcolon, semi};
-use crate::parser::token::token;
 use crate::parser::ParseResult; // Use just token, not token_no_case
 
 // Import types
 use crate::types::address::Address;
-use crate::types::param::Param;
 use crate::types::to::To as ToHeader; // Import the specific header type
-use crate::types::uri::{Host, Scheme};
 
 // to-spec = ( name-addr / addr-spec ) *( SEMI to-param )
 // to-param = tag-param / generic-param
@@ -67,11 +62,11 @@ pub fn to_header(input: &[u8]) -> ParseResult<'_, ToHeader> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::address::Address;
+    
     use crate::types::param::{GenericValue, Param};
-    use crate::types::uri::{Host, Scheme, Uri};
+    use crate::types::uri::Scheme;
     use nom::combinator::all_consuming;
-    use std::collections::HashMap;
+    
 
     // Helper function to test with full input consumption
     fn test_parse_to(input: &[u8]) -> Result<ToHeader, nom::Err<nom::error::Error<&[u8]>>> {

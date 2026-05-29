@@ -8,7 +8,7 @@ use crate::types::sdp::ParsedAttribute;
 use nom::{
     bytes::complete::tag,
     character::complete::{char, digit1},
-    combinator::{map_res, opt, verify},
+    combinator::{map_res, opt},
     sequence::separated_pair,
     IResult,
 };

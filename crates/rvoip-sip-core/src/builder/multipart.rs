@@ -1,6 +1,7 @@
-use crate::types::header::{Header, HeaderName};
-use crate::types::multipart::{MimePart, MultipartBody, ParsedBody};
+#[cfg(test)]
 use crate::types::TypedHeader;
+use crate::types::header::{Header, HeaderName};
+use crate::types::multipart::{MimePart, MultipartBody};
 use bytes::Bytes;
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
@@ -590,21 +591,6 @@ impl MultipartBodyBuilder {
         self
     }
 
-    /// Adds multiple MIME parts from a vector.
-    ///
-    /// Internal helper method for converting between builder types.
-    ///
-    /// # Parameters
-    ///
-    /// - `parts`: Vector of MimePart instances to add
-    ///
-    /// # Returns
-    ///
-    /// Self for method chaining
-    fn add_parts_from_vec(mut self, parts: Vec<MimePart>) -> Self {
-        self.parts.extend(parts);
-        self
-    }
 
     /// Generates a random boundary string if one hasn't been set.
     ///
@@ -1596,7 +1582,6 @@ impl MultipartBuilt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builder::headers::ContentTypeBuilderExt;
     use crate::builder::SimpleRequestBuilder;
     use crate::sdp::SdpBuilder;
     use crate::types::Method;

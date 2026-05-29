@@ -1,7 +1,7 @@
+#[cfg(test)]
+use crate::types::TypedHeader;
 use super::HeaderSetter;
-use crate::error::{Error, Result};
 use crate::types::content_language::ContentLanguage;
-use crate::types::{header::TypedHeaderTrait, headers::header_access::HeaderAccess, TypedHeader};
 
 /// Content-Language Header Builder for SIP Messages
 ///
@@ -259,7 +259,7 @@ mod tests {
     use super::*;
     use crate::builder::SimpleRequestBuilder;
     use crate::types::header::HeaderName;
-    use crate::types::ContentLanguage; // Import the actual type
+     // Import the actual type
 
     #[test]
     fn test_content_language_single() {

@@ -601,8 +601,8 @@ mod tests {
     use super::*;
     use crate::types::address::Address;
     use crate::types::param::{GenericValue, Param};
-    use crate::types::uri::{Host, Scheme, Uri};
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use crate::types::uri::{Host, Scheme};
+    use std::net::{IpAddr, Ipv6Addr};
     use std::str::FromStr;
 
     #[test]

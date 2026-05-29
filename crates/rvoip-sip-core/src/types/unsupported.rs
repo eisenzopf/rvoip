@@ -40,9 +40,8 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::parser;
-use crate::types::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use crate::types::{Header, HeaderName, TypedHeaderTrait};
 use crate::Error;
-use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 
 /// Represents an Unsupported header as defined in RFC 3261 Section 20.41

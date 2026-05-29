@@ -8,9 +8,9 @@ use crate::types::sdp::ConnectionData;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_till, take_while},
-    character::complete::{char, digit1, space1},
-    combinator::{map, map_res, opt},
-    sequence::{preceded, tuple},
+    character::complete::{digit1, space1},
+    combinator::opt,
+    sequence::tuple,
     IResult,
 };
 use std::net::{Ipv4Addr, Ipv6Addr};

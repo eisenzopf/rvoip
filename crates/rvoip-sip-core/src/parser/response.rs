@@ -1,10 +1,8 @@
 use nom::{
-    branch::alt,
-    bytes::complete::{take_till, take_till1, take_while_m_n},
+    bytes::complete::take_till,
     character::complete::{digit1, line_ending, space1},
-    combinator::{all_consuming, map, map_res, opt, recognize},
-    error::{Error as NomError, ErrorKind, ParseError},
-    sequence::{preceded, terminated, tuple},
+    combinator::{map, map_res},
+    sequence::{terminated, tuple},
     IResult,
 };
 use std::str;
@@ -17,44 +15,6 @@ use crate::parser::ParseResult;
 use crate::types::version::Version;
 use crate::types::StatusCode;
 
-/// Parser for SIP response status line (RFC 3261 Section 7.2)
-///
-/// ABNF Grammar:
-/// Status-Line =  SIP-Version SP Status-Code SP Reason-Phrase CRLF
-/// Status-Code =  3DIGIT
-/// Reason-Phrase  =  *(reserved / unreserved / escaped / UTF8-NONASCII / UTF8-CONT / SP / HTAB)
-///
-/// Parser for a SIP response line
-/// Returns components needed by IncrementalParser
-pub fn parse_response_line(input: &str) -> IResult<&str, (Version, StatusCode, String)> {
-    let (input, version) = map_res(take_till(|c| c == ' '), |s: &str| Version::from_str(s))(input)?;
-
-    let (input, _) = space1(input)?;
-
-    let (input, status_code) = map_res(digit1, |s: &str| s.parse::<u16>())(input)?;
-
-    let status = match StatusCode::from_u16(status_code) {
-        Ok(status) => status,
-        // Use Failure for semantic errors, match nom::error::Error structure
-        Err(_) => {
-            return Err(nom::Err::Failure(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )))
-        }
-    };
-
-    let (input, _) = space1(input)?;
-
-    let (input, reason) = map(take_till(|c| c == '\r' || c == '\n'), |s: &str| {
-        s.to_string()
-    })(input)?;
-
-    // Consume the line ending
-    let (input, _) = line_ending(input)?;
-
-    Ok((input, (version, status, reason)))
-}
 
 // Status-Code = 3DIGIT
 pub fn status_code(input: &[u8]) -> ParseResult<'_, StatusCode> {

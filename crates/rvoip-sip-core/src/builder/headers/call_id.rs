@@ -1,4 +1,3 @@
-use crate::builder::headers::HeaderSetter;
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::types::{call_id::CallId, TypedHeader};
 
@@ -242,8 +241,8 @@ impl CallIdBuilderExt for SimpleResponseBuilder {
 mod tests {
     use super::*;
     use crate::builder::headers::cseq::CSeqBuilderExt;
-    use crate::types::headers::HeaderAccess;
-    use crate::types::{Method, StatusCode};
+    
+    use crate::types::Method;
 
     #[test]
     fn test_request_call_id_header() {

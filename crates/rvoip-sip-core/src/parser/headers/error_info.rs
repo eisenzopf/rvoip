@@ -3,29 +3,25 @@
 // error-uri = LAQUOT absoluteURI RAQUOT *( SEMI generic-param )
 
 use nom::{
-    bytes::complete::{is_not, tag, tag_no_case, take_until},
+    bytes::complete::{tag, tag_no_case, take_until},
     character::complete::space0,
-    combinator::{all_consuming, fail, map, map_res, opt, recognize, verify},
+    combinator::map_res,
     multi::{many0, separated_list1},
     sequence::{delimited, pair, preceded, tuple},
-    Err, IResult,
+    Err,
 };
 use std::str;
 
 // Import from base parser modules
-use crate::parser::common::comma_separated_list1;
 use crate::parser::common_params::generic_param;
 use crate::parser::separators::{comma, hcolon, laquot, raquot, semi};
-use crate::parser::whitespace::sws;
 use crate::parser::ParseResult;
 
 use crate::error::Error as CrateError;
-use crate::types::error_info::ErrorInfo as ErrorInfoHeader;
 use crate::types::param::Param;
 use crate::types::uri::Uri;
 use crate::types::uri::{Host, Scheme};
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
 
 /// Represents a single error-uri with its parameters in an Error-Info header.
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -105,55 +101,6 @@ fn param(input: &[u8]) -> ParseResult<'_, Param> {
     )(input)
 }
 
-/// Verifies that there are no trailing characters after the parameter list
-/// except possibly a properly formatted comment in parentheses
-fn verify_no_trailing_chars(input: &[u8]) -> bool {
-    // Skip any leading whitespace
-    let mut i = 0;
-    while i < input.len() && (input[i] == b' ' || input[i] == b'\t') {
-        i += 1;
-    }
-
-    // Empty input is valid
-    if i >= input.len() {
-        return true;
-    }
-
-    // A comma (which would start the next URI) is valid
-    if input[i] == b',' {
-        return true;
-    }
-
-    // A '(' char starts a comment, which is valid
-    if input[i] == b'(' {
-        // Find the matching closing parenthesis
-        let mut paren_count = 1;
-        i += 1;
-
-        while i < input.len() && paren_count > 0 {
-            if input[i] == b'(' {
-                paren_count += 1;
-            } else if input[i] == b')' {
-                paren_count -= 1;
-            }
-            i += 1;
-        }
-
-        // If we found the closing parenthesis
-        if paren_count == 0 {
-            // Skip any more whitespace
-            while i < input.len() && (input[i] == b' ' || input[i] == b'\t') {
-                i += 1;
-            }
-
-            // Now we expect to be at the end of input or at a comma
-            return i >= input.len() || input[i] == b',';
-        }
-    }
-
-    // Anything else is invalid
-    false
-}
 
 /// Parse a comment enclosed in parentheses
 fn error_info_comment(input: &[u8]) -> ParseResult<'_, &[u8]> {
@@ -299,8 +246,8 @@ pub fn full_parse_error_info(input: &[u8]) -> ParseResult<'_, Vec<ErrorInfoValue
 mod tests {
     use super::*;
     use crate::types::param::{GenericValue, Param};
-    use crate::types::uri::{Host, Scheme, Uri};
-    use std::str::FromStr;
+    use crate::types::uri::Scheme;
+    
 
     #[test]
     fn test_parse_error_info() {

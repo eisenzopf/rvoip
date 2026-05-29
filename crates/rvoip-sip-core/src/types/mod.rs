@@ -310,7 +310,6 @@
 //! assert_eq!(custom.unwrap().to_string(), "X-Custom-Header: Custom Value");
 //! ```
 
-use std::str::FromStr;
 
 pub mod via;
 pub use via::Via;

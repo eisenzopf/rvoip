@@ -1,8 +1,12 @@
+#[cfg(test)]
+use crate::types::headers::HeaderName;
+#[cfg(test)]
+use crate::types::headers::TypedHeader;
 use super::HeaderSetter;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::types::{
-    headers::header_access::HeaderAccess, headers::HeaderName, headers::TypedHeader, path::Path,
-    uri::Uri, Address,
+    path::Path,
+    uri::Uri,
 };
 use std::str::FromStr;
 /// Path header builder
@@ -211,9 +215,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{method::Method, uri::Uri, version::Version, StatusCode};
-    use crate::{RequestBuilder, ResponseBuilder};
-    use std::str::FromStr;
+    use crate::types::method::Method;
+    use crate::RequestBuilder;
+    
 
     #[test]
     fn test_request_path() {

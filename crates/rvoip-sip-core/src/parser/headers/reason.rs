@@ -6,13 +6,12 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case, take_while1},
+    bytes::complete::{tag_no_case, take_while1},
     character::complete::digit1,
-    combinator::{map, map_res, opt},
-    error::{Error as NomError, ErrorKind, ParseError},
+    combinator::{map, map_res},
+    error::{Error as NomError, ErrorKind},
     multi::many0,
     sequence::{pair, preceded, tuple},
-    IResult,
 };
 use std::str;
 
@@ -20,7 +19,6 @@ use std::str;
 use crate::parser::common_params::generic_param;
 use crate::parser::quoted::quoted_string;
 use crate::parser::separators::{equal, semi};
-use crate::parser::token::token;
 use crate::parser::ParseResult;
 
 // Import the Reason type from types

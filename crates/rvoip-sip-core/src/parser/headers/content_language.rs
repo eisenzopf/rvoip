@@ -10,20 +10,15 @@
 // - Underscores are NOT allowed per RFC 5646
 
 use nom::{
-    bytes::complete::{tag, tag_no_case, take_while1},
-    character::complete::{alpha1, space0},
-    combinator::{fail, map, opt, recognize, verify},
+    bytes::complete::{tag, take_while1},
     error::ErrorKind,
-    multi::{many0, separated_list1},
-    sequence::{delimited, pair, preceded, tuple},
+    multi::separated_list1,
     Err, IResult,
 };
 use std::str;
 
 // Import from parser modules
-use crate::parser::common::comma_separated_list1;
-use crate::parser::separators::{comma, hcolon};
-use crate::parser::whitespace::{crlf, lws, owsp, sws};
+use crate::parser::whitespace::sws;
 use crate::parser::ParseResult;
 
 // Define the LanguageTag struct
@@ -31,20 +26,8 @@ use crate::parser::ParseResult;
 pub struct LanguageTag(pub String);
 
 // Helper function to check if primary tag is valid (1-8 alpha characters)
-fn is_valid_primary_tag(s: &[u8]) -> bool {
-    !s.is_empty() && s.len() <= 8 && s.iter().all(|&c| c.is_ascii_alphabetic())
-}
 
 // Helper function to check if subtag is valid (1-8 alphanumeric characters)
-fn is_valid_subtag(subtag: &str) -> bool {
-    if subtag.is_empty() {
-        return false;
-    }
-
-    // RFC 5646 allows subtags to be alphanumeric
-    // Check if all characters are alphanumeric and length is 1-8 characters
-    subtag.len() <= 8 && subtag.chars().all(|c| c.is_ascii_alphanumeric())
-}
 
 // Parse a language tag, which consists of a primary tag and optional subtags
 fn parse_language_tag(input: &[u8]) -> IResult<&[u8], LanguageTag> {

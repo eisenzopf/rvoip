@@ -42,14 +42,11 @@
 //! ```
 
 use crate::error::{Error, Result};
-use crate::parser;
-use crate::parser::headers::parse_expires;
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use std::time::Duration;
 
 /// Represents the Expires header field (RFC 3261 Section 20.19).
 /// Indicates the duration for which a registration or subscription is valid.

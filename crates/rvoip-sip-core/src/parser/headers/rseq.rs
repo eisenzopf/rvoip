@@ -3,9 +3,8 @@
 
 use nom::{
     character::complete::digit1,
-    combinator::{all_consuming, map_res, recognize},
+    combinator::{map_res, recognize},
     error::ErrorKind,
-    IResult,
 };
 use std::str;
 

@@ -3,7 +3,6 @@
 // This module contains all the SIP header implementations.
 // Each header type is implemented in its own file.
 
-use crate::error::{Error, Result};
 
 // Define sub-modules
 pub mod common;

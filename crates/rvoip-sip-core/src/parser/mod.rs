@@ -92,8 +92,8 @@ pub mod whitespace;
 mod tests {
     use super::*;
     use crate::types::header::HeaderName;
-    use crate::types::{Method, Request, Response, StatusCode, Uri, Via};
-    use nom::error::ErrorKind;
+    use crate::types::{Method, StatusCode};
+    
 
     #[test]
     fn test_parse_result_type() {
@@ -234,8 +234,7 @@ mod tests {
         // Test that header parsers are correctly re-exported
         use super::headers::via::parse_via_params;
         use super::headers::{
-            parse_call_id, parse_contact, parse_content_type_value, parse_cseq, parse_from,
-            parse_to, parse_via,
+            parse_contact, parse_cseq, parse_from,
         };
 
         // Via - uncommented for debugging
@@ -262,7 +261,7 @@ mod tests {
     // Add specific test for Via headers
     #[test]
     fn test_via_headers() {
-        use super::headers::parse_via;
+        
         use super::headers::via::parse_via_params;
 
         // Test basic Via header

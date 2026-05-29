@@ -56,7 +56,6 @@
 
 use crate::error::{Error, Result};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
-use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;

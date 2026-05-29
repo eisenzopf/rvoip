@@ -1,14 +1,14 @@
 // RFC 2396 / 3261 absoluteURI parser (Full)
 
+#[cfg(test)]
+use crate::parser::uri::scheme::parse_scheme_raw;
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_until, take_while1},
-    combinator::{map, map_res, opt, recognize, verify},
+    bytes::complete::{tag, take_while1},
+    combinator::{opt, recognize, verify},
     multi::many0,
-    sequence::{pair, preceded, terminated},
-    IResult,
+    sequence::{pair, preceded},
 };
-use std::str;
 
 // Import shared parsers from common_chars
 use crate::parser::common_chars::{escaped, reserved, unreserved};
@@ -16,55 +16,21 @@ use crate::parser::ParseResult;
 
 // Import existing parsers from other URI modules
 use crate::parser::uri::authority::parse_authority;
-use crate::parser::uri::ipv6::ipv6_reference;
-use crate::parser::uri::path::{abs_path, param};
-use crate::parser::uri::query::{parse_query, query_raw};
-use crate::parser::uri::scheme::parse_scheme_raw;
+use crate::parser::uri::path::abs_path;
+use crate::parser::uri::query::query_raw;
 
 // --- URI Character Sets (RFC 2396 / 3261) ---
 
 // uric = reserved / unreserved / escaped
-fn uric(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    alt((reserved, unreserved, escaped))(input)
-}
 
 // uric-no-slash = unreserved / escaped / ";" / "?" / ":" / "@" / "&" / "=" / "+" / "$" / ","
-fn is_uric_no_slash_char(c: u8) -> bool {
-    // Check unreserved first (alphanum / mark)
-    c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')') ||
-    // Check other allowed chars (reserved chars except '/')
-    matches!(c, b';' | b'?' | b':' | b'@' | b'&' | b'=' | b'+' | b'$' | b',')
-}
 
-fn uric_no_slash(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    alt((escaped, take_while1(is_uric_no_slash_char)))(input)
-}
 
 // --- URI Components ---
 
-// net-path = "//" authority [ abs-path ]
-fn net_path(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize(pair(
-        preceded(
-            tag(b"//"),
-            verify(parse_authority, |a: &[u8]| !a.is_empty()),
-        ),
-        opt(abs_path),
-    ))(input)
-}
 
-// hier-part = ( net-path / abs-path ) [ "?" query ]
-fn hier_part(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize(pair(
-        alt((net_path, abs_path)),
-        opt(preceded(tag(b"?"), query_raw)),
-    ))(input)
-}
 
 // opaque-part = uric-no-slash *uric
-fn opaque_part(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize(pair(uric_no_slash, many0(uric)))(input)
-}
 
 // Check for empty authority after //
 fn is_valid_authority_context(scheme: &[u8], rest: &[u8]) -> bool {

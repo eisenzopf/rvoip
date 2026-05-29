@@ -4,10 +4,9 @@
 use nom::{
     bytes::complete::tag_no_case,
     character::complete::digit1,
-    combinator::{map, map_res, opt, recognize},
+    combinator::{map, map_res},
     error::{Error as NomError, ErrorKind, ParseError}, // Import NomError
-    sequence::{pair, preceded, separated_pair, tuple},
-    IResult,
+    sequence::{pair, preceded},
 };
 use std::str::{self, FromStr};
 

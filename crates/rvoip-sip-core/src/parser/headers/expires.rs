@@ -1,7 +1,7 @@
 // Parser for Expires header (RFC 3261 Section 20.19)
 // Expires = "Expires" HCOLON delta-seconds
 
-use nom::{branch::alt, bytes::complete::tag_no_case, combinator::opt, IResult};
+use nom::{bytes::complete::tag_no_case, combinator::opt};
 
 // Import delta_seconds parser and other utilities
 use crate::parser::separators::hcolon;

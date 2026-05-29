@@ -3,23 +3,20 @@
 // Method = token
 
 use nom::{
-    bytes::complete::tag_no_case,
-    combinator::{map, map_res, recognize, verify},
     error::Error,
     multi::separated_list0,
-    sequence::{delimited, preceded, tuple},
-    IResult,
+    sequence::delimited,
 };
 
 // Import from new modules
 use crate::parser::separators::comma;
 use crate::parser::token::token; // Method is token
-use crate::parser::whitespace::{owsp, sws}; // Proper whitespace handling
+use crate::parser::whitespace::sws; // Proper whitespace handling
 use crate::parser::ParseResult;
 
 use crate::types::allow::Allow;
 use crate::types::method::Method;
-use std::str::{self, FromStr}; // Import self for FromStr
+use std::str::FromStr; // Import self for FromStr
 
 // Parse a single method token with proper whitespace handling
 fn parse_method_token(input: &[u8]) -> ParseResult<'_, Method> {
@@ -139,30 +136,6 @@ fn parse_methods(input: &[u8]) -> ParseResult<'_, Vec<Method>> {
 }
 
 // Validate no trailing comma or other invalid syntax
-fn validate_method_list(input: &[u8], methods: Vec<Method>) -> ParseResult<'_, Vec<Method>> {
-    // Detect trailing comma by looking for a comma at the end
-    let (after_ws, _) = sws(input)?;
-
-    if !after_ws.is_empty() {
-        // If there's anything left after whitespace, it's an error
-        return Err(nom::Err::Error(Error::new(
-            after_ws,
-            nom::error::ErrorKind::TakeWhile1,
-        )));
-    }
-
-    // Check for empty elements in the comma-separated list
-    // (the parser would have failed on this already, but checking explicitly)
-    if methods.is_empty() && !input.is_empty() {
-        // If input had content but no methods were parsed, it's an error
-        return Err(nom::Err::Error(Error::new(
-            input,
-            nom::error::ErrorKind::Tag,
-        )));
-    }
-
-    Ok((input, methods))
-}
 
 // Allow = "Allow" HCOLON [ Method *(COMMA Method) ]
 // Note: HCOLON handled elsewhere

@@ -28,15 +28,7 @@ pub(crate) fn parse_transport_protocol(input: &str) -> IResult<&str, String> {
     ))(input)
 }
 
-/// Check if a protocol string is secure (uses DTLS/TLS/SAVP)
-pub(crate) fn is_secure_protocol(protocol: &str) -> bool {
-    protocol.contains("TLS") || protocol.contains("SAVP") || protocol.contains("DTLS")
-}
 
-/// Check if a protocol string is for RTP-based media
-pub(crate) fn is_rtp_protocol(protocol: &str) -> bool {
-    protocol.contains("RTP")
-}
 
 #[cfg(test)]
 mod tests {

@@ -8,7 +8,6 @@ use nom::{
     multi::many0,
     sequence::{pair, preceded},
 };
-use std::str;
 
 use crate::parser::common_chars::escaped;
 use crate::parser::ParseResult;

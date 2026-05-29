@@ -1,11 +1,7 @@
+#[cfg(test)]
+use crate::types::headers::HeaderName;
 use super::HeaderSetter;
-use crate::error::{Error, Result};
-use crate::types::{
-    error_info::{ErrorInfo, ErrorInfoHeader, ErrorInfoList},
-    headers::header_access::HeaderAccess,
-    headers::HeaderName,
-    headers::TypedHeader,
-};
+use crate::types::error_info::{ErrorInfo, ErrorInfoHeader};
 
 /// Error-Info header builder
 ///
@@ -324,10 +320,10 @@ mod tests {
     use super::*;
     use crate::types::header::TypedHeaderTrait;
     use crate::types::TypedHeader;
-    use crate::types::{method::Method, uri::Uri, version::Version, StatusCode};
-    use crate::{RequestBuilder, ResponseBuilder};
+    use crate::types::StatusCode;
+    use crate::ResponseBuilder;
     use std::convert::TryFrom;
-    use std::str::FromStr;
+    
 
     #[test]
     fn test_error_info_uri() {

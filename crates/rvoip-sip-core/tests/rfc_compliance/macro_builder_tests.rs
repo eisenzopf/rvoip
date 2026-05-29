@@ -753,35 +753,6 @@ fn compare_messages(original: &Message, parsed: &Message) -> Result<(), String> 
     }
 }
 
-/// Helper to compare header values
-fn compare_header(
-    orig_req: &Request,
-    parsed_req: &Request,
-    header_name: &HeaderName,
-) -> Result<(), String> {
-    let orig_header = orig_req.header(header_name);
-    let parsed_header = parsed_req.header(header_name);
-
-    match (orig_header, parsed_header) {
-        (Some(orig), Some(parsed)) => {
-            // Simple string comparison of the header values
-            // A more sophisticated implementation would compare the parsed structures
-            if orig.to_string() != parsed.to_string() {
-                return Err(format!(
-                    "{} header mismatch: original={}, parsed={}",
-                    header_name, orig, parsed
-                ));
-            }
-            Ok(())
-        }
-        (None, None) => Ok(()),
-        (Some(_), None) => Err(format!("Header {} missing in parsed message", header_name)),
-        (None, Some(_)) => Err(format!(
-            "Header {} unexpectedly present in parsed message",
-            header_name
-        )),
-    }
-}
 
 /// Convert message to string for testing
 fn message_to_string(message: &Message) -> String {

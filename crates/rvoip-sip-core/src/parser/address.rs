@@ -2,13 +2,10 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_until},
     combinator::{map, map_res, opt, recognize},
     multi::many1,
-    sequence::{delimited, pair, terminated},
-    IResult,
+    sequence::terminated,
 };
-use ordered_float::NotNan;
 use std::str;
 
 // Import necessary parsers
@@ -21,10 +18,8 @@ use super::whitespace::lws;
 use super::ParseResult;
 
 // Import necessary types
-use crate::error::Error; // For unquote error
+ // For unquote error
 use crate::types::address::Address; // Changed to use Address struct
-use crate::types::param::Param;
-use crate::types::uri::Scheme;
 use crate::types::uri::Uri;
 
 // display-name = *(token LWS) / quoted-string
@@ -100,14 +95,14 @@ pub fn name_addr_or_addr_spec(input: &[u8]) -> ParseResult<'_, Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::separators;
+    
     use crate::types::param::Param;
     use crate::types::uri::Host;
     use crate::types::uri::Scheme;
     use nom::bytes::complete::{tag, take_until};
     use nom::error::Error as NomError;
-    use nom::error::ErrorKind;
-    use std::net::Ipv4Addr;
+    
+    
 
     #[test]
     fn test_display_name_simple() {

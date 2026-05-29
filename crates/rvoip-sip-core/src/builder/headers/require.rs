@@ -1,9 +1,9 @@
+#[cfg(test)]
+use crate::types::headers::HeaderName;
+#[cfg(test)]
+use crate::types::headers::TypedHeader;
 use super::HeaderSetter;
-use crate::error::{Error, Result};
-use crate::types::{
-    headers::header_access::HeaderAccess, headers::HeaderName, headers::TypedHeader,
-    require::Require,
-};
+use crate::types::require::Require;
 
 /// Require header builder
 ///
@@ -404,9 +404,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{method::Method, uri::Uri, version::Version, StatusCode};
+    use crate::types::{method::Method, StatusCode};
     use crate::{RequestBuilder, ResponseBuilder};
-    use std::str::FromStr;
+    
 
     #[test]
     fn test_request_require_tag() {

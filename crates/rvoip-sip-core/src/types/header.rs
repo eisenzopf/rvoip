@@ -41,73 +41,39 @@
 //! // let from_header = TypedHeader::try_from(parse_header(header_str).unwrap()).unwrap();
 //! ```
 
-use crate::error::{Error, Result};
-use crate::parser; // Import the parser module
-use crate::types; // Import the types module itself
-use chrono::DateTime; // Import DateTime specifically
-use chrono::FixedOffset; // Import FixedOffset
-use nom::combinator::all_consuming;
-use ordered_float::NotNan;
-use std::convert::TryFrom;
-use std::fmt;
-use std::str::FromStr;
+ // Import the parser module
+ // Import the types module itself
+ // Import DateTime specifically
+ // Import FixedOffset
 use std::string::FromUtf8Error; // Import FromUtf8Error
 
-use crate::parser::headers::accept::AcceptValue; // Import directly from parser
-use crate::parser::headers::accept_encoding::EncodingInfo;
-use crate::parser::headers::alert_info::AlertInfoValue; // Keep parser type if no types::* yet
-use crate::parser::headers::content_type::parse_content_type_value;
-use crate::parser::headers::content_type::ContentTypeValue; // Import directly from parser
-use crate::parser::headers::error_info::ErrorInfoValue; // Keep parser type if no types::* yet
-use crate::parser::headers::reply_to::ReplyToValue; // Import from parser
-use crate::parser::headers::route::RouteEntry; // Import RouteEntry from parser
-use crate::prelude::GenericValue;
-use crate::types::accept::Accept;
-use crate::types::accept_encoding::AcceptEncoding;
-use crate::types::accept_language::AcceptLanguage; // Use our new AcceptLanguage type
-use crate::types::address::Address; // Add explicit import for Address
-use crate::types::allow::Allow;
-use crate::types::auth::{
-    AuthenticationInfo, Authorization, ProxyAuthenticate, ProxyAuthorization, WwwAuthenticate,
-};
-use crate::types::call_id::CallId;
-use crate::types::call_info::{CallInfo, CallInfoValue};
-use crate::types::contact::{Contact, ContactValue as TypesContactValue}; // Import Contact
-use crate::types::content_disposition::{
-    ContentDisposition, DispositionParam, DispositionType, Handling,
-}; // Import ContentDisposition
-use crate::types::content_encoding::ContentEncoding;
-use crate::types::content_language::ContentLanguage;
-use crate::types::content_length::ContentLength;
-use crate::types::content_type::ContentType;
-use crate::types::cseq::CSeq;
-use crate::types::expires::Expires;
-use crate::types::from::From as FromHeaderValue; // Rename From to avoid conflict
-use crate::types::max_forwards::MaxForwards;
-use crate::types::method::Method; // Needed for Allow parsing
-use crate::types::param::Param;
-use crate::types::priority::Priority; // Import Priority type
-use crate::types::record_route::RecordRoute;
-use crate::types::record_route::RecordRouteEntry; // Import RecordRouteEntry from types module
-use crate::types::refer_to::ReferTo; // Add ReferTo import
-use crate::types::reply_to::ReplyTo;
-use crate::types::require::Require; // Import Require type
-use crate::types::retry_after::RetryAfter;
-use crate::types::route::Route;
-use crate::types::subject::Subject; // Import Subject type
-use crate::types::supported::Supported; // Import Supported type
-use crate::types::to::To as ToHeaderValue; // Rename To to avoid conflict
-use crate::types::unsupported::Unsupported; // Import Unsupported type
-use crate::types::uri::Scheme; // Import Scheme
-use crate::types::uri::Uri; // Import Uri
-use crate::types::via::{Via, ViaHeader}; // Import both Via and ViaHeader
-use crate::types::warning::{WarnAgent, Warning}; // Add WarnAgent import
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+ // Import directly from parser
+ // Keep parser type if no types::* yet
+ // Import directly from parser
+ // Keep parser type if no types::* yet
+ // Import from parser
+ // Import RouteEntry from parser
+ // Use our new AcceptLanguage type
+ // Add explicit import for Address
+ // Import Contact
+ // Import ContentDisposition
+ // Rename From to avoid conflict
+ // Needed for Allow parsing
+ // Import Priority type
+ // Import RecordRouteEntry from types module
+ // Add ReferTo import
+ // Import Require type
+ // Import Subject type
+ // Import Supported type
+ // Rename To to avoid conflict
+ // Import Unsupported type
+ // Import Scheme
+ // Import Uri
+ // Import both Via and ViaHeader
+ // Add WarnAgent import
 
 // Add log for debug printing
 extern crate log;
-use log::debug;
 
 // Import the HeaderName and HeaderValue from headers module
 use crate::types::headers;

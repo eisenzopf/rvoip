@@ -15,12 +15,10 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case},
-    combinator::{map, map_res, opt, verify},
-    error::{Error as NomError, ErrorKind, ParseError},
+    combinator::{map_res, opt},
+    error::{Error as NomError, ErrorKind},
     multi::many0,
-    sequence::{pair, preceded, separated_pair, terminated, tuple},
-    IResult,
+    sequence::{separated_pair, terminated, tuple},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -28,11 +26,10 @@ use std::fmt;
 use std::str;
 
 // Import from base parser modules
-use crate::parser::common_params::{generic_param, semicolon_separated_params0};
 use crate::parser::quoted::quoted_string;
-use crate::parser::separators::{equal, hcolon, semi, slash};
+use crate::parser::separators::{equal, semi, slash};
 use crate::parser::token::token;
-use crate::parser::whitespace::{lws, owsp, sws};
+use crate::parser::whitespace::{lws, sws};
 use crate::parser::ParseResult;
 
 // Import from sibling header modules
@@ -41,8 +38,7 @@ use crate::parser::ParseResult;
 // Import the shared media_type parser - REMOVED
 // use super::media_type::media_type;
 // use crate::types::media_type::MediaType;
-use crate::types::content_type::ContentType as ContentTypeHeader; // Specific header type
-use crate::types::param::Param;
+ // Specific header type
 
 // m-type, m-subtype are just tokens
 // Note: These seem to be defined in media_type.rs now, potentially remove if unused locally
@@ -52,9 +48,6 @@ use crate::types::param::Param;
 // Access m_type and m_subtype through imported media_type module functions if needed.
 
 // m-value = token / quoted-string
-fn m_value(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    alt((token, quoted_string))(input)
-}
 
 // Define structure for Content-Type value
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]

@@ -34,7 +34,6 @@
 use crate::error::{Error, Result};
 use crate::parser::headers::accept_encoding::{parse_accept_encoding, EncodingInfo};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
-use crate::types::param::Param;
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 use std::fmt;

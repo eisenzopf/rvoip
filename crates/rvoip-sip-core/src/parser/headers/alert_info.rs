@@ -6,13 +6,12 @@
 // Angle brackets (LAQUOT, RAQUOT) are explicitly required around the URI.
 // Multiple Alert-Info values may be provided as a comma-separated list.
 
+#[cfg(test)]
+use super::uri_with_params::uri_with_generic_params;
 use nom::{
     bytes::complete::{tag_no_case, take_while1},
-    combinator::{map, map_res},
-    error::ParseError,
     multi::many0,
     sequence::{delimited, pair, preceded},
-    IResult,
 };
 use std::fmt;
 use std::str;
@@ -22,12 +21,12 @@ use std::str::FromStr;
 
 // Import from base parser modules
 use crate::parser::common::comma_separated_list1;
-use crate::parser::common_params::{generic_param, semicolon_separated_params0};
-use crate::parser::separators::{comma, hcolon, laquot, raquot, semi};
-use crate::parser::uri::parse_absolute_uri; // Using the correct function name
-use crate::parser::uri::parse_uri; // Import the actual URI parser
+use crate::parser::common_params::generic_param;
+use crate::parser::separators::{hcolon, laquot, raquot, semi};
+ // Using the correct function name
+ // Import the actual URI parser
 use crate::parser::ParseResult;
-use nom::combinator::all_consuming; // Import all_consuming
+ // Import all_consuming
 
 use crate::error::Error as CrateError;
 use crate::types::uri::Uri; // Import crate error
@@ -36,7 +35,6 @@ use crate::types::uri::Uri; // Import crate error
 use crate::types::param::Param;
 
 // Import shared parsers
-use super::uri_with_params::uri_with_generic_params;
 
 use serde::{Deserialize, Serialize};
 
@@ -187,35 +185,11 @@ pub fn parse_alert_info_header(input: &[u8]) -> ParseResult<'_, Vec<AlertInfoVal
 mod tests {
     use super::*;
     use crate::types::param::{GenericValue, Param};
-    use crate::types::uri::{Host, Scheme, Uri};
+    use crate::types::uri::Uri;
 
     // Helper function to create an HTTP URI for testing
-    fn http_uri(url: &str) -> AlertInfoUri {
-        // Manually construct AlertInfoUri::Other after basic validation
-        if let Some(colon_pos) = url.find(':') {
-            let scheme = &url[..colon_pos];
-            if !scheme.is_empty()
-                && scheme
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_alphabetic())
-            {
-                return AlertInfoUri::Other {
-                    scheme: scheme.to_string(),
-                    uri: url.to_string(),
-                };
-            }
-        }
-        panic!("Invalid test URI for http_uri: {}", url);
-    }
 
     // Helper function to create a SIP URI for testing
-    fn sip_uri(uri_str: &str) -> AlertInfoUri {
-        // Use Uri::from_str directly
-        let uri =
-            Uri::from_str(uri_str).expect(&format!("Failed to parse test SIP URI: {}", uri_str));
-        AlertInfoUri::Sip(uri)
-    }
 
     // Debug test to see what's happening with URI parsing
     #[test]

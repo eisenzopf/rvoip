@@ -4,9 +4,8 @@
 
 use nom::{
     bytes::complete::tag,
-    combinator::{map, map_res},
+    combinator::map_res,
     sequence::delimited,
-    IResult,
 };
 use std::str;
 

@@ -40,12 +40,9 @@
 //! ```
 
 use crate::error::{Error, Result};
-use crate::parser;
 use crate::parser::headers::content_type::parse_content_type_value;
 use crate::parser::headers::content_type::ContentTypeValue;
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
-use crate::types::param::Param;
-use bytes::Bytes;
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

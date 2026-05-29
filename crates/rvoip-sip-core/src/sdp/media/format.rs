@@ -51,13 +51,6 @@ pub(crate) fn parse_port_and_count(input: &str) -> IResult<&str, (u16, Option<u1
     ))(input)
 }
 
-/// Check if a format ID is a valid RTP payload type (0-127)
-pub(crate) fn is_valid_payload_type(format: &str) -> bool {
-    if let Ok(pt) = format.parse::<u8>() {
-        return pt <= 127;
-    }
-    false
-}
 
 #[cfg(test)]
 mod tests {

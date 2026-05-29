@@ -5,14 +5,12 @@ use nom::{
     character::complete::digit1,
     combinator::{map_res, opt},
     error::{Error as NomError, ErrorKind, ParseError},
-    sequence::{preceded, terminated},
-    IResult,
 };
 use std::str;
 
 // Import from new modules
 use crate::parser::separators::hcolon;
-use crate::parser::whitespace::{lws, owsp, sws};
+use crate::parser::whitespace::{owsp, sws};
 use crate::parser::ParseResult; // Import whitespace handling functions
 
 /// Parses the Content-Length header value according to RFC 3261 Section 20.14

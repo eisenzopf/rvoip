@@ -2,16 +2,15 @@
 // Unsupported = "Unsupported" HCOLON option-tag *(COMMA option-tag)
 // option-tag = token
 
+#[cfg(test)]
+use nom::combinator::all_consuming;
 use nom::{
     bytes::complete::tag_no_case,
-    combinator::{all_consuming, verify},
-    error::{make_error, ErrorKind, ParseError},
-    multi::separated_list1, // Unsupported needs at least one tag
+    error::{make_error, ErrorKind}, // Unsupported needs at least one tag
     sequence::{preceded, terminated},
     Err as NomErr,
     IResult,
 };
-use std::str;
 
 // Import shared parser
 use super::token_list::token_string; // Need underlying token parser
@@ -21,9 +20,6 @@ use crate::parser::utils::unfold_lws;
 use crate::parser::ParseResult;
 
 // Helper to ensure there are no spaces in the input
-fn no_spaces(input: &[u8]) -> bool {
-    !input.iter().any(|&b| b == b' ')
-}
 
 // Unsupported = "Unsupported" HCOLON option-tag *(COMMA option-tag)
 // Note: HCOLON handled elsewhere.
@@ -108,7 +104,7 @@ pub fn unsupported_header(input: &[u8]) -> IResult<&[u8], Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nom::error::ErrorKind;
+    
 
     #[test]
     fn test_parse_unsupported_basic() {

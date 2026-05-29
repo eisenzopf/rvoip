@@ -4,19 +4,16 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case, take_while, take_while1},
-    character::complete::{char, digit1, space0},
-    combinator::{map, map_res, opt, recognize},
+    bytes::complete::{tag, take_while},
+    character::complete::{digit1, space0},
+    combinator::{map_res, opt, recognize},
     error::{Error as NomError, ErrorKind, ParseError},
     sequence::{pair, preceded, tuple},
-    IResult,
 };
 use ordered_float::NotNan;
 use std::str; // For parsing float strings
 
 // Import from new modules
-use crate::parser::separators::hcolon;
-use crate::parser::whitespace::lws;
 use crate::parser::ParseResult;
 
 // Parses a float-like sequence of digits: 1*(DIGIT) [ "." *(DIGIT) ]

@@ -113,13 +113,27 @@
 //!
 //! Both approaches validate the resulting SDP message against RFC 8866 requirements.
 
-use crate::error::Result;
-use crate::sdp::attributes::MediaDirection;
-use crate::types::sdp::{
-    ConnectionData, FmtpAttribute, MediaDescription, Origin, ParsedAttribute, RtpMapAttribute,
-    SdpSession, TimeDescription,
-};
 
+#[cfg(test)]
+use crate::error::Result;
+#[cfg(test)]
+use crate::sdp::attributes::MediaDirection;
+#[cfg(test)]
+use crate::types::sdp::ConnectionData;
+#[cfg(test)]
+use crate::types::sdp::FmtpAttribute;
+#[cfg(test)]
+use crate::types::sdp::MediaDescription;
+#[cfg(test)]
+use crate::types::sdp::Origin;
+#[cfg(test)]
+use crate::types::sdp::ParsedAttribute;
+#[cfg(test)]
+use crate::types::sdp::RtpMapAttribute;
+#[cfg(test)]
+use crate::types::sdp::SdpSession;
+#[cfg(test)]
+use crate::types::sdp::TimeDescription;
 /// Creates a validated SDP session with a declarative syntax
 ///
 /// The `sdp!` macro provides a structured, declarative syntax for creating SDP sessions

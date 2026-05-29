@@ -49,13 +49,10 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::types;
-use crate::types::address::Address;
 use crate::types::from::From;
 use crate::types::header::{HeaderName, TypedHeader, TypedHeaderTrait};
 use crate::types::headers::HeaderAccess;
-use crate::types::method::Method;
 use crate::types::to::To;
-use crate::types::uri::Uri;
 use crate::types::version::Version;
 use crate::types::via::Via;
 use crate::types::CSeq;

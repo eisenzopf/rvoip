@@ -39,12 +39,8 @@ use crate::error::{Error, Result};
 use crate::parser::headers::accept::AcceptValue;
 use crate::parser::headers::parse_accept;
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
-use crate::types::media_type::MediaType;
-use crate::types::param::Param;
 use nom::combinator::all_consuming;
-use ordered_float::NotNan;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 

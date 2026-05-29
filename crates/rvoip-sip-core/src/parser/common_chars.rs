@@ -1,12 +1,11 @@
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take, take_till, take_while1, take_while_m_n},
-    character::complete::{alpha1, alphanumeric1, digit1, hex_digit1},
-    combinator::{map_res, recognize},
+    bytes::complete::{tag, take_till, take_while1, take_while_m_n},
+    character::complete::hex_digit1,
+    combinator::recognize,
     sequence::tuple,
     IResult,
 };
-use std::str;
 
 // Type alias for parser result
 pub type ParseResult<'a, O> = IResult<&'a [u8], O>;
@@ -96,7 +95,7 @@ pub fn take_till_crlf(input: &[u8]) -> ParseResult<'_, &[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nom::error::{Error, ErrorKind};
+    
 
     #[test]
     fn test_alpha() {

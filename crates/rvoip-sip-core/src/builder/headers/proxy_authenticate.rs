@@ -1,12 +1,7 @@
+#[cfg(test)]
+use crate::types::headers::header_access::HeaderAccess;
 use super::HeaderSetter;
-use crate::error::{Error, Result};
-use crate::types::{
-    auth::{Algorithm, AuthParam, Challenge, DigestParam, ProxyAuthenticate, Qop},
-    header::{Header, HeaderName, TypedHeaderTrait},
-    headers::header_access::HeaderAccess,
-    TypedHeader,
-};
-use std::convert::TryFrom;
+use crate::types::auth::{Algorithm, AuthParam, Challenge, DigestParam, ProxyAuthenticate, Qop};
 
 /// Proxy-Authenticate header builder
 ///

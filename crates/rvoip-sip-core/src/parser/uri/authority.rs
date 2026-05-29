@@ -2,19 +2,13 @@
 // authority = userinfo@host:port or standalone reg-name
 
 use nom::{
-    branch::alt,
-    bytes::complete::{tag, take_while1, take_while_m_n},
-    combinator::{map, opt, recognize, verify},
-    multi::{many0, many1},
+    bytes::complete::tag,
+    combinator::{opt, recognize},
     sequence::{pair, preceded, terminated},
-    IResult,
 };
-use std::str;
 
 // Import shared parsers
-use crate::parser::common_chars::{escaped, unreserved};
 use crate::parser::uri::host::hostport;
-use crate::parser::uri::userinfo::userinfo;
 use crate::parser::ParseResult;
 
 /// Parse an RFC 3261/2396 authority component
@@ -77,46 +71,11 @@ fn is_hex_digit(c: u8) -> bool {
 }
 
 // reg-name-char = unreserved / escaped / "$" / "," / ";" / ":" / "@" / "&" / "=" / "+"
-fn is_reg_name_char(c: u8) -> bool {
-    // Check unreserved first (alphanum / mark)
-    c.is_ascii_alphanumeric() ||
-    matches!(c, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')') ||
-    // Check other allowed chars
-    matches!(c, b'$' | b',' | b';' | b':' | b'@' | b'&' | b'=' | b'+')
-}
 
 // userinfo_bytes = use userinfo parser but return matched bytes instead
-fn userinfo_bytes(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize(terminated(
-        pair(
-            crate::parser::uri::userinfo::user,
-            opt(preceded(tag(b":"), crate::parser::uri::userinfo::password)),
-        ),
-        tag(b"@"),
-    ))(input)
-}
 
-// srvr = [ [ userinfo "@" ] hostport ]
-fn srvr(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize(pair(opt(userinfo_bytes), hostport))(input)
-}
 
 // Function to validate that authority strings don't have invalid percent-encoding
-fn validate_percent_encoding(input: &[u8]) -> bool {
-    let mut i = 0;
-    while i < input.len() {
-        if input[i] == b'%' {
-            // Check for incomplete sequence or invalid hex digits
-            if i + 2 >= input.len() || !is_hex_digit(input[i + 1]) || !is_hex_digit(input[i + 2]) {
-                return false;
-            }
-            i += 3;
-        } else {
-            i += 1;
-        }
-    }
-    true
-}
 
 #[cfg(test)]
 mod tests {

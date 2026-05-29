@@ -1,14 +1,10 @@
 use nom::{
     branch::alt,
     bytes::complete::tag,
-    character::complete::digit1,
-    combinator::{map_res, opt},
+    combinator::opt,
     sequence::{pair, preceded},
-    IResult,
 };
-use std::str;
 
-use crate::parser::common_chars::digit;
 use crate::parser::ParseResult;
 use crate::types::uri::Host; // Keep digit if still used by port
 
@@ -80,7 +76,7 @@ pub fn hostport(input: &[u8]) -> ParseResult<'_, (Host, Option<u16>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::net::{IpAddr, Ipv4Addr};
 
     // === Host Type Selection Tests ===
 

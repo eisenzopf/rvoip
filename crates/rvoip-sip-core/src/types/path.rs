@@ -51,7 +51,7 @@ use crate::parser::headers::route::RouteEntry as PathEntry; // Reuse RouteEntry 
 use crate::types::header::Header;
 use crate::types::uri::Uri;
 use crate::types::Address;
-use crate::types::{HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
+use crate::types::{HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 use std::fmt;

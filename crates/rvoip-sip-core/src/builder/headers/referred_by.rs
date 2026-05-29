@@ -1,10 +1,10 @@
-use super::HeaderSetter;
-use crate::error::{Error, Result};
-use crate::types::address::Address;
-use crate::types::headers::header::Header;
-use crate::types::headers::header_name::HeaderName;
-use crate::types::headers::typed_header::TypedHeaderTrait;
+#[cfg(test)]
 use crate::types::headers::TypedHeader;
+#[cfg(test)]
+use crate::types::headers::header_name::HeaderName;
+use super::HeaderSetter;
+use crate::error::Result;
+use crate::types::address::Address;
 use crate::types::referred_by::ReferredBy;
 use crate::types::uri::Uri;
 
@@ -303,7 +303,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{method::Method, uri::Uri, version::Version, StatusCode};
+    use crate::types::{method::Method, uri::Uri, StatusCode};
     use crate::{RequestBuilder, ResponseBuilder};
     use std::str::FromStr;
 

@@ -2,25 +2,27 @@
 // Date = "Date" HCOLON SIP-date
 // SIP-date = rfc1123-date (defined in RFC 2616)
 
+#[cfg(test)]
+use chrono::Datelike;
+#[cfg(test)]
+use chrono::Timelike;
+#[cfg(test)]
+use chrono::Weekday;
 use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while_m_n},
-    character::complete::{char, digit1, space1},
-    combinator::{map_res, recognize},
+    character::complete::{char, space1},
     error::{Error as NomError, ErrorKind, ParseError},
-    sequence::{delimited, preceded, tuple},
-    IResult,
+    sequence::{preceded, tuple},
 };
-use std::str;
 
 // Import from new modules
-use crate::parser::separators::hcolon;
 use crate::parser::ParseResult;
 
 // Assuming chrono is available as a dependency
 // If not, we'd need manual parsing logic.
 use chrono::{
-    DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Weekday,
+    DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime,
 };
 
 // wkday = "Mon" / "Tue" / "Wed" / "Thu" / "Fri" / "Sat" / "Sun"
@@ -66,22 +68,8 @@ fn four_digit(input: &[u8]) -> ParseResult<'_, &[u8]> {
 }
 
 // date1 = 2DIGIT SP month SP 4DIGIT
-fn date1(input: &[u8]) -> ParseResult<'_, (&[u8], &[u8], &[u8])> {
-    tuple((
-        two_digit,
-        preceded(space1, month),
-        preceded(space1, four_digit),
-    ))(input)
-}
 
 // time = 2DIGIT ":" 2DIGIT ":" 2DIGIT
-fn time(input: &[u8]) -> ParseResult<'_, (&[u8], &[u8], &[u8])> {
-    tuple((
-        two_digit,
-        preceded(char(':'), two_digit),
-        preceded(char(':'), two_digit),
-    ))(input)
-}
 
 // rfc1123-date = wkday "," SP date1 SP time SP "GMT"
 // Returns DateTime<FixedOffset> assuming chrono is available
@@ -273,7 +261,7 @@ pub fn parse_date(input: &[u8]) -> ParseResult<'_, DateTime<FixedOffset>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    
 
     #[test]
     fn test_sip_date() {

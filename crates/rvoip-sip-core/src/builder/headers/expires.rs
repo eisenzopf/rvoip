@@ -1,9 +1,7 @@
+#[cfg(test)]
+use crate::types::headers::TypedHeader;
 use super::HeaderSetter;
-use crate::error::{Error, Result};
-use crate::types::{
-    expires::Expires, headers::header_access::HeaderAccess, headers::HeaderName,
-    headers::TypedHeader,
-};
+use crate::types::expires::Expires;
 use std::time::Duration;
 
 /// Expires header builder
@@ -286,11 +284,10 @@ mod tests {
     use super::*;
     use crate::builder::request::SimpleRequestBuilder;
     use crate::types::expires::Expires;
-    use crate::types::headers::header_access::HeaderAccess;
     use crate::types::headers::HeaderName;
-    use crate::types::{method::Method, uri::Uri, version::Version, StatusCode};
+    use crate::types::{method::Method, StatusCode};
     use crate::{RequestBuilder, ResponseBuilder};
-    use std::str::FromStr;
+    
     use std::time::Duration;
 
     #[test]

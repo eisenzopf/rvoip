@@ -1,4 +1,3 @@
-use crate::builder::headers::HeaderSetter;
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::types::{
     call_info::{CallInfo, CallInfoValue, InfoPurpose},
@@ -323,10 +322,8 @@ impl CallInfoBuilderExt for SimpleResponseBuilder {
 mod tests {
     use super::*;
     use crate::builder::headers::cseq::CSeqBuilderExt;
-    use crate::builder::headers::from::FromBuilderExt;
-    use crate::builder::headers::to::ToBuilderExt;
-    use crate::types::headers::HeaderAccess;
-    use crate::types::{Method, StatusCode};
+    
+    use crate::types::Method;
 
     #[test]
     fn test_request_call_info_uri() {

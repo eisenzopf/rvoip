@@ -40,11 +40,9 @@
 //! ```
 
 use crate::error::{Error, Result};
-use crate::parser::headers::parse_content_disposition;
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::types::param::GenericValue;
 use crate::types::param::Param;
-use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;

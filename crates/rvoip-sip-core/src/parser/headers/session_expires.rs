@@ -17,12 +17,11 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case},
+    bytes::complete::tag_no_case,
     character::complete::digit1,
-    combinator::{map, map_res, opt},
+    combinator::{map, map_res},
     multi::many0,
-    sequence::{pair, preceded, tuple},
-    IResult,
+    sequence::{pair, preceded},
 };
 
 // Import from base parser modules
@@ -31,7 +30,7 @@ use crate::parser::separators::{equal, hcolon, semi};
 use crate::parser::ParseResult;
 use crate::types::param::Param;
 use crate::types::session_expires::Refresher;
-use std::str::{self, FromStr};
+use std::str::{self};
 
 /// Parse delta-seconds (non-negative decimal integer)
 fn delta_seconds(input: &[u8]) -> ParseResult<'_, u32> {

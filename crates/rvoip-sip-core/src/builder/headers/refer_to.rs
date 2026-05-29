@@ -1,8 +1,8 @@
+#[cfg(test)]
+use crate::types::headers::HeaderName;
 use super::HeaderSetter;
-use crate::error::{Error, Result};
 use crate::types::{
-    address::Address, headers::header_access::HeaderAccess, headers::HeaderName,
-    headers::TypedHeader, refer_to::ReferTo, uri::Uri,
+    address::Address, refer_to::ReferTo, uri::Uri,
 };
 use std::str::FromStr;
 
@@ -345,9 +345,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+    use crate::builder::SimpleRequestBuilder;
     use crate::types::header::TypedHeaderTrait;
-    use crate::types::{method::Method, uri::Uri, version::Version, StatusCode, TypedHeader};
+    use crate::types::{method::Method, uri::Uri, TypedHeader};
     use std::convert::TryFrom;
     use std::str::FromStr;
 

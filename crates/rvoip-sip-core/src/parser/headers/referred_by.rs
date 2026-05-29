@@ -4,26 +4,21 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case, take_while1},
+    bytes::complete::{tag_no_case, take_while1},
     combinator::{map, map_res},
     multi::many0,
     sequence::{pair, preceded},
-    IResult,
 };
 
 // Import from base parser modules
 use crate::parser::address::name_addr_or_addr_spec;
-use crate::parser::common_params::{generic_param, semicolon_separated_params0};
-use crate::parser::separators::{equal, hcolon, semi};
-use crate::parser::token::{is_token_char, token};
+use crate::parser::common_params::generic_param;
+use crate::parser::separators::{equal, semi};
+use crate::parser::token::is_token_char;
 use crate::parser::ParseResult;
 
 use crate::types::address::Address;
 use crate::types::param::Param;
-use crate::types::referred_by::ReferredBy;
-use crate::types::uri::Uri;
-use serde::{Deserialize, Serialize};
-use std::str::{self, FromStr};
 
 // cid parameter parser for Referred-By header
 // cid-param = "cid" EQUAL token
@@ -84,8 +79,8 @@ pub fn parse_referred_by_public(input: &[u8]) -> ParseResult<'_, Address> {
 mod tests {
     use super::*;
     use crate::types::param::{GenericValue, Param};
-    use crate::types::uri::{Host, Scheme};
-    use nom::combinator::all_consuming;
+    use crate::types::uri::Scheme;
+    
 
     #[test]
     fn test_parse_referred_by_simple() {

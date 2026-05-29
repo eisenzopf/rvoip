@@ -1,4 +1,3 @@
-use crate::builder::headers::HeaderSetter;
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::parser::headers::content_type::ContentTypeValue;
 use crate::types::{content_type::ContentType, TypedHeader};
@@ -834,11 +833,9 @@ impl ContentTypeBuilderExt for SimpleResponseBuilder {
 mod tests {
     use super::*;
     use crate::builder::headers::cseq::CSeqBuilderExt;
-    use crate::builder::headers::from::FromBuilderExt;
-    use crate::builder::headers::to::ToBuilderExt;
-    use crate::types::headers::HeaderAccess;
-    use crate::types::{Method, StatusCode};
-    use std::str::FromStr;
+    
+    use crate::types::Method;
+    
 
     #[test]
     fn test_request_content_type_shortcuts() {

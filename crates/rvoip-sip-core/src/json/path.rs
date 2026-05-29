@@ -1,8 +1,5 @@
 use crate::json::value::SipValue;
 use crate::json::{SipJsonError, SipJsonResult};
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::str::FromStr;
 /// # Path-based Access to SIP Values
 ///
 /// This module provides functions and types for accessing SIP message data via dot-notation
@@ -800,7 +797,7 @@ fn parse_path_nom(input: &str) -> nom::IResult<&str, Vec<PathSegment>> {
     use nom::bytes::complete::take_while1;
     use nom::character::complete::{char, digit1};
     use nom::combinator::{map, opt, recognize};
-    use nom::error::Error;
+    
     use nom::multi::separated_list1;
     use nom::sequence::{delimited, tuple};
     use nom::IResult;
@@ -881,45 +878,7 @@ fn find_field_case_insensitive<'a>(
     obj.get(&cap)
 }
 
-/// Find the first object in an array that has the specified field
-fn find_first_object_with_field<'a>(arr: &'a [SipValue], field_name: &str) -> Option<&'a SipValue> {
-    for item in arr {
-        if let SipValue::Object(obj) = item {
-            if let Some(value) = find_field_case_insensitive(obj, field_name) {
-                return Some(value);
-            }
-        }
-    }
-    None
-}
 
-/// Find the Nth object in an array that has the specified field
-fn find_nth_object_with_field<'a>(
-    arr: &'a [SipValue],
-    field_name: &str,
-    index: i32,
-) -> Option<&'a SipValue> {
-    let mut matching_values = Vec::new();
-
-    // Collect all items that match
-    for item in arr {
-        if let SipValue::Object(obj) = item {
-            if let Some(value) = find_field_case_insensitive(obj, field_name) {
-                matching_values.push(value);
-            }
-        }
-    }
-
-    // Convert negative index to positive (counting from end)
-    let final_idx = if index < 0 {
-        matching_values.len().checked_sub(index.abs() as usize)
-    } else {
-        Some(index as usize)
-    };
-
-    // Get the value at the calculated index
-    final_idx.and_then(|idx| matching_values.get(idx)).copied()
-}
 
 /// Path segment representing a single access operation
 #[derive(Debug, Clone, PartialEq)]

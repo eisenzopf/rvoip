@@ -5,21 +5,15 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_until, take_while},
-    character::complete::char as nom_char,
+    bytes::complete::{tag, take_while},
     combinator::{map, map_res, opt},
-    error::{Error as NomError, ErrorKind, ParseError},
-    multi::{many0, separated_list1},
-    sequence::{pair, preceded, tuple},
-    IResult,
+    error::{Error as NomError, ErrorKind},
 };
 
 // Import from base parser modules
-use crate::parser::address::name_addr; // For reference
+ // For reference
 use crate::parser::common::comma_separated_list1;
-use crate::parser::common_params::{generic_param, semicolon_separated_params0};
 use crate::parser::quoted::quoted_string;
-use crate::parser::separators::{comma, hcolon};
 use crate::parser::token::token;
 use crate::parser::uri::params::uri_parameters;
 use crate::parser::uri::parse_uri;
@@ -29,8 +23,7 @@ use crate::types::address::Address;
 use crate::types::param::Param;
 use crate::types::record_route::{RecordRoute as RecordRouteHeader, RecordRouteEntry};
 use crate::types::uri::Uri;
-use serde::{Deserialize, Serialize};
-use std::str::{self, FromStr};
+use std::str::{self};
 
 // Helper to parse an optional display name
 fn parse_display_name(input: &[u8]) -> ParseResult<'_, Option<String>> {
@@ -139,7 +132,7 @@ pub fn parse_record_route(input: &[u8]) -> ParseResult<'_, RecordRouteHeader> {
 mod tests {
     use super::*;
     use crate::types::param::Param;
-    use crate::types::uri::{Host, Scheme, Uri};
+    use crate::types::uri::{Host, Scheme};
 
     #[test]
     fn test_parse_record_route_single() {

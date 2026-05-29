@@ -5,33 +5,29 @@
 // warn-agent = hostport / pseudonym (token)
 // warn-text = quoted-string
 
+#[cfg(test)]
+use crate::types::uri::Host;
 use nom::{
     branch::alt,
-    bytes::complete::tag,
-    bytes::complete::{tag_no_case, take_while1, take_while_m_n},
-    character::complete::{digit1, space1},
-    combinator::{map, map_res, opt, recognize},
+    bytes::complete::take_while_m_n,
+    character::complete::space1,
+    combinator::{map, map_res},
     error::{Error as NomError, ErrorKind, ParseError}, // Import NomError
     multi::separated_list1,
-    sequence::{pair, preceded, tuple},
-    IResult,
+    sequence::{preceded, tuple},
 };
 use std::str;
 
 // Import from base parser modules
 use crate::parser::quoted::quoted_string;
-use crate::parser::separators::{comma, hcolon};
+use crate::parser::separators::comma;
 use crate::parser::token::token;
 use crate::parser::uri::host::hostport;
 use crate::parser::ParseResult;
 
-use crate::types::uri::Host;
-use crate::types::uri::Uri;
-use crate::types::warning::{WarnAgent, Warning as WarningHeader, WarningValue}; // Import types
+use crate::types::warning::{WarnAgent, WarningValue}; // Import types
 
-use crate::parser::values::delta_seconds; // Use delta_seconds for duration
-use crate::parser::whitespace::sws;
-use std::str::FromStr;
+ // Use delta_seconds for duration
 
 // WarningValue struct is now imported from types/warning.rs
 

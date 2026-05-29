@@ -3,10 +3,9 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take, take_while_m_n},
-    combinator::{map_res, recognize},
+    bytes::complete::take,
+    combinator::map_res,
     error::{Error as NomError, ErrorKind},
-    sequence::tuple,
     IResult,
 };
 
@@ -14,15 +13,6 @@ use nom::{
 pub type ParseResult<'a, O> = IResult<&'a [u8], O>;
 
 // UTF8-CONT = %x80-BF
-fn utf8_cont(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    map_res(take(1usize), |byte: &[u8]| {
-        if byte.is_empty() || !(byte[0] >= 0x80 && byte[0] <= 0xBF) {
-            Err(nom::Err::Failure(NomError::new(input, ErrorKind::Verify)))
-        } else {
-            Ok(byte)
-        }
-    })(input)
-}
 
 // UTF8-NONASCII = %xC2-DF 1UTF8-CONT
 //               / %xE0-EF 2UTF8-CONT
@@ -105,7 +95,7 @@ pub fn text_utf8_char(input: &[u8]) -> ParseResult<'_, &[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nom::error::ErrorKind;
+    
 
     #[test]
     fn test_utf8_cont() {

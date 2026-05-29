@@ -108,6 +108,12 @@
 //! assert!(found_fingerprint);
 //! ```
 
+#[cfg(test)]
+use bytes::Bytes;
+#[cfg(test)]
+use crate::sdp::attributes::MediaDirection;
+#[cfg(test)]
+use crate::types::sdp::ParsedAttribute;
 mod attribute_parser;
 mod line_parser;
 mod media_parser;
@@ -130,19 +136,11 @@ pub use self::validation::{
     validate_network_type, validate_sdp,
 };
 
-use crate::error::{Error, Result};
-use crate::sdp::attributes::MediaDirection;
-use crate::types::sdp::{
-    ConnectionData, MediaDescription, Origin, ParsedAttribute, SdpSession, TimeDescription,
-};
-use crate::types::MediaType;
-use bytes::Bytes;
-use std::str;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::Error;
+    
 
     #[test]
     fn test_parse_simple_sdp() {

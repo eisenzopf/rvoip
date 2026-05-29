@@ -1,11 +1,9 @@
 use nom::{
-    branch::alt,
-    bytes::complete::{tag, take_while1, take_while_m_n},
     character::complete::digit1,
-    combinator::{map_res, opt, recognize},
+    combinator::{map_res, recognize},
     error::ErrorKind,
-    multi::{many0, many1},
-    sequence::{pair, preceded, tuple},
+    multi::many0,
+    sequence::tuple,
     IResult,
 };
 use ordered_float::NotNan;
@@ -214,7 +212,7 @@ pub fn ttl_value(input: &[u8]) -> ParseResult<'_, u8> {
 mod tests {
     use super::*;
     use crate::parser::utils::unfold_lws;
-    use nom::error::ErrorKind;
+    
 
     #[test]
     fn test_delta_seconds() {

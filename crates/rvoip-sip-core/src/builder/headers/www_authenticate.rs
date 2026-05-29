@@ -1,12 +1,15 @@
-use super::HeaderSetter;
-use crate::error::{Error, Result};
-use crate::types::{
-    auth::{Algorithm, AuthParam, Challenge, DigestParam, Qop, WwwAuthenticate},
-    header::{Header, HeaderName, TypedHeaderTrait},
-    headers::header_access::HeaderAccess,
-    TypedHeader,
-};
+#[cfg(test)]
+use crate::types::TypedHeader;
+#[cfg(test)]
+use crate::types::header::HeaderName;
+#[cfg(test)]
+use crate::types::header::TypedHeaderTrait;
+#[cfg(test)]
+use crate::types::headers::header_access::HeaderAccess;
+#[cfg(test)]
 use std::convert::TryFrom;
+use super::HeaderSetter;
+use crate::types::auth::{Algorithm, AuthParam, Challenge, DigestParam, Qop, WwwAuthenticate};
 
 /// WWW-Authenticate header builder
 ///

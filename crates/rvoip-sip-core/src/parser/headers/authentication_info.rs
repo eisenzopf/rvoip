@@ -1,18 +1,15 @@
 // RFC 3261 Section 22.5 Authentication-Info
 
 use super::auth::common::ainfo;
-use crate::parser::common::comma_separated_list1;
 use crate::parser::separators::comma;
-use crate::parser::whitespace::{lws, owsp, sws};
+use crate::parser::whitespace::{lws, sws};
 use crate::parser::ParseResult;
 use crate::types::auth::AuthenticationInfoParam;
 use nom::{
-    bytes::complete::tag,
-    combinator::{map, opt, recognize, verify},
+    combinator::opt,
     error::{Error as NomError, ErrorKind},
     multi::separated_list1,
-    sequence::{delimited, preceded, terminated},
-    IResult,
+    sequence::delimited,
 };
 
 /// Custom error types for Authentication-Info parser to improve error messages

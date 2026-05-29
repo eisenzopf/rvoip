@@ -4,22 +4,16 @@
 //! Includes parsers for rtcp-mux and rtcp-fb attributes.
 
 use crate::error::{Error, Result};
-use crate::sdp::attributes::common::{to_result, token};
+use crate::sdp::attributes::common::token;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_till1},
-    character::complete::{char, digit1, space1},
+    character::complete::{digit1, space1},
     combinator::{map, opt, verify},
-    sequence::{pair, preceded, tuple},
+    sequence::{preceded, tuple},
     IResult,
 };
 
-/// Parser for RTCP-MUX attribute (flag attribute with no value)
-fn rtcp_mux_parser(input: &str) -> IResult<&str, bool> {
-    // rtcp-mux is a flag attribute with no value
-    // Some implementations might include extra data, so we're lenient here
-    Ok((input, true))
-}
 
 /// Parser for payload type or wildcard
 fn payload_type_parser(input: &str) -> IResult<&str, String> {

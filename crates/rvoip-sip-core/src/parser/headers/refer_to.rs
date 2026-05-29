@@ -4,26 +4,22 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, tag_no_case},
+    bytes::complete::tag_no_case,
     combinator::{map, map_res},
     multi::many0,
     sequence::{pair, preceded},
-    IResult,
 };
 
 // Import from base parser modules
 use crate::parser::address::name_addr_or_addr_spec;
-use crate::parser::common_params::{generic_param, semicolon_separated_params0};
-use crate::parser::separators::{hcolon, semi};
+use crate::parser::common_params::generic_param;
+use crate::parser::separators::semi;
 use crate::parser::token::token;
 use crate::parser::ParseResult;
 
 use crate::types::address::Address;
 use crate::types::param::Param;
-use crate::types::refer_to::ReferTo as ReferToHeader;
-use crate::types::uri::Uri;
-use serde::{Deserialize, Serialize};
-use std::str::{self, FromStr};
+use std::str::{self};
 
 // Method parameter parser for Refer-To header
 // method-param = "method=" Method (Method token)
@@ -77,7 +73,7 @@ pub fn parse_refer_to_public(input: &[u8]) -> ParseResult<'_, Address> {
 mod tests {
     use super::*;
     use crate::types::param::{GenericValue, Param};
-    use crate::types::uri::{Host, Scheme};
+    use crate::types::uri::Scheme;
 
     #[test]
     fn test_parse_refer_to_simple() {

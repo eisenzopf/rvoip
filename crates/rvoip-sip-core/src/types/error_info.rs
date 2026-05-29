@@ -59,7 +59,6 @@ use crate::error::{Error, Result};
 use crate::parser::headers::error_info::{full_parse_error_info, parse_error_info, ErrorInfoValue};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::types::param::Param;
-use crate::types::uri::Uri;
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -709,7 +708,7 @@ impl TypedHeaderTrait for ErrorInfoHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::uri::Uri;
+    
 
     #[test]
     fn test_from_str_basic() {

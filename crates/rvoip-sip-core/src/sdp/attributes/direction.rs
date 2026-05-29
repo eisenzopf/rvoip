@@ -3,7 +3,7 @@
 //! Implements parsers for media direction attributes (sendrecv, sendonly, recvonly, inactive)
 //! as defined in RFC 8866.
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::sdp::attributes::common::to_result;
 use nom::{branch::alt, bytes::complete::tag, combinator::map, IResult};
 use serde::{Deserialize, Serialize};

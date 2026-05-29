@@ -24,9 +24,7 @@
 
 use nom::{
     bytes::complete::{tag, take_until},
-    character::complete::{char, not_line_ending, space0, space1},
-    combinator::{map, opt},
-    sequence::{preceded, terminated, tuple},
+    character::complete::{char, not_line_ending},
     IResult,
 };
 

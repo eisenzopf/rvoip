@@ -2,20 +2,16 @@
 // Organization = "Organization" HCOLON [TEXT-UTF8-TRIM]
 
 use nom::{
-    bytes::complete::tag_no_case,
-    combinator::{map, map_res, opt, recognize},
-    sequence::{delimited, pair, preceded},
-    IResult,
+    combinator::{map, map_res, opt},
+    sequence::delimited,
 };
 
 // Import from new modules
-use crate::parser::separators::hcolon;
 use crate::parser::utils::unfold_lws;
 use crate::parser::values::text_utf8_trim;
-use crate::parser::whitespace::{lws, owsp, sws};
+use crate::parser::whitespace::{owsp, sws};
 use crate::parser::ParseResult;
 use crate::types::Organization;
-use std::str;
 
 /// Parses the Organization header value according to RFC 3261 Section 20.27
 /// Organization = "Organization" HCOLON [TEXT-UTF8-TRIM]

@@ -46,14 +46,11 @@
 //! ```
 
 use crate::error::{Error, Result};
-use crate::parser::headers::parse_route;
 use crate::parser::headers::route::RouteEntry as ParserRouteValue;
-use crate::parser::ParseResult;
 use crate::types::header::Header;
-use crate::types::param::Param;
 use crate::types::uri::Uri;
 use crate::types::Address;
-use crate::types::{HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
+use crate::types::{HeaderName, TypedHeaderTrait};
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -705,8 +702,8 @@ impl TypedHeaderTrait for Route {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::param::Param;
-    use crate::types::uri::{Host, Scheme, Uri};
+    
+    use crate::types::uri::{Scheme, Uri};
 
     #[test]
     fn test_route_empty() {

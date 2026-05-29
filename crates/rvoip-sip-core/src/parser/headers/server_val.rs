@@ -2,10 +2,8 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::tag,
     combinator::{map, map_res, opt},
     sequence::{pair, preceded},
-    IResult,
 };
 use std::str;
 
@@ -19,7 +17,6 @@ use crate::parser::ParseResult;
 use crate::types::server::{Product, ServerVal};
 
 // Create an alias for compatibility with existing code
-pub type ServerValComponent = ServerVal;
 
 // product-version = token
 fn product_version(input: &[u8]) -> ParseResult<'_, String> {
@@ -52,9 +49,6 @@ pub fn server_val(input: &[u8]) -> ParseResult<'_, ServerVal> {
 }
 
 // Alias for function to help with migration
-pub fn server_val_parser(input: &[u8]) -> ParseResult<'_, ServerVal> {
-    server_val(input)
-}
 
 #[cfg(test)]
 mod tests {

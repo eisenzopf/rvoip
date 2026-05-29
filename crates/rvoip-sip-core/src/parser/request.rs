@@ -1,22 +1,17 @@
+#[cfg(test)]
+use crate::types::param::Param;
 use nom::{
-    branch::alt,
-    bytes::complete::{tag, take_till, take_while1},
-    character::complete::{line_ending, space1},
-    combinator::{map_res, recognize},
-    error::{Error as NomError, ErrorKind, ParseError},
+    character::complete::space1,
+    error::{Error as NomError, ErrorKind},
     sequence::tuple,
-    IResult,
 };
 use std::str;
-use std::str::FromStr;
 // Keep Result for FromStr impls if needed elsewhere
-use crate::error::{Error, Result};
 use crate::parser::common::sip_version;
 use crate::parser::token::token;
 use crate::parser::uri::parse_uri;
 use crate::parser::whitespace::crlf;
 use crate::parser::ParseResult;
-use crate::types::param::Param;
 use crate::types::uri::{Host, Scheme};
 use crate::types::{Method, Uri, Version};
 
@@ -118,7 +113,7 @@ pub fn parse_request_line(input: &[u8]) -> ParseResult<'_, (Method, Uri, Version
 mod tests {
     use super::*;
     use crate::types::uri::{Host, Scheme};
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
     fn test_parse_valid_request_line() {

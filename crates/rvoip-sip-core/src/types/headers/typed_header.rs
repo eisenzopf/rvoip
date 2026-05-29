@@ -4,7 +4,6 @@ use log::debug;
 use nom::combinator::all_consuming;
 use ordered_float::NotNan;
 use serde::{Deserialize, Serialize};
-use std::any::Any;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fmt;
@@ -23,8 +22,6 @@ use crate::prelude::GenericValue;
 use crate::types::accept::Accept;
 use crate::types::accept_encoding::AcceptEncoding;
 use crate::types::accept_language::AcceptLanguage;
-use crate::types::address::Address;
-use crate::types::alert_info::{AlertInfo, AlertInfoHeader, AlertInfoList};
 use crate::types::allow::Allow;
 use crate::types::auth::{
     AuthenticationInfo, Authorization, ProxyAuthenticate, ProxyAuthorization, WwwAuthenticate,
@@ -40,7 +37,7 @@ use crate::types::content_language::ContentLanguage;
 use crate::types::content_length::ContentLength;
 use crate::types::content_type::ContentType;
 use crate::types::cseq::CSeq;
-use crate::types::error_info::{ErrorInfo, ErrorInfoHeader, ErrorInfoList};
+use crate::types::error_info::{ErrorInfoHeader, ErrorInfoList};
 use crate::types::event::Event as EventTypeData; // Alias to avoid clash if Event struct is also used locally
 use crate::types::expires::Expires;
 use crate::types::from::From as FromHeaderValue;
@@ -49,7 +46,6 @@ use crate::types::min_expires::MinExpires;
 use crate::types::min_se::MinSE;
 use crate::types::organization::Organization;
 use crate::types::param::Param;
-use crate::types::rack::RAck;
 use crate::types::record_route::RecordRoute;
 use crate::types::refer_to::ReferTo;
 use crate::types::referred_by::ReferredBy;
@@ -57,7 +53,6 @@ use crate::types::reply_to::ReplyTo;
 use crate::types::require::Require;
 use crate::types::retry_after::RetryAfter;
 use crate::types::route::Route;
-use crate::types::rseq::RSeq;
 use crate::types::session_expires::SessionExpires;
 use crate::types::subject::Subject;
 use crate::types::subscription_state::SubscriptionState as SubscriptionStateType; // Full type from types::subscription_state
@@ -65,19 +60,13 @@ use crate::types::supported::Supported;
 use crate::types::to::To as ToHeaderValue;
 use crate::types::unsupported::Unsupported;
 use crate::types::uri::{Scheme, Uri};
-use crate::types::via::{Via, ViaHeader};
+use crate::types::via::Via;
 use crate::types::warning::{WarnAgent, Warning};
 use crate::types::MimeVersion;
 
 // Import parser components
 use crate::parser;
-use crate::parser::headers::accept::AcceptValue;
-use crate::parser::headers::accept_encoding::EncodingInfo;
-use crate::parser::headers::alert_info::AlertInfoValue;
 use crate::parser::headers::content_type::parse_content_type_value;
-use crate::parser::headers::error_info::ErrorInfoValue;
-use crate::parser::headers::reply_to::ReplyToValue;
-use crate::parser::headers::route::RouteEntry;
 use crate::parser::headers::session_expires::parse_session_expires;
 
 /// A strongly-typed representation of a SIP header.

@@ -8,10 +8,9 @@
 use nom::{
     branch::alt,
     bytes::complete::tag,
-    combinator::{map, opt, value},
-    multi::{many0, separated_list0, separated_list1},
+    combinator::map,
+    multi::{many0, separated_list0},
     sequence::{pair, preceded},
-    IResult,
 };
 use ordered_float::NotNan;
 use serde::{Deserialize, Serialize};
@@ -19,9 +18,8 @@ use std::collections::HashMap;
 use std::str;
 
 // Import from base parser modules
-use crate::parser::common::comma_separated_list0;
 use crate::parser::common_params::accept_param; // Reuses generic_param, qvalue
-use crate::parser::separators::{comma, hcolon, semi};
+use crate::parser::separators::{comma, semi};
 use crate::parser::token::token;
 use crate::parser::ParseResult;
 
@@ -141,7 +139,7 @@ pub fn parse_accept_encoding(input: &[u8]) -> ParseResult<'_, Vec<EncodingInfo>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::param::{GenericValue, Param};
+    use crate::types::param::Param;
     use ordered_float::NotNan;
 
     #[test]

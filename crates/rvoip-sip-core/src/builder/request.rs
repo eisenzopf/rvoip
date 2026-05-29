@@ -3,20 +3,11 @@ use std::str::FromStr;
 
 use crate::error::{Error, Result};
 use crate::types::{
-    call_id::CallId,
-    contact::{Contact, ContactParamInfo, ContactValue},
     content_length::ContentLength,
     content_type::ContentType,
-    cseq::CSeq,
-    from::From,
-    header::{HeaderName, HeaderValue},
-    max_forwards::MaxForwards,
+    header::HeaderName,
     sip_request::Request,
-    to::To,
-    uri::{Host, Scheme, Uri},
-    user_agent::UserAgent,
-    via::{SentProtocol, Via, ViaHeader},
-    Address, Method, Param, TypedHeader, Version,
+    uri::Uri, Method, TypedHeader,
 };
 
 /// # SIP Request Builder
