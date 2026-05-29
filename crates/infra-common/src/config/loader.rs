@@ -1,3 +1,10 @@
+// TODO: migrate from the deprecated `config::Config::merge` to the
+// `ConfigBuilder` API. The migration is non-trivial — the current code
+// builds the Config incrementally (file → env-file → env-vars); the
+// builder API requires assembling the source list up-front. Tracked as
+// a follow-up since it changes the loader's control flow.
+#![allow(deprecated)]
+
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 

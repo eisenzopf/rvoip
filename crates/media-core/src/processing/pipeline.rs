@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 
 use super::audio::{AudioProcessingConfig, AudioProcessingResult, AudioProcessor};
 use super::format::{ConversionParams, FormatConverter};
-use crate::error::{AudioProcessingError, Result};
+use crate::error::Result;
 use crate::types::{AudioFrame, SampleRate};
 
 /// Configuration for the processing pipeline

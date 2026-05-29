@@ -7,19 +7,17 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info, warn};
-
+use tokio::sync::RwLock;
+use tracing::{debug, error, info};
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
 use rvoip_infra_common::events::cross_crate::{
-    CrossCrateEvent, MediaQualityMetrics, MediaStreamConfig, MediaToRtpEvent, MediaToSessionEvent,
-    RecordingFormat, RtpToMediaEvent, RvoipCrossCrateEvent, SessionToMediaEvent,
+    CrossCrateEvent, MediaQualityMetrics, MediaToRtpEvent, MediaToSessionEvent,
+    RvoipCrossCrateEvent, SessionToMediaEvent,
 };
 use rvoip_infra_common::planes::LayerTaskManager;
 
 use crate::integration::events::IntegrationEventType;
 use crate::session::events::{MediaSessionEventType, QualitySeverity};
-use crate::types::{DialogId, MediaSessionId};
 
 /// Media Event Adapter that bridges local media events with global cross-crate events
 pub struct MediaEventAdapter {
@@ -79,12 +77,12 @@ impl MediaEventAdapter {
         debug!("Setting up cross-crate event subscriptions for media-core");
 
         // Subscribe to events targeted at media-core
-        let session_to_media_receiver = self
+        let _session_to_media_receiver = self
             .global_coordinator
             .subscribe("session_to_media")
             .await?;
 
-        let rtp_to_media_receiver = self.global_coordinator.subscribe("rtp_to_media").await?;
+        let _rtp_to_media_receiver = self.global_coordinator.subscribe("rtp_to_media").await?;
 
         debug!("Cross-crate event subscriptions setup complete for media-core");
         Ok(())
@@ -95,7 +93,7 @@ impl MediaEventAdapter {
         debug!("Starting media event processing tasks");
 
         // Task: Process incoming cross-crate events from session-core and rtp-core
-        let coordinator = self.global_coordinator.clone();
+        let _coordinator = self.global_coordinator.clone();
 
         self.task_manager
             .spawn_tracked(
@@ -188,7 +186,7 @@ impl MediaEventAdapter {
                 },
             )),
 
-            MediaSessionEventType::QualityIssue { metrics, severity } => {
+            MediaSessionEventType::QualityIssue { metrics: _, severity } => {
                 let mos_score = match severity {
                     QualitySeverity::Minor => 3.5,
                     QualitySeverity::Moderate => 3.0,
@@ -268,7 +266,11 @@ impl MediaEventAdapter {
         }
     }
 
-    /// Convert cross-crate events to local media events
+    /// Convert cross-crate events to local media events. Same
+    /// rationale as `convert_media_to_cross_crate_event`: the inner
+    /// destructured fields document the wire format even where this
+    /// iteration's mapping is `None`-only.
+    #[allow(unused_variables, dead_code)]
     fn convert_cross_crate_to_media_event(
         &self,
         event: &RvoipCrossCrateEvent,
@@ -303,8 +305,12 @@ impl MediaEventAdapter {
     }
 }
 
-/// Event handler for processing cross-crate events in media-core
+/// Event handler for processing cross-crate events in media-core.
+/// `adapter` is captured at construction so the `handle` impl can
+/// route inbound cross-crate events into the local adapter once the
+/// TODO in `handle` is implemented.
 pub struct MediaCrossCrateEventHandler {
+    #[allow(dead_code)]
     adapter: Arc<MediaEventAdapter>,
 }
 
@@ -332,7 +338,6 @@ impl CrossCrateEventHandler for MediaCrossCrateEventHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
 
     #[tokio::test]
     async fn test_media_adapter_creation() {

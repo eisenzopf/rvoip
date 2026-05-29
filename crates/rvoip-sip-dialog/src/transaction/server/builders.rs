@@ -15,7 +15,6 @@ use rvoip_sip_core::types::{
     via::Via,
 };
 use std::net::SocketAddr;
-use std::str::FromStr;
 use tracing::debug;
 use uuid::Uuid;
 

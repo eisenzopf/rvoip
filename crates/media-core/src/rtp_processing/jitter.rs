@@ -41,7 +41,12 @@ impl Default for JitterBufferConfig {
     }
 }
 
-/// High-performance adaptive jitter buffer
+/// High-performance adaptive jitter buffer. The `next_sequence` and
+/// `last_playout_time` state are initialised so the upcoming
+/// sequence-aware playout policy can take over without re-allocating
+/// the buffer; the current simplified `pop_first` implementation
+/// doesn't consume them.
+#[allow(dead_code)]
 pub struct JitterBuffer {
     config: JitterBufferConfig,
     buffer: BTreeMap<u32, Vec<u8>>, // timestamp -> packet data
@@ -63,7 +68,7 @@ impl JitterBuffer {
     /// Add a packet to the jitter buffer
     pub fn put_packet(
         &mut self,
-        sequence: u32,
+        _sequence: u32,
         timestamp: u32,
         payload: Vec<u8>,
     ) -> Result<(), String> {
@@ -83,8 +88,8 @@ impl JitterBuffer {
 
     /// Flush old packets from the buffer
     pub fn flush_old_packets(&mut self) {
-        let now = std::time::Instant::now();
-        let max_age = Duration::from_millis(self.config.max_packet_age_ms as u64);
+        let _now = std::time::Instant::now();
+        let _max_age = Duration::from_millis(self.config.max_packet_age_ms as u64);
 
         // Simplified - real implementation would track packet ages
         if self.buffer.len() > self.config.max_out_of_order / 2 {

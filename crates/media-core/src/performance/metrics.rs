@@ -3,10 +3,9 @@
 //! This module provides tools to measure and compare the performance
 //! of different audio processing strategies.
 
-use crate::performance::pool::{AudioFramePool, PoolConfig, PooledAudioFrame};
+use crate::performance::pool::{AudioFramePool, PoolConfig};
 use crate::performance::zero_copy::ZeroCopyAudioFrame;
 use crate::types::AudioFrame;
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 

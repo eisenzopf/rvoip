@@ -13,7 +13,6 @@ use rvoip_sip_transport::diagnostics as udp_diagnostics;
 use rvoip_sip_transport::factory::{TransportFactory, TransportFactoryConfig};
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{
-    error::{Error as TransportError, Result as TransportResult},
     TcpTransport, Transport, TransportEvent, UdpParseConfig, UdpParseDispatch, UdpSocketOptions,
     UdpTransport, WebSocketTransport,
 };
@@ -283,7 +282,10 @@ pub struct TransportManager {
     default_transport: Option<Arc<dyn Transport>>,
     /// Default UDP transport (required for SIP)
     udp_transport: Option<Arc<dyn Transport>>,
-    /// Transport factory
+    /// Transport factory. Captured at construction so a future
+    /// dynamic transport-add path can spin new transports without
+    /// re-creating the factory.
+    #[allow(dead_code)]
     transport_factory: Arc<TransportFactory>,
     /// Combined event channel
     event_tx: mpsc::Sender<TransportEvent>,
@@ -698,13 +700,17 @@ impl TransportManager {
         bind_addr: SocketAddr,
         secure: bool,
     ) -> Result<Arc<dyn Transport>> {
-        let cert_path = if secure {
+        // `cert_path` / `key_path` are only consumed inside the
+        // `feature = "ws"` block below; the `not` arm doesn't read
+        // them. Prefix with `_` so the default lib build doesn't flag
+        // the bindings as unused.
+        let _cert_path = if secure {
             self.config.tls_cert_path.as_deref()
         } else {
             None
         };
 
-        let key_path = if secure {
+        let _key_path = if secure {
             self.config.tls_key_path.as_deref()
         } else {
             None
@@ -714,8 +720,8 @@ impl TransportManager {
         let result = WebSocketTransport::bind(
             bind_addr,
             secure,
-            cert_path,
-            key_path,
+            _cert_path,
+            _key_path,
             Some(self.config.default_channel_capacity),
         )
         .await;
@@ -777,7 +783,7 @@ impl TransportManager {
     /// Gets a transport appropriate for the given destination
     pub async fn get_transport_for_destination(
         &self,
-        destination: SocketAddr,
+        _destination: SocketAddr,
     ) -> Option<Arc<dyn Transport>> {
         // For now, we just return the UDP transport
         // In the future, we'll add URI-based transport selection
@@ -1090,7 +1096,6 @@ mod tests {
     use super::*;
     use rvoip_sip_core::Method;
     use rvoip_sip_transport::transport::TransportType;
-    use std::net::SocketAddr;
 
     fn dispatch_request(
         method: Method,

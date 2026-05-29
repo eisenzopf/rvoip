@@ -5,7 +5,7 @@
 //! It is a wideband codec operating at 64, 56 or 48 kbit/s.
 
 use super::traits::PayloadFormat;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use std::any::Any;
 
 /// G.722 payload format handler

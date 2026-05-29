@@ -3,9 +3,7 @@
 //! This module handles media mixing for conference scenarios, including
 //! voice activity detection and active speaker mixing.
 
-use bytes::Bytes;
 use std::collections::HashMap;
-use tracing::{debug, warn};
 
 use crate::api::error::MediaError;
 use crate::api::types::{MediaFrame, MediaFrameType};

@@ -61,7 +61,6 @@
 /// - **Timer E**: Initial value T1, doubles on each retransmission (up to T2). Controls request retransmissions.
 /// - **Timer F**: Typically 64*T1. Controls transaction timeout. When it fires, the transaction terminates with an error.
 /// - **Timer K**: Typically 5s. Controls how long to wait in Completed state for response retransmissions.
-use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -79,10 +78,9 @@ use crate::transaction::client::{ClientTransaction, ClientTransactionData};
 use crate::transaction::common_logic;
 use crate::transaction::error::{Error, Result};
 use crate::transaction::logic::TransactionLogic;
-use crate::transaction::runner::{run_transaction_loop, AsRefKey, HasCommandSender};
+use crate::transaction::runner::run_transaction_loop;
 use crate::transaction::timer::{TimerFactory, TimerManager, TimerSettings, TimerType};
 use crate::transaction::timer_utils;
-use crate::transaction::utils;
 use crate::transaction::validators;
 use crate::transaction::{
     AtomicTransactionState, InternalTransactionCommand, Transaction, TransactionAsync,
@@ -108,6 +106,10 @@ use crate::transaction::{
 #[derive(Debug, Clone)]
 pub struct ClientNonInviteTransaction {
     data: Arc<ClientTransactionData>,
+    /// Logic instance held so the spawned transaction loop keeps the
+    /// same state machine; the transaction itself reads through the
+    /// loop.
+    #[allow(dead_code)]
     logic: Arc<ClientNonInviteLogic>,
 }
 
@@ -290,7 +292,7 @@ impl ClientNonInviteLogic {
                 .await;
             return Err(Error::transport_error(e, "Failed to send initial request"));
         }
-        drop(request_guard); // Release lock
+        // `request_guard` is a plain `&Request`, no lock to release.
 
         // Start timers for Trying state
         self.start_timer_e(data, timer_handles, command_tx.clone())
@@ -444,7 +446,7 @@ impl ClientNonInviteLogic {
         // Get the original method from the request to validate the response
         let request_guard: &Request = &data.request;
         let original_method = validators::get_method_from_request(&request_guard);
-        drop(request_guard);
+        // `request_guard` is a plain `&Request`, no lock to release.
 
         // Validate that the response matches our transaction
         if let Err(e) =
@@ -544,7 +546,7 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
         &self,
         data: &Arc<ClientTransactionData>,
         new_state: TransactionState,
-        previous_state: TransactionState,
+        _previous_state: TransactionState,
         timer_handles: &mut ClientNonInviteTimerHandles,
         command_tx: mpsc::Sender<InternalTransactionCommand>, // This is the runner's command_tx
     ) -> Result<()> {
@@ -1005,13 +1007,12 @@ impl TransactionAsync for ClientNonInviteTransaction {
     }
 }
 
+// Same rationale as the test mod in invite.rs.
 #[cfg(test)]
+#[allow(unused_assignments, unused_mut, unused_imports, unused_variables)]
 mod tests {
     use super::*;
-    use crate::transaction::runner::{
-        AsRefKey, AsRefState, HasCommandSender, HasTransactionEvents, HasTransport,
-    }; // For ClientTransactionData
-    use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder}; // Added SimpleResponseBuilder
+    use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
     use rvoip_sip_core::types::status::StatusCode;
     use rvoip_sip_core::Response as SipCoreResponse;
     // use rvoip_sip_transport::TransportEvent as TransportLayerEvent; // This was unused

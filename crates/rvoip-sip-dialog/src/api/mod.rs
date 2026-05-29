@@ -69,9 +69,7 @@ pub mod config;
 mod errors;
 
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
-use crate::events::SessionCoordinationEvent;
 use crate::manager::DialogManager;
 
 // Re-export main API types

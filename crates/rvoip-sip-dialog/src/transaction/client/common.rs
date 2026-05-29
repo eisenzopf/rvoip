@@ -7,32 +7,23 @@
 /// - Processing responses
 /// - Sending commands to the transaction's event loop
 /// - Accessing transaction state and data
-use std::fmt;
 use std::future::Future;
-use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
-use tracing::{debug, error, trace, warn};
 
 use rvoip_sip_core::prelude::*;
-use rvoip_sip_transport::Transport;
 
-use async_trait::async_trait;
-
-use crate::transaction::client::{ClientTransaction, ClientTransactionData};
+use crate::transaction::client::ClientTransactionData;
 use crate::transaction::error::{Error, Result};
-use crate::transaction::timer::{TimerSettings, TimerType};
-use crate::transaction::utils;
-use crate::transaction::{
-    InternalTransactionCommand, Transaction, TransactionEvent, TransactionKey, TransactionKind,
-    TransactionState,
-};
+use crate::transaction::InternalTransactionCommand;
 
 /// Common functionality for all client transaction types.
 ///
 /// This trait defines utility methods shared by both INVITE and non-INVITE client
 /// transactions to reduce code duplication and provide consistent behavior.
+/// Currently each transaction type implements the helpers inline; the
+/// trait is retained for the upcoming common-loop refactor.
+#[allow(dead_code)]
 pub trait CommonClientTransaction {
     /// Returns the transaction data structure containing state and communication channels.
     ///

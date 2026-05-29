@@ -2,12 +2,18 @@ use bytes::Bytes;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tracing::{debug, error, trace};
-
+use tracing::trace;
+// `error!` is only reached from the `#[cfg(test)] pub fn default()`
+// fallback path below; gate the import the same way to avoid an
+// unused-import warning in the lib build.
+#[cfg(test)]
+use tracing::error;
 use super::socket::{bind_std_udp_socket, UdpSocketOptions};
 use crate::error::{Error, Result};
 
-// Maximum UDP packet size
+// Reserved for the upcoming oversized-datagram drop path; kept so the
+// constant has one canonical home when that lands.
+#[allow(dead_code)]
 const MAX_UDP_PACKET_SIZE: usize = 65_507;
 // Buffer size for receiving packets
 const UDP_BUFFER_SIZE: usize = 8192;
@@ -125,7 +131,6 @@ impl UdpListener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt;
 
     #[tokio::test]
     async fn test_udp_listener_bind() {

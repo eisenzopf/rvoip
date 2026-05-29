@@ -32,7 +32,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-use tokio::runtime::{Builder, Runtime};
+use tokio::runtime::Builder;
 
 /// Bridge counts driven concurrently. `/64` was originally on the
 /// list but trips the rtp-core `GlobalPortAllocator` retry budget

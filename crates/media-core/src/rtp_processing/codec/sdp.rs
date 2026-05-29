@@ -5,15 +5,14 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
-use tracing::{debug, warn};
-
+use tracing::{warn};
 use super::{
     negotiation::{CodecCapability, CodecNegotiator, NegotiationPreferences},
-    registry::{get_global_registry, PayloadTypeInfo},
+    registry::get_global_registry,
 };
 use crate::api::{
     error::MediaError,
-    types::{MediaCodec, MediaDirection, MediaStreamConfig},
+    types::{MediaCodec, MediaDirection},
 };
 
 /// SDP media line representation

@@ -16,8 +16,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite;
-use tracing::{debug, error, info, trace, warn};
-
+use tracing::{debug, error, info, warn};
 use crate::error::{Error, Result};
 use crate::transport::{Transport, TransportEvent, TransportType};
 use rvoip_sip_core::Message;
@@ -210,7 +209,7 @@ impl WebSocketTransport {
             while !inner.closed.load(Ordering::Relaxed) {
                 // Accept a new connection
                 match listener_clone.accept().await {
-                    Ok((connection, mut reader)) => {
+                    Ok((connection, reader)) => {
                         let peer_addr = connection.peer_addr();
                         debug!("Accepted WebSocket connection from {}", peer_addr);
 
@@ -682,7 +681,7 @@ impl fmt::Debug for WebSocketTransport {
 mod tests {
     use super::*;
     use rvoip_sip_core::builder::SimpleRequestBuilder;
-    use rvoip_sip_core::{Method, Request};
+    use rvoip_sip_core::Method;
     use tokio::time::Duration;
 
     #[cfg(feature = "ws")]

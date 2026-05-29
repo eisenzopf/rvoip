@@ -62,6 +62,45 @@ impl HickoryResolver {
         })
     }
 
+    /// Like [`new_system`](Self::new_system) but resilient to a slow or hung
+    /// system DNS configuration read.
+    ///
+    /// `read_system_conf` can block for many seconds on a misconfigured or
+    /// slow host (observed ~14s on macOS where a configured resolver is
+    /// unreachable). This runs the config read on a blocking thread, caps it
+    /// at `timeout`, and on timeout/failure falls back to hickory's default
+    /// resolver config so the first resolution can never stall the caller.
+    /// Always returns a usable resolver.
+    pub async fn new_system_resilient(timeout: Duration) -> Self {
+        let read = tokio::task::spawn_blocking(hickory_resolver::system_conf::read_system_conf);
+        let (config, mut opts) = match tokio::time::timeout(timeout, read).await {
+            Ok(Ok(Ok((config, opts)))) => (config, opts),
+            Ok(Ok(Err(e))) => {
+                warn!("system DNS config read failed ({e}); using default resolver config");
+                (ResolverConfig::default(), ResolverOpts::default())
+            }
+            Ok(Err(join_err)) => {
+                warn!("system DNS config read task failed ({join_err}); using default resolver config");
+                (ResolverConfig::default(), ResolverOpts::default())
+            }
+            Err(_) => {
+                warn!("system DNS config read exceeded {timeout:?}; using default resolver config");
+                (ResolverConfig::default(), ResolverOpts::default())
+            }
+        };
+        opts.edns0 = true;
+        let inner = build_tokio_resolver(config, opts).unwrap_or_else(|e| {
+            warn!("resolver build failed ({e}); rebuilding from default config");
+            let mut default_opts = ResolverOpts::default();
+            default_opts.edns0 = true;
+            build_tokio_resolver(ResolverConfig::default(), default_opts)
+                .expect("default Hickory resolver config must build")
+        });
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+
     /// Build a resolver from explicit config + opts. Used by tests
     /// pointing at a local `hickory-server` fixture.
     pub fn with_resolver(config: ResolverConfig, mut opts: ResolverOpts) -> Self {

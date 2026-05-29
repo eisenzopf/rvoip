@@ -4,16 +4,13 @@
 //! of multiple audio streams for conference calls. Each participant receives
 //! a mix of all other participants (N-1 mixing).
 
-use crate::error::Result;
-use crate::processing::audio::{
-    AudioStreamConfig, AudioStreamManager, VadConfig, VoiceActivityDetector,
-};
+use crate::processing::audio::{AudioStreamConfig, AudioStreamManager, VoiceActivityDetector};
 use crate::processing::format::FormatConverter;
 use crate::types::conference::{
     AudioStream, ConferenceError, ConferenceMixingConfig, ConferenceMixingEvent,
-    ConferenceMixingStats, ConferenceResult, MixedAudioOutput, MixingQuality, ParticipantId,
+    ConferenceMixingStats, ConferenceResult, MixingQuality, ParticipantId,
 };
-use crate::types::{AudioFrame, SampleRate};
+use crate::types::AudioFrame;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,13 +35,23 @@ pub struct AudioMixer {
     /// block the mix cycle's writes (and vice versa).
     output_cache: Arc<DashMap<ParticipantId, Arc<AudioFrame>>>,
 
-    /// Memory pool for audio frames to reduce allocations
+    /// Memory pool for audio frames to reduce allocations. Wired in
+    /// at construction; the per-cycle pull path is staged out and
+    /// will be reattached when the alloc-aware mix loop lands.
+    #[allow(dead_code)]
     frame_pool: Arc<Mutex<Vec<AudioFrame>>>,
 
-    /// Format converter for audio processing
+    /// Format converter for audio processing. Held by the mixer so
+    /// the conversion happens in-place when an input frame's sample
+    /// rate diverges from the configured mix rate; current callers
+    /// pre-normalise so the converter is unused but kept.
+    #[allow(dead_code)]
     format_converter: Arc<Mutex<FormatConverter>>,
 
-    /// Voice activity detector for selective mixing
+    /// Voice activity detector for selective mixing. Held so the
+    /// suppression path can come online without re-plumbing the
+    /// mixer.
+    #[allow(dead_code)]
     vad: Arc<Mutex<VoiceActivityDetector>>,
 
     /// Event sender for conference monitoring
@@ -190,7 +197,7 @@ impl AudioMixer {
     /// This is the core N-way mixing function: N inputs → N outputs (N-1 mixing)
     pub async fn mix_participants(
         &self,
-        inputs: &[AudioFrame],
+        _inputs: &[AudioFrame],
     ) -> ConferenceResult<HashMap<ParticipantId, AudioFrame>> {
         let start_time = Instant::now();
 
@@ -261,7 +268,7 @@ impl AudioMixer {
     async fn update_mixing_stats(
         &self,
         start_time: Instant,
-        participant_count: usize,
+        _participant_count: usize,
         mixed_outputs: &HashMap<ParticipantId, AudioFrame>,
     ) -> ConferenceResult<()> {
         let mixing_latency = start_time.elapsed().as_micros() as u64;
@@ -371,7 +378,6 @@ impl MixingAlgorithms {
         }
 
         let first_frame = frames[0];
-        let samples_per_channel = first_frame.samples_per_channel();
         let mut mixed_samples = vec![0i32; first_frame.samples.len()];
 
         // Simple additive mixing

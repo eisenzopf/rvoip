@@ -18,15 +18,23 @@
 
 #![cfg(feature = "ws")]
 
-use std::io::Write;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use rvoip_sip_core::builder::SimpleRequestBuilder;
 use rvoip_sip_core::{Message, Method};
 use rvoip_sip_transport::transport::ws::WebSocketTransport;
 use rvoip_sip_transport::{Transport, TransportEvent};
+
+// The self-signed-cert helper below is only built when both `wss`
+// and `dev-insecure-tls` are enabled — keep its imports together
+// behind the same gate so the default `--features ws` build doesn't
+// see them as unused.
+#[cfg(all(feature = "wss", feature = "dev-insecure-tls"))]
+use std::io::Write;
+#[cfg(all(feature = "wss", feature = "dev-insecure-tls"))]
+use std::sync::Arc;
+#[cfg(all(feature = "wss", feature = "dev-insecure-tls"))]
 use tempfile::tempdir;
 
 fn loopback_addr(port: u16) -> SocketAddr {

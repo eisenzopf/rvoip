@@ -14,7 +14,6 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 use rvoip_sip_core::{Method, Request, StatusCode};
 use rvoip_sip_dialog::transaction::transport::{TransportManager, TransportManagerConfig};

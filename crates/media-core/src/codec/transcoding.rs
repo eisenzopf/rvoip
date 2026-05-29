@@ -6,14 +6,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, trace, warn};
-
+use tracing::{debug, trace};
 use crate::codec::audio::common::AudioCodec;
 use crate::codec::audio::{G729Codec, OpusApplication, OpusCodec};
 use crate::codec::factory::CodecFactory;
 use crate::error::{CodecError, Result};
 use crate::processing::format::{ConversionParams, FormatConverter};
-use crate::types::{AudioFrame, PayloadType, SampleRate};
+use crate::types::{PayloadType, SampleRate};
 
 /// Transcoding path between two codecs
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -322,7 +321,6 @@ impl Transcoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::processing::format::ConversionParams;
 
     fn create_test_transcoder() -> Transcoder {
         let format_converter = Arc::new(RwLock::new(FormatConverter::new()));
@@ -385,9 +383,11 @@ mod tests {
         let stats = transcoder.get_stats(0, 8).unwrap();
         assert_eq!(stats.frames_transcoded, 100);
         assert_eq!(stats.errors, 0);
-        // Even with optimizations, 100 transcodings should be measurable
-        assert!(stats.avg_processing_time_us >= 0.0); // Allow zero if it's just that fast
-        assert!(stats.total_processing_time_us >= 0); // At least total should be measurable
+        // Even with optimizations, 100 transcodings should be measurable.
+        // `avg_processing_time_us` is `f64`; the lower bound check is
+        // documentation. `total_processing_time_us` is `u64` so the
+        // tautological `>= 0` check has been removed.
+        assert!(stats.avg_processing_time_us >= 0.0);
     }
 
     #[tokio::test]

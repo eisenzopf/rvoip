@@ -17,11 +17,8 @@
 //! Use `set_audio_muted()` and `is_audio_muted()` for muting functionality.
 
 use dashmap::DashMap;
-use rand::Rng;
-use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 
@@ -30,36 +27,23 @@ use crate::codec::audio::G711Codec;
 use crate::codec::mapping::CodecMapper;
 use crate::diagnostics;
 use crate::error::{Error, Result};
-use crate::integration::{IntegrationEvent, RtpBridge, RtpBridgeConfig, RtpEventCallback};
+use crate::integration::{RtpBridge, RtpBridgeConfig, RtpEventCallback};
 use crate::performance::{
-    metrics::{ConcurrentPerformanceMetrics, PerformanceMetrics},
-    pool::{AudioFramePool, PoolConfig, PoolStats, PooledRtpBuffer, RtpBufferPool},
+    metrics::ConcurrentPerformanceMetrics,
+    pool::{AudioFramePool, PoolConfig, RtpBufferPool},
     simd::SimdProcessor,
-    zero_copy::ZeroCopyAudioFrame,
 };
-use crate::processing::audio::{
-    AdvancedAcousticEchoCanceller, AdvancedAecConfig, AdvancedAecResult, AdvancedAgcConfig,
-    AdvancedAgcResult, AdvancedAutomaticGainControl, AdvancedVadConfig, AdvancedVadResult,
-    AdvancedVoiceActivityDetector,
-};
-use crate::processing::audio::{AudioMixer, AudioStreamManager};
+use crate::processing::audio::AudioMixer;
 use crate::quality::QualityMonitor;
 use crate::relay::controller::codec_detection::CodecDetector;
 use crate::relay::controller::codec_fallback::CodecFallbackManager;
-use crate::types::conference::{
-    AudioStream, ConferenceError, ConferenceMixingConfig, ConferenceMixingEvent,
-    ConferenceMixingStats, ConferenceResult, MixingQuality, ParticipantId,
-};
-use crate::types::SampleRate;
-use crate::types::{payload_types, AudioFrame, DialogId, MediaDirection, MediaSessionId};
-use codec_core::codecs::g711::G711Variant;
+use crate::types::conference::{ConferenceMixingConfig, ConferenceMixingEvent};
+use crate::types::{AudioFrame, DialogId, MediaDirection, MediaSessionId};
 
 use rvoip_rtp_core as rtp_core;
-use rvoip_rtp_core::session::{RtpSessionStats, RtpStreamStats};
 use rvoip_rtp_core::transport::{
     AllocationStrategy, GlobalPortAllocator, PortAllocator, PortAllocatorConfig,
 };
-use rvoip_rtp_core::{RtpHeader, RtpPacket};
 use rvoip_rtp_core::{RtpSession, RtpSessionConfig};
 
 const RTP_SESSION_BIND_RETRIES: usize = 8;
@@ -103,7 +87,6 @@ pub use types::{
     MediaSessionInfo, MediaSessionStatus,
 };
 
-use audio_generation::{AudioGenerator, AudioTransmitter};
 use types::RtpSessionWrapper;
 
 /// RFC 4733 DTMF event delivered from media-core to session-core.
@@ -134,7 +117,9 @@ pub struct MediaSessionController {
     pub(super) rtp_sessions: Arc<DashMap<DialogId, RtpSessionWrapper>>,
     /// Event channel for media session events
     pub(super) event_tx: mpsc::UnboundedSender<MediaSessionEvent>,
-    /// Event receiver (taken by the user)
+    /// Event receiver (taken by the user). Held here until
+    /// `take_event_receiver` drains it on the consumer side.
+    #[allow(dead_code)]
     event_rx: RwLock<Option<mpsc::UnboundedReceiver<MediaSessionEvent>>>,
     /// Event hub for global event coordination
     event_hub: Arc<RwLock<Option<Arc<crate::events::MediaEventHub>>>>,
@@ -150,7 +135,10 @@ pub struct MediaSessionController {
     pub(super) conference_event_tx: mpsc::UnboundedSender<ConferenceMixingEvent>,
     /// Conference event receiver
     conference_event_rx: RwLock<Option<mpsc::UnboundedReceiver<ConferenceMixingEvent>>>,
-    /// Quality monitor for conference sessions
+    /// Quality monitor for conference sessions. Wired in but the
+    /// per-controller reads land via the conference task; retained
+    /// here so the controller can install/replace it at runtime.
+    #[allow(dead_code)]
     pub(super) quality_monitor: Option<Arc<QualityMonitor>>,
     /// Port allocator for RTP ports (if custom range specified)
     port_allocator: Option<Arc<PortAllocator>>,
@@ -394,7 +382,10 @@ impl MediaSessionController {
         })
     }
 
-    /// Emit a media event through both channel and event hub
+    /// Emit a media event through both channel and event hub. Held
+    /// alongside the public `take_event_receiver` path; new emission
+    /// sites will use this helper once dialog events get wired in.
+    #[allow(dead_code)]
     async fn emit_event(&self, event: MediaSessionEvent) {
         // Send to channel (legacy)
         let _ = self.event_tx.send(event.clone());
@@ -1092,11 +1083,11 @@ impl MediaSessionController {
         &self,
         dialog_id: DialogId,
         mut rtp_events: tokio::sync::broadcast::Receiver<rtp_core::session::RtpSessionEvent>,
-        expected_payload_type: u8,
+        _expected_payload_type: u8,
     ) {
         let audio_frame_callbacks = self.audio_frame_callbacks.clone();
         let dtmf_callbacks = self.dtmf_callbacks.clone();
-        let codec_mapper = self.codec_mapper.clone();
+        let _codec_mapper = self.codec_mapper.clone();
         let media_directions = self.media_directions.clone();
 
         // RFC 4733 §2.5.1.3 retransmit dedup formerly lived here as a

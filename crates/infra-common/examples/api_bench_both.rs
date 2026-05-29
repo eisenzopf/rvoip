@@ -1,3 +1,10 @@
+// This example exercises multiple paths through the event system as a
+// benchmark harness; it intentionally constructs scaffolding (extra
+// helper fns / a `MediaProcessor` mock) that isn't exercised on every
+// run. Allowing unused-item lints keeps the demo code editable without
+// having to chase the harness on every refactor.
+#![allow(unused_imports, unused_variables, dead_code)]
+
 use rvoip_infra_common::events::api::EventSystem as EventSystemTrait;
 use rvoip_infra_common::events::api::{EventPublisher, EventSubscriber};
 use rvoip_infra_common::events::builder::{EventSystemBuilder, ImplementationType};

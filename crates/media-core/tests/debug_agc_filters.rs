@@ -2,7 +2,7 @@
 //!
 //! Test to isolate which biquad filter is causing the "OutsideNyquist" error
 
-use biquad::{Biquad, Coefficients, DirectForm1, ToHertz, Type};
+use biquad::{Coefficients, DirectForm1, ToHertz, Type};
 
 #[tokio::test]
 async fn debug_agc_filter_creation() {

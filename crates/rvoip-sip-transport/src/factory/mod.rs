@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
 
 use crate::error::{Error, Result};
 use crate::transport::tcp::pool::PoolConfig;

@@ -43,19 +43,15 @@ mod data;
 mod invite;
 mod non_invite;
 
-pub use common::*;
 pub use data::{ClientTransactionData, CommandReceiver, CommandSender, CommonClientTransaction};
 pub use invite::ClientInviteTransaction;
 pub use non_invite::ClientNonInviteTransaction;
 
-use async_trait::async_trait;
 use std::future::Future;
-use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use crate::transaction::error::Result;
-use crate::transaction::{Transaction, TransactionAsync, TransactionKey, TransactionState};
+use crate::transaction::Transaction;
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::Request;
 

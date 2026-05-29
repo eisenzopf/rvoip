@@ -31,7 +31,12 @@ fn is_type_static_event<T: 'static>() -> bool {
     is_registered_static_event::<T>()
 }
 
-/// Trait for erased broadcast senders of any type.
+/// Trait for erased broadcast senders of any type. `type_name` and
+/// `clone_sender` are part of the trait surface so the registry can
+/// introspect and rehydrate the underlying typed senders later; the
+/// current code path doesn't call them yet but the trait shape must
+/// stay stable for the upcoming registry rework.
+#[allow(dead_code)]
 trait AnyBroadcastSender: Send + Sync + 'static {
     fn as_any(&self) -> &dyn Any;
     fn type_name(&self) -> &str;

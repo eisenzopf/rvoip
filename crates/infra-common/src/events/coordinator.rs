@@ -2,18 +2,23 @@
 //!
 //! Provides a unified event system that replaces individual crate event processors
 //! with a single shared event bus, reducing thread count by 50-75%.
+//
+// The distributed-mode pieces (network_transport publishing, plane routing,
+// ChannelForwarder, EventSubscription bookkeeping) are scaffolded but not
+// wired to a running deployment yet, so several fields and helpers are
+// reachable only on the future code path that consumes them.
+#![allow(dead_code)]
 
 use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, OnceCell, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::events::system::EventSystem;
-use crate::events::types::{Event, EventHandler, EventPriority};
+use crate::events::types::EventPriority;
 use crate::planes::{LayerTaskManager, PlaneConfig, PlaneRouter, PlaneType};
 
 use crate::events::cross_crate::{
@@ -368,7 +373,7 @@ impl GlobalEventCoordinator {
 
         // For distributed mode, check if we need network transport
         if let DeploymentConfig::Distributed { .. } = &self.config.deployment {
-            if let Some(transport) = &self.network_transport {
+            if let Some(_transport) = &self.network_transport {
                 // TODO: Determine target service from event metadata
                 warn!(
                     "Distributed event publishing not yet implemented for event: {}",
@@ -453,7 +458,7 @@ impl GlobalEventCoordinator {
     pub async fn route_event(
         &self,
         source_plane: PlaneType,
-        event: Arc<dyn CrossCrateEvent>,
+        _event: Arc<dyn CrossCrateEvent>,
     ) -> Result<()> {
         debug!("Routing event from plane: {:?}", source_plane);
 

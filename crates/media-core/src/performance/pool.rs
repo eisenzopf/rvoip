@@ -3,12 +3,10 @@
 //! This module provides efficient memory pooling to reduce allocations
 //! during real-time audio processing operations.
 
-use crate::performance::zero_copy::{SharedAudioBuffer, ZeroCopyAudioFrame};
-use crate::types::{AudioFrame, SampleRate};
+use crate::performance::zero_copy::ZeroCopyAudioFrame;
 use crossbeam_queue::ArrayQueue;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 use tracing::{debug, warn};
 
 /// Cache-line-aligned `AtomicUsize` wrapper used for hot-path pool
@@ -32,6 +30,7 @@ impl PaddedCounter {
         self.0.fetch_add(1, Ordering::Relaxed);
     }
     #[inline]
+    #[allow(dead_code)]
     fn add(&self, n: usize) {
         self.0.fetch_add(n, Ordering::Relaxed);
     }
@@ -652,7 +651,7 @@ mod tests {
         // Exhaust the pool
         let _frame1 = pool.get_frame();
         let _frame2 = pool.get_frame();
-        let frame3 = pool.get_frame(); // Should trigger new allocation
+        let _frame3 = pool.get_frame(); // Should trigger new allocation
 
         let stats = pool.get_stats();
         assert_eq!(stats.pool_hits, 2);

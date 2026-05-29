@@ -61,7 +61,6 @@
 /// - **Timer A**: Initial value T1, doubles on each retransmission. Controls request retransmissions in Calling state.
 /// - **Timer B**: Typically 64*T1. Controls transaction timeout. When it fires, the transaction terminates with an error.
 /// - **Timer D**: Typically 32s, but can be shorter. Controls how long to wait for retransmissions of the final response.
-use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -79,7 +78,7 @@ use crate::transaction::client::{
 };
 use crate::transaction::error::{Error, Result};
 use crate::transaction::logic::TransactionLogic;
-use crate::transaction::runner::{run_transaction_loop, AsRefKey, HasCommandSender};
+use crate::transaction::runner::run_transaction_loop;
 use crate::transaction::timer::{TimerFactory, TimerManager, TimerSettings, TimerType};
 use crate::transaction::utils;
 use crate::transaction::{
@@ -109,6 +108,10 @@ use crate::transaction::validators;
 #[derive(Debug, Clone)]
 pub struct ClientInviteTransaction {
     data: Arc<ClientTransactionData>,
+    /// Owned logic instance held so the spawned transaction loop's
+    /// clone keeps the same state machine; the transaction itself
+    /// does all the reads through the loop.
+    #[allow(dead_code)]
     logic: Arc<ClientInviteLogic>,
 }
 
@@ -281,7 +284,7 @@ impl ClientInviteLogic {
                 .await;
             return Err(Error::transport_error(e, "Failed to send initial request"));
         }
-        drop(request_guard); // Release lock
+        // `request_guard` is a plain `&Request`, no lock to release.
 
         // Start timers for Calling state
         timer_handles.current_timer_a_interval = Some(data.timer_config.t1);
@@ -447,14 +450,14 @@ impl ClientInviteLogic {
         response: Response,
         current_state: TransactionState,
         timer_handles: &mut ClientInviteTimerHandles,
-        command_tx: mpsc::Sender<InternalTransactionCommand>,
+        _command_tx: mpsc::Sender<InternalTransactionCommand>,
     ) -> Result<Option<TransactionState>> {
         let tx_id = &data.id;
 
         // Get the original method from the request to validate the response
         let request_guard: &Request = &data.request;
         let original_method = validators::get_method_from_request(&request_guard);
-        drop(request_guard);
+        // `request_guard` is a plain `&Request`, no lock to release.
 
         // Validate that the response matches our transaction
         if let Err(e) =
@@ -582,7 +585,7 @@ impl TransactionLogic<ClientTransactionData, ClientInviteTimerHandles> for Clien
         &self,
         data: &Arc<ClientTransactionData>,
         new_state: TransactionState,
-        previous_state: TransactionState,
+        _previous_state: TransactionState,
         timer_handles: &mut ClientInviteTimerHandles,
         command_tx: mpsc::Sender<InternalTransactionCommand>,
     ) -> Result<()> {
@@ -1027,12 +1030,14 @@ impl TransactionAsync for ClientInviteTransaction {
     }
 }
 
+// Test scaffolding uses lots of timer-fired / event-received flags
+// that get assigned-and-broken-out-of; the trailing assignments are
+// observed only by sibling code paths. Allow `unused_assignments`
+// at the module level to keep the tests readable.
 #[cfg(test)]
+#[allow(unused_assignments, unused_mut, unused_imports, unused_variables)]
 mod tests {
     use super::*;
-    use crate::transaction::runner::{
-        AsRefKey, AsRefState, HasCommandSender, HasTransactionEvents, HasTransport,
-    };
     use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
     use rvoip_sip_core::types::status::StatusCode;
     use rvoip_sip_core::Response as SipCoreResponse;
@@ -1480,6 +1485,11 @@ mod tests {
                 }
                 Ok(Some(TransactionEvent::TransactionTerminated { transaction_id, .. })) => {
                     assert_eq!(transaction_id, *setup.transaction.id());
+                    // The break below exits before the next iteration's
+                    // read of `transaction_terminated_received`, so the
+                    // assignment is observed only by that check on a
+                    // different code path; mark with `_` to silence.
+                    let _ = transaction_terminated_received;
                     transaction_terminated_received = true;
                     break; // We got the terminal event, can stop waiting
                 }

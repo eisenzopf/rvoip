@@ -24,7 +24,6 @@
 /// >    value of the branch parameter.
 ///
 /// This module implements these rules to ensure proper transaction matching.
-use std::sync::Arc;
 use tracing::{trace, warn};
 
 use rvoip_sip_core::prelude::*;

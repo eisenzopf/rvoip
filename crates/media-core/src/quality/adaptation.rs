@@ -4,10 +4,8 @@
 //! media parameters based on real-time quality monitoring and network conditions.
 
 use super::metrics::{QualityGrade, QualityMetrics, QualityTrend};
-use crate::error::Result;
 use crate::types::{MediaSessionId, SampleRate};
-use tracing::{debug, info, warn};
-
+use tracing::debug;
 /// Quality adjustment recommendations
 #[derive(Debug, Clone)]
 pub struct QualityAdjustment {
@@ -248,7 +246,7 @@ impl AdaptationEngine {
         &self,
         session_id: &MediaSessionId,
         metrics: &QualityMetrics,
-        current_bitrate: u32,
+        _current_bitrate: u32,
     ) -> Vec<QualityAdjustment> {
         let mut adjustments = Vec::new();
 

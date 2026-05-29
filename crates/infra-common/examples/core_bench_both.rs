@@ -1,3 +1,6 @@
+// Same harness as api_bench_both.rs — see that file for rationale.
+#![allow(unused_imports, unused_variables, dead_code)]
+
 use rvoip_infra_common::events::api::EventSystem as EventSystemTrait;
 use rvoip_infra_common::events::api::{EventPublisher, EventSubscriber};
 use rvoip_infra_common::events::builder::{EventSystemBuilder, ImplementationType};

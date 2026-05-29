@@ -11,14 +11,14 @@
 
 use rvoip_media_core::{
     types::conference::{ConferenceMixingConfig, ConferenceMixingEvent, MixingQuality},
-    types::{AudioFrame, DialogId, SampleRate},
+    types::{AudioFrame, DialogId},
     MediaConfig, MediaSessionController,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::{interval, sleep};
+use tokio::time::interval;
 use tracing::{error, info, warn};
 
 #[tokio::main]

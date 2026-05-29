@@ -160,10 +160,10 @@ mod tests {
 
         println!("🎯 Allocated ports: {:?}", ports);
 
-        // Verify all ports are in valid range (no privileged ports)
+        // Verify all ports are in valid range (no privileged ports).
+        // The upper bound is enforced by the `u16` port type.
         for &port in &ports {
             assert!(port >= 1024, "Port should be >= 1024 (non-privileged)");
-            assert!(port <= 65535, "Port should be <= 65535 (valid range)");
         }
 
         println!("✅ All ports are in valid range and unique");

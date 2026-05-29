@@ -3,7 +3,6 @@
 //! This example demonstrates the complete quality monitoring and adaptation system
 //! including real-time metrics, trend analysis, and automatic quality adjustments.
 
-use rvoip_media_core::codec::audio::common::AudioCodec;
 use rvoip_media_core::prelude::*;
 use rvoip_media_core::quality::adaptation::{AdaptationConfig, AdaptationEngine, AdjustmentType};
 use rvoip_media_core::quality::metrics::QualityTrend;
@@ -44,7 +43,7 @@ async fn main() -> Result<()> {
 
     // Create test sessions
     let session1 = MediaSessionId::new("session-001");
-    let session2 = MediaSessionId::new("session-002");
+    let _session2 = MediaSessionId::new("session-002");
 
     println!("\n📡 Demo 1: Quality Monitoring");
 
@@ -342,6 +341,7 @@ fn create_test_packet() -> MediaPacket {
     }
 }
 
+#[allow(dead_code)]
 fn create_test_audio_frame() -> AudioFrame {
     // Create a simple test tone
     let samples: Vec<i16> = (0..320) // 20ms at 16kHz

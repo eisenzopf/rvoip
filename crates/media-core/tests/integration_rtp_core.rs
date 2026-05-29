@@ -9,12 +9,7 @@ use tokio::sync::{mpsc, RwLock};
 use tokio::time::{timeout, Duration};
 
 // Import rtp-core types
-use rvoip_rtp_core::{
-    ClientConfig, ClientConfigBuilder, ClientFactory, MediaFrame, MediaFrameType,
-    MediaTransportClient, MediaTransportEvent, RtpPacket,
-};
-// PayloadType moved into media-core when RTP payload handling was split out.
-use rvoip_media_core::rtp_processing::payload::PayloadType;
+use rvoip_rtp_core::{ClientConfigBuilder, ClientFactory, MediaFrame, MediaFrameType, MediaTransportClient};
 
 // Import media-core types
 use codec_core::codecs::g711::G711Variant;
@@ -26,7 +21,6 @@ use rvoip_media_core::{
     relay::controller::codec_detection::CodecDetector,
     relay::controller::codec_fallback::CodecFallbackManager,
     AudioFrame, DialogId, MediaEngine, MediaEngineConfig, MediaSessionId, MediaSessionParams,
-    SampleRate,
 };
 
 /// Test helper to create a configured media engine
@@ -82,13 +76,13 @@ fn create_test_rtp_bridge(
 async fn test_basic_rtp_transport_integration() {
     // Setup: Create media engine and RTP client
     let media_engine = create_test_media_engine().await;
-    let rtp_client = create_test_rtp_client().await;
+    let _rtp_client = create_test_rtp_client().await;
 
     // Test: Create media session
     let dialog_id = DialogId::new("test-dialog-rtp-001");
     let params = MediaSessionParams::audio_only().with_preferred_codec(0); // PCMU
 
-    let session_handle = media_engine
+    let _session_handle = media_engine
         .create_media_session(dialog_id.clone(), params)
         .await
         .expect("Failed to create media session");
@@ -231,11 +225,11 @@ async fn test_media_frame_conversion() {
 async fn test_rtp_bridge_packet_routing() {
     // Test that RtpBridge correctly routes packets between media-core and rtp-core
 
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let rtp_bridge = create_test_rtp_bridge(event_tx);
 
     // Set up packet channels (simulation)
-    let (incoming_packet_tx, incoming_packet_rx) = mpsc::unbounded_channel();
+    let (_incoming_packet_tx, incoming_packet_rx) = mpsc::unbounded_channel();
     let (outgoing_packet_tx, mut outgoing_packet_rx) = mpsc::unbounded_channel();
 
     rtp_bridge

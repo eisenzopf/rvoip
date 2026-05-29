@@ -4,9 +4,8 @@
 //! including capability matching and format selection.
 
 use std::collections::HashMap;
-use tracing::{debug, warn};
-
-use super::registry::{get_global_registry, PayloadTypeInfo};
+use tracing::{debug};
+use super::registry::get_global_registry;
 use crate::api::{
     error::MediaError,
     types::{MediaCodec, MediaDirection},
@@ -260,7 +259,7 @@ impl CodecNegotiator {
         }
 
         // Quality threshold
-        let min_quality = (local.quality_factor.min(remote.quality_factor));
+        let min_quality = local.quality_factor.min(remote.quality_factor);
         if min_quality < self.preferences.min_quality_factor {
             score *= min_quality / self.preferences.min_quality_factor;
         }

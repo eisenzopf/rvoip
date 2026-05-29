@@ -78,6 +78,12 @@ events = []
 # Testing features
 testing = []
 
+# WebSocket transport support. Declared so the cfg gates in
+# transport/mod.rs compile cleanly; enabling it on its own is a no-op
+# until the corresponding rvoip-sip-transport `ws` feature is wired
+# through.
+ws = []
+
 # Development features (additional debugging)
 dev = ["recovery", "events", "testing"]
 

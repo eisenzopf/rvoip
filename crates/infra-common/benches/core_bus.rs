@@ -3,7 +3,6 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use rvoip_infra_common::events::bus::Publisher;
 use rvoip_infra_common::events::bus::{EventBus, EventBusConfig};
 use rvoip_infra_common::events::publisher::FastPublisher;
-use rvoip_infra_common::events::registry::GlobalTypeRegistry;
 use rvoip_infra_common::events::types::{Event, EventHandler, EventPriority, StaticEvent};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

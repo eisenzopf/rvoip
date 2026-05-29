@@ -3,7 +3,6 @@
 //! This module provides utilities for working with SIP dialogs, including
 //! templates for creating in-dialog requests and helper functions.
 
-use std::net::SocketAddr;
 use std::str::FromStr;
 use uuid::Uuid;
 

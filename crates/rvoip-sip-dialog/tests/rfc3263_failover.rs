@@ -36,6 +36,11 @@ struct ProgrammableTransport {
     sends: Arc<Mutex<Vec<SocketAddr>>>,
 }
 
+/// Programmable per-attempt outcome for the failover tests. `Ok` is
+/// kept alongside the failure variants for symmetry; today the tests
+/// only schedule failures, but mixing in an `Ok` is essential when
+/// extending coverage to recovery-after-success scenarios.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum Outcome {
     Ok,

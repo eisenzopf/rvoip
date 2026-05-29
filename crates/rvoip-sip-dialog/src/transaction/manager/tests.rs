@@ -1,4 +1,9 @@
+// Test scaffolding: tests build channels/transports and discard the
+// receiver/sender ends to keep the test focused on the transaction
+// manager surface. Allow `unused_variables` / `unused_mut` so the
+// scaffolding doesn't need underscores everywhere.
 #[cfg(test)]
+#[allow(unused_variables, unused_mut, dead_code)]
 mod tests {
     use super::super::RFC3261_BRANCH_MAGIC_COOKIE;
     use super::super::{
@@ -8,7 +13,7 @@ mod tests {
         TransactionIngressKind, TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
     };
     use crate::transaction::client::builders::{ByeBuilder, InviteBuilder, RegisterBuilder};
-    use crate::transaction::client::{ClientInviteTransaction, ClientNonInviteTransaction};
+    use crate::transaction::client::ClientInviteTransaction;
     use crate::transaction::error::{Error, Result};
     use crate::transaction::manager::ClientTransaction;
     use crate::transaction::Transaction;
@@ -24,9 +29,6 @@ mod tests {
     use rvoip_sip_core::types::ContactParamInfo;
     use rvoip_sip_transport::transport::TransportType;
     use rvoip_sip_transport::{Transport, TransportEvent};
-    use std::collections::HashMap;
-    use std::fs::File;
-    use std::io::Write;
     use std::net::SocketAddr;
     use std::str::FromStr;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -34,7 +36,6 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio::sync::mpsc;
     use tokio::sync::Mutex;
-    use tracing::{debug, info};
 
     /// Create a mock transport for testing
     #[derive(Debug, Clone)]
@@ -64,6 +65,7 @@ mod tests {
             }
         }
 
+        #[allow(dead_code)]
         fn set_send_failure(&self, should_fail: bool) {
             self.should_fail_send.store(should_fail, Ordering::SeqCst);
         }
@@ -1478,7 +1480,6 @@ mod tests {
     /// Test server transaction creation and operations
     #[tokio::test]
     async fn test_server_transaction_lifecycle() -> Result<()> {
-        use rvoip_sip_transport::TransportEvent;
 
         // Setup mock transport
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));

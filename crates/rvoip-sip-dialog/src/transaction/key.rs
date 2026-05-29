@@ -33,26 +33,12 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
-use rvoip_sip_core::prelude::*;
-// Removed: use rvoip_sip_core::common::Branch;
-
+// Lib code only uses CSeq, Via, Method, Request, Response directly;
+// the other types are reachable through the test mod's own
+// imports below.
 use rvoip_sip_core::{
-    types::{
-        address::Address,
-        call_id::CallId,
-        cseq::CSeq,
-        from::From,
-        headers::header_name::HeaderName, // Ensure this is the only HeaderName import
-        param::Param,
-        to::To,
-        uri::Uri,
-        via::Via, // Added Via
-    },
-    Method,
-    Request,
-    Response,   // Added Response
-    StatusCode, // Added StatusCode
-    Version,    // Added Version
+    types::{cseq::CSeq, via::Via},
+    Method, Request, Response,
 };
 
 /// Uniquely identifies a SIP transaction.
@@ -347,7 +333,6 @@ mod tests {
     use rvoip_sip_core::types::call_id::CallId;
     use rvoip_sip_core::types::cseq::CSeq;
     use rvoip_sip_core::types::from::From;
-    use rvoip_sip_core::types::headers::header_name::HeaderName;
     use rvoip_sip_core::types::param::Param;
     use rvoip_sip_core::types::to::To;
     use rvoip_sip_core::types::uri::Uri;

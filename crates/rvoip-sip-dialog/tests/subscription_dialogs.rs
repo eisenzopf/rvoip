@@ -15,12 +15,12 @@ use dashmap::DashMap;
 use std::sync::Arc;
 
 use rvoip_sip_dialog::{
-    dialog::{Dialog, DialogId, SubscriptionState, SubscriptionTerminationReason},
+    dialog::{SubscriptionState, SubscriptionTerminationReason},
     events::DialogEvent,
     subscription::SubscriptionManager,
 };
 
-use rvoip_sip_core::{builder::SimpleRequestBuilder, Method, Request, StatusCode};
+use rvoip_sip_core::{builder::SimpleRequestBuilder, Method, Request};
 
 /// Helper to create a SUBSCRIBE request
 fn create_subscribe_request(event: &str, expires: u32) -> Request {

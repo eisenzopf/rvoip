@@ -6,7 +6,6 @@
 use crate::codec::audio::common::AudioCodec;
 use crate::codec::audio::g711::G711Codec;
 use crate::error::{Error, Result};
-use codec_core::codecs::g711::G711Variant;
 
 pub struct CodecFactory;
 

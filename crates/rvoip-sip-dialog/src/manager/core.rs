@@ -334,7 +334,11 @@ pub struct DialogManager {
     /// Channel for sending dialog events to external consumers (session-core)
     pub(crate) dialog_event_sender: Arc<tokio::sync::RwLock<Option<mpsc::Sender<DialogEvent>>>>,
 
-    /// Channel for receiving dialog events (for shutdown coordination)
+    /// Channel for receiving dialog events (for shutdown coordination).
+    /// Retained so a future "consume remaining events on shutdown"
+    /// path can drain the channel; today the manager just drops the
+    /// receiver to signal completion.
+    #[allow(dead_code)]
     pub(crate) dialog_event_receiver: Arc<tokio::sync::RwLock<Option<mpsc::Receiver<DialogEvent>>>>,
 
     /// Shutdown signal for global event processor
@@ -2647,7 +2651,7 @@ impl DialogManager {
     pub fn get_dialog_mut(
         &self,
         dialog_id: &DialogId,
-    ) -> DialogResult<dashmap::mapref::one::RefMut<DialogId, Dialog>> {
+    ) -> DialogResult<dashmap::mapref::one::RefMut<'_, DialogId, Dialog>> {
         <Self as super::dialog_operations::DialogStore>::get_dialog_mut(self, dialog_id)
     }
 
@@ -2711,8 +2715,8 @@ impl DialogManager {
         session_id: &str,
         dialog_id: DialogId,
         transaction_id: TransactionKey,
-        request: rvoip_sip_core::Request,
-        source: SocketAddr,
+        _request: rvoip_sip_core::Request,
+        _source: SocketAddr,
     ) {
         self.session_to_dialog
             .insert(session_id.to_string(), dialog_id.clone());

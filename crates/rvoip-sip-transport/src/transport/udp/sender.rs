@@ -104,8 +104,6 @@ impl UdpSender {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncReadExt;
-    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_udp_sender_send() {

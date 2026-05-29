@@ -35,19 +35,15 @@ use std::env;
 /// to be added without modifying the runner itself.
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, error::TrySendError};
-use tokio::task::JoinHandle;
 use tracing::{debug, error, trace, warn};
 
 use crate::diagnostics;
-use crate::transaction::error::{Error, Result};
 use crate::transaction::logic::TransactionLogic;
 use crate::transaction::state::TransactionLifecycle;
 use crate::transaction::{
     AtomicTransactionState, InternalTransactionCommand, TransactionEvent, TransactionKey,
-    TransactionKind, TransactionState,
+    TransactionState,
 };
-use rvoip_sip_core::types::method::Method; // Import Method for method comparison
-use rvoip_sip_core::Message; // Assuming common Message type // The new trait
 
 /// Run the main event loop for a SIP transaction.
 ///

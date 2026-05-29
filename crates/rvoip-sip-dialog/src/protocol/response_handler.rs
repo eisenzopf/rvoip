@@ -179,8 +179,6 @@ pub(crate) fn extract_nat_discovery(
     local_addr: std::net::SocketAddr,
     response: &Response,
 ) -> Option<std::net::SocketAddr> {
-    use crate::manager::MessageExtensions;
-
     let via = response.first_via()?;
     let received_ip = via.received()?;
     let rport = via.rport()??;
@@ -491,7 +489,6 @@ mod nat_discovery_tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use rvoip_sip_core::types::{
-        headers::HeaderAccess,
         param::Param,
         status::StatusCode,
         via::{Via, ViaHeader},

@@ -3,7 +3,6 @@
 //! Routes events efficiently between planes based on affinity and deployment
 
 use anyhow::Result;
-use async_trait::async_trait;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -160,14 +159,14 @@ impl PlaneRouter {
     }
 
     /// Determine event affinity based on event type and content
-    async fn determine_affinity(&self, event: &Arc<dyn RoutableEvent>) -> Result<EventAffinity> {
+    async fn determine_affinity(&self, _event: &Arc<dyn RoutableEvent>) -> Result<EventAffinity> {
         // This would be implemented based on event type and routing rules
         // For now, returning a default
         Ok(EventAffinity::IntraPlane)
     }
 
     /// Route event within the same plane
-    async fn route_intra_plane(&self, event: Arc<dyn RoutableEvent>) -> Result<()> {
+    async fn route_intra_plane(&self, _event: Arc<dyn RoutableEvent>) -> Result<()> {
         // Implementation would depend on the specific plane
         Ok(())
     }
@@ -207,7 +206,7 @@ impl PlaneRouter {
     }
 
     /// Add event to batch for efficient delivery
-    async fn add_to_batch(&self, event: Arc<dyn RoutableEvent>) -> Result<()> {
+    async fn add_to_batch(&self, _event: Arc<dyn RoutableEvent>) -> Result<()> {
         // Implementation would batch events for network efficiency
         Ok(())
     }
@@ -274,6 +273,14 @@ impl PlaneRouter {
     }
 }
 
+// RoutingTable / RoutingRule / RoutingCondition / RoutingAction /
+// RoutingMetrics below are private scaffolding for the planned
+// custom-rule routing layer (event_routes / custom_rules). The
+// PlaneRouter above currently routes by static `EventAffinity` only,
+// so none of the rule machinery is reachable yet. Kept (rather than
+// deleted) so the next iteration can wire it up without re-designing
+// the data model.
+#[allow(dead_code)]
 /// Routing table for event routing decisions
 #[derive(Debug, Default)]
 struct RoutingTable {
@@ -287,6 +294,7 @@ struct RoutingTable {
     custom_rules: Vec<RoutingRule>,
 }
 
+#[allow(dead_code)]
 impl RoutingTable {
     /// Update plane availability status
     fn update_plane_status(&mut self, plane_type: PlaneType, available: bool) {
@@ -306,6 +314,7 @@ impl RoutingTable {
     }
 }
 
+#[allow(dead_code)]
 /// Custom routing rule
 #[derive(Debug, Clone)]
 struct RoutingRule {
@@ -322,6 +331,7 @@ struct RoutingRule {
     priority: u32,
 }
 
+#[allow(dead_code)]
 /// Routing condition
 #[derive(Clone)]
 enum RoutingCondition {
@@ -351,6 +361,7 @@ impl std::fmt::Debug for RoutingCondition {
     }
 }
 
+#[allow(dead_code)]
 /// Routing action
 #[derive(Clone)]
 enum RoutingAction {
@@ -378,10 +389,14 @@ impl std::fmt::Debug for RoutingAction {
     }
 }
 
-/// Metrics for routing performance
+/// Metrics for routing performance. `routing_errors` /
+/// `average_latency_ns` and the corresponding setter are kept for
+/// when the rule-based routing layer above is wired up.
 struct RoutingMetrics {
     events_routed: std::sync::atomic::AtomicU64,
+    #[allow(dead_code)]
     routing_errors: std::sync::atomic::AtomicU64,
+    #[allow(dead_code)]
     average_latency_ns: std::sync::atomic::AtomicU64,
 }
 
@@ -399,6 +414,7 @@ impl RoutingMetrics {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     fn record_routing_error(&self) {
         self.routing_errors
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

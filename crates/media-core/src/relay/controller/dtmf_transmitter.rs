@@ -167,7 +167,7 @@ async fn send_packet(
         duration,
     };
     let wire = tele.encode();
-    let mut session = rtp_session.lock().await;
+    let session = rtp_session.lock().await;
     session
         .send_packet_with_pt(
             timestamp,

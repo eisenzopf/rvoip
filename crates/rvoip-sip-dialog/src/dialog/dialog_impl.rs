@@ -17,7 +17,6 @@ use super::dialog_state::DialogState;
 use super::dialog_utils::extract_uri_from_contact;
 use super::subscription_state::SubscriptionState;
 use crate::errors::{DialogError, DialogResult};
-use tokio::task::JoinHandle;
 
 /// A SIP dialog as defined in RFC 3261
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -496,7 +495,7 @@ impl Dialog {
         event_id: Option<String>,
         expires: u32,
     ) {
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         self.event_package = Some(event_package);
         self.event_id = event_id;
@@ -535,7 +534,7 @@ impl Dialog {
 
     /// Mark subscription as refreshing
     pub fn start_subscription_refresh(&mut self, new_expires: u32) {
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         if let Some(SubscriptionState::Active {
             remaining_duration, ..

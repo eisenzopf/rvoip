@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use rvoip_infra_common::events::bus::EventBus;
 use rvoip_infra_common::events::bus::Publisher;
 use rvoip_infra_common::events::registry::GlobalTypeRegistry;

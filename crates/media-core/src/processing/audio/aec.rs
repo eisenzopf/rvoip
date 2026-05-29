@@ -273,7 +273,7 @@ impl AcousticEchoCanceller {
         let mut output = Vec::with_capacity(near_samples.len());
         let mut total_suppression = 0.0;
 
-        for (i, (&near, &echo)) in near_samples.iter().zip(echo_estimate.iter()).enumerate() {
+        for (_i, (&near, &echo)) in near_samples.iter().zip(echo_estimate.iter()).enumerate() {
             let echo_cancelled = if double_talk {
                 // Reduce suppression during double-talk
                 near - echo * (self.config.suppression_factor * 0.3)

@@ -4,8 +4,10 @@ use std::sync::Arc;
 
 use std::fmt::Debug;
 
-/// Handle returned when subscribing to events
-/// Can be used to unsubscribe
+/// Handle returned when subscribing to events. Can be used to
+/// unsubscribe; the inner fields are bookkeeping that the registry
+/// will read once the unsubscribe path is implemented.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SubscriberHandle {
     pub(crate) id: u64,

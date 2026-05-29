@@ -5,16 +5,11 @@
 //! the complete RTP → Audio Processing → RTP pipeline.
 
 use rvoip_media_core::performance::{
-    metrics::{BenchmarkConfig, PerformanceMetrics},
-    pool::{AudioFramePool, PoolConfig},
-    simd::SimdProcessor,
-    zero_copy::{SharedAudioBuffer, ZeroCopyAudioFrame},
+    pool::{AudioFramePool, PoolConfig}, simd::SimdProcessor, zero_copy::ZeroCopyAudioFrame,
 };
-use rvoip_media_core::prelude::*;
 
 // Import rtp-core types
-use rvoip_rtp_core::prelude::*;
-use rvoip_rtp_core::{MediaFrame, MediaFrameType, RtpHeader, RtpPacket};
+use rvoip_rtp_core::{RtpHeader, RtpPacket};
 // G711UPayloadFormat lives in media-core's rtp_processing module after the
 // RTP payload-handling split.
 use rvoip_media_core::rtp_processing::payload::G711UPayloadFormat;
@@ -27,6 +22,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Configuration for RTP performance testing
+/// Knobs for the RTP performance test. `payload_type` is captured at
+/// build time so the test fixture can extend to other codecs without
+/// restructuring; currently the pipeline hard-codes PCMU.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct RtpPerformanceTestConfig {
     /// Number of RTP packets to process
@@ -53,7 +52,12 @@ impl Default for RtpPerformanceTestConfig {
     }
 }
 
-/// End-to-End RTP Processing Pipeline
+/// End-to-End RTP Processing Pipeline. Pre-allocates the working
+/// buffers and codec so each iteration of the benchmark is
+/// allocation-free; the buffers are accessed via the closure inside
+/// `process_packet` so the struct's direct reads aren't visible to the
+/// compiler.
+#[allow(dead_code)]
 struct RtpProcessingPipeline {
     pool: Arc<AudioFramePool>,
     simd: SimdProcessor,
@@ -217,8 +221,9 @@ impl RtpProcessingPipeline {
         // Apply gain using SIMD
         self.simd.apply_gain(samples, 1.2, &mut processed_samples);
 
-        // Calculate RMS for monitoring
-        let rms = self.simd.calculate_rms(samples);
+        // Calculate RMS for monitoring. Result is discarded today;
+        // the call exercises the SIMD-RMS code path for the benchmark.
+        let _rms = self.simd.calculate_rms(samples);
 
         // Create processed frame (shares computation result)
         Ok(ZeroCopyAudioFrame::new(

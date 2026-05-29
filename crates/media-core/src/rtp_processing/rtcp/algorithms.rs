@@ -229,7 +229,7 @@ impl GoogleCongestionControl {
     }
 
     /// Process new packet arrival
-    pub fn on_packet_arrival(&mut self, timestamp: Instant, size_bytes: usize) -> u32 {
+    pub fn on_packet_arrival(&mut self, timestamp: Instant, _size_bytes: usize) -> u32 {
         if let Some(last) = self.last_update {
             let delta_ms = last.elapsed().as_millis() as i64;
 

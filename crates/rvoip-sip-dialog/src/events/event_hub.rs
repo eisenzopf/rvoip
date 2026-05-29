@@ -11,13 +11,12 @@ use tracing::{debug, error, info, trace, warn};
 use crate::transaction::TransactionKey;
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
 use rvoip_infra_common::events::cross_crate::{
-    CallState, CrossCrateEvent, DialogToSessionEvent, DialogToTransportEvent, RvoipCrossCrateEvent,
-    SessionToDialogEvent, TerminationReason, TransportToDialogEvent,
+    CallState, CrossCrateEvent, DialogToSessionEvent, RvoipCrossCrateEvent,
+    SessionToDialogEvent, TerminationReason,
 };
-use rvoip_sip_core::{Method, Request, StatusCode};
+use rvoip_sip_core::Method;
 
 use crate::dialog::{DialogId, DialogState};
-use crate::errors::DialogError;
 use crate::events::{DialogEvent, SessionCoordinationEvent};
 use crate::manager::DialogManager;
 
@@ -179,7 +178,7 @@ impl DialogEventHub {
         match event {
             DialogEvent::StateChanged {
                 dialog_id,
-                old_state,
+                old_state: _,
                 new_state,
             } => {
                 // Map dialog states to cross-crate call states
@@ -206,7 +205,7 @@ impl DialogEventHub {
                 }
             }
 
-            DialogEvent::Terminated { dialog_id, reason } => {
+            DialogEvent::Terminated { dialog_id, reason: _ } => {
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
                     Some(RvoipCrossCrateEvent::DialogToSession(
                         DialogToSessionEvent::CallTerminated {
@@ -364,7 +363,7 @@ impl DialogEventHub {
                 }
             }
 
-            SessionCoordinationEvent::CallTerminating { dialog_id, reason } => {
+            SessionCoordinationEvent::CallTerminating { dialog_id, reason: _ } => {
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
                     Some(RvoipCrossCrateEvent::DialogToSession(
                         DialogToSessionEvent::CallTerminated {
@@ -784,7 +783,7 @@ impl DialogEventHub {
                 }
             }
 
-            SessionCoordinationEvent::CallTerminating { dialog_id, reason } => {
+            SessionCoordinationEvent::CallTerminating { dialog_id, reason: _ } => {
                 // When BYE completes, notify session-core that dialog is terminating
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
                     debug!(

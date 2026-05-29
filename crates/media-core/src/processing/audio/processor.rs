@@ -5,8 +5,7 @@
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, error, warn};
-
+use tracing::{debug};
 use super::agc::{AgcConfig, AgcResult, AutomaticGainControl};
 use super::vad::{VadConfig, VadResult, VoiceActivityDetector};
 use crate::error::{AudioProcessingError, Result};
@@ -14,10 +13,7 @@ use crate::types::{AudioFrame, SampleRate};
 
 // NEW: Performance library imports
 use crate::performance::{
-    metrics::{BenchmarkResults, PerformanceMetrics},
-    pool::{AudioFramePool, PooledAudioFrame},
-    simd::SimdProcessor,
-    zero_copy::{SharedAudioBuffer, ZeroCopyAudioFrame},
+    metrics::PerformanceMetrics, pool::AudioFramePool, simd::SimdProcessor,
 };
 
 // NEW: Advanced v2 processor imports
@@ -364,12 +360,12 @@ impl AudioProcessor {
         let mut agc_result = None;
         let mut advanced_vad_result = None;
         let mut advanced_agc_result = None;
-        let mut advanced_aec_result = None;
+        let advanced_aec_result = None;
 
         // Step 1: Get optimized frame for processing
         let mut processed_frame = if self.config.use_zero_copy_frames {
             // Use pooled frame for zero-copy optimization
-            let pooled_frame = self.frame_pool.get_frame();
+            let _pooled_frame = self.frame_pool.get_frame();
 
             // Copy input data to pooled frame
             if self.config.enable_simd_optimizations {
@@ -390,7 +386,7 @@ impl AudioProcessor {
         };
 
         // Step 2: Advanced Echo Cancellation (AEC v2) - if enabled with far-end reference
-        if let Some(aec) = &self.advanced_aec {
+        if let Some(_aec) = &self.advanced_aec {
             // TODO: AEC requires far-end reference signal
             // For now, skip AEC processing until far-end reference is available
             debug!("AEC v2 enabled but far-end reference not available, skipping");
@@ -604,7 +600,7 @@ impl AudioProcessor {
     /// Update processing statistics (v1 legacy)
     async fn update_stats(
         &self,
-        frame: &AudioFrame,
+        _frame: &AudioFrame,
         vad_result: &Option<VadResult>,
         agc_result: &Option<AgcResult>,
         processing_time: std::time::Duration,
@@ -633,7 +629,7 @@ impl AudioProcessor {
     /// Update processing statistics with v2 advanced processors
     async fn update_stats_v2(
         &self,
-        frame: &AudioFrame,
+        _frame: &AudioFrame,
         vad_result: &Option<VadResult>,
         agc_result: &Option<AgcResult>,
         advanced_vad_result: &Option<AdvancedVadResult>,

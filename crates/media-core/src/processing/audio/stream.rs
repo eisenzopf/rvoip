@@ -4,7 +4,6 @@
 //! audio mixing. It handles individual participant audio streams, synchronization,
 //! format conversion, and health monitoring.
 
-use crate::error::Result;
 use crate::processing::audio::VoiceActivityDetector;
 use crate::processing::format::FormatConverter;
 use crate::types::conference::{AudioStream, ConferenceError, ConferenceResult, ParticipantId};
@@ -23,7 +22,10 @@ pub struct AudioStreamManager {
     target_sample_rate: u32,
     target_channels: u8,
 
-    /// Format converter for stream adaptation
+    /// Format converter for stream adaptation. Held so per-stream
+    /// resampling can come online without re-plumbing the stream
+    /// manager when caller-side normalisation is removed.
+    #[allow(dead_code)]
     format_converter: Arc<FormatConverter>,
 
     /// Voice activity detector for stream optimization
@@ -73,7 +75,10 @@ pub struct StreamStats {
     /// Total frames processed
     frames_processed: u64,
 
-    /// Frames dropped due to format issues
+    /// Frames dropped due to format issues. Incremented by the
+    /// resample path that's currently bypassed (caller-normalised
+    /// input); retained so the stat surface stays stable.
+    #[allow(dead_code)]
     frames_dropped_format: u64,
 
     /// Frames dropped due to buffer overflow
@@ -279,7 +284,7 @@ impl AudioStreamManager {
         let mut streams = async_std::task::block_on(self.streams.lock());
 
         let mut frames = Vec::new();
-        let now = Instant::now();
+        let _now = Instant::now();
 
         // Collect frames from active, healthy streams
         for (participant_id, managed_stream) in streams.iter_mut() {
@@ -334,7 +339,7 @@ impl AudioStreamManager {
     pub fn get_active_participants(&self) -> ConferenceResult<Vec<ParticipantId>> {
         let streams = async_std::task::block_on(self.streams.lock());
 
-        let now = Instant::now();
+        let _now = Instant::now();
         let active_participants: Vec<ParticipantId> = streams
             .values()
             .filter(|stream| stream.stream_info.is_healthy(self.config.stream_timeout))
@@ -348,15 +353,13 @@ impl AudioStreamManager {
     fn convert_frame_format(
         &self,
         frame: AudioFrame,
-        participant_id: &ParticipantId,
+        _participant_id: &ParticipantId,
     ) -> ConferenceResult<AudioFrame> {
-        // Create conversion parameters
-        let target_sample_rate =
+        // Create conversion parameters. Computed here so the
+        // resample path can be re-enabled without re-deriving the
+        // target rate / channel count at every site.
+        let _target_sample_rate =
             SampleRate::from_hz(self.target_sample_rate).unwrap_or(SampleRate::default());
-        let params = crate::processing::format::ConversionParams::new(
-            target_sample_rate,
-            self.target_channels,
-        );
 
         // Convert frame - need mutable access to format converter
         // For now, we'll skip the conversion and return the original frame

@@ -2,13 +2,17 @@
 //!
 //! This module implements state-of-the-art AEC using frequency-domain processing,
 //! multi-delay adaptive filtering, and advanced double-talk detection.
+//
+// The advanced filter structures (multi-delay overlap buffers, per-band
+// power estimators, the inverse-FFT path) are scaffolded for the
+// upcoming `MultiDelayFilter` implementation; the current simplified
+// loop doesn't read them but the API surface needs to stay stable.
+#![allow(dead_code)]
 
 use crate::error::{AudioProcessingError, Result};
 use crate::types::AudioFrame;
 use num_complex::Complex;
-use std::f32::consts::PI;
-use tracing::{debug, trace};
-
+use tracing::debug;
 /// Advanced AEC configuration with frequency-domain processing
 #[derive(Debug, Clone)]
 pub struct AdvancedAecConfig {
@@ -250,7 +254,7 @@ impl AdvancedAcousticEchoCanceller {
     /// NLMS update for multi-partition filters
     fn update_multi_partition_filters(
         &mut self,
-        near_fft: &[Complex<f32>],
+        _near_fft: &[Complex<f32>],
         error_fft: &[Complex<f32>],
     ) -> Result<()> {
         for partition in 0..self.config.num_partitions {

@@ -165,7 +165,7 @@ impl PayloadFormatRegistry {
 
     /// Register standard format factories
     fn register_standard_factories(&mut self) {
-        let factory = Box::new(StandardPayloadFormatFactory) as Box<dyn PayloadFormatFactory>;
+        let _factory = Box::new(StandardPayloadFormatFactory) as Box<dyn PayloadFormatFactory>;
 
         // Register for payload types we can handle
         for pt in [0, 8, 9] {

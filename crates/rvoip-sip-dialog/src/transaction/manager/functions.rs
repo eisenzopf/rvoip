@@ -1,25 +1,16 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, Mutex};
-use tokio::time::timeout;
-use tracing::{debug, error, trace, warn};
-
+use tracing::{debug, trace, warn};
 use rvoip_sip_core::prelude::*;
-use rvoip_sip_transport::Transport;
 
 use crate::diagnostics;
-use crate::transaction::client::ClientTransaction;
 use crate::transaction::client::TransactionExt as ClientTransactionExt;
 use crate::transaction::error::{Error, Result};
 use crate::transaction::server::ServerTransaction;
 use crate::transaction::server::TransactionExt as ServerTransactionExt;
-use crate::transaction::{
-    InternalTransactionCommand, Transaction, TransactionAsync, TransactionEvent, TransactionKey,
-    TransactionKind, TransactionState,
-};
+use crate::transaction::{TransactionEvent, TransactionKey, TransactionState};
 
 use super::TransactionManager;
 

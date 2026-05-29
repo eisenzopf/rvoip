@@ -13,7 +13,7 @@ use tracing::{debug, warn};
 
 use crate::events::api::{EventPublisher, EventSubscriber, EventSystem, FilterableSubscriber};
 use crate::events::registry::{GlobalTypeRegistry, TypedBroadcastReceiver};
-use crate::events::types::{Event, EventError, EventFilter, EventResult, StaticEvent};
+use crate::events::types::{Event, EventError, EventFilter, EventResult};
 
 /// Static Fast Path implementation of the event system.
 ///
@@ -571,7 +571,7 @@ impl<E: Event + 'static> FilterableSubscriber<E> for FilteredStaticFastPathSubsc
 mod tests {
     use super::*;
     use crate::events::registry::GlobalTypeRegistry;
-    use crate::events::types::EventPriority;
+    use crate::events::types::{EventPriority, StaticEvent};
     use serde::{Deserialize, Serialize};
     use std::any::Any;
     use std::sync::Arc;

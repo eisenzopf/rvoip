@@ -20,37 +20,26 @@
 /// - Section 8.2.6: Generating automatic responses
 /// - Section 9.2: CANCEL handling
 /// - Section 17.1.1.3: ACK handling
-use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::{mpsc, Mutex};
-use tracing::{debug, error, info, warn};
-
+use tokio::sync::mpsc;
+use tracing::{debug, error, warn};
 use rvoip_infra_common::events::cross_crate::SipTraceDirection;
-use rvoip_sip_core::json::ext::SipMessageJson;
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{Transport, TransportEvent};
 
 use crate::diagnostics;
-use crate::transaction::client::{
-    ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction,
-    TransactionExt as ClientTransactionExt,
-};
-use crate::transaction::error::{self, Error, Result};
+use crate::transaction::error::{Error, Result};
 use crate::transaction::runner::HasLifecycle;
-use crate::transaction::server::{
-    ServerInviteTransaction, ServerNonInviteTransaction, ServerTransaction,
-    TransactionExt as ServerTransactionExt,
-};
+use crate::transaction::server::ServerTransaction;
 use crate::transaction::state::TransactionLifecycle;
-use crate::transaction::utils::{self, create_ack_from_invite, transaction_key_from_message};
+use crate::transaction::utils::{create_ack_from_invite, transaction_key_from_message};
 use crate::transaction::{
-    InternalTransactionCommand, Transaction, TransactionAsync, TransactionEvent, TransactionKey,
-    TransactionKind, TransactionState,
+    TransactionEvent, TransactionKey, TransactionKind, TransactionState,
 };
 
 use super::types::*;
@@ -79,6 +68,10 @@ use super::TransactionManager;
 ///
 /// # Returns
 /// * `Result<()>` - Success or error depending on message processing outcome
+///
+/// Retained for the upcoming transport-event dispatcher refactor; today
+/// the manager dispatches transport events inline.
+#[allow(dead_code)]
 pub(crate) async fn handle_transport_message(
     event: TransportEvent,
     transport: &Arc<dyn Transport>,
@@ -94,7 +87,7 @@ pub(crate) async fn handle_transport_message(
         TransportEvent::MessageReceived {
             message,
             source,
-            destination,
+            destination: _,
             ..
         } => {
             match message {
@@ -558,7 +551,12 @@ pub(crate) async fn handle_transport_message(
 ///
 /// # Returns
 /// * `Option<SocketAddr>` - The destination socket address if it can be determined
-pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr> {
+///
+/// `utils::determine_ack_destination` is the canonical implementation
+/// at the module surface; this variant + its `resolve_*` helpers
+/// below are kept for the upcoming DNS-aware fallback path.
+#[allow(dead_code)]
+pub(crate) async fn determine_ack_destination(response: &Response) -> Option<SocketAddr> {
     if let Some(contact_header) = response.header(&HeaderName::Contact) {
         if let TypedHeader::Contact(contact) = contact_header {
             if let Some(addr) = contact.addresses().next() {
@@ -607,6 +605,7 @@ pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr
 ///
 /// # Returns
 /// * `Option<SocketAddr>` - Resolved socket address if successful
+#[allow(dead_code)]
 async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
     // Delegate to the shared RFC 3263 resolver. Preserves the ACK
     // destination semantics (`sips:`→5061 default, `transport=` / scheme
@@ -625,6 +624,7 @@ async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
 ///
 /// # Returns
 /// * `Option<SocketAddr>` - Resolved socket address if successful
+#[allow(dead_code)]
 async fn resolve_host_to_socketaddr(host: &rvoip_sip_core::Host, port: u16) -> Option<SocketAddr> {
     match host {
         rvoip_sip_core::Host::Address(ip) => Some(SocketAddr::new(*ip, port)),
@@ -857,7 +857,7 @@ impl TransactionManager {
         &self,
         message: Message,
         source: SocketAddr,
-        destination: SocketAddr,
+        _destination: SocketAddr,
     ) -> Result<()> {
         match message {
             Message::Request(request) => {
@@ -1316,7 +1316,10 @@ async fn send_transaction_event(
     result
 }
 
-/// Helper function to handle stray CANCEL requests
+/// Helper function to handle stray CANCEL requests. Retained for the
+/// upcoming stray-CANCEL dispatcher; today the manager handles them
+/// inline via the matched-server-transaction path.
+#[allow(dead_code)]
 async fn handle_stray_cancel(
     request: Request,
     source: SocketAddr,

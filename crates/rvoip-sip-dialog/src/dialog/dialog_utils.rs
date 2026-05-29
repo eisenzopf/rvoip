@@ -10,7 +10,6 @@ use rvoip_sip_core::types::contact::ContactValue;
 use rvoip_sip_core::Uri;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use tracing::{debug, warn};
 
 /// Extract tag from header with parameter
 pub fn extract_tag(_header: &rvoip_sip_core::Header) -> Option<String> {
@@ -151,6 +150,14 @@ pub async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
         return Some(SocketAddr::new(ip.clone(), port));
     }
 
+    // `localhost` is loopback by convention — resolve it directly so a
+    // localhost target never triggers system-DNS resolver init (which can
+    // block for seconds on a slow/misconfigured host). See
+    // [`loopback_for_localhost`].
+    if let Some(addr) = loopback_for_localhost(uri) {
+        return Some(addr);
+    }
+
     let resolver = process_default_resolver().await?;
     match resolver.resolve(uri).await {
         Ok(candidates) => candidates.into_iter().next().map(|t| t.addr),
@@ -191,6 +198,12 @@ pub async fn resolve_uri_to_candidates(
         )];
     }
 
+    // `localhost` → loopback, bypassing system-DNS resolver init.
+    if let Some(addr) = loopback_for_localhost(uri) {
+        let transport = select_transport_for_uri(uri);
+        return vec![ResolvedTarget::immediate(addr, transport)];
+    }
+
     let Some(resolver) = process_default_resolver().await else {
         return Vec::new();
     };
@@ -203,6 +216,31 @@ pub async fn resolve_uri_to_candidates(
     }
 }
 
+/// Loopback short-circuit for the special `localhost` name.
+///
+/// `localhost` is loopback by convention, so resolving it through the system
+/// DNS resolver is both unnecessary and risky: the one-time resolver init
+/// (`read_system_conf`) can block for many seconds on a slow or misconfigured
+/// host. Returning loopback directly keeps localhost targets fast and works in
+/// sandboxes with no `/etc/resolv.conf`. Honors the `sips:`→5061 default port.
+fn loopback_for_localhost(uri: &Uri) -> Option<SocketAddr> {
+    use rvoip_sip_core::types::uri::{Host, Scheme};
+    if let Host::Domain(name) = &uri.host {
+        if name.eq_ignore_ascii_case("localhost") {
+            let default_port = match uri.scheme() {
+                Scheme::Sips => 5061,
+                _ => 5060,
+            };
+            let port = uri.port.filter(|p| *p > 0).unwrap_or(default_port);
+            return Some(SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                port,
+            ));
+        }
+    }
+    None
+}
+
 /// URI resolution utilities (historical module path). Re-exports of the
 /// free function above are kept so existing call sites compile unchanged.
 pub mod uri_resolver {
@@ -210,35 +248,30 @@ pub mod uri_resolver {
 }
 
 /// Process-wide lazy-init system resolver. The first call constructs a
-/// [`HickoryResolver`](rvoip_sip_transport::resolver::HickoryResolver)
-/// from `/etc/resolv.conf` (or the OS resolver). Failure to construct
-/// (sandboxed CI without resolv.conf) is logged once and `None` is
-/// cached forever so IP-literal-only code paths still work.
+/// [`HickoryResolver`](rvoip_sip_transport::resolver::HickoryResolver) from the
+/// system DNS config, but via
+/// [`new_system_resilient`](rvoip_sip_transport::resolver::HickoryResolver::new_system_resilient):
+/// the config read is capped at 2s and falls back to a default config if the
+/// host's DNS setup is slow/hung, so the first non-IP, non-localhost resolution
+/// can never stall the caller for seconds.
 async fn process_default_resolver(
 ) -> Option<std::sync::Arc<dyn rvoip_sip_transport::resolver::Resolver>> {
     use std::sync::Arc;
     static DEFAULT_RESOLVER: tokio::sync::OnceCell<
-        Option<Arc<dyn rvoip_sip_transport::resolver::Resolver>>,
+        Arc<dyn rvoip_sip_transport::resolver::Resolver>,
     > = tokio::sync::OnceCell::const_new();
 
-    DEFAULT_RESOLVER
+    let resolver = DEFAULT_RESOLVER
         .get_or_init(|| async {
-            match rvoip_sip_transport::resolver::HickoryResolver::new_system() {
-                Ok(r) => {
-                    let arc: Arc<dyn rvoip_sip_transport::resolver::Resolver> = Arc::new(r);
-                    Some(arc)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "system DNS resolver init failed: {} — only IP-literal URIs will resolve",
-                        e
-                    );
-                    None
-                }
-            }
+            let r = rvoip_sip_transport::resolver::HickoryResolver::new_system_resilient(
+                std::time::Duration::from_secs(2),
+            )
+            .await;
+            Arc::new(r) as Arc<dyn rvoip_sip_transport::resolver::Resolver>
         })
         .await
-        .clone()
+        .clone();
+    Some(resolver)
 }
 
 #[cfg(test)]

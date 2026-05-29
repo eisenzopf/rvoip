@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use tracing::{debug, warn};
 
 /// Media quality levels based on ITU-T standards
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

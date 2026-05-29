@@ -6,7 +6,6 @@
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
-use tracing::{debug, warn};
 
 use super::feedback::{
     CongestionState, FeedbackConfig, FeedbackContext, FeedbackDecision, FeedbackGenerator,
@@ -39,6 +38,10 @@ pub struct LossFeedbackGenerator {
     total_lost: u32,
 }
 
+/// Loss-event sample retained for the upcoming bursty-loss summariser
+/// (consumes `loss_rate` / `consecutive_count`); the current generator
+/// only orders events by `timestamp`.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct LossEvent {
     timestamp: Instant,
@@ -215,6 +218,10 @@ pub struct CongestionFeedbackGenerator {
     confidence: f32,
 }
 
+/// Sample of measured bandwidth + correlated loss/RTT. The non-time
+/// fields feed the bandwidth-trend estimator (`BandwidthTrend`);
+/// today the trend is computed from `timestamp` deltas only.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct BandwidthSample {
     timestamp: Instant,
@@ -370,13 +377,15 @@ impl FeedbackGenerator for CongestionFeedbackGenerator {
     }
 }
 
-/// Quality-based feedback generator
-/// Combines multiple quality metrics for comprehensive feedback decisions
+/// Quality-based feedback generator. `last_feedback` is captured for
+/// the upcoming rate-limiter; today's decision uses score history
+/// only.
 pub struct QualityFeedbackGenerator {
     /// Quality score history
     quality_history: VecDeque<QualityScore>,
 
     /// Last feedback generation time
+    #[allow(dead_code)]
     last_feedback: Option<Instant>,
 
     /// Quality trend analysis
@@ -386,6 +395,10 @@ pub struct QualityFeedbackGenerator {
     quality_thresholds: QualityThresholds,
 }
 
+/// Components of the quality score. The per-axis scores are stored
+/// for the upcoming axis-aware degradation report; today only
+/// `overall_score` drives decisions.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct QualityScore {
     timestamp: Instant,
@@ -403,6 +416,9 @@ enum QualityTrend {
     Unknown,
 }
 
+/// Thresholds for quality classification. `excellent` documents the
+/// top band but the classifier only consults the lower bands.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct QualityThresholds {
     excellent: f32, // > 0.9

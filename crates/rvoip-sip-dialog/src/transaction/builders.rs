@@ -3,7 +3,6 @@
 //! This module provides convenience functions for creating SIP requests and responses,
 //! as well as helper functions for extracting dialog information from SIP messages.
 
-use crate::transaction::error::Result;
 use rvoip_sip_core::{Request, Response};
 
 /// Client-side request builders for common SIP operations

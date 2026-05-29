@@ -7,8 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
-
+use tracing::{debug, info, warn};
 use super::config::{AudioCodecCapability, EngineCapabilities, MediaEngineConfig};
 use super::lifecycle::{EngineState, LifecycleManager};
 use crate::error::{Error, Result};
@@ -22,8 +21,7 @@ use crate::performance::{
 
 // NEW: Audio processing imports
 use crate::processing::audio::{
-    AdvancedAcousticEchoCanceller, AdvancedAecConfig, AdvancedAgcConfig,
-    AdvancedAutomaticGainControl, AdvancedVadConfig, AdvancedVoiceActivityDetector,
+    AdvancedAcousticEchoCanceller, AdvancedAutomaticGainControl, AdvancedVoiceActivityDetector,
     AudioProcessingConfig, AudioProcessor,
 };
 
@@ -152,10 +150,14 @@ impl MediaSessionParams {
     }
 }
 
-/// Factory for creating advanced audio processors
+/// Factory for creating advanced audio processors. The
+/// `default_performance_config` is captured at construction so the
+/// per-session factory can hand it to the processor pipeline once
+/// the runtime tuning path is wired in.
 #[derive(Debug)]
 pub struct AdvancedProcessorFactory {
     /// Default performance configuration
+    #[allow(dead_code)]
     default_performance_config: PerformanceMetrics,
     /// Advanced processing configuration
     advanced_config: Option<super::config::AdvancedProcessingConfig>,
@@ -294,12 +296,16 @@ pub struct AdvancedProcessorSet {
     pub aec: Option<Arc<RwLock<AdvancedAcousticEchoCanceller>>>,
 }
 
-/// Handle to a media session for external operations
+/// Handle to a media session for external operations. The `engine`
+/// back-reference is captured so the handle can call back into the
+/// engine for runtime ops (start/stop/recreate); the current API
+/// surface routes those through other paths.
 #[derive(Debug, Clone)]
 pub struct MediaSessionHandle {
     /// Session identifier
     pub session_id: MediaSessionId,
     /// Reference to the engine for operations
+    #[allow(dead_code)]
     engine: Arc<MediaEngine>,
     /// Session-specific audio processor
     audio_processor: Option<Arc<AudioProcessor>>,
@@ -413,7 +419,11 @@ pub struct MediaEngine {
     performance_metrics: Arc<RwLock<PerformanceMetrics>>,
     /// Session-specific frame pools
     session_pools: RwLock<HashMap<MediaSessionId, Arc<AudioFramePool>>>,
-    /// Factory for creating advanced processors
+    /// Factory for creating advanced processors. Currently consumed
+    /// at engine construction; retained so per-session reconfigure
+    /// paths can spin new processors without re-creating the
+    /// factory.
+    #[allow(dead_code)]
     advanced_processor_factory: Arc<AdvancedProcessorFactory>,
     // TODO: Add component managers when implemented
     // codec_manager: Arc<CodecManager>,
@@ -526,7 +536,7 @@ impl MediaEngine {
     pub async fn create_media_session(
         self: &Arc<Self>,
         dialog_id: DialogId,
-        params: MediaSessionParams,
+        _params: MediaSessionParams,
     ) -> Result<MediaSessionHandle> {
         // Check if engine is running
         if !self.is_running().await {
@@ -585,8 +595,10 @@ impl MediaEngine {
             dialog_id, params.performance_optimization_level
         );
 
-        // 1. Create session-specific performance pool
-        let session_pool = self.create_session_pool(&session_id, &params).await?;
+        // 1. Create session-specific performance pool. The handle
+        // is dropped; the pool's lifetime is owned by `self.session_pools`
+        // once `create_session_pool` registers it there.
+        let _session_pool = self.create_session_pool(&session_id, &params).await?;
 
         // 2. Create audio processor with advanced configuration
         let audio_processor = AudioProcessor::new(params.audio_processing_config.clone())?;

@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use tokio::sync::RwLock;
 use tracing::{debug, trace};
 
-use crate::error::{BufferError, Result};
+use crate::error::Result;
 use crate::types::AudioFrame;
 
 /// Configuration for frame buffer
@@ -38,7 +38,10 @@ struct FrameEntry {
     frame: AudioFrame,
     /// Insert timestamp (for ordering)
     insert_time: std::time::Instant,
-    /// Frame timestamp (from RTP or local)
+    /// Frame timestamp (from RTP or local). Captured at insert so a
+    /// future RTP-aware reorder pass can use it; today's FIFO drain
+    /// only orders by `insert_time`.
+    #[allow(dead_code)]
     frame_timestamp: u32,
 }
 
@@ -325,7 +328,6 @@ impl FrameBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::SampleRate;
 
     #[tokio::test]
     async fn test_frame_buffer_creation() {

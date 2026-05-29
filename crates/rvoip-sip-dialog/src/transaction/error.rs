@@ -115,7 +115,7 @@ impl From<String> for Error {
 
 // More specific error for channel errors
 impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error {
-    fn from(e: tokio::sync::mpsc::error::SendError<T>) -> Self {
+    fn from(_e: tokio::sync::mpsc::error::SendError<T>) -> Self {
         Error::ChannelError {
             context: format!(
                 "Send error: channel closed while sending {:?}",

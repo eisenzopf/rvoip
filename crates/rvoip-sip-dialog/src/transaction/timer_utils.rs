@@ -1,10 +1,9 @@
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, trace};
 
-use crate::transaction::timer::{Timer, TimerFactory, TimerManager, TimerSettings, TimerType};
+use crate::transaction::timer::{TimerManager, TimerSettings, TimerType};
 use crate::transaction::{InternalTransactionCommand, TransactionKey, TransactionState};
 
 /// Helper module for transaction-specific timer operations using the core timer infrastructure.
@@ -61,7 +60,7 @@ pub async fn start_timer_with_transition(
     timer_manager: &TimerManager,
     tx_id: &TransactionKey,
     timer_name: &str,
-    timer_type: TimerType,
+    _timer_type: TimerType,
     interval: Duration,
     cmd_tx: mpsc::Sender<InternalTransactionCommand>,
     target_state: TransactionState,

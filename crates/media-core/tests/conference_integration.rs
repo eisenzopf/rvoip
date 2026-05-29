@@ -5,13 +5,12 @@
 
 use rvoip_media_core::{
     types::conference::{ConferenceMixingConfig, ConferenceMixingEvent, MixingQuality},
-    types::{AudioFrame, DialogId, SampleRate},
+    types::{AudioFrame, DialogId},
     MediaConfig, MediaSessionController,
 };
 use serial_test::serial;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
 

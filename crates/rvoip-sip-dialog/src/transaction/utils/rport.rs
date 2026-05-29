@@ -49,16 +49,15 @@ use std::net::SocketAddr;
 /// Returns `true` when at least one parameter was added or replaced.
 pub fn stamp_received_rport(via: &mut Via, source: SocketAddr) -> bool {
     let inbound_rport_present = via.rport().is_some();
-    let mut changed = false;
-
     via.set_received(source.ip());
-    changed = true;
 
     if inbound_rport_present {
         via.set_rport(Some(source.port()));
     }
 
-    changed
+    // `set_received` is unconditional; we always changed at least one
+    // parameter on the Via header.
+    true
 }
 
 /// Convenience wrapper that locates the top `Via` header on an

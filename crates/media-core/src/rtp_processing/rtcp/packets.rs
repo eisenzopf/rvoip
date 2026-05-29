@@ -183,7 +183,7 @@ impl FirPacket {
 
     /// Serialize FIR packet to bytes
     pub fn to_bytes(&self) -> Bytes {
-        let mut header_bytes = self.header.to_bytes();
+        let header_bytes = self.header.to_bytes();
         let mut buf = BytesMut::from(header_bytes.as_ref());
 
         // Add FIR entries

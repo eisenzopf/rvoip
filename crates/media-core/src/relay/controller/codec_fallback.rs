@@ -11,7 +11,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::codec::mapping::CodecMapper;
-use crate::codec::transcoding::{Transcoder, TranscodingPath, TranscodingSession};
+use crate::codec::transcoding::Transcoder;
 use crate::error::{Error, Result};
 use crate::processing::format::FormatConverter;
 use crate::types::{AudioFrame, DialogId};
@@ -228,7 +228,7 @@ impl FallbackHandler {
         detected_codec: String,
         detected_payload_type: u8,
         confidence: f32,
-        codec_mapper: &CodecMapper,
+        _codec_mapper: &CodecMapper,
     ) -> Result<()> {
         if confidence < self.config.min_detection_confidence {
             return Err(Error::config(format!(
@@ -313,7 +313,7 @@ impl FallbackHandler {
         &mut self,
         from_codec: &str,
         to_codec: &str,
-        from_payload_type: u8,
+        _from_payload_type: u8,
     ) -> Result<()> {
         debug!(
             "Setting up transcoding session: {} → {} for dialog {}",

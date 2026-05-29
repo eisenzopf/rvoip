@@ -15,7 +15,10 @@ use crate::events::cross_crate::CrossCrateEvent;
 pub struct GrpcTransport {
     /// Listen endpoint for this service
     endpoint: String,
-    /// Service name for this instance
+    /// Service name for this instance. Will be embedded in outbound
+    /// metadata once the publish path is wired; the field is captured
+    /// at construction so callers don't have to re-thread it later.
+    #[allow(dead_code)]
     service_name: String,
     /// Known service endpoints
     service_endpoints: HashMap<String, String>,

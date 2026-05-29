@@ -5,14 +5,13 @@
 
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info, warn};
-
-use super::events::{MediaSessionEvent, MediaSessionEventType, QualitySeverity};
+use tracing::{debug, info, warn};
+use super::events::MediaSessionEvent;
 use crate::codec::audio::common::AudioCodec;
 use crate::error::{MediaSessionError, Result};
 use crate::processing::audio::AudioProcessor;
 use crate::quality::{QualityMetrics, QualityMonitor};
-use crate::types::{AudioFrame, DialogId, MediaDirection, MediaPacket, MediaSessionId, MediaType};
+use crate::types::{AudioFrame, DialogId, MediaPacket, MediaSessionId, MediaType};
 
 /// Media session state
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +66,10 @@ pub struct MediaSession {
     /// Current session state
     state: Arc<RwLock<MediaSessionState>>,
 
-    /// Session configuration
+    /// Session configuration. Captured at session creation so a
+    /// future reconfigure path can compare new vs initial settings;
+    /// today's state machine doesn't read it back.
+    #[allow(dead_code)]
     config: MediaSessionConfig,
 
     /// Audio codec for this session
@@ -400,8 +402,6 @@ impl MediaSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::audio::G711Codec;
-    use crate::types::SampleRate;
 
     #[tokio::test]
     async fn test_media_session_creation() {

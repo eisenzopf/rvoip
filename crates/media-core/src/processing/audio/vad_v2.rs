@@ -2,12 +2,16 @@
 //!
 //! This module implements state-of-the-art VAD using spectral feature extraction,
 //! frequency-domain analysis, and ensemble detection methods.
+//
+// The spectral-feature scaffolding (smoothed spectrum, rolloff statistic)
+// is captured during analysis but the simplified energy-based classifier
+// doesn't consume it yet.
+#![allow(dead_code, unused_variables, unused_mut)]
 
 use crate::error::{AudioProcessingError, Result};
 use crate::types::AudioFrame;
 use apodize::hanning_iter;
 use rustfft::{num_complex::Complex, FftPlanner};
-use std::f32::consts::PI;
 use tracing::{debug, trace};
 
 /// Advanced VAD configuration with spectral analysis
@@ -548,7 +552,7 @@ mod tests {
 
         for i in 0..total_samples {
             let t = i as f32 / sample_rate as f32;
-            let signal = (2.0 * PI * frequency * t).sin() * amplitude;
+            let signal = (2.0 * std::f32::consts::PI * frequency * t).sin() * amplitude;
             samples.push((signal * 16384.0) as i16);
         }
 

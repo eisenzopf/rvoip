@@ -6,11 +6,9 @@ use bytes::Bytes;
 use rvoip_sip_core::{
     types::pidf::PidfDocument, HeaderName, HeaderValue, Method, Request, TypedHeader, Uri,
 };
-use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, info, warn};
-
-use crate::{Dialog, DialogError, DialogId, DialogResult};
+use tracing::{debug, info};
+use crate::{DialogError, DialogResult};
 
 /// PUBLISH request builder for presence updates
 pub struct PublishBuilder {
@@ -269,8 +267,6 @@ impl PresencePublisher {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_publish_builder() {
         // This would need mock transaction manager to test properly

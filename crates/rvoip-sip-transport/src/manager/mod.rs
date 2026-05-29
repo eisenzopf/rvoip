@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::select;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{debug, error, info, trace, warn};
-
+use tracing::{debug, error, info};
 use crate::error::{Error, Result};
 use crate::factory::{TransportFactory, TransportFactoryConfig, TransportType};
 use crate::transport::{Transport, TransportEvent};
@@ -81,7 +79,7 @@ impl TransportManager {
     /// Initializes the event listener task that forwards events from all transports
     fn init_event_listener(
         &self,
-        event_tx: mpsc::Sender<TransportEvent>,
+        _event_tx: mpsc::Sender<TransportEvent>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             info!("Transport event listener started");
@@ -205,7 +203,7 @@ mod tests {
     use super::*;
     use crate::bind_udp;
     use rvoip_sip_core::builder::SimpleRequestBuilder;
-    use rvoip_sip_core::{Method, Request};
+    use rvoip_sip_core::Method;
 
     #[tokio::test]
     async fn test_transport_manager_create() {
@@ -260,7 +258,7 @@ mod tests {
             .unwrap();
 
         let client_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let client_bound_addr = manager
+        let _client_bound_addr = manager
             .create_transport(TransportType::Udp, client_addr)
             .await
             .unwrap();
@@ -290,7 +288,7 @@ mod tests {
         match event {
             TransportEvent::MessageReceived {
                 message,
-                source,
+                source: _,
                 destination,
                 ..
             } => {

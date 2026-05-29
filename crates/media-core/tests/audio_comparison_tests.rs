@@ -5,25 +5,11 @@
 
 use rvoip_media_core::prelude::*;
 use rvoip_media_core::processing::audio::{
-    AcousticEchoCanceller,
-    AdvancedAcousticEchoCanceller,
-    AdvancedAecConfig,
-    AdvancedAecResult,
-    AdvancedAgcConfig,
-    AdvancedAgcResult,
-    AdvancedAutomaticGainControl,
-    AdvancedVadConfig,
-    AdvancedVadResult,
+    AcousticEchoCanceller, AdvancedAcousticEchoCanceller, AdvancedAecConfig, AdvancedAgcConfig,
+    AdvancedAutomaticGainControl, AdvancedVadConfig,
     // Advanced implementations
     AdvancedVoiceActivityDetector,
-    AecConfig,
-    AecResult,
-    AgcConfig,
-    AgcResult,
-
-    AutomaticGainControl,
-    VadConfig,
-    VadResult,
+    AecConfig, AgcConfig, AutomaticGainControl, VadConfig,
     // Basic implementations
     VoiceActivityDetector,
 };

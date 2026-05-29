@@ -29,7 +29,6 @@ use crate::manager::transaction_integration::detect_peer_100rel_support;
 use crate::manager::{DialogLookup, DialogManager, SessionCoordinator};
 use crate::transaction::utils::response_builders;
 use crate::transaction::TransactionKey;
-use rvoip_sip_core::types::header::TypedHeaderTrait;
 use rvoip_sip_core::types::min_se::MinSE;
 use rvoip_sip_core::types::unsupported::Unsupported;
 use rvoip_sip_core::types::TypedHeader;

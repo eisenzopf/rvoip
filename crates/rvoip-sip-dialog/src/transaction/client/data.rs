@@ -32,8 +32,7 @@ use crate::transaction::runner::{
 use crate::transaction::state::TransactionLifecycle;
 use crate::transaction::timer::TimerSettings;
 use crate::transaction::{
-    AtomicTransactionState, InternalTransactionCommand, Transaction, TransactionEvent,
-    TransactionKey, TransactionState,
+    AtomicTransactionState, InternalTransactionCommand, TransactionEvent, TransactionKey,
 };
 
 /// Command sender for transaction event loops.

@@ -29,9 +29,7 @@
 /// and timers) from the common event loop machinery, reducing code duplication and making the
 /// code more maintainable.
 use std::sync::Arc;
-use std::time::Duration; // Required for timer configurations
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
 // Assuming these are accessible. Adjust paths if necessary.
 use crate::transaction::error::Result;
@@ -234,7 +232,7 @@ where
     /// # Returns
     ///
     /// A Result indicating success or failure of the timer cancellation.
-    async fn handle_cancel_timer_100(&self, timer_handles: &mut TH) -> Result<()> {
+    async fn handle_cancel_timer_100(&self, _timer_handles: &mut TH) -> Result<()> {
         // Default implementation is a no-op for non-INVITE server transactions
         Ok(())
     }

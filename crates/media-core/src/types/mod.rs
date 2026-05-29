@@ -174,7 +174,7 @@ pub struct AudioFrame {
 
 /// Custom serialization for Duration as milliseconds
 mod duration_ms {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{Deserialize, Deserializer, Serializer};
     use std::time::Duration;
 
     pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>

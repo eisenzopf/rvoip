@@ -13,10 +13,17 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_rustls::rustls::{
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName},
+    ClientConfig, RootCertStore, ServerConfig,
+};
+// `dev-insecure-tls` is the only path that implements `ServerCertVerifier`;
+// everything below is only reachable inside that gate.
+#[cfg(feature = "dev-insecure-tls")]
+use tokio_rustls::rustls::{
     self,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
-    ClientConfig, DigitallySignedStruct, RootCertStore, ServerConfig, SignatureScheme,
+    pki_types::UnixTime,
+    DigitallySignedStruct, SignatureScheme,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::{debug, error, info, trace, warn};
@@ -761,44 +768,51 @@ pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig>
         let _ = cfg.insecure_skip_verify;
     }
 
-    let mut root_store = RootCertStore::empty();
-
-    let mut loaded_any_system = false;
-    let certs = rustls_native_certs::load_native_certs();
-    for cert in certs.certs {
-        if root_store.add(cert).is_ok() {
-            loaded_any_system = true;
-        }
-    }
-    for error in &certs.errors {
-        warn!(
-            "TLS client: failed to load one system trust anchor: {}",
-            error
-        );
-    }
-    if loaded_any_system {
-        debug!(
-            "TLS client root store loaded {} system certs",
-            root_store.len()
-        );
-    } else {
-        if let Some(error) = certs.errors.first().map(|e| e.to_string()) {
-            warn!(
-                "TLS client: failed to read system trust store ({}); falling back to webpki-roots",
-                error
-            );
-        } else {
-            warn!("TLS client: no system trust anchors found; falling back to webpki-roots");
-        }
-    }
-
-    if !loaded_any_system {
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        debug!(
-            "TLS client root store fell back to webpki-roots ({} anchors)",
-            root_store.len()
-        );
-    }
+    // System trust anchors are loaded once per process and cached. Reading the
+    // OS trust store (`rustls_native_certs::load_native_certs()` → the macOS
+    // keychain via the Security framework) can take *seconds* — pathologically
+    // so on some hosts — and the anchors don't change over a process's
+    // lifetime. Load them once, then clone the cached store per config; extras
+    // supplied by the caller are still added below.
+    let mut root_store = {
+        static SYSTEM_ROOTS: std::sync::OnceLock<RootCertStore> = std::sync::OnceLock::new();
+        SYSTEM_ROOTS
+            .get_or_init(|| {
+                let mut root_store = RootCertStore::empty();
+                let mut loaded_any_system = false;
+                let certs = rustls_native_certs::load_native_certs();
+                for cert in certs.certs {
+                    if root_store.add(cert).is_ok() {
+                        loaded_any_system = true;
+                    }
+                }
+                for error in &certs.errors {
+                    warn!("TLS client: failed to load one system trust anchor: {}", error);
+                }
+                if loaded_any_system {
+                    debug!(
+                        "TLS client root store loaded {} system certs",
+                        root_store.len()
+                    );
+                } else if let Some(error) = certs.errors.first().map(|e| e.to_string()) {
+                    warn!(
+                        "TLS client: failed to read system trust store ({}); falling back to webpki-roots",
+                        error
+                    );
+                } else {
+                    warn!("TLS client: no system trust anchors found; falling back to webpki-roots");
+                }
+                if !loaded_any_system {
+                    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+                    debug!(
+                        "TLS client root store fell back to webpki-roots ({} anchors)",
+                        root_store.len()
+                    );
+                }
+                root_store
+            })
+            .clone()
+    };
 
     if let Some(extra_path) = &cfg.extra_ca_path {
         let extras = load_certs(extra_path)?;

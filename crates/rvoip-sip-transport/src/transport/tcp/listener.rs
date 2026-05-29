@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
-use tracing::{debug, error, info, trace};
-
+use tracing::{debug, error, info};
 use crate::error::{Error, Result};
 
 /// TCP listener for accepting SIP connections

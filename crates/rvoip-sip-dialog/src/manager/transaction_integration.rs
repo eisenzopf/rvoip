@@ -18,7 +18,7 @@ use crate::dialog::DialogId;
 use crate::errors::DialogResult;
 use crate::events::{DialogEvent, SessionCoordinationEvent};
 use crate::protocol::response_handler::response_has_auth_challenge;
-use crate::transaction::builders::{dialog_quick, dialog_utils};
+use crate::transaction::builders::dialog_quick;
 use crate::transaction::dialog::{request_builder_from_dialog_template, DialogRequestTemplate};
 use crate::transaction::{TransactionEvent, TransactionKey, TransactionState};
 use rvoip_sip_core::{Method, Request, Response};
@@ -722,7 +722,6 @@ impl DialogManager {
         dialog_id: &DialogId,
     ) -> Option<TransactionKey> {
         use rvoip_sip_core::types::cseq::CSeq;
-        use rvoip_sip_core::types::TypedHeader;
 
         let candidates: Vec<TransactionKey> = self
             .dialog_invite_transactions

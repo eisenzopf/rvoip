@@ -396,7 +396,6 @@ use super::{
     ApiError, ApiResult, DialogApi, DialogStats,
 };
 use crate::dialog::{Dialog, DialogId, DialogState};
-use crate::events::SessionCoordinationEvent;
 use crate::manager::DialogManager;
 
 /// High-level client interface for SIP dialog management

@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use rvoip_media_core::relay::controller::types::{MediaConfig, MediaSessionEvent};
+use rvoip_media_core::relay::controller::types::MediaConfig;
 use rvoip_media_core::relay::controller::MediaSessionController;
 use rvoip_media_core::types::{AudioFrame, DialogId};
 

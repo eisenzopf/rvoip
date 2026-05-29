@@ -4,7 +4,6 @@
 //! to external subscribers like session-core.
 
 use bytes::Bytes;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;

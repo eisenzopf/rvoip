@@ -1,5 +1,4 @@
-use rvoip_sip_core::prelude::{Message, Method, Request, Response, StatusCode, Uri, Version};
-use std::fmt;
+use rvoip_sip_core::prelude::{Request, Response};
 /// # Transaction Events
 ///
 /// This module defines the events that flow from the transaction layer to the Transaction User (TU)
@@ -328,6 +327,7 @@ mod tests {
     use super::*;
     use rvoip_sip_core::types::method::Method;
     use rvoip_sip_core::types::uri::Uri;
+    use rvoip_sip_core::StatusCode;
 
     #[test]
     fn it_builds_provisional_response_event() {

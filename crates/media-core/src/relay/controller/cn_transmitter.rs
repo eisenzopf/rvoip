@@ -68,7 +68,7 @@ impl CnTransmitter {
             session.current_timestamp()
         };
 
-        let mut session = self.rtp_session.lock().await;
+        let session = self.rtp_session.lock().await;
         session
             .send_packet_with_pt(
                 timestamp,

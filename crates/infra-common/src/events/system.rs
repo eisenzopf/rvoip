@@ -14,10 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::events::api::{self, EventSystem as EventSystemTrait};
-use crate::events::builder::{EventSystemBuilder, ImplementationType};
 use crate::events::bus::{EventBus, EventBusConfig};
 use crate::events::static_path::StaticFastPathSystem;
-use crate::events::types::{Event, EventError, EventFilter, EventResult, StaticEvent};
+use crate::events::types::{Event, EventFilter, EventResult};
 use crate::events::zero_copy::ZeroCopySystem;
 
 /// Unified event system that provides a common interface to both implementations.
@@ -304,10 +303,9 @@ mod tests {
     use super::*;
     use crate::events::api::EventSystem as EventSystemTrait;
     use crate::events::builder::{EventSystemBuilder, ImplementationType};
-    use crate::events::types::EventPriority;
+    use crate::events::types::{EventPriority, StaticEvent};
     use serde::{Deserialize, Serialize};
     use std::any::Any;
-    use std::sync::Arc;
     use std::time::Duration;
 
     #[derive(Clone, Debug, Serialize, Deserialize)]

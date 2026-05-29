@@ -133,6 +133,7 @@ impl OutboundFlow {
         true
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn state(&self) -> FlowState {
         *self.state.read().await
     }

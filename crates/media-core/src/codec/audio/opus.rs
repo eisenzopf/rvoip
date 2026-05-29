@@ -6,8 +6,7 @@
 use super::common::{AudioCodec, CodecInfo};
 use crate::error::{CodecError, Result};
 use crate::types::{AudioFrame, SampleRate};
-use tracing::{debug, error, warn};
-
+use tracing::{debug, warn};
 /// Opus codec configuration
 #[derive(Debug, Clone)]
 pub struct OpusConfig {
@@ -58,7 +57,10 @@ pub struct OpusCodec {
     /// Opus decoder (when available)
     #[cfg(feature = "opus")]
     decoder: Option<opus::Decoder>,
-    /// Frame size in samples
+    /// Frame size in samples. Captured at construction so the encode
+    /// path can resize buffers without recomputing; the current
+    /// implementation derives the size from the input frame instead.
+    #[allow(dead_code)]
     frame_size: usize,
 }
 
@@ -183,6 +185,11 @@ impl OpusCodec {
     }
 }
 
+// `audio_frame` / `encoded_data` parameters are consumed by the
+// `#[cfg(feature = "opus")]` arms and dropped in the
+// `#[cfg(not(feature = "opus"))]` stub arms; allow the unused
+// bindings since they're only "unused" with opus disabled.
+#[allow(unused_variables)]
 impl AudioCodec for OpusCodec {
     fn encode(&mut self, audio_frame: &AudioFrame) -> Result<Vec<u8>> {
         #[cfg(feature = "opus")]

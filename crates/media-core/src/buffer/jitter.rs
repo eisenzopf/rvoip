@@ -5,11 +5,10 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tracing::{debug, trace, warn};
 
-use crate::error::{BufferError, Result};
-use crate::quality::metrics::QualityMetrics;
+use crate::error::Result;
 use crate::types::{AudioFrame, MediaPacket};
 
 /// Jitter buffer configuration
@@ -56,7 +55,10 @@ pub enum AdaptationStrategy {
     Aggressive,
 }
 
-/// Buffered frame with metadata
+/// Buffered frame with metadata. The arrival-time / RTP-timestamp /
+/// sequence-number fields are captured on insert for the late-arrival
+/// statistics path that's wired in but not yet read on every pull.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct BufferedFrame {
     /// Audio frame data
@@ -293,6 +295,7 @@ impl JitterBuffer {
     pub async fn get_next_frame(&self) -> Result<Option<AudioFrame>> {
         let target_depth = self.target_depth.load(Ordering::Relaxed);
 
+        #[allow(dead_code)]
         enum Pulled {
             Empty,
             NotReady,
@@ -452,7 +455,6 @@ impl JitterBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{MediaType, SampleRate};
 
     #[tokio::test]
     async fn test_jitter_buffer_creation() {

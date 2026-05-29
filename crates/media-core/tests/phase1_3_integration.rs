@@ -4,13 +4,9 @@
 //! with advanced v2 processors and performance monitoring.
 
 use rvoip_media_core::prelude::*;
-use rvoip_media_core::processing::audio::{
-    AdvancedAecConfig, AdvancedAgcConfig, AdvancedVadConfig,
-};
 use rvoip_media_core::relay::{MediaConfig, MediaSessionController};
 use rvoip_media_core::types::{AudioFrame, DialogId};
 use serial_test::serial;
-use std::net::SocketAddr;
 use std::time::Duration;
 
 #[tokio::test]

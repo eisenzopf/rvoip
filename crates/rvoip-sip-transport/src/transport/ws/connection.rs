@@ -1,17 +1,12 @@
-use bytes::{Buf, BytesMut};
-use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::stream::SplitSink;
 use futures_util::SinkExt;
-use futures_util::StreamExt;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tracing::{debug, error, trace, warn};
-
+use tracing::{debug, trace, warn};
 #[cfg(feature = "ws")]
-use tokio_tungstenite::tungstenite::protocol::{Message as WsMessage, Role};
+use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 #[cfg(feature = "ws")]
 use tokio_tungstenite::{tungstenite, WebSocketStream};
 
@@ -21,11 +16,16 @@ use super::SipWsStream;
 use crate::error::{Error, Result};
 use rvoip_sip_core::{parse_message, Message};
 
-// SIP WebSocket subprotocol names as per RFC 7118
+// SIP WebSocket subprotocol names as per RFC 7118. `SIP_WS_SUBPROTOCOL`
+// is referenced by the in-file tests; the others document the protocol
+// constants the upcoming SIP-over-WS path will consume.
+#[allow(dead_code)]
 const SIP_WS_SUBPROTOCOL: &str = "sip";
+#[allow(dead_code)]
 const SIP_WSS_SUBPROTOCOL: &str = "sips";
 
-// Maximum message size in bytes
+// Maximum message size in bytes.
+#[allow(dead_code)]
 const MAX_MESSAGE_SIZE: usize = 65535;
 
 /// WebSocket connection for SIP messages
@@ -321,8 +321,7 @@ impl Drop for WebSocketConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rvoip_sip_core::builder::SimpleRequestBuilder;
-    use rvoip_sip_core::{Method, Request};
+    use rvoip_sip_core::Method;
     use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 
     // For testing only: a simplified WebSocketConnection without real WebSocket dependencies

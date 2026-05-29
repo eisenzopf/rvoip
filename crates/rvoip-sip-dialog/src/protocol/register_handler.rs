@@ -20,12 +20,10 @@
 //! - Maintains proper SIP transaction handling
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tracing::{debug, warn};
 
 use crate::errors::{DialogError, DialogResult};
-use crate::events::SessionCoordinationEvent;
-use crate::manager::{DialogManager, SessionCoordinator};
+use crate::manager::DialogManager;
 use rvoip_sip_core::Request;
 
 /// REGISTER-specific handling operations
@@ -204,7 +202,7 @@ impl DialogManager {
     ) -> DialogResult<()> {
         use rvoip_sip_core::types::header::HeaderName;
         use rvoip_sip_core::types::headers::header_value::HeaderValue;
-        use rvoip_sip_core::{ResponseBuilder, StatusCode, TypedHeader};
+        use rvoip_sip_core::{StatusCode, TypedHeader};
 
         debug!("Sending REGISTER response: {} {}", status_code, reason);
 
@@ -222,7 +220,6 @@ impl DialogManager {
             })?;
 
         // Verify the request has CSeq header
-        use rvoip_sip_core::types::headers::HeaderAccess;
         if let Some(cseq) = request.typed_header::<rvoip_sip_core::types::cseq::CSeq>() {
             debug!(
                 "Original request has CSeq: {} {}",
@@ -259,7 +256,7 @@ impl DialogManager {
                 crate::transaction::utils::response_builders::create_response(&request, status);
 
             // Add Contact header if provided
-            if let Some(contact_uri) = contact {
+            if let Some(_contact_uri) = contact {
                 // Copy Contact header from request or use provided value
                 if let Some(contact_header) = request.header(&HeaderName::Contact) {
                     resp.headers.push(contact_header.clone());

@@ -2,11 +2,16 @@
 //!
 //! This module implements state-of-the-art AGC using multi-band processing,
 //! look-ahead limiting, and perceptual loudness models.
+//
+// The multi-band scaffolding (per-band sample rate, look-ahead samples,
+// perceptual weighting, delay-line state) is captured at construction;
+// the simplified single-band gain path doesn't read them yet but the
+// configuration surface needs to stay stable.
+#![allow(dead_code, unused_variables)]
 
 use crate::error::{AudioProcessingError, Result};
 use crate::types::AudioFrame;
-use tracing::{debug, trace};
-
+use tracing::debug;
 /// Advanced multi-band AGC configuration
 #[derive(Debug, Clone)]
 pub struct AdvancedAgcConfig {

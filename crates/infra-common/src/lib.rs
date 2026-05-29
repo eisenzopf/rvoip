@@ -147,7 +147,7 @@ mod tests {
             let channel_counter_clone = channel_counter.clone();
             let channel_task = tokio::spawn(async move {
                 println!("Channel receiver task started");
-                while let Ok(event) = rx.recv().await {
+                while let Ok(_event) = rx.recv().await {
                     println!("Received event on channel");
                     channel_counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }

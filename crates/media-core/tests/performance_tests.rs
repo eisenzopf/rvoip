@@ -5,9 +5,9 @@
 
 use rvoip_media_core::performance::{
     metrics::{BenchmarkConfig, BenchmarkResults, PerformanceMetrics},
-    pool::{AudioFramePool, PoolConfig, PooledAudioFrame},
+    pool::{AudioFramePool, PoolConfig},
     simd::SimdProcessor,
-    zero_copy::{SharedAudioBuffer, ZeroCopyAudioFrame},
+    zero_copy::ZeroCopyAudioFrame,
 };
 use rvoip_media_core::prelude::*;
 use serial_test::serial;
@@ -17,6 +17,9 @@ use std::time::Instant;
 struct AudioFrameBenchmark {
     config: BenchmarkConfig,
     pool: std::sync::Arc<AudioFramePool>,
+    /// SIMD processor; held by the benchmark but accessed via the
+    /// closure inside `run_*`, so the direct read isn't visible.
+    #[allow(dead_code)]
     simd: SimdProcessor,
 }
 
@@ -206,8 +209,8 @@ async fn test_audio_frame_pool() {
 
     // Test frame allocation and return
     {
-        let frame1 = pool.get_frame();
-        let frame2 = pool.get_frame();
+        let _frame1 = pool.get_frame();
+        let _frame2 = pool.get_frame();
 
         let stats = pool.get_stats();
         assert_eq!(stats.pool_hits, 2);

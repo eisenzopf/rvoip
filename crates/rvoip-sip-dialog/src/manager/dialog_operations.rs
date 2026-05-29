@@ -46,7 +46,7 @@ pub trait DialogStore {
     fn get_dialog(&self, dialog_id: &DialogId) -> DialogResult<Dialog>;
 
     /// Get a mutable reference to a dialog
-    fn get_dialog_mut(&self, dialog_id: &DialogId) -> DialogResult<RefMut<DialogId, Dialog>>;
+    fn get_dialog_mut(&self, dialog_id: &DialogId) -> DialogResult<RefMut<'_, DialogId, Dialog>>;
 
     /// Terminate a dialog
     fn terminate_dialog(
@@ -255,7 +255,7 @@ impl DialogStore for DialogManager {
     }
 
     /// Get a mutable reference to a dialog
-    fn get_dialog_mut(&self, dialog_id: &DialogId) -> DialogResult<RefMut<DialogId, Dialog>> {
+    fn get_dialog_mut(&self, dialog_id: &DialogId) -> DialogResult<RefMut<'_, DialogId, Dialog>> {
         self.dialogs
             .get_mut(dialog_id)
             .ok_or_else(|| DialogError::dialog_not_found(&dialog_id.to_string()))

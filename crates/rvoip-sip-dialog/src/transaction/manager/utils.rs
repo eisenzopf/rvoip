@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 /// # Transaction Manager Utilities
 ///
 /// This module provides utility functions for the TransactionManager implementation.
@@ -14,24 +13,17 @@ use std::collections::HashMap;
 /// These functions encapsulate low-level details, allowing the TransactionManager
 /// to focus on higher-level transaction state management.
 use std::net::SocketAddr;
-use std::str::FromStr;
-use std::sync::Arc;
 
-use tokio::sync::mpsc;
-use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
-
+use tracing::debug;
 use rvoip_sip_core::prelude::*;
-use rvoip_sip_core::{Host, TypedHeader};
+use rvoip_sip_core::TypedHeader;
 use rvoip_sip_transport::transport::TransportType;
 
 use crate::transaction::transport::multiplexed::select_transport_for_uri;
 
-use crate::transaction::client::ClientTransaction;
 use crate::transaction::client::TransactionExt as ClientTransactionExt;
-use crate::transaction::error::{self, Error, Result};
-use crate::transaction::server::TransactionExt as ServerTransactionExt;
-use crate::transaction::{Transaction, TransactionKey};
+use crate::transaction::error::{Error, Result};
+use crate::transaction::TransactionKey;
 
 /// Extensions for response building to ensure RFC 3261 compliance.
 ///

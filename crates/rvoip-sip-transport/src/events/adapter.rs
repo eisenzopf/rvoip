@@ -12,13 +12,11 @@ use tracing::{debug, error, info, warn};
 
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
 use rvoip_infra_common::events::cross_crate::{
-    CrossCrateEvent, DialogToTransportEvent, RegistrationStatus, RvoipCrossCrateEvent,
-    TransportToDialogEvent,
+    CrossCrateEvent, DialogToTransportEvent, RvoipCrossCrateEvent, TransportToDialogEvent,
 };
 use rvoip_infra_common::planes::LayerTaskManager;
 
 use crate::transport::TransportEvent;
-use rvoip_sip_core::{Method, StatusCode};
 
 /// Transport Event Adapter that bridges local transport events with global cross-crate events
 pub struct TransportEventAdapter {
@@ -82,7 +80,7 @@ impl TransportEventAdapter {
         debug!("Setting up cross-crate event subscriptions for sip-transport");
 
         // Subscribe to events targeted at sip-transport
-        let dialog_to_transport_receiver = self
+        let _dialog_to_transport_receiver = self
             .global_coordinator
             .subscribe("dialog_to_transport")
             .await?;
@@ -96,7 +94,7 @@ impl TransportEventAdapter {
         debug!("Starting transport event processing tasks");
 
         // Task: Process incoming cross-crate events from dialog-core
-        let coordinator = self.global_coordinator.clone();
+        let _coordinator = self.global_coordinator.clone();
 
         self.task_manager
             .spawn_tracked(
@@ -160,7 +158,11 @@ impl TransportEventAdapter {
     // CROSS-CRATE EVENT CONVERSION
     // =============================================================================
 
-    /// Convert local transport events to cross-crate events where applicable
+    /// Convert local transport events to cross-crate events where applicable.
+    /// The destructured fields (`destination`, `headers`, `body`, etc.) are
+    /// bound for documentation and future use even when this iteration's
+    /// translation path drops them.
+    #[allow(unused_variables)]
     fn convert_transport_to_cross_crate_event(
         &self,
         event: &TransportEvent,
@@ -256,7 +258,11 @@ impl TransportEventAdapter {
         }
     }
 
-    /// Convert cross-crate events to local transport events
+    /// Convert cross-crate events to local transport events. Same
+    /// rationale as `convert_transport_to_cross_crate_event` above —
+    /// the inner destructured fields document the wire format even
+    /// where this iteration's mapping returns `None`.
+    #[allow(unused_variables, dead_code)]
     fn convert_cross_crate_to_transport_event(
         &self,
         event: &RvoipCrossCrateEvent,
@@ -311,8 +317,12 @@ impl TransportEventAdapter {
     }
 }
 
-/// Event handler for processing cross-crate events in sip-transport
+/// Event handler for processing cross-crate events in sip-transport.
+/// `adapter` is captured at construction so the `handle` impl below
+/// can route inbound cross-crate events into the local adapter once
+/// the TODO at line ~339 is implemented.
 pub struct TransportCrossCrateEventHandler {
+    #[allow(dead_code)]
     adapter: Arc<TransportEventAdapter>,
 }
 
@@ -340,7 +350,6 @@ impl CrossCrateEventHandler for TransportCrossCrateEventHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
 
     #[tokio::test]
     async fn test_transport_adapter_creation() {

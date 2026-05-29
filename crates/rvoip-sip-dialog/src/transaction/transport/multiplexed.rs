@@ -117,7 +117,7 @@ impl MultiplexedTransport {
         Self::new(default, transports, None)
     }
 
-    pub fn new(
+    pub(crate) fn new(
         default: Arc<dyn Transport>,
         transports: HashMap<TransportType, Arc<dyn Transport>>,
         sip_trace: Option<Arc<SipTraceRuntime>>,

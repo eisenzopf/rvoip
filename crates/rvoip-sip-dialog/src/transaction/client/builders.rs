@@ -9,7 +9,7 @@ use crate::transaction::utils::dialog_utils::generate_branch;
 use rvoip_sip_core::builder::SimpleRequestBuilder;
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::types::{
-    contact::{Contact, ContactParamInfo},
+    contact::Contact,
     content_type::ContentType,
     event::{Event, EventType},
     expires::Expires,

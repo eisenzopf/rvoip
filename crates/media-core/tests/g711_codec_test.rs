@@ -2,13 +2,12 @@
 //!
 //! This test validates the working G.711 implementation in media-core
 
-use bytes::BytesMut;
 use codec_core::codecs::g711::{
     alaw_compress, alaw_expand, ulaw_compress, ulaw_expand, G711Variant,
 };
 use rvoip_media_core::codec::audio::common::AudioCodec;
 use rvoip_media_core::codec::audio::g711::G711Codec;
-use rvoip_media_core::{AudioBuffer, AudioFormat, AudioFrame, Sample, SampleRate};
+use rvoip_media_core::{AudioBuffer, AudioFrame};
 
 /// Calculate signal-to-noise ratio (SNR) between AudioFrames
 fn calculate_audio_frame_snr(original: &AudioFrame, processed: &AudioFrame) -> f64 {
@@ -236,8 +235,8 @@ fn test_g711_codec_pcma() {
 fn test_g711_codec_properties() {
     println!("🎵 Testing G.711 codec properties");
 
-    let mut pcmu_codec = G711Codec::new(G711Variant::MuLaw, 8000, 1).unwrap();
-    let mut pcma_codec = G711Codec::new(G711Variant::ALaw, 8000, 1).unwrap();
+    let pcmu_codec = G711Codec::new(G711Variant::MuLaw, 8000, 1).unwrap();
+    let pcma_codec = G711Codec::new(G711Variant::ALaw, 8000, 1).unwrap();
 
     // Test codec properties
     let pcmu_info = pcmu_codec.get_info();
@@ -249,17 +248,10 @@ fn test_g711_codec_properties() {
     assert_eq!(pcma_info.name, "G.711 A-law");
     assert_eq!(pcma_info.sample_rate, 8000);
 
-    // Test format support
-    let valid_format = AudioFormat::mono_16bit(SampleRate::Rate8000);
-    let invalid_format_stereo = AudioFormat {
-        channels: 2,
-        bit_depth: 16,
-        sample_rate: SampleRate::Rate8000,
-    };
-    let invalid_format_rate = AudioFormat::mono_16bit(SampleRate::Rate16000);
-
-    // G.711 codec supports 8kHz mono by construction
-    // Format support is implicit in the constructor parameters
+    // G.711 codec supports 8kHz mono by construction; format support
+    // is implicit in the constructor parameters above so the
+    // explicit `AudioFormat` round-trip the test originally built no
+    // longer adds coverage.
 
     println!("✅ All codec properties correct!");
 }
@@ -295,9 +287,10 @@ fn test_g711_edge_cases() {
             value, alaw_encoded, alaw_decoded
         );
 
-        // Verify no panics occurred (basic sanity check)
-        assert!(ulaw_decoded.abs() <= 32767);
-        assert!(alaw_decoded.abs() <= 32767);
+        // Smoke check: the encode/decode pair returns `i16`, so the
+        // range is enforced by the type; we only need to keep the
+        // values live to prove the path doesn't panic.
+        let _ = (ulaw_decoded, alaw_decoded);
     }
 
     println!("✅ Edge case tests passed!");
@@ -382,7 +375,10 @@ pub fn calculate_snr_samples(original: &[i16], decoded: &[i16]) -> f32 {
     10.0 * (signal_power / noise_power).log10() as f32
 }
 
-// Helper function to calculate SNR
+// Helper function to calculate SNR. Currently the AudioBuffer-aware
+// tests have been folded into the i16-slice variant above; kept so
+// future buffer-level codec tests can use it without re-writing.
+#[allow(dead_code)]
 fn calculate_snr(original: &AudioBuffer, decoded: &AudioBuffer) -> f32 {
     let mut signal_power = 0.0f64;
     let mut noise_power = 0.0f64;

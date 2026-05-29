@@ -80,12 +80,11 @@ use std::pin::Pin;
 ///
 /// This architecture separates the transaction-specific behavior from the common
 /// event loop machinery, making the code more maintainable and extensible.
-use std::{fmt, net::SocketAddr, sync::Arc, time::Duration};
+use std::{fmt, net::SocketAddr, time::Duration};
 
 use rvoip_sip_core::prelude::*;
-use rvoip_sip_transport::Transport;
 
-use self::error::{Error, Result};
+use self::error::Result;
 
 // Core submodules
 pub mod common_logic;
@@ -354,6 +353,7 @@ impl Default for TimerConfig {
 /// The created request uses `Method::Register` and a dummy URI `sip:example.com`.
 /// This might need to be `Method::Invite` or more generic if its use implies an INVITE.
 /// Currently uses `Method::Register`. Let's assume it's generic enough or update if specific to INVITE.
+#[allow(dead_code)]
 pub(crate) fn create_empty_request() -> Request {
     let uri = Uri::sip("example.com"); // Creates sip:example.com
                                        // Corrected: Request::new in sip-core only takes method and uri.

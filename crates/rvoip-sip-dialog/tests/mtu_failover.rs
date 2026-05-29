@@ -7,7 +7,6 @@
 //! outbound INVITEs, which pushes them past UDP's safe size.
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};

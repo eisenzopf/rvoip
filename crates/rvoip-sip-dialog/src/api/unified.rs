@@ -154,7 +154,6 @@ use super::{
 };
 use crate::config::DialogManagerConfig;
 use crate::dialog::{Dialog, DialogId, DialogState};
-use crate::events::{DialogEvent, SessionCoordinationEvent};
 use crate::manager::unified::UnifiedDialogManager;
 
 /// Unified Dialog API

@@ -3,12 +3,10 @@
 //! This test verifies that our optimized G.711 codec provides significant performance
 //! improvements over naive implementations.
 
-use codec_core::codecs::g711::{
-    alaw_compress, alaw_expand, ulaw_compress, ulaw_expand, G711Variant,
-};
+use codec_core::codecs::g711::{alaw_compress, alaw_expand, ulaw_compress, ulaw_expand};
 use rvoip_media_core::codec::audio::common::AudioCodec;
 use rvoip_media_core::codec::audio::g711::G711Codec;
-use rvoip_media_core::types::{AudioFrame, SampleRate};
+use rvoip_media_core::types::AudioFrame;
 use serial_test::serial;
 use std::time::Instant;
 

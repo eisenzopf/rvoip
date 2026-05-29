@@ -18,12 +18,10 @@
 use bytes::Bytes;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 use crate::codec::audio::common::AudioCodec;
-use crate::error::{CodecError, Error, Result};
+use crate::error::{Error, Result};
 use crate::types::{DialogId, MediaDirection};
 use rvoip_rtp_core::RtpSession;
 

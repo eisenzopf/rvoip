@@ -3,7 +3,6 @@
 //! This module defines comprehensive error handling for all media processing
 //! operations, codec management, and integration with other crates.
 
-use std::fmt;
 use thiserror::Error;
 
 /// Result type alias for media-core operations

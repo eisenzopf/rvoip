@@ -9,7 +9,6 @@
 //! covered by integration tests in session-core.
 
 use rvoip_sip_core::builder::SimpleRequestBuilder;
-use rvoip_sip_core::types::rack::RAck;
 use rvoip_sip_core::types::{HeaderName, Method, RSeq, Require, Supported, TypedHeader};
 use rvoip_sip_core::{Response, StatusCode, Uri, Version};
 use rvoip_sip_dialog::api::config::RelUsage;

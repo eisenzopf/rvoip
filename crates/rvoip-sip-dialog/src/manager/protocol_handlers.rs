@@ -20,7 +20,7 @@ use super::session_coordination::SessionCoordinator;
 use super::utils::SourceExtractor;
 use crate::errors::{DialogError, DialogResult};
 use crate::transaction::TransactionKey;
-use rvoip_sip_core::types::header::{HeaderName, TypedHeader, TypedHeaderTrait};
+use rvoip_sip_core::types::header::{HeaderName, TypedHeader};
 use rvoip_sip_core::types::refer_to::ReferTo;
 use rvoip_sip_core::{Method, Request, Response, StatusCode};
 

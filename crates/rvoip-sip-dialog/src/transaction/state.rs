@@ -1,4 +1,3 @@
-use crate::transaction::error::{Error, Result};
 use crate::transaction::TransactionKind;
 /// # Transaction State Machine
 ///

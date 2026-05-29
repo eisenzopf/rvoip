@@ -1,6 +1,5 @@
 use std::fmt;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Instant;
 
 use crate::error::Result;
@@ -227,7 +226,7 @@ pub trait Transport: Send + Sync + fmt::Debug {
     }
 
     /// Get the number of active connections for a transport type
-    fn get_connection_count(&self, transport_type: TransportType) -> usize {
+    fn get_connection_count(&self, _transport_type: TransportType) -> usize {
         // Default implementation
         if self.is_closed() {
             0
@@ -364,7 +363,7 @@ pub fn apply_via_rewrite(bytes: Bytes, rewrite: ViaRewrite) -> Result<Bytes> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use tokio::sync::mpsc;
+    use std::sync::Arc;
 
     // Mock transport for testing the trait
     #[derive(Debug)]

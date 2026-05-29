@@ -7,8 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{debug, trace, warn};
-
+use tracing::{debug, warn};
 use super::metrics::{
     OverallMetrics, QualityMetrics, QualityThresholds, QualityTrend, SessionMetrics,
 };

@@ -626,7 +626,7 @@ pub mod helpers {
         event: &str,
         body: Option<String>,
     ) -> Result<Request> {
-        let mut builder = InDialogRequestBuilder::for_notify(event, body).from_dialog_enhanced(
+        let builder = InDialogRequestBuilder::for_notify(event, body).from_dialog_enhanced(
             &template.call_id,
             &template.from_uri,
             &template.from_tag,

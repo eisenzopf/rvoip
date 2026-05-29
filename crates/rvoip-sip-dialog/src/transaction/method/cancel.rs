@@ -51,12 +51,10 @@
 //! CANCEL requests according to the rules in RFC 3261.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::types::CSeq;
 use rvoip_sip_core::types::MaxForwards;
-use uuid::Uuid;
 
 use crate::transaction::error::{Error, Result};
 use crate::transaction::TransactionKey;
@@ -190,6 +188,10 @@ pub fn create_cancel_request(invite_request: &Request, local_addr: &SocketAddr) 
 ///
 /// # Returns
 /// * `Result<TypedHeader>` - A Via header or an error
+///
+/// Retained for the upcoming explicit-Via construction path; today
+/// the CANCEL builder uses an inline Via assembly.
+#[allow(dead_code)]
 fn via_header_with_branch(local_addr: &SocketAddr, branch: &str) -> Result<TypedHeader> {
     use rvoip_sip_core::types::via::Via;
 
@@ -344,12 +346,12 @@ pub fn find_matching_invite_transaction(
     cancel_request: &Request,
     invite_tx_keys: Vec<TransactionKey>,
 ) -> Option<TransactionKey> {
-    // Extract the needed headers from the CANCEL request
-    let cancel_call_id = cancel_request.call_id()?;
-    let cancel_from = cancel_request.from()?;
-    let cancel_to = cancel_request.to()?;
-    let cancel_uri = cancel_request.uri().clone();
-    let cancel_cseq = cancel_request.cseq()?;
+    // RFC 3261 §9.1 says CANCEL matching can lean entirely on the
+    // Via branch — we ensure those exist before matching.
+    let _ = cancel_request.call_id()?;
+    let _ = cancel_request.from()?;
+    let _ = cancel_request.to()?;
+    let _ = cancel_request.cseq()?;
 
     // Basic validation - CANCEL must have a branch parameter
     let cancel_via = cancel_request.first_via()?;

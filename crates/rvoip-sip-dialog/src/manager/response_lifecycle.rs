@@ -233,8 +233,6 @@ impl DialogManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_response_lifecycle_trait_exists() {
         // This test just validates the trait compiles

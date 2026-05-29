@@ -120,7 +120,7 @@ use crate::api::{
 use crate::config::DialogManagerConfig;
 use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
-use crate::events::{DialogEvent, SessionCoordinationEvent};
+use crate::events::DialogEvent;
 use crate::subscription::SubscriptionManager;
 
 // Import the existing core DialogManager functionality

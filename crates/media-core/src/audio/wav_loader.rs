@@ -5,11 +5,10 @@
 
 use crate::codec::audio::{AudioCodec, G711Codec};
 use crate::error::{Error, Result};
-use crate::types::{AudioFrame, SampleRate};
-use hound::{WavReader, WavSpec};
+use crate::types::AudioFrame;
+use hound::WavReader;
 use std::path::Path;
-use tracing::{debug, info, warn};
-
+use tracing::{debug, info};
 /// Loaded WAV audio data
 #[derive(Debug, Clone)]
 pub struct WavAudio {
@@ -230,8 +229,6 @@ impl MusicOnHoldCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
 
     #[test]
     fn test_stereo_to_mono() {

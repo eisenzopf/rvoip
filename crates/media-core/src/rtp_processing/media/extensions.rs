@@ -6,8 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, warn};
-
+use tracing::{debug};
 use crate::api::error::MediaError;
 
 /// Header extension format types
@@ -148,7 +147,9 @@ impl HeaderExtensionManager {
                 }
             }
             ExtensionFormat::TwoByte => {
-                if id < 1 || id > 255 {
+                // `id` is a `u8`; the upper bound is enforced by the
+                // type, so only the lower bound needs checking here.
+                if id < 1 {
                     return Err(MediaError::ConfigError(format!(
                         "Invalid extension ID for two-byte format: {} (must be 1-255)",
                         id

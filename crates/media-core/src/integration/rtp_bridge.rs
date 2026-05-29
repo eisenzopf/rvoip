@@ -4,7 +4,6 @@
 //! RTP packet handling and media transport.
 
 use dashmap::DashMap;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
@@ -182,7 +181,7 @@ impl RtpValidationState {
     }
 
     /// Update validation stats
-    pub fn update_validation_stats(&mut self, payload_type: u8, expected: bool) {
+    pub fn update_validation_stats(&mut self, _payload_type: u8, expected: bool) {
         self.validation_stats.packets_validated += 1;
         self.validation_stats.last_validation = std::time::Instant::now();
 
@@ -209,10 +208,13 @@ impl RtpValidationState {
     }
 }
 
-/// RTP session information
+/// RTP session information. The `params` field is captured at session
+/// registration so a future per-session reconfigure path can consult
+/// it without round-tripping through the relay controller.
 #[derive(Debug, Clone)]
 struct RtpSessionInfo {
     /// Session parameters
+    #[allow(dead_code)]
     params: RtpParameters,
     /// Packets sent counter
     packets_sent: u64,
@@ -676,8 +678,10 @@ impl RtpBridge {
                 .fallback_activations += 1;
         }
 
-        // Initialize fallback if not already done
-        if let (Some(expected), Some(detected)) = (expected_codec, detected_codec) {
+        // Initialize fallback if not already done. `_detected` is
+        // bound to ensure the codec-detection signal stays observed
+        // for diagnostics; the fallback init only consults `expected`.
+        if let (Some(expected), Some(_detected)) = (expected_codec, detected_codec) {
             if let Err(e) = self
                 .fallback_manager
                 .initialize_fallback(dialog_id.clone(), Some(expected.clone()))

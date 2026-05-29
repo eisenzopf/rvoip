@@ -3,15 +3,14 @@ use futures_util::StreamExt;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, error, info, trace, warn};
-
+use tokio::net::TcpListener;
+use tracing::{debug, error, info};
 #[cfg(feature = "ws")]
 use http::HeaderValue;
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 #[cfg(feature = "ws")]
-use tokio_tungstenite::{accept_async, tungstenite, WebSocketStream};
+use tokio_tungstenite::{tungstenite, WebSocketStream};
 
 #[cfg(feature = "wss")]
 use tokio_rustls::rustls::ServerConfig;
@@ -28,9 +27,13 @@ pub struct WebSocketListener {
     listener: TcpListener,
     /// Whether this is a secure WebSocket listener (WSS)
     secure: bool,
-    /// TLS certificate path if secure
+    /// TLS certificate path if secure. Captured at bind so a future
+    /// hot-reload / diagnostics path can surface the configured
+    /// material without re-threading it.
+    #[allow(dead_code)]
     cert_path: Option<String>,
-    /// TLS key path if secure
+    /// TLS key path if secure. See `cert_path` for retention rationale.
+    #[allow(dead_code)]
     key_path: Option<String>,
     /// Pre-built TLS acceptor for WSS. Built once at `bind()` time so
     /// every accept() reuses the same `ServerConfig` (and therefore
@@ -265,8 +268,6 @@ impl WebSocketListener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use tokio::net::TcpStream;
 
     /// Test binding a WebSocket listener
     #[tokio::test]

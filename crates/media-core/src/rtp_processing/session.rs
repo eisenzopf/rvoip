@@ -1,6 +1,5 @@
 //! Media session management (moved from rtp-core)
 
-use std::collections::HashMap;
 use std::time::Instant;
 
 /// Configuration for a media session
@@ -41,10 +40,15 @@ pub enum MediaSessionState {
     Terminated,
 }
 
-/// Media session for handling RTP streams
+/// Media session for handling RTP streams. The owned `config` and
+/// `created_at` are captured here so a future read-out path (e.g.
+/// diagnostics, age-based eviction) can consult them without
+/// re-threading them through the session state.
 pub struct MediaSession {
+    #[allow(dead_code)]
     config: MediaSessionConfig,
     state: MediaSessionState,
+    #[allow(dead_code)]
     created_at: Instant,
     statistics: MediaSessionStatistics,
 }

@@ -1410,12 +1410,14 @@ pub fn record_udp_receive_to_invite_200(elapsed: Duration) {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn record_transaction_dispatch_queue_delay(elapsed: Duration) {
     if transaction_timing_enabled() {
         TRANSACTION_DISPATCH_QUEUE.record(elapsed);
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn record_transaction_dispatch_queue_depth(depth: usize) {
     if !transaction_timing_enabled() {
         return;

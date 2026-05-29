@@ -6,15 +6,14 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use std::time::Instant;
 
-use crate::performance::{metrics::PerformanceMetrics, pool::AudioFramePool, simd::SimdProcessor};
+use crate::performance::{pool::AudioFramePool, simd::SimdProcessor};
 use crate::processing::audio::{
     AdvancedAcousticEchoCanceller, AdvancedAecConfig, AdvancedAgcConfig,
     AdvancedAutomaticGainControl, AdvancedVadConfig, AdvancedVoiceActivityDetector,
 };
-use crate::types::{AudioFrame, DialogId};
+use crate::types::DialogId;
 use rvoip_rtp_core::{session::RtpSessionStats, RtpSession};
 
 /// Media configuration for a session

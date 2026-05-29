@@ -13,27 +13,21 @@
 /// - `ServerTransactionData`: Core data structure shared by all server transaction types
 /// - `CommonServerTransaction`: Trait providing shared behavior across transaction types
 /// - Command channels for communication with the transaction's event loop
-use std::fmt;
-use std::future::Future;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
-use tracing::{debug, trace};
-
+use tracing::debug;
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_transport::Transport;
 
-use crate::transaction::error::{Error, Result};
 use crate::transaction::runner::{
     AsRefKey, AsRefState, HasCommandSender, HasLifecycle, HasTransactionEvents, HasTransport,
 };
 use crate::transaction::state::TransactionLifecycle;
 use crate::transaction::timer::TimerSettings;
 use crate::transaction::{
-    AtomicTransactionState, InternalTransactionCommand, Transaction, TransactionEvent,
-    TransactionKey, TransactionState,
+    AtomicTransactionState, InternalTransactionCommand, TransactionEvent, TransactionKey,
 };
 
 /// Command sender for transaction event loops.

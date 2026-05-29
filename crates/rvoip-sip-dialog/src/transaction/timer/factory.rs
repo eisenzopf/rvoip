@@ -60,13 +60,12 @@
 //! ```
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::transaction::error::Result; // Assuming crate::error::Result is suitable
 use crate::transaction::TransactionKey;
 // Use super::types to access TimerSettings, Timer, TimerType from the same module level.
 use super::manager::TimerManager;
-use super::types::{Timer, TimerSettings, TimerType};
+use super::types::{TimerSettings, TimerType};
 
 /// A factory for creating and scheduling SIP timers based on RFC 3261.
 ///
@@ -418,11 +417,17 @@ impl Default for TimerFactory {
 }
 
 #[cfg(test)]
+// The MockTimerManager + TimerManagerActions trait scaffolding below
+// was wired in for unit tests that haven't landed yet; the existing
+// tests only exercise the TimerFactory itself. Keep the scaffolding
+// reachable for the upcoming tests.
+#[allow(dead_code, unused_variables, unused_imports)]
 mod tests {
     use super::*;
     use crate::transaction::TransactionKey;
     use rvoip_sip_core::Method;
     use std::sync::Mutex;
+    use std::time::Duration;
     use tokio::sync::mpsc; // For TimerManager's internal channel, if needed for mock
 
     // Helper to create a dummy TransactionKey for tests

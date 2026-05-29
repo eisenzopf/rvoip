@@ -1,7 +1,7 @@
 //! Tests for REFER request handling and call transfers
 
 use rvoip_sip_core::types::refer_to::ReferTo;
-use rvoip_sip_core::{Method, Request, StatusCode};
+use rvoip_sip_core::{Method, Request};
 use rvoip_sip_dialog::dialog::DialogId;
 use rvoip_sip_dialog::events::SessionCoordinationEvent;
 use rvoip_sip_dialog::transaction::TransactionKey;
@@ -122,8 +122,6 @@ mod integration_tests {
     use rvoip_sip_core::builder::{
         headers::ReferToExt, headers::ReferredByExt, SimpleRequestBuilder,
     };
-    use rvoip_sip_core::{Header, HeaderName};
-    use std::net::SocketAddr;
 
     fn create_refer_request(refer_to_uri: &str, include_referred_by: bool) -> Request {
         let mut builder = SimpleRequestBuilder::new(Method::Refer, "sip:alice@example.com")

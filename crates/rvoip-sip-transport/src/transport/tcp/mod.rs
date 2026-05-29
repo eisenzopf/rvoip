@@ -7,22 +7,18 @@ pub use listener::TcpListener;
 pub use pool::{ConnectionPool, PoolConfig};
 
 use bytes::Bytes;
-use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
-use tracing::{debug, error, info, trace, warn};
-
+use tokio::sync::mpsc;
+use tracing::{debug, error, info, trace};
 use crate::error::{Error, Result};
 use crate::transport::{Transport, TransportEvent, TransportType};
 use rvoip_sip_core::Message;
 
 // Default channel capacity
 const DEFAULT_CHANNEL_CAPACITY: usize = 1000;
-// Default connection idle timeout in seconds
-const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
 /// TCP transport for SIP messages with connection pooling
 #[derive(Clone)]
@@ -367,7 +363,7 @@ impl fmt::Debug for TcpTransport {
 mod tests {
     use super::*;
     use rvoip_sip_core::builder::SimpleRequestBuilder;
-    use rvoip_sip_core::{Method, Request};
+    use rvoip_sip_core::Method;
     use tokio::time::Duration;
 
     #[tokio::test]
@@ -429,7 +425,7 @@ mod tests {
         match event {
             TransportEvent::MessageReceived {
                 message,
-                source,
+                source: _,
                 destination,
                 ..
             } => {

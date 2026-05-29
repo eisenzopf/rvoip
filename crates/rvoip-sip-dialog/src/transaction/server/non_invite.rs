@@ -1,9 +1,7 @@
-use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, trace, warn};
@@ -14,14 +12,13 @@ use rvoip_sip_transport::Transport;
 use crate::transaction::common_logic;
 use crate::transaction::error::{Error, Result};
 use crate::transaction::logic::TransactionLogic;
-use crate::transaction::runner::{run_transaction_loop, AsRefKey, HasCommandSender};
+use crate::transaction::runner::run_transaction_loop;
 use crate::transaction::server::{
     CommonServerTransaction, ServerTransaction, ServerTransactionData,
 };
 use crate::transaction::timer::{TimerFactory, TimerManager, TimerSettings, TimerType};
 use crate::transaction::timer_utils;
 use crate::transaction::utils;
-use crate::transaction::validators;
 use crate::transaction::{
     AtomicTransactionState, InternalTransactionCommand, Transaction, TransactionAsync,
     TransactionEvent, TransactionKey, TransactionKind, TransactionState,
@@ -32,6 +29,9 @@ use crate::transaction::{
 #[derive(Debug, Clone)]
 pub struct ServerNonInviteTransaction {
     data: Arc<ServerTransactionData>,
+    /// Logic instance held so the spawned transaction loop keeps the
+    /// same state machine.
+    #[allow(dead_code)]
     logic: Arc<ServerNonInviteLogic>,
 }
 
@@ -111,7 +111,7 @@ impl ServerNonInviteLogic {
     async fn process_request_retransmission(
         &self,
         data: &Arc<ServerTransactionData>,
-        request: Request,
+        _request: Request,
         current_state: TransactionState,
     ) -> Result<Option<TransactionState>> {
         let tx_id = &data.id;
@@ -172,7 +172,7 @@ impl TransactionLogic<ServerTransactionData, ServerNonInviteTimerHandles> for Se
         &self,
         data: &Arc<ServerTransactionData>,
         new_state: TransactionState,
-        previous_state: TransactionState,
+        _previous_state: TransactionState,
         timer_handles: &mut ServerNonInviteTimerHandles,
         command_tx: mpsc::Sender<InternalTransactionCommand>,
     ) -> Result<()> {
@@ -241,7 +241,7 @@ impl TransactionLogic<ServerTransactionData, ServerNonInviteTimerHandles> for Se
         data: &Arc<ServerTransactionData>,
         message: Message,
         current_state: TransactionState,
-        timer_handles: &mut ServerNonInviteTimerHandles,
+        _timer_handles: &mut ServerNonInviteTimerHandles,
     ) -> Result<Option<TransactionState>> {
         let tx_id = &data.id;
 
@@ -568,6 +568,7 @@ impl ServerTransaction for ServerNonInviteTransaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
     use rvoip_sip_core::types::status::StatusCode;
     use std::collections::VecDeque;

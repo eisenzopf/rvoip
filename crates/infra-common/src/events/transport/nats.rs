@@ -16,7 +16,9 @@ pub struct NatsTransport {
     servers: Vec<String>,
     /// Optional cluster name
     cluster: Option<String>,
-    /// Service name for this instance
+    /// Service name for this instance. Captured for the future
+    /// subject-prefix path; see GrpcTransport for the same pattern.
+    #[allow(dead_code)]
     service_name: String,
 }
 

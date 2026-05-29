@@ -6,7 +6,6 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::events::types::{Event, EventPriority};
 use crate::planes::routing::RoutableEvent;

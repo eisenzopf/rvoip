@@ -4,10 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::time::interval;
-use tracing::{debug, error, info, trace, warn};
-
+use tracing::{debug, error, info, trace};
 use super::TcpConnection;
-use crate::error::Result;
 
 /// Configuration for the TCP connection pool
 #[derive(Clone, Debug)]
@@ -205,12 +203,15 @@ impl Clone for ConnectionPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::Error;
+    use crate::error::Result;
     use std::net::{IpAddr, Ipv4Addr};
-    use tokio::net::TcpStream;
     use tokio::sync::Mutex as TokioMutex;
 
-    // Use a wrapper around Arc<TcpConnection> for the tests
+    // Use a wrapper around Arc<TcpConnection> for the tests. The mock
+    // is constructed by the basic tests below but its methods aren't
+    // exercised in this iteration — the original integration tests
+    // were simplified out. Kept for the upcoming pool-behaviour tests.
+    #[allow(dead_code)]
     #[derive(Clone)]
     struct MockConnectionWrapper {
         peer_addr: SocketAddr,
@@ -218,6 +219,7 @@ mod tests {
         closed: Arc<TokioMutex<bool>>,
     }
 
+    #[allow(dead_code)]
     impl MockConnectionWrapper {
         fn new(peer_addr: SocketAddr) -> Self {
             Self {
@@ -261,8 +263,8 @@ mod tests {
         let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)), 5060);
 
         // Create mock connection objects, wrapped in a way that TcpConnection would be
-        let conn1 = Arc::new(MockConnectionWrapper::new(addr1));
-        let conn2 = Arc::new(MockConnectionWrapper::new(addr2));
+        let _conn1 = Arc::new(MockConnectionWrapper::new(addr1));
+        let _conn2 = Arc::new(MockConnectionWrapper::new(addr2));
 
         // Here we simulate the connection pool behavior without actually testing the add_connection logic
         // Instead, just check if we can retrieve, remove connections, etc.
@@ -289,9 +291,9 @@ mod tests {
         let addr3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 3)), 5060);
 
         // Create mock connections
-        let conn1 = Arc::new(MockConnectionWrapper::new(addr1));
-        let conn2 = Arc::new(MockConnectionWrapper::new(addr2));
-        let conn3 = Arc::new(MockConnectionWrapper::new(addr3));
+        let _conn1 = Arc::new(MockConnectionWrapper::new(addr1));
+        let _conn2 = Arc::new(MockConnectionWrapper::new(addr2));
+        let _conn3 = Arc::new(MockConnectionWrapper::new(addr3));
 
         // Skip testing this particular functionality since it requires actual TcpConnection instances
         // This would be better tested in integration tests with real connections

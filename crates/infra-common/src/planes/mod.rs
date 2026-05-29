@@ -239,23 +239,23 @@ impl PlaneFactory {
         }
     }
 
-    async fn create_local_plane(plane_type: PlaneType) -> Result<Arc<dyn FederatedPlane>> {
+    async fn create_local_plane(_plane_type: PlaneType) -> Result<Arc<dyn FederatedPlane>> {
         // This will be implemented by the actual plane implementations
         // in their respective crates (dialog-core, media-core, etc.)
         todo!("Implement local plane creation")
     }
 
     async fn create_remote_proxy(
-        plane_type: PlaneType,
-        endpoints: Vec<String>,
+        _plane_type: PlaneType,
+        _endpoints: Vec<String>,
     ) -> Result<Arc<dyn FederatedPlane>> {
         // Create a proxy that communicates with remote plane
         todo!("Implement remote proxy creation")
     }
 
     async fn create_hybrid_plane(
-        plane_type: PlaneType,
-        config: PlaneConfig,
+        _plane_type: PlaneType,
+        _config: PlaneConfig,
     ) -> Result<Arc<dyn FederatedPlane>> {
         // Create hybrid plane with both local and remote components
         todo!("Implement hybrid plane creation")

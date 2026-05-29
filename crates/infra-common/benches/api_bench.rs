@@ -1,6 +1,5 @@
-use async_trait::async_trait;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use rvoip_infra_common::events::api::{EventPublisher, EventSubscriber, EventSystem};
+use rvoip_infra_common::events::api::EventSystem;
 use rvoip_infra_common::events::builder::{EventSystemBuilder, ImplementationType};
 use rvoip_infra_common::events::registry::GlobalTypeRegistry;
 use rvoip_infra_common::events::types::{Event, EventPriority, StaticEvent};

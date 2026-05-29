@@ -2,15 +2,12 @@ use bytes::{Buf, BufMut, BytesMut};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tracing::{debug, error, trace, warn};
-
+use tracing::{debug, trace, warn};
 use crate::error::{Error, Result};
-use rvoip_sip_core::builder::ContentLengthBuilderExt;
 use rvoip_sip_core::{parse_message, Message};
 
 // Buffer sizes
@@ -396,8 +393,8 @@ impl Drop for TcpConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rvoip_sip_core::builder::SimpleRequestBuilder;
-    use rvoip_sip_core::{Method, Request};
+    use rvoip_sip_core::builder::{ContentLengthBuilderExt, SimpleRequestBuilder};
+    use rvoip_sip_core::Method;
     use tokio::net::TcpListener;
 
     #[tokio::test]

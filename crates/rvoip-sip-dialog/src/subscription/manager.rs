@@ -4,21 +4,14 @@
 //! lifecycle, refresh timers, and NOTIFY processing according to RFC 6665.
 
 use dashmap::DashMap;
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, warn};
-
+use tracing::debug;
 use rvoip_sip_core::{
-    builder::{SimpleRequestBuilder, SimpleResponseBuilder},
-    types::{
-        event::Event, expires::Expires,
-        subscription_state::SubscriptionState as SubscriptionStateHeader,
-    },
-    HeaderName, Method, Request, Response, StatusCode, TypedHeader,
+    builder::SimpleResponseBuilder, HeaderName, Request, Response, StatusCode, TypedHeader,
 };
 
 use super::event_package::EventPackage;
@@ -66,7 +59,11 @@ pub struct SubscriptionManager {
     command_tx: mpsc::Sender<SubscriptionCommand>,
 }
 
-/// Internal commands for subscription management
+/// Internal commands for subscription management. `RefreshSubscription`
+/// carries the dialog the timer wakes up against; the manager fetches
+/// it on demand so the variant body isn't read. `TerminateSubscription`
+/// is retained for the upcoming explicit-shutdown path.
+#[allow(dead_code)]
 #[derive(Debug)]
 enum SubscriptionCommand {
     RefreshSubscription(DialogId),
@@ -120,8 +117,8 @@ impl SubscriptionManager {
     pub async fn handle_subscribe(
         &self,
         request: Request,
-        source: SocketAddr,
-        local_addr: SocketAddr,
+        _source: SocketAddr,
+        _local_addr: SocketAddr,
     ) -> DialogResult<(Response, Option<DialogId>)> {
         // Extract Event header
         let event = request

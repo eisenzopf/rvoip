@@ -13,11 +13,9 @@ use crate::performance::{
     simd::SimdProcessor,
 };
 use crate::processing::audio::{
-    AdvancedAcousticEchoCanceller, AdvancedAecConfig, AdvancedAgcConfig,
-    AdvancedAutomaticGainControl, AdvancedVadConfig, AdvancedVoiceActivityDetector,
+    AdvancedAcousticEchoCanceller, AdvancedAutomaticGainControl, AdvancedVoiceActivityDetector,
 };
 use crate::types::{AudioFrame, DialogId};
-use tokio::sync::RwLock;
 
 use super::{AdvancedProcessorConfig, AdvancedProcessorSet, MediaConfig, MediaSessionController};
 
@@ -91,7 +89,7 @@ impl AdvancedProcessorSet {
         let mut processed_frame = input_frame.clone();
 
         // Process with advanced AEC first (if enabled and far-end reference available)
-        if let Some(aec) = &self.aec {
+        if let Some(_aec) = &self.aec {
             // TODO: Add far-end reference when available
             debug!("AEC v2 processing skipped - far-end reference not available");
         }

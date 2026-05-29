@@ -3,7 +3,6 @@
 use crate::error::Result;
 use crate::types::AudioFrame;
 use crate::types::SampleRate;
-use crate::{AudioBuffer, AudioFormat};
 
 /// Audio codec trait for encoding and decoding
 pub trait AudioCodec: Send {
@@ -165,7 +164,7 @@ pub fn pcm_frame_size(
 }
 
 /// Calculate the expected codec frame size in bytes
-pub fn codec_frame_size(sample_rate: SampleRate, frame_size: FrameSize, bitrate: u32) -> usize {
+pub fn codec_frame_size(_sample_rate: SampleRate, frame_size: FrameSize, bitrate: u32) -> usize {
     let duration_sec = frame_size.as_ms() as f64 / 1000.0;
     let bytes = (bitrate as f64 * duration_sec / 8.0).ceil() as usize;
     bytes

@@ -63,7 +63,6 @@
 /// - **Timer G**: Initial value T1, doubles on each retransmission (up to T2). Controls response retransmissions in Completed state.
 /// - **Timer H**: Typically 64*T1. Controls timeout waiting for ACK. When it fires, the transaction terminates with an error.
 /// - **Timer I**: Typically 5s (UDP) or 0s (TCP/SCTP). Controls how long to wait in Confirmed state.
-use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -79,14 +78,13 @@ use rvoip_sip_transport::Transport;
 use crate::transaction::common_logic;
 use crate::transaction::error::{Error, Result};
 use crate::transaction::logic::TransactionLogic;
-use crate::transaction::runner::{run_transaction_loop, AsRefKey, HasCommandSender};
+use crate::transaction::runner::run_transaction_loop;
 use crate::transaction::server::{
     CommonServerTransaction, ServerTransaction, ServerTransactionData,
 };
 use crate::transaction::timer::{TimerFactory, TimerManager, TimerSettings, TimerType};
 use crate::transaction::timer_utils;
 use crate::transaction::utils;
-use crate::transaction::validators;
 use crate::transaction::{
     AtomicTransactionState, InternalTransactionCommand, Transaction, TransactionAsync,
     TransactionEvent, TransactionKey, TransactionKind, TransactionState,
@@ -111,6 +109,9 @@ use crate::transaction::{
 #[derive(Debug, Clone)]
 pub struct ServerInviteTransaction {
     data: Arc<ServerTransactionData>,
+    /// Logic instance held so the spawned transaction loop keeps the
+    /// same state machine.
+    #[allow(dead_code)]
     logic: Arc<ServerInviteLogic>,
 }
 
@@ -290,7 +291,7 @@ impl ServerInviteLogic {
                         let mut last_response = data.last_response.lock().await;
                         *last_response = Some(trying_response);
                     }
-                    drop(original_request);
+                    // `original_request` is a plain `&Request`, no lock to release.
                 } else {
                     trace!(id=%tx_id, "Timer 100 fired but TU already sent provisional response, ignoring");
                 }
@@ -822,7 +823,7 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
         data: &Arc<ServerTransactionData>,
         message: Message,
         current_state: TransactionState,
-        timer_handles: &mut ServerInviteTimerHandles,
+        _timer_handles: &mut ServerInviteTimerHandles,
     ) -> Result<Option<TransactionState>> {
         let tx_id = &data.id;
 
@@ -1349,7 +1350,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_invite_send_provisional_response() {
-        let mut setup = setup_test_environment().await;
+        let setup = setup_test_environment().await;
 
         // Create a provisional response
         let original_request = (*setup.transaction.data.request).clone();
@@ -1450,7 +1451,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_invite_send_success_response() {
-        let mut setup = setup_test_environment().await;
+        let setup = setup_test_environment().await;
 
         // Create a 2xx response
         let original_request = (*setup.transaction.data.request).clone();

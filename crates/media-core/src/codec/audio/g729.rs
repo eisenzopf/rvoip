@@ -6,8 +6,7 @@
 use super::common::{AudioCodec, CodecInfo};
 use crate::error::{CodecError, Result};
 use crate::types::{AudioFrame, SampleRate};
-use tracing::{debug, error, warn};
-
+use tracing::{debug, warn};
 /// G.729 codec configuration
 #[derive(Debug, Clone)]
 pub struct G729Config {
@@ -44,9 +43,12 @@ impl Default for G729Config {
     }
 }
 
-/// G.729 audio codec implementation
+/// G.729 audio codec implementation. The owned `config` is held so
+/// the encoder/decoder can be re-initialised when the `g729` feature
+/// is enabled; the stub build keeps the field for ABI parity.
 pub struct G729Codec {
     /// Codec configuration
+    #[allow(dead_code)]
     config: G729Config,
     /// Sample rate (fixed at 8kHz for G.729)
     sample_rate: u32,

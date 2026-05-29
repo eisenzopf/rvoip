@@ -163,27 +163,22 @@ mod tests;
 mod types;
 pub mod utils;
 
-use functions::*;
 pub use handlers::*;
 pub use types::*;
 pub use utils::*;
 
-use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, HashSet, VecDeque};
 use std::fmt;
-use std::future::Future;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::net::{IpAddr, SocketAddr};
-use std::pin::Pin;
-use std::str::FromStr;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use async_trait::async_trait;
 use dashmap::DashMap;
 use tokio::sync::{mpsc, Mutex};
-use tokio::time::{sleep, MissedTickBehavior};
+use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, trace, warn};
 
 use rvoip_sip_core::prelude::*;
@@ -196,17 +191,16 @@ use rvoip_sip_transport::{
 
 use crate::diagnostics;
 use crate::transaction::client::{
-    ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction,
-    CommonClientTransaction, TransactionExt,
+    ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction, CommonClientTransaction,
 };
-use crate::transaction::error::{self, Error, Result};
-use crate::transaction::method::{ack, cancel, update};
+use crate::transaction::error::{Error, Result};
+use crate::transaction::method::{cancel, update};
 use crate::transaction::runner::HasLifecycle;
 use crate::transaction::server::{
     CommonServerTransaction, ServerInviteTransaction, ServerNonInviteTransaction, ServerTransaction,
 };
 use crate::transaction::state::TransactionLifecycle;
-use crate::transaction::timer::{Timer, TimerFactory, TimerManager, TimerSettings};
+use crate::transaction::timer::{TimerFactory, TimerManager, TimerSettings};
 use crate::transaction::transport::multiplexed::{
     next_hop_uri_for_request, select_transport_for_request, top_route_uri,
 };
@@ -214,15 +208,17 @@ use crate::transaction::transport::{
     NetworkInfoForSdp, SipTraceRuntime, TransportCapabilities, TransportCapabilitiesExt,
     TransportInfo, WebSocketStatus,
 };
-use crate::transaction::utils::{
-    create_ack_from_invite, generate_branch, transaction_key_from_message,
-};
+use crate::transaction::utils::transaction_key_from_message;
 use crate::transaction::{
-    InternalTransactionCommand, Transaction, TransactionAsync, TransactionEvent, TransactionKey,
+    InternalTransactionCommand, Transaction, TransactionEvent, TransactionKey,
     TransactionKind, TransactionState, DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
 };
 
-// Type aliases without Sync requirement
+// Type aliases without Sync requirement. `BoxedTransaction` and
+// `BoxedServerTransaction` below are retained for downstream APIs
+// that still construct boxed handles directly; the manager itself
+// stores `Arc<dyn ClientTransaction>` / `Arc<dyn ServerTransaction>`.
+#[allow(dead_code)]
 type BoxedTransaction = Box<dyn Transaction + Send>;
 /// Type alias for a boxed client transaction
 /// Per-transaction handle stored in `client_transactions`.
@@ -233,7 +229,9 @@ type BoxedTransaction = Box<dyn Transaction + Send>;
 /// whole map while one transaction was doing transport I/O. Cheap to
 /// clone (atomic refcount bump).
 pub(crate) type ArcClientTransaction = Arc<dyn ClientTransaction>;
-/// Type alias for an Arc wrapped server transaction
+/// Type alias for an Arc wrapped server transaction. See
+/// `BoxedTransaction` above for retention rationale.
+#[allow(dead_code)]
 type BoxedServerTransaction = Arc<dyn ServerTransaction>;
 
 /// Retained transaction-manager state counts used by release-gate leak checks.
@@ -418,7 +416,10 @@ pub struct TransactionManager {
     timer_settings: TimerSettings,
     /// Centralized timer manager
     timer_manager: Arc<TimerManager>,
-    /// Timer factory
+    /// Timer factory. Held by the manager so future per-transaction
+    /// timer creation calls land on the same factory instance; today
+    /// the timer dispatch routes through `timer_manager` directly.
+    #[allow(dead_code)]
     timer_factory: TimerFactory,
     /// Optional forwarder for transport-side events that dialog-core's
     /// RFC 5626 outbound-flow monitor needs to observe
@@ -2436,6 +2437,42 @@ impl TransactionManager {
             debug!("Transport close during shutdown: {}", e);
         }
 
+        // Step 2.5: Tell every in-flight transaction to terminate so its event
+        // loop runs `cancel_all_specific_timers` and aborts pending timers NOW.
+        // Otherwise the force-clear below merely drops the transaction `Arc`,
+        // whose `Drop` aborts only the event-loop task; that detaches (does not
+        // abort) the timer tasks, so a pending Timer B on an INVITE to a
+        // non-responsive peer sleeps out its full ~64*T1 and holds the bound
+        // port that long. `Terminate` drives the graceful path, which reaches
+        // the `Destroyed` lifecycle in milliseconds.
+        //
+        // Collect `Arc` clones first so we never hold a DashMap shard guard
+        // across the loop. Use `try_send` (never `.await`) so shutdown cannot
+        // block if a transaction's event loop is momentarily not draining its
+        // command channel; the wait-poll + force-clear below remain the fallback.
+        let in_flight_clients: Vec<_> = self
+            .client_transactions
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        let in_flight_servers: Vec<_> = self
+            .server_transactions
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        for tx in in_flight_clients {
+            let _ = tx
+                .data()
+                .cmd_tx
+                .try_send(InternalTransactionCommand::Terminate);
+        }
+        for tx in in_flight_servers {
+            let _ = tx
+                .data()
+                .cmd_tx
+                .try_send(InternalTransactionCommand::Terminate);
+        }
+
         // Step 3: Small drain period for in-flight messages
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -2986,7 +3023,7 @@ impl TransactionManager {
     }
 
     /// Helper function to get timer settings for a request
-    fn timer_settings_for_request(&self, request: &Request) -> Option<TimerSettings> {
+    fn timer_settings_for_request(&self, _request: &Request) -> Option<TimerSettings> {
         // In the future, we could customize timer settings based on request properties
         // For now, just return a clone of the default settings
         Some(self.timer_settings.clone())

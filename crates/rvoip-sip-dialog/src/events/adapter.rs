@@ -6,21 +6,18 @@
 
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info, warn};
-
+use tokio::sync::RwLock;
+use tracing::{debug, error, info};
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
 use rvoip_infra_common::events::cross_crate::{
     CallState as CrossCrateCallState, CrossCrateEvent, DialogToSessionEvent,
-    DialogToTransportEvent, RvoipCrossCrateEvent, SessionToDialogEvent, TransportToDialogEvent,
+    RvoipCrossCrateEvent, SessionToDialogEvent,
 };
 use rvoip_infra_common::planes::LayerTaskManager;
 
 use crate::dialog::{DialogId, DialogState};
-use crate::errors::DialogError;
 use crate::events::{DialogEvent, SessionCoordinationEvent};
 use crate::manager::DialogManager;
-use crate::transaction::TransactionKey;
 
 /// Dialog Event Adapter that bridges local dialog events with global cross-crate events
 pub struct DialogEventAdapter {
@@ -89,12 +86,12 @@ impl DialogEventAdapter {
         debug!("Setting up cross-crate event subscriptions for dialog-core");
 
         // Subscribe to events targeted at dialog-core
-        let session_to_dialog_receiver = self
+        let _session_to_dialog_receiver = self
             .global_coordinator
             .subscribe("session_to_dialog")
             .await?;
 
-        let transport_to_dialog_receiver = self
+        let _transport_to_dialog_receiver = self
             .global_coordinator
             .subscribe("transport_to_dialog")
             .await?;
@@ -109,7 +106,7 @@ impl DialogEventAdapter {
 
         // Task: Process incoming SendRegisterResponse events from session-core
         let coordinator = self.global_coordinator.clone();
-        let dialog_manager = self.dialog_manager.clone();
+        let _dialog_manager = self.dialog_manager.clone();
 
         self.task_manager
             .spawn_tracked(
@@ -256,7 +253,7 @@ impl DialogEventAdapter {
         match event {
             DialogEvent::StateChanged {
                 dialog_id,
-                old_state,
+                old_state: _,
                 new_state,
             } => {
                 // Convert dialog state changes that affect session state
@@ -380,7 +377,11 @@ impl DialogEventAdapter {
         }
     }
 
-    /// Convert cross-crate events to local dialog events
+    /// Convert cross-crate events to local dialog events. The
+    /// destructured fields (`session_id`, `from`, `to`) document the
+    /// wire format for the upcoming session-id ↔ dialog-id mapping;
+    /// today the body uses `DialogId::new()` as a placeholder.
+    #[allow(unused_variables, dead_code)]
     fn convert_cross_crate_to_dialog_event(
         &self,
         event: &RvoipCrossCrateEvent,
@@ -418,8 +419,11 @@ impl DialogEventAdapter {
     }
 }
 
-/// Event handler for processing cross-crate events in dialog-core
+/// Event handler for processing cross-crate events in dialog-core.
+/// `adapter` is captured at construction so `handle` can route
+/// inbound events into the local adapter once the dispatch is wired.
 pub struct DialogCrossCrateEventHandler {
+    #[allow(dead_code)]
     adapter: Arc<DialogEventAdapter>,
 }
 
@@ -447,7 +451,6 @@ impl CrossCrateEventHandler for DialogCrossCrateEventHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
 
     #[tokio::test]
     async fn test_dialog_adapter_creation() {

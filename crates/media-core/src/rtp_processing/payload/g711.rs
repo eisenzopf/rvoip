@@ -4,7 +4,7 @@
 //! G.711 is defined in RFC 3551 and is a commonly used codec for VoIP.
 
 use super::traits::PayloadFormat;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use std::any::Any;
 
 /// G.711 µ-law payload format handler

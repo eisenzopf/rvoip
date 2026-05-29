@@ -10,7 +10,10 @@
 /// both for flexibility, but defaults to scalar for optimal performance.
 #[derive(Debug)]
 pub struct SimdProcessor {
-    /// Whether to prefer scalar processing (true for G.711 optimization)
+    /// Whether to prefer scalar processing (true for G.711 optimization).
+    /// Captured at construction; today the apply_gain / rms paths
+    /// always go through the scalar implementation.
+    #[allow(dead_code)]
     prefer_scalar: bool,
 }
 

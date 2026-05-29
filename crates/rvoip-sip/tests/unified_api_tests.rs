@@ -29,6 +29,7 @@ fn test_config(base_port: u16) -> Config {
 async fn test_create_coordinator() {
     let coordinator = UnifiedCoordinator::new(test_config(15200)).await;
     assert!(coordinator.is_ok());
+    let _ = coordinator.unwrap().shutdown_gracefully(None).await;
 }
 
 #[tokio::test]
@@ -44,12 +45,10 @@ async fn tls_client_only_config_does_not_require_endpoint_certificates() {
     config.local_uri = "sips:test@127.0.0.1".to_string();
     config.contact_uri = Some("sips:test@127.0.0.1:15229;transport=tls".to_string());
 
-    let coordinator = UnifiedCoordinator::new(config).await;
-    assert!(
-        coordinator.is_ok(),
-        "client-only SIP TLS must not require tls_cert_path/tls_key_path: {:?}",
-        coordinator.err()
-    );
+    let coordinator = UnifiedCoordinator::new(config)
+        .await
+        .expect("client-only SIP TLS must not require tls_cert_path/tls_key_path");
+    let _ = coordinator.shutdown_gracefully(None).await;
 }
 
 #[test]
@@ -252,6 +251,7 @@ async fn inbound_options_gets_dialog_core_200_without_session_state() {
         coordinator.list_sessions().await.is_empty(),
         "OPTIONS qualify must not create rvoip-sip state"
     );
+    let _ = coordinator.shutdown_gracefully(None).await;
 }
 
 #[tokio::test]
@@ -274,6 +274,7 @@ async fn test_make_call() {
     assert!(state.is_ok());
     // Should be Initiating
     assert_eq!(state.unwrap(), CallState::Initiating);
+    let _ = coordinator.shutdown_gracefully(None).await;
 }
 
 #[tokio::test]
@@ -296,6 +297,7 @@ async fn test_hold_resume() {
     // Resume
     let resume_result = coordinator.resume(&session_id).await;
     assert!(resume_result.is_ok());
+    let _ = coordinator.shutdown_gracefully(None).await;
 }
 
 #[tokio::test]
@@ -335,6 +337,7 @@ async fn test_conference_operations() {
     // Check if in conference
     let in_conf1 = coordinator.is_in_conference(&session1).await;
     assert!(in_conf1.is_ok());
+    let _ = coordinator.shutdown_gracefully(None).await;
 }
 
 #[tokio::test]
@@ -355,6 +358,7 @@ async fn test_dtmf_operations() {
         let result = coordinator.send_dtmf(&session_id, digit).await;
         assert!(result.is_ok());
     }
+    let _ = coordinator.shutdown_gracefully(None).await;
 }
 
 #[tokio::test]
@@ -377,6 +381,7 @@ async fn test_recording_operations() {
     // Stop recording
     let stop_result = coordinator.stop_recording(&session_id).await;
     assert!(stop_result.is_ok());
+    let _ = coordinator.shutdown_gracefully(None).await;
 }
 
 #[tokio::test]
@@ -408,6 +413,7 @@ async fn test_session_queries() {
     let info = info.unwrap();
     assert_eq!(info.from, "sip:alice@localhost");
     assert_eq!(info.to, "sip:bob@localhost:15219");
+    let _ = coordinator.shutdown_gracefully(None).await;
 }
 
 #[tokio::test]
@@ -440,6 +446,7 @@ async fn test_event_subscription() {
 
     // Unsubscribe
     coordinator.unsubscribe(&session_id).await;
+    let _ = coordinator.shutdown_gracefully(None).await;
 }
 
 #[tokio::test]
@@ -461,6 +468,7 @@ async fn test_accept_reject_calls() {
         .send()
         .await;
     assert!(reject_result.is_err()); // No such session
+    let _ = coordinator.shutdown_gracefully(None).await;
 }
 
 #[tokio::test]
@@ -503,4 +511,5 @@ async fn test_multiple_calls() {
     assert!(coordinator.hangup(&session1).await.is_ok());
     assert!(coordinator.hangup(&session2).await.is_ok());
     assert!(coordinator.hangup(&session3).await.is_ok());
+    let _ = coordinator.shutdown_gracefully(None).await;
 }
