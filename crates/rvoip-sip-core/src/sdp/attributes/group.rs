@@ -4,15 +4,6 @@
 //! Format: a=group:<semantics> <identification-tag> ...
 
 use crate::error::{Error, Result};
-use crate::sdp::attributes::common::token;
-use nom::{
-    bytes::complete::take_while1,
-    character::complete::space1,
-    combinator::{map, verify},
-    multi::separated_list0,
-    sequence::{pair, preceded},
-    IResult,
-};
 
 
 
@@ -239,22 +230,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_direct_parser_functions() {
-        // Test semantics_parser directly
-        let (remainder, semantics) = semantics_parser("BUNDLE rest").unwrap();
-        assert_eq!(semantics, "BUNDLE");
-        assert_eq!(remainder, " rest");
-
-        // Test identification_tags_parser directly
-        let (remainder, tags) = identification_tags_parser(" tag1 tag2 tag3").unwrap();
-        assert_eq!(tags, vec!["tag1", "tag2", "tag3"]);
-        assert_eq!(remainder, "");
-
-        // Test group_parser directly
-        let (remainder, (semantics, tags)) = group_parser("BUNDLE tag1 tag2").unwrap();
-        assert_eq!(semantics, "BUNDLE");
-        assert_eq!(tags, vec!["tag1", "tag2"]);
-        assert_eq!(remainder, "");
-    }
 }

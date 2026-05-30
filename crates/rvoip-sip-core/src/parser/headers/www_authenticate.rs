@@ -58,7 +58,7 @@ pub fn parse_www_authenticate(input: &[u8]) -> ParseResult<'_, Vec<Challenge>> {
     };
 
     // Trim any leading whitespace
-    let (mut input, _) = opt(take_while(|c| {
+    let (input, _) = opt(take_while(|c| {
         c == b' ' || c == b'\t' || c == b'\r' || c == b'\n'
     }))(processed_input)?;
 

@@ -235,7 +235,7 @@ pub fn parse_attribute(value: &str) -> Result<ParsedAttribute> {
                 Ok(ParsedAttribute::Rid(rid_attr))
             }
             "simulcast" => {
-                let (send, recv) = simulcast::parse_simulcast(val)?;
+                let (send, recv) = simulcast::parse_simulcast_compat(val)?;
                 Ok(ParsedAttribute::Simulcast(send, recv))
             }
 

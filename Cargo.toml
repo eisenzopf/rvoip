@@ -80,10 +80,10 @@ keywords = ["sip", "voip", "rtp", "communication", "telephony"]
 # overrides any per-lint setting below it (this bit us during Phase 3
 # and silently disabled every per-lint warn for the whole workspace).
 unused_imports = "warn"
-unused_variables = "allow"   # TEMP-IMPORT-PASS: restore to "warn"
-unused_mut = "allow"         # TEMP-IMPORT-PASS: restore to "warn"
+unused_variables = "warn"
+unused_mut = "warn"
 dead_code = "warn"
-unused_comparisons = "allow" # TEMP-IMPORT-PASS: restore to "warn"
+unused_comparisons = "warn"
 # `elided_named_lifetimes` was renamed to `mismatched_lifetime_syntaxes`
 # in recent Rust toolchains; the parser-wide `'_,` cleanup in Phase 4
 # brought the workspace count to zero.
@@ -97,7 +97,7 @@ ambiguous_glob_reexports = "warn"
 unexpected_cfgs = "warn"
 unreachable_patterns = "allow"
 irrefutable_let_patterns = "allow"
-unused_assignments = "allow" # TEMP-IMPORT-PASS: restore to "warn"
+unused_assignments = "warn"
 async_fn_in_trait = "allow"
 
 [workspace.lints.clippy]

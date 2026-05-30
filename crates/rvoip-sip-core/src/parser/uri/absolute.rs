@@ -2,22 +2,11 @@
 
 #[cfg(test)]
 use crate::parser::uri::scheme::parse_scheme_raw;
-use nom::{
-    branch::alt,
-    bytes::complete::{tag, take_while1},
-    combinator::{opt, recognize, verify},
-    multi::many0,
-    sequence::{pair, preceded},
-};
 
 // Import shared parsers from common_chars
-use crate::parser::common_chars::{escaped, reserved, unreserved};
 use crate::parser::ParseResult;
 
 // Import existing parsers from other URI modules
-use crate::parser::uri::authority::parse_authority;
-use crate::parser::uri::path::abs_path;
-use crate::parser::uri::query::query_raw;
 
 // --- URI Character Sets (RFC 2396 / 3261) ---
 
@@ -351,27 +340,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_opaque_part() {
-        // Test opaque_part function directly
-
-        // Valid opaque parts
-        let result = opaque_part(b"opaque-data");
-        assert!(result.is_ok());
-        let (rem, part) = result.unwrap();
-        assert!(rem.is_empty());
-        assert_eq!(part, b"opaque-data");
-
-        let result = opaque_part(b"user@example.com");
-        assert!(result.is_ok());
-        let (rem, part) = result.unwrap();
-        assert!(rem.is_empty());
-        assert_eq!(part, b"user@example.com");
-
-        // Invalid opaque parts
-        assert!(opaque_part(b"/path").is_err()); // Leading slash not allowed in opaque part
-        assert!(opaque_part(b"").is_err()); // Empty input
-    }
 
     #[test]
     fn test_absolute_uri_hierarchical() {

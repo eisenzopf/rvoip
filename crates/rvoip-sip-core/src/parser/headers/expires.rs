@@ -137,7 +137,7 @@ mod tests {
         let result = parse_expires(b"4294967296");
         if result.is_ok() {
             // If it's handled by truncation/wrapping
-            let (rem, val) = result.unwrap();
+            let (rem, _val) = result.unwrap();
             assert!(rem.is_empty() || !rem.is_empty()); // Either way is fine
         } else {
             // If it's rejected as an error, that's also fine

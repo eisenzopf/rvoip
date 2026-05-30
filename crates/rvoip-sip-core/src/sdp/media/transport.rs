@@ -50,7 +50,7 @@ mod tests {
         let result = parse_transport_protocol(input);
         assert!(result.is_ok(), "Failed to parse RTP/SAVP");
 
-        let (rest, protocol) = result.unwrap();
+        let (_rest, protocol) = result.unwrap();
         assert_eq!(protocol, "RTP/SAVP", "Incorrect protocol parsed");
     }
 
@@ -61,7 +61,7 @@ mod tests {
         let result = parse_transport_protocol(input);
         assert!(result.is_ok(), "Failed to parse RTP/AVPF");
 
-        let (rest, protocol) = result.unwrap();
+        let (_rest, protocol) = result.unwrap();
         assert_eq!(protocol, "RTP/AVPF", "Incorrect protocol parsed");
 
         // Test RTP/SAVPF protocol (RFC 5124 - Secure RTP with feedback)
@@ -69,7 +69,7 @@ mod tests {
         let result = parse_transport_protocol(input);
         assert!(result.is_ok(), "Failed to parse RTP/SAVPF");
 
-        let (rest, protocol) = result.unwrap();
+        let (_rest, protocol) = result.unwrap();
         assert_eq!(protocol, "RTP/SAVPF", "Incorrect protocol parsed");
     }
 
@@ -80,7 +80,7 @@ mod tests {
         let result = parse_transport_protocol(input);
         assert!(result.is_ok(), "Failed to parse UDP/TLS/RTP/SAVP");
 
-        let (rest, protocol) = result.unwrap();
+        let (_rest, protocol) = result.unwrap();
         assert_eq!(protocol, "UDP/TLS/RTP/SAVP", "Incorrect protocol parsed");
 
         // Test UDP/TLS/RTP/SAVPF protocol (WebRTC common protocol)
@@ -88,7 +88,7 @@ mod tests {
         let result = parse_transport_protocol(input);
         assert!(result.is_ok(), "Failed to parse UDP/TLS/RTP/SAVPF");
 
-        let (rest, protocol) = result.unwrap();
+        let (_rest, protocol) = result.unwrap();
         assert_eq!(protocol, "UDP/TLS/RTP/SAVPF", "Incorrect protocol parsed");
     }
 
@@ -99,7 +99,7 @@ mod tests {
         let result = parse_transport_protocol(input);
         assert!(result.is_ok(), "Failed to parse UDP");
 
-        let (rest, protocol) = result.unwrap();
+        let (_rest, protocol) = result.unwrap();
         assert_eq!(protocol, "UDP", "Incorrect protocol parsed");
 
         // Test TCP protocol
@@ -107,7 +107,7 @@ mod tests {
         let result = parse_transport_protocol(input);
         assert!(result.is_ok(), "Failed to parse TCP");
 
-        let (rest, protocol) = result.unwrap();
+        let (_rest, protocol) = result.unwrap();
         assert_eq!(protocol, "TCP", "Incorrect protocol parsed");
     }
 
@@ -118,7 +118,7 @@ mod tests {
         let result = parse_transport_protocol(input);
         assert!(result.is_ok(), "Failed to parse lowercase protocol");
 
-        let (rest, protocol) = result.unwrap();
+        let (_rest, protocol) = result.unwrap();
         assert_eq!(protocol, "RTP/AVP", "Should normalize to uppercase");
 
         // Mixed case should also work
@@ -126,7 +126,7 @@ mod tests {
         let result = parse_transport_protocol(input);
         assert!(result.is_ok(), "Failed to parse mixed case protocol");
 
-        let (rest, protocol) = result.unwrap();
+        let (_rest, protocol) = result.unwrap();
         assert_eq!(protocol, "RTP/AVP", "Should normalize to uppercase");
     }
 
@@ -148,66 +148,7 @@ mod tests {
         assert!(result.is_err(), "Should reject incomplete protocol");
     }
 
-    #[test]
-    fn test_is_secure_protocol() {
-        // Secure protocols
-        assert!(is_secure_protocol("RTP/SAVP"), "RTP/SAVP should be secure");
-        assert!(
-            is_secure_protocol("RTP/SAVPF"),
-            "RTP/SAVPF should be secure"
-        );
-        assert!(
-            is_secure_protocol("UDP/TLS/RTP/SAVP"),
-            "UDP/TLS/RTP/SAVP should be secure"
-        );
-        assert!(
-            is_secure_protocol("UDP/TLS/RTP/SAVPF"),
-            "UDP/TLS/RTP/SAVPF should be secure"
-        );
-        assert!(
-            is_secure_protocol("DTLS/SCTP"),
-            "DTLS/SCTP should be secure"
-        );
 
-        // Non-secure protocols
-        assert!(
-            !is_secure_protocol("RTP/AVP"),
-            "RTP/AVP should not be secure"
-        );
-        assert!(
-            !is_secure_protocol("RTP/AVPF"),
-            "RTP/AVPF should not be secure"
-        );
-        assert!(!is_secure_protocol("UDP"), "UDP should not be secure");
-        assert!(!is_secure_protocol("TCP"), "TCP should not be secure");
-        assert!(!is_secure_protocol("SCTP"), "SCTP should not be secure");
-    }
-
-    #[test]
-    fn test_is_rtp_protocol() {
-        // RTP-based protocols
-        assert!(is_rtp_protocol("RTP/AVP"), "RTP/AVP should be RTP-based");
-        assert!(is_rtp_protocol("RTP/SAVP"), "RTP/SAVP should be RTP-based");
-        assert!(is_rtp_protocol("RTP/AVPF"), "RTP/AVPF should be RTP-based");
-        assert!(
-            is_rtp_protocol("RTP/SAVPF"),
-            "RTP/SAVPF should be RTP-based"
-        );
-        assert!(
-            is_rtp_protocol("UDP/TLS/RTP/SAVP"),
-            "UDP/TLS/RTP/SAVP should be RTP-based"
-        );
-        assert!(
-            is_rtp_protocol("UDP/TLS/RTP/SAVPF"),
-            "UDP/TLS/RTP/SAVPF should be RTP-based"
-        );
-
-        // Non-RTP protocols
-        assert!(!is_rtp_protocol("UDP"), "UDP should not be RTP-based");
-        assert!(!is_rtp_protocol("TCP"), "TCP should not be RTP-based");
-        assert!(!is_rtp_protocol("DCCP"), "DCCP should not be RTP-based");
-        assert!(!is_rtp_protocol("SCTP"), "SCTP should not be RTP-based");
-    }
 
     #[test]
     fn test_parse_rfc_examples() {

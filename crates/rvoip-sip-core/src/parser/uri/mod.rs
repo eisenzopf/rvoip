@@ -615,7 +615,7 @@ mod tests {
                 println!("Trying to parse userinfo...");
                 if let Some(at_pos) = uri_bytes.iter().position(|&c| c == b'@') {
                     match userinfo(&uri_bytes[4..at_pos + 1]) {
-                        Ok((rem, info)) => println!("Userinfo parsed successfully: {:?}", info),
+                        Ok((_rem, info)) => println!("Userinfo parsed successfully: {:?}", info),
                         Err(e) => println!("Userinfo parsing failed: {:?}", e),
                     }
                 }
@@ -625,7 +625,7 @@ mod tests {
                     if let Some(at_pos) = uri_bytes.iter().position(|&c| c == b'@') {
                         // Try to parse just the host part
                         match hostport(&uri_bytes[at_pos + 1..semi_pos]) {
-                            Ok((rem, (host, port))) => {
+                            Ok((_rem, (host, port))) => {
                                 println!("Hostport parsed successfully: {:?}, {:?}", host, port)
                             }
                             Err(e) => println!("Hostport parsing failed: {:?}", e),
@@ -633,7 +633,7 @@ mod tests {
 
                         // Try to parse just the parameters part
                         match uri_parameters(&uri_bytes[semi_pos..]) {
-                            Ok((rem, params)) => {
+                            Ok((_rem, params)) => {
                                 println!("Parameters parsed successfully: {:?}", params)
                             }
                             Err(e) => println!("Parameters parsing failed: {:?}", e),

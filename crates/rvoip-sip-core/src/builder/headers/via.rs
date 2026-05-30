@@ -264,7 +264,7 @@ pub trait ViaBuilderExt {
 }
 
 impl ViaBuilderExt for SimpleRequestBuilder {
-    fn via(mut self, host: &str, transport: &str, branch: Option<&str>) -> Self {
+    fn via(self, host: &str, transport: &str, branch: Option<&str>) -> Self {
         let mut params = Vec::new();
 
         // Add branch parameter if provided
@@ -298,7 +298,7 @@ impl ViaBuilderExt for SimpleRequestBuilder {
 }
 
 impl ViaBuilderExt for SimpleResponseBuilder {
-    fn via(mut self, host: &str, transport: &str, branch: Option<&str>) -> Self {
+    fn via(self, host: &str, transport: &str, branch: Option<&str>) -> Self {
         let mut params = Vec::new();
 
         // Add branch parameter if provided

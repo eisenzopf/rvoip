@@ -167,7 +167,6 @@ pub fn parse_allow(input: &[u8]) -> ParseResult<'_, Allow> {
 
     // Case 3: Test for invalid characters in methods "INVITE, AC@K"
     let mut in_token = false;
-    let mut token_start = 0;
 
     for i in 0..input.len() {
         if input[i] == b' ' || input[i] == b'\t' || input[i] == b',' {
@@ -175,7 +174,6 @@ pub fn parse_allow(input: &[u8]) -> ParseResult<'_, Allow> {
         } else if !in_token {
             // Starting a new token - record where it starts
             in_token = true;
-            token_start = i;
 
             // Check if the next character after "INVITE, " is '*' - Case 4: "INVITE, *OPTIONS"
             if input[i] == b'*' {

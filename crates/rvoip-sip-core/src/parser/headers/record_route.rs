@@ -37,7 +37,7 @@ fn parse_display_name(input: &[u8]) -> ParseResult<'_, Option<String>> {
     )))(input)?;
 
     // If we found a display name, look for whitespace followed by '<'
-    if let Some(name) = &display_name_opt {
+    if let Some(_name) = &display_name_opt {
         // Check if this is actually a display name by looking for a following '<'
         // First skip any whitespace
         let (input_after_ws, _) = take_while(|c: u8| c == b' ' || c == b'\t')(input)?;

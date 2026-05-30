@@ -422,7 +422,7 @@ mod tests {
         if let Err(Error::Parser(msg)) = result {
             let expected_msg_part1 = "Failed to parse Event value string 'presence;id=123 then rubbish': Parser error at '";
             let expected_rubbish_part = "then rubbish"; // This is what e.input should be for the Eof error
-            let expected_msg_part2 = format!("{}' (code: Eof)", expected_rubbish_part);
+            let _expected_msg_part2 = format!("{}' (code: Eof)", expected_rubbish_part);
 
             assert!(
                 msg.starts_with(expected_msg_part1) && msg.contains(&expected_rubbish_part) && msg.ends_with("(code: Eof)"),

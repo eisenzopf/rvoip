@@ -95,8 +95,6 @@ pub fn to_result<T>(res: IResult<&str, T>, err_msg: &str) -> Result<T> {
 pub fn validate_attributes(attributes: &[ParsedAttribute]) -> Result<()> {
     // Collect all mid values in the attributes
     let mut mids: Vec<String> = Vec::new();
-    let mut has_bundle = false;
-    let mut bundle_mids: Vec<String> = Vec::new();
     let mut rids: Vec<String> = Vec::new();
     let mut simulcast_rids: Vec<String> = Vec::new();
 
@@ -105,12 +103,6 @@ pub fn validate_attributes(attributes: &[ParsedAttribute]) -> Result<()> {
         match attr {
             ParsedAttribute::Mid(mid) => {
                 mids.push(mid.clone());
-            }
-            ParsedAttribute::Group(semantics, group_mids) => {
-                if semantics.to_uppercase() == "BUNDLE" {
-                    has_bundle = true;
-                    bundle_mids = group_mids.clone();
-                }
             }
             ParsedAttribute::Rid(rid) => {
                 rids.push(rid.id.clone());

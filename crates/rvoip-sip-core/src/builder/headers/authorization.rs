@@ -453,7 +453,7 @@ where
         cnonce: Option<&str>,
         qop: Option<&str>,
         nc: Option<&str>,
-        method: Option<&str>,
+        _method: Option<&str>,
         uri: Option<&str>,
         algorithm: Option<&str>,
         opaque: Option<&str>,

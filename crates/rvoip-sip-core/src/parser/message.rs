@@ -622,7 +622,7 @@ mod tests {
         let input = b"m: audio 49170 RTP/AVP 0\r\n"; // Contact compact form
         let result = message_header(input);
         assert!(result.is_ok());
-        let (rem, header) = result.unwrap();
+        let (_rem, header) = result.unwrap();
         assert_eq!(header.name, HeaderName::Contact);
     }
 

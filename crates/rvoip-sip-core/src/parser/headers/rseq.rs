@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn test_parse_rseq_in_message() {
         // Sample provisional response message with RSeq header
-        let response = b"SIP/2.0 183 Session Progress\r\n\
+        let _response = b"SIP/2.0 183 Session Progress\r\n\
                          Via: SIP/2.0/UDP client.example.com:5060;branch=z9hG4bK74bf9\r\n\
                          From: Alice <sip:alice@example.com>;tag=9fxced76sl\r\n\
                          To: Bob <sip:bob@example.com>;tag=8321234356\r\n\

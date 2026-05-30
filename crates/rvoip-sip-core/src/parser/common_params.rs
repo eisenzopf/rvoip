@@ -22,7 +22,6 @@ use nom::{
     multi::many0,
     sequence::{pair, preceded},
 };
-use std::collections::HashMap;
 use std::str;
 
 // Import specific parsers from the new modules
@@ -153,7 +152,7 @@ pub fn tag_param(input: &[u8]) -> ParseResult<'_, Param> {
                     // eprintln!("Successfully parsed tag: {}", s);
                     Ok((rem, Param::Tag(s.to_string())))
                 }
-                Err(e) => {
+                Err(_e) => {
                     // eprintln!("UTF-8 error in tag: {:?}", e);
                     // Use properly imported types
                     Err(nom::Err::Failure(nom::error::Error::new(
@@ -460,47 +459,4 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_hashmap_conversion() {
-        // Test conversion of parameters to HashMap for easy lookup
-        let params = vec![
-            Param::Other(
-                "name1".to_string(),
-                Some(GenericValue::Token("value1".to_string())),
-            ),
-            Param::Other("name2".to_string(), None),
-            Param::Other(
-                "name3".to_string(),
-                Some(GenericValue::Quoted("value3".to_string())),
-            ),
-        ];
-
-        let map = params_to_hashmap(params);
-
-        assert_eq!(map.len(), 3);
-        assert_eq!(map.get("name1"), Some(&Some("value1".to_string())));
-        assert_eq!(map.get("name2"), Some(&None));
-
-        // RFC 3261 Section 7.3.1 and 25.1 specify that when a quoted string value is
-        // extracted and used (e.g., in our hashmap), the quotes should NOT be included.
-        // The quotes are only part of the syntax for representing the value in the protocol.
-        assert_eq!(map.get("name3"), Some(&Some("value3".to_string())));
-
-        // Test with duplicate parameter names (last one wins)
-        let params = vec![
-            Param::Other(
-                "name".to_string(),
-                Some(GenericValue::Token("value1".to_string())),
-            ),
-            Param::Other(
-                "name".to_string(),
-                Some(GenericValue::Token("value2".to_string())),
-            ),
-        ];
-
-        let map = params_to_hashmap(params);
-
-        assert_eq!(map.len(), 1);
-        assert_eq!(map.get("name"), Some(&Some("value2".to_string())));
-    }
 }

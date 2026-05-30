@@ -1470,7 +1470,7 @@ impl MultipartBuilder {
             format!("boundary-{}", random_suffix)
         });
 
-        let mut body_builder = MultipartBodyBuilder::new().boundary(boundary);
+        let body_builder = MultipartBodyBuilder::new().boundary(boundary);
 
         // Add all parts
         let mut builder = body_builder;

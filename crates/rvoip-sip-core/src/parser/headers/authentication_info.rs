@@ -16,10 +16,7 @@ use nom::{
 #[derive(Debug)]
 enum AuthInfoError {
     EmptyInput,
-    EmptyParameter,
-    TrailingComma,
     InvalidParameter,
-    MalformedHeaderSyntax,
     UnexpectedTrailingContent,
 }
 
@@ -27,10 +24,7 @@ enum AuthInfoError {
 fn auth_info_error(input: &[u8], error: AuthInfoError) -> nom::Err<NomError<&[u8]>> {
     let kind = match error {
         AuthInfoError::EmptyInput => ErrorKind::TakeWhile1,
-        AuthInfoError::EmptyParameter => ErrorKind::SeparatedList,
-        AuthInfoError::TrailingComma => ErrorKind::Tag,
         AuthInfoError::InvalidParameter => ErrorKind::Alt,
-        AuthInfoError::MalformedHeaderSyntax => ErrorKind::Verify,
         AuthInfoError::UnexpectedTrailingContent => ErrorKind::Eof,
     };
 
@@ -248,20 +242,20 @@ mod tests {
         let input = br#"nc=00000001, nextnonce="12345678""#;
         let result = parse_authentication_info(input);
         assert!(result.is_ok());
-        let (rem, params) = result.unwrap();
+        let (_rem, params) = result.unwrap();
         assert!(params.contains(&AuthenticationInfoParam::NonceCount(1)));
 
         let input = br#"nc=0000ABCD, nextnonce="12345678""#;
         let result = parse_authentication_info(input);
         assert!(result.is_ok());
-        let (rem, params) = result.unwrap();
+        let (_rem, params) = result.unwrap();
         assert!(params.contains(&AuthenticationInfoParam::NonceCount(0xABCD)));
 
         // Mixed case in hex is valid
         let input = br#"nc=0000aBcD, nextnonce="12345678""#;
         let result = parse_authentication_info(input);
         assert!(result.is_ok());
-        let (rem, params) = result.unwrap();
+        let (_rem, params) = result.unwrap();
         assert!(params.contains(&AuthenticationInfoParam::NonceCount(0xABCD)));
     }
 

@@ -7,20 +7,19 @@
 use nom::{
     branch::alt,
     bytes::complete::tag_no_case,
-    combinator::{map, map_res, opt, recognize, value},
+    combinator::{map, map_res, value},
     error::{Error as NomError, ErrorKind},
-    multi::{many0, many1},
-    sequence::{delimited, pair, preceded, terminated},
+    multi::many0,
+    sequence::{pair, preceded},
 };
 use std::str;
 
 // Import from base parser modules
 use crate::parser::address::name_addr_or_addr_spec; // Use shared address parser
-use crate::parser::quoted::quoted_string; // Added quoted_string
-use crate::parser::separators::{equal, laquot, raquot, semi};
+ // Added quoted_string
+use crate::parser::separators::{equal, semi};
 use crate::parser::token::token; // Added token
-use crate::parser::uri::parse_uri;
-use crate::parser::whitespace::lws; // Added lws // Added parse_uri
+ // Added lws // Added parse_uri
                                     // Import specific param parser and list helper
 use crate::parser::common_params::generic_param; // Added generic_param
 use crate::parser::ParseResult;
@@ -28,7 +27,7 @@ use crate::parser::ParseResult;
 use crate::types::address::Address;
 use crate::types::from::From as FromHeader;
 use crate::types::param::Param;
-use crate::types::uri::Uri; // Use specific type alias
+ // Use specific type alias
 
 // NOTE: name_addr and addr_spec are duplicated from contact.rs for now.
 // Consider extracting to a shared address.rs module later.

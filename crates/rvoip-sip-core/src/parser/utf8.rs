@@ -97,14 +97,6 @@ mod tests {
     use super::*;
     
 
-    #[test]
-    fn test_utf8_cont() {
-        assert_eq!(utf8_cont(&[0x80]), Ok((&[][..], &[0x80][..])));
-        assert_eq!(utf8_cont(&[0xBF]), Ok((&[][..], &[0xBF][..])));
-        assert!(utf8_cont(&[0x7F]).is_err());
-        assert!(utf8_cont(&[0xC0]).is_err());
-        assert!(utf8_cont(&[]).is_err());
-    }
 
     #[test]
     fn test_utf8_nonascii() {

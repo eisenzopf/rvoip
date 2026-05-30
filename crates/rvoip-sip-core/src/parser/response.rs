@@ -1,12 +1,10 @@
 use nom::{
     bytes::complete::take_till,
-    character::complete::{digit1, line_ending, space1},
-    combinator::{map, map_res},
+    character::complete::{digit1, space1},
+    combinator::map_res,
     sequence::{terminated, tuple},
-    IResult,
 };
 use std::str;
-use std::str::FromStr;
 // Keep Result for FromStr impls if needed elsewhere
 use crate::error::{Error, Result};
 use crate::parser::common::sip_version;

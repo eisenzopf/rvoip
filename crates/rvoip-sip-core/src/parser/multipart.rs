@@ -5,7 +5,7 @@ use std::str;
 use bytes::Bytes;
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_while},
+    bytes::complete::tag,
     character::complete::space0,
     combinator::eof,
     error::{Error as NomError, ErrorKind, ParseError},
@@ -336,7 +336,7 @@ fn find_next_boundary(input: &[u8], boundary: &str) -> Option<(usize, bool)> {
     let dash_boundary = format!("--{}", boundary);
     let dash_boundary_bytes = dash_boundary.as_bytes();
     let end_boundary = format!("--{}--", boundary);
-    let end_boundary_bytes = end_boundary.as_bytes();
+    let _end_boundary_bytes = end_boundary.as_bytes();
 
     // To avoid embedded boundaries being confused with actual delimiters,
     // we need to check that the boundary appears at the start of a line
@@ -482,7 +482,7 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
         // First check if this is a boundary - especially important for consecutive boundaries
         if current_input.starts_with(dash_boundary_bytes) {
             // Found a boundary immediately - this means we have an empty part
-            let mut empty_part = MimePart::new();
+            let empty_part = MimePart::new();
             body.add_part(empty_part);
 
             // Parse the boundary
@@ -695,7 +695,7 @@ pub fn parse_multipart(content: &[u8], boundary: &str) -> Result<MultipartBody> 
 
     // Perform the actual parsing
     match multipart_parser(content, boundary) {
-        Ok((remaining, body)) => {
+        Ok((_remaining, body)) => {
             // RFC 2046 compliant - any epilogue after the final boundary is ignored
             Ok(body)
         }

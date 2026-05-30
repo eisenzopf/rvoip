@@ -1005,7 +1005,7 @@ mod tests {
     #[test]
     fn test_from_sip_value() {
         // Simplest approach: create a minimal valid Request manually
-        let mut minimal_request = SimpleRequestBuilder::invite("sip:test@example.com")
+        let minimal_request = SimpleRequestBuilder::invite("sip:test@example.com")
             .unwrap()
             .build();
 

@@ -42,7 +42,7 @@ impl Authorization {
     ///
     /// A new Authorization header with the specified credentials
     pub fn new(
-        scheme: AuthScheme,
+        _scheme: AuthScheme,
         username: impl Into<String>,
         realm: impl Into<String>,
         nonce: impl Into<String>,

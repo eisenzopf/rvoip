@@ -185,7 +185,7 @@ pub fn parse_alert_info_header(input: &[u8]) -> ParseResult<'_, Vec<AlertInfoVal
 mod tests {
     use super::*;
     use crate::types::param::{GenericValue, Param};
-    use crate::types::uri::Uri;
+    
 
     // Helper function to create an HTTP URI for testing
 
@@ -228,7 +228,7 @@ mod tests {
 
         // Finally test the full alert_param function
         match super::alert_param(input) {
-            Ok((rem, value)) => {
+            Ok((_rem, value)) => {
                 println!("Successfully parsed alert_param!");
                 println!("URI: {:?}", value.uri);
                 println!("Params: {:?}", value.params);

@@ -6,7 +6,7 @@ use nom::{
     bytes::complete::tag,
     combinator::{opt, recognize},
     multi::many0,
-    sequence::{preceded, separated_pair},
+    sequence::preceded,
 };
 use std::collections::HashMap;
 

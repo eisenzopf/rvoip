@@ -599,14 +599,11 @@ mod tests {
         assert_eq!(original, roundtrip);
     }
 
-    #[cfg(feature = "serde")]
     #[test]
     fn test_serialization() {
         let unsupported = Unsupported::with_tags(vec!["timer".to_string(), "100rel".to_string()]);
-        let json = serde_json::to_string(&unsupported).unwrap();
-
-        // Convert to header
-        let header = unsupported.to_header();
-        let header = unsupported.to_header(); // Just for the test, don't need to manipulate raw value
+        // Smoke tests: serialization and typed-header conversion must not fail.
+        let _json = serde_json::to_string(&unsupported).unwrap();
+        let _header = unsupported.to_header();
     }
 }

@@ -5,15 +5,6 @@
 //! an RTP session.
 
 use crate::error::{Error, Result};
-use nom::{
-    branch::alt,
-    bytes::complete::{tag, tag_no_case, take_while1},
-    character::complete::{alpha1, alphanumeric1, char, digit1, space0, space1},
-    combinator::{map, recognize},
-    multi::{many0, separated_list0, separated_list1},
-    sequence::{pair, preceded},
-    IResult,
-};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -500,44 +491,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_parser_functions_directly() {
-        // Test parse_rid_id
-        let (rem, id) = parse_rid_id("example-id rest").unwrap();
-        assert_eq!(id, "example-id");
-        assert_eq!(rem, " rest");
-
-        // Test parse_direction
-        let (rem, dir) = parse_direction("send rest").unwrap();
-        assert_eq!(dir, RidDirection::Send);
-        assert_eq!(rem, " rest");
-
-        // Test parse_format_list
-        let (rem, formats) = parse_format_list("pt=96,97,98 rest").unwrap();
-        assert_eq!(formats, vec!["96", "97", "98"]);
-        assert_eq!(rem, " rest");
-
-        // Test parse_restriction
-        let (rem, (key, val)) = parse_restriction("max-width=1280 rest").unwrap();
-        assert_eq!(key, "max-width");
-        assert_eq!(val, "1280");
-        assert_eq!(rem, " rest");
-
-        // Test parse_restrictions_list - both with and without semicolon
-        let (rem, restrictions) =
-            parse_restrictions_list(";max-width=1280;max-height=720 rest").unwrap();
-        assert_eq!(restrictions.len(), 2);
-        assert_eq!(restrictions.get("max-width"), Some(&"1280".to_string()));
-        assert_eq!(restrictions.get("max-height"), Some(&"720".to_string()));
-        assert_eq!(rem, " rest");
-
-        let (rem, restrictions) =
-            parse_restrictions_list("max-width=1280;max-height=720 rest").unwrap();
-        assert_eq!(restrictions.len(), 2);
-        assert_eq!(restrictions.get("max-width"), Some(&"1280".to_string()));
-        assert_eq!(restrictions.get("max-height"), Some(&"720".to_string()));
-        assert_eq!(rem, " rest");
-    }
 
     #[test]
     fn test_strict_rfc_compliance() {

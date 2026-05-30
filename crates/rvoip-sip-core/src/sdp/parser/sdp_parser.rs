@@ -305,7 +305,7 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                         session.session_info = Some(value.to_string());
                     }
                     SdpParseSection::MediaDescription => {
-                        if let Some(ref mut md) = current_media_description {
+                        if current_media_description.is_some() {
                             // Media description doesn't have an information field in this codebase
                             // Just ignore it or add it as an attribute
                         } else {

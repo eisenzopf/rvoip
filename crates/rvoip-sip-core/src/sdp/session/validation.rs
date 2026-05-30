@@ -2,13 +2,6 @@
 //
 // Functions for validating hostnames, usernames, IP addresses, and other SDP components.
 
-use nom::{
-    bytes::complete::take_while1,
-    character::complete::char,
-    combinator::{recognize, verify},
-    multi::separated_list1,
-    IResult,
-};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// Validates if a string is a valid username per SDP rules

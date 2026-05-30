@@ -4,15 +4,6 @@
 //! Format: a=extmap:<id>[/<direction>] <uri> [<extension parameters>]
 
 use crate::error::{Error, Result};
-use crate::sdp::attributes::common::positive_integer;
-use nom::{
-    branch::alt,
-    bytes::complete::{tag, take_till1, take_while1},
-    character::complete::space1,
-    combinator::{map, opt, verify},
-    sequence::{preceded, tuple},
-    IResult,
-};
 
 
 

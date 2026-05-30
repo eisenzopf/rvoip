@@ -391,7 +391,7 @@ mod tests {
         let input = "   <sip:busy@example.com>  ;  reason=busy  ,  <sip:error@example.net>";
         let result = parse_error_info(input.as_bytes());
         assert!(result.is_ok(), "Should handle extra whitespace");
-        let (rem, infos) = result.unwrap();
+        let (_rem, infos) = result.unwrap();
 
         // Should parse two URIs
         assert_eq!(infos.len(), 2);

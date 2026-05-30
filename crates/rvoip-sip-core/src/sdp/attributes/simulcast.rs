@@ -6,10 +6,9 @@
 
 use crate::error::{Error, Result};
 use nom::{
-    branch::alt,
-    bytes::complete::{tag, take_while1},
-    character::complete::{char, space1},
-    combinator::{map, opt, value},
+    bytes::complete::take_while1,
+    character::complete::char,
+    combinator::{map, opt},
     multi::separated_list1,
     IResult,
 };
@@ -585,47 +584,4 @@ mod tests {
         assert_eq!(attrs[0].stream_versions[1].alternatives[0].rid, "a3");
     }
 
-    #[test]
-    fn test_parser_functions_directly() {
-        // Test parse_simulcast_direction
-        let (rest, direction) = parse_simulcast_direction("send rest").unwrap();
-        assert_eq!(rest, " rest");
-        assert!(matches!(direction, SimulcastDirection::Send));
-
-        let (rest, direction) = parse_simulcast_direction("recv rest").unwrap();
-        assert_eq!(rest, " rest");
-        assert!(matches!(direction, SimulcastDirection::Recv));
-
-        // Test parse_rid
-        let (rest, rid) = parse_rid("rid-1 rest").unwrap();
-        assert_eq!(rest, " rest");
-        assert_eq!(rid, "rid-1");
-
-        // Test parse_simulcast_alternative
-        let (rest, alt) = parse_simulcast_alternative("rid-1 rest").unwrap();
-        assert_eq!(rest, " rest");
-        assert_eq!(alt.rid, "rid-1");
-        assert!(matches!(alt.status, SimulcastStatus::Active));
-
-        let (rest, alt) = parse_simulcast_alternative("~rid-1 rest").unwrap();
-        assert_eq!(rest, " rest");
-        assert_eq!(alt.rid, "rid-1");
-        assert!(matches!(alt.status, SimulcastStatus::Paused));
-
-        // Test parse_simulcast_version
-        let (rest, version) = parse_simulcast_version("rid-1,rid-2 rest").unwrap();
-        assert_eq!(rest, " rest");
-        assert_eq!(version.alternatives.len(), 2);
-        assert_eq!(version.alternatives[0].rid, "rid-1");
-        assert_eq!(version.alternatives[1].rid, "rid-2");
-
-        // Test parse_simulcast_stream_versions
-        let (rest, versions) = parse_simulcast_stream_versions("rid-1;rid-2 rest").unwrap();
-        assert_eq!(rest, " rest");
-        assert_eq!(versions.len(), 2);
-        assert_eq!(versions[0].alternatives.len(), 1);
-        assert_eq!(versions[0].alternatives[0].rid, "rid-1");
-        assert_eq!(versions[1].alternatives.len(), 1);
-        assert_eq!(versions[1].alternatives[0].rid, "rid-2");
-    }
 }

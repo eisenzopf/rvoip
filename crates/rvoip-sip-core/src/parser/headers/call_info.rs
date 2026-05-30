@@ -510,7 +510,7 @@ mod tests {
         );
 
         // Format the header directly instead of using the Display impl which might have a bug
-        let formatted = format!("<{}>", header.0[0].uri);
+        let _formatted = format!("<{}>", header.0[0].uri);
         for param in &header.0[0].params {
             let param_str = format!(";{}", param);
             assert!(

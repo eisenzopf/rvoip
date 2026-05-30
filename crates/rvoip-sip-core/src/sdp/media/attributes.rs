@@ -2,8 +2,9 @@
 //
 // Functions for working with media-level attributes
 
-use crate::error::Result;
+#[cfg(test)]
 use crate::sdp::attributes::MediaDirection;
+use crate::error::Result;
 use crate::types::sdp::{MediaDescription, ParsedAttribute};
 
 /// Update a media description with a parsed attribute
@@ -207,41 +208,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_get_media_direction() {
-        let mut media = MediaDescription::new("audio", 49170, "RTP/AVP", vec!["0".to_string()]);
-        assert_eq!(
-            get_media_direction(&media),
-            None,
-            "Default media should have no direction"
-        );
-
-        media.direction = Some(MediaDirection::SendRecv);
-        assert_eq!(
-            get_media_direction(&media),
-            Some(MediaDirection::SendRecv),
-            "Failed to get SendRecv direction"
-        );
-
-        media.direction = Some(MediaDirection::SendOnly);
-        assert_eq!(
-            get_media_direction(&media),
-            Some(MediaDirection::SendOnly),
-            "Failed to get SendOnly direction"
-        );
-
-        media.direction = Some(MediaDirection::RecvOnly);
-        assert_eq!(
-            get_media_direction(&media),
-            Some(MediaDirection::RecvOnly),
-            "Failed to get RecvOnly direction"
-        );
-
-        media.direction = Some(MediaDirection::Inactive);
-        assert_eq!(
-            get_media_direction(&media),
-            Some(MediaDirection::Inactive),
-            "Failed to get Inactive direction"
-        );
-    }
 }

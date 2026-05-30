@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn test_accepts() {
         // Create test languages
-        let mut en = LanguageInfo {
+        let en = LanguageInfo {
             range: "en".to_string(),
             q: Some(NotNan::new(0.8).unwrap()),
             params: vec![],

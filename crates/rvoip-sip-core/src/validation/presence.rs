@@ -169,7 +169,7 @@ pub fn validate_subscribe_request(request: &Request) -> Result<()> {
         .iter()
         .find(|h| matches!(h, TypedHeader::To(_)) || h.name() == HeaderName::To);
 
-    if let Some(TypedHeader::To(to)) = to_header {
+    if let Some(TypedHeader::To(_to)) = to_header {
         // If To has a tag, this is a refresh/unsubscribe within a dialog
         // Different validation rules may apply
     }

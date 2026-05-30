@@ -442,15 +442,9 @@ mod tests {
     fn test_serde_errors() {
         // Test serialization error with invalid serialization
         #[derive(Serialize)]
-        struct NonSerializable {
-            // This field can't be serialized directly
-            #[serde(skip_serializing)]
-            value: std::cell::RefCell<i32>,
-        }
+        struct NonSerializable {}
 
-        let non_serializable = NonSerializable {
-            value: std::cell::RefCell::new(42),
-        };
+        let non_serializable = NonSerializable {};
 
         // Attempting to convert a SipValue to JSON string with invalid UTF-8
         let serialization_result = serde_json::to_string(&non_serializable);

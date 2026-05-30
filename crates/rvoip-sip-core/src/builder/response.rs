@@ -312,7 +312,7 @@ impl SimpleResponseBuilder {
         for via in request.via_headers() {
             for via_header in via.headers() {
                 // Reconstruct the full host:port string to preserve port information
-                let host = if let Some(port) = via_header.sent_by_port {
+                let _host = if let Some(port) = via_header.sent_by_port {
                     format!("{}:{}", via_header.sent_by_host, port)
                 } else {
                     via_header.sent_by_host.to_string()
@@ -1410,7 +1410,7 @@ impl SimpleResponseBuilder {
     /// let builder = SimpleResponseBuilder::new(StatusCode::Ok, None)
     ///     .expires(3600);
     /// ```
-    pub fn expires(mut self, seconds: u32) -> Self {
+    pub fn expires(self, seconds: u32) -> Self {
         use crate::types::expires::Expires;
         // Use the builder's header method which properly handles single-value headers
         self.header(TypedHeader::Expires(Expires::new(seconds)))

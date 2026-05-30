@@ -15,7 +15,6 @@ use nom::{
     multi::separated_list1,
     Err, IResult,
 };
-use std::str;
 
 // Import from parser modules
 use crate::parser::whitespace::sws;

@@ -1,14 +1,8 @@
 // Parser for URI authority component (RFC 3261/2396)
 // authority = userinfo@host:port or standalone reg-name
 
-use nom::{
-    bytes::complete::tag,
-    combinator::{opt, recognize},
-    sequence::{pair, preceded, terminated},
-};
 
 // Import shared parsers
-use crate::parser::uri::host::hostport;
 use crate::parser::ParseResult;
 
 /// Parse an RFC 3261/2396 authority component

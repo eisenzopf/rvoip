@@ -460,7 +460,7 @@ impl Request {
     ///
     /// # Returns
     /// An optional string slice containing the header value
-    pub fn get_header_value(&self, name: &HeaderName) -> Option<&str> {
+    pub fn get_header_value(&self, _name: &HeaderName) -> Option<&str> {
         None // Placeholder
     }
 

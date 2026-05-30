@@ -276,7 +276,7 @@ pub fn add_webrtc_profile(
     let rtpmap_video = &["96", "97"];
 
     // Add audio
-    let mut media_builder = builder
+    let media_builder = builder
         .media_audio(audio_port, "UDP/TLS/RTP/SAVPF")
         .formats(rtpmap_audio)
         .rtpmap("111", "opus/48000/2")
@@ -296,7 +296,7 @@ pub fn add_webrtc_profile(
         return builder;
     }
 
-    let mut media_builder = builder
+    let media_builder = builder
         .media_video(video_port, "UDP/TLS/RTP/SAVPF")
         .formats(rtpmap_video)
         .rtpmap("96", "VP8/90000")

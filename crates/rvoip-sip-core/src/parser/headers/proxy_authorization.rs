@@ -215,7 +215,7 @@ mod tests {
         let input = br#"Digest  username = "Bob" ,  realm = "proxy.com" , nonce = "qwert" , uri = "sip:resource.com" , response = "12345"  "#;
         let result = parse_proxy_authorization(input);
         assert!(result.is_ok());
-        let (rem, creds) = result.unwrap();
+        let (_rem, creds) = result.unwrap();
 
         // The credentials parser may leave trailing whitespace in the remainder,
         // which is acceptable according to the RFC 3261 grammar

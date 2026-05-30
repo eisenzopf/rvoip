@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_set_full_event_object() {
-        let custom_event =
+        let _custom_event =
             Event::new(EventType::Token("custom-event".to_string())).with_id("custom-id-001");
 
         let request = RequestBuilder::new(Method::Subscribe, "sip:test@example.com")

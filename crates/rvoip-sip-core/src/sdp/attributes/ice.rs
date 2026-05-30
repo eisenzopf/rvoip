@@ -5,12 +5,10 @@
 //! protocol for NAT traversal.
 
 use crate::error::{Error, Result};
-use crate::sdp::attributes::common::{to_result, token};
+use crate::sdp::attributes::common::to_result;
 use nom::{
     bytes::complete::take_while1,
-    character::complete::space1,
-    combinator::{map, verify},
-    multi::separated_list1,
+    combinator::verify,
     IResult,
 };
 
@@ -265,46 +263,6 @@ mod tests {
         assert!(result);
     }
 
-    #[test]
-    fn test_parser_functions_directly() {
-        // Test ice_ufrag_parser directly
-        let input = "abcd";
-        let (remainder, ufrag) = ice_ufrag_parser(input).unwrap();
-        assert_eq!(ufrag, "abcd");
-        assert_eq!(remainder, "");
-
-        // Test with trailing content
-        let input_with_suffix = "abcd rest";
-        let result = ice_ufrag_parser(input_with_suffix);
-        assert!(result.is_ok());
-        let (remainder, ufrag) = result.unwrap();
-        assert_eq!(ufrag, "abcd");
-        assert_eq!(remainder, " rest");
-
-        // Test ice_pwd_parser directly
-        let pwd = "a".repeat(22);
-        let (remainder, parsed_pwd) = ice_pwd_parser(&pwd).unwrap();
-        assert_eq!(parsed_pwd, pwd);
-        assert_eq!(remainder, "");
-
-        // Test ice_pwd_parser with trailing content
-        let pwd_input = format!("{} rest", pwd);
-        let (remainder, parsed_pwd) = ice_pwd_parser(&pwd_input).unwrap();
-        assert_eq!(parsed_pwd, pwd);
-        assert_eq!(remainder, " rest");
-
-        // Test ice_options_parser directly with non-empty input
-        let options_input = "trickle ice2";
-        let (remainder, options) = ice_options_parser(options_input).unwrap();
-        assert_eq!(options, vec!["trickle", "ice2"]);
-        assert_eq!(remainder, "");
-
-        // Test ice_options_parser with empty input
-        let empty_input = "";
-        let (remainder, options) = ice_options_parser(empty_input).unwrap();
-        assert_eq!(options, Vec::<String>::new());
-        assert_eq!(remainder, "");
-    }
 
     #[test]
     fn test_real_world_examples() {

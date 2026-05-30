@@ -134,7 +134,7 @@ pub fn validate_via_header(via: &ViaHeader) -> bool {
 
     // Check for valid transport (RFC 3261 lists UDP, TCP, TLS, SCTP as standard)
     let transport_upper = via.sent_protocol.transport.to_uppercase();
-    let is_standard_transport = ["UDP", "TCP", "TLS", "SCTP"].contains(&transport_upper.as_str());
+    let _is_standard_transport = ["UDP", "TCP", "TLS", "SCTP"].contains(&transport_upper.as_str());
 
     // Check for valid host
     let has_valid_host = !via.sent_by_host.to_string().is_empty();
@@ -265,7 +265,7 @@ mod tests {
         let result = via_param_item(b"ttl=256");
         // This should either fail or clamp to 255
         if let Ok((_, p)) = result {
-            assert!(matches!(p, Param::Ttl(t) if t <= 255));
+            assert!(matches!(p, Param::Ttl(_)));
         }
 
         // Test maddr parameter with domain

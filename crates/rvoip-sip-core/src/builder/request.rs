@@ -1163,7 +1163,7 @@ impl SimpleRequestBuilder {
     ///     .event("presence")
     ///     .expires(3600);
     /// ```
-    pub fn expires(mut self, seconds: u32) -> Self {
+    pub fn expires(self, seconds: u32) -> Self {
         use crate::types::expires::Expires;
         // Use the builder's header method which properly handles single-value headers
         self.header(TypedHeader::Expires(Expires::new(seconds)))

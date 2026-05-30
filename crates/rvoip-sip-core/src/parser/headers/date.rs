@@ -11,9 +11,9 @@ use chrono::Weekday;
 use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while_m_n},
-    character::complete::{char, space1},
+    character::complete::space1,
     error::{Error as NomError, ErrorKind, ParseError},
-    sequence::{preceded, tuple},
+    sequence::tuple,
 };
 
 // Import from new modules
@@ -95,7 +95,7 @@ pub fn sip_date(input: &[u8]) -> ParseResult<'_, DateTime<FixedOffset>> {
     ))(input)?;
 
     // Convert components to strings
-    let day_of_week = match std::str::from_utf8(date_parts.0) {
+    let _day_of_week = match std::str::from_utf8(date_parts.0) {
         Ok(s) => s,
         Err(_) => {
             return Err(nom::Err::Failure(NomError::from_error_kind(
@@ -247,7 +247,7 @@ pub fn sip_date(input: &[u8]) -> ParseResult<'_, DateTime<FixedOffset>> {
 
     let naive_datetime = NaiveDateTime::new(naive_date, naive_time);
     let datetime =
-        DateTime::<FixedOffset>::from_utc(naive_datetime, FixedOffset::east_opt(0).unwrap());
+        DateTime::<FixedOffset>::from_naive_utc_and_offset(naive_datetime, FixedOffset::east_opt(0).unwrap());
 
     Ok((remaining, datetime))
 }

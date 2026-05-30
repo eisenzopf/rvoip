@@ -448,7 +448,7 @@ mod tests {
                                s=Invalid Media Type\r\n\
                                t=0 0\r\n\
                                m=invalid 9 RTP/AVP 0\r\n";
-        let result = SdpSession::from_str(invalid_media_type);
+        let _result = SdpSession::from_str(invalid_media_type);
         // Note: The parser might accept non-standard media types, so this could pass
 
         // Invalid port number

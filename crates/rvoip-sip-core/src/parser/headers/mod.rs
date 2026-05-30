@@ -147,12 +147,12 @@ mod tests {
     fn test_parser_exports() {
         // Test sampling of different header parsers to ensure they're correctly exported
         // This doesn't test the actual parsing, just that the functions are accessible
-        let via_fn: fn(&[u8]) -> ParseResult<'_, _> = parse_via;
-        let contact_fn: fn(&[u8]) -> ParseResult<'_, _> = parse_contact;
-        let from_fn: fn(&[u8]) -> ParseResult<'_, _> = parse_from;
-        let to_fn: fn(&[u8]) -> ParseResult<'_, _> = parse_to;
-        let cseq_fn: fn(&[u8]) -> ParseResult<'_, _> = parse_cseq;
-        let auth_fn: fn(&[u8]) -> ParseResult<'_, _> = parse_www_authenticate;
+        let _via_fn: fn(&[u8]) -> ParseResult<'_, _> = parse_via;
+        let _contact_fn: fn(&[u8]) -> ParseResult<'_, _> = parse_contact;
+        let _from_fn: fn(&[u8]) -> ParseResult<'_, _> = parse_from;
+        let _to_fn: fn(&[u8]) -> ParseResult<'_, _> = parse_to;
+        let _cseq_fn: fn(&[u8]) -> ParseResult<'_, _> = parse_cseq;
+        let _auth_fn: fn(&[u8]) -> ParseResult<'_, _> = parse_www_authenticate;
 
         // If this compiles, the exports are working correctly
         assert!(true);

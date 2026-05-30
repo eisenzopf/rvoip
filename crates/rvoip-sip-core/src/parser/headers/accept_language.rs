@@ -580,7 +580,7 @@ mod tests {
         let input = b"en;q=0.7, da, en-gb;q=0.8, *;q=0.1";
         let result = parse_languages(input);
         assert!(result.is_ok());
-        let (rem, languages) = result.unwrap();
+        let (_rem, languages) = result.unwrap();
 
         // Languages should be sorted by q-value: da (q=1.0), en-gb (q=0.8), en (q=0.7), * (q=0.1)
         assert_eq!(languages.len(), 4);
