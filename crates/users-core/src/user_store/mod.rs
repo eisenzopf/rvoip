@@ -2,7 +2,7 @@
 
 use crate::{CreateUserRequest, Error, Result, UpdateUserRequest, User, UserFilter};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use sqlx_core::{query::query, raw_sql::raw_sql, row::Row};
 use sqlx_sqlite::{SqlitePool, SqliteRow};
 

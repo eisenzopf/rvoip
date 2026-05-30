@@ -1,7 +1,6 @@
 //! Tests for the user store functionality
 //! These tests serve as both verification and developer examples
 
-use chrono::Utc;
 use tempfile::TempDir;
 use users_core::{CreateUserRequest, SqliteUserStore, UpdateUserRequest, UserFilter, UserStore};
 

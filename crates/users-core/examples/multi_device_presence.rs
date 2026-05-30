@@ -10,22 +10,30 @@ use users_core::{init, CreateUserRequest, UsersConfig};
 
 // Simulated device registration
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // reserved / not yet read
 struct DeviceRegistration {
+    #[allow(dead_code)] // reserved / not yet read
     user_id: String,
+    #[allow(dead_code)] // reserved / not yet read
     username: String,
     device_id: String,
+    #[allow(dead_code)] // reserved / not yet read
     device_type: DeviceType,
     contact: String,
     user_agent: String,
+    #[allow(dead_code)] // reserved / not yet read
     token: String,
+    #[allow(dead_code)] // reserved / not yet read
     registered_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // reserved / not yet read
 enum DeviceType {
     Desktop,
     Mobile,
     WebBrowser,
+    #[allow(dead_code)] // reserved / not yet read
     DeskPhone,
 }
 
@@ -40,18 +48,24 @@ enum PresenceState {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)] // reserved / not yet read
 struct UserPresence {
+    #[allow(dead_code)] // reserved / not yet read
     user_id: String,
     overall_state: PresenceState,
     devices: Vec<DevicePresence>,
+    #[allow(dead_code)] // reserved / not yet read
     last_activity: DateTime<Utc>,
 }
 
 #[derive(Debug)]
+#[allow(dead_code)] // reserved / not yet read
 struct DevicePresence {
     device_id: String,
+    #[allow(dead_code)] // reserved / not yet read
     device_type: DeviceType,
     state: PresenceState,
+    #[allow(dead_code)] // reserved / not yet read
     status_message: Option<String>,
 }
 

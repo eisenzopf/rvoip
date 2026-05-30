@@ -9,8 +9,11 @@ use users_core::api_keys::CreateApiKeyRequest;
 use users_core::{init, CreateUserRequest, UsersConfig};
 
 // Simulated service that needs API access
+#[allow(dead_code)] // reserved / not yet read
 struct PbxService {
+    #[allow(dead_code)] // reserved / not yet read
     api_key: String,
+    #[allow(dead_code)] // reserved / not yet read
     base_url: String,
 }
 
@@ -157,7 +160,7 @@ async fn main() -> Result<()> {
     println!("\n🔄 API Key rotation example...");
 
     // Create new key before revoking old one
-    let (new_pbx_key, new_pbx_raw) = api_key_store
+    let (_new_pbx_key, new_pbx_raw) = api_key_store
         .create_api_key(CreateApiKeyRequest {
             user_id: pbx_account.id.clone(),
             name: "PBX Master Key v2".to_string(),

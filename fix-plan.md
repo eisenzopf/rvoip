@@ -14,6 +14,7 @@ Companion to [test-report.md](test-report.md). Sequenced from "blocks CI" → "r
 | 5. callback_peer trait stubs | ✅ Done (already correct in source) |
 | 6. Lock in lints | ✅ Done |
 | 7. Manual cleanup of cargo-fix-broken crates | ✅ Done (unified_api_tests slow-teardown resolved — see Phase 7 notes) |
+| 8. Post-merge full re-clean → **0 workspace warnings** | ✅ Done (Phases 0–7 were committed incomplete/broken; see Phase 8) |
 
 ---
 
@@ -181,3 +182,88 @@ To re-enable lints fully (raise warn → deny on a clean tree):
 - Examples gated behind `--features X` that weren't built with that feature (`webrtc/*` need `client`, `sip pbx_*` and `sip regression_tls_*` need `dev-insecure-tls`, etc.).
 - Benchmarks (`cargo bench`).
 - The pre-existing `unified_api_tests` hang in sip-dialog.
+
+---
+
+## Phase 8 — Post-merge full re-clean to **0 workspace warnings** ✅ (2026-05-29/30)
+
+**Why this was needed:** Phases 0–7 above were declared "done", but building HEAD
+(`edd71150`) showed the tree was **not** clean — ~2,700 warnings total. The merge
+`2865603d` ("beta release prep + UCTP/WebRTC work") reintroduced pre-cleanup code,
+and the follow-up "crate cleanup" commits were committed while still incomplete
+(and, in places, **broken** — see below). A fresh `cargo build --workspace --all-targets`
+now produces **0 warnings / 0 errors**.
+
+### Result (verified `cargo build --workspace --all-targets` = 0 warnings)
+
+| Crate | Before | After |
+|---|---|---|
+| rvoip-sip-core | 752 | **0** (2043 lib tests pass) |
+| rvoip-rtp-core | 446 | **0** (227 lib tests pass) |
+| rvoip-codec-core | 12 | **0** (103 lib tests pass) |
+| users-core | 55 | **0** |
+| rvoip-webrtc | 7 | **0** (34 lib tests pass) |
+| codec/media/sip-dialog/quic/ws/wt/client/proxy/uctp/core (misc) | ~30 | **0** |
+
+### Hard-won lessons (these WILL bite again — read before the next sweep)
+
+1. **`cargo fix` is unsafe on this codebase.** It strips file-level `use`s that are
+   only used by `#[cfg(test)]` siblings (the non-test lib compile legitimately sees
+   them unused), and **backs out the entire crate's fixes** if *any* applied
+   suggestion fails to compile (one macro-false-positive blocks all). Hand-rolled
+   byte-span tooling (apply only MachineApplicable spans, no all-or-nothing backout)
+   plus a cfg(test)-gate-restorer was required. Tooling lives in `/tmp/*.py`.
+
+2. **Dead-field deletion corrupts constructors.** Deleting an inert field means
+   editing every `Struct { field: val }` literal — shorthand inits `Self { x }`
+   (no `:`) and adjacent fields make automated removal mangle code. **Fell back to
+   `#[allow(dead_code)]` for all dead fields** (with a comment). This is also
+   *required* for `Arc`/permit/handle fields held purely for `Drop`/liveness —
+   deleting those compiles fine but silently breaks runtime.
+
+3. **Cross-target false positives.** A helper in a shared `tests/common` or
+   `tests/support` module is flagged "never used" in the one integration-test target
+   that doesn't call it, while *other* targets do. **Never delete these — `#[allow]`
+   them** (or restore if already deleted). Same for `dead_code` methods on test
+   fixtures.
+
+4. **A stale cargo cache masks broken tests.** `cargo build --all-targets` returning
+   exit 0 does NOT prove the tree compiles — cached test binaries hide it. The prior
+   "crate cleanup" commits deleted helpers (`parse_token_list0`, `is_rtp_protocol`,
+   `drive_auth_handshake`, …) but left their callers; only `cargo clean -p <crate>`
+   then rebuild exposes it. **Always `cargo clean` (or actually run the tests) before
+   trusting a green `--all-targets`.**
+
+### Decisions taken (with the user, mid-sweep)
+
+- **Scope:** full clean to zero, all crates.
+- **Dead code:** delete dead fns/methods/statics/whole-dead-modules (+ delete the
+  orphaned tests that referenced now-deleted helpers); `#[allow]` dead fields and
+  cross-target test helpers.
+- The `Cargo.toml` `[workspace.lints.rust]` temporary `allow`s used during the import
+  passes were reverted — all lints are back to `warn`.
+
+### Follow-up: single rustls CryptoProvider (ring only)
+
+`cargo test --workspace` was panicking in 3 WSS tests:
+`Could not automatically determine the process-level CryptoProvider from Rustls`.
+Cause: the process linked **two** rustls providers (ring + aws-lc-rs), so rustls
+can't auto-pick one. `rustls`'s *default* features include `aws_lc_rs` (and
+`prefer-post-quantum`, which also needs it), and several deps pulled rustls with
+defaults. Standardized on **ring** by disabling those defaults everywhere:
+
+- `[workspace.dependencies]`: `rustls` and `tokio-rustls` → `default-features = false`
+  + explicit `ring`/`std`/`tls12`/`logging` (drops `aws_lc_rs` + post-quantum KX).
+- `web-transport-quinn` → `default-features = false, features = ["ring"]` (its
+  default is `aws-lc-rs`, reached via `rvoip-webtransport`).
+- `auth-core` reqwest → `default-features = false` + `rustls-tls` (was also pulling
+  native-tls/OpenSSL); `users-core` `axum-server` → `tls-rustls-no-provider`
+  (its `tls-rustls` hard-enables `rustls/aws-lc-rs`).
+- `rvoip-sip-transport` `rustls`/`tokio-rustls` switched from direct version pins to
+  `{ workspace = true }` so they inherit the ring config.
+
+`cargo tree -i aws-lc-rs` → no match across all members; aws-lc-rs/aws-lc-sys are no
+longer compiled. With one provider linked, rustls auto-selects ring — no
+`install_default()` calls needed. **Gotcha:** `cargo tree` defaults to
+*default-members* only; aws-lc-rs hid in non-default members' dev-deps (`users-core`,
+`auth-core`). Scan every member (`cargo tree -p <crate> -e all -i aws-lc-rs`).

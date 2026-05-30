@@ -240,8 +240,8 @@ pub async fn rate_limit_middleware(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    use crate::{api::AuthType, UserClaims};
-    use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+    use crate::UserClaims;
+    use jsonwebtoken::{decode, Validation};
 
     // Try to extract user ID from JWT token in Authorization header
     let mut user_id = None;
@@ -337,7 +337,7 @@ mod tests {
         });
 
         // Test user rate limiting
-        for i in 0..5 {
+        for _i in 0..5 {
             assert!(limiter
                 .check_rate_limit(RateLimitIdentifier::User("user1".to_string()))
                 .await

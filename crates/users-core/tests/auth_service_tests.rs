@@ -168,7 +168,7 @@ async fn test_api_key_authentication() {
 
     // Create an API key
     let api_key_store = auth_service.api_key_store().clone();
-    let (api_key, raw_key) = api_key_store
+    let (_api_key, raw_key) = api_key_store
         .create_api_key(users_core::api_keys::CreateApiKeyRequest {
             user_id: user.id.clone(),
             name: "Test API Key".to_string(),
@@ -294,7 +294,7 @@ async fn test_inactive_user_cannot_authenticate() {
 
 #[tokio::test]
 async fn test_jwt_claims_content() {
-    use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+    use jsonwebtoken::{decode, Validation};
 
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");

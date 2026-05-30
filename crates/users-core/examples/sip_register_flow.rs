@@ -11,18 +11,26 @@ use std::collections::HashMap;
 use users_core::{init, CreateUserRequest, UserClaims, UsersConfig};
 
 // Simulated SIP REGISTER message
+#[allow(dead_code)] // reserved / not yet read
 struct SipRegister {
+    #[allow(dead_code)] // reserved / not yet read
     from: String,
+    #[allow(dead_code)] // reserved / not yet read
     to: String,
     contact: String,
     authorization: Option<String>,
 }
 
 // Simulated SIP registration entry
+#[allow(dead_code)] // reserved / not yet read
 struct SipRegistration {
+    #[allow(dead_code)] // reserved / not yet read
     user_id: String,
+    #[allow(dead_code)] // reserved / not yet read
     username: String,
+    #[allow(dead_code)] // reserved / not yet read
     contact: String,
+    #[allow(dead_code)] // reserved / not yet read
     expires: u32,
 }
 

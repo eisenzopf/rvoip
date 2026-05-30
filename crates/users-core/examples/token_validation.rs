@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 use users_core::{init, CreateUserRequest, UserClaims, UsersConfig};
 
@@ -21,9 +21,12 @@ struct UserContext {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // reserved / not yet read
 enum TokenType {
     UsersCore,
+    #[allow(dead_code)] // reserved / not yet read
     OAuth2Google,
+    #[allow(dead_code)] // reserved / not yet read
     OAuth2Azure,
 }
 
@@ -42,7 +45,7 @@ async fn main() -> Result<()> {
     // Create and authenticate a user
     println!("📝 Setting up test user...");
 
-    let user = auth_service
+    let _user = auth_service
         .create_user(CreateUserRequest {
             username: "validator".to_string(),
             password: "SecureValidate2024!".to_string(),
@@ -100,7 +103,7 @@ async fn main() -> Result<()> {
     println!("\n🌐 Handling different token sources...");
 
     // Simulate OAuth2 token (for comparison)
-    let oauth2_token = simulate_oauth2_token();
+    let _oauth2_token = simulate_oauth2_token();
     println!("   OAuth2 token would be validated against provider's endpoint");
     println!("   Users-core tokens are validated locally with the issuer verification key");
 
@@ -233,9 +236,9 @@ fn simulate_oauth2_token() -> String {
     "ya29.a0AfH6SMBx3J5Xb_XYZ123".to_string()
 }
 
-fn create_expired_token(auth_service: &users_core::AuthenticationService) -> Result<String> {
+fn create_expired_token(_auth_service: &users_core::AuthenticationService) -> Result<String> {
     // Create a token that's already expired
-    let claims = UserClaims {
+    let _claims = UserClaims {
         iss: "https://users.rvoip.local".to_string(),
         sub: "test-user".to_string(),
         aud: vec!["rvoip-api".to_string()],

@@ -81,7 +81,7 @@ async fn example_sip_register_flow() {
     // auth-core would validate using users-core's public key
     // For this example, we'll demonstrate by decoding the JWT
 
-    use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+    use jsonwebtoken::{decode, Validation};
     let mut validation = Validation::new(auth_service.jwt_issuer().algorithm());
     validation.set_issuer(&["https://users.rvoip.local"]);
     validation.set_audience(&["rvoip-sip"]);

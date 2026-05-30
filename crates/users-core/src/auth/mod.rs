@@ -10,10 +10,12 @@ use sqlx_sqlite::SqlitePool;
 use std::sync::Arc;
 
 /// Authentication service
+#[allow(dead_code)] // reserved / not yet read
 pub struct AuthenticationService {
     user_store: Arc<dyn UserStore>,
     jwt_issuer: JwtIssuer,
     api_key_store: Arc<dyn ApiKeyStore>,
+    #[allow(dead_code)] // reserved / not yet read
     password_config: PasswordConfig,
     argon2: Argon2<'static>,
     pool: Option<SqlitePool>, // For refresh token management
@@ -138,7 +140,6 @@ impl AuthenticationService {
         username: &str,
         password: &str,
     ) -> Result<AuthenticationResult> {
-        use rand::Rng;
         use std::time::Duration;
 
         // Always fetch user (or use dummy)

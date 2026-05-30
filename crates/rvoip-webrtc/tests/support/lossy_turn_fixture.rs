@@ -26,6 +26,7 @@ use tokio::net::UdpSocket;
 use super::coturn_fixture::{CoturnFixture, TURN_PASSWORD, TURN_USERNAME};
 
 pub struct LossyTurnFixture {
+    #[allow(dead_code)] // shared test fixture; used by some integration tests, not all
     coturn: CoturnFixture,
     proxy_addr: SocketAddr,
 }
@@ -48,10 +49,12 @@ impl LossyTurnFixture {
         )
     }
 
+    #[allow(dead_code)] // shared test fixture; used by some integration tests, not all
     pub fn proxy_port(&self) -> u16 {
         self.proxy_addr.port()
     }
 
+    #[allow(dead_code)] // shared test fixture accessor
     pub fn coturn(&self) -> &CoturnFixture {
         &self.coturn
     }

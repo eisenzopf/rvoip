@@ -48,7 +48,7 @@ async-trait = "0.1"
 
 # Web framework (for REST API)
 axum = { version = "0.7", features = ["http2", "json", "tokio", "macros"] }
-axum-server = { version = "0.8", features = ["tls-rustls"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Logging

@@ -1,6 +1,6 @@
 //! Rate Limiting Security Tests
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::time::sleep;
 use users_core::api::rate_limit::{
     EnhancedRateLimiter, RateLimitConfig, RateLimitError, RateLimitIdentifier,

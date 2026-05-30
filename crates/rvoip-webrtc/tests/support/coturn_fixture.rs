@@ -120,6 +120,7 @@ impl CoturnFixture {
     }
 
     /// Produce a ready-to-use `IceServerConfig` for this coturn instance.
+    #[allow(dead_code)] // shared test fixture; used by some integration tests, not all
     pub fn ice_config(&self) -> IceServerConfig {
         IceServerConfig::turn(
             format!("turn:127.0.0.1:{}?transport=udp", self.host_port),
@@ -128,6 +129,7 @@ impl CoturnFixture {
         )
     }
 
+    #[allow(dead_code)] // shared test fixture; used by some integration tests, not all
     pub fn host_port(&self) -> u16 {
         self.host_port
     }

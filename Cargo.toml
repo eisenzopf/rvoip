@@ -220,10 +220,14 @@ log = "0.4"
 ordered-float = { version = "4.2.0", features = ["serde"] }
 socket2 = { version = "0.5", features = ["all"] }
 mio = { version = "0.8", features = ["os-poll", "net"] }
-rustls = { version = "0.23", features = ["ring", "std"] }  # "std" needed for RootCertStore::add in rvoip-uctp::substrate::tls
+# default-features=false drops rustls's default `aws_lc_rs` provider AND
+# `prefer-post-quantum` (which also requires aws_lc_rs) — otherwise the process
+# links two CryptoProviders (ring + aws-lc-rs) and rustls can't auto-select one.
+# We standardize on `ring`. "std" needed for RootCertStore::add in rvoip-uctp::substrate::tls.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2.0"
 # Used by rvoip-webrtc tls-rustls feature for in-process HTTPS/WSS termination.
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 # Headless-Chromium driver for rvoip-webrtc's interop-browser dev-only test.
 # Requires a Chromium binary on PATH at test time. Default features disabled
@@ -244,7 +248,11 @@ fastrand = "2.0"
 # UCTP substrate deps — QUIC, WebTransport, length-prefix codec, metrics.
 # Consumed by rvoip-uctp / rvoip-quic / rvoip-webtransport.
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
-web-transport-quinn = "0.11"
+# default features pull `aws-lc-rs`, which clashes with the workspace's
+# ring rustls provider (rustls/quinn are pinned to ring above). Force ring
+# so the process has exactly ONE rustls CryptoProvider — otherwise rustls
+# can't auto-select one and TLS/WSS paths panic at runtime.
+web-transport-quinn = { version = "0.11", default-features = false, features = ["ring"] }
 tokio-util = { version = "0.7", features = ["codec", "compat"] }
 metrics = "0.23"
 # rvoip-websocket signaling + media. tokio-tungstenite for the WebSocket

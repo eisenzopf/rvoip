@@ -1,7 +1,7 @@
 //! Input Validation Security Tests
 
 use tempfile::TempDir;
-use users_core::{AuthenticationService, CreateUserRequest, UpdateUserRequest, UsersConfig};
+use users_core::{AuthenticationService, CreateUserRequest, UsersConfig};
 
 async fn setup_test_auth_service() -> (AuthenticationService, TempDir) {
     let temp_dir = TempDir::new().unwrap();
@@ -225,7 +225,7 @@ async fn test_display_name_sanitization() {
         ("Name\n\nWith\nNewlines", "Name\n\nWith\nNewlines"), // Newlines might be ok
     ];
 
-    for (i, (input, expected_sanitized)) in xss_attempts.iter().enumerate() {
+    for (i, (input, _expected_sanitized)) in xss_attempts.iter().enumerate() {
         let result = auth_service
             .create_user(CreateUserRequest {
                 username: format!("xsstest{}", i),

@@ -248,7 +248,7 @@ async fn test_api_key_permissions() {
     let (store, user_id, _temp_dir) = create_test_db_with_user().await;
 
     // Create keys with different permission sets
-    let (read_key, read_raw) = store
+    let (_read_key, read_raw) = store
         .create_api_key(CreateApiKeyRequest {
             user_id: user_id.clone(),
             name: "Read Only".to_string(),
@@ -258,7 +258,7 @@ async fn test_api_key_permissions() {
         .await
         .unwrap();
 
-    let (admin_key, admin_raw) = store
+    let (_admin_key, admin_raw) = store
         .create_api_key(CreateApiKeyRequest {
             user_id: user_id.clone(),
             name: "Admin Key".to_string(),
@@ -282,7 +282,7 @@ async fn test_api_key_cleanup_on_user_delete() {
     let (store, user_id, _temp_dir) = create_test_db_with_user().await;
 
     // Create API keys
-    let (key1, _) = store
+    let (_key1, _) = store
         .create_api_key(CreateApiKeyRequest {
             user_id: user_id.clone(),
             name: "Key 1".to_string(),
@@ -292,7 +292,7 @@ async fn test_api_key_cleanup_on_user_delete() {
         .await
         .unwrap();
 
-    let (key2, _) = store
+    let (_key2, _) = store
         .create_api_key(CreateApiKeyRequest {
             user_id: user_id.clone(),
             name: "Key 2".to_string(),

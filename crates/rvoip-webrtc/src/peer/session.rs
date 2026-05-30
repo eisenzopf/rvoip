@@ -17,7 +17,7 @@ use webrtc::peer_connection::PeerConnection;
 use webrtc::peer_connection::{
     RTCIceCandidate, RTCIceCandidateInit, RTCSdpType,
 };
-use webrtc::rtp_transceiver::{RtpTransceiver, RTCRtpTransceiverDirection};
+use webrtc::rtp_transceiver::RTCRtpTransceiverDirection;
 
 use crate::config::WebRtcConfig;
 use crate::errors::{Result, WebRtcError};
@@ -711,7 +711,6 @@ impl RvoipPeerConnection {
 
     /// Discover a remote track of `kind` from transceivers.
     pub async fn discover_remote_track(&self, kind: RtpCodecKind) -> Option<Arc<dyn TrackRemote>> {
-        use webrtc::media_stream::Track;
 
         for tx in self.pc.get_transceivers().await {
             let Ok(Some(receiver)) = tx.receiver().await else {
@@ -904,7 +903,6 @@ impl RvoipPeerConnection {
     }
 
     async fn set_audio_direction(&self, direction: RTCRtpTransceiverDirection) -> Result<()> {
-        use webrtc::media_stream::Track;
 
         for tx in self.pc.get_transceivers().await {
             let Some(sender) = tx.sender().await? else {

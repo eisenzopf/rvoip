@@ -6,24 +6,23 @@ pub mod security_headers;
 use self::rate_limit::{EnhancedRateLimiter, RateLimitConfig};
 use crate::{
     api_keys::CreateApiKeyRequest, AuthenticationService, CreateUserRequest, Error as UsersError,
-    UpdateUserRequest, UserClaims, UserFilter,
+    UpdateUserRequest, UserFilter,
 };
 use axum::{
     extract::{FromRef, Json, Path, Query, State},
-    http::{header, HeaderMap, Request, StatusCode},
-    middleware::{self, Next},
+    http::{header, StatusCode},
+    middleware::{self},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
     Router,
 };
 use chrono::{DateTime, Utc};
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{decode, Validation};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tower_http::cors::CorsLayer;
 
 // API State

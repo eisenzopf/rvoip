@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
 
     // Try to authenticate with new password
     println!("\n🔐 Authenticating with new password...");
-    let new_auth = auth_service
+    let _new_auth = auth_service
         .authenticate_password("alice", "NewSecurePassword456!")
         .await?;
 

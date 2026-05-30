@@ -38,7 +38,7 @@ impl AuthCore {
 
     async fn validate_token(&self, token: &str) -> Result<ValidatedToken> {
         // Decode header to find issuer
-        let header = jsonwebtoken::decode_header(token)?;
+        let _header = jsonwebtoken::decode_header(token)?;
 
         // For this example, we'll assume it's from users-core
         let issuer = "https://users.rvoip.local";
@@ -63,9 +63,11 @@ impl AuthCore {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)] // reserved / not yet read
 struct ValidatedToken {
     user_id: String,
     username: String,
+    #[allow(dead_code)] // reserved / not yet read
     roles: Vec<String>,
     scope: String,
 }
@@ -75,7 +77,9 @@ struct RegistrarCore {
     registrations: Arc<RwLock<HashMap<String, Registration>>>,
 }
 
+#[allow(dead_code)] // reserved / not yet read
 struct Registration {
+    #[allow(dead_code)] // reserved / not yet read
     user_id: String,
     username: String,
     contact: String,
@@ -251,7 +255,7 @@ async fn main() -> Result<()> {
 
     // Bob subscribes to Alice's presence
     println!("\n[Bob's SIP Client]");
-    let bob_auth = users_core
+    let _bob_auth = users_core
         .authenticate_password("bob", "SecureIntegration2024!")
         .await?;
 

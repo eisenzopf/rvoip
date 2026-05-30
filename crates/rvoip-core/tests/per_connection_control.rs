@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{broadcast::Receiver, mpsc};
+use tokio::sync::mpsc;
 
 #[derive(Default)]
 struct Counts {
