@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use super::clock::MediaClock;
 use crate::packet::rtcp::NtpTimestamp;
@@ -14,11 +14,14 @@ use crate::RtpSsrc;
 use crate::RtpTimestamp;
 
 /// Mapping between a source stream and a target stream
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 struct StreamMapping {
     /// Source stream SSRC
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     source_ssrc: RtpSsrc,
 
     /// Target stream SSRC
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     target_ssrc: RtpSsrc,
 
     /// Source stream clock rate
@@ -343,7 +346,7 @@ mod tests {
         let target_rtp = 18000; // 200ms of video
         let ntp = NtpTimestamp::now();
 
-        let mut mapping = StreamMapping::new(
+        let mapping = StreamMapping::new(
             source_ssrc,
             target_ssrc,
             source_rate,

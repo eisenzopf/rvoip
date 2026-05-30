@@ -69,6 +69,7 @@ pub struct RtpStats {
 }
 
 /// Comprehensive RTP statistics manager integrating all statistical components
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct RtpStatsManager {
     /// Overall session statistics
     stats: Arc<Mutex<RtpStats>>,
@@ -89,6 +90,7 @@ pub struct RtpStatsManager {
     start_time: Instant,
 
     /// Clock rate for timestamp conversions
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     clock_rate: u32,
 }
 
@@ -174,17 +176,17 @@ impl RtpStatsManager {
             }
             PacketLossResult::Gap {
                 seq,
-                expected,
+                expected: _,
                 lost,
             } => {
                 stats.packets_lost += lost as u64;
                 stats.highest_seq = seq as u32;
                 stats.last_seq = Some(seq);
             }
-            PacketLossResult::Duplicate { seq } => {
+            PacketLossResult::Duplicate { seq: _ } => {
                 stats.packets_duplicated += 1;
             }
-            PacketLossResult::Reordered { seq, expected } => {
+            PacketLossResult::Reordered { seq, expected: _ } => {
                 stats.packets_out_of_order += 1;
                 stats.last_seq = Some(seq);
             }
@@ -245,41 +247,11 @@ impl Default for RtpStatsManager {
     }
 }
 
-/// Check if sequence 'a' is older than sequence 'b', handling wraparound
-fn is_sequence_older(a: RtpSequenceNumber, b: RtpSequenceNumber) -> bool {
-    if a == b {
-        return false; // A sequence is not older than itself
-    }
-
-    // Compare with wraparound as per RFC 3550
-    // A sequence number is considered older if it's in the first half of the sequence
-    // space behind the other sequence number.
-    // This handles the case where 65000 is newer than 1000 but 1000 is newer than 33000
-    let half_range = 0x8000;
-    (b > a && b - a < half_range) || (a > b && a - b >= half_range)
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_sequence_comparison() {
-        // Normal cases
-        assert!(is_sequence_older(100, 101));
-        assert!(is_sequence_older(100, 200));
-        assert!(!is_sequence_older(200, 100));
-        assert!(!is_sequence_older(101, 100));
-
-        // Wraparound cases
-        assert!(is_sequence_older(65530, 10));
-        assert!(!is_sequence_older(10, 65530));
-
-        // Edge cases
-        assert!(!is_sequence_older(100, 100));
-        assert!(!is_sequence_older(0, 32768)); // 32768 is 0x8000 - a sequence is only older if diff < 0x8000
-        assert!(is_sequence_older(32768, 0));
-    }
 
     #[test]
     fn test_stats_manager() {

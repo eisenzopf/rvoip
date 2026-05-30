@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 use crate::api::common::error::SecurityError;
 use crate::api::server::security::SocketHandle;

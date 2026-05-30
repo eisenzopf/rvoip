@@ -40,7 +40,7 @@ use tracing::{debug, info, warn};
 pub struct UctpWtServer {}
 
 impl UctpWtServer {
-    pub fn start(
+    pub(crate) fn start(
         mut accept_rx: mpsc::Receiver<quinn::Connection>,
         bearer: Arc<dyn BearerValidator>,
         events_tx: mpsc::Sender<AdapterEvent>,

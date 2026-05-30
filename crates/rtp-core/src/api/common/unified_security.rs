@@ -4,12 +4,14 @@
 //! including DTLS-SRTP, SDES, MIKEY, and ZRTP. It abstracts away the differences
 //! between these methods and provides a consistent API.
 
+#[cfg(test)]
+use crate::api::common::config::SecurityMode;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::api::common::config::{KeyExchangeMethod, SecurityConfig, SecurityMode};
+use crate::api::common::config::{KeyExchangeMethod, SecurityConfig};
 use crate::api::common::error::SecurityError;
-use crate::security::{mikey::Mikey, sdes::Sdes, zrtp::Zrtp, SecurityKeyExchange};
+use crate::security::SecurityKeyExchange;
 use crate::srtp::{crypto::SrtpCryptoKey, SrtpContext, SrtpCryptoSuite};
 
 /// Security state for unified context
@@ -234,7 +236,7 @@ impl UnifiedSecurityContext {
             KeyExchangeMethod::Mikey => {
                 if let KeyExchangeConfig::Mikey {
                     psk,
-                    identity,
+                    identity: _,
                     mode,
                 } = &self.method_config
                 {
@@ -283,7 +285,7 @@ impl UnifiedSecurityContext {
             KeyExchangeMethod::Zrtp => {
                 if let KeyExchangeConfig::Zrtp {
                     enable_sas,
-                    cache_expiry,
+                    cache_expiry: _,
                 } = &self.method_config
                 {
                     // Create ZRTP configuration based on security config
@@ -490,7 +492,7 @@ impl SecurityContextFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::common::config::{SecurityConfig, SecurityProfile, SrtpProfile};
+    use crate::api::common::config::{SecurityConfig, SecurityProfile};
 
     /// Test data for SRTP keys
     fn test_srtp_key() -> Vec<u8> {

@@ -191,13 +191,13 @@ use rvoip_sip_transport::{
 
 use crate::diagnostics;
 use crate::transaction::client::{
-    ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction, CommonClientTransaction,
+    ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction, 
 };
 use crate::transaction::error::{Error, Result};
 use crate::transaction::method::{cancel, update};
 use crate::transaction::runner::HasLifecycle;
 use crate::transaction::server::{
-    CommonServerTransaction, ServerInviteTransaction, ServerNonInviteTransaction, ServerTransaction,
+    ServerInviteTransaction, ServerNonInviteTransaction, ServerTransaction,
 };
 use crate::transaction::state::TransactionLifecycle;
 use crate::transaction::timer::{TimerFactory, TimerManager, TimerSettings};

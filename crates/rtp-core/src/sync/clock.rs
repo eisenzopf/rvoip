@@ -3,7 +3,7 @@
 //! This module provides utilities for working with different clock domains
 //! and handling clock rate conversions for media synchronization.
 
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::packet::rtcp::NtpTimestamp;
 use crate::RtpTimestamp;
@@ -237,7 +237,7 @@ mod tests {
         let ref_rtp = 48000;
         let clock_rate = 8000;
 
-        let mut clock = MediaClock::new(clock_rate, ref_rtp, ref_ntp);
+        let clock = MediaClock::new(clock_rate, ref_rtp, ref_ntp);
 
         // Test RTP to NTP conversion (should be close to reference)
         let ntp = clock.rtp_to_ntp(ref_rtp);

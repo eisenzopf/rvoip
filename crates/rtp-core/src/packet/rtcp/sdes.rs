@@ -1,6 +1,6 @@
 use crate::error::Error;
 use crate::{Result, RtpSsrc};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, BytesMut};
 
 /// RTCP Source Description (SDES) item types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

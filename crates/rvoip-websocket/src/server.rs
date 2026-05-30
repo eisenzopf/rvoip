@@ -25,7 +25,7 @@ use crate::adapter::Route;
 pub struct UctpWsServer;
 
 impl UctpWsServer {
-    pub fn start(
+    pub(crate) fn start(
         listener: TcpListener,
         bearer: Arc<dyn BearerValidator>,
         events_tx: mpsc::Sender<AdapterEvent>,

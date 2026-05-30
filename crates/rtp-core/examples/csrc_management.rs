@@ -69,27 +69,6 @@ impl SourceBuffer {
     }
 
     // Create an RTP packet with the current samples
-    fn create_packet(&self) -> RtpPacket {
-        // For simplicity, we'll just pack raw PCM samples
-        // In a real implementation, this would be encoded with the appropriate codec
-        let mut payload_data = Vec::with_capacity(self.samples.len() * 2);
-
-        for sample in &self.samples {
-            // Convert to network byte order (big-endian)
-            payload_data.push((*sample >> 8) as u8);
-            payload_data.push(*sample as u8);
-        }
-
-        // Create RTP header
-        let header = RtpHeader::new(
-            0, // PCM audio
-            self.sequence,
-            self.timestamp,
-            self.ssrc,
-        );
-
-        RtpPacket::new(header, Bytes::from(payload_data))
-    }
 
     // Check if the source is currently active (talking)
     fn is_active(&self) -> bool {

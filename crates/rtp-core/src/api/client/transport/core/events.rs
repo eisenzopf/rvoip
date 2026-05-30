@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::api::common::error::MediaTransportError;
 use crate::api::common::events::{MediaEventCallback, MediaTransportEvent};

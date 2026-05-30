@@ -18,7 +18,6 @@ use crate::security::{
     sdes::{Sdes, SdesConfig, SdesCryptoAttribute, SdesRole},
     SecurityKeyExchange,
 };
-use crate::srtp::crypto::SrtpCryptoKey;
 use crate::srtp::{SrtpContext, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80};
 
 /// SDES client configuration
@@ -335,10 +334,12 @@ impl SdesClient {
 
 /// SRTP-only client security context (no DTLS handshake)
 /// This implementation uses pre-shared keys negotiated through SIP/SDP
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct SrtpClientSecurityContext {
     /// Configuration
     config: ClientSecurityConfig,
     /// SDES client for key management
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     sdes_client: Arc<SdesClient>,
     /// Remote address
     remote_addr: Arc<RwLock<Option<SocketAddr>>>,

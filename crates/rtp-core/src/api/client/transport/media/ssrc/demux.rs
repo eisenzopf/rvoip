@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::api::common::error::MediaTransportError;
 use crate::session::RtpSession;
@@ -50,7 +50,7 @@ pub async fn get_sequence_number(
 ) -> Result<u16, MediaTransportError> {
     // First try to get from the session
     let session_guard = session.lock().await;
-    if let Some(stream) = session_guard.get_stream(ssrc).await {
+    if let Some(_stream) = session_guard.get_stream(ssrc).await {
         // Stream exists, but we need to check if we can get a sequence number
         // The field might be called differently or we may need to access it through a method
         // For now, we'll skip this and rely on our manual tracking

@@ -3,12 +3,9 @@
 //! This module provides abstractions for sending and receiving RTP/RTCP packets over the network.
 
 use async_trait::async_trait;
-use bytes::Bytes;
-use std::any::Any;
 use std::net::SocketAddr;
 use tokio::sync::broadcast;
 
-use crate::error::Error;
 use crate::packet::rtcp::RtcpPacket;
 use crate::packet::RtpPacket;
 use crate::traits::RtpEvent;

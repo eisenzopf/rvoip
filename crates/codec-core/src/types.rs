@@ -443,12 +443,14 @@ impl CodecConfig {
     }
 
     /// Set G.729 VAD
+    #[allow(deprecated)] // intentionally writes the legacy field for backward compat
     pub fn with_g729_vad(mut self, vad: bool) -> Self {
         self.parameters.g729.vad_enabled = vad;
         self
     }
 
     /// Set G.729 CNG
+    #[allow(deprecated)] // intentionally writes the legacy field for backward compat
     pub fn with_g729_cng(mut self, cng: bool) -> Self {
         self.parameters.g729.cng_enabled = cng;
         self

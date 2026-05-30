@@ -12,7 +12,7 @@ use tracing::{debug, error, info, warn};
 
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
 use rvoip_infra_common::events::cross_crate::{
-    CrossCrateEvent, MediaToRtpEvent, RtpStatistics, RtpToMediaEvent, RvoipCrossCrateEvent,
+    CrossCrateEvent, RtpStatistics, RtpToMediaEvent, RvoipCrossCrateEvent,
 };
 use rvoip_infra_common::planes::LayerTaskManager;
 
@@ -80,7 +80,7 @@ impl RtpEventAdapter {
         debug!("Setting up cross-crate event subscriptions for rtp-core");
 
         // Subscribe to events targeted at rtp-core
-        let media_to_rtp_receiver = self.global_coordinator.subscribe("media_to_rtp").await?;
+        let _media_to_rtp_receiver = self.global_coordinator.subscribe("media_to_rtp").await?;
 
         debug!("Cross-crate event subscriptions setup complete for rtp-core");
         Ok(())
@@ -91,7 +91,7 @@ impl RtpEventAdapter {
         debug!("Starting RTP event processing tasks");
 
         // Task: Process incoming cross-crate events from media-core
-        let coordinator = self.global_coordinator.clone();
+        let _coordinator = self.global_coordinator.clone();
 
         self.task_manager
             .spawn_tracked(
@@ -174,7 +174,7 @@ impl RtpEventAdapter {
                 },
             )),
 
-            MediaTransportEvent::QualityChanged { quality } => {
+            MediaTransportEvent::QualityChanged { quality: _ } => {
                 // Convert quality metrics to RTP statistics
                 Some(RvoipCrossCrateEvent::RtpToMedia(
                     RtpToMediaEvent::RtpStatisticsUpdate {
@@ -216,54 +216,12 @@ impl RtpEventAdapter {
         }
     }
 
-    /// Convert cross-crate events to local RTP transport events
-    fn convert_cross_crate_to_transport_event(
-        &self,
-        event: &RvoipCrossCrateEvent,
-    ) -> Option<MediaTransportEvent> {
-        match event {
-            RvoipCrossCrateEvent::MediaToRtp(media_event) => {
-                match media_event {
-                    MediaToRtpEvent::StartRtpStream {
-                        session_id,
-                        local_port,
-                        remote_address,
-                        remote_port,
-                        ..
-                    } => {
-                        // Starting RTP stream maps to Connected event
-                        Some(MediaTransportEvent::Connected)
-                    }
-
-                    MediaToRtpEvent::StopRtpStream { session_id } => {
-                        Some(MediaTransportEvent::Disconnected)
-                    }
-
-                    MediaToRtpEvent::SendRtpPacket {
-                        session_id,
-                        payload,
-                        ..
-                    } => {
-                        // No direct equivalent in MediaTransportEvent for packet sending
-                        None
-                    }
-
-                    MediaToRtpEvent::UpdateRtpStream { session_id, .. } => {
-                        // Stream update could map to a state change
-                        Some(MediaTransportEvent::StateChanged(
-                            "Stream updated".to_string(),
-                        ))
-                    }
-                }
-            }
-
-            _ => None,
-        }
-    }
 }
 
 /// Event handler for processing cross-crate events in rtp-core
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct RtpCrossCrateEventHandler {
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     adapter: Arc<RtpEventAdapter>,
 }
 
@@ -291,7 +249,7 @@ impl CrossCrateEventHandler for RtpCrossCrateEventHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
+    
 
     #[tokio::test]
     async fn test_rtp_adapter_creation() {

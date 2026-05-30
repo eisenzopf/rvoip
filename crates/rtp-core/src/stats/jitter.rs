@@ -1,4 +1,6 @@
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 use crate::RtpTimestamp;
 

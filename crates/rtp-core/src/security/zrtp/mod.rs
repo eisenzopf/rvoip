@@ -20,7 +20,6 @@ use sha2::{Digest, Sha256};
 pub mod hash;
 pub mod packet;
 
-use hash::ZrtpHash as ZrtpHashFunctions;
 use packet::{ZrtpMessageType, ZrtpPacket, ZrtpVersion};
 
 /// ZRTP cipher algorithms

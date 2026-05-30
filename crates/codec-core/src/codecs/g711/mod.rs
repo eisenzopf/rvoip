@@ -61,7 +61,6 @@
 use crate::error::CodecError;
 
 mod reference;
-mod tables;
 
 #[cfg(test)]
 pub mod tests;

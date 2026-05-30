@@ -5,12 +5,9 @@
 //! header extensions without directly interfacing with the lower-level packet
 //! structures.
 
-use bytes::Bytes;
 use std::collections::HashMap;
 
-use crate::error::Error;
-use crate::packet::extension::{ExtensionElement, RtpHeaderExtensions};
-use crate::Result;
+use crate::packet::extension::RtpHeaderExtensions;
 
 // Re-export the ExtensionFormat enum directly from the packet layer
 pub use crate::packet::extension::ExtensionFormat;

@@ -8,10 +8,10 @@ use crate::RtpSequenceNumber;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Notify, Semaphore};
-use tracing::{debug, info, trace, warn};
+use tokio::sync::Notify;
+use tracing::{debug, trace};
 
-use super::{BufferLimits, GlobalBufferManager, MemoryPermit};
+use super::GlobalBufferManager;
 
 /// Default jitter buffer size in milliseconds
 pub const DEFAULT_JITTER_BUFFER_SIZE_MS: u32 = 50;
@@ -116,6 +116,7 @@ pub struct JitterBufferStats {
 /// - Proper handling of sequence wraparound
 /// - Memory management with global limits
 /// - Real-time statistics collection
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct AdaptiveJitterBuffer {
     /// Buffer configuration
     config: JitterBufferConfig,
@@ -151,6 +152,7 @@ pub struct AdaptiveJitterBuffer {
     stats: JitterBufferStats,
 
     /// Time when the buffer started
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     start_time: Instant,
 
     /// Reference to global buffer manager
@@ -520,24 +522,6 @@ impl AdaptiveJitterBuffer {
         }
     }
 
-    /// Get an extended sequence number that accounts for wraparound
-    fn get_extended_seq(&mut self, seq: RtpSequenceNumber) -> u32 {
-        // Detect sequence number cycle (wraparound from 65535 to 0)
-        if self.next_seq.is_some() {
-            let next_seq = self.next_seq.unwrap();
-            // If the sequence is much lower than the expected one, we probably wrapped around
-            if next_seq > 0xf000 && seq < 0x1000 {
-                debug!(
-                    "Sequence wraparound detected in get_extended_seq: {} -> {}",
-                    next_seq, seq
-                );
-                self.seq_cycles += 1;
-            }
-        }
-
-        // Calculate extended sequence with cycle count
-        (self.seq_cycles as u32) << 16 | (seq as u32)
-    }
 
     /// Check if we should adapt the buffer size based on network conditions
     fn maybe_adapt_buffer_size(&mut self, now: Instant) {

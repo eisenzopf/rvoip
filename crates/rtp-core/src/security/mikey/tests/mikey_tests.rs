@@ -279,9 +279,7 @@ fn test_mikey_pke_vs_psk_mode() {
 #[test]
 fn test_mikey_pke_unified_security_integration() {
     use crate::api::common::config::SecurityConfig;
-    use crate::api::common::unified_security::{
-        KeyExchangeConfig, MikeyMode, SecurityContextFactory,
-    };
+    use crate::api::common::unified_security::SecurityContextFactory;
     use crate::security::mikey::crypto::{generate_key_pair_and_certificate, CertificateConfig};
 
     // Generate certificates

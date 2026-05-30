@@ -36,12 +36,10 @@
 use bytes::Bytes;
 use rand::Rng;
 
-use super::crypto::cipher::CipherSuiteId;
-use super::crypto::keys::{calculate_master_secret, generate_ecdhe_pre_master_secret};
 use super::message::extension::{Extension, SrtpProtectionProfile, UseSrtpExtension};
 use super::message::handshake::{
-    Certificate, CertificateRequest, CertificateVerify, ClientHello, ClientKeyExchange, Finished,
-    HandshakeMessage, HandshakeType, HelloVerifyRequest, ServerHello, ServerKeyExchange,
+    ClientHello,
+    HandshakeMessage, HandshakeType, HelloVerifyRequest, ServerHello,
 };
 use super::{DtlsRole, DtlsVersion, Result};
 
@@ -90,6 +88,7 @@ pub enum HandshakeStep {
 
 /// Handshake state machine for DTLS connections
 #[derive(Clone)]
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct HandshakeState {
     /// Current handshake step
     step: HandshakeStep,
@@ -131,6 +130,7 @@ pub struct HandshakeState {
     retransmission_count: usize,
 
     /// Maximum number of retransmissions
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     max_retransmissions: usize,
 
     /// Negotiated SRTP profile
@@ -431,27 +431,6 @@ impl HandshakeState {
         self.handshake_messages.clone()
     }
 
-    /// Get verification data in the correct order for a given role
-    ///
-    /// DEPRECATED: Use get_handshake_hash_input instead for consistent results
-    fn get_verification_data_for_role(&self, is_client_role: bool) -> Vec<u8> {
-        let mut verify_buffer = Vec::new();
-
-        // Following RFC 5246 guidance on Finished message calculation
-        // The verify_data value is calculated as follows:
-        // verify_data = PRF(master_secret, finished_label, Hash(handshake_messages)) [0..verify_data_length]
-        //
-        // Where handshake_messages is all handshake messages sent and received
-        // starting at client hello and up to but not including this finished message
-
-        // If this is a client-generated message, we concat in client->server order
-        // If this is a server-generated message, we also concat in client->server order
-        // RFC specifies the hash includes ALL handshake messages up to but not including Finished
-        verify_buffer.extend_from_slice(&self.client_handshake_messages);
-        verify_buffer.extend_from_slice(&self.server_handshake_messages);
-
-        verify_buffer
-    }
 
     /// Process a handshake message as a client
     fn process_message_client(

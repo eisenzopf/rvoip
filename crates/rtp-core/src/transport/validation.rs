@@ -4,7 +4,7 @@
 //! and implementing fallback mechanisms when platform-specific issues are detected.
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use tracing::{debug, error, info, warn};
 

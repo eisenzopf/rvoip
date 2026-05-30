@@ -1,12 +1,10 @@
-use bytes::Bytes;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
-use crate::error::Error;
 use crate::packet::RtpPacket;
-use crate::{Result, RtpSequenceNumber, RtpSsrc, RtpTimestamp};
+use crate::{RtpSequenceNumber, RtpSsrc, RtpTimestamp};
 
 /// Represents an RTP stream with sequence tracking and statistics
 pub struct RtpStream {
@@ -344,7 +342,7 @@ impl RtpStream {
 
     /// Calculate the delay since last SR in 1/65536 seconds units
     pub fn calculate_delay_since_last_sr(&self) -> u32 {
-        if let (Some(timestamp), Some(time)) = (self.last_sr_timestamp, self.last_sr_time) {
+        if let (Some(_timestamp), Some(time)) = (self.last_sr_timestamp, self.last_sr_time) {
             // Calculate delay in seconds, then convert to 1/65536 seconds
             let delay_secs = Instant::now().duration_since(time).as_secs_f64();
             (delay_secs * 65536.0) as u32

@@ -176,9 +176,9 @@ impl SrtpContext {
     /// Create a new SRTP context from separate local and remote keys
     pub fn new_from_keys(
         local_key: Vec<u8>,
-        remote_key: Vec<u8>,
+        _remote_key: Vec<u8>,
         local_salt: Vec<u8>,
-        remote_salt: Vec<u8>,
+        _remote_salt: Vec<u8>,
         profile: SrtpCryptoSuite,
     ) -> Result<Self, crate::Error> {
         // Create a combined key for simplicity in this implementation
@@ -280,8 +280,8 @@ impl SrtpContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::{RtpHeader, RtpPacket};
-    use bytes::Bytes;
+    
+    
 
     #[test]
     fn test_srtp_context_creation() {

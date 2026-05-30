@@ -78,6 +78,7 @@ impl rvoip_sip_transport::Transport for MockTransport {
 struct Harness {
     transport: Arc<MockTransport>,
     tx: mpsc::Sender<TransportEvent>,
+    #[allow(dead_code)] // held to keep the TransactionManager alive
     tm: Arc<TransactionManager>,
     _proxy_task: tokio::task::JoinHandle<()>,
 }
@@ -130,28 +131,6 @@ impl Harness {
         self.tx.send(event).await.expect("inject transport event");
     }
 
-    async fn wait_for_send(
-        &self,
-        want_at_least: usize,
-        deadline_ms: u64,
-    ) -> Vec<(Message, SocketAddr)> {
-        let start = std::time::Instant::now();
-        loop {
-            let sent = self.transport.sent().await;
-            if sent.len() >= want_at_least {
-                return sent;
-            }
-            if start.elapsed() > Duration::from_millis(deadline_ms) {
-                panic!(
-                    "Timed out waiting for {} sent messages; got {} so far: {:#?}",
-                    want_at_least,
-                    sent.len(),
-                    sent
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
 
     /// Poll until a sent message matches `predicate` or the deadline
     /// passes. Returns the matching `(message, destination)`.

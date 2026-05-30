@@ -10,10 +10,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
-use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
-use super::validation::{PlatformSocketStrategy, PlatformType, RtpSocketValidator};
+use super::validation::{PlatformSocketStrategy, PlatformType};
 use crate::error::Error;
 use crate::Result;
 
@@ -570,36 +569,6 @@ impl PortAllocator {
         (self.config.port_range_end - self.config.port_range_start + 1) as usize
     }
 
-    /// Find an available even port (for RTP when using adjacent port pairs)
-    async fn find_available_even_port(&self, ip: IpAddr) -> Option<u16> {
-        let mut retries = 0;
-
-        while retries < self.config.allocation_retries * 2 {
-            // Get a candidate port based on the allocation strategy
-            let mut port = match self.config.allocation_strategy {
-                AllocationStrategy::Sequential => self.get_next_sequential_port().await,
-                AllocationStrategy::Random => self.get_random_port().await,
-                AllocationStrategy::Incremental => self.get_next_incremental_port().await,
-            };
-
-            // Make sure it's even
-            if port % 2 != 0 {
-                port -= 1;
-                if port < self.config.port_range_start {
-                    port = self.config.port_range_start + (port % 2);
-                }
-            }
-
-            // Check if the port is available
-            if self.is_port_available(ip, port).await {
-                return Some(port);
-            }
-
-            retries += 1;
-        }
-
-        None
-    }
 
     /// Find a recently released port that can be reused
     async fn find_reusable_port(&self, ip: IpAddr) -> Option<u16> {
@@ -686,31 +655,6 @@ impl PortAllocator {
         }
     }
 
-    /// Check if a port is available
-    async fn is_port_available(&self, ip: IpAddr, port: u16) -> bool {
-        // First, check if it's in our allocated ports
-        let allocated = self.allocated_ports.lock().await;
-        if allocated.contains(&port) {
-            return false;
-        }
-
-        // Check if it's in the configured range
-        if port < self.config.port_range_start || port > self.config.port_range_end {
-            return false;
-        }
-
-        // If we're not doing validation, we're done
-        if !self.config.validate_ports {
-            return true;
-        }
-
-        // Try to create a UDP socket to verify availability
-        let addr = SocketAddr::new(ip, port);
-        match UdpSocket::bind(addr).await {
-            Ok(_) => true,
-            Err(_) => false,
-        }
-    }
 
     /// Get the next port using sequential allocation
     async fn get_next_sequential_port(&self) -> u16 {
@@ -878,7 +822,7 @@ impl GlobalPortAllocator {
             *allocator = Some(Arc::new(port_allocator));
 
             // Log creation
-            if let Some(ref alloc) = *allocator {
+            if allocator.is_some() {
                 info!(
                     "Created global port allocator with range {}-{}",
                     config.port_range_start, config.port_range_end
@@ -1145,7 +1089,7 @@ mod tests {
             let result = allocator.allocate_port_pair("test-session", None).await;
             assert!(result.is_ok());
 
-            let (rtp_addr, rtcp_addr) = result.unwrap();
+            let (_rtp_addr, rtcp_addr) = result.unwrap();
 
             // RTCP address should be None for muxed
             assert!(rtcp_addr.is_none());

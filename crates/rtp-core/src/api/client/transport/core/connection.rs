@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tokio::time;
 use tracing::{debug, error, info, warn};
 use uuid;
 
@@ -17,7 +16,7 @@ use crate::api::common::config::SecurityMode;
 use crate::api::common::error::MediaTransportError;
 use crate::api::server::security::SocketHandle;
 use crate::srtp::crypto::SrtpCryptoKey;
-use crate::srtp::{SrtpContext, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_80};
+use crate::srtp::{SrtpContext, SRTP_AES128_CM_SHA1_80};
 use crate::transport::{RtpTransport, RtpTransportConfig, SecurityRtpTransport, UdpRtpTransport};
 
 /// Check if the security mode requires DTLS

@@ -15,7 +15,7 @@ use rand::Rng;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -24,10 +24,9 @@ use tracing::{debug, error, info, trace, warn};
 use crate::error::Error;
 use crate::packet::{RtpHeader, RtpPacket};
 use crate::transport::{RtpTransport, RtpTransportConfig, UdpRtpTransport};
-use crate::{Result, RtpSequenceNumber, RtpSsrc, RtpTimestamp, DEFAULT_MAX_PACKET_SIZE};
+use crate::{Result, RtpSsrc, RtpTimestamp};
 
 // Define the constant locally since it's not publicly exported
-const RTP_MIN_HEADER_SIZE: usize = 12;
 
 /// Stats for an RTP session
 #[derive(Debug, Clone, Default)]
@@ -405,12 +404,12 @@ impl RtpSession {
         let event_tx_send = self.event_tx.clone();
         let event_tx_recv = self.event_tx.clone();
         let clock_rate = self.config.clock_rate;
-        let payload_type = self.config.payload_type;
+        let _payload_type = self.config.payload_type;
         let ssrc = self.ssrc;
         let streams_map = self.streams.clone();
-        let jitter_buffer_enabled = self.config.enable_jitter_buffer;
-        let jitter_size = self.config.jitter_buffer_size.unwrap_or(50);
-        let max_age_ms = self.config.max_packet_age_ms.unwrap_or(200);
+        let _jitter_buffer_enabled = self.config.enable_jitter_buffer;
+        let _jitter_size = self.config.jitter_buffer_size.unwrap_or(50);
+        let _max_age_ms = self.config.max_packet_age_ms.unwrap_or(200);
 
         let media_sync = self.media_sync.clone();
 
@@ -511,7 +510,7 @@ impl RtpSession {
             // to avoid race conditions where two tasks read from the same socket
             loop {
                 match transport_events.recv().await {
-                    Ok(crate::traits::RtpEvent::RtcpReceived { data, source }) => {
+                    Ok(crate::traits::RtpEvent::RtcpReceived { data, source: _ }) => {
                         // Try to parse the RTCP packet
                         if let Ok(rtcp_packet) = crate::packet::rtcp::RtcpPacket::parse(&data) {
                             // Handle the RTCP packet based on its type
@@ -745,7 +744,7 @@ impl RtpSession {
             let event_tx = self.event_tx.clone();
             let stats = self.stats.clone();
             let active_state = Arc::new(tokio::sync::Mutex::new(true));
-            let active_state_clone = active_state.clone();
+            let _active_state_clone = active_state.clone();
             let bandwidth = self.bandwidth_bps;
 
             // Set bandwidth in the generator
@@ -1423,6 +1422,7 @@ impl RtpSession {
 /// This handle can be used to send RTP packets to the session
 /// from another thread without having to clone the entire session.
 #[derive(Clone)]
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct RtpSessionSender {
     /// Channel for sending packets
     sender: mpsc::Sender<RtpPacket>,
@@ -1434,6 +1434,7 @@ pub struct RtpSessionSender {
     payload_type: u8,
 
     /// Clock rate for the payload type
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     clock_rate: u32,
 }
 

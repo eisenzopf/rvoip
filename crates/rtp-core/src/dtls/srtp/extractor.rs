@@ -8,7 +8,6 @@ use crate::dtls::Result;
 use crate::srtp::{
     SrtpAuthenticationAlgorithm, SrtpCryptoKey, SrtpCryptoSuite, SrtpEncryptionAlgorithm,
 };
-use bytes::Bytes;
 
 /// DTLS-SRTP context after key extraction
 #[derive(Debug, Clone)]
@@ -51,7 +50,7 @@ impl DtlsSrtpContext {
 pub fn extract_srtp_keys_from_dtls(
     keying_material: &DtlsKeyingMaterial,
     profile: SrtpProtectionProfile,
-    is_client: bool,
+    _is_client: bool,
 ) -> Result<DtlsSrtpContext> {
     // Convert DTLS protection profile to SRTP crypto suite
     let crypto_suite = convert_profile_to_suite(profile)?;

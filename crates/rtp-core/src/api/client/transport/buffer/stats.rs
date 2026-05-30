@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 use crate::api::common::error::MediaTransportError;
 use crate::buffer::{TransmitBuffer, TransmitBufferStats};

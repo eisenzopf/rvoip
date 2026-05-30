@@ -9,8 +9,7 @@
 //! - Detecting and compensating for clock drift
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use crate::packet::rtcp::NtpTimestamp;
 use crate::RtpSsrc;
@@ -128,7 +127,7 @@ impl MediaSync {
                 let rtp_elapsed_cycles = rtp.wrapping_sub(p_rtp) as f64 / stream.clock_rate as f64;
 
                 // Time elapsed on our clock
-                let our_elapsed = now.duration_since(p_update).as_secs_f64();
+                let _our_elapsed = now.duration_since(p_update).as_secs_f64();
 
                 // Calculate drift: difference between NTP and RTP elapsed times
                 let raw_drift = (ntp_elapsed_seconds - rtp_elapsed_cycles) / ntp_elapsed_seconds;
@@ -175,9 +174,9 @@ impl MediaSync {
         }
 
         // Unwrap values (safe due to checks above)
-        let from_ntp = from_stream.last_ntp.unwrap();
+        let _from_ntp = from_stream.last_ntp.unwrap();
         let from_rtp_ref = from_stream.last_rtp.unwrap();
-        let to_ntp = to_stream.last_ntp.unwrap();
+        let _to_ntp = to_stream.last_ntp.unwrap();
         let to_rtp_ref = to_stream.last_rtp.unwrap();
 
         // Calculate time difference in source RTP clock ticks

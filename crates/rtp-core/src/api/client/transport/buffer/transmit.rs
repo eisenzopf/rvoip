@@ -5,12 +5,12 @@
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 use crate::api::common::error::MediaTransportError;
 use crate::api::common::frame::MediaFrame;
 use crate::buffer::{
-    BufferLimits, BufferPool, GlobalBufferManager, PacketPriority, TransmitBuffer,
+    BufferPool, GlobalBufferManager, PacketPriority, TransmitBuffer,
     TransmitBufferConfig,
 };
 use crate::transport::RtpTransport;

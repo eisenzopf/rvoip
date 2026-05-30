@@ -3,7 +3,7 @@
 //! This module handles event subscription and callback management.
 
 use crate::api::common::error::MediaTransportError;
-use crate::api::common::events::{MediaEventCallback, MediaTransportEvent};
+use crate::api::common::events::MediaEventCallback;
 use crate::api::server::transport::ClientInfo;
 use std::sync::Arc;
 use tokio::sync::RwLock;

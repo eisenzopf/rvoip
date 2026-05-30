@@ -229,7 +229,7 @@ impl Sdes {
         let key_info = base64::encode(&keysalt);
 
         // Create crypto attribute
-        let mut attr = SdesCryptoAttribute::new(tag, crypto_suite_str, &key_info);
+        let attr = SdesCryptoAttribute::new(tag, crypto_suite_str, &key_info);
 
         // Create SRTP key for later use
         let srtp_key = SrtpCryptoKey::new(key, salt);

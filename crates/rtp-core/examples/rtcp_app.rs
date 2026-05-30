@@ -6,7 +6,6 @@
 use bytes::Bytes;
 use rvoip_rtp_core::{
     packet::rtcp::{RtcpApplicationDefined, RtcpPacket},
-    transport::RtpTransport,
     RtpEvent, RtpSession, RtpSessionConfig,
 };
 use std::time::Duration;

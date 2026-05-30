@@ -5,8 +5,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::debug;
 
 use crate::api::client::security::ClientSecurityContext;
 use crate::api::common::config::SecurityInfo;
@@ -81,7 +80,7 @@ pub async fn get_security_info(
 pub async fn start_handshake(
     security: &Option<Arc<dyn ClientSecurityContext>>,
     remote_address: std::net::SocketAddr,
-    is_client: bool,
+    _is_client: bool,
 ) -> Result<(), MediaTransportError> {
     // Placeholder for the extracted start_handshake functionality
     if let Some(security) = security {

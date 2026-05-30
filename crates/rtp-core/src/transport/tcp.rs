@@ -4,10 +4,7 @@
 //! Currently, this is a placeholder for future implementation.
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
 use super::{RtpTransport, RtpTransportConfig};
@@ -16,8 +13,10 @@ use crate::traits::RtpEvent;
 use crate::Result;
 
 /// TCP transport for RTP (placeholder)
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct TcpRtpTransport {
     /// Configuration
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     config: RtpTransportConfig,
 
     /// Event channel

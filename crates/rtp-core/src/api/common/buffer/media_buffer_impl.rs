@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, info, warn};
 
 use crate::api::common::buffer::{BufferStats, MediaBuffer, MediaBufferConfig};
 use crate::api::common::error::BufferError;
@@ -18,6 +17,7 @@ use crate::buffer::jitter::AdaptiveJitterBuffer;
 use crate::buffer::transmit::TransmitBuffer;
 
 /// Default implementation of MediaBuffer
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct DefaultMediaBuffer {
     /// Jitter buffer for incoming frames. `parking_lot::Mutex`
     /// because the `AdaptiveJitterBuffer::{add_packet, get_next_packet}`
@@ -27,6 +27,7 @@ pub struct DefaultMediaBuffer {
     jitter_buffer: parking_lot::Mutex<AdaptiveJitterBuffer>,
 
     /// Transmit buffer for outgoing frames
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     transmit_buffer: Option<Arc<TransmitBuffer>>,
 
     /// Configuration for the buffer

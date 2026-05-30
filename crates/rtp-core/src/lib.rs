@@ -190,7 +190,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use packet::{hex_dump, RtpHeader};
-    use tracing::{debug, info};
+    use tracing::debug;
 
     // Set up a simple test logger
     fn init_test_logging() {

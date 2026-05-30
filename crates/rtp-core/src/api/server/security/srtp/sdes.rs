@@ -19,7 +19,6 @@ use crate::security::{
     sdes::{Sdes, SdesConfig, SdesCryptoAttribute, SdesRole},
     SecurityKeyExchange,
 };
-use crate::srtp::crypto::SrtpCryptoKey;
 use crate::srtp::{SrtpContext, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80};
 
 /// SDES server configuration
@@ -65,10 +64,12 @@ pub enum SdesServerState {
 }
 
 /// SDES server session for handling per-client crypto negotiation
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct SdesServerSession {
     /// Session identifier
     pub session_id: String,
     /// Configuration
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     config: SdesServerConfig,
     /// Current state
     state: Arc<RwLock<SdesServerState>>,
@@ -454,10 +455,12 @@ impl SdesServer {
 
 /// SRTP-only server security context (no DTLS handshake)
 /// This implementation uses pre-shared keys negotiated through SIP/SDP
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct SrtpServerSecurityContext {
     /// Configuration
     config: ServerSecurityConfig,
     /// SDES server for key management
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     sdes_server: Arc<SdesServer>,
     /// Socket handle
     socket: Arc<RwLock<Option<SocketHandle>>>,
@@ -562,7 +565,7 @@ impl ServerSecurityContext for SrtpServerSecurityContext {
 
     async fn remove_client(&self, addr: SocketAddr) -> Result<(), SecurityError> {
         let mut clients = self.client_contexts.write().await;
-        clients.retain(|ctx| {
+        clients.retain(|_ctx| {
             // This is a bit hacky - in a real implementation you'd have a better way to identify clients
             true // For now, we don't remove them
         });

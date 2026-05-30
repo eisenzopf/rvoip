@@ -3,18 +3,18 @@
 //! This module handles security context initialization and management.
 
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, info, warn};
+use tokio::sync::Mutex;
+use tracing::debug;
 
-use crate::api::common::config::{SecurityInfo, SecurityMode, SrtpProfile};
+use crate::api::common::config::{SecurityInfo, SrtpProfile};
 use crate::api::common::error::SecurityError;
-use crate::api::server::security::{ServerSecurityConfig, ServerSecurityContext, SocketHandle};
+use crate::api::server::security::{ServerSecurityConfig, SocketHandle};
 use crate::dtls::DtlsConnection;
 
 /// Initialize security context if needed
 pub async fn initialize_security_context(
-    config: &ServerSecurityConfig,
-    socket: Option<SocketHandle>,
+    _config: &ServerSecurityConfig,
+    _socket: Option<SocketHandle>,
     connection_template: &Arc<Mutex<Option<DtlsConnection>>>,
 ) -> Result<(), SecurityError> {
     debug!("Initializing server security context");
@@ -123,7 +123,7 @@ pub async fn get_fingerprint_from_template(
 
 /// Get the fingerprint algorithm from the template
 pub async fn get_fingerprint_algorithm_from_template(
-    connection_template: &Arc<Mutex<Option<DtlsConnection>>>,
+    _connection_template: &Arc<Mutex<Option<DtlsConnection>>>,
 ) -> Result<String, SecurityError> {
     // We hardcode this for now since the algorithm is set during certificate creation
     Ok("sha-256".to_string())

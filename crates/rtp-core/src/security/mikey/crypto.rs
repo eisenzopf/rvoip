@@ -197,7 +197,7 @@ pub fn sign_certificate_with_ca(
     let public_key_der = key_pair.public_key_raw().to_vec();
 
     // Extract the CA's Common Name to set as issuer in the subject cert
-    let ca_info = extract_certificate_info(&ca_cert.certificate)?;
+    let _ca_info = extract_certificate_info(&ca_cert.certificate)?;
 
     // Create subject certificate parameters
     let mut params = CertificateParams::default();
@@ -241,7 +241,7 @@ pub fn validate_certificate_chain(subject_cert: &[u8], ca_cert: &[u8]) -> Result
     let (_, subject) = x509_parser::parse_x509_certificate(subject_cert)
         .map_err(|_| Error::CryptoError("Failed to parse subject certificate".into()))?;
 
-    let (_, ca) = x509_parser::parse_x509_certificate(ca_cert)
+    let (_, _ca) = x509_parser::parse_x509_certificate(ca_cert)
         .map_err(|_| Error::CryptoError("Failed to parse CA certificate".into()))?;
 
     // Basic validation checks

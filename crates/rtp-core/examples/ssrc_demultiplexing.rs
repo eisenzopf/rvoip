@@ -112,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let receiver_clone = receiver.clone();
     let receiver_handle = tokio::spawn(async move {
         let mut packet_count = 0;
-        let mut stream_count = 0;
+        let mut stream_count;
 
         // Keep track of unique SSRCs seen
         let mut seen_ssrcs = std::collections::HashSet::new();

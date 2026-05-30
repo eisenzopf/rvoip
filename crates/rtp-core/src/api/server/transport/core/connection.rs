@@ -3,24 +3,24 @@
 //! This module handles client connection establishment, management, and disconnection.
 
 use dashmap::DashMap;
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::api::common::error::MediaTransportError;
 use crate::api::common::frame::MediaFrame;
 use crate::api::server::config::ServerConfig;
-use crate::api::server::security::{ClientSecurityContext, ServerSecurityContext};
+use crate::api::server::security::ClientSecurityContext;
 use crate::api::server::transport::ClientInfo;
 use crate::session::{RtpSession, RtpSessionConfig, RtpSessionEvent};
 // payload registry moved to media-core
 
 /// Client connection in the server
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct ClientConnection {
     /// Client ID
     pub(crate) id: String,
@@ -35,171 +35,13 @@ pub struct ClientConnection {
     /// Is connected
     pub(crate) connected: bool,
     /// Creation time
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     pub(crate) created_at: SystemTime,
     /// Last activity time
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     pub(crate) last_activity: Arc<Mutex<SystemTime>>,
 }
 
-/// Handle an incoming client connection
-pub async fn handle_client(
-    addr: SocketAddr,
-    config: &ServerConfig,
-    security_context: &Arc<RwLock<Option<Arc<dyn ServerSecurityContext + Send + Sync>>>>,
-    clients: &Arc<DashMap<String, ClientConnection>>,
-    frame_sender: &broadcast::Sender<(String, MediaFrame)>,
-    client_connected_callbacks: &Arc<RwLock<Vec<Box<dyn Fn(ClientInfo) + Send + Sync>>>>,
-) -> Result<String, crate::api::common::error::MediaTransportError> {
-    info!("Handling new client from {}", addr);
-
-    let client_id = format!("client-{}", Uuid::new_v4());
-    debug!("Assigned client ID: {}", client_id);
-
-    // Create RTP session config for this client
-    let session_config = RtpSessionConfig {
-        local_addr: config.local_address,
-        remote_addr: Some(addr),
-        ssrc: Some(rand::random()),
-        payload_type: config.default_payload_type,
-        clock_rate: config.clock_rate,
-        jitter_buffer_size: Some(config.jitter_buffer_size as usize),
-        max_packet_age_ms: Some(config.jitter_max_packet_age_ms),
-        enable_jitter_buffer: config.enable_jitter_buffer,
-    };
-
-    // Create RTP session
-    let rtp_session = RtpSession::new(session_config).await.map_err(|e| {
-        MediaTransportError::Transport(format!("Failed to create client RTP session: {}", e))
-    })?;
-
-    let rtp_session = Arc::new(Mutex::new(rtp_session));
-
-    // Create security context if needed
-    let security_ctx = if config.security_config.security_mode.is_enabled() {
-        // Check if we have a server security context
-        let server_ctx_option = security_context.read().await;
-
-        if let Some(server_ctx) = server_ctx_option.as_ref() {
-            // Create client context from server context - still using the trait method
-            let client_ctx: Arc<dyn ClientSecurityContext + Send + Sync> =
-                server_ctx.create_client_context(addr).await.map_err(|e| {
-                    MediaTransportError::Security(format!(
-                        "Failed to create client security context: {}",
-                        e
-                    ))
-                })?;
-
-            // Get socket from the session
-            let session = rtp_session.lock().await;
-            let socket_arc = session.get_socket_handle().await.map_err(|e| {
-                MediaTransportError::Transport(format!("Failed to get socket handle: {}", e))
-            })?;
-            drop(session);
-
-            // Create a proper SocketHandle from the UdpSocket
-            let socket_handle = crate::api::server::security::SocketHandle {
-                socket: socket_arc,
-                remote_addr: Some(addr),
-            };
-
-            // Set socket on the client context
-            client_ctx.set_socket(socket_handle).await.map_err(|e| {
-                MediaTransportError::Security(format!(
-                    "Failed to set socket on client security context: {}",
-                    e
-                ))
-            })?;
-
-            Some(client_ctx)
-        } else {
-            return Err(MediaTransportError::Security(
-                "Server security context not initialized".to_string(),
-            ));
-        }
-    } else {
-        None
-    };
-
-    // Start a task to forward frames from this client
-    let frame_sender_clone = frame_sender.clone(); // Clone directly from self
-    let client_id_clone = client_id.clone();
-    let session_clone = rtp_session.clone();
-
-    let forward_task = tokio::spawn(async move {
-        let session = session_clone.lock().await;
-        let mut event_rx = session.subscribe();
-        drop(session);
-
-        while let Ok(event) = event_rx.recv().await {
-            match event {
-                RtpSessionEvent::PacketReceived(packet) => {
-                    // Determine frame type from payload type
-                    let frame_type = crate::api::common::frame::MediaFrameType::Audio; // Default to Audio, media-core handles frame type
-
-                    // Convert to MediaFrame
-                    let frame = MediaFrame {
-                        frame_type,
-                        data: packet.payload.to_vec(),
-                        timestamp: packet.header.timestamp,
-                        sequence: packet.header.sequence_number,
-                        marker: packet.header.marker,
-                        payload_type: packet.header.payload_type,
-                        ssrc: packet.header.ssrc,
-                        csrcs: packet.header.csrc.clone(),
-                    };
-
-                    // Forward to server via broadcast channel
-                    // We can ignore send errors since they just mean no receivers are listening
-                    if let Err(e) = frame_sender_clone.send((client_id_clone.clone(), frame)) {
-                        // Only log this as a warning, not an error - it's expected if no subscribers
-                        debug!(
-                            "No receivers for frame from client {}: {}",
-                            client_id_clone, e
-                        );
-                    }
-                }
-                RtpSessionEvent::NewStreamDetected { ssrc } => {
-                    debug!(
-                        "New stream with SSRC={:08x} detected for client {}",
-                        ssrc, client_id_clone
-                    );
-                }
-                _ => {} // Handle other events if needed
-            }
-        }
-    });
-
-    // Create client connection
-    let client = ClientConnection {
-        id: client_id.clone(),
-        address: addr,
-        session: rtp_session,
-        security: security_ctx,
-        task: Some(forward_task),
-        connected: true,
-        created_at: SystemTime::now(),
-        last_activity: Arc::new(Mutex::new(SystemTime::now())),
-    };
-
-    // Add to clients (DashMap insert is sharded; no outer guard).
-    clients.insert(client_id.clone(), client);
-
-    // Create client info
-    let client_info = ClientInfo {
-        id: client_id.clone(),
-        address: addr,
-        secure: false, // Will be updated once handshake is complete
-        security_info: None,
-        connected: true,
-    };
-
-    // Notify callbacks
-    let callbacks_guard = client_connected_callbacks.read().await;
-    for callback in &*callbacks_guard {
-        callback(client_info.clone());
-    }
-
-    Ok(client_id)
-}
 
 /// Static helper function to handle a new client connection
 pub async fn handle_client_static(
@@ -344,21 +186,6 @@ pub async fn handle_client_static(
     Ok(client_id)
 }
 
-/// Get client transport information (address and session)
-pub async fn get_client_transport_info(
-    client_id: &str,
-    clients: &Arc<DashMap<String, ClientConnection>>,
-) -> Result<(SocketAddr, Arc<Mutex<RtpSession>>), MediaTransportError> {
-    let client = clients
-        .get(client_id)
-        .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
-    if !client.connected {
-        return Err(MediaTransportError::ClientNotConnected(
-            client_id.to_string(),
-        ));
-    }
-    Ok((client.address, client.session.clone()))
-}
 
 /// Disconnect a client
 pub async fn disconnect_client(

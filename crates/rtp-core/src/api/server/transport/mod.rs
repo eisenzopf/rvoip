@@ -5,7 +5,6 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
@@ -17,8 +16,6 @@ use crate::api::common::events::MediaEventCallback;
 use crate::api::common::extension::ExtensionFormat;
 use crate::api::common::frame::MediaFrame;
 use crate::api::common::stats::MediaStats;
-use crate::api::server::config::ServerConfig;
-use crate::buffer::{PacketPriority, TransmitBufferConfig, TransmitBufferStats};
 use crate::{CsrcMapping, RtpCsrc, RtpSsrc};
 
 mod core;

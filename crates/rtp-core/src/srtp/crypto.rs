@@ -6,11 +6,10 @@ use aes::{
     cipher::{generic_array::GenericArray, KeyIvInit, StreamCipher},
     Aes128, Aes256,
 };
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use ctr::Ctr64BE;
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
-use std::sync::Arc;
 
 // Define types for AES-CM
 type Aes128Ctr64BE = Ctr64BE<Aes128>;
@@ -215,7 +214,7 @@ impl SrtpCrypto {
 
         // Extract header and payload
         let header = packet.header.clone();
-        let mut payload = packet.payload.clone();
+        let payload = packet.payload.clone();
 
         // Create an IV for encryption
         let ssrc = packet.header.ssrc;
@@ -488,7 +487,7 @@ impl SrtpCrypto {
     }
 
     /// Calculate authentication tag for an RTCP packet
-    fn calculate_rtcp_auth_tag(&self, data: &[u8], index: u32) -> Result<Vec<u8>> {
+    fn calculate_rtcp_auth_tag(&self, data: &[u8], _index: u32) -> Result<Vec<u8>> {
         if self.suite.authentication == SrtpAuthenticationAlgorithm::Null {
             return Err(Error::SrtpError(
                 "Authentication is not enabled".to_string(),
@@ -769,7 +768,7 @@ mod tests {
         assert_ne!(data, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
         // Make a copy of the encrypted data
-        let encrypted = data.clone();
+        let _encrypted = data.clone();
 
         // Now decrypt
         let result = aes_cm_decrypt(&mut data, &key, &iv);
@@ -979,7 +978,7 @@ mod tests {
         assert!(decrypted.is_ok());
 
         // Test 2: Tamper with the payload and verify it fails authentication
-        let tampered_size = protected_data.len();
+        let _tampered_size = protected_data.len();
         let mut tampered = protected_data.to_vec();
 
         // Change one byte in the middle of the packet
@@ -991,7 +990,7 @@ mod tests {
 
         // Test 3: Tamper with the authentication tag and verify it fails
         let mut tampered = protected_data.to_vec();
-        if let Some(tag) = auth_tag_clone {
+        if let Some(_tag) = auth_tag_clone {
             // Calculate position of the last byte in the auth tag
             let tag_idx = tampered.len() - 1;
             // Store the value before changing it

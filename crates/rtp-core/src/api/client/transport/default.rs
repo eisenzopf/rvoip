@@ -4,7 +4,6 @@
 //! which combines all the functionality from the smaller module files.
 
 use async_trait::async_trait;
-use rand::Rng;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,7 +21,7 @@ use crate::api::client::transport::RtcpStats;
 use crate::api::client::transport::VoipMetrics;
 use crate::api::common::config::SecurityInfo;
 use crate::api::common::error::MediaTransportError;
-use crate::api::common::events::{MediaEventCallback, MediaTransportEvent};
+use crate::api::common::events::MediaEventCallback;
 use crate::api::common::extension::ExtensionFormat;
 use crate::api::common::frame::MediaFrame;
 use crate::api::common::frame::MediaFrameType;
@@ -34,13 +33,13 @@ use crate::buffer::{
     TransmitBufferStats,
 };
 use crate::session::{RtpSession, RtpSessionConfig};
-use crate::transport::{RtpTransport, UdpRtpTransport};
+use crate::transport::RtpTransport;
 use crate::{CsrcManager, CsrcMapping, RtpCsrc, RtpSsrc};
 
 // Import module functions
 use crate::api::client::transport::buffer::{stats, transmit};
 use crate::api::client::transport::core::{connection, events, frame};
-use crate::api::client::transport::media::{csrc, extensions, sync};
+use crate::api::client::transport::media::{csrc, extensions};
 use crate::api::client::transport::rtcp::{app_packets, reports};
 use crate::api::client::transport::security::client_security;
 
@@ -284,11 +283,11 @@ impl MediaTransportClient for DefaultMediaTransportClient {
 
     async fn connect(&self) -> Result<(), MediaTransportError> {
         // Define the start_receive_task closure
-        let session_clone = Arc::clone(&self.session);
-        let frame_sender_clone = self.frame_sender.clone();
-        let event_callbacks_clone = Arc::clone(&self.event_callbacks);
+        let _session_clone = Arc::clone(&self.session);
+        let _frame_sender_clone = self.frame_sender.clone();
+        let _event_callbacks_clone = Arc::clone(&self.event_callbacks);
         let start_receive_task =
-            move |transport: Arc<dyn RtpTransport>| -> Result<(), MediaTransportError> {
+            move |_transport: Arc<dyn RtpTransport>| -> Result<(), MediaTransportError> {
                 // Start receive task implementation would be here
                 Ok(())
             };
@@ -475,8 +474,8 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         )
     }
 
-    async fn set_jitter_buffer_size(&self, size_ms: Duration) -> Result<(), MediaTransportError> {
-        let mut session = self.session.lock().await;
+    async fn set_jitter_buffer_size(&self, _size_ms: Duration) -> Result<(), MediaTransportError> {
+        let _session = self.session.lock().await;
         // This method doesn't exist in RtpSession but would in a real implementation
         // Just return Ok for now
         Ok(())
@@ -548,7 +547,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
 
     async fn enable_media_sync(&self) -> Result<bool, MediaTransportError> {
         // Enable media sync on the session which creates the MediaSync context
-        let session_media_sync = {
+        let _session_media_sync = {
             let mut session = self.session.lock().await;
             session.enable_media_sync()
         };

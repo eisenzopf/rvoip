@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hickory_proto::rr::rdata::{NAPTR, SRV};
-use hickory_proto::rr::{LowerName, Name, RData, Record, RecordType};
+use hickory_proto::rr::{LowerName, Name, RData, Record};
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_server::store::in_memory::InMemoryZoneHandler;
 use hickory_server::zone_handler::{AxfrPolicy, Catalog, ZoneHandler, ZoneType};

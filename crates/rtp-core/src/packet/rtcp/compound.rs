@@ -5,11 +5,10 @@
 //! 1. A mandatory SR or RR packet first
 //! 2. Optional additional packets (SDES, BYE, APP, XR)
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::io::Cursor;
+use bytes::{Buf, Bytes, BytesMut};
 
 use super::{
-    RtcpApplicationDefined, RtcpExtendedReport, RtcpGoodbye, RtcpPacket, RtcpPacketType,
+    RtcpApplicationDefined, RtcpExtendedReport, RtcpGoodbye, RtcpPacket,
     RtcpReceiverReport, RtcpSenderReport, RtcpSourceDescription,
 };
 use crate::error::Error;
@@ -131,8 +130,8 @@ impl RtcpCompoundPacket {
 
             // Look ahead to see packet length without consuming
             let mut peek_buf = buf.clone();
-            let first_byte = peek_buf.get_u8();
-            let packet_type_byte = peek_buf.get_u8();
+            let _first_byte = peek_buf.get_u8();
+            let _packet_type_byte = peek_buf.get_u8();
             let length = peek_buf.get_u16() as usize * 4;
 
             // Total packet size = header (4 bytes) + length field * 4
@@ -166,9 +165,9 @@ impl RtcpCompoundPacket {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{NtpTimestamp, RtcpReportBlock};
+    use super::super::NtpTimestamp;
     use super::*;
-    use crate::RtpSsrc;
+    
 
     #[test]
     fn test_compound_packet_validation() {
@@ -185,7 +184,7 @@ mod tests {
             report_blocks: Vec::new(),
         };
 
-        let mut compound = RtcpCompoundPacket::new_with_sr(sr);
+        let compound = RtcpCompoundPacket::new_with_sr(sr);
         assert!(compound.validate().is_ok());
 
         // Valid compound packet with RR first

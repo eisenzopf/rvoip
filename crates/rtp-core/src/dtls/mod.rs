@@ -81,6 +81,6 @@ pub type Result<T> = std::result::Result<T, crate::error::Error>;
 ///
 /// # Returns
 /// A new DTLS connection
-pub async fn create_connection(config: DtlsConfig) -> Result<DtlsConnection> {
+pub async fn create_connection(_config: DtlsConfig) -> Result<DtlsConnection> {
     unimplemented!("DTLS implementation is not yet complete")
 }

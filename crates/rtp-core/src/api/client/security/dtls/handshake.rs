@@ -6,7 +6,6 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
@@ -71,7 +70,7 @@ pub async fn wait_for_handshake(
                 *completed = true;
 
                 // Extract SRTP keys if needed
-                let mut srtp_guard = srtp_context.lock().await;
+                let srtp_guard = srtp_context.lock().await;
                 if srtp_guard.is_none() {
                     // Release the SRTP guard before calling extract_srtp_keys
                     // to avoid potential deadlock

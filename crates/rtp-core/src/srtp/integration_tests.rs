@@ -132,7 +132,7 @@ fn test_srtp_with_mikey_key_exchange() {
         ..Default::default()
     };
 
-    let mut responder = Mikey::new(responder_config, MikeyRole::Responder);
+    let _responder = Mikey::new(responder_config, MikeyRole::Responder);
 
     // Initialize key exchange
     initiator.init().expect("Failed to initialize initiator");

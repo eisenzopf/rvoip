@@ -4,26 +4,25 @@
 //! through the DefaultServerSecurityContext struct.
 
 use async_trait::async_trait;
-use std::any::Any;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, warn};
 
-use crate::api::common::config::{SecurityInfo, SecurityMode, SrtpProfile};
+use crate::api::common::config::{SecurityInfo, SrtpProfile};
 use crate::api::common::error::SecurityError;
 use crate::api::server::security::{
     ClientSecurityContext, ServerSecurityConfig, ServerSecurityContext,
 };
-use crate::api::server::security::{ConnectionConfig, ConnectionRole, SocketHandle};
+use crate::api::server::security::SocketHandle;
 use crate::dtls::DtlsConnection;
 
 // Import our core modules
 use crate::api::server::security::client::context::DefaultClientSecurityContext;
 use crate::api::server::security::core::connection;
 use crate::api::server::security::core::context;
-use crate::api::server::security::dtls::{handshake, transport};
+use crate::api::server::security::dtls::transport;
 use crate::api::server::security::srtp::keys;
 use crate::api::server::security::util::conversion;
 

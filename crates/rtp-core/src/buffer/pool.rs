@@ -3,11 +3,11 @@
 //! This module provides a pooled allocator for packet buffers to minimize
 //! allocations and improve performance under high loads.
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// A pool of reusable byte buffers
 ///
@@ -47,6 +47,7 @@ struct BufferPoolInner {
 /// A buffer from the pool
 ///
 /// This buffer will be automatically returned to the pool when it is dropped.
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct PooledBuffer {
     /// The buffer itself
     buffer: Option<BytesMut>,
@@ -59,6 +60,7 @@ pub struct PooledBuffer {
     pool: BufferPool,
 
     /// Permit for the buffer
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
@@ -379,7 +381,7 @@ impl SharedPools {
 mod tests {
     use super::*;
     use std::time::Duration;
-    use tokio::time::timeout;
+    
 
     #[tokio::test]
     async fn test_buffer_pool() {
@@ -388,7 +390,7 @@ mod tests {
 
         // Get 5 initial buffers
         let mut buffers = Vec::new();
-        for i in 0..5 {
+        for _i in 0..5 {
             let buffer = pool.get_buffer().await;
             buffers.push(buffer);
         }

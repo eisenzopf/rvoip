@@ -11,6 +11,7 @@ use crate::packet::RtpPacket;
 use crate::{Result, RtpSequenceNumber, RtpTimestamp};
 
 /// RTP packet scheduler for periodic sending of packets
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct RtpScheduler {
     /// Current sequence number for outgoing packets. `Arc<AtomicU16>`
     /// so an `RtpSendHandle` (handed out by the owning `RtpSession`)
@@ -24,12 +25,14 @@ pub struct RtpScheduler {
     timestamp: RtpTimestamp,
 
     /// Clock rate (samples per second)
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     clock_rate: u32,
 
     /// Timestamp increment per packet
     timestamp_increment: RtpTimestamp,
 
     /// Initial timestamp
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     initial_timestamp: RtpTimestamp,
 
     /// Time when scheduler was started
@@ -172,7 +175,7 @@ impl RtpScheduler {
         // Clone necessary data for the task
         let queue = self.packet_queue.clone();
         let sender = self.sender.clone().unwrap();
-        let interval = self.interval;
+        let _interval = self.interval;
 
         // Start a task to send packets at their scheduled times
         let handle = tokio::spawn(async move {
@@ -282,7 +285,7 @@ pub struct RtpSchedulerStats {
 mod tests {
     use super::*;
     use crate::packet::{RtpHeader, RtpPacket};
-    use crate::RtpSsrc;
+    
     use bytes::Bytes;
 
     #[tokio::test]

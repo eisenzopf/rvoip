@@ -23,8 +23,6 @@ use rvoip_rtp_core::api::client::transport::DefaultMediaTransportClient;
 use rvoip_rtp_core::api::server::transport::DefaultMediaTransportServer;
 
 // Constants for our streams
-const AUDIO_SSRC: u32 = 0x1234ABCD;
-const VIDEO_SSRC: u32 = 0x5678DCBA;
 const AUDIO_CLOCK_RATE: u32 = 48000; // 48kHz audio
 const VIDEO_CLOCK_RATE: u32 = 90000; // 90kHz video
 

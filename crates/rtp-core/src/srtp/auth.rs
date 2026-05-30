@@ -1,8 +1,6 @@
 use super::SrtpAuthenticationAlgorithm;
 use crate::error::Error;
-use crate::packet::RtpPacket;
 use crate::Result;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 

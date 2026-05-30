@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, warn};
 
 use crate::api::common::error::SecurityError;
 use crate::dtls::DtlsConnection;

@@ -5,10 +5,9 @@
 //! Extended Reports (XR) are defined in RFC 3611.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::Error;
-use crate::{Result, RtpSsrc};
+use crate::Result;
 
 /// RTCP version (same as RTP, always 2)
 pub const RTCP_VERSION: u8 = 2;

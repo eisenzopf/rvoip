@@ -177,7 +177,7 @@ impl Record {
 
     /// Serialize the record to bytes
     pub fn serialize(&self) -> Result<Bytes> {
-        let mut header_buf = self.header.serialize()?;
+        let header_buf = self.header.serialize()?;
         let mut buf = BytesMut::with_capacity(header_buf.len() + self.data.len());
 
         buf.extend_from_slice(&header_buf);

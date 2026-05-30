@@ -18,7 +18,6 @@ pub use transport::DefaultMediaTransportServer;
 // Import errors
 use crate::api::common::error::MediaTransportError;
 
-use std::sync::Arc;
 
 /// Factory for creating media transport servers
 pub struct ServerFactory;
@@ -101,7 +100,7 @@ impl ServerConfigBuilder {
                 self = self.security_config(server_security_config);
 
                 // If a key was provided, set it up for SRTP
-                if let Some(key) = security_config.srtp_key {
+                if let Some(_key) = security_config.srtp_key {
                     // Here you would set up the pre-shared key
                     // This might require additional implementation in your SRTP code
                 }

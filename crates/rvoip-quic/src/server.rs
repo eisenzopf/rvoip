@@ -44,7 +44,7 @@ impl UctpQuicServer {
     /// Spawn the accept loop. Returns a handle that owns no state — the
     /// loop owns its own task. Adapter shutdown happens via dropping
     /// the dispatcher channel (`accept_rx`).
-    pub fn start(
+    pub(crate) fn start(
         mut accept_rx: mpsc::Receiver<quinn::Connection>,
         bearer: Arc<dyn BearerValidator>,
         events_tx: mpsc::Sender<AdapterEvent>,

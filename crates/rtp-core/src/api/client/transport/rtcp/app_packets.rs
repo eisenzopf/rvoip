@@ -5,15 +5,13 @@
 
 use bytes;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 use crate::api::client::transport::VoipMetrics;
 use crate::api::common::error::MediaTransportError;
 use crate::session::RtpSession;
 use crate::transport::RtpTransport;
-use crate::transport::UdpRtpTransport;
 
 /// Send an RTCP Application-Defined (APP) packet
 ///

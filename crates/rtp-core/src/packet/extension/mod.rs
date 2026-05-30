@@ -5,10 +5,7 @@
 //! This module supports both one-byte and two-byte header extension formats,
 //! as well as the legacy RFC 5285 format.
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::collections::HashMap;
-use std::fmt;
-use tracing::{debug, warn};
+use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::error::Error;
 use crate::Result;
@@ -81,7 +78,7 @@ impl ExtensionElement {
                 }
             }
             ExtensionFormat::TwoByte => {
-                if self.id < 1 || self.id > 255 {
+                if self.id < 1 {
                     return Err(Error::InvalidParameter(format!(
                         "Invalid extension ID for two-byte format: {} (must be 1-255)",
                         self.id

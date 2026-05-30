@@ -12,7 +12,7 @@ use super::crypto::verify::Certificate;
 use super::handshake::HandshakeState;
 use super::message::extension::SrtpProtectionProfile;
 use super::message::handshake::HandshakeMessage;
-use super::record::{ContentType, Record};
+use super::record::Record;
 use super::srtp::extractor::{extract_srtp_keys_from_dtls, DtlsSrtpContext};
 use super::transport::udp::UdpTransport;
 use super::{DtlsConfig, DtlsRole, Result};
@@ -149,15 +149,15 @@ impl DtlsConnection {
         let transport = self.transport.as_ref().unwrap().clone();
         let remote_addr = self.remote_addr.unwrap();
         let handshake_complete_tx = self.handshake_complete_tx.take().unwrap();
-        let srtp_profiles = self.config.srtp_profiles.clone();
-        let local_cert = self.local_cert.clone();
+        let _srtp_profiles = self.config.srtp_profiles.clone();
+        let _local_cert = self.local_cert.clone();
         let version = self.config.version;
         let max_retransmissions = self.config.max_retransmissions;
 
         // Create a separate async function to handle the handshake
         let handle_handshake = async move {
             // Create a new handshake state machine
-            let mut handshake =
+            let handshake =
                 super::handshake::HandshakeState::new(role, version, max_retransmissions);
 
             // Initialize transport handler
@@ -672,7 +672,7 @@ impl DtlsConnection {
 
             // Process the message with the handshake state machine
             let mut response_messages = Vec::new();
-            let mut handshake_complete = false;
+            let handshake_complete;
 
             if let Some(handshake) = self.handshake.as_mut() {
                 println!(
@@ -771,7 +771,7 @@ impl DtlsConnection {
     }
 
     /// Process an alert record
-    async fn process_alert_record(&mut self, data: &[u8]) -> Result<()> {
+    async fn process_alert_record(&mut self, _data: &[u8]) -> Result<()> {
         // This would parse and handle alerts
         Err(crate::error::Error::NotImplemented(
             "Alert record processing not yet implemented".to_string(),
@@ -779,7 +779,7 @@ impl DtlsConnection {
     }
 
     /// Process an application data record
-    async fn process_application_data_record(&mut self, data: &[u8]) -> Result<()> {
+    async fn process_application_data_record(&mut self, _data: &[u8]) -> Result<()> {
         // This would handle application data (not used in DTLS-SRTP)
         Err(crate::error::Error::NotImplemented(
             "Application data record processing not yet implemented".to_string(),
@@ -1065,14 +1065,14 @@ impl DtlsConnection {
     /// Send a handshake message
     async fn send_handshake_message(&mut self, message: HandshakeMessage) -> Result<()> {
         // Make sure we have a transport
-        let transport = self.transport.as_ref().ok_or_else(|| {
+        let _transport = self.transport.as_ref().ok_or_else(|| {
             crate::error::Error::InvalidState(
                 "Cannot send handshake message: no transport configured".to_string(),
             )
         })?;
 
         // Make sure we have a remote address
-        let remote_addr = self.remote_addr.ok_or_else(|| {
+        let _remote_addr = self.remote_addr.ok_or_else(|| {
             crate::error::Error::InvalidState(
                 "Cannot send handshake message: no remote address configured".to_string(),
             )

@@ -10,11 +10,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use crate::api::common::config::{KeyExchangeMethod, SecurityConfig, SrtpProfile};
 use crate::api::common::error::SecurityError;
-use crate::srtp::{crypto::SrtpCryptoKey, SrtpContext, SrtpCryptoSuite};
+use crate::srtp::{crypto::SrtpCryptoKey, SrtpContext};
 
 /// Key rotation policy defines when keys should be rotated
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -606,7 +606,7 @@ impl KeyManager {
         match policy {
             KeyRotationPolicy::TimeInterval(interval) => {
                 let key_store = self.key_store.clone();
-                let rotation_policy = self.rotation_policy.clone();
+                let _rotation_policy = self.rotation_policy.clone();
 
                 let handle = tokio::spawn(async move {
                     let mut rotation_interval = tokio::time::interval(interval);
@@ -616,7 +616,7 @@ impl KeyManager {
                     loop {
                         rotation_interval.tick().await;
 
-                        if let Some(mut store) = key_store.write().await.as_mut() {
+                        if let Some(store) = key_store.write().await.as_mut() {
                             if let Err(e) = store.rotate_keys() {
                                 error!("Automatic key rotation failed: {}", e);
                             } else {
@@ -681,12 +681,12 @@ impl KeyManager {
     }
 
     /// Get syndication manager
-    pub async fn syndication(&self) -> tokio::sync::RwLockReadGuard<KeySyndication> {
+    pub async fn syndication(&self) -> tokio::sync::RwLockReadGuard<'_, KeySyndication> {
         self.syndication.read().await
     }
 
     /// Get mutable syndication manager
-    pub async fn syndication_mut(&self) -> tokio::sync::RwLockWriteGuard<KeySyndication> {
+    pub async fn syndication_mut(&self) -> tokio::sync::RwLockWriteGuard<'_, KeySyndication> {
         self.syndication.write().await
     }
 

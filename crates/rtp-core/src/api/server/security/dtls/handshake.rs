@@ -9,7 +9,6 @@ use tracing::{debug, error, warn};
 
 use crate::api::common::error::SecurityError;
 use crate::api::server::security::srtp::keys;
-use crate::api::server::security::{ClientSecurityContext, SocketHandle};
 use crate::dtls::{handshake::HandshakeStep, DtlsConnection};
 use crate::srtp::SrtpContext;
 

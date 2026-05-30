@@ -5,7 +5,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error};
 
 use crate::api::client::security::create_dtls_config as api_create_dtls_config;
 use crate::api::client::security::ClientSecurityConfig;
@@ -13,10 +13,7 @@ use crate::api::common::error::SecurityError;
 use crate::api::server::security::SocketHandle;
 use crate::dtls::transport::udp::UdpTransport;
 use crate::dtls::{DtlsConfig, DtlsConnection, DtlsRole, DtlsVersion};
-use crate::srtp::{
-    SrtpContext, SrtpCryptoSuite, SRTP_AEAD_AES_128_GCM, SRTP_AEAD_AES_256_GCM,
-    SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80, SRTP_NULL_NULL,
-};
+use crate::srtp::SRTP_AES128_CM_SHA1_80;
 use tokio::net::UdpSocket;
 
 /// Initialize a DTLS connection with the given configuration
@@ -56,7 +53,7 @@ pub async fn init_connection(
         );
 
         // Read certificate and key files
-        let cert_data = match std::fs::read_to_string(cert_path) {
+        let _cert_data = match std::fs::read_to_string(cert_path) {
             Ok(data) => data,
             Err(e) => {
                 return Err(SecurityError::Configuration(format!(
@@ -66,7 +63,7 @@ pub async fn init_connection(
             }
         };
 
-        let key_data = match std::fs::read_to_string(key_path) {
+        let _key_data = match std::fs::read_to_string(key_path) {
             Ok(data) => data,
             Err(e) => {
                 return Err(SecurityError::Configuration(format!(
@@ -149,7 +146,7 @@ pub async fn init_connection(
 /// Create a new DTLS connection
 pub async fn create_connection(
     socket: &Arc<UdpSocket>,
-    remote_addr: SocketAddr,
+    _remote_addr: SocketAddr,
 ) -> Result<DtlsConnection, SecurityError> {
     // Create DTLS connection config
     let dtls_config = DtlsConfig {

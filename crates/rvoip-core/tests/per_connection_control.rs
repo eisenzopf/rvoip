@@ -173,12 +173,6 @@ async fn track_inbound(
     let _ = orch; // just here for symmetry — not used directly
 }
 
-async fn next_event(rx: &mut Receiver<Event>) -> Event {
-    tokio::time::timeout(Duration::from_secs(2), rx.recv())
-        .await
-        .expect("timeout")
-        .expect("closed")
-}
 
 #[tokio::test]
 async fn mute_and_unmute_round_trip() {

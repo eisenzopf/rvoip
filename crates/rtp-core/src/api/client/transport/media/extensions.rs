@@ -4,10 +4,6 @@
 //! adding extensions to outgoing packets, and extracting them from incoming packets.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
 
 use crate::api::common::error::MediaTransportError;
 use crate::api::common::extension::ExtensionFormat;
@@ -21,7 +17,7 @@ pub fn is_header_extensions_enabled(config_header_extensions_enabled: bool) -> b
 
 /// Enable header extensions with the specified format
 pub async fn enable_header_extensions(
-    format: ExtensionFormat,
+    _format: ExtensionFormat,
 ) -> Result<bool, MediaTransportError> {
     // Placeholder for the extracted enable_header_extensions functionality
     // In a real implementation, this would configure the RTP session to use the specified format
@@ -29,7 +25,7 @@ pub async fn enable_header_extensions(
 }
 
 /// Configure a header extension mapping
-pub async fn configure_header_extension(id: u8, uri: String) -> Result<(), MediaTransportError> {
+pub async fn configure_header_extension(_id: u8, _uri: String) -> Result<(), MediaTransportError> {
     // Placeholder for the extracted configure_header_extension functionality
     // In a real implementation, this would register the URI for the given ID
     Ok(())
@@ -37,7 +33,7 @@ pub async fn configure_header_extension(id: u8, uri: String) -> Result<(), Media
 
 /// Configure multiple header extension mappings
 pub async fn configure_header_extensions(
-    mappings: HashMap<u8, String>,
+    _mappings: HashMap<u8, String>,
 ) -> Result<(), MediaTransportError> {
     // Placeholder for the extracted configure_header_extensions functionality
     // In a real implementation, this would register each URI for its corresponding ID
@@ -45,7 +41,7 @@ pub async fn configure_header_extensions(
 }
 
 /// Add a header extension to the next outgoing packet
-pub async fn add_header_extension(extension: HeaderExtension) -> Result<(), MediaTransportError> {
+pub async fn add_header_extension(_extension: HeaderExtension) -> Result<(), MediaTransportError> {
     // Placeholder for the extracted add_header_extension functionality
     // In a real implementation, this would store the extension to be added to the next packet
     Ok(())
@@ -53,8 +49,8 @@ pub async fn add_header_extension(extension: HeaderExtension) -> Result<(), Medi
 
 /// Add audio level header extension
 pub async fn add_audio_level_extension(
-    voice_activity: bool,
-    level: u8,
+    _voice_activity: bool,
+    _level: u8,
 ) -> Result<(), MediaTransportError> {
     // Placeholder for the extracted add_audio_level_extension functionality
     // In a real implementation, this would create and store an audio level extension
@@ -63,9 +59,9 @@ pub async fn add_audio_level_extension(
 
 /// Add video orientation header extension
 pub async fn add_video_orientation_extension(
-    camera_front_facing: bool,
-    camera_flipped: bool,
-    rotation: u16,
+    _camera_front_facing: bool,
+    _camera_flipped: bool,
+    _rotation: u16,
 ) -> Result<(), MediaTransportError> {
     // Placeholder for the extracted add_video_orientation_extension functionality
     // In a real implementation, this would create and store a video orientation extension
@@ -73,7 +69,7 @@ pub async fn add_video_orientation_extension(
 }
 
 /// Add transport-cc header extension
-pub async fn add_transport_cc_extension(sequence_number: u16) -> Result<(), MediaTransportError> {
+pub async fn add_transport_cc_extension(_sequence_number: u16) -> Result<(), MediaTransportError> {
     // Placeholder for the extracted add_transport_cc_extension functionality
     // In a real implementation, this would create and store a transport-cc extension
     Ok(())

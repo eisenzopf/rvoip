@@ -3,15 +3,12 @@
 //! This module handles SSRC demultiplexing for multiple streams.
 
 use dashmap::DashMap;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
 use tracing::debug;
 
 use crate::api::common::error::MediaTransportError;
 use crate::api::server::transport::core::connection::ClientConnection;
-use crate::session::RtpSession;
 use crate::RtpSsrc;
 
 /// Check if SSRC demultiplexing is enabled
@@ -105,44 +102,4 @@ pub async fn get_client_ssrcs(
     Ok(ssrcs)
 }
 
-/// Find clients by SSRC
-///
-/// Returns a list of client IDs that have the given SSRC registered.
-pub async fn find_clients_by_ssrc(
-    ssrc: RtpSsrc,
-    clients: &Arc<DashMap<String, ClientConnection>>,
-) -> Result<Vec<String>, MediaTransportError> {
-    let mut result = Vec::new();
 
-    // Snapshot (id, session) pairs without holding shard guards
-    // across the per-client async calls.
-    let candidates: Vec<(String, Arc<Mutex<RtpSession>>)> = clients
-        .iter()
-        .filter(|e| e.value().connected)
-        .map(|e| (e.key().clone(), e.value().session.clone()))
-        .collect();
-
-    for (client_id, session_arc) in candidates {
-        let session = session_arc.lock().await;
-        let ssrcs = session.get_all_ssrcs().await;
-        if ssrcs.contains(&ssrc) {
-            result.push(client_id);
-        }
-    }
-
-    Ok(result)
-}
-
-/// Map an SSRC to a client ID
-///
-/// Returns the client ID for the given SSRC, or None if not found.
-pub async fn map_ssrc_to_client_id(
-    ssrc: RtpSsrc,
-    clients: &Arc<DashMap<String, ClientConnection>>,
-) -> Result<Option<String>, MediaTransportError> {
-    // Find all clients with this SSRC
-    let matches = find_clients_by_ssrc(ssrc, clients).await?;
-
-    // If there's at least one match, return the first one
-    Ok(matches.into_iter().next())
-}

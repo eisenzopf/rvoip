@@ -101,8 +101,10 @@ impl GlobalBufferManager {
 }
 
 /// RAII guard for memory allocation
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct MemoryPermit {
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     chunks: usize,
 }
 
@@ -119,8 +121,8 @@ impl Drop for MemoryPermit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
-    use tokio::time::timeout;
+    
+    
 
     #[tokio::test]
     async fn test_memory_limits() {

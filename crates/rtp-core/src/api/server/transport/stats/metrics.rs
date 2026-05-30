@@ -3,11 +3,8 @@
 //! This module handles server-specific media metrics.
 
 use dashmap::DashMap;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
-use tracing::debug;
 
 use crate::api::common::error::MediaTransportError;
 use crate::api::common::stats::{MediaStats, QualityLevel};

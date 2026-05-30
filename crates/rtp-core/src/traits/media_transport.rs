@@ -9,7 +9,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::error::Error;
 use crate::session::RtpSession;
 use crate::traits::MediaTransport;
 use crate::transport::UdpRtpTransport;

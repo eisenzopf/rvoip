@@ -156,6 +156,7 @@ pub struct SessionHandle {
 
 #[derive(Debug, Default)]
 struct SessionInner {
+    #[allow(dead_code)] // call-hold state: written, not yet read
     held: bool,
 }
 

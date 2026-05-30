@@ -4,7 +4,7 @@
 //! the details of setting up secure connections.
 
 use crate::api::client::security::{ClientSecurityContext, DefaultClientSecurityContext};
-use crate::api::common::config::{SecurityConfig, SecurityMode, SecurityProfile};
+use crate::api::common::config::{SecurityConfig, SecurityMode};
 use crate::api::common::error::SecurityError;
 use crate::api::server::security::{
     DefaultServerSecurityContext, ServerSecurityContext, SocketHandle,

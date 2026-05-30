@@ -551,7 +551,7 @@ impl ClientHello {
                 extensions.push(extension);
 
                 // Skip over the parsed extension
-                let (parsed_type, parsed_len) = {
+                let (_parsed_type, parsed_len) = {
                     let ext_start = cursor.position() as usize;
                     let mut temp_cursor = Cursor::new(&data[ext_start..]);
                     let typ = temp_cursor.get_u16();
@@ -728,7 +728,7 @@ impl ServerHello {
                 extensions.push(extension);
 
                 // Skip over the parsed extension
-                let (parsed_type, parsed_len) = {
+                let (_parsed_type, parsed_len) = {
                     let ext_start = cursor.position() as usize;
                     let mut temp_cursor = Cursor::new(&data[ext_start..]);
                     let typ = temp_cursor.get_u16();

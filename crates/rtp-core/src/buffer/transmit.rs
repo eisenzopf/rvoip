@@ -6,23 +6,18 @@
 //! - Buffer limits to prevent memory exhaustion
 //! - Efficient packet scheduling
 
-use futures::future::poll_fn;
 use std::collections::{BTreeMap, VecDeque};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore};
 use tokio::time::sleep;
 
-use bytes::Bytes;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 use crate::packet::{rtcp::RtcpPacket, RtpPacket};
 use crate::RtpSsrc;
-use crate::RtpTimestamp;
 
-use super::{BufferLimits, BufferPool, GlobalBufferManager, MemoryPermit, PooledBuffer};
+use super::{BufferPool, GlobalBufferManager};
 
 /// Default transmit buffer capacity
 pub const DEFAULT_TRANSMIT_BUFFER_CAPACITY: usize = 1000;
@@ -65,6 +60,7 @@ impl Default for PacketPriority {
 }
 
 /// Packet in the transmit queue
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 struct QueuedPacket {
     /// The RTP packet to transmit
     packet: RtpPacket,
@@ -73,9 +69,11 @@ struct QueuedPacket {
     queue_time: Instant,
 
     /// Priority of this packet
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     priority: PacketPriority,
 
     /// Whether this is a retransmission
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     is_retransmission: bool,
 
     /// Metadata for the packet
@@ -99,6 +97,7 @@ pub struct PacketMetadata {
 }
 
 /// Congestion control state
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 struct CongestionState {
     /// Current congestion window size (packets)
     cwnd: usize,
@@ -116,15 +115,18 @@ struct CongestionState {
     rttvar_ms: Option<f64>,
 
     /// Last time window was reduced
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     last_window_reduction: Instant,
 
     /// Current estimate of network bandwidth (bps)
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     estimated_bps: u64,
 
     /// Packets in flight
     in_flight: usize,
 
     /// Lost packets detected
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     lost_packets: u64,
 
     /// Total packets sent
@@ -282,6 +284,7 @@ impl Default for TransmitBufferStats {
 /// - Packet prioritization
 /// - RTCP-based feedback handling
 /// - Memory management with global limits
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct TransmitBuffer {
     /// Configuration
     config: TransmitBufferConfig,
@@ -312,6 +315,7 @@ pub struct TransmitBuffer {
     packet_buffer: Option<Arc<BufferPool>>,
 
     /// SSRC for this transmit buffer
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     ssrc: RtpSsrc,
 
     /// Last packet send time
@@ -475,7 +479,7 @@ impl TransmitBuffer {
             if !metadata.acknowledged {
                 // Find the packet to retransmit (we may still have it)
                 // Look through all queues in order of priority
-                for (priority, queue) in self.queues.iter() {
+                for (_priority, queue) in self.queues.iter() {
                     for queued_packet in queue {
                         if queued_packet.packet.header.sequence_number == seq {
                             // Packet is already queued, just update stats
@@ -554,7 +558,7 @@ impl TransmitBuffer {
         // Get highest priority packet
         let packet_option = self.dequeue_highest_priority_packet();
 
-        if let Some(packet) = &packet_option {
+        if let Some(_packet) = &packet_option {
             // Update in-flight count
             self.congestion.in_flight += 1;
             self.congestion.total_sent += 1;
@@ -685,63 +689,6 @@ impl TransmitBuffer {
         self.stats.rto_ms = self.congestion.rto_ms;
     }
 
-    /// Handle a congestion event (packet loss or timeout)
-    fn congestion_event(&mut self) {
-        let now = Instant::now();
-
-        // Avoid reacting to multiple congestion events in a short time
-        if now
-            .duration_since(self.congestion.last_window_reduction)
-            .as_millis()
-            < self.congestion.rto_ms as u128
-        {
-            return;
-        }
-
-        // Record the time
-        self.congestion.last_window_reduction = now;
-
-        // Cut congestion window in half (but minimum of 2)
-        let new_cwnd = (self.congestion.cwnd / 2).max(2);
-
-        if self.congestion.in_slow_start {
-            // Exit slow start
-            self.congestion.in_slow_start = false;
-
-            // Set slow start threshold to half of current window
-            self.congestion.ssthresh = new_cwnd;
-        }
-
-        // Update congestion window
-        self.congestion.cwnd = new_cwnd;
-
-        // Recompute pacing interval
-        self.update_pacing();
-
-        // Update semaphore (may need to invalidate permits)
-        let in_flight = self.congestion.in_flight;
-
-        // Reset semaphore to current window size minus in-flight packets
-        let available = if in_flight < self.congestion.cwnd {
-            self.congestion.cwnd - in_flight
-        } else {
-            0
-        };
-
-        // Reset semaphore to new permitted value
-        self.cwnd_semaphore = Arc::new(Semaphore::new(available));
-
-        // Update stats
-        self.stats.cwnd = self.congestion.cwnd;
-
-        debug!(
-            "Congestion event: cwnd={} -> {}, in_flight={}, loss_rate={:.2}%",
-            self.congestion.cwnd * 2,
-            self.congestion.cwnd,
-            in_flight,
-            self.stats.loss_rate * 100.0
-        );
-    }
 
     /// Update congestion window after successful transmission
     fn update_congestion_window(&mut self, seq: Option<u16>) {
@@ -989,7 +936,7 @@ impl TransmitBuffer {
     /// Update the configuration of the transmit buffer
     pub fn update_config(&mut self, config: TransmitBufferConfig) {
         // Store current values for comparison
-        let old_max_packets = self.config.max_packets;
+        let _old_max_packets = self.config.max_packets;
         let old_cwnd = self.config.initial_cwnd;
         let old_cc_enabled = self.config.congestion_control_enabled;
 

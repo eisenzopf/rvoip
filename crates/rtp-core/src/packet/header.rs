@@ -1,5 +1,4 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::fmt;
 use tracing::debug;
 
 use super::extension::{ExtensionFormat, RtpHeaderExtensions};

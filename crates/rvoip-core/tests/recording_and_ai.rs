@@ -37,6 +37,7 @@ struct TestStream {
     inbound_tx: mpsc::Sender<MediaFrame>,
     inbound_rx: Mutex<Option<mpsc::Receiver<MediaFrame>>>,
     outbound_tx: mpsc::Sender<MediaFrame>,
+    #[allow(dead_code)] // held to keep the channel open
     outbound_rx: Mutex<Option<mpsc::Receiver<MediaFrame>>>,
 }
 

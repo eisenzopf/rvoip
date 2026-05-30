@@ -1,9 +1,10 @@
+#[cfg(test)]
+use super::header::RTP_MIN_HEADER_SIZE;
 use bytes::{Bytes, BytesMut};
 use std::fmt;
 use tracing::debug;
 
-use super::header::{hex_dump, RtpHeader, RTP_MIN_HEADER_SIZE};
-use crate::error::Error;
+use super::header::RtpHeader;
 use crate::{Result, RtpSequenceNumber, RtpSsrc, RtpTimestamp};
 
 /// An RTP packet with header and payload

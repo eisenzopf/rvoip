@@ -5,12 +5,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::api::client::security::srtp::keys;
 use crate::api::common::error::SecurityError;
-use crate::dtls::message::handshake::HandshakeHeader;
-use crate::dtls::record::{ContentType, Record};
 use crate::dtls::DtlsConnection;
 use crate::srtp::SrtpContext;
 

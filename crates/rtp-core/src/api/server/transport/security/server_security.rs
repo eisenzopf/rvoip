@@ -2,12 +2,11 @@
 //!
 //! This module handles security context initialization and management.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, warn};
+use tracing::debug;
 
-use crate::api::common::config::{SecurityInfo, SecurityMode, SrtpProfile};
+use crate::api::common::config::{SecurityInfo, SrtpProfile};
 use crate::api::common::error::MediaTransportError;
 use crate::api::server::config::ServerConfig;
 use crate::api::server::security::{DefaultServerSecurityContext, ServerSecurityContext};
@@ -104,36 +103,5 @@ pub async fn get_security_info(
     }
 }
 
-/// Check if security is enabled
-pub async fn is_security_enabled(config: &ServerConfig) -> bool {
-    config.security_config.security_mode.is_enabled()
-}
 
-/// Get the security mode
-pub async fn get_security_mode(config: &ServerConfig) -> SecurityMode {
-    config.security_config.security_mode
-}
 
-/// Check if a client connection is secure
-pub async fn is_client_secure(
-    client_id: &str,
-    clients: &Arc<
-        RwLock<HashMap<String, crate::api::server::transport::core::connection::ClientConnection>>,
-    >,
-) -> Result<bool, MediaTransportError> {
-    // Get the client
-    let clients_guard = clients.read().await;
-    let client = clients_guard
-        .get(client_id)
-        .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
-
-    // Check if client is connected
-    if !client.connected {
-        return Err(MediaTransportError::ClientNotConnected(
-            client_id.to_string(),
-        ));
-    }
-
-    // Check if security context exists
-    Ok(client.security.is_some())
-}

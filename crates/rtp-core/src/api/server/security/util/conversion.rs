@@ -7,10 +7,8 @@ use std::net::SocketAddr;
 use tracing::debug;
 
 use crate::api::common::config::{SecurityInfo, SecurityMode, SrtpProfile};
-use crate::api::common::error::SecurityError;
 use crate::api::server::security::{ConnectionConfig, ConnectionRole};
 use crate::dtls::{DtlsRole, DtlsVersion};
-use crate::srtp::SrtpCryptoSuite;
 
 use crate::api::server::security::srtp::keys;
 
@@ -108,19 +106,19 @@ pub fn security_context_to_string(
 }
 
 /// Convert API SrtpProfile array to internal SrtpCryptoSuite array
-pub fn convert_srtp_profiles(profiles: &[SrtpProfile]) -> Vec<crate::srtp::SrtpCryptoSuite> {
+pub fn convert_srtp_profiles(_profiles: &[SrtpProfile]) -> Vec<crate::srtp::SrtpCryptoSuite> {
     // This function will be fully implemented in Phase 6
     todo!("Implement convert_srtp_profiles in Phase 6")
 }
 
 /// Convert SrtpProfile to string
-pub fn srtp_profile_to_string(profile: SrtpProfile) -> String {
+pub fn srtp_profile_to_string(_profile: SrtpProfile) -> String {
     // This function will be fully implemented in Phase 6
     todo!("Implement srtp_profile_to_string in Phase 6")
 }
 
 /// Get crypto suites as strings
-pub fn get_crypto_suite_strings(profiles: &[SrtpProfile]) -> Vec<String> {
+pub fn get_crypto_suite_strings(_profiles: &[SrtpProfile]) -> Vec<String> {
     // This function will be fully implemented in Phase 6
     todo!("Implement get_crypto_suite_strings in Phase 6")
 }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error};
 
 use crate::api::client::security::ClientSecurityContext;
 use crate::api::common::error::SecurityError;

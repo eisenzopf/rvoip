@@ -1,5 +1,4 @@
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::time::{Duration, Instant};
+use bytes::{Buf, BufMut, BytesMut};
 
 use super::NtpTimestamp;
 use crate::error::Error;
@@ -841,7 +840,7 @@ impl VoipMetricsBlock {
         &mut self,
         packet_loss_percent: f32,
         round_trip_ms: u16,
-        jitter_ms: f32,
+        _jitter_ms: f32,
     ) {
         // Base R-factor (modern codecs typically use 93.2)
         let r0 = 93.2;

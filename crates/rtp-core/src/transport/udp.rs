@@ -2,7 +2,6 @@
 //!
 //! This module provides a UDP-based implementation of the RTP transport.
 
-use std::any::Any;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +13,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
 use tokio::net::UdpSocket;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, trace, warn};
 
@@ -207,7 +206,7 @@ fn log_malformed_rtp_packet(
 
 use super::allocator::{GlobalPortAllocator, PairingStrategy};
 use super::recv_pool::RecvBufPool;
-use super::validation::{PlatformSocketStrategy, RtpSocketValidator};
+use super::validation::PlatformSocketStrategy;
 use super::{RtpTransport, RtpTransportConfig};
 use crate::error::Error;
 use crate::packet::rtcp::RtcpPacket;
@@ -310,7 +309,7 @@ impl UdpRtpTransport {
         let socket_strategy = PlatformSocketStrategy::for_current_platform();
 
         // Determine how to create the sockets based on config
-        let (socket_rtp, socket_rtcp, local_rtp_addr, local_rtcp_addr) = if config
+        let (socket_rtp, socket_rtcp, _local_rtp_addr, _local_rtcp_addr) = if config
             .use_port_allocator
         {
             // Generate a session ID if not provided

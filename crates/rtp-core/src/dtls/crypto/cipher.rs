@@ -8,13 +8,12 @@ use crate::dtls::Result;
 use bytes::{BufMut, Bytes, BytesMut};
 
 // Add crypto imports
-use aes::cipher::{BlockCipher, BlockDecrypt, BlockEncrypt, Key, KeyInit};
+use aes::cipher::{BlockDecrypt, BlockEncrypt, Key, KeyInit};
 use aes::{Aes128, Aes256};
 use aes_gcm::{
-    aead::{Aead, Nonce, Payload, Tag},
-    Aes128Gcm, Aes256Gcm, AesGcm, KeySizeUser,
+    aead::{Aead, Nonce, Payload},
+    Aes128Gcm, Aes256Gcm,
 };
-use ctr::{Ctr128BE, Ctr32BE};
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use sha2::{Sha256, Sha384};

@@ -6,10 +6,8 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
-use crate::api::client::config::ClientConfig;
 use crate::api::common::config::SecurityInfo;
 use crate::api::common::error::MediaTransportError;
 use crate::api::common::events::MediaEventCallback;
@@ -474,7 +472,7 @@ pub trait MediaTransportClient: Send + Sync {
     async fn send_frame_with_priority(
         &self,
         frame: MediaFrame,
-        priority: PacketPriority,
+        _priority: PacketPriority,
     ) -> Result<(), MediaTransportError> {
         // Default implementation just calls send_frame, ignoring priority
         self.send_frame(frame).await
@@ -495,7 +493,7 @@ pub trait MediaTransportClient: Send + Sync {
     /// or application requirements.
     async fn update_transmit_buffer_config(
         &self,
-        config: TransmitBufferConfig,
+        _config: TransmitBufferConfig,
     ) -> Result<(), MediaTransportError> {
         // Default implementation does nothing
         Ok(())
@@ -507,8 +505,8 @@ pub trait MediaTransportClient: Send + Sync {
     /// only packets with priority greater than or equal to the given threshold will be sent.
     async fn set_priority_threshold(
         &self,
-        buffer_fullness: f32,
-        priority: PacketPriority,
+        _buffer_fullness: f32,
+        _priority: PacketPriority,
     ) -> Result<(), MediaTransportError> {
         // Default implementation does nothing
         Ok(())

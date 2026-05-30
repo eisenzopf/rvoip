@@ -4,7 +4,7 @@
 
 use crate::dtls::crypto::cipher::{HashAlgorithm, MacAlgorithm};
 use crate::dtls::Result;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 
 // Add crypto imports
 use hmac::{Hmac, Mac};
@@ -274,12 +274,6 @@ pub fn derive_key_material(
     iv_size: usize,
 ) -> Result<DtlsKeyingMaterial> {
     // Key material constants
-    const CLIENT_MAC_KEY_LABEL: &[u8] = b"client write MAC key";
-    const SERVER_MAC_KEY_LABEL: &[u8] = b"server write MAC key";
-    const CLIENT_WRITE_KEY_LABEL: &[u8] = b"client write key";
-    const SERVER_WRITE_KEY_LABEL: &[u8] = b"server write key";
-    const CLIENT_WRITE_IV_LABEL: &[u8] = b"client write IV";
-    const SERVER_WRITE_IV_LABEL: &[u8] = b"server write IV";
 
     // Calculate sizes
     let mac_key_size = mac_algorithm.hash_size();

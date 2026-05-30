@@ -2,19 +2,17 @@
 //!
 //! This module handles the creation and management of DTLS connections.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, error, warn};
+use tracing::debug;
 
-use crate::api::common::config::SrtpProfile;
 use crate::api::common::error::SecurityError;
 use crate::api::server::security::srtp::keys;
 use crate::api::server::security::util::conversion;
 use crate::api::server::security::{
-    ConnectionConfig, ConnectionRole, ServerSecurityConfig, SocketHandle,
+    ConnectionRole, ServerSecurityConfig, SocketHandle,
 };
-use crate::dtls::{DtlsConfig, DtlsConnection, DtlsRole};
+use crate::dtls::{DtlsConfig, DtlsConnection};
 
 /// Create a new DTLS connection with server role
 pub async fn create_server_connection(
@@ -33,7 +31,7 @@ pub async fn create_server_connection(
     let connection = DtlsConnection::new(dtls_config);
 
     // Generate or load certificate based on config
-    let cert = if let (Some(cert_path), Some(key_path)) =
+    let _cert = if let (Some(cert_path), Some(key_path)) =
         (&config.certificate_path, &config.private_key_path)
     {
         // Load certificate from files
@@ -43,7 +41,7 @@ pub async fn create_server_connection(
         );
 
         // Read certificate and key files
-        let cert_data = match std::fs::read_to_string(cert_path) {
+        let _cert_data = match std::fs::read_to_string(cert_path) {
             Ok(data) => data,
             Err(e) => {
                 return Err(SecurityError::Configuration(format!(
@@ -53,7 +51,7 @@ pub async fn create_server_connection(
             }
         };
 
-        let key_data = match std::fs::read_to_string(key_path) {
+        let _key_data = match std::fs::read_to_string(key_path) {
             Ok(data) => data,
             Err(e) => {
                 return Err(SecurityError::Configuration(format!(

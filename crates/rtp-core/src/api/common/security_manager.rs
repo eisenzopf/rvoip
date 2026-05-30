@@ -8,13 +8,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::api::client::security::{ClientSecurityContext, DefaultClientSecurityContext};
-use crate::api::common::config::{KeyExchangeMethod, SecurityConfig, SecurityMode, SrtpProfile};
+use crate::api::client::security::ClientSecurityContext;
+use crate::api::common::config::{KeyExchangeMethod, SecurityConfig};
 use crate::api::common::error::SecurityError;
 use crate::api::common::unified_security::{
-    SecurityContextFactory, SecurityState, UnifiedSecurityContext,
+    SecurityContextFactory, UnifiedSecurityContext,
 };
-use crate::api::server::security::{DefaultServerSecurityContext, ServerSecurityContext};
+use crate::api::server::security::ServerSecurityContext;
 
 /// High-level security context manager that can coordinate multiple security methods
 pub struct SecurityContextManager {
@@ -382,7 +382,7 @@ impl SecurityContextManager {
         })?;
 
         match context {
-            SecurityContextType::Unified(unified) => {
+            SecurityContextType::Unified(_unified) => {
                 // For SDES, we can generate crypto lines
                 if method == KeyExchangeMethod::Sdes {
                     // This would generate SDP crypto attributes
@@ -453,7 +453,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_initialize_manager() {
-        let mut config = SecurityConfig::srtp_with_key(test_srtp_key());
+        let config = SecurityConfig::srtp_with_key(test_srtp_key());
         let manager = SecurityContextManager::new(config);
 
         // Initialize should work

@@ -6,7 +6,9 @@
 use super::common::{AudioCodec, CodecInfo};
 use crate::error::{CodecError, Result};
 use crate::types::{AudioFrame, SampleRate};
-use tracing::{debug, warn};
+use tracing::debug;
+#[cfg(not(feature = "opus"))]
+use tracing::warn;
 /// Opus codec configuration
 #[derive(Debug, Clone)]
 pub struct OpusConfig {

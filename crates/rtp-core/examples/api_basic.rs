@@ -308,14 +308,13 @@ async fn main() -> Result<(), ExampleError> {
         };
 
         // Send with timeout and retry logic
-        let mut sent = false;
+        let sent = false;
         for attempt in 0..2 {
             match time::timeout(Duration::from_millis(500), client.send_frame(frame.clone())).await
             {
                 Ok(Ok(_)) => {
                     info!("Client sent frame {} successfully", i);
                     frames_sent += 1;
-                    sent = true;
                     break;
                 }
                 Ok(Err(e)) => warn!(
@@ -346,12 +345,11 @@ async fn main() -> Result<(), ExampleError> {
     info!("Cleaning up...");
 
     // Try to disconnect client with retry
-    let mut disconnected = false;
+    let disconnected = false;
     for attempt in 0..3 {
         match time::timeout(Duration::from_millis(500), client.disconnect()).await {
             Ok(Ok(_)) => {
                 info!("Client disconnected successfully");
-                disconnected = true;
                 break;
             }
             Ok(Err(e)) => warn!("Client disconnect error (attempt {}): {}", attempt + 1, e),
@@ -364,12 +362,11 @@ async fn main() -> Result<(), ExampleError> {
     }
 
     // Try to stop server with retry
-    let mut server_stopped = false;
+    let server_stopped = false;
     for attempt in 0..3 {
         match time::timeout(Duration::from_millis(500), server.stop()).await {
             Ok(Ok(_)) => {
                 info!("Server stopped successfully");
-                server_stopped = true;
                 break;
             }
             Ok(Err(e)) => warn!("Server stop error (attempt {}): {}", attempt + 1, e),

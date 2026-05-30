@@ -4,10 +4,9 @@
 //! for Picture Loss Indication (PLI), Full Intra Request (FIR), Slice Loss Indication (SLI),
 //! Temporal-Spatial Trade-off (TSTO), REMB, and Transport-wide Congestion Control.
 
-use crate::feedback::{FeedbackPacketType, PayloadFeedbackFormat, TransportCcFormat};
+use crate::feedback::FeedbackPacketType;
 use crate::{Error, Result, RtpSsrc};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::collections::HashMap;
 
 /// RTCP common header size (4 bytes)
 pub const RTCP_HEADER_SIZE: usize = 4;

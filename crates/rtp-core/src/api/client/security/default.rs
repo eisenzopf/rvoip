@@ -5,40 +5,30 @@
 
 use async_trait::async_trait;
 use std::any::Any;
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
-use uuid::Uuid;
+use tracing::{debug, error};
 
 use crate::api::client::security::{
-    create_dtls_config, ClientSecurityConfig, ClientSecurityContext,
+    ClientSecurityConfig, ClientSecurityContext,
 };
-use crate::api::common::config::{SecurityInfo, SecurityMode, SrtpProfile};
+use crate::api::common::config::{SecurityInfo, SrtpProfile};
 use crate::api::common::error::SecurityError;
 use crate::api::server::security::SocketHandle;
-use crate::dtls::message::handshake::HandshakeHeader;
-use crate::dtls::record::{ContentType, Record};
-use crate::dtls::transport::udp::UdpTransport;
-use crate::dtls::{DtlsConfig, DtlsConnection, DtlsRole, DtlsVersion};
-use crate::srtp::crypto::SrtpCryptoKey;
-use crate::srtp::{
-    SrtpContext, SrtpCryptoSuite, SRTP_AEAD_AES_128_GCM, SRTP_AEAD_AES_256_GCM,
-    SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80, SRTP_NULL_NULL,
-};
+use crate::dtls::DtlsConnection;
+use crate::srtp::SrtpContext;
 
 // Import module functions
 use crate::api::client::security::dtls::{connection, handshake, transport};
 use crate::api::client::security::fingerprint::verify;
 use crate::api::client::security::packet::processor;
-use crate::api::client::security::srtp::keys;
 
 /// Default implementation of the ClientSecurityContext trait
 #[derive(Clone)]
+#[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct DefaultClientSecurityContext {
     /// Security configuration
     config: ClientSecurityConfig,
@@ -57,6 +47,7 @@ pub struct DefaultClientSecurityContext {
     /// Remote fingerprint algorithm (if set)
     remote_fingerprint_algorithm: Arc<Mutex<Option<String>>>,
     /// Flag to indicate if handshake monitor is running
+    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     handshake_monitor_running: Arc<AtomicBool>,
 }
 
@@ -84,17 +75,6 @@ impl DefaultClientSecurityContext {
         connection::init_connection(&self.config, &self.socket, &self.connection).await
     }
 
-    /// Start a handshake monitor task
-    async fn start_handshake_monitor(&self) -> Result<(), SecurityError> {
-        handshake::start_handshake_monitor(
-            &self.handshake_monitor_running,
-            &self.remote_addr,
-            &self.socket,
-            &self.connection,
-            &self.handshake_completed,
-        )
-        .await
-    }
 }
 
 #[async_trait]
@@ -116,7 +96,7 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
 
         // Get the client socket
         let socket_guard = self.socket.lock().await;
-        let socket = socket_guard.clone().ok_or_else(|| {
+        let _socket = socket_guard.clone().ok_or_else(|| {
             SecurityError::Configuration("No socket set for client security context".to_string())
         })?;
         drop(socket_guard);
@@ -456,76 +436,3 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
     }
 }
 
-/// Helper function to create a new DTLS connection
-async fn init_new_connection(
-    socket: &Arc<UdpSocket>,
-    remote_addr: SocketAddr,
-) -> Result<DtlsConnection, SecurityError> {
-    // Create DTLS connection config
-    let dtls_config = DtlsConfig {
-        role: DtlsRole::Client,
-        version: DtlsVersion::Dtls12,
-        mtu: 1500,
-        max_retransmissions: 5,
-        srtp_profiles: vec![SRTP_AES128_CM_SHA1_80],
-    };
-
-    // Create new DTLS connection
-    let mut connection = DtlsConnection::new(dtls_config);
-
-    // Generate a self-signed certificate
-    debug!("Generating self-signed certificate for new connection");
-    match crate::dtls::crypto::verify::generate_self_signed_certificate() {
-        Ok(cert) => connection.set_certificate(cert),
-        Err(e) => {
-            return Err(SecurityError::Configuration(format!(
-                "Failed to generate certificate: {}",
-                e
-            )))
-        }
-    }
-
-    // Create UDP transport from socket
-    let transport = match UdpTransport::new(socket.clone(), 1500).await {
-        Ok(t) => t,
-        Err(e) => {
-            return Err(SecurityError::Configuration(format!(
-                "Failed to create DTLS transport: {}",
-                e
-            )))
-        }
-    };
-
-    // Create an Arc<Mutex<UdpTransport>> for the connection
-    let transport_arc = Arc::new(Mutex::new(transport));
-
-    // Start the transport
-    let start_result = transport_arc.lock().await.start().await;
-
-    // Only proceed if the transport started successfully
-    if start_result.is_ok() {
-        debug!("DTLS transport started successfully for new connection");
-
-        // Set the transport on the connection (clone the Arc)
-        connection.set_transport(transport_arc.clone());
-
-        // Start the handshake
-        if let Err(e) = connection.start_handshake(remote_addr).await {
-            return Err(SecurityError::Handshake(format!(
-                "Failed to start handshake: {}",
-                e
-            )));
-        }
-
-        debug!("Started handshake on new connection");
-        Ok(connection)
-    } else {
-        // Log the error and return it
-        let err = start_result.err().unwrap();
-        error!("Failed to start DTLS transport for new connection: {}", err);
-        Err(SecurityError::Configuration(format!(
-            "Failed to start DTLS transport: {}",
-            err
-        )))
-    }
-}

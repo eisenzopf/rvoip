@@ -7,12 +7,11 @@ use std::any::Any;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error};
 
-use crate::api::common::config::{SecurityInfo, SecurityMode, SrtpProfile};
+use crate::api::common::config::SecurityInfo;
 use crate::api::common::error::SecurityError;
-use crate::api::server::security::dtls::{handshake, transport};
-use crate::api::server::security::srtp::keys;
+use crate::api::server::security::dtls::handshake;
 use crate::api::server::security::util::conversion;
 use crate::api::server::security::{ClientSecurityContext, ServerSecurityConfig, SocketHandle};
 use crate::dtls::DtlsConnection;

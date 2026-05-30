@@ -359,7 +359,7 @@ impl Mikey {
             .ok_or_else(|| Error::InvalidMessage("Salt data missing".into()))?;
 
         // Extract security policy
-        let security_policy = message
+        let _security_policy = message
             .get_security_policy()
             .ok_or_else(|| Error::InvalidMessage("Security policy missing".into()))?;
 
@@ -697,7 +697,7 @@ impl Mikey {
         self.generated_salt = Some(salt.clone());
 
         // Extract security policy
-        let security_policy = message
+        let _security_policy = message
             .get_security_policy()
             .ok_or_else(|| Error::InvalidMessage("Security policy missing".into()))?;
 
