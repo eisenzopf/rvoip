@@ -16,13 +16,15 @@
 //! use rvoip::{Orchestrator, Config};
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut orchestrator = Orchestrator::new(Config::default());
-//! # #[cfg(feature = "sip")] {
-//! orchestrator.register(rvoip::sip::SipAdapter::new(Default::default()))?;
-//! # }
+//! // `Orchestrator::new` returns an `Arc<Orchestrator>`.
+//! let orchestrator = Orchestrator::new(Config::default());
+//!
+//! // Register interop adapters (e.g. `rvoip::sip::SipAdapter::new(coordinator).await?`,
+//! // built from a configured `UnifiedCoordinator`) via `orchestrator.register(adapter)?`.
+//!
 //! let mut events = orchestrator.subscribe_events();
-//! while let Some(event) = events.recv().await {
-//!     // handle event
+//! while let Ok(event) = events.recv().await {
+//!     // handle each orchestrator event
 //!     drop(event);
 //! }
 //! # Ok(()) }
