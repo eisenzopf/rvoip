@@ -328,13 +328,13 @@ impl SessionBuilder {
         self
     }
 
-    /// Set the dialog-core transaction-event dispatch worker count.
+    /// Set the rvoip-sip-dialog transaction-event dispatch worker count.
     pub fn with_sip_dialog_dispatch_workers(mut self, workers: usize) -> Self {
         self.config.sip_dialog_dispatch_workers = Some(workers);
         self
     }
 
-    /// Set the dialog-core transaction-event dispatch queue capacity.
+    /// Set the rvoip-sip-dialog transaction-event dispatch queue capacity.
     pub fn with_sip_dialog_dispatch_queue_capacity(mut self, capacity: usize) -> Self {
         self.config.sip_dialog_dispatch_queue_capacity = Some(capacity);
         self

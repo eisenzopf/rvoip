@@ -74,15 +74,25 @@ pub enum TransferTargetEvidence {
     /// A REFER `message/sipfrag` produced provisional target progress before
     /// the final successful sipfrag.
     ReferProgressThenFinal {
+        /// Status code from the provisional progress sipfrag.
         progress_status_code: u16,
+        /// Reason phrase from the provisional progress sipfrag.
         progress_reason: String,
+        /// Status code from the final successful sipfrag.
         final_status_code: u16,
+        /// Reason phrase from the final successful sipfrag.
         final_reason: String,
     },
     /// The target leg is local to this coordinator and reached answered state.
-    LocalTargetLeg { call_id: CallId },
+    LocalTargetLeg {
+        /// Session identifier of the local target leg.
+        call_id: CallId,
+    },
     /// An RFC 4235 dialog-package NOTIFY reported matching target state.
-    DialogPackage { dialog: DialogInfo },
+    DialogPackage {
+        /// Dialog state reported by the dialog-package NOTIFY.
+        dialog: DialogInfo,
+    },
 }
 
 impl TransferKind {
@@ -397,21 +407,29 @@ pub enum Event {
 
     /// Evidence that the transfer target answered.
     TransferTargetAnswered {
+        /// Session identifier of the transferring (REFER-issuing) call.
         transfer_call_id: CallId,
+        /// URI of the transfer target that answered.
         target_uri: String,
+        /// How the target's answer was observed.
         evidence: TransferTargetEvidence,
     },
 
     /// RFC 4235 observed a replacement dialog that appears related to a transfer.
     TransferReplacementDialogObserved {
+        /// Session identifier of the transferring call.
         transfer_call_id: CallId,
+        /// The observed replacement dialog's state.
         dialog: DialogInfo,
     },
 
     /// RFC 4235 or local target-leg evidence observed replacement dialog teardown.
     TransferReplacementDialogTerminated {
+        /// Session identifier of the transferring call.
         transfer_call_id: CallId,
+        /// The replacement dialog's final state.
         dialog: DialogInfo,
+        /// Teardown reason, when reported.
         reason: Option<String>,
     },
 
@@ -498,16 +516,23 @@ pub enum Event {
 
     /// Parsed RFC 4235 dialog-package NOTIFY.
     DialogPackageNotify {
+        /// Session identifier of the dialog-package subscription.
         subscription_id: CallId,
+        /// `entity` attribute of the dialog-info document, when present.
         entity: Option<String>,
+        /// `version` attribute of the dialog-info document, when present.
         version: Option<u32>,
+        /// Per-dialog states reported by this NOTIFY.
         dialogs: Vec<DialogInfo>,
+        /// The full parsed dialog-info document.
         document: DialogInfoDocument,
     },
 
     /// Derived per-dialog state transition from an RFC 4235 NOTIFY.
     DialogStateChanged {
+        /// Session identifier of the dialog-package subscription.
         subscription_id: CallId,
+        /// The dialog whose state changed.
         dialog: DialogInfo,
     },
 

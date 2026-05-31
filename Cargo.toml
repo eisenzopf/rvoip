@@ -165,11 +165,15 @@ rvoip-rtp-core = { path = "crates/rtp-core", version = "0.1.26" }
 rvoip-media-core = { path = "crates/media-core", version = "0.1.26" }
 rvoip-sip = { path = "crates/rvoip-sip", version = "0.2.0" }
 rvoip-core = { path = "crates/rvoip-core", version = "0.1.26" }
-rvoip-call-engine = { path = "crates/call-engine", version = "0.1.26" }
+# NOTE: rvoip-client-core points at crates/client-core, which is not present in
+# this tree. It is referenced only by the non-member crate audio-core (its
+# optional `client-integration` feature), so the entry is retained rather than
+# removed. The former rvoip-call-engine (crates/call-engine) and rvoip-sip-client
+# (crates/sip-client) entries were removed: those directories don't exist and no
+# crate referenced them.
 rvoip-client-core = { path = "crates/client-core", version = "0.1.26" }
 rvoip-codec-core = { path = "crates/codec-core", version = "0.1.26" }
 rvoip-audio-core = { path = "crates/audio-core", version = "0.1.26" }
-rvoip-sip-client = { path = "crates/sip-client", version = "0.1.26", features = ["simple-api"] }
 rvoip = { path = "crates/rvoip", version = "0.1.26" }
 rvoip-infra-common = { path = "crates/infra-common", version = "0.1.26" }
 # UCTP family — substrate-agnostic application protocol + per-substrate adapters.

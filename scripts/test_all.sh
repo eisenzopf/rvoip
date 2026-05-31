@@ -113,10 +113,6 @@ for crate in "${CRATES[@]}"; do
     # Run doc tests
     run_test "$crate doc tests" "cargo test -p $crate --doc --no-fail-fast"
 
-    if [ "$crate" = "rvoip-session-core" ]; then
-        run_test "$crate rustdoc quality gate" "scripts/check_session_core_docs.sh"
-    fi
-    
     echo -e "${BLUE}--- Finished $crate ---${NC}"
     echo ""
 done

@@ -9,6 +9,7 @@ use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::{Result, SessionError};
 
+/// Builds and sends a generic non-2xx final response (3xx/4xx/5xx/6xx).
 pub struct GenericResponseBuilder {
     coord: Arc<UnifiedCoordinator>,
     call_id: CallId,
@@ -46,11 +47,14 @@ impl GenericResponseBuilder {
         })
     }
 
+    /// Set the response reason phrase (defaults to a status-derived value).
     pub fn with_reason(mut self, r: impl Into<String>) -> Self {
         self.reason = Some(r.into());
         self
     }
 
+    /// Send the response, routing 3xx through the redirect path and
+    /// 4xx/5xx/6xx through the reject path.
     pub async fn send(mut self) -> Result<()> {
         let reason = self.reason.unwrap_or_else(|| "OK".to_string());
         let extras = take_staged(&mut self.state);

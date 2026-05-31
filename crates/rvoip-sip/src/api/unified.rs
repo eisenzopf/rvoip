@@ -333,7 +333,7 @@ pub struct Config {
     /// behaviour for backwards compatibility).
     ///
     /// When the registrar echoes the outbound Contact in a 2xx REGISTER,
-    /// dialog-core starts CRLFCRLF keep-alive pings on the registration
+    /// rvoip-sip-dialog starts CRLFCRLF keep-alive pings on the registration
     /// flow. Flow failure is surfaced back into rvoip-sip so the
     /// registration can be refreshed.
     pub sip_outbound_enabled: bool,
@@ -392,7 +392,7 @@ pub struct Config {
 
     /// Optional local SIP TLS listener address. Used for
     /// [`SipTlsMode::ServerOnly`] and [`SipTlsMode::ClientAndServer`].
-    /// When unset, dialog-core retains its legacy default of deriving the
+    /// When unset, rvoip-sip-dialog retains its legacy default of deriving the
     /// TLS listener address from [`Config::bind_addr`] by adding 1 to the
     /// port.
     pub tls_bind_addr: Option<SocketAddr>,
@@ -403,7 +403,7 @@ pub struct Config {
     /// by peers.
     pub tls_advertised_addr: Option<SocketAddr>,
 
-    /// Optional Contact URI override used by dialog-core for
+    /// Optional Contact URI override used by rvoip-sip-dialog for
     /// dialog-creating and target-refresh requests. Registrations can
     /// still override Contact per REGISTER via [`Registration`].
     pub contact_uri: Option<String>,
@@ -733,14 +733,14 @@ pub struct Config {
     /// by uncleared INVITE `2xx` loss bursts.
     pub sip_invite_2xx_retransmit_max_due_per_tick: Option<usize>,
 
-    /// Optional dialog-core transaction-event dispatch worker count.
+    /// Optional rvoip-sip-dialog transaction-event dispatch worker count.
     ///
     /// `None` preserves the single dialog event processor. High-CPS servers can
     /// set this above `1` to fan out transaction events by stable call key while
     /// preserving per-call dialog ordering.
     pub sip_dialog_dispatch_workers: Option<usize>,
 
-    /// Optional dialog-core transaction-event dispatch queue capacity.
+    /// Optional rvoip-sip-dialog transaction-event dispatch queue capacity.
     ///
     /// `None` uses the dialog max-dialog capacity hint. When dispatch workers
     /// are enabled, this capacity is divided across workers.
@@ -1781,7 +1781,7 @@ impl Config {
         self
     }
 
-    /// Set the dialog-core transaction-event dispatch worker count.
+    /// Set the rvoip-sip-dialog transaction-event dispatch worker count.
     ///
     /// Values above `1` enable keyed sharding of transaction events before
     /// dialog protocol handling. Values below `1` are rejected by
@@ -1791,7 +1791,7 @@ impl Config {
         self
     }
 
-    /// Set the dialog-core transaction-event dispatch queue capacity.
+    /// Set the rvoip-sip-dialog transaction-event dispatch queue capacity.
     ///
     /// `None` uses the dialog max-dialog capacity hint. Values below `1` are
     /// rejected by [`Config::validate`].
@@ -1800,7 +1800,7 @@ impl Config {
         self
     }
 
-    /// Set dialog-core transaction-event dispatch worker and queue overrides
+    /// Set rvoip-sip-dialog transaction-event dispatch worker and queue overrides
     /// together.
     pub fn with_sip_dialog_dispatch_config(
         mut self,
@@ -3661,7 +3661,7 @@ impl UnifiedCoordinator {
         Ok(())
     }
 
-    /// Complete local BYE teardown when dialog-core accepts the outbound BYE.
+    /// Complete local BYE teardown when rvoip-sip-dialog accepts the outbound BYE.
     ///
     /// Dialog-core does not currently emit a per-session `DialogTerminated`
     /// event for every successful outbound BYE transaction, so the public BYE
@@ -4501,10 +4501,10 @@ impl UnifiedCoordinator {
             TransactionManager,
         };
 
-        // Create transport manager first (dialog-core's own transport manager).
+        // Create transport manager first (rvoip-sip-dialog's own transport manager).
         //
         // TCP is enabled by default — the URI-aware
-        // `MultiplexedTransport` (`crates/dialog-core/src/transaction/transport/multiplexed.rs`)
+        // `MultiplexedTransport` (`crates/rvoip-sip-dialog/src/transaction/transport/multiplexed.rs`)
         // routes outbound INVITEs to the right flavour based on the
         // Request-URI's scheme + `;transport=` parameter.
         //
@@ -4512,7 +4512,7 @@ impl UnifiedCoordinator {
         let enable_tls = effective_tls_mode != SipTlsMode::Disabled;
         if config.tls_cert_path.is_some() ^ config.tls_key_path.is_some() {
             tracing::warn!(
-                "session-core Config has tls_cert_path xor tls_key_path set; \
+                "rvoip-sip Config has tls_cert_path xor tls_key_path set; \
                  TLS listener roles require both"
             );
         }
@@ -5249,7 +5249,7 @@ pub enum RegistrationStatus {
 /// Query result for a registration handle.
 ///
 /// This is a snapshot of the current client-side registration lifecycle. It
-/// combines rvoip-sip state with metadata learned from dialog-core REGISTER
+/// combines rvoip-sip state with metadata learned from rvoip-sip-dialog REGISTER
 /// responses.
 #[derive(Debug, Clone)]
 pub struct RegistrationInfo {
@@ -5281,7 +5281,7 @@ pub struct RegistrationInfo {
     pub pub_gruu: Option<String>,
     /// Registrar-assigned temporary GRUU, if supplied.
     pub temp_gruu: Option<String>,
-    /// Whether dialog-core currently has an RFC 5626 outbound flow monitor.
+    /// Whether rvoip-sip-dialog currently has an RFC 5626 outbound flow monitor.
     pub outbound_flow_active: bool,
 }
 

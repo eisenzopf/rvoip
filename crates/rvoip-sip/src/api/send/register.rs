@@ -8,6 +8,8 @@ use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::{RegistrationHandle, UnifiedCoordinator};
 use crate::errors::Result;
 
+/// Outbound REGISTER builder (RFC 3261 §10). Reachable via
+/// [`UnifiedCoordinator::register`](crate::api::unified::UnifiedCoordinator::register).
 pub struct RegisterBuilder {
     coord: Arc<UnifiedCoordinator>,
     registrar: String,
@@ -52,47 +54,59 @@ impl RegisterBuilder {
         }
     }
 
+    /// Set the registration lifetime via the `Expires:` header (seconds).
     pub fn with_expires(mut self, secs: u32) -> Self {
         self.expires = secs;
         self
     }
+    /// Override the `From:` URI (defaults to `Config.local_uri`).
     pub fn with_from_uri(mut self, s: impl Into<String>) -> Self {
         self.from_uri = Some(s.into());
         self
     }
+    /// Override the `Contact:` URI being registered.
     pub fn with_contact_uri(mut self, s: impl Into<String>) -> Self {
         self.contact_uri = Some(s.into());
         self
     }
+    /// Route the REGISTER through an outbound proxy `Route:`.
     pub fn with_outbound_proxy(mut self, s: impl Into<String>) -> Self {
         self.outbound_proxy = Some(s.into());
         self
     }
+    /// Suppress the outbound proxy `Route:` even when configured.
     pub fn without_outbound_proxy(mut self) -> Self {
         self.suppress_outbound_proxy = true;
         self
     }
+    /// Add an RFC 3327 `Path:` header.
     pub fn with_path(mut self, uri: impl Into<String>) -> Self {
         self.path = Some(uri.into());
         self
     }
+    /// Set the `Contact:` `q` value (RFC 3261 preference weighting).
     pub fn with_q_value(mut self, q: f32) -> Self {
         self.q_value = Some(q);
         self
     }
+    /// Set the RFC 5626 `+sip.instance` Contact parameter (instance URN).
     pub fn with_sip_instance(mut self, urn: impl Into<String>) -> Self {
         self.sip_instance = Some(urn.into());
         self
     }
+    /// Set the RFC 5626 `reg-id` Contact parameter.
     pub fn with_reg_id(mut self, id: u32) -> Self {
         self.reg_id = Some(id);
         self
     }
+    /// Pre-computed `Authorization:` header value, bypassing 401-driven
+    /// digest computation.
     pub fn with_precomputed_authorization(mut self, s: impl Into<String>) -> Self {
         self.precomputed_authorization = Some(s.into());
         self
     }
 
+    /// Send the REGISTER, returning a [`RegistrationHandle`] for refresh.
     pub async fn send(mut self) -> Result<RegistrationHandle> {
         let from_uri = self
             .from_uri
@@ -103,7 +117,7 @@ impl RegisterBuilder {
 
         // SIP_API_DESIGN_2 §10 #19 — application-staged extras (raw
         // `P-Asserted-Identity`, custom `X-*`, RFC 3327 `Path`, …) ride
-        // through dialog-core's `extra_headers` channel. The empty-extras
+        // through rvoip-sip-dialog's `extra_headers` channel. The empty-extras
         // case (auth-retry / 423-retry / plain register) takes the same
         // path; the slice is just empty.
         self.coord
@@ -132,6 +146,8 @@ impl SipRequestOptions for RegisterBuilder {
     }
 }
 
+/// Builder that refreshes an existing registration, reusing the
+/// original Call-ID / AoR / contact while incrementing CSeq.
 pub struct RegisterRefreshBuilder {
     coord: Arc<UnifiedCoordinator>,
     handle: RegistrationHandle,
@@ -149,6 +165,8 @@ impl RegisterRefreshBuilder {
         }
     }
 
+    /// Override the refresh `Expires:` (seconds); defaults to the
+    /// original registration's interval.
     pub fn with_expires(mut self, secs: u32) -> Self {
         self.expires = Some(secs);
         self

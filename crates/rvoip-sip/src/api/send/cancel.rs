@@ -9,6 +9,9 @@ use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
 
+/// Outbound CANCEL builder (RFC 3261 §9, abort a pending INVITE).
+/// Reachable via
+/// [`UnifiedCoordinator::cancel`](crate::api::unified::UnifiedCoordinator::cancel).
 pub struct CancelBuilder {
     coord: Arc<UnifiedCoordinator>,
     session_id: CallId,

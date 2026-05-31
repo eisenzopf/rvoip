@@ -287,7 +287,7 @@ impl SipAdapter {
     }
 
     fn map_session_err(err: crate::errors::SessionError) -> RvoipError {
-        RvoipError::Adapter(format!("session-core: {}", err))
+        RvoipError::Adapter(format!("rvoip-sip: {}", err))
     }
 }
 

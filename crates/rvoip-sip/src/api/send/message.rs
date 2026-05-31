@@ -10,6 +10,8 @@ use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
 use crate::types::Credentials;
 
+/// Outbound out-of-dialog MESSAGE builder (RFC 3428). Reachable via
+/// [`UnifiedCoordinator::message`](crate::api::unified::UnifiedCoordinator::message).
 pub struct MessageBuilder {
     coord: Arc<UnifiedCoordinator>,
     target: String,
@@ -33,23 +35,28 @@ impl MessageBuilder {
         }
     }
 
+    /// Attach the message body.
     pub fn with_body(mut self, body: impl Into<Bytes>) -> Self {
         self.body = Some(body.into());
         self
     }
+    /// Set the body's `Content-Type:` (defaults to `text/plain`).
     pub fn with_content_type(mut self, ct: impl Into<String>) -> Self {
         self.content_type = ct.into();
         self
     }
+    /// Attach digest credentials for 401/407 retry.
     pub fn with_credentials(mut self, c: Credentials) -> Self {
         self.credentials = Some(c);
         self
     }
+    /// Override the `From:` URI (defaults to `Config.local_uri`).
     pub fn with_from_uri(mut self, s: impl Into<String>) -> Self {
         self.from_uri = Some(s.into());
         self
     }
 
+    /// Send the MESSAGE.
     pub async fn send(mut self) -> Result<()> {
         let from_uri = self
             .from_uri

@@ -27,10 +27,13 @@ use crate::server::bridge::sip_bridge;
 use crate::SessionId;
 use std::sync::Arc;
 
+/// Error returned by [`SipB2bua`] operations.
 #[derive(Debug, thiserror::Error)]
 pub enum B2buaError {
+    /// A session/signalling operation (accept or originate) failed.
     #[error("session error: {0}")]
     Session(#[from] crate::errors::SessionError),
+    /// Bridging the two legs failed.
     #[error("bridge error: {0}")]
     Bridge(BridgeError),
 }
@@ -41,12 +44,15 @@ impl From<BridgeError> for B2buaError {
     }
 }
 
+/// Convenience B2BUA that wires incoming-INVITE → originate-outbound →
+/// bridge entirely through [`UnifiedCoordinator`].
 #[derive(Clone)]
 pub struct SipB2bua {
     coordinator: Arc<UnifiedCoordinator>,
 }
 
 impl SipB2bua {
+    /// Create a B2BUA over the given [`UnifiedCoordinator`].
     pub fn new(coordinator: Arc<UnifiedCoordinator>) -> Self {
         Self { coordinator }
     }

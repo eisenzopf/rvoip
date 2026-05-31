@@ -9,6 +9,9 @@ use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
 
+/// In-dialog re-INVITE builder (RFC 3261 §14, session modification).
+/// Reachable via
+/// [`UnifiedCoordinator::reinvite`](crate::api::unified::UnifiedCoordinator::reinvite).
 pub struct ReInviteBuilder {
     coord: Arc<UnifiedCoordinator>,
     session_id: CallId,
@@ -30,19 +33,24 @@ impl ReInviteBuilder {
         }
     }
 
+    /// Attach the renegotiated SDP offer.
     pub fn with_sdp(mut self, sdp: impl Into<String>) -> Self {
         self.sdp = Some(sdp.into());
         self
     }
+    /// Mark this re-INVITE as an RFC 4028 session-timer refresh.
     pub fn as_session_timer_refresh(mut self) -> Self {
         self.session_timer_refresh = true;
         self
     }
+    /// Pre-computed `Authorization:` header value, bypassing 401-driven
+    /// digest computation.
     pub fn with_precomputed_authorization(mut self, s: impl Into<String>) -> Self {
         self.precomputed_authorization = Some(s.into());
         self
     }
 
+    /// Send the re-INVITE through the dialog's state machine.
     pub async fn send(mut self) -> Result<()> {
         let extra_headers = take_staged(&mut self.state);
         let opts = Arc::new(rvoip_sip_dialog::api::unified::ReInviteRequestOptions {

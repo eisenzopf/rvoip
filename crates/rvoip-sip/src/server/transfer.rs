@@ -12,8 +12,10 @@ use crate::api::unified::UnifiedCoordinator;
 use crate::SessionId;
 use thiserror::Error;
 
+/// Error returned by the B2BUA transfer helpers.
 #[derive(Debug, Error)]
 pub enum TransferError {
+    /// The transfer (REFER send or accept) failed.
     #[error("transfer failed: {0}")]
     Failed(String),
 }

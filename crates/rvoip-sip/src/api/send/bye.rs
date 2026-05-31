@@ -48,7 +48,7 @@ impl ByeBuilder {
         self
     }
 
-    /// Send the BYE through dialog-core's
+    /// Send the BYE through rvoip-sip-dialog's
     /// `send_bye_with_options` so staged application headers ride to
     /// the wire after stack-managed headers are stamped.
     pub async fn send(mut self) -> Result<()> {

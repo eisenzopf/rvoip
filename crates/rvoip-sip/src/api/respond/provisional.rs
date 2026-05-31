@@ -10,6 +10,8 @@ use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
 use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
 
+/// Builds and sends a 1xx provisional response (e.g. 180 Ringing,
+/// 183 Session Progress) for an inbound INVITE.
 pub struct ProvisionalBuilder {
     coord: Arc<UnifiedCoordinator>,
     call_id: CallId,
@@ -31,15 +33,19 @@ impl ProvisionalBuilder {
         }
     }
 
+    /// Set the early-media SDP for the provisional message body.
     pub fn with_sdp(mut self, sdp: impl Into<String>) -> Self {
         self.sdp = Some(sdp.into());
         self
     }
+    /// Require reliable provisional delivery, stamping `Require: 100rel`
+    /// (RFC 3262) on the response.
     pub fn with_require_100rel(mut self, require: bool) -> Self {
         self.require_100rel = require;
         self
     }
 
+    /// Send the provisional response on the wire.
     pub async fn send(mut self) -> Result<()> {
         let mut extras = take_staged(&mut self.state);
 

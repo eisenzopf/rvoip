@@ -74,8 +74,11 @@ impl fmt::Display for ViolationReason {
 /// policy rule rejects the header.
 #[derive(Debug, Clone)]
 pub struct HeaderPolicyViolation {
+    /// The SIP method the offending builder targets.
     pub method: Method,
+    /// The header that was rejected.
     pub header: HeaderName,
+    /// Why the header was rejected.
     pub reason: ViolationReason,
 }
 
@@ -96,7 +99,9 @@ impl std::error::Error for HeaderPolicyViolation {}
 /// were copied through and which were filtered (and why).
 #[derive(Default, Debug, Clone)]
 pub struct HeaderCarryThroughReport {
+    /// Headers that were copied through from the source.
     pub copied: Vec<HeaderName>,
+    /// Headers that were filtered out, each paired with the reason.
     pub skipped: Vec<(HeaderName, ViolationReason)>,
 }
 
@@ -243,7 +248,7 @@ pub trait SipRequestOptions: Sized + Send + Sync {
 }
 
 /// Convert builder-staged headers into the `Vec<TypedHeader>` that
-/// dialog-core's `extra_headers` channel accepts.
+/// rvoip-sip-dialog's `extra_headers` channel accepts.
 pub fn take_staged(state: &mut BuilderHeaderState) -> Vec<TypedHeader> {
     std::mem::take(&mut state.headers)
 }

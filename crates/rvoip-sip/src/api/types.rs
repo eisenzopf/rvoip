@@ -111,6 +111,7 @@ impl SessionId {
         Self(id)
     }
 
+    /// Borrow the session ID as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -159,10 +160,15 @@ pub struct PreparedCall {
 /// Represents an active call session
 #[derive(Debug, Clone)]
 pub struct CallSession {
+    /// Session identifier for this call.
     pub id: SessionId,
+    /// Local party URI (the `From` side for an outgoing call).
     pub from: String,
+    /// Remote party URI (the `To` side for an outgoing call).
     pub to: String,
+    /// Current call state.
     pub state: CallState,
+    /// When the session was created, if tracked.
     pub started_at: Option<Instant>,
     /// SIP Call-ID header value that uniquely identifies this call across UAC and UAS
     pub sip_call_id: Option<String>,
@@ -262,11 +268,17 @@ impl CallSession {
 /// Represents an incoming call that needs to be handled
 #[derive(Debug, Clone)]
 pub struct IncomingCall {
+    /// Session identifier assigned to this incoming call.
     pub id: SessionId,
+    /// Caller URI from the SIP `From` header.
     pub from: String,
+    /// Called URI from the SIP `To` header / request URI.
     pub to: String,
+    /// Remote SDP offer, if the INVITE carried one.
     pub sdp: Option<String>,
+    /// Selected SIP headers from the INVITE, keyed by header name.
     pub headers: std::collections::HashMap<String, String>,
+    /// When the INVITE was received.
     pub received_at: Instant,
     /// SIP Call-ID header value that uniquely identifies this call across UAC and UAS
     pub sip_call_id: Option<String>,
@@ -376,19 +388,28 @@ impl CallDecision {
 /// Statistics about active sessions
 #[derive(Debug, Clone)]
 pub struct SessionStats {
+    /// Total number of sessions created over the lifetime of the coordinator.
     pub total_sessions: usize,
+    /// Number of currently active sessions.
     pub active_sessions: usize,
+    /// Number of sessions that ended in failure.
     pub failed_sessions: usize,
+    /// Average session duration, when computable.
     pub average_duration: Option<std::time::Duration>,
 }
 
 /// Media information for a session
 #[derive(Debug, Clone)]
 pub struct MediaInfo {
+    /// Local SDP (offer or answer) for the session, if negotiated.
     pub local_sdp: Option<String>,
+    /// Remote SDP (offer or answer) for the session, if negotiated.
     pub remote_sdp: Option<String>,
+    /// Local RTP port allocated for the session.
     pub local_rtp_port: Option<u16>,
+    /// Remote RTP port negotiated for the session.
     pub remote_rtp_port: Option<u16>,
+    /// Negotiated audio codec name, when known.
     pub codec: Option<String>,
     // pub rtp_stats: Option<crate::media::stats::RtpSessionStats>, // TODO: Re-add when media stats are implemented
     // pub quality_metrics: Option<crate::media::stats::QualityMetrics>, // TODO: Re-add when media stats are implemented

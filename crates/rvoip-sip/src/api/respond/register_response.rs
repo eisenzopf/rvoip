@@ -5,7 +5,7 @@
 //! `Path`, RFC 3608 `Service-Route`, RFC 3455 `P-Associated-URI`,
 //! RFC 3261 `Min-Expires`, and application-staged extras onto the
 //! response, then publishes a `SessionToDialogEvent::SendRegisterResponse`
-//! that dialog-core's `event_hub` consumes to send the response on the
+//! that rvoip-sip-dialog's `event_hub` consumes to send the response on the
 //! wire.
 
 use std::sync::Arc;
@@ -27,6 +27,8 @@ enum RegisterResponseKind {
     Reject(u16),
 }
 
+/// Builds and sends a REGISTER response — 200 OK, 401/407 challenge,
+/// 423 Interval Too Brief, or a generic non-2xx reject.
 pub struct RegisterResponseBuilder {
     transaction_id: String,
     coordinator: Option<Arc<UnifiedCoordinator>>,
@@ -97,6 +99,8 @@ impl RegisterResponseBuilder {
         s
     }
 
+    /// Set the granted registration lifetime, in seconds, stamped as
+    /// `Expires` on the 200 OK.
     pub fn with_expires(mut self, secs: u32) -> Self {
         self.expires = secs;
         self
@@ -146,26 +150,32 @@ impl RegisterResponseBuilder {
 
     // ─── Auth-challenge convenience setters (mirror AuthChallengeBuilder) ───
 
+    /// Set the challenge `realm` parameter.
     pub fn with_realm(mut self, s: impl Into<String>) -> Self {
         self.challenge_realm = Some(s.into());
         self
     }
+    /// Set the challenge `nonce` parameter.
     pub fn with_nonce(mut self, s: impl Into<String>) -> Self {
         self.challenge_nonce = Some(s.into());
         self
     }
+    /// Set the Digest `algorithm` parameter (e.g. MD5, SHA-256).
     pub fn with_algorithm(mut self, s: impl Into<String>) -> Self {
         self.challenge_algorithm = Some(s.into());
         self
     }
+    /// Set the Digest `opaque` parameter.
     pub fn with_opaque(mut self, s: impl Into<String>) -> Self {
         self.challenge_opaque = Some(s.into());
         self
     }
+    /// Set the Digest `qop` parameter (e.g. `auth`, `auth-int`).
     pub fn with_qop(mut self, s: impl Into<String>) -> Self {
         self.challenge_qop = Some(s.into());
         self
     }
+    /// Set the Digest `stale` flag (request re-auth with a fresh nonce).
     pub fn with_stale(mut self, stale: bool) -> Self {
         self.challenge_stale = stale;
         self
@@ -335,16 +345,28 @@ impl RegisterResponseBuilder {
 /// `build_event_fields()` for test inspection.
 #[derive(Debug, Clone)]
 pub struct RegisterResponseEventFields {
+    /// Transaction the response belongs to.
     pub transaction_id: String,
+    /// SIP status code of the response.
     pub status_code: u16,
+    /// Reason phrase of the response.
     pub reason: String,
+    /// Rendered `WWW-Authenticate` / `Proxy-Authenticate` body, when a
+    /// challenge.
     pub www_authenticate: Option<String>,
+    /// `Contact` URI for the 200 OK, when overridden.
     pub contact: Option<String>,
+    /// Granted `Expires` lifetime in seconds (2xx only).
     pub expires: Option<u32>,
+    /// `Min-Expires` value for a 423 response.
     pub min_expires: Option<u32>,
+    /// RFC 3608 `Service-Route` URIs to stamp on the response.
     pub service_route: Vec<String>,
+    /// Whether to echo the inbound RFC 3327 `Path` headers.
     pub path_echo: bool,
+    /// RFC 3455 `P-Associated-URI` list.
     pub associated_uri: Vec<String>,
+    /// Application-staged extra headers, as `(name, value)` wire pairs.
     pub extra_headers: Vec<(String, String)>,
 }
 

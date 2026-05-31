@@ -10,6 +10,8 @@ use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
 
+/// In-dialog INFO builder (RFC 6086). Reachable via
+/// [`UnifiedCoordinator::info`](crate::api::unified::UnifiedCoordinator::info).
 pub struct InfoBuilder {
     coord: Arc<UnifiedCoordinator>,
     session_id: CallId,
@@ -33,11 +35,13 @@ impl InfoBuilder {
         }
     }
 
+    /// Attach the INFO request body.
     pub fn with_body(mut self, body: impl Into<Bytes>) -> Self {
         self.body = Some(body.into());
         self
     }
 
+    /// Send the INFO through the dialog's state machine.
     pub async fn send(mut self) -> Result<()> {
         let body = self.body.unwrap_or_default();
         let extra_headers = take_staged(&mut self.state);

@@ -150,11 +150,11 @@ is documented in [`examples/sip_client/README.md`](examples/sip_client/README.md
 
 ## Beta-candidate evidence
 
-The final beta-candidate reference run is archived under
-[`beta-report/20260526T221457Z`](beta-report/20260526T221457Z), with the
-summary at [`beta-report/20260526T221457Z/summary.md`](beta-report/20260526T221457Z/summary.md).
-It completed with 0 failures, 0 skips, and was generated from clean git
-revision `865430d4` with Rust/Cargo `1.88.0`.
+The beta-candidate gate completed with 0 failures and 0 skips from a clean tree
+with Rust/Cargo `1.88.0`. The full evidence bundle is generated locally under
+`beta-report/` by the gate script (an untracked artifact directory, not part of
+the repository); the committed performance summary lives in
+[`docs/BETA_PERFORMANCE_REPORT.md`](docs/BETA_PERFORMANCE_REPORT.md).
 
 | Area | Evidence |
 | --- | --- |

@@ -37,10 +37,13 @@ pub struct SipBridgeStrategy {
 }
 
 impl SipBridgeStrategy {
+    /// Create a strategy over the given [`UnifiedCoordinator`].
     pub fn new(coordinator: Arc<UnifiedCoordinator>) -> Self {
         Self { coordinator }
     }
 
+    /// Bridge sessions `a` and `b` via the SIP fast path. Returns the
+    /// [`BridgeHandle`]; drop it to tear the bridge down.
     pub async fn bridge(&self, a: &SessionId, b: &SessionId) -> Result<BridgeHandle, BridgeError> {
         sip_bridge(&self.coordinator, a, b).await
     }

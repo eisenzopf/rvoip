@@ -11,7 +11,7 @@
 //! **Payload contract — important.** The WebRTC adapter today places the
 //! full RTP wire image into `MediaFrame.payload` (see the inbound pump in
 //! `crates/rvoip-webrtc/src/media/pump.rs`). The orchestrator's
-//! [`Transcoder`] (see `crates/media-core/src/codec/transcoding.rs`)
+//! `Transcoder` (see `crates/media-core/src/codec/transcoding.rs`)
 //! expects **codec payload bytes** (no RTP header). The SIP side here
 //! emits codec payload bytes (G.711 μ-law) — the shape the transcoder
 //! consumes. End-to-end audio bridging from a SIP UA through the
@@ -63,7 +63,7 @@ struct SipMediaStreamInner {
 }
 
 /// Concrete `MediaStream` for the SIP transport. Built lazily by
-/// [`SipAdapter::streams`](crate::SipAdapter::streams) the first time a
+/// `SipAdapter::streams()` the first time a
 /// caller asks for streams on a connection that has an active audio
 /// session.
 pub struct SipMediaStream {

@@ -7,6 +7,14 @@ authors = ["RVoIP Contributors"]
 description = "SIP umbrella for RVoIP: api/* (UnifiedCoordinator, StreamPeer, CallbackPeer, Endpoint), server/* (B2BUA helpers), adapter/* (rvoip-core::ConnectionAdapter impl)"
 license = "MIT OR Apache-2.0"
 
+# docs.rs build configuration. `all-features` is deliberately avoided: the
+# `tokio-console` feature requires `RUSTFLAGS=--cfg tokio_unstable` and `dhat`
+# swaps the global allocator — neither of which docs.rs sets. These two match
+# the crate's own rustdoc gate in scripts/beta_gate.sh so docs.rs renders the
+# same feature-gated surface (TLS config, generated-validation).
+[package.metadata.docs.rs]
+features = ["generated-validation", "dev-insecure-tls"]
+
 # Endpoint examples (simplest account/profile API)
 [[example]]
 name = "endpoint_local_call"

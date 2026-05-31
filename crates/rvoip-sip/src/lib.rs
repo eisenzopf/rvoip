@@ -421,6 +421,11 @@
 
 #![deny(rustdoc::bare_urls)]
 #![deny(rustdoc::broken_intra_doc_links)]
+// Public-API documentation is mandatory. `missing_docs` automatically exempts
+// `#[doc(hidden)]` items, so the crate's hidden internal modules (adapters,
+// state_machine, session_store, types, …) are not in scope — only the
+// user-facing surface (api/, server/, adapter, errors, media_stream).
+#![deny(missing_docs)]
 
 // ── Internal modules (pub for doc visibility, use the re-exports below) ─────
 

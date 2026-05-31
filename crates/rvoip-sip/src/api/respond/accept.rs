@@ -9,6 +9,7 @@ use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
 
+/// Builds and sends a 200 OK accepting an inbound INVITE.
 pub struct AcceptBuilder {
     coord: Arc<UnifiedCoordinator>,
     call_id: CallId,
@@ -26,11 +27,13 @@ impl AcceptBuilder {
         }
     }
 
+    /// Set the answer SDP for the 200 OK message body.
     pub fn with_sdp(mut self, sdp: impl Into<String>) -> Self {
         self.sdp = Some(sdp.into());
         self
     }
 
+    /// Send the 200 OK and return a handle to the now-established session.
     pub async fn send(mut self) -> Result<SessionHandle> {
         if self.coord.fast_auto_accept_incoming_calls() {
             return Ok(SessionHandle::new(self.call_id, self.coord));

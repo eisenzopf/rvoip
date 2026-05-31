@@ -43,6 +43,8 @@ impl SubscriptionHandle {
     }
 }
 
+/// Outbound out-of-dialog SUBSCRIBE builder (RFC 6665). Reachable via
+/// [`UnifiedCoordinator::subscribe`](crate::api::unified::UnifiedCoordinator::subscribe).
 pub struct SubscribeBuilder {
     coord: Arc<UnifiedCoordinator>,
     target: String,
@@ -74,22 +76,27 @@ impl SubscribeBuilder {
         }
     }
 
+    /// Override the `From:` URI (defaults to `Config.local_uri`).
     pub fn with_from_uri(mut self, s: impl Into<String>) -> Self {
         self.from_uri = Some(s.into());
         self
     }
+    /// Override the `Contact:` URI.
     pub fn with_contact_uri(mut self, s: impl Into<String>) -> Self {
         self.contact_uri = Some(s.into());
         self
     }
+    /// Set the subscription lifetime via the `Expires:` header (seconds).
     pub fn with_expires(mut self, secs: u32) -> Self {
         self.expires = secs;
         self
     }
+    /// Set the `Accept:` header advertising acceptable notification body types.
     pub fn with_accept(mut self, ct: impl Into<String>) -> Self {
         self.accept = Some(ct.into());
         self
     }
+    /// Attach digest credentials for 401/407 retry.
     pub fn with_credentials(mut self, c: Credentials) -> Self {
         self.credentials = Some(c);
         self
@@ -112,6 +119,8 @@ impl SubscribeBuilder {
         crate::api::dialog_subscription::DialogSubscriptionHandle::from_subscription(handle, target)
     }
 
+    /// Send the SUBSCRIBE, returning a [`SubscriptionHandle`] for
+    /// refresh / unsubscribe.
     pub async fn send(mut self) -> Result<SubscriptionHandle> {
         let from_uri = self
             .from_uri
@@ -172,6 +181,8 @@ impl SipRequestOptions for SubscribeBuilder {
     }
 }
 
+/// Builder that refreshes an existing subscription within the same
+/// dialog, reusing the original event package, target and `From:`.
 pub struct SubscribeRefreshBuilder {
     handle: SubscriptionHandle,
     expires: Option<u32>,
@@ -189,15 +200,19 @@ impl SubscribeRefreshBuilder {
         }
     }
 
+    /// Override the refresh `Expires:` (seconds); defaults to the
+    /// original subscription's interval.
     pub fn with_expires(mut self, secs: u32) -> Self {
         self.expires = Some(secs);
         self
     }
+    /// Attach digest credentials for 401/407 retry.
     pub fn with_credentials(mut self, c: Credentials) -> Self {
         self.credentials = Some(c);
         self
     }
 
+    /// Send the refresh SUBSCRIBE through the subscription's dialog.
     pub async fn send(mut self) -> Result<()> {
         let coord = self.handle.coord.clone().ok_or_else(|| {
             crate::errors::SessionError::InternalError(

@@ -21,47 +21,84 @@ use thiserror::Error;
 #[derive(Clone, Debug)]
 pub enum ContactRequest {
     /// Use a literal SIP URI as-is (no registrar lookup).
-    Static { uri: String },
+    Static {
+        /// Literal SIP URI to dial.
+        uri: String,
+    },
     /// Look up a registered SIP user by AOR; the resolver consults the
     /// configured [`rvoip_sip_registrar::RegistrarService`] to find the live
     /// Contact binding.
-    Registered { aor: String },
+    Registered {
+        /// Address-of-record to resolve to a live Contact.
+        aor: String,
+    },
 }
 
+/// A resolved live Contact for an AOR or literal URI, with the SIP routing
+/// metadata gathered during resolution.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedContact {
+    /// Contact URI to dial.
     pub uri: String,
+    /// Expiry of the registration binding, when known (registrar-sourced).
     pub expires_at: Option<DateTime<Utc>>,
+    /// How this contact was resolved (static, registrar, or custom).
     pub source: ContactSource,
+    /// Transport associated with the binding (e.g. `Udp`, `Tcp`, `Tls`).
     pub transport: Option<String>,
+    /// Source address observed at registration time (`received` parameter, RFC 3261).
     pub received: Option<String>,
+    /// Path vector recorded for the binding (RFC 3327 Path).
     pub path: Vec<String>,
+    /// SIP instance ID of the registering UA (`+sip.instance`, RFC 5626/5627).
     pub instance_id: Option<String>,
+    /// Registration flow identifier (`reg-id`, RFC 5626 outbound).
     pub reg_id: Option<u32>,
+    /// Flow identifier for the registered outbound connection (RFC 5626).
     pub flow_id: Option<String>,
 }
 
+/// Origin of a [`ResolvedContact`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContactSource {
+    /// Resolved from a literal [`ContactRequest::Static`] URI.
     Static,
+    /// Resolved from a live registrar binding.
     Registrar,
+    /// Resolved by a custom resolver implementation.
     Custom,
 }
 
+/// Error returned when contact resolution fails.
 #[derive(Debug, Error)]
 pub enum ContactResolverError {
+    /// Resolution failed for an unspecified or resolver-defined reason.
     #[error("contact resolution failed: {0}")]
     Failed(String),
+    /// The underlying registrar lookup returned an error.
     #[error("registrar error: {0}")]
     Registrar(String),
+    /// The supplied AOR could not be parsed.
     #[error("invalid AOR `{aor}`: {detail}")]
-    InvalidAor { aor: String, detail: String },
+    InvalidAor {
+        /// The AOR string that failed to parse.
+        aor: String,
+        /// Parser-supplied detail describing why it is invalid.
+        detail: String,
+    },
+    /// The AOR parsed but has no live (unexpired) contacts registered.
     #[error("AOR `{0}` has no live contacts")]
     NoLiveContacts(String),
 }
 
+/// Resolves a [`ContactRequest`] into a live [`ResolvedContact`].
 #[async_trait]
 pub trait ContactResolver: Send + Sync {
+    /// Resolve `request` into a [`ResolvedContact`].
+    ///
+    /// Returns a [`ContactResolverError`] when the request cannot be
+    /// resolved — for example an unsupported request kind, a registrar
+    /// failure, an unparseable AOR, or an AOR with no live contacts.
     async fn resolve_contact(
         &self,
         request: &ContactRequest,
@@ -107,6 +144,7 @@ pub struct RegistrarContactResolver {
 }
 
 impl RegistrarContactResolver {
+    /// Create a resolver backed by the given [`RegistrarService`].
     pub fn new(registrar: Arc<RegistrarService>) -> Self {
         Self { registrar }
     }

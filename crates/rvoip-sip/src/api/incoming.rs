@@ -947,7 +947,7 @@ impl Drop for IncomingCallGuard {
 // IncomingRequest / IncomingResponse / IncomingRegister
 //
 // These three wrappers complete the inbound surface. They are populated
-// when dialog-core publishes an in-dialog request, an inbound response,
+// when rvoip-sip-dialog publishes an in-dialog request, an inbound response,
 // or an inbound REGISTER. Today only `IncomingCall` carries a fully
 // parsed `Arc<Request>`; the other three retain the same field shape so
 // later phases can fill in their typed payloads without breaking the
@@ -1328,7 +1328,7 @@ pub struct IncomingRegister {
     pub(crate) request: Option<Arc<Request>>,
     /// SIP_API_DESIGN_2 Phase D — optional hook back into the
     /// coordinator so `RegisterResponseBuilder.send()` can publish a
-    /// `SessionToDialogEvent::SendRegisterResponse` to dialog-core.
+    /// `SessionToDialogEvent::SendRegisterResponse` to rvoip-sip-dialog.
     /// `None` when the wrapper was synthesized for tests or by the
     /// legacy registrar crate that authors responses directly.
     pub(crate) coordinator: Option<Arc<UnifiedCoordinator>>,
@@ -1443,7 +1443,7 @@ impl IncomingRegister {
     /// Same as [`with_request`] but threads the coordinator handle so
     /// the response builder can publish a
     /// `SessionToDialogEvent::SendRegisterResponse` back to
-    /// dialog-core.
+    /// rvoip-sip-dialog.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_request_and_coordinator(
         transaction_id: String,

@@ -9,6 +9,8 @@ use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
 
+/// Builds and sends a 3xx redirect response (default 302 Moved
+/// Temporarily) carrying one or more `Contact:` targets.
 pub struct RedirectBuilder {
     coord: Arc<UnifiedCoordinator>,
     call_id: CallId,
@@ -28,19 +30,23 @@ impl RedirectBuilder {
         }
     }
 
+    /// Set the 3xx status code (e.g. 301, 302, 305).
     pub fn with_status(mut self, code: u16) -> Self {
         self.status = code;
         self
     }
+    /// Append a single redirect target (`Contact:` URI).
     pub fn with_contact(mut self, uri: impl Into<String>) -> Self {
         self.contacts.push(uri.into());
         self
     }
+    /// Append multiple redirect targets (`Contact:` URIs).
     pub fn with_contacts(mut self, uris: Vec<String>) -> Self {
         self.contacts.extend(uris);
         self
     }
 
+    /// Send the redirect response on the wire.
     pub async fn send(mut self) -> Result<()> {
         if self.coord.fast_auto_accept_incoming_calls() {
             return Ok(());

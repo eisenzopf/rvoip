@@ -1015,7 +1015,7 @@ impl SessionHandle {
     /// `message-summary`, `presence`, `refer`). `subscription_state` is the
     /// raw `Subscription-State:` header value (`"active;expires=3600"`,
     /// `"terminated;reason=noresource"`, …). The body is sent verbatim with
-    /// dialog-core choosing the Content-Type (`message/sipfrag` for the
+    /// rvoip-sip-dialog choosing the Content-Type (`message/sipfrag` for the
     /// `refer` package, caller-supplied otherwise — see
     /// `DialogAdapter::send_notify`).
     ///

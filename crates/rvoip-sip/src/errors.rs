@@ -1,44 +1,66 @@
+//! Error and `Result` types for the `rvoip-sip` session layer.
+//!
+//! [`SessionError`] is the crate-wide error enum returned by the public API
+//! surfaces (`Endpoint`, `StreamPeer`, `CallbackPeer`, `UnifiedCoordinator`,
+//! `SessionHandle`). [`Result`] is the `Result<T, SessionError>` alias used
+//! throughout the crate.
+
 use thiserror::Error;
 
-/// Result type for session operations
+/// Convenience alias for `Result<T, SessionError>` used across the crate's API.
 pub type Result<T> = std::result::Result<T, SessionError>;
 
-/// Session-related errors
+/// Errors returned by the `rvoip-sip` session layer.
 #[derive(Debug, Error)]
 pub enum SessionError {
+    /// No session with the given identifier exists in the registry.
     #[error("Session not found: {0}")]
     SessionNotFound(String),
 
+    /// A requested state-machine transition is not legal from the current state.
     #[error("Invalid state transition: {0}")]
     InvalidTransition(String),
 
+    /// An error originating in the dialog layer (`rvoip-sip-dialog`).
     #[error("Dialog error: {0}")]
     DialogError(String),
 
+    /// An error originating in the media layer (`rvoip-media-core`).
     #[error("Media error: {0}")]
     MediaError(String),
 
+    /// SIP signalling succeeded but wiring media to the negotiated session failed.
     #[error("Media integration error: {reason}")]
-    MediaIntegration { reason: String },
+    MediaIntegration {
+        /// Human-readable description of the media-integration failure.
+        reason: String,
+    },
 
+    /// SDP offer/answer negotiation failed (no common codec, malformed SDP, etc.).
     #[error("SDP negotiation failed: {0}")]
     SDPNegotiationFailed(String),
 
+    /// Invalid or inconsistent configuration supplied to a builder or coordinator.
     #[error("Configuration error: {0}")]
     ConfigurationError(String),
 
+    /// Configuration error (legacy alias of [`SessionError::ConfigurationError`]).
     #[error("Config error: {0}")]
     ConfigError(String),
 
+    /// An application-supplied argument was malformed or out of range.
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 
+    /// An operation did not complete within its allotted time.
     #[error("Timeout: {0}")]
     Timeout(String),
 
+    /// A transport-level network error occurred.
     #[error("Network error: {0}")]
     NetworkError(String),
 
+    /// A SIP protocol violation was detected.
     #[error("Protocol error: {0}")]
     ProtocolError(String),
 
@@ -62,24 +84,31 @@ pub enum SessionError {
     #[error("INVITE auth retry limit exceeded")]
     InviteAuthRetryExhausted,
 
+    /// An unexpected internal invariant was violated.
     #[error("Internal error: {0}")]
     InternalError(String),
 
+    /// An underlying `std::io` error (transport sockets, file I/O).
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
+    /// The requested capability is recognized but not yet implemented.
     #[error("Not implemented: {0}")]
     NotImplemented(String),
 
+    /// A call transfer (REFER flow) failed.
     #[error("Transfer failed: {0}")]
     TransferFailed(String),
 
+    /// Authentication failed or could not be completed.
     #[error("Authentication error: {0}")]
     AuthError(String),
 
+    /// A REGISTER flow failed after any supported retry path.
     #[error("Registration failed: {0}")]
     RegistrationFailed(String),
 
+    /// A flattened/stringly error from a lower layer that has no dedicated variant.
     #[error("Other error: {0}")]
     Other(String),
 
@@ -90,8 +119,11 @@ pub enum SessionError {
     /// dedicated setter (e.g. Authorization → `with_credentials`).
     #[error("header policy violation on {method}: {header} — {reason}")]
     HeaderPolicy {
+        /// SIP method whose per-method header policy was violated.
         method: rvoip_sip_core::Method,
+        /// The offending header name.
         header: rvoip_sip_core::types::headers::HeaderName,
+        /// Why the header was rejected.
         reason: crate::api::headers::ViolationReason,
     },
 
@@ -100,7 +132,9 @@ pub enum SessionError {
     /// were missing for the chosen method.
     #[error("required application header(s) missing for {method}: {names:?}")]
     MissingRequiredHeader {
+        /// SIP method that requires the missing header(s).
         method: rvoip_sip_core::Method,
+        /// The required header names that were not supplied.
         names: Vec<rvoip_sip_core::types::headers::HeaderName>,
     },
 
@@ -111,7 +145,10 @@ pub enum SessionError {
     /// complete (or drop cleanly) before starting another of the
     /// same method.
     #[error("another {method} is already in flight on this session")]
-    Conflict { method: rvoip_sip_core::Method },
+    Conflict {
+        /// SIP method whose in-flight `.send()` blocks a second concurrent send.
+        method: rvoip_sip_core::Method,
+    },
 }
 
 impl From<crate::api::headers::HeaderPolicyViolation> for SessionError {

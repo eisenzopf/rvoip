@@ -138,14 +138,17 @@ impl ProxyCoordinator {
         }))
     }
 
+    /// Return the local address the proxy transport is bound to.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
+    /// Return the underlying transport, for sharing with other machinery.
     pub fn transport(&self) -> Arc<dyn Transport> {
         self.transport.clone()
     }
 
+    /// Return the wrapped [`StatefulProxy`].
     pub fn proxy(&self) -> Arc<StatefulProxy> {
         self.proxy.clone()
     }

@@ -9,6 +9,8 @@ use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
 
+/// In-dialog UPDATE builder (RFC 3311). Reachable via
+/// [`UnifiedCoordinator::update`](crate::api::unified::UnifiedCoordinator::update).
 pub struct UpdateBuilder {
     coord: Arc<UnifiedCoordinator>,
     session_id: CallId,
@@ -28,15 +30,18 @@ impl UpdateBuilder {
         }
     }
 
+    /// Attach the renegotiated SDP offer.
     pub fn with_sdp(mut self, sdp: impl Into<String>) -> Self {
         self.sdp = Some(sdp.into());
         self
     }
+    /// Mark this UPDATE as an RFC 4028 session-timer refresh.
     pub fn as_session_timer_refresh(mut self) -> Self {
         self.session_timer_refresh = true;
         self
     }
 
+    /// Send the UPDATE through the dialog's state machine.
     pub async fn send(mut self) -> Result<()> {
         let extra_headers = take_staged(&mut self.state);
         let opts = Arc::new(rvoip_sip_dialog::api::unified::UpdateRequestOptions {

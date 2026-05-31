@@ -27,9 +27,12 @@ pub enum PaiOverride {
 #[non_exhaustive]
 #[derive(Default, Debug, Clone)]
 pub enum ProxyOverride {
+    /// Inherit `Config.outbound_proxy_uri`.
     #[default]
     Default,
+    /// Suppress the outbound proxy `Route:` even if `Config` has one.
     Suppress,
+    /// Override the outbound proxy `Route:` for this call only.
     Use(String),
 }
 
@@ -38,25 +41,40 @@ pub enum ProxyOverride {
 /// `Action::SendINVITEWithOptions` handler.
 ///
 /// `OutboundCallOptions` is an rvoip-sip-side struct (not in
-/// dialog-core) because INVITE carries rvoip-sip concerns dialog-core
+/// rvoip-sip-dialog) because INVITE carries rvoip-sip concerns rvoip-sip-dialog
 /// doesn't need: PAI mode, credentials, transfer-leg tracking,
 /// `supported_100rel`. The state machine unpacks it at the
-/// DialogAdapter boundary and calls dialog-core's existing
+/// DialogAdapter boundary and calls rvoip-sip-dialog's existing
 /// `make_call_with_extra_headers_for_session`.
 #[derive(Default, Debug, Clone)]
 pub struct OutboundCallOptionsSnapshot {
+    /// `From:` URI; falls back to `Config.local_uri` when `None`.
     pub from: Option<String>,
+    /// Request-URI / `To:` target of the INVITE.
     pub to: String,
+    /// SDP offer body, if any.
     pub sdp: Option<String>,
+    /// Digest credentials used for 401/407 retry.
     pub credentials: Option<Credentials>,
+    /// `P-Asserted-Identity` (RFC 3325) override mode for this call.
     pub pai_override: PaiOverride,
+    /// `Contact:` URI override advertised on the INVITE.
     pub contact_uri: Option<String>,
+    /// Outbound proxy `Route:` override mode for this call.
     pub outbound_proxy_override: ProxyOverride,
+    /// `Subject:` header value.
     pub subject: Option<String>,
+    /// `From:` display name override.
     pub from_display: Option<String>,
+    /// Pre-computed `Authorization:` header value, bypassing 401-driven
+    /// digest computation.
     pub precomputed_auth: Option<String>,
+    /// When set, marks this INVITE as the B leg of an attended transfer
+    /// initiated by the named transferor session.
     pub transfer_leg: Option<CallId>,
+    /// Whether RFC 3262 reliable provisional responses are advertised.
     pub supported_100rel: bool,
+    /// Application-staged extra headers appended after stack-managed ones.
     pub extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     /// When true, the outbound INVITE applies SBC topology hiding:
     /// stack-managed Via headers below the top entry are stripped
@@ -214,7 +232,7 @@ impl OutboundCallBuilder {
     /// The state table's `(Idle, SendOutboundInvite, UAC)` row runs
     /// `CreateDialog → CreateMediaSession → GenerateLocalSDP →
     /// SendINVITEWithOptions`, which drains the stash and emits the
-    /// INVITE through dialog-core's `send_invite_with_extra_headers`.
+    /// INVITE through rvoip-sip-dialog's `send_invite_with_extra_headers`.
     /// Application-staged headers, PAI override, outbound-proxy
     /// override, credentials and Subject ride through the snapshot.
     pub async fn send(self) -> Result<CallId> {

@@ -11,6 +11,8 @@ use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
 use crate::types::Credentials;
 
+/// Outbound out-of-dialog OPTIONS builder (RFC 3261 §11). Reachable via
+/// [`UnifiedCoordinator::options`](crate::api::unified::UnifiedCoordinator::options).
 pub struct OptionsBuilder {
     coord: Arc<UnifiedCoordinator>,
     target: String,
@@ -34,23 +36,28 @@ impl OptionsBuilder {
         }
     }
 
+    /// Override the `From:` URI (defaults to `Config.local_uri`).
     pub fn with_from_uri(mut self, s: impl Into<String>) -> Self {
         self.from_uri = Some(s.into());
         self
     }
+    /// Set the `Accept:` header advertising acceptable response body types.
     pub fn with_accept(mut self, ct: impl Into<String>) -> Self {
         self.accept = Some(ct.into());
         self
     }
+    /// Attach digest credentials for 401/407 retry.
     pub fn with_credentials(mut self, c: Credentials) -> Self {
         self.credentials = Some(c);
         self
     }
+    /// Set how long to await the OPTIONS response before timing out.
     pub fn with_timeout(mut self, dur: Duration) -> Self {
         self.timeout = Some(dur);
         self
     }
 
+    /// Send the OPTIONS and await the [`IncomingResponse`].
     pub async fn send(mut self) -> Result<IncomingResponse> {
         use crate::state_table::types::SessionId;
         let from_uri = self
@@ -66,7 +73,7 @@ impl OptionsBuilder {
             extra_headers,
         };
         // Credentials are staged on the builder for parity with other
-        // UAC builders but dialog-core's options surface doesn't carry
+        // UAC builders but rvoip-sip-dialog's options surface doesn't carry
         // an authorization slot for OPTIONS yet; the 401 retry path
         // remains application-driven.
         let _ = self.credentials;

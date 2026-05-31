@@ -17,10 +17,15 @@ use crate::errors::{Result, SessionError};
 #[non_exhaustive]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AuthScheme {
+    /// HTTP Digest authentication (RFC 7616 / RFC 3261 §22).
     Digest,
+    /// Bearer-token authentication (RFC 6750).
     Bearer,
 }
 
+/// Builds and sends an authentication challenge — 401 Unauthorized
+/// (`WWW-Authenticate`) or 407 Proxy Authentication Required
+/// (`Proxy-Authenticate`) — for the inbound request.
 pub struct AuthChallengeBuilder {
     coord: Arc<UnifiedCoordinator>,
     call_id: CallId,
@@ -59,30 +64,38 @@ impl AuthChallengeBuilder {
         }
     }
 
+    /// Set the challenge `realm` parameter.
     pub fn with_realm(mut self, s: impl Into<String>) -> Self {
         self.realm = Some(s.into());
         self
     }
+    /// Set the challenge `nonce` parameter.
     pub fn with_nonce(mut self, s: impl Into<String>) -> Self {
         self.nonce = Some(s.into());
         self
     }
+    /// Set the Digest `algorithm` parameter (e.g. MD5, SHA-256).
     pub fn with_algorithm(mut self, s: impl Into<String>) -> Self {
         self.algorithm = Some(s.into());
         self
     }
+    /// Set the Digest `qop` parameter (e.g. `auth`, `auth-int`).
     pub fn with_qop(mut self, s: impl Into<String>) -> Self {
         self.qop = Some(s.into());
         self
     }
+    /// Set the Digest `stale` flag (request re-auth with a fresh nonce).
     pub fn with_stale(mut self, stale: bool) -> Self {
         self.stale = stale;
         self
     }
+    /// Set the Digest `opaque` parameter.
     pub fn with_opaque(mut self, s: impl Into<String>) -> Self {
         self.opaque = Some(s.into());
         self
     }
+    /// Issue this as a proxy challenge (407 / `Proxy-Authenticate`)
+    /// instead of a UA challenge (401 / `WWW-Authenticate`).
     pub fn as_proxy_challenge(mut self, proxy: bool) -> Self {
         self.proxy = proxy;
         self
@@ -166,6 +179,7 @@ impl AuthChallengeBuilder {
         }
     }
 
+    /// Build the challenge header and send the 401/407 response.
     pub async fn send(mut self) -> Result<()> {
         let challenge_header = self.build_challenge_header()?;
         let mut extras = take_staged(&mut self.state);

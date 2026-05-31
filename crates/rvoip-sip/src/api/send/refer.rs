@@ -9,6 +9,8 @@ use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
 
+/// In-dialog REFER builder (RFC 3515, call transfer). Reachable via
+/// [`UnifiedCoordinator::refer`](crate::api::unified::UnifiedCoordinator::refer).
 pub struct ReferBuilder {
     coord: Arc<UnifiedCoordinator>,
     session_id: CallId,
@@ -71,6 +73,7 @@ impl ReferBuilder {
         self
     }
 
+    /// Send the REFER through the dialog's state machine.
     pub async fn send(mut self) -> Result<()> {
         let extra_headers = take_staged(&mut self.state);
         let opts = Arc::new(rvoip_sip_dialog::api::unified::ReferRequestOptions {

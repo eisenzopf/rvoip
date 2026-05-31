@@ -63,6 +63,8 @@ pub struct Presence {
 }
 
 impl Presence {
+    /// Build a `Presence` for the given entity URI and basic status
+    /// (`"open"` or `"closed"`), with no note.
     pub fn new(entity: impl Into<String>, basic: impl Into<String>) -> Self {
         Self {
             entity: entity.into(),
@@ -70,6 +72,7 @@ impl Presence {
             note: None,
         }
     }
+    /// Attach a human-readable note to the presence document.
     pub fn with_note(mut self, note: impl Into<String>) -> Self {
         self.note = Some(note.into());
         self

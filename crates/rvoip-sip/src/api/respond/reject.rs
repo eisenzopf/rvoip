@@ -10,6 +10,8 @@ use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
 
+/// Builds and sends a non-2xx final response rejecting an inbound
+/// INVITE (default 486 Busy Here).
 pub struct RejectBuilder {
     coord: Arc<UnifiedCoordinator>,
     call_id: CallId,
@@ -36,14 +38,17 @@ impl RejectBuilder {
         }
     }
 
+    /// Set the rejection status code (4xx/5xx/6xx).
     pub fn with_status(mut self, code: u16) -> Self {
         self.status = code;
         self
     }
+    /// Set the response reason phrase (defaults to a status-derived value).
     pub fn with_reason(mut self, r: impl Into<String>) -> Self {
         self.reason = Some(r.into());
         self
     }
+    /// Set the `Retry-After` header (RFC 3261 §20.33), in seconds.
     pub fn with_retry_after(mut self, secs: u32) -> Self {
         self.retry_after = Some(secs);
         self
@@ -59,6 +64,7 @@ impl RejectBuilder {
         self
     }
 
+    /// Send the rejection response on the wire.
     pub async fn send(mut self) -> Result<()> {
         if self.coord.fast_auto_accept_incoming_calls() {
             return Ok(());

@@ -118,9 +118,9 @@ impl DialogSubscriptionHandle {
 
     /// Terminate the subscription by sending an in-dialog SUBSCRIBE with `Expires: 0`.
     pub async fn unsubscribe(&self) -> Result<()> {
-        // Reuse the dialog-core out-of-dialog refresh path with expires=0
+        // Reuse the rvoip-sip-dialog out-of-dialog refresh path with expires=0
         // through the adapter. The session-state lifecycle for SUBSCRIBE
-        // refresh is owned by dialog-core; rvoip-sip just provides the
+        // refresh is owned by rvoip-sip-dialog; rvoip-sip just provides the
         // session-id → dialog-id mapping.
         self.coordinator
             .dialog_adapter()
