@@ -1,3 +1,14 @@
+// DEAD UNTIL CallbackPeer REWRITE
+//
+// This file used to exercise rvoip-audio-core against the deleted
+// rvoip-client-core crate via the `client-integration` feature. Both
+// the dep and the feature have been removed (see audio-core's
+// Cargo.toml). Re-implement on top of rvoip-sip's CallbackPeer API
+// when audio-core's integration layer is rewritten — see
+// ~/.claude/plans/we-are-preparing-to-abstract-marshmallow.md and
+// crates/rvoip-sip/examples/callback_peer/ for the target shape.
+#![cfg(any())]
+
 #[cfg(feature = "client-integration")]
 use std::sync::Arc;
 #[cfg(feature = "client-integration")]

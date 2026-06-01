@@ -1,10 +1,16 @@
 [package]
 name = "rvoip-auth-core"
-version = "0.1.0"
-edition = "2021"
-authors = ["RVoIP Contributors"]
+version.workspace = true  # 0.2.0-beta.1 — beta-tier; inherits from [workspace.package]
+edition.workspace = true
+authors.workspace = true
 description = "OAuth2 and token-based authentication for RVoIP services"
-license = "MIT OR Apache-2.0"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
 
 [dependencies]
 # Async runtime
@@ -51,12 +57,12 @@ hex = "0.4"
 rand = "0.8"
 
 # Internal dependencies
-rvoip-infra-common = { path = "../infra-common", version = "0.1.0" }
+rvoip-infra-common.workspace = true
 # V2.A — depend on the trait-only crate, not rvoip-core itself.
 # This is what breaks the rvoip-core → rvoip-vcon → rvoip-auth-core →
 # rvoip-core cycle so rvoip-core can take an optional rvoip-vcon dep
 # for the `vcon-signing` feature.
-rvoip-core-traits = { path = "../rvoip-core-traits", version = "0.1.26" }
+rvoip-core-traits.workspace = true
 
 # uuid (used by bearer_stub for the throwaway JWK key id)
 uuid = { version = "1.7", features = ["v4"] }

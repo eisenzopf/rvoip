@@ -1,6 +1,7 @@
 [package]
 name = "rvoip-webrtc"
-version.workspace = true
+version = "0.1.0-alpha.1"
+publish = false  # Alpha-tier; pinned to upstream webrtc-rs 0.20.0-alpha.1.
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true

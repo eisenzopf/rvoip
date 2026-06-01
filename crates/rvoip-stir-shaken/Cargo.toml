@@ -1,6 +1,7 @@
 [package]
 name = "rvoip-stir-shaken"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
+publish = false  # Alpha-tier; standalone STIR/SHAKEN impl, not gated by SIP beta closure.
 edition = "2021"
 authors = ["RVoIP Contributors"]
 description = "STIR/SHAKEN (RFC 8224 / RFC 8225 / ATIS-1000074) signing and verification for rvoip"
@@ -24,10 +25,10 @@ tokio = { version = "1.40", features = ["rt", "macros", "sync"] }
 async-trait = "0.1"
 
 # Internal — typed Identity header (RFC 8224) and Request/Response types
-rvoip-sip-core = { path = "../rvoip-sip-core" }
+rvoip-sip-core.workspace = true
 
 # Trait surface that this crate's impls satisfy
-rvoip-sip-dialog = { path = "../rvoip-sip-dialog" }
+rvoip-sip-dialog.workspace = true
 
 # JWS / JWT for PASSporT (RFC 8225)
 jsonwebtoken = "9.3"

@@ -90,9 +90,9 @@ fn crate_readmes_do_not_make_unqualified_beta_production_claims() {
     let readmes = [
         "README.md",
         "crates/rvoip-sip/README.md",
-        "crates/rvoip-sip-core/README.md",
-        "crates/rvoip-sip-transport/README.md",
-        "crates/rvoip-sip-dialog/README.md",
+        "crates/rvoip-sip/sip-core/README.md",
+        "crates/rvoip-sip/sip-transport/README.md",
+        "crates/rvoip-sip/sip-dialog/README.md",
         "crates/media-core/README.md",
         "crates/rtp-core/README.md",
     ];

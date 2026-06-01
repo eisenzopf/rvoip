@@ -2,21 +2,29 @@
 resolver = "2"
 
 members = [
-    # CARVE_PLAN step 12: SIP-family crates renamed for alphabetical
-    # clustering. `sip-core` / `sip-transport` keep their package names;
-    # `dialog-core` → `rvoip-sip-dialog` and `registrar-core` →
-    # `rvoip-sip-registrar` rename both directory and package.
-    "crates/rvoip-sip-core",
-    "crates/rvoip-sip-transport",
-    "crates/rvoip-sip-dialog",
-    "crates/rvoip-sip-proxy",
-    "crates/rvoip-sip-registrar",
+    # SIP family — nested under crates/rvoip-sip/ to visually group the
+    # SIP product. Package names stay as `rvoip-sip-core`, etc., so the
+    # crates.io view is unchanged. See plan
+    # ~/.claude/plans/we-are-preparing-to-abstract-marshmallow.md.
+    "crates/rvoip-sip",
+    "crates/rvoip-sip/sip-core",
+    "crates/rvoip-sip/sip-transport",
+    "crates/rvoip-sip/sip-dialog",
+    "crates/rvoip-sip/sip-proxy",
+    "crates/rvoip-sip/sip-registrar",
+
+    # Shared foundation crates (used by SIP family AND adapters like
+    # rvoip-webrtc / rvoip-vcon / rvoip-core).
     "crates/rtp-core",
     "crates/media-core",
-    "crates/rvoip-sip",
     "crates/rvoip-core",
     "crates/codec-core",
     "crates/infra-common",
+    "crates/auth-core",
+    "crates/rvoip-core-traits",
+
+    # Alpha-tier crates (publish = false in their own Cargo.toml).
+    "crates/audio-core",
     "crates/users-core",
     "crates/rvoip-stir-shaken",
     "crates/rvoip-uctp",
@@ -25,10 +33,8 @@ members = [
     "crates/rvoip-websocket",
     "crates/rvoip-webrtc",
     "crates/rvoip-vcon",
-    "crates/auth-core",
     "crates/rvoip-harness",
     "crates/rvoip-identity",
-    "crates/rvoip-core-traits",
     "crates/rvoip",
     "crates/rvoip-client",
 ]
@@ -43,13 +49,13 @@ exclude = [
 # Default members - when you run cargo commands without -p or --workspace,
 # these are the packages that will be affected
 default-members = [
-    "crates/rvoip-sip-core",
-    "crates/rvoip-sip-transport",
-    "crates/rvoip-sip-dialog",
-    "crates/rvoip-sip-registrar",
+    "crates/rvoip-sip",
+    "crates/rvoip-sip/sip-core",
+    "crates/rvoip-sip/sip-transport",
+    "crates/rvoip-sip/sip-dialog",
+    "crates/rvoip-sip/sip-registrar",
     "crates/rtp-core",
     "crates/media-core",
-    "crates/rvoip-sip",
     "crates/rvoip-core",
     "crates/codec-core",
     "crates/infra-common",
@@ -60,7 +66,11 @@ default-members = [
 
 # ✨ WORKSPACE PACKAGE INHERITANCE - Define common metadata once!
 [workspace.package]
-version = "0.1.26"  # 🎯 SINGLE VERSION TO MANAGE!
+# Beta-tier crates inherit this. Alpha-tier crates must override in
+# their own [package] with version = "0.1.0-alpha.1" to avoid the
+# accidental promotion to beta. See plan: ~/.claude/plans/
+# we-are-preparing-to-abstract-marshmallow.md.
+version = "0.2.0-beta.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/eisenzopf/rvoip"
@@ -152,45 +162,42 @@ manual_find = "allow"
 collapsible_else_if = "allow"
 
 [workspace.dependencies]
-# 🎯 INTERNAL CRATES - Include version for publishing to crates.io!
-rvoip-sip-core = { path = "crates/rvoip-sip-core", version = "0.1.26" }
-rvoip-sip-transport = { path = "crates/rvoip-sip-transport", version = "0.1.26" }
-rvoip-sip-dialog = { path = "crates/rvoip-sip-dialog", version = "0.1.26" }
-rvoip-sip-proxy = { path = "crates/rvoip-sip-proxy", version = "0.1.0" }
-rvoip-sip-registrar = { path = "crates/rvoip-sip-registrar", version = "0.1.0" }
-# CARVE_PLAN step 12: rvoip-dialog-core / rvoip-registrar-core entries
-# removed — packages renamed to rvoip-sip-dialog / rvoip-sip-registrar above.
-# Update consumer Cargo.toml entries to the new names.
-rvoip-rtp-core = { path = "crates/rtp-core", version = "0.1.26" }
-rvoip-media-core = { path = "crates/media-core", version = "0.1.26" }
-rvoip-sip = { path = "crates/rvoip-sip", version = "0.2.0" }
-rvoip-core = { path = "crates/rvoip-core", version = "0.1.26" }
-# NOTE: rvoip-client-core points at crates/client-core, which is not present in
-# this tree. It is referenced only by the non-member crate audio-core (its
-# optional `client-integration` feature), so the entry is retained rather than
-# removed. The former rvoip-call-engine (crates/call-engine) and rvoip-sip-client
-# (crates/sip-client) entries were removed: those directories don't exist and no
-# crate referenced them.
-rvoip-client-core = { path = "crates/client-core", version = "0.1.26" }
-rvoip-codec-core = { path = "crates/codec-core", version = "0.1.26" }
-rvoip-audio-core = { path = "crates/audio-core", version = "0.1.26" }
-rvoip = { path = "crates/rvoip", version = "0.1.26" }
-rvoip-infra-common = { path = "crates/infra-common", version = "0.1.26" }
-# UCTP family — substrate-agnostic application protocol + per-substrate adapters.
-# See crates/rvoip-uctp/UCTP_IMPLEMENTATION_PLAN.md for the design.
-rvoip-uctp = { path = "crates/rvoip-uctp", version = "0.1.26" }
-rvoip-quic = { path = "crates/rvoip-quic", version = "0.1.26" }
-rvoip-webtransport = { path = "crates/rvoip-webtransport", version = "0.1.26" }
-rvoip-websocket = { path = "crates/rvoip-websocket", version = "0.1.26" }
-rvoip-webrtc = { path = "crates/rvoip-webrtc", version = "0.1.26" }
-rvoip-auth-core = { path = "crates/auth-core", version = "0.1.0" }
-# vCon container builder + store (plan C1) — IETF vCon WG draft impl
-# referenced by Event::RecordingComplete.vcon_ref.
-rvoip-vcon = { path = "crates/rvoip-vcon", version = "0.1.26" }
-rvoip-harness = { path = "crates/rvoip-harness", version = "0.1.26" }
-rvoip-identity = { path = "crates/rvoip-identity", version = "0.1.26" }
-rvoip-core-traits = { path = "crates/rvoip-core-traits", version = "0.1.26" }
-rvoip-client = { path = "crates/rvoip-client", version = "0.1.26" }
+# INTERNAL CRATES — every entry must carry both `path` (for in-workspace
+# resolution) AND `version` (for `cargo publish` registry resolution).
+# Adding/renaming an entry without `version` will fail dry-run publish.
+#
+# SIP family — nested under crates/rvoip-sip/ (see [workspace] members
+# note above). Package names are unchanged on crates.io.
+# Beta-tier crates (publish to crates.io as 0.2.0-beta.1).
+rvoip-sip-core      = { path = "crates/rvoip-sip/sip-core",      version = "0.2.0-beta.1" }
+rvoip-sip-transport = { path = "crates/rvoip-sip/sip-transport", version = "0.2.0-beta.1" }
+rvoip-sip-dialog    = { path = "crates/rvoip-sip/sip-dialog",    version = "0.2.0-beta.1" }
+rvoip-sip-proxy     = { path = "crates/rvoip-sip/sip-proxy",     version = "0.2.0-beta.1" }
+rvoip-sip-registrar = { path = "crates/rvoip-sip/sip-registrar", version = "0.2.0-beta.1" }
+rvoip-rtp-core      = { path = "crates/rtp-core",                version = "0.2.0-beta.1" }
+rvoip-media-core    = { path = "crates/media-core",              version = "0.2.0-beta.1" }
+rvoip-sip           = { path = "crates/rvoip-sip",               version = "0.2.0-beta.1" }
+rvoip-core          = { path = "crates/rvoip-core",              version = "0.2.0-beta.1" }
+rvoip-codec-core    = { path = "crates/codec-core",              version = "0.2.0-beta.1" }
+rvoip-infra-common  = { path = "crates/infra-common",            version = "0.2.0-beta.1" }
+rvoip-auth-core     = { path = "crates/auth-core",               version = "0.2.0-beta.1" }
+rvoip-core-traits   = { path = "crates/rvoip-core-traits",       version = "0.2.0-beta.1" }
+
+# Alpha-tier crates. Most are `publish = false` in their own Cargo.toml.
+# rvoip-vcon and rvoip-harness DO publish (at the alpha version) because
+# rvoip-core lists them as optional runtime deps — cargo verifies the
+# version exists on crates.io regardless of feature activation.
+rvoip-vcon          = { path = "crates/rvoip-vcon",              version = "0.1.0-alpha.1" }
+rvoip-harness       = { path = "crates/rvoip-harness",           version = "0.1.0-alpha.1" }
+rvoip-audio-core    = { path = "crates/audio-core",              version = "0.1.0-alpha.1" }
+rvoip               = { path = "crates/rvoip",                   version = "0.1.0-alpha.1" }
+rvoip-uctp          = { path = "crates/rvoip-uctp",              version = "0.1.0-alpha.1" }
+rvoip-quic          = { path = "crates/rvoip-quic",              version = "0.1.0-alpha.1" }
+rvoip-webtransport  = { path = "crates/rvoip-webtransport",      version = "0.1.0-alpha.1" }
+rvoip-websocket     = { path = "crates/rvoip-websocket",         version = "0.1.0-alpha.1" }
+rvoip-webrtc        = { path = "crates/rvoip-webrtc",            version = "0.1.0-alpha.1" }
+rvoip-identity      = { path = "crates/rvoip-identity",          version = "0.1.0-alpha.1" }
+rvoip-client        = { path = "crates/rvoip-client",            version = "0.1.0-alpha.1" }
 rtc = "=0.20.0-alpha.1"
 
 # External dependencies

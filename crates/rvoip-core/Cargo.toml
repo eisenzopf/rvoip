@@ -44,21 +44,21 @@ uuid.workspace = true
 [dev-dependencies]
 # Examples — sip_only_orchestrator demonstrates the cross-transport seam by
 # registering rvoip-sip's SipAdapter against a rvoip-core Orchestrator.
-rvoip-sip = { path = "../rvoip-sip" }
+rvoip-sip.workspace = true
 # cross_transport_bridge proves SIP + WebRTC + QUIC adapters all
 # register with one Orchestrator and exercises bridge_connections
 # across transport pairs.
-rvoip-webrtc = { path = "../rvoip-webrtc" }
-rvoip-quic = { path = "../rvoip-quic" }
-rvoip-uctp = { path = "../rvoip-uctp" }
-rvoip-auth-core = { path = "../auth-core" }
-rvoip-media-core = { path = "../media-core", features = ["opus"] }
+rvoip-webrtc.workspace = true
+rvoip-quic.workspace = true
+rvoip-uctp.workspace = true
+rvoip-auth-core.workspace = true
+rvoip-media-core = { workspace = true, features = ["opus"] }
 quinn = { workspace = true }
 rustls = { workspace = true }
 parking_lot = { workspace = true }
 # P5 tests use no-op providers + VecRecordingSink from rvoip-harness to
 # exercise the AI / recording dispatch.
-rvoip-harness = { path = "../rvoip-harness" }
+rvoip-harness.workspace = true
 tracing-subscriber.workspace = true
 
 [[example]]

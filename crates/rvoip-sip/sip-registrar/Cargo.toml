@@ -1,7 +1,16 @@
 [package]
 name = "rvoip-sip-registrar"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description = "SIP registrar (RFC 3261 §10): REGISTER processing, location service, contact bindings"
 
 [dependencies]
 # Async runtime
@@ -27,9 +36,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2.0"
 
 # Internal dependencies
-rvoip-infra-common = { path = "../infra-common" }
-rvoip-sip-dialog = { path = "../rvoip-sip-dialog" }
-rvoip-auth-core = { path = "../auth-core" }
+rvoip-infra-common.workspace = true
+rvoip-sip-dialog.workspace = true
+rvoip-auth-core.workspace = true
 
 # UUID generation
 uuid = { version = "1.5", features = ["v4", "serde"] }

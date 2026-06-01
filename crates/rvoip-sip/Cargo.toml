@@ -1,11 +1,28 @@
 [package]
 name = "rvoip-sip"
-version = "0.2.0"
-edition = "2021"
+version.workspace = true  # 0.2.0-beta.1 — beta-tier; inherits from [workspace.package]
+edition.workspace = true
 rust-version.workspace = true
-authors = ["RVoIP Contributors"]
+authors.workspace = true
 description = "SIP umbrella for RVoIP: api/* (UnifiedCoordinator, StreamPeer, CallbackPeer, Endpoint), server/* (B2BUA helpers), adapter/* (rvoip-core::ConnectionAdapter impl)"
-license = "MIT OR Apache-2.0"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+categories.workspace = true
+keywords.workspace = true
+# Nested SIP sub-crates (sip-core / sip-transport / sip-dialog / sip-proxy
+# / sip-registrar) and the fuzz harness live as their own workspace
+# members under this directory. They must NOT be bundled into the
+# `rvoip-sip` .crate file uploaded to crates.io.
+exclude = [
+    "sip-core",
+    "sip-transport",
+    "sip-dialog",
+    "sip-proxy",
+    "sip-registrar",
+    "fuzz",
+]
 
 # docs.rs build configuration. `all-features` is deliberately avoided: the
 # `tokio-console` feature requires `RUSTFLAGS=--cfg tokio_unstable` and `dhat`
@@ -283,19 +300,21 @@ serde_yaml = "0.9"
 futures = "0.3"
 roxmltree = "0.20"
 
-# RVoIP crates - using actual package names
-rvoip-core = { path = "../rvoip-core" }
-rvoip-infra-common = { path = "../infra-common" }
-rvoip-sip-dialog = { path = "../rvoip-sip-dialog" }
-rvoip-sip-proxy = { path = "../rvoip-sip-proxy" }
-rvoip-sip-transport = { path = "../rvoip-sip-transport" }
-rvoip-media-core = { path = "../media-core" }
-rvoip-sip-core = { path = "../rvoip-sip-core" }
-rvoip-rtp-core = { path = "../rtp-core" }
+# RVoIP crates — sourced from [workspace.dependencies] so versions, paths,
+# and crates.io publishing all stay coherent. Bare `path = "..."` form is
+# rejected by `cargo publish`; do NOT regress to it.
+rvoip-core.workspace = true
+rvoip-infra-common.workspace = true
+rvoip-sip-dialog.workspace = true
+rvoip-sip-proxy.workspace = true
+rvoip-sip-transport.workspace = true
+rvoip-media-core.workspace = true
+rvoip-sip-core.workspace = true
+rvoip-rtp-core.workspace = true
 # RFC 4568 SDES — base64 encoding of `a=crypto: inline:` master keys.
 base64 = "0.21"
-rvoip-auth-core = { path = "../auth-core" }
-rvoip-sip-registrar = { path = "../rvoip-sip-registrar" }
+rvoip-auth-core.workspace = true
+rvoip-sip-registrar.workspace = true
 
 # State management
 lazy_static = "1.4"
@@ -322,8 +341,8 @@ strum = { version = "0.26", features = ["derive"] }
 [dev-dependencies]
 tracing-subscriber = "0.3"
 dotenvy = "0.15"
-rvoip-sip-transport = { path = "../rvoip-sip-transport" }
-rvoip-sip-registrar = { path = "../rvoip-sip-registrar" }
+rvoip-sip-transport.workspace = true
+rvoip-sip-registrar.workspace = true
 serial_test = { workspace = true }
 tempfile = "3.14"
 # Self-signed cert generation for the TLS-call integration test.

@@ -64,23 +64,13 @@ run_test() {
     echo ""
 }
 
-# List of all crates to test
-CRATES=(
-    "rvoip-audio-core"
-    "rvoip-call-engine"
-    "rvoip-client-core"
-    "rvoip-codec-core"
-    "rvoip-dialog-core"
-    "rvoip-infra-common"
-    "rvoip-media-core"
-    "rvoip-rtp-core"
-    "rvoip"
-    "rvoip-session-core"
-    "rvoip-sip-client"
-    "rvoip-sip-core"
-    "rvoip-sip-transport"
-    "rvoip-transaction-core"
-)
+# Crate list is sourced from `cargo metadata` so it can't drift from the
+# actual workspace members. The old hand-maintained array referenced 7
+# deleted crates (rvoip-call-engine, rvoip-client-core, rvoip-dialog-core,
+# rvoip-session-core, rvoip-sip-client, rvoip-transaction-core, plus the
+# orphan rvoip-audio-core) — losing the array prevents that class of drift.
+mapfile -t CRATES < <(cargo metadata --no-deps --format-version 1 \
+    | jq -r '.packages[].name' | sort)
 
 # Optional: Clean build artifacts (comment out for faster runs)
 # echo -e "${YELLOW}Cleaning previous build artifacts...${NC}"
@@ -102,9 +92,15 @@ for crate in "${CRATES[@]}"; do
         echo ""
     fi
     
-    # Run integration tests
-    if [ -d "crates/${crate#rvoip-}/tests" ]; then
-        run_test "$crate integration tests" "cargo test -p $crate --test '*' --no-fail-fast"
+    # Run integration tests. Path lookup based on stripping `rvoip-`
+    # broke when SIP crates were nested under crates/rvoip-sip/ — instead
+    # ask cargo whether the crate has any test targets.
+    has_tests=$(cargo metadata --no-deps --format-version 1 \
+        | jq -r --arg n "$crate" \
+            '.packages[] | select(.name == $n) | .targets[] | select(.kind[] | contains("test")) | .name' \
+        | head -1)
+    if [ -n "$has_tests" ]; then
+        run_test "$crate integration tests" "cargo test -p $crate --tests --no-fail-fast"
     else
         echo -e "${YELLOW}No integration tests in $crate${NC}"
         echo ""

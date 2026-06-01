@@ -1,7 +1,13 @@
 [package]
 name = "rvoip-audio-core"
-# 🎯 INHERIT VERSION AND METADATA FROM WORKSPACE!
-version.workspace = true
+# Alpha-tier — held until the CallbackPeer integration is rewritten
+# against the new rvoip-sip api/* surface. Was previously a non-member
+# orphan referencing the deleted rvoip-client-core; the optional
+# `client-integration` feature has been removed, and the rvoip-sip dep
+# is now the only SIP entry point. See plan ~/.claude/plans/
+# we-are-preparing-to-abstract-marshmallow.md.
+version = "0.1.0-alpha.1"
+publish = false
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true
@@ -13,17 +19,17 @@ categories.workspace = true
 keywords.workspace = true
 
 # Crate-specific description
-description = "Comprehensive audio handling for VoIP applications with device management and format conversion"
+description = "Audio device management and format conversion for SIP-client developers using rvoip-sip's CallbackPeer API (alpha)"
 
 # ✨ INHERIT LINTS FROM WORKSPACE
 [lints]
 workspace = true
 
 [dependencies]
-# 🎯 INTERNAL CRATES - Use workspace dependencies (no version needed!)
+# Internal: integrates with rvoip-sip's CallbackPeer / Endpoint surface
+# (see crates/rvoip-sip/examples/callback_peer/).
 rvoip-sip.workspace = true
 rvoip-rtp-core.workspace = true
-rvoip-client-core = { workspace = true, optional = true }
 
 # Audio device access
 cpal = { version = "0.15", optional = true }
@@ -62,8 +68,10 @@ test-audio = ["device-mock"]
 format-conversion = ["dasp"]
 format-advanced = ["format-conversion"]
 
-# Client integration features
-client-integration = ["rvoip-client-core"]
+# NOTE: the former `client-integration` feature was removed when the
+# deleted `rvoip-client-core` dep was dropped. The replacement is a
+# direct rvoip-sip integration via CallbackPeer (TODO — tracked in the
+# audio-core promotion section of the release plan).
 
 # Audio processing features (future)
 processing-aec = []

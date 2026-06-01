@@ -151,8 +151,8 @@ fn direct_wired_source_paths_match_manifest() {
 #[test]
 fn infra_common_and_dialog_preserve_method_specific_bye() {
     let infra = include_str!("../../infra-common/src/events/cross_crate.rs");
-    let bye_handler = include_str!("../../rvoip-sip-dialog/src/protocol/bye_handler.rs");
-    let event_hub = include_str!("../../rvoip-sip-dialog/src/events/event_hub.rs");
+    let bye_handler = include_str!("../sip-dialog/src/protocol/bye_handler.rs");
+    let event_hub = include_str!("../sip-dialog/src/events/event_hub.rs");
     let session_handler = include_str!("../src/adapters/session_event_handler.rs");
 
     assert!(infra.contains("ByeReceived"));
@@ -165,7 +165,7 @@ fn infra_common_and_dialog_preserve_method_specific_bye() {
 
 #[test]
 fn response_fanout_is_guarded_by_cseq_method() {
-    let event_hub = include_str!("../../rvoip-sip-dialog/src/events/event_hub.rs");
+    let event_hub = include_str!("../sip-dialog/src/events/event_hub.rs");
 
     assert!(event_hub.contains("response.cseq()"));
     assert!(event_hub.contains("is_invite_response"));
