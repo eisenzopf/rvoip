@@ -9,7 +9,7 @@ auth handshake works from real browser code.
 
 - Node.js ≥ 20 (the harness uses ESM + `node:child_process.spawn`).
 - A working `cargo` in `PATH` (the smoke compiles + runs
-  `crates/rvoip-uctp/examples/uctp_to_sip_bridge/orchestrator_bridge.rs`).
+  `crates/uctp/rvoip-uctp/examples/uctp_to_sip_bridge/orchestrator_bridge.rs`).
 
 ## Setup
 
@@ -74,8 +74,8 @@ in the workspace `exclude` array.
 
 Six additional specs validate `rvoip-webrtc` against a real Chromium.
 They share the static frontends already shipped in
-`crates/rvoip-webrtc/static/` and a new
-`crates/rvoip-webrtc/examples/webrtc_browser_demo.rs` server that boots
+`crates/webrtc/rvoip-webrtc/static/` and a new
+`crates/webrtc/rvoip-webrtc/examples/webrtc_browser_demo.rs` server that boots
 WHIP + WHEP + WS + a static HTTP server on one process.
 
 ```bash

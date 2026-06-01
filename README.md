@@ -7,7 +7,7 @@
 
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#-license)
-[![Crates.io](https://img.shields.io/crates/v/rvoip-sip.svg?label=rvoip-sip)](https://crates.io/crates/rvoip-sip)
+[![Crates.io](https://img.shields.io/crates/v/rvoip-sip.svg?label=rvoip-sip)](https://crates.io/crates/sip/rvoip-sip)
 [![Documentation](https://docs.rs/rvoip-sip/badge.svg)](https://docs.rs/rvoip-sip)
 [![Repository](https://img.shields.io/badge/github-eisenzopf%2Frvoip-24292f.svg)](https://github.com/eisenzopf/rvoip)
 
@@ -23,7 +23,7 @@
 > scenarios. The rest of the workspace — WebRTC, QUIC, WebTransport,
 > WebSocket, UCTP, vCon, identity, AI harness — is **alpha** and not
 > published to crates.io in this release.
-> The [rvoip 3 vision](crates/rvoip-core/voip-3-conversation-model.md)
+> The [rvoip 3 vision](crates/foundation/rvoip-core/voip-3-conversation-model.md)
 > describes the destination; what ships today is its SIP slice.
 
 ## ⚡ rvoip in one breath
@@ -38,11 +38,11 @@ The full design lives alongside `rvoip-core`:
 
 | Doc | What it covers |
 | --- | --- |
-| [voip-3-conversation-model.md](crates/rvoip-core/voip-3-conversation-model.md) | The vocabulary — Conversation, Session, Connection, Stream, Message, Participant |
-| [PRD.md](crates/rvoip-core/PRD.md) | Product scope, audiences, positioning |
-| [INTERFACE_DESIGN.md](crates/rvoip-core/INTERFACE_DESIGN.md) | Crate architecture and dependency rules |
-| [GAP_PLAN.md](crates/rvoip-core/GAP_PLAN.md) | Implementation status (v1 shipped May 2026) |
-| [CONVERSATION_PROTOCOL.md](crates/rvoip-core/CONVERSATION_PROTOCOL.md) | UCTP wire specification |
+| [voip-3-conversation-model.md](crates/foundation/rvoip-core/voip-3-conversation-model.md) | The vocabulary — Conversation, Session, Connection, Stream, Message, Participant |
+| [PRD.md](crates/foundation/rvoip-core/PRD.md) | Product scope, audiences, positioning |
+| [INTERFACE_DESIGN.md](crates/foundation/rvoip-core/INTERFACE_DESIGN.md) | Crate architecture and dependency rules |
+| [GAP_PLAN.md](crates/foundation/rvoip-core/GAP_PLAN.md) | Implementation status (v1 shipped May 2026) |
+| [CONVERSATION_PROTOCOL.md](crates/foundation/rvoip-core/CONVERSATION_PROTOCOL.md) | UCTP wire specification |
 
 <a id="build-with-rvoip-today"></a>
 ## 🎯 Build with rvoip today
@@ -55,8 +55,8 @@ What you can ship right now on the beta:
 | 🧪 **Test / script writer** | Linear test that drives a call from start to finish | [`StreamPeer`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.StreamPeer.html) |
 | 🤖 **IVR / contact-center dev** | A reactive server that routes, queues, transfers | [`CallbackPeer`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.CallbackPeer.html) |
 | 🔀 **B2BUA / gateway dev** | A back-to-back UA bridging two SIP legs (carrier, SBC, gateway) | [`UnifiedCoordinator`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.UnifiedCoordinator.html) |
-| 📋 **Registrar / PBX dev** | A SIP REGISTER service with location bindings | [`rvoip-sip-registrar`](crates/rvoip-sip/sip-registrar) |
-| 🎙️ **Voice-AI agent dev** | A SIP-reachable AI agent (alpha — wire your ASR/TTS via the harness) | `CallbackPeer` + [`rvoip-harness`](crates/rvoip-harness) (alpha) |
+| 📋 **Registrar / PBX dev** | A SIP REGISTER service with location bindings | [`rvoip-sip-registrar`](crates/sip/sip-registrar) |
+| 🎙️ **Voice-AI agent dev** | A SIP-reachable AI agent (alpha — wire your ASR/TTS via the harness) | `CallbackPeer` + [`rvoip-harness`](crates/extensions/rvoip-harness) (alpha) |
 
 Pick the lowest-ceremony API that gives you what you need. All four sit on the
 same `UnifiedCoordinator` underneath; you can drop down a layer without
@@ -120,7 +120,7 @@ cargo run -p rvoip-sip --example endpoint_local_call
 
 More runnable examples — registration, blind transfer, B2BUA bridging, IVR
 builder, queue handler, TLS, SRTP, DTMF, PBX interop — live under
-[`crates/rvoip-sip/examples/`](crates/rvoip-sip/examples/).
+[`crates/sip/rvoip-sip/examples/`](crates/sip/rvoip-sip/examples/).
 
 <a id="feature-support"></a>
 ## 📊 Feature support
@@ -188,11 +188,11 @@ builder, queue handler, TLS, SRTP, DTMF, PBX interop — live under
 | Workload | Status | Number |
 | --- | --- | --- |
 | General full-media SIP | ✅ Beta target | Up to **2,000 CPS** sustained |
-| Higher CPS profiles | 🚧 Tuned | Available but caveated; see [BETA_PERFORMANCE_REPORT.md](crates/rvoip-sip/docs/BETA_PERFORMANCE_REPORT.md) |
-| 10,000 CPS general-user | 🔮 Roadmap | Tracked in [RELEASE_NOTES_NEXT.md](crates/rvoip-sip/docs/RELEASE_NOTES_NEXT.md) |
+| Higher CPS profiles | 🚧 Tuned | Available but caveated; see [BETA_PERFORMANCE_REPORT.md](crates/sip/rvoip-sip/docs/BETA_PERFORMANCE_REPORT.md) |
+| 10,000 CPS general-user | 🔮 Roadmap | Tracked in [RELEASE_NOTES_NEXT.md](crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md) |
 
-The [`crates/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md`](crates/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md)
-and [`crates/rvoip-sip/docs/SECURITY_POSTURE.md`](crates/rvoip-sip/docs/SECURITY_POSTURE.md)
+The [`crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md`](crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md)
+and [`crates/sip/rvoip-sip/docs/SECURITY_POSTURE.md`](crates/sip/rvoip-sip/docs/SECURITY_POSTURE.md)
 documents are the authoritative source — this table is a summary.
 
 <a id="architecture"></a>
@@ -249,19 +249,19 @@ without the substrates knowing about each other.
 
 | Crate | Purpose |
 | --- | --- |
-| **[rvoip-sip](crates/rvoip-sip)** | SIP umbrella — `Endpoint` / `StreamPeer` / `CallbackPeer` / `UnifiedCoordinator` |
-| [rvoip-sip-core](crates/rvoip-sip/sip-core) | RFC 3261 message parsing, SDP, URIs |
-| [rvoip-sip-transport](crates/rvoip-sip/sip-transport) | UDP / TCP / TLS / WebSocket transport |
-| [rvoip-sip-dialog](crates/rvoip-sip/sip-dialog) | Dialog state machine + transaction layer |
-| [rvoip-sip-proxy](crates/rvoip-sip/sip-proxy) | Stateful SIP proxy primitives (RFC 3261 §16) |
-| [rvoip-sip-registrar](crates/rvoip-sip/sip-registrar) | REGISTER processing + location service |
-| [rvoip-core](crates/rvoip-core) | Transport-agnostic spine: Conversation / Session / ConnectionAdapter |
-| [rvoip-core-traits](crates/rvoip-core-traits) | Cycle-breaker trait + type surface |
-| [rvoip-infra-common](crates/infra-common) | Event bus, executors, shared infra |
-| [rvoip-media-core](crates/media-core) | Codec negotiation, mixing, MediaStream trait |
-| [rvoip-rtp-core](crates/rtp-core) | RTP / SRTP framing and transport |
-| [rvoip-codec-core](crates/codec-core) | G.711 codec implementation |
-| [rvoip-auth-core](crates/auth-core) | OAuth2 + Bearer + token primitives |
+| **[rvoip-sip](crates/sip/rvoip-sip)** | SIP umbrella — `Endpoint` / `StreamPeer` / `CallbackPeer` / `UnifiedCoordinator` |
+| [rvoip-sip-core](crates/sip/sip-core) | RFC 3261 message parsing, SDP, URIs |
+| [rvoip-sip-transport](crates/sip/sip-transport) | UDP / TCP / TLS / WebSocket transport |
+| [rvoip-sip-dialog](crates/sip/sip-dialog) | Dialog state machine + transaction layer |
+| [rvoip-sip-proxy](crates/sip/sip-proxy) | Stateful SIP proxy primitives (RFC 3261 §16) |
+| [rvoip-sip-registrar](crates/sip/sip-registrar) | REGISTER processing + location service |
+| [rvoip-core](crates/foundation/rvoip-core) | Transport-agnostic spine: Conversation / Session / ConnectionAdapter |
+| [rvoip-core-traits](crates/foundation/rvoip-core-traits) | Cycle-breaker trait + type surface |
+| [rvoip-infra-common](crates/foundation/infra-common) | Event bus, executors, shared infra |
+| [rvoip-media-core](crates/media/media-core) | Codec negotiation, mixing, MediaStream trait |
+| [rvoip-rtp-core](crates/media/rtp-core) | RTP / SRTP framing and transport |
+| [rvoip-codec-core](crates/media/codec-core) | G.711 codec implementation |
+| [rvoip-auth-core](crates/identity/auth-core) | OAuth2 + Bearer + token primitives |
 
 ### 🚧 Alpha — in the workspace, not yet on crates.io
 
@@ -273,22 +273,22 @@ publish at `0.1.0-alpha.1` to satisfy `rvoip-core`'s optional features.
 | --- | --- |
 | [rvoip](crates/rvoip) | Umbrella — held until more substrates reach beta |
 | [rvoip-client](crates/rvoip-client) | Client SDK — API still in motion |
-| [rvoip-uctp](crates/rvoip-uctp) | UCTP protocol design ongoing ([GAP_PLAN](crates/rvoip-core/GAP_PLAN.md)) |
-| [rvoip-quic](crates/rvoip-quic) | New QUIC substrate adapter |
-| [rvoip-webtransport](crates/rvoip-webtransport) | New WebTransport substrate adapter |
-| [rvoip-websocket](crates/rvoip-websocket) | Deferred per rvoip 3 v1.x |
-| [rvoip-webrtc](crates/rvoip-webrtc) | Pinned to upstream `webrtc 0.20.0-alpha.1` |
-| [rvoip-vcon](crates/rvoip-vcon) | First Rust impl of the IETF vCon draft — publishes |
-| [rvoip-harness](crates/rvoip-harness) | ASR / TTS / DialogManager provider traits — publishes |
-| [rvoip-identity](crates/rvoip-identity) | OAuth 2.1 + OIDC + SIP Digest + Passkey backends |
-| [rvoip-stir-shaken](crates/rvoip-stir-shaken) | STIR/SHAKEN signing + verification |
-| [rvoip-audio-core](crates/audio-core) | Device + format management for SIP-client devs |
-| [users-core](crates/users-core) | Reference user-management service |
+| [rvoip-uctp](crates/uctp/rvoip-uctp) | UCTP protocol design ongoing ([GAP_PLAN](crates/foundation/rvoip-core/GAP_PLAN.md)) |
+| [rvoip-quic](crates/uctp/rvoip-quic) | New QUIC substrate adapter |
+| [rvoip-webtransport](crates/uctp/rvoip-webtransport) | New WebTransport substrate adapter |
+| [rvoip-websocket](crates/uctp/rvoip-websocket) | Deferred per rvoip 3 v1.x |
+| [rvoip-webrtc](crates/webrtc/rvoip-webrtc) | Pinned to upstream `webrtc 0.20.0-alpha.1` |
+| [rvoip-vcon](crates/extensions/rvoip-vcon) | First Rust impl of the IETF vCon draft — publishes |
+| [rvoip-harness](crates/extensions/rvoip-harness) | ASR / TTS / DialogManager provider traits — publishes |
+| [rvoip-identity](crates/identity/rvoip-identity) | OAuth 2.1 + OIDC + SIP Digest + Passkey backends |
+| [rvoip-stir-shaken](crates/extensions/rvoip-stir-shaken) | STIR/SHAKEN signing + verification |
+| [rvoip-audio-core](crates/sip/audio-core) | Device + format management for SIP-client devs |
+| [users-core](crates/identity/users-core) | Reference user-management service |
 
 <a id="roadmap"></a>
 ## 🗺️ Roadmap
 
-Tracked in detail under [`crates/rvoip-core/GAP_PLAN.md`](crates/rvoip-core/GAP_PLAN.md).
+Tracked in detail under [`crates/foundation/rvoip-core/GAP_PLAN.md`](crates/foundation/rvoip-core/GAP_PLAN.md).
 Highlights below.
 
 ### 🚧 v1.x — incremental on rvoip 3 v1
@@ -346,7 +346,7 @@ implementation of the IETF vCon draft.
 The UCTP substrate model gives rvoip a place to land SIP-over-QUIC, RoQ,
 and MoQ when those mature (2027–2029) **without breaking the SIP path**.
 
-See [`crates/rvoip-core/PRD.md`](crates/rvoip-core/PRD.md) §1.2 for the
+See [`crates/foundation/rvoip-core/PRD.md`](crates/foundation/rvoip-core/PRD.md) §1.2 for the
 full positioning analysis.
 
 ## 🧪 Evaluating rvoip
@@ -383,7 +383,7 @@ interop, security, and performance gates.
 
 - 🐛 **Bugs**: open an issue with reproduction steps
 - 💡 **Feature requests**: discussions or issues — please reference the
-  [rvoip 3 docs](crates/rvoip-core/voip-3-conversation-model.md) for context
+  [rvoip 3 docs](crates/foundation/rvoip-core/voip-3-conversation-model.md) for context
 - 🔧 **Pull requests welcome** — workspace-wide tests run via
   `scripts/test_all.sh`
 
@@ -396,6 +396,6 @@ Licensed under the **MIT** license. See [LICENSE](LICENSE).
 
 ---
 
-**Built with ❤️ in Rust** · [📚 Docs](https://docs.rs/rvoip-sip) · [💡 Examples](crates/rvoip-sip/examples/) · [🐛 Issues](https://github.com/eisenzopf/rvoip/issues) · [💬 Discussions](https://github.com/eisenzopf/rvoip/discussions)
+**Built with ❤️ in Rust** · [📚 Docs](https://docs.rs/rvoip-sip) · [💡 Examples](crates/sip/rvoip-sip/examples/) · [🐛 Issues](https://github.com/eisenzopf/rvoip/issues) · [💬 Discussions](https://github.com/eisenzopf/rvoip/discussions)
 
 </div>

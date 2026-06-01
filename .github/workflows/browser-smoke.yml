@@ -3,10 +3,10 @@ name: browser-smoke
 on:
   pull_request:
     paths:
-      - "crates/rvoip-uctp/**"
-      - "crates/rvoip-websocket/**"
-      - "crates/rvoip-quic/**"
-      - "crates/rvoip-webtransport/**"
+      - "crates/uctp/rvoip-uctp/**"
+      - "crates/uctp/rvoip-websocket/**"
+      - "crates/uctp/rvoip-quic/**"
+      - "crates/uctp/rvoip-webtransport/**"
       - "tests/browser-smoke/**"
       - ".github/workflows/browser-smoke.yml"
   push:

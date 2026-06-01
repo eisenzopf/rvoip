@@ -7,7 +7,7 @@
 > bounded SIP client/server/PBX scenarios, PCMU/PCMA full-media support, and a
 > general full-media performance target up to 2,000 CPS. WebRTC-grade media,
 > DTLS-SRTP, ICE/TURN, carrier certification, and broad production claims are
-> post-beta unless linked from `crates/rvoip-sip/docs/COMPATIBILITY_MATRIX.md`.
+> post-beta unless linked from `crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md`.
 
 RVOIP is a modular VoIP communication platform built in Rust. This document
 outlines intended use cases, target markets, and deployment scenarios across
