@@ -16,20 +16,19 @@
 - P2P and B2BUA dual-mode architecture
 
 ### 🔶 Partially Complete
-- Expiry management (basic implementation, needs background tasks)
+- Expiry management (registration expiry + background cleanup wired via `start_expiry_manager`; subscription-expiry sweep still TODO)
 - Testing (unit tests exist, integration tests needed)
 - Documentation (inline docs complete, guides needed)
 
 ### ❌ Not Yet Implemented
 - Persistent storage (uses in-memory only)
-- Background expiry cleanup tasks
 - Performance benchmarks and load testing
 - Integration test suites
 - Example applications
 
 ### 🎯 Next Priority Tasks
 1. **Complete SimplePeer Integration** - Wire up register() and unregister() methods to use RegistrarService
-2. **Background Tasks** - Implement expiry cleanup for registrations and subscriptions
+2. **Subscription expiry** - registration expiry/cleanup is wired (`start_expiry_manager`); add the subscription-expiry sweep
 3. **Integration Tests** - Full end-to-end testing of registration and presence flows
 4. **Performance Testing** - Verify 10,000+ user capacity claims
 

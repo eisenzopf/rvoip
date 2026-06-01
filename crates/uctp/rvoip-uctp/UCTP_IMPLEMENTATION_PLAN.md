@@ -1,6 +1,6 @@
 # UCTP v0 — Implementation Plan
 
-**Status:** working draft, 2026-05-22. Pre-implementation design doc — code is not yet written.
+**Status:** as-built record (updated 2026-06-01). The v0 spike, v0.x production-hardening (§13), and multi-party routing (§12) all shipped — §11–§13 document the as-built code. Remaining work is tracked in [`UCTP_GAP_PLAN.md`](UCTP_GAP_PLAN.md).
 
 **Companion documents (authoritative; this plan defers to them on conflicts):**
 - `../../foundation/rvoip-core/CONVERSATION_PROTOCOL.md` — UCTP v0 wire spec (envelope shape, lifecycle, error codes)
@@ -53,7 +53,7 @@ This plan adds three new crates (above) and depends on these existing/planned wo
 
 ### 1.4 After v0: v0.x roadmap
 
-This document is scoped to the **v0 spike** — the smallest end-to-end cut that proves the substrate-adapter architecture and cross-transport bridging. The following were deferred to **v0.x** (next milestone after v0 ships). Status legend: ✅ landed, 🟡 partial, ⏳ remaining (see [V0X_REMAINING.md](V0X_REMAINING.md) for why).
+This document is scoped to the **v0 spike** — the smallest end-to-end cut that proves the substrate-adapter architecture and cross-transport bridging. The following were deferred to **v0.x** (next milestone after v0 ships). Status legend: ✅ landed, 🟡 partial, ⏳ remaining (see [V0X_REMAINING.md](archived/V0X_REMAINING.md) for why).
 
 | v0.x track | What ships | Status | Reference docs |
 |---|---|---|---|
@@ -62,10 +62,10 @@ This document is scoped to the **v0 spike** — the smallest end-to-end cut that
 | **Identity assurance enforcement** | Per-peer auth gating on the coordinator (`PeerAuthState`); `Authenticated` flips at `auth.response`; non-auth envelopes from un-authed peers → `error 401`. `identity.step-up-request` / `step-up-response` envelope flow is v0.x follow-on. | ✅ landed (§13.1 / G1 auth gating) | CONVERSATION_PROTOCOL.md §5.6 + §8, INTERFACE_DESIGN.md §3.8 |
 | **`Orchestrator::bridge_connections` automation** | `BridgeManager` / `BridgeHandle` per INTERFACE_DESIGN.md §10.2; automatic frame-pump. | ✅ landed (v0 §11 — `bridge_connections` no longer stubbed) | INTERFACE_DESIGN.md §10.2–3 |
 | **`rvoip-websocket` substrate adapter** | Fourth substrate crate; WS text frames for signaling + co-located `webrtc-rs` PeerConnection for media. | ✅ signaling + media plane both landed (signaling in v0.x; media plane wired 2026-05-25 once `rvoip-webrtc` shipped — `WebRtcMediaBridge` gated on `media-webrtc` feature; WS↔WS end-to-end bridge proof at `crates/uctp/rvoip-websocket/tests/ws_bridge_flow.rs` flows 10 marker frames through SDP-negotiated SRTP between two offerer/answerer pairs via the orchestrator's cross-transport pump) | CONVERSATION_PROTOCOL.md §4.3, INTERFACE_DESIGN.md §2 |
-| **DTMF, quality reports** | `connection.dtmf` / `dtmf.send` / `dtmf.received`; `connection.quality` per-stream events; `Event::DtmfReceived` + `Event::MediaQuality` typed surfaces. Bridge-side RFC 4733 audio-pipeline integration partial (4-byte passthrough); full PT-aware routing queued. | ✅ signaling end-to-end (§13.6 / §13.7); 🟡 audio-pipeline partial (§13.11) | CONVERSATION_PROTOCOL.md §7.5 + §10.3; full integration in [V0X_REMAINING.md §3.3](V0X_REMAINING.md) |
-| **RFC 9421 / DPoP / JWT / AAuth backends** | Real validators in `auth-core` consumed by the UCTP coordinator's A1 auth gate. JWT (HMAC/RSA/EC), JWKS-fetching, DPoP-Proof (RFC 9449) + RFC 7638 thumbprint shipped. AAuth and RFC 9421 queued. | ✅ JWT (§13.5) / JWKS (§13.8) / DPoP (§13.12); ⏳ AAuth + RFC 9421 in [V0X_REMAINING.md §3](V0X_REMAINING.md) | INTERFACE_DESIGN.md §8 |
+| **DTMF, quality reports** | `connection.dtmf` / `dtmf.send` / `dtmf.received`; `connection.quality` per-stream events; `Event::DtmfReceived` + `Event::MediaQuality` typed surfaces. Bridge-side RFC 4733 audio-pipeline integration partial (4-byte passthrough); full PT-aware routing queued. | ✅ signaling end-to-end (§13.6 / §13.7); 🟡 audio-pipeline partial (§13.11) | CONVERSATION_PROTOCOL.md §7.5 + §10.3; full integration in [V0X_REMAINING.md §3.3](archived/V0X_REMAINING.md) |
+| **RFC 9421 / DPoP / JWT / AAuth backends** | Real validators in `auth-core` consumed by the UCTP coordinator's A1 auth gate. JWT (HMAC/RSA/EC), JWKS-fetching, DPoP-Proof (RFC 9449) + RFC 7638 thumbprint shipped. AAuth and RFC 9421 queued. | ✅ JWT (§13.5) / JWKS (§13.8) / DPoP (§13.12); ⏳ AAuth + RFC 9421 in [V0X_REMAINING.md §3](archived/V0X_REMAINING.md) | INTERFACE_DESIGN.md §8 |
 
-The v0 spike was a single coherent cut; v0.x was **one milestone per row above**, each shippable independently. As of the production-hardening pass ([§13](#13-v0x--production-hardening-track)) the only items remaining are external blocks or substantial standards-track work — see [V0X_REMAINING.md](V0X_REMAINING.md).
+The v0 spike was a single coherent cut; v0.x was **one milestone per row above**, each shippable independently. As of the production-hardening pass ([§13](#13-v0x--production-hardening-track)) the only items remaining are external blocks or substantial standards-track work — see [V0X_REMAINING.md](archived/V0X_REMAINING.md).
 
 ---
 
@@ -1200,7 +1200,7 @@ The list below is the **as-of-v0-ship** state. The v0.x production-hardening pas
 - 🟡 **`Pending` integration into envelope flows** — still no v0.x envelope path uses `wait_for/deliver`. The field, accessor, and shutdown drain remain wired (§3.5 layer 2b); first user lands with whatever request/response envelope the next milestone needs.
 - ✅ **vCon emission** — `rvoip-vcon` crate landed (§13.10). `recording.vcon-ready` envelope emission and `RecordingComplete { vcon_ref: Some(...) }` wiring at the orchestrator boundary is the follow-on (the data path is there; just needs to be hooked up at session-end).
 - ✅ **Multi-party routing** — functionally complete (§12 + §13.2 MP3c + §13.3 codec gate).
-- ✅ **DTMF + quality reports** — signaling end-to-end (§13.6 / §13.7). 🟡 audio-pipeline integration partial (§13.11); full RFC 4733 PT-aware routing in [V0X_REMAINING.md §3.3](V0X_REMAINING.md).
+- ✅ **DTMF + quality reports** — signaling end-to-end (§13.6 / §13.7). 🟡 audio-pipeline integration partial (§13.11); full RFC 4733 PT-aware routing in [V0X_REMAINING.md §3.3](archived/V0X_REMAINING.md).
 - ✅ **`rvoip-websocket` adapter** — signaling + WebRTC media plane both shipped. Media is gated on the `media-webrtc` feature (pulls in `rvoip-webrtc`). End-to-end bridge proof at `crates/uctp/rvoip-websocket/tests/ws_bridge_flow.rs`. Envelope-level `connection.offer`/`connection.answer` SDP interception remains v0.x cleanup; production callers currently drive SDP via the `UctpWsAdapter::bridge_for` accessor.
 - ✅ **`uctp.connection.lifetime` tracing span** — landed as §13.4 / C5. Per-frame `uctp.stream.frame` spans already shipped in v0 (in `spawn_datagram_reader`).
 
@@ -1271,7 +1271,7 @@ Listed here so the surface stays bounded:
 
 ## 13. v0.x — Production hardening track
 
-**Status:** the production-hardening pass following the v0 spike + multi-party landings. Closed all production blockers (Track A), all spec-compliance items (Track B excl. §11.2 spec PR), all config knobs (Track D), the observability polish (C5), the signaling side of DTMF + Quality (C2), the foundational vCon crate (C1), and three real `BearerValidator` implementations including the RFC 9449 DPoP foundation (C4 JWT / JWKS / DPoP). Remaining items captured in [V0X_REMAINING.md](V0X_REMAINING.md).
+**Status:** the production-hardening pass following the v0 spike + multi-party landings. Closed all production blockers (Track A), all spec-compliance items (Track B excl. §11.2 spec PR), all config knobs (Track D), the observability polish (C5), the signaling side of DTMF + Quality (C2), the foundational vCon crate (C1), and three real `BearerValidator` implementations including the RFC 9449 DPoP foundation (C4 JWT / JWKS / DPoP). Remaining items captured in [V0X_REMAINING.md](archived/V0X_REMAINING.md).
 
 ### Test surface
 
@@ -1347,7 +1347,7 @@ Wires through `Event::RecordingComplete.vcon_ref` (the `VconRef::Local { uuid }`
 
 ### 13.11 C2 (audio-pipeline partial) — RFC 4733 DTMF passthrough
 
-`bridge::frame_pump` now detects 4-byte transcode failures (the RFC 4733 telephone-event size) and passes the frame through verbatim instead of dropping. New metric: `rvoip_bridge_dtmf_passthrough_total{direction}`. Prevents DTMF events from getting silently dropped at the SIP↔UCTP bridge boundary; the destination's RTP receiver routes by its own PT when it sees the wire packet. Full per-frame PT routing requires a `MediaFrame::payload_type: Option<u8>` field touching 70+ construction sites — queued in [V0X_REMAINING.md §3.3](V0X_REMAINING.md).
+`bridge::frame_pump` now detects 4-byte transcode failures (the RFC 4733 telephone-event size) and passes the frame through verbatim instead of dropping. New metric: `rvoip_bridge_dtmf_passthrough_total{direction}`. Prevents DTMF events from getting silently dropped at the SIP↔UCTP bridge boundary; the destination's RTP receiver routes by its own PT when it sees the wire packet. Full per-frame PT routing requires a `MediaFrame::payload_type: Option<u8>` field touching 70+ construction sites — queued in [V0X_REMAINING.md §3.3](archived/V0X_REMAINING.md).
 
 ### 13.12 C4 — `DpopValidator` (auth-core, RFC 9449 foundational)
 

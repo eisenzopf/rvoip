@@ -11,7 +11,7 @@ Built on [webrtc-rs](https://webrtc.rs) **`0.20.0-alpha.1`** (Sans-I/O `rtc` cor
 
 - **Dual role:** gateway/interop adapter (`WebRtcAdapter` → orchestrator) **and** WebRTC server
   (WHIP/WHEP/WS signaling surfaces feeding the same adapter). See
-  [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) §1.
+  [`docs/archived/IMPLEMENTATION_PLAN.md`](docs/archived/IMPLEMENTATION_PLAN.md) §1.
 - **In scope:** 1:1 audio + VP8 video interop, full-SDP ICE gathering, Opus + G.711,
   SCTP data channels, fixture-encoded RTP for deterministic tests, `ConnectionAdapter` for
   `Transport::WebRtc`, optional WHIP/WHEP and WebSocket JSON signalers, external TURN via
@@ -160,4 +160,4 @@ out-of-scope list.
 [`rvoip-websocket`](../../uctp/rvoip-websocket) may replace its stub `WebRtcMediaBridge` with types
 from this crate in a follow-up PR — WebRTC expertise stays here.
 
-See [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) for the full design.
+See [`docs/archived/IMPLEMENTATION_PLAN.md`](docs/archived/IMPLEMENTATION_PLAN.md) for the full design.

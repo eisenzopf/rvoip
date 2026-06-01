@@ -3,8 +3,8 @@
 //! WebRTC **interop adapter** for [`rvoip_core::ConnectionAdapter`], built on
 //! webrtc-rs **0.20.0-alpha.1**.
 //!
-//! See [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) for architecture
-//! and [`docs/HARDENING_PLAN.md`](docs/HARDENING_PLAN.md) for the path to production.
+//! See [`docs/archived/IMPLEMENTATION_PLAN.md`](docs/archived/IMPLEMENTATION_PLAN.md) for architecture
+//! and [`docs/archived/HARDENING_PLAN.md`](docs/archived/HARDENING_PLAN.md) for the path to production.
 
 // Phase H1: deny ad-hoc panic paths in the library. Tests / examples may still
 // use unwrap/expect via `#[cfg(test)]` and the unwrap_used lint exemption.

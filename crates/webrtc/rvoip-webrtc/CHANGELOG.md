@@ -10,7 +10,7 @@ analysis ([`docs/GAP_PLAN.md`](docs/GAP_PLAN.md)) identified the remaining
 client/server library: data-channel options API, RFC 9725 §4.1 Bearer
 auth, outbound RTP stats, header-extension registration, SDP rollback,
 perfect-negotiation helper, signaling pool, ops-tail items. This arc
-([`docs/GAP_IMPLEMENTATION_PLAN.md`](docs/GAP_IMPLEMENTATION_PLAN.md))
+([`docs/archived/GAP_IMPLEMENTATION_PLAN.md`](docs/archived/GAP_IMPLEMENTATION_PLAN.md))
 closed every G-phase except G7 (deferred upstream) and the cpal backend
 half of G3 (deferred, needs workspace dep additions).
 
@@ -229,13 +229,13 @@ half of G3 (deferred, needs workspace dep additions).
 
 ## v0.1.26 — production-hardening arc (H1–H7)
 
-The v1 implementation (Phases 0–11 of [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md))
+The v1 implementation (Phases 0–11 of [`docs/archived/IMPLEMENTATION_PLAN.md`](docs/archived/IMPLEMENTATION_PLAN.md))
 shipped the skeleton, peer/media/SDP layers, `WebRtcAdapter`, WHIP/WHEP/WS
 signaling, client API, and the QUIC bridge. An end-to-end audit then identified
 that the surface was demo-grade rather than production-grade: panics on benign
 inputs, silent event drops, no real client surfaces, no metrics/CORS/rate-limit,
 trickle ICE returning `NotImplemented`, etc. The H1–H7 work below closed
-every gap. See [`docs/HARDENING_PLAN.md`](docs/HARDENING_PLAN.md) for the full
+every gap. See [`docs/archived/HARDENING_PLAN.md`](docs/archived/HARDENING_PLAN.md) for the full
 audit trail and per-task post-mortem.
 
 ### Added
