@@ -1,0 +1,5 @@
+# Each example is a standalone Cargo project, so its build artifacts and run
+# logs live under the example dir (the root `/target` ignore is root-anchored
+# and does not cover these). Cargo.lock is ignored workspace-wide already.
+target/
+logs/

@@ -55,6 +55,12 @@ exclude = [
     # outside the Cargo workspace so `cargo` doesn't try to interpret
     # `package.json` or descend into `node_modules`.
     "tests/browser-smoke",
+    # Root developer examples. Each is a standalone Cargo project (its own
+    # empty `[workspace]` table) that path-depends on the local `rvoip-sip`
+    # so it always builds against current code. Kept out of the main
+    # workspace so `cargo build` stays lean; a dedicated CI job
+    # (.github/workflows/examples.yml) builds each one to catch API drift.
+    "examples",
 ]
 
 # Default members - when you run cargo commands without -p or --workspace,

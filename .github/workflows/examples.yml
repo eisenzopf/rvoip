@@ -1,0 +1,81 @@
+# Builds (and smoke-runs) the root developer examples under examples/.
+#
+# Why this exists: each example is a STANDALONE Cargo project that path-depends
+# on the local rvoip-sip. They are deliberately outside the main workspace
+# (`cargo build --workspace` does not see them), so without this job they could
+# silently rot when the rvoip-sip API changes. Building every example here makes
+# API drift break loudly.
+#
+# Two jobs:
+#   build  — compile every example (the drift guard; covers all 10, incl. the
+#            ones that need external infra to RUN, like register-to-pbx / TLS).
+#   smoke  — actually run the hardware-free, no-external-dependency demos and
+#            assert they succeed.
+#
+# Path-filtered so it runs when either the examples or the libraries change.
+
+name: examples
+
+on:
+  push:
+    branches: [main]
+    paths: ["examples/**", "crates/**", "Cargo.toml", "Cargo.lock"]
+  pull_request:
+    paths: ["examples/**", "crates/**", "Cargo.toml", "Cargo.lock"]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: build ${{ matrix.example }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        example:
+          - 01-quickstart-p2p
+          - 02-softphone-audio
+          - 03-register-to-pbx
+          - 04-call-control
+          - 05-blind-transfer
+          - 06-attended-transfer
+          - 07-secure-call-srtp
+          - 08-tls-transport
+          - 09-ivr-server
+          - 10-call-center-b2bua
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "examples/${{ matrix.example }}"
+      - name: Build
+        run: cargo build --manifest-path "examples/${{ matrix.example }}/Cargo.toml"
+
+  smoke:
+    name: smoke ${{ matrix.example }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Hardware-free, no-external-dependency demos only. Excluded:
+        #   03-register-to-pbx (needs a live PBX), 08-tls-transport (needs
+        #   openssl + TLS handshake timing) — both are build-gated above.
+        example:
+          - 01-quickstart-p2p
+          - 02-softphone-audio
+          - 06-attended-transfer
+          - 07-secure-call-srtp
+          - 10-call-center-b2bua
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "examples/${{ matrix.example }}"
+      - name: Ensure lsof is present
+        run: sudo apt-get update && sudo apt-get install -y lsof
+      - name: Run demo
+        run: timeout 240 ./run_demo.sh
+        working-directory: "examples/${{ matrix.example }}"

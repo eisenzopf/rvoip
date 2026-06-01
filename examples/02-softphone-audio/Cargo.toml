@@ -1,0 +1,29 @@
+[package]
+name = "rvoip-example-softphone-audio"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# Copying into your own project? Drop `path` and keep: rvoip-sip = "0.2.0-beta.1"
+rvoip-sip = { version = "0.2.0-beta.1", path = "../../crates/sip/rvoip-sip" }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+# Shared tone-generation + analysis helpers, used by both binaries.
+[lib]
+name = "softphone_audio"
+path = "src/lib.rs"
+
+[[bin]]
+name = "caller"
+path = "src/caller.rs"
+
+[[bin]]
+name = "callee"
+path = "src/callee.rs"

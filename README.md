@@ -118,9 +118,14 @@ Try it:
 cargo run -p rvoip-sip --example endpoint_local_call
 ```
 
-More runnable examples — registration, blind transfer, B2BUA bridging, IVR
-builder, queue handler, TLS, SRTP, DTMF, PBX interop — live under
-[`crates/sip/rvoip-sip/examples/`](crates/sip/rvoip-sip/examples/).
+**New here? Start with the scenario examples in [`examples/`](examples/)** — a
+guided, well-documented path from a first P2P call through audio, registration,
+call control, transfers, SRTP/TLS, an IVR server, and a B2BUA call center, each a
+standalone project with a `./run_demo.sh`.
+
+For per-API-surface reference examples (one lane each for `endpoint`,
+`stream_peer`, `callback_peer`, `unified`, plus protocol regression fixtures and
+PBX interop), see [`crates/sip/rvoip-sip/examples/`](crates/sip/rvoip-sip/examples/).
 
 <a id="feature-support"></a>
 ## 📊 Feature support
@@ -396,6 +401,6 @@ Licensed under the **MIT** license. See [LICENSE](LICENSE).
 
 ---
 
-**Built with ❤️ in Rust** · [📚 Docs](https://docs.rs/rvoip-sip) · [💡 Examples](crates/sip/rvoip-sip/examples/) · [🐛 Issues](https://github.com/eisenzopf/rvoip/issues) · [💬 Discussions](https://github.com/eisenzopf/rvoip/discussions)
+**Built with ❤️ in Rust** · [📚 Docs](https://docs.rs/rvoip-sip) · [💡 Examples](examples/) · [🐛 Issues](https://github.com/eisenzopf/rvoip/issues) · [💬 Discussions](https://github.com/eisenzopf/rvoip/discussions)
 
 </div>

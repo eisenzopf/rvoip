@@ -1,0 +1,26 @@
+[package]
+name = "rvoip-example-tls-transport"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# `dev-insecure-tls` exposes `Config::tls_insecure_skip_verify` so the demo can
+# run against a self-signed dev cert. PRODUCTION builds must omit this feature
+# so rustls always validates server certs.
+# Copying into your own project? Drop `path` and keep just the version+features.
+rvoip-sip = { version = "0.2.0-beta.1", path = "../../crates/sip/rvoip-sip", features = ["dev-insecure-tls"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+
+[[bin]]
+name = "server"
+path = "src/server.rs"
+
+[[bin]]
+name = "client"
+path = "src/client.rs"
