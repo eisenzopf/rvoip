@@ -6,7 +6,7 @@
 **A unified Rust substrate for real-time voice — SIP today, WebRTC + QUIC + AI agents next.**
 
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#-license)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#-license)
 [![Crates.io](https://img.shields.io/crates/v/rvoip-sip.svg?label=rvoip-sip)](https://crates.io/crates/rvoip-sip)
 [![Documentation](https://docs.rs/rvoip-sip/badge.svg)](https://docs.rs/rvoip-sip)
 [![Repository](https://img.shields.io/badge/github-eisenzopf%2Frvoip-24292f.svg)](https://github.com/eisenzopf/rvoip)
@@ -390,7 +390,7 @@ interop, security, and performance gates.
 <a id="license"></a>
 ## 📄 License
 
-Licensed under **MIT OR Apache-2.0** at your option. See [LICENSE](LICENSE).
+Licensed under the **MIT** license. See [LICENSE](LICENSE).
 
 <div align="center">
 

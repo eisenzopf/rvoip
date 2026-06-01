@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/rvoip-rtp-core.svg)](https://crates.io/crates/rvoip-rtp-core)
 [![Documentation](https://docs.rs/rvoip-rtp-core/badge.svg)](https://docs.rs/rvoip-rtp-core)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > **Beta scope notice:** for the `rvoip-sip` beta, RTP-layer production claims
 > are limited to RTP/RTCP basics and tested SDES-SRTP paths. DTLS-SRTP, ICE,
@@ -580,9 +580,4 @@ For rtp-core specific contributions:
 
 ## License
 
-This project is licensed under either of
-
-- Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
+This project is licensed under the [MIT license](LICENSE).

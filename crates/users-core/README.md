@@ -616,4 +616,4 @@ We welcome contributions! Please see the main RVoIP contributing guidelines.
 
 ## License
 
-Dual-licensed under MIT or Apache 2.0 - choose whichever fits your project!
+Licensed under the MIT license. See [LICENSE](https://github.com/eisenzopf/rvoip/blob/main/LICENSE).

@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/rvoip-sip-proxy.svg)](https://crates.io/crates/rvoip-sip-proxy)
 [![Documentation](https://docs.rs/rvoip-sip-proxy/badge.svg)](https://docs.rs/rvoip-sip-proxy)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/eisenzopf/rvoip)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/eisenzopf/rvoip)
 
 Stateful SIP proxy primitives (RFC 3261 §16) for
 [rvoip](https://github.com/eisenzopf/rvoip). Provides the
@@ -30,4 +30,4 @@ rvoip-sip-proxy = "0.2.0-beta.1"
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+Licensed under the MIT license. See the repository [LICENSE](https://github.com/eisenzopf/rvoip/blob/main/LICENSE).

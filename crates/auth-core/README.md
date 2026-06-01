@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/rvoip-auth-core.svg)](https://crates.io/crates/rvoip-auth-core)
 [![Documentation](https://docs.rs/rvoip-auth-core/badge.svg)](https://docs.rs/rvoip-auth-core)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/eisenzopf/rvoip)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/eisenzopf/rvoip)
 
 OAuth2 and token-based authentication primitives for [rvoip](https://github.com/eisenzopf/rvoip).
 Used by `rvoip-sip-registrar`, `rvoip-vcon` (JWS signing), and any rvoip
@@ -38,4 +38,4 @@ rvoip-auth-core = "0.2.0-beta.1"
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+Licensed under the MIT license. See the repository [LICENSE](https://github.com/eisenzopf/rvoip/blob/main/LICENSE).

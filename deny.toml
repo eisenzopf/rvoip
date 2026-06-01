@@ -32,7 +32,10 @@ yanked = "warn"
 ignore = []
 
 # License compliance — permissive default; revisit when shipping
-# binary releases. The workspace uses MIT OR Apache-2.0 throughout.
+# binary releases. The workspace itself publishes under MIT only, but
+# the `allow` list below still includes Apache-2.0 / BSD / etc. because
+# those govern licenses we CONSUME from upstream deps (tokio, axum,
+# rustls, etc. are Apache-licensed and we need them).
 [licenses]
 allow = [
     "MIT",

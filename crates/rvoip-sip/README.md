@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/rvoip-sip.svg)](https://crates.io/crates/rvoip-sip)
 [![docs.rs](https://docs.rs/rvoip-sip/badge.svg)](https://docs.rs/rvoip-sip)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/eisenzopf/rvoip/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/eisenzopf/rvoip/blob/main/LICENSE)
 [![Repository](https://img.shields.io/badge/github-eisenzopf%2Frvoip-24292f.svg)](https://github.com/eisenzopf/rvoip)
 [![GitHub issues](https://img.shields.io/github/issues/eisenzopf/rvoip.svg)](https://github.com/eisenzopf/rvoip/issues)
 
@@ -241,5 +241,5 @@ reproduces the behavior.
 
 ## License
 
-Licensed under either MIT or Apache-2.0, at your option. See the repository
+Licensed under the MIT license, See the repository
 [`LICENSE`](https://github.com/eisenzopf/rvoip/blob/main/LICENSE).

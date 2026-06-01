@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/rvoip-core-traits.svg)](https://crates.io/crates/rvoip-core-traits)
 [![Documentation](https://docs.rs/rvoip-core-traits/badge.svg)](https://docs.rs/rvoip-core-traits)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/eisenzopf/rvoip)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/eisenzopf/rvoip)
 
 Pure trait + type surface for the [rvoip](https://github.com/eisenzopf/rvoip)
 ecosystem — IDs, errors, capability negotiation, identity contracts,
@@ -34,4 +34,4 @@ rvoip-core-traits = "0.2.0-beta.1"
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+Licensed under the MIT license. See the repository [LICENSE](https://github.com/eisenzopf/rvoip/blob/main/LICENSE).

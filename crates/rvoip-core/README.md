@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/rvoip-core.svg)](https://crates.io/crates/rvoip-core)
 [![Documentation](https://docs.rs/rvoip-core/badge.svg)](https://docs.rs/rvoip-core)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/eisenzopf/rvoip)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/eisenzopf/rvoip)
 
 Transport-agnostic spine for [rvoip](https://github.com/eisenzopf/rvoip).
 Defines the rvoip 3 conversation model (`Conversation`, `Session`,
@@ -53,4 +53,4 @@ rvoip-core = "0.2.0-beta.1"
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+Licensed under the MIT license. See the repository [LICENSE](https://github.com/eisenzopf/rvoip/blob/main/LICENSE).

@@ -1,6 +1,6 @@
 # rvoip-audio-core
 
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/eisenzopf/rvoip)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/eisenzopf/rvoip)
 
 Audio device management, format conversion, and pipeline glue for
 developers building SIP clients on top of
@@ -34,4 +34,4 @@ Until then, treat audio-core as **scaffolding**, not a stable API.
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+Licensed under the MIT license. See the repository [LICENSE](https://github.com/eisenzopf/rvoip/blob/main/LICENSE).

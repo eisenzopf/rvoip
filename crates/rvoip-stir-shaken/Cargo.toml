@@ -5,7 +5,7 @@ publish = false  # Alpha-tier; standalone STIR/SHAKEN impl, not gated by SIP bet
 edition = "2021"
 authors = ["RVoIP Contributors"]
 description = "STIR/SHAKEN (RFC 8224 / RFC 8225 / ATIS-1000074) signing and verification for rvoip"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 homepage = "https://github.com/eisenzopf/rvoip"
 repository = "https://github.com/eisenzopf/rvoip"
 
