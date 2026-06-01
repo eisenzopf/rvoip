@@ -74,7 +74,7 @@ name = "media_api_usage"
 path = "examples/media_api_usage.rs"
 
 # Performance benchmarks. Run with `cargo bench -p rvoip-rtp-core`. See
-# `crates/rvoip-sip/docs/PROFILING.md` for the broader profiling workflow.
+# `crates/sip/rvoip-sip/docs/PROFILING.md` for the broader profiling workflow.
 [[bench]]
 name = "packet_parse_serialize"
 harness = false

@@ -11,7 +11,7 @@
 //! those live in the adapter crates.
 //!
 //! See `UCTP_IMPLEMENTATION_PLAN.md` (this directory) for the v0 design
-//! and `crates/rvoip-core/CONVERSATION_PROTOCOL.md` for the wire spec.
+//! and `docs/CONVERSATION_PROTOCOL.md` for the wire spec.
 //!
 //! ## Public surface
 //!

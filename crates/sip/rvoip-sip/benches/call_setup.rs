@@ -7,7 +7,7 @@
 //! The peers are constructed *outside* the timed window so the bench
 //! measures call setup, not socket binding. If you need the per-peer
 //! construction cost, run the `profiling_call_setup_loop` example
-//! under `samply` instead — see `crates/rvoip-sip/docs/PROFILING.md`.
+//! under `samply` instead — see `crates/sip/rvoip-sip/docs/PROFILING.md`.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rvoip_sip::{Config, StreamPeer};

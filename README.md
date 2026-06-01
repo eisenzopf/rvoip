@@ -23,7 +23,7 @@
 > scenarios. The rest of the workspace — WebRTC, QUIC, WebTransport,
 > WebSocket, UCTP, vCon, identity, AI harness — is **alpha** and not
 > published to crates.io in this release.
-> The [rvoip 3 vision](crates/foundation/rvoip-core/voip-3-conversation-model.md)
+> The [rvoip 3 vision](docs/voip-3-conversation-model.md)
 > describes the destination; what ships today is its SIP slice.
 
 ## ⚡ rvoip in one breath
@@ -34,15 +34,15 @@ participants share a single transport-agnostic conversation model. One Rust
 library hosts all of them. Cross-substrate bridging — SIP ↔ WebRTC ↔ QUIC —
 is a first-class primitive, not glue code.
 
-The full design lives alongside `rvoip-core`:
+The full design lives under [`docs/`](docs/):
 
 | Doc | What it covers |
 | --- | --- |
-| [voip-3-conversation-model.md](crates/foundation/rvoip-core/voip-3-conversation-model.md) | The vocabulary — Conversation, Session, Connection, Stream, Message, Participant |
-| [PRD.md](crates/foundation/rvoip-core/PRD.md) | Product scope, audiences, positioning |
-| [INTERFACE_DESIGN.md](crates/foundation/rvoip-core/INTERFACE_DESIGN.md) | Crate architecture and dependency rules |
-| [GAP_PLAN.md](crates/foundation/rvoip-core/GAP_PLAN.md) | Implementation status (v1 shipped May 2026) |
-| [CONVERSATION_PROTOCOL.md](crates/foundation/rvoip-core/CONVERSATION_PROTOCOL.md) | UCTP wire specification |
+| [voip-3-conversation-model.md](docs/voip-3-conversation-model.md) | The vocabulary — Conversation, Session, Connection, Stream, Message, Participant |
+| [PRD.md](docs/PRD.md) | Product scope, audiences, positioning |
+| [INTERFACE_DESIGN.md](docs/INTERFACE_DESIGN.md) | Crate architecture and dependency rules |
+| [GAP_PLAN.md](docs/GAP_PLAN.md) | Implementation status (v1 shipped May 2026) |
+| [CONVERSATION_PROTOCOL.md](docs/CONVERSATION_PROTOCOL.md) | UCTP wire specification |
 
 <a id="build-with-rvoip-today"></a>
 ## 🎯 Build with rvoip today
@@ -273,7 +273,7 @@ publish at `0.1.0-alpha.1` to satisfy `rvoip-core`'s optional features.
 | --- | --- |
 | [rvoip](crates/rvoip) | Umbrella — held until more substrates reach beta |
 | [rvoip-client](crates/rvoip-client) | Client SDK — API still in motion |
-| [rvoip-uctp](crates/uctp/rvoip-uctp) | UCTP protocol design ongoing ([GAP_PLAN](crates/foundation/rvoip-core/GAP_PLAN.md)) |
+| [rvoip-uctp](crates/uctp/rvoip-uctp) | UCTP protocol design ongoing ([GAP_PLAN](docs/GAP_PLAN.md)) |
 | [rvoip-quic](crates/uctp/rvoip-quic) | New QUIC substrate adapter |
 | [rvoip-webtransport](crates/uctp/rvoip-webtransport) | New WebTransport substrate adapter |
 | [rvoip-websocket](crates/uctp/rvoip-websocket) | Deferred per rvoip 3 v1.x |
@@ -288,7 +288,7 @@ publish at `0.1.0-alpha.1` to satisfy `rvoip-core`'s optional features.
 <a id="roadmap"></a>
 ## 🗺️ Roadmap
 
-Tracked in detail under [`crates/foundation/rvoip-core/GAP_PLAN.md`](crates/foundation/rvoip-core/GAP_PLAN.md).
+Tracked in detail under [`docs/GAP_PLAN.md`](docs/GAP_PLAN.md).
 Highlights below.
 
 ### 🚧 v1.x — incremental on rvoip 3 v1
@@ -346,7 +346,7 @@ implementation of the IETF vCon draft.
 The UCTP substrate model gives rvoip a place to land SIP-over-QUIC, RoQ,
 and MoQ when those mature (2027–2029) **without breaking the SIP path**.
 
-See [`crates/foundation/rvoip-core/PRD.md`](crates/foundation/rvoip-core/PRD.md) §1.2 for the
+See [`docs/PRD.md`](docs/PRD.md) §1.2 for the
 full positioning analysis.
 
 ## 🧪 Evaluating rvoip
@@ -383,7 +383,7 @@ interop, security, and performance gates.
 
 - 🐛 **Bugs**: open an issue with reproduction steps
 - 💡 **Feature requests**: discussions or issues — please reference the
-  [rvoip 3 docs](crates/foundation/rvoip-core/voip-3-conversation-model.md) for context
+  [rvoip 3 docs](docs/voip-3-conversation-model.md) for context
 - 🔧 **Pull requests welcome** — workspace-wide tests run via
   `scripts/test_all.sh`
 

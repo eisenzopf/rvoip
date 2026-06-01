@@ -350,7 +350,7 @@ ratatui = "0.26"
 criterion = { workspace = true }
 futures = { workspace = true }
 
-# End-to-end benchmarks. See `crates/rvoip-sip/docs/PROFILING.md`.
+# End-to-end benchmarks. See `crates/sip/rvoip-sip/docs/PROFILING.md`.
 [[bench]]
 name = "call_setup"
 harness = false
@@ -387,7 +387,7 @@ dev-insecure-tls = ["rvoip-sip-dialog/dev-insecure-tls"]
 # binaries. Off by default so `cargo build` / `cargo test` never see
 # the allocator swap. The forwarded `rvoip-infra-common/no-global-allocator`
 # suppresses mimalloc so the two `#[global_allocator]`s don't conflict.
-# See `crates/rvoip-sip/docs/PROFILING.md`.
+# See `crates/sip/rvoip-sip/docs/PROFILING.md`.
 dhat = ["dep:dhat", "rvoip-infra-common/no-global-allocator"]
 # `console-subscriber` integration for the long-running profiling
 # examples (`profiling_registration_storm`, `profiling_dialog_steady_state`).
@@ -396,7 +396,7 @@ tokio-console = ["dep:console-subscriber"]
 # Opt-in publically-reportable concurrency benchmark suite under
 # tests/perf/. Pulls in hdrhistogram for latency percentiles and sysinfo
 # for environment-block capture. Off by default so `cargo build` /
-# `cargo test` are untouched. See `crates/rvoip-sip/docs/BENCHMARKING.md`.
+# `cargo test` are untouched. See `crates/sip/rvoip-sip/docs/BENCHMARKING.md`.
 perf-tests = ["dep:hdrhistogram", "dep:sysinfo", "rvoip-media-core/perf-diagnostics"]
 
 [[test]]
@@ -407,7 +407,7 @@ required-features = ["generated-validation"]
 # Publically-reportable concurrency benchmark suite. Each scenario is a
 # real integration test that writes a JSON result file to
 # `target/perf-results/<scenario>.json`. Run with `--release` for citable
-# numbers. See `crates/rvoip-sip/docs/BENCHMARKING.md`.
+# numbers. See `crates/sip/rvoip-sip/docs/BENCHMARKING.md`.
 [[test]]
 name = "perf_call_setup_cps"
 path = "tests/perf/perf_call_setup_cps.rs"
@@ -493,7 +493,7 @@ path = "tests/perf/perf_sipp_parity.rs"
 required-features = ["perf-tests"]
 
 # Profiling-only optional deps. Off by default; enabled via the `dhat`
-# and `tokio-console` features. See `crates/rvoip-sip/docs/PROFILING.md`.
+# and `tokio-console` features. See `crates/sip/rvoip-sip/docs/PROFILING.md`.
 [dependencies.dhat]
 version = "0.3"
 optional = true

@@ -10,8 +10,8 @@
 //!
 //! **Payload contract — important.** The WebRTC adapter today places the
 //! full RTP wire image into `MediaFrame.payload` (see the inbound pump in
-//! `crates/rvoip-webrtc/src/media/pump.rs`). The orchestrator's
-//! `Transcoder` (see `crates/media-core/src/codec/transcoding.rs`)
+//! `crates/webrtc/rvoip-webrtc/src/media/pump.rs`). The orchestrator's
+//! `Transcoder` (see `crates/media/media-core/src/codec/transcoding.rs`)
 //! expects **codec payload bytes** (no RTP header). The SIP side here
 //! emits codec payload bytes (G.711 μ-law) — the shape the transcoder
 //! consumes. End-to-end audio bridging from a SIP UA through the
@@ -46,7 +46,7 @@ const G711_SAMPLE_RATE: u32 = 8_000;
 const G711_FRAME_SAMPLES: usize = 160; // 20 ms @ 8 kHz mono
 
 /// Frame channel depth. Same default as `rvoip-webrtc` (see
-/// `crates/rvoip-webrtc/src/media/pump.rs::FRAME_CHANNEL_CAP`).
+/// `crates/webrtc/rvoip-webrtc/src/media/pump.rs::FRAME_CHANNEL_CAP`).
 const FRAME_CHANNEL_CAP: usize = 64;
 
 /// One-take wrapper for the inbound `MediaFrame` receiver — mirrors the

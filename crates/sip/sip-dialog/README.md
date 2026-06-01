@@ -10,7 +10,7 @@
 > `crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md` until this README is fully
 > rewritten.
 
-RFC 3261 SIP Dialog Management Layer for the [rvoip](../README.md) VoIP stack, providing clean separation between session coordination and SIP protocol operations.
+RFC 3261 SIP Dialog Management Layer for the [rvoip](../../../README.md) VoIP stack, providing clean separation between session coordination and SIP protocol operations.
 
 ## Overview
 
@@ -591,7 +591,7 @@ This crate is part of the RVOIP architecture refactoring to establish clean laye
 
 ## Contributing
 
-Contributions are welcome! Please see the main [rvoip contributing guidelines](../../README.md#contributing) for details.
+Contributions are welcome! Please see the main [rvoip contributing guidelines](../../../README.md#contributing) for details.
 
 When contributing to dialog-core:
 1. Ensure proper RFC 3261 compliance

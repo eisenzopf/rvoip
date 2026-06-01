@@ -1134,7 +1134,7 @@ match parse_message(&data) {
 
 ## Contributing
 
-Contributions are welcome! Please see the main [rvoip contributing guidelines](../../README.md#contributing) for details.
+Contributions are welcome! Please see the main [rvoip contributing guidelines](../../../README.md#contributing) for details.
 
 For sip-core specific contributions:
 - Ensure all new headers have complete type definitions

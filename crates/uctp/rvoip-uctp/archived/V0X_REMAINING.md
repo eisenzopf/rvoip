@@ -22,7 +22,7 @@ The split matters because category 1 and 2 are decisions for a human, not implem
 
 ### 1.1 B3 — Spec catalog: `501 not-implemented` / `505 version-not-supported`
 
-**Owner:** maintainer of `crates/foundation/rvoip-core/CONVERSATION_PROTOCOL.md`.
+**Owner:** maintainer of `docs/CONVERSATION_PROTOCOL.md`.
 
 **Why blocked:** §11.2 of CONVERSATION_PROTOCOL.md is the wire-format authority for error codes. Adding `501` and `505` is a one-line spec PR — not code work. The implementer's follow-up that swaps `503 transient` (today's compromise) → `501 not-implemented` in:
 
@@ -134,4 +134,4 @@ Nothing else from the original UCTP_IMPLEMENTATION_PLAN.md (v0 spike + v0.x prod
 
 - **Completed work:** [UCTP_IMPLEMENTATION_PLAN.md §11](UCTP_IMPLEMENTATION_PLAN.md#11-v0-spike--what-shipped) (v0 spike) and [§13](UCTP_IMPLEMENTATION_PLAN.md#13-v0x--production-hardening-track) (this session's work).
 - **Architectural concerns inventory:** [UCTP_IMPLEMENTATION_PLAN.md §7](UCTP_IMPLEMENTATION_PLAN.md#7-known-tensions--gaps-to-revisit-after-v0) — production concerns from the original audit. All actionable items in that list are now closed.
-- **Spec source of truth:** `../rvoip-core/CONVERSATION_PROTOCOL.md`.
+- **Spec source of truth:** `../../foundation/rvoip-core/CONVERSATION_PROTOCOL.md`.

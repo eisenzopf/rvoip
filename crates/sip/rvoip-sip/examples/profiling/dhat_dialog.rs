@@ -3,7 +3,7 @@
 //! Establishes a small backlog of concurrent dialogs and then churns
 //! through additional call setups under dhat. Smaller backlog than the
 //! CPU-side `profiling_dialog_steady_state` because dhat slows things
-//! down considerably. See `crates/rvoip-sip/docs/PROFILING.md`.
+//! down considerably. See `crates/sip/rvoip-sip/docs/PROFILING.md`.
 //!
 //! ```bash
 //! cargo run --release --features dhat -p rvoip-sip --example profiling_dhat_dialog

@@ -101,7 +101,7 @@ criterion = { workspace = true }
 futures = "0.3"
 
 # Performance benchmarks. Run with `cargo bench -p rvoip-media-core`. See
-# `crates/rvoip-sip/docs/PROFILING.md` for the broader profiling workflow.
+# `crates/sip/rvoip-sip/docs/PROFILING.md` for the broader profiling workflow.
 [[bench]]
 name = "audio_frame_pipeline"
 harness = false

@@ -422,7 +422,7 @@ mod tests {
     //! require a DNS server — IP-literal short-circuits and the
     //! `sips:` / `transport=udp` rejection. Full NAPTR/SRV/A coverage
     //! against a live hickory client lives in
-    //! `crates/rvoip-sip-transport/tests/resolver_hickory_e2e.rs`.
+    //! `crates/sip/rvoip-sip-transport/tests/resolver_hickory_e2e.rs`.
 
     use super::*;
     use hickory_resolver::config::{NameServerConfig, ResolverConfig};

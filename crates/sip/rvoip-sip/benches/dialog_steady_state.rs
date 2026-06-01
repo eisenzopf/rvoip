@@ -8,7 +8,7 @@
 //! `Arc<Mutex<HashMap<TransactionKey, _>>>`, etc.
 //!
 //! For heap-side measurement, run the `profiling_dhat_dialog` example
-//! under the `dhat` feature; see `crates/rvoip-sip/docs/PROFILING.md`.
+//! under the `dhat` feature; see `crates/sip/rvoip-sip/docs/PROFILING.md`.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use rvoip_sip::{Config, StreamPeer};

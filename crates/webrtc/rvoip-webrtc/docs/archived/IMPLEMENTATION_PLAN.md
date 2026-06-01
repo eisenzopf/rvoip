@@ -5,9 +5,9 @@
 **Scope boundary:** All source, tests, and docs live under `crates/webrtc/rvoip-webrtc/**`. No edits to `rvoip-core`, `rvoip-websocket`, `rvoip-sip`, or any other crate. The only out-of-crate change required for compilation is adding the crate to the workspace `members` list and a `rvoip-webrtc` path alias in the root [`Cargo.toml`](Cargo.toml) — not counted as "touching other crates."
 
 **Authoritative design references (read-only):**
-- [`crates/foundation/rvoip-core/INTERFACE_DESIGN.md`](crates/foundation/rvoip-core/INTERFACE_DESIGN.md) §2, §3.6, §6, §7, §9, §13
-- [`crates/foundation/rvoip-core/PRD.md`](crates/foundation/rvoip-core/PRD.md) §4 "WebRTC interop"
-- [`crates/foundation/rvoip-core/CONVERSATION_PROTOCOL.md`](crates/foundation/rvoip-core/CONVERSATION_PROTOCOL.md) §12.2 (gateway boundary)
+- [`docs/INTERFACE_DESIGN.md`](docs/INTERFACE_DESIGN.md) §2, §3.6, §6, §7, §9, §13
+- [`docs/PRD.md`](docs/PRD.md) §4 "WebRTC interop"
+- [`docs/CONVERSATION_PROTOCOL.md`](docs/CONVERSATION_PROTOCOL.md) §12.2 (gateway boundary)
 - [`crates/uctp/rvoip-websocket/src/media_bridge.rs`](crates/uctp/rvoip-websocket/src/media_bridge.rs) (stub integration notes — do not modify; use as API checklist)
 
 **webrtc-rs version:** `=0.20.0-alpha.1` (already pinned in root [`Cargo.toml`](Cargo.toml) line 228). Feature: `runtime-tokio` (default).
@@ -150,7 +150,7 @@ The alpha redesign replaces v0.17 callback hell with trait-based handlers on a S
 
 **Alpha risk mitigation:** Pin `webrtc = "=0.20.0-alpha.1"` strictly in `rvoip-webrtc/Cargo.toml`. Isolate all webrtc-rs imports behind `peer/`, `media/`, and `signaling/` modules so an API bump is a contained rewrite. Document known alpha limitations in README.
 
-**UCTP v0 constraint:** Full SDP in offer/answer — **no trickle ICE** ([CONVERSATION_PROTOCOL.md §10.2.2](crates/foundation/rvoip-core/CONVERSATION_PROTOCOL.md)). Wait for `RTCIceGatheringState::Complete` before emitting local SDP.
+**UCTP v0 constraint:** Full SDP in offer/answer — **no trickle ICE** ([CONVERSATION_PROTOCOL.md §10.2.2](docs/CONVERSATION_PROTOCOL.md)). Wait for `RTCIceGatheringState::Complete` before emitting local SDP.
 
 ---
 

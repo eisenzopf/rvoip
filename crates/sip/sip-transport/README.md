@@ -9,7 +9,7 @@
 > release-gated transport; TCP/TLS/WS require their listed tests; WSS outbound
 > remains a non-claim until the known incomplete path is finished and tested.
 
-SIP transport layer implementation for the [rvoip](../README.md) VoIP stack, providing reliable and efficient transport mechanisms for SIP messages across different network protocols.
+SIP transport layer implementation for the [rvoip](../../../README.md) VoIP stack, providing reliable and efficient transport mechanisms for SIP messages across different network protocols.
 
 ## Overview
 
@@ -298,7 +298,7 @@ See [TODO.md](./TODO.md) for a comprehensive list of planned enhancements, inclu
 
 ## Contributing
 
-Contributions are welcome! Please see the main [rvoip contributing guidelines](../../README.md#contributing) for details.
+Contributions are welcome! Please see the main [rvoip contributing guidelines](../../../README.md#contributing) for details.
 
 ## License
 

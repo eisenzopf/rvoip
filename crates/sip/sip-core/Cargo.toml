@@ -62,7 +62,7 @@ path = "tests/generated_message_compliance.rs"
 required-features = ["generated-validation"]
 
 # Performance benchmarks. Run with `cargo bench -p rvoip-sip-core`. See
-# `crates/rvoip-sip/docs/PROFILING.md` for the broader profiling workflow.
+# `crates/sip/rvoip-sip/docs/PROFILING.md` for the broader profiling workflow.
 [[bench]]
 name = "parse"
 harness = false

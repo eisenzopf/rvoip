@@ -11,8 +11,8 @@
 //!    tokio tasks — the structure used verbatim by `TransactionManager`.
 //!
 //! Use these to ground end-to-end results from
-//! `crates/rvoip-sip/benches/call_setup.rs` and the `dialog_steady_state`
-//! profiling example. See `crates/rvoip-sip/docs/PROFILING.md`.
+//! `crates/sip/rvoip-sip/benches/call_setup.rs` and the `dialog_steady_state`
+//! profiling example. See `crates/sip/rvoip-sip/docs/PROFILING.md`.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use dashmap::DashMap;

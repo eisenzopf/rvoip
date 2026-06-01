@@ -14,7 +14,7 @@
 
 The `rtp-core` library provides RTP/RTCP packet processing, UDP media
 transport, SRTP primitives, buffer management, and statistics collection for
-the [rvoip](../../README.md) VoIP stack. Some additional security and transport
+the [rvoip](../../../README.md) VoIP stack. Some additional security and transport
 modules exist in this crate, but they are not `rvoip-sip` beta claims unless
 the beta compatibility matrix links test evidence for them.
 
@@ -570,7 +570,7 @@ match rtp_result {
 
 ## Contributing
 
-Contributions are welcome! Please see the main [rvoip contributing guidelines](../../README.md#contributing) for details.
+Contributions are welcome! Please see the main [rvoip contributing guidelines](../../../README.md#contributing) for details.
 
 For rtp-core specific contributions:
 - Ensure RFC compliance for any protocol changes

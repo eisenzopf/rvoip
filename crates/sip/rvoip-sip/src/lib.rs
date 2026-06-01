@@ -270,7 +270,7 @@
 //! # }
 //! ```
 //!
-//! See `crates/rvoip-core/examples/sip_only_orchestrator.rs` for a complete
+//! See `crates/foundation/rvoip-core/examples/sip_only_orchestrator.rs` for a complete
 //! runner. When `rvoip-webrtc` and `rvoip-quic` ship, they register against
 //! the same `Orchestrator` handle without reshaping consumer code.
 //!

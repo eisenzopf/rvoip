@@ -1,6 +1,6 @@
 //! Create / find hot-path micro-benchmarks for `rvoip-sip`.
 //!
-//! Modeled on `crates/rtp-core/benches/session_demux.rs`: each hot path
+//! Modeled on `crates/media/rtp-core/benches/session_demux.rs`: each hot path
 //! is benchmarked in isolation rather than end-to-end. Where there is a
 //! concrete candidate optimization, the bench measures today's structure
 //! side-by-side with the replacement at thread counts {1, 4, 8, 16} so

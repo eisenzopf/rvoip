@@ -196,7 +196,7 @@ async fn bridge_smoke_three_adapters_register_and_fire_events() {
     // transport directly (the orchestrator normalizes it down to just
     // a connection_id + timestamp). Just assert a second
     // ConnectionInbound fires — the WS adapter test itself
-    // (`crates/rvoip-websocket/tests/adapter.rs`) verifies the
+    // (`crates/uctp/rvoip-websocket/tests/adapter.rs`) verifies the
     // transport label.
     let mut saw_ws_inbound = false;
     for _ in 0..30 {

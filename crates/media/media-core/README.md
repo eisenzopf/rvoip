@@ -13,7 +13,7 @@
 
 ## Overview
 
-The `media-core` library provides comprehensive media processing and audio management capabilities for the [rvoip](../../README.md) VoIP stack. It handles all media-level operations including codec management, advanced audio processing, quality monitoring, and multi-party conference mixing while integrating seamlessly with `session-core` (SIP signaling) and `rtp-core` (RTP transport).
+The `media-core` library provides comprehensive media processing and audio management capabilities for the [rvoip](../../../README.md) VoIP stack. It handles all media-level operations including codec management, advanced audio processing, quality monitoring, and multi-party conference mixing while integrating seamlessly with `session-core` (SIP signaling) and `rtp-core` (RTP transport).
 
 ### ✅ **Core Responsibilities**
 - **Media Processing**: Codec encode/decode, audio processing (AEC, AGC, VAD, NS)
@@ -644,7 +644,7 @@ match media_result {
 
 ## Contributing
 
-Contributions are welcome! Please see the main [rvoip contributing guidelines](../../README.md#contributing) for details.
+Contributions are welcome! Please see the main [rvoip contributing guidelines](../../../README.md#contributing) for details.
 
 For media-core specific contributions:
 - Ensure ITU-T compliance for any codec changes

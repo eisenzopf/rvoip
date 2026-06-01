@@ -8,7 +8,7 @@
 //! pair that media-core's RTP transport will use.
 //!
 //! The SDES state-machine logic lives here (rather than in
-//! `crates/rtp-core/src/security/sdes/mod.rs::Sdes`) because the
+//! `crates/media/rtp-core/src/security/sdes/mod.rs::Sdes`) because the
 //! existing rtp-core wrapper is bytes-oriented (its `process_message`
 //! takes `&[u8]` of `\r\n`-joined `a=crypto:` lines), which would
 //! force an awkward typed↔string round-trip at the SDP boundary.

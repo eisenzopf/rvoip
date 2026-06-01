@@ -11,7 +11,7 @@
 //!    sandboxed environments without `/etc/resolv.conf`).
 //!
 //! Algorithm-level coverage of the NAPTR ladder lives in
-//! `crates/rvoip-sip-transport/tests/resolver_hickory_e2e.rs`. Full
+//! `crates/sip/rvoip-sip-transport/tests/resolver_hickory_e2e.rs`. Full
 //! INVITE-flow wire tests depend on the broader transaction harness
 //! and run as part of the PBX matrix.
 

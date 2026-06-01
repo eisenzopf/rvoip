@@ -98,7 +98,7 @@
 //! close-after-idle driver).
 //!
 //! See `examples/sip_only_orchestrator.rs` for the working SIP-adapter
-//! flow end-to-end, and [`GAP_PLAN.md`](../../crates/rvoip-core/GAP_PLAN.md)
+//! flow end-to-end, and [`GAP_PLAN.md`](../../docs/GAP_PLAN.md)
 //! for the phased-roadmap status.
 //!
 //! ## Layering rule

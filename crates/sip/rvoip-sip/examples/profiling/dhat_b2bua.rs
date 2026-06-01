@@ -3,7 +3,7 @@
 //! Runs a small fixed registration storm under dhat so per-REGISTER
 //! allocation counts are visible. Smaller numbers than the CPU-side
 //! `profiling_registration_storm` because dhat instruments every
-//! allocation. See `crates/rvoip-sip/docs/PROFILING.md`.
+//! allocation. See `crates/sip/rvoip-sip/docs/PROFILING.md`.
 //!
 //! ```bash
 //! cargo run --release --features dhat -p rvoip-sip --example profiling_dhat_b2bua

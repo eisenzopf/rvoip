@@ -17,7 +17,7 @@
 //!    `connection.offer.substrate_setup`. `MediaFrame.payload` (already RTP-shaped)
 //!    bridges to outbound tracks and back via inbound pumps.
 //!
-//! See `crates/rvoip-uctp/UCTP_IMPLEMENTATION_PLAN.md` for the design.
+//! See `crates/uctp/rvoip-uctp/UCTP_IMPLEMENTATION_PLAN.md` for the design.
 
 pub mod adapter;
 pub mod client;

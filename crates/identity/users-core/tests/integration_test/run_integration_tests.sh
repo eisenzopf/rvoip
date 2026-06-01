@@ -50,7 +50,7 @@ else
 fi
 
 # Change to users-core directory
-cd "$PROJECT_ROOT/crates/users-core"
+cd "$PROJECT_ROOT/crates/identity/users-core"
 
 echo "📍 Working directory: $(pwd)"
 echo ""

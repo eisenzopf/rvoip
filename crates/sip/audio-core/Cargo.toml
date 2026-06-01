@@ -27,7 +27,7 @@ workspace = true
 
 [dependencies]
 # Internal: integrates with rvoip-sip's CallbackPeer / Endpoint surface
-# (see crates/rvoip-sip/examples/callback_peer/).
+# (see crates/sip/rvoip-sip/examples/callback_peer/).
 rvoip-sip.workspace = true
 rvoip-rtp-core.workspace = true
 

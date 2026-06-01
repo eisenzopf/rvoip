@@ -5,7 +5,7 @@
 //! setting up + tearing down additional calls against the backlog for
 //! `RVOIP_PROFILE_DURATION` seconds. Pair with `tokio-console` to see
 //! whether `Mutex` wait time grows with the backlog. See
-//! `crates/rvoip-sip/docs/PROFILING.md`.
+//! `crates/sip/rvoip-sip/docs/PROFILING.md`.
 
 use rvoip_sip::{Config, StreamPeer};
 use std::env;

@@ -93,7 +93,7 @@ for crate in "${CRATES[@]}"; do
     fi
     
     # Run integration tests. Path lookup based on stripping `rvoip-`
-    # broke when SIP crates were nested under crates/rvoip-sip/ — instead
+    # broke when SIP crates were nested under crates/sip/rvoip-sip/ — instead
     # ask cargo whether the crate has any test targets.
     has_tests=$(cargo metadata --no-deps --format-version 1 \
         | jq -r --arg n "$crate" \

@@ -15,7 +15,7 @@
 //! This test does NOT capture wire bytes to assert encryption — that
 //! claim is locked in by the `srtp_round_trip_through_real_udp_sockets`
 //! and `srtp_silent_drop_on_auth_failure` unit tests in
-//! `crates/rtp-core/src/transport/udp.rs` (Step 2B.2). What this test
+//! `crates/media/rtp-core/src/transport/udp.rs` (Step 2B.2). What this test
 //! adds is the proof that the *full* SIP+SDP+SDES negotiation +
 //! transport-installation flow works end-to-end through the public
 //! `UnifiedCoordinator` API.
@@ -144,7 +144,7 @@ async fn srtp_call_negotiates_and_establishes_end_to_end() {
 //   SDES validation path that turns into a terminal `CallFailed` when
 //   `srtp_required` is set.
 // - `srtp_silent_drop_on_auth_failure` in
-//   `crates/rtp-core/src/transport/udp.rs` covers RFC 3711 §3.4
+//   `crates/media/rtp-core/src/transport/udp.rs` covers RFC 3711 §3.4
 //   silent-drop semantics on the receive side.
 //
 // A multi-binary fixture that strips `a=crypto:` from the answer to

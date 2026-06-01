@@ -16,7 +16,7 @@
 //!   bridge.
 //!
 //! The reverse direction (UCTP `dtmf.send` → RFC 4733 RTP on the SIP
-//! leg) is exercised by `crates/rvoip-sip` unit tests for the
+//! leg) is exercised by `crates/sip/rvoip-sip` unit tests for the
 //! `parse_rfc4733_digit` helper.
 
 use bytes::Bytes;

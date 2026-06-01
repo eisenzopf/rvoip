@@ -8,7 +8,7 @@
 //! DTMF event from leg A, observe leg B's adapter record a matching
 //! `send_dtmf` call.
 //!
-//! Companion to `crates/rvoip-uctp/tests/dtmf_bridge.rs`, which covers
+//! Companion to `crates/uctp/rvoip-uctp/tests/dtmf_bridge.rs`, which covers
 //! the in-band RTP RFC 4733 path through the frame pump.
 
 use std::sync::atomic::{AtomicUsize, Ordering};

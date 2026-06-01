@@ -1,6 +1,6 @@
 # rvoip-webrtc
 
-WebRTC **interop adapter** for [`rvoip-core`](../rvoip-core): terminates foreign WebRTC peers
+WebRTC **interop adapter** for [`rvoip-core`](../../foundation/rvoip-core): terminates foreign WebRTC peers
 (ICE/DTLS-SRTP, SDP offer/answer) and exposes voip-3 `Connection`s with channel-based
 `MediaStream` flows.
 
@@ -36,7 +36,7 @@ Enable both signaling features for the unified [`WebRtcServer`](src/server.rs) f
 ## Running as a WebRTC server
 
 Dual-role deployment: one process runs WHIP/WHEP + WS signaling **and** registers the same
-`WebRtcAdapter` with [`rvoip_core::Orchestrator`](../rvoip-core).
+`WebRtcAdapter` with [`rvoip_core::Orchestrator`](../../foundation/rvoip-core).
 
 ```rust
 use std::sync::Arc;
@@ -97,7 +97,7 @@ cargo test -p rvoip-webrtc --features bridge-quic --test webrtc_quic_bridge_e2e
 ```
 
 For a full multi-adapter stack (QUIC + WT + WS + SIP), see
-[`rvoip-uctp/examples/uctp_to_sip_bridge/orchestrator_bridge.rs`](../rvoip-uctp/examples/uctp_to_sip_bridge/orchestrator_bridge.rs).
+[`rvoip-uctp/examples/uctp_to_sip_bridge/orchestrator_bridge.rs`](../../uctp/rvoip-uctp/examples/uctp_to_sip_bridge/orchestrator_bridge.rs).
 
 Environment variables: `WHIP_BIND` (default `127.0.0.1:8080`), `WS_BIND` (default `127.0.0.1:8081`), `QUIC_BIND` (default `127.0.0.1:4433`).
 
@@ -157,7 +157,7 @@ out-of-scope list.
 
 ## Future integration
 
-[`rvoip-websocket`](../rvoip-websocket) may replace its stub `WebRtcMediaBridge` with types
+[`rvoip-websocket`](../../uctp/rvoip-websocket) may replace its stub `WebRtcMediaBridge` with types
 from this crate in a follow-up PR — WebRTC expertise stays here.
 
 See [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) for the full design.

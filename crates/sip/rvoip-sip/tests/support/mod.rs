@@ -1,6 +1,6 @@
 //! Shared two-coordinator scaffolding for §10 verification tests.
 //!
-//! Tests under `crates/rvoip-sip/tests/` opt in via `mod support;` at
+//! Tests under `crates/sip/rvoip-sip/tests/` opt in via `mod support;` at
 //! the top of each file. Cargo compiles this directory once per test
 //! binary that imports it; the `#[allow(dead_code)]` on each submodule
 //! suppresses the per-binary unused-helper warnings.

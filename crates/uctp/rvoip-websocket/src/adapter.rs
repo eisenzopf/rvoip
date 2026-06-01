@@ -122,7 +122,7 @@ impl UctpWsConfig {
     /// Enable TLS termination on the WS server socket using the given
     /// `rustls::ServerConfig`. The server's `accept` loop will wrap
     /// each TCP stream via `tokio_rustls::TlsAcceptor` before running
-    /// the WebSocket handshake. See `crates/rvoip-uctp/src/substrate/tls.rs`
+    /// the WebSocket handshake. See `crates/uctp/rvoip-uctp/src/substrate/tls.rs`
     /// for a `self_signed_for_dev` helper that produces a suitable
     /// config for dev/test.
     #[cfg(feature = "wss")]

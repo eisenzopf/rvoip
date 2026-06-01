@@ -3,8 +3,8 @@
 # covered by its own matrix runner). Sequential to avoid 5060-range port
 # collisions between back-to-back peer demos.
 set -u
-DIR=/Users/jonathan/Developer/rvoip/crates/rvoip-sip/examples
-OUT=/Users/jonathan/Developer/rvoip/crates/rvoip-sip/examples/pbx/output/example-scripts
+DIR=/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples
+OUT=/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/example-scripts
 mkdir -p "$OUT"
 SUMMARY="$OUT/_summary.tsv"
 : > "$SUMMARY"

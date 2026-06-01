@@ -60,7 +60,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sy
 rvoip-sip-core = { workspace = true }
 dashmap = { workspace = true }
 
-# Performance benchmarks. See `crates/rvoip-sip/docs/PROFILING.md`.
+# Performance benchmarks. See `crates/sip/rvoip-sip/docs/PROFILING.md`.
 [[bench]]
 name = "transaction_manager"
 harness = false

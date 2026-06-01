@@ -1,7 +1,7 @@
 //! Scenario report: stdout summary table + JSON file writer.
 //!
 //! The JSON shape follows the canonical schema in
-//! `crates/rvoip-sip/docs/BENCHMARKING.md`. Adding scenario-specific
+//! `crates/sip/rvoip-sip/docs/BENCHMARKING.md`. Adding scenario-specific
 //! keys is fine; removing one of the canonical keys
 //! (`scenario` / `environment` / `load` / `results` / `latency_ns` /
 //! `resources`) is a breaking change for downstream dashboards and is
@@ -282,7 +282,7 @@ fn target_dir() -> PathBuf {
     let manifest_dir = PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set under cargo"),
     );
-    // crates/rvoip-sip/ → ../../target
+    // crates/sip/rvoip-sip/ → ../../target
     manifest_dir
         .parent() // crates/
         .and_then(|p| p.parent()) // workspace root

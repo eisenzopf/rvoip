@@ -7,7 +7,7 @@
 //! for task wait-time analysis (requires `--features tokio-console` and
 //! `RUSTFLAGS="--cfg tokio_unstable"`).
 //!
-//! See `crates/rvoip-sip/docs/PROFILING.md`.
+//! See `crates/sip/rvoip-sip/docs/PROFILING.md`.
 
 use rvoip_sip::{Config, StreamPeer, UnifiedCoordinator};
 use std::collections::HashMap;

@@ -33,8 +33,8 @@ rvoip-auth-core = "0.2.0-beta.1"
   minimal JWK/JWS verifier `rvoip-vcon` and `rvoip-sip-registrar` plug
   into.
 - Integration examples live in the [rvoip-sip
-  README](../rvoip-sip/README.md) and in
-  [`crates/sip/rvoip-sip/examples/callback_peer/`](../rvoip-sip/examples/callback_peer/).
+  README](../../sip/rvoip-sip/README.md) and in
+  [`crates/sip/rvoip-sip/examples/callback_peer/`](../../sip/rvoip-sip/examples/callback_peer/).
 
 ## License
 

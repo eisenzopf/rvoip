@@ -2,7 +2,7 @@
 //!
 //! vCon ("Virtualized Conversation") is the IETF-WG container format
 //! for a recorded conversation's metadata + media references. Per
-//! `crates/rvoip-core/CONVERSATION_PROTOCOL.md` §7.6 and
+//! `docs/CONVERSATION_PROTOCOL.md` §7.6 and
 //! `INTERFACE_DESIGN.md` §3.9, every UCTP-family adapter emits a
 //! `RecordingComplete` event at `session.ended` carrying a
 //! `VconRef`; this crate is what actually produces the vCon document

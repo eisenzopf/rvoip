@@ -106,7 +106,7 @@ Six categories of work remain, ordered roughly from "smallest dependency / clear
 
 **Status:** ✅ **Landed 2026-05-25.** `build_connection` is now async and calls `get_or_init_stream` to populate the per-`ConnectionId` cache eagerly. Both inbound (`translate_api_event::IncomingCall`) and outbound (`originate`) paths return `Connection.streams.len() == 1`. The `streams()` impl falls back to lazy-init if the eager construction failed, preserving the prior failure surface for unknown connection IDs (`ConnectionNotFound`). Test: `crates/sip/rvoip-sip/tests/adapter_eager_streams.rs`.
 
-**Why:** [`crates/sip/rvoip-sip/src/adapter.rs:126`](../rvoip-sip/src/adapter.rs) builds `Connection { streams: vec![], ... }` at inbound-call time and lazy-creates the `SipMediaStream` only on first `streams()` call (line 310). QUIC and WT adapters eagerly populate `Connection.streams` at `InboundInvite` time. The asymmetry isn't a correctness bug — bridges through SIP do work because `bridge_connections` polls `streams()` up to the deadline — but it's a footgun for any consumer that inspects `Connection.streams` synchronously off the `Event::ConnectionInbound` event.
+**Why:** [`crates/sip/rvoip-sip/src/adapter.rs:126`](../../sip/rvoip-sip/src/adapter.rs) builds `Connection { streams: vec![], ... }` at inbound-call time and lazy-creates the `SipMediaStream` only on first `streams()` call (line 310). QUIC and WT adapters eagerly populate `Connection.streams` at `InboundInvite` time. The asymmetry isn't a correctness bug — bridges through SIP do work because `bridge_connections` polls `streams()` up to the deadline — but it's a footgun for any consumer that inspects `Connection.streams` synchronously off the `Event::ConnectionInbound` event.
 
 **Proposed approach:**
 
@@ -282,7 +282,7 @@ The wire protocol is now in place, so peers that negotiate via envelopes get a w
    - When an inbound `connection.update` envelope arrives with `action = "renegotiate-media"` and `codec_preferences = [...]`, run the §8.1 negotiation algorithm against the current peer caps + the new preferences.
    - On success, emit `connection.update` reply with the chosen codec.
    - On failure (no overlap), emit `error` with code `488 not-acceptable`.
-2. **Wire `Orchestrator::renegotiate_media` driver** ([`crates/foundation/rvoip-core/src/orchestrator.rs`](../rvoip-core/src/orchestrator.rs)):
+2. **Wire `Orchestrator::renegotiate_media` driver** ([`crates/foundation/rvoip-core/src/orchestrator.rs`](../../foundation/rvoip-core/src/orchestrator.rs)):
    - Look up the adapter for the connection's transport, call `adapter.renegotiate_media(conn_id, new_caps)`.
 3. **Adapter impl** for each substrate:
    - **QUIC + WT** (`crates/uctp/rvoip-quic/src/adapter.rs:507`, `crates/uctp/rvoip-webtransport/src/adapter.rs`): send a `connection.update` envelope with `action = "renegotiate-media"`; await the reply; update the connection's `negotiated_codecs` field.
@@ -453,12 +453,12 @@ Workspace pin is now `web-transport-quinn = "0.11"` (kept the upgrade — strict
 |---|---|
 | Authoritative design + as-built | [`UCTP_IMPLEMENTATION_PLAN.md`](UCTP_IMPLEMENTATION_PLAN.md) |
 | Previous remaining-work pass (partially stale) | [`V0X_REMAINING.md`](V0X_REMAINING.md) |
-| Wire spec | [`../rvoip-core/CONVERSATION_PROTOCOL.md`](../rvoip-core/CONVERSATION_PROTOCOL.md) |
-| Architecture | [`../rvoip-core/INTERFACE_DESIGN.md`](../rvoip-core/INTERFACE_DESIGN.md) |
+| Wire spec | [`../../foundation/rvoip-core/CONVERSATION_PROTOCOL.md`](../../../docs/CONVERSATION_PROTOCOL.md) |
+| Architecture | [`../../foundation/rvoip-core/INTERFACE_DESIGN.md`](../../../docs/INTERFACE_DESIGN.md) |
 | WS WebRTC bridge (today's landing) | [`../rvoip-websocket/src/media_bridge.rs`](../rvoip-websocket/src/media_bridge.rs), [`../rvoip-websocket/tests/ws_bridge_flow.rs`](../rvoip-websocket/tests/ws_bridge_flow.rs) |
-| Cross-transport frame pump | [`../rvoip-core/src/bridge/frame_pump.rs`](../rvoip-core/src/bridge/frame_pump.rs) |
-| `ConnectionAdapter` trait (where `NotImplemented` stubs live) | [`../rvoip-core/src/adapter.rs`](../rvoip-core/src/adapter.rs) |
-| `MediaFrame` (gets `payload_type` field in §4.3) | [`../rvoip-core/src/stream.rs`](../rvoip-core/src/stream.rs) |
+| Cross-transport frame pump | [`../../foundation/rvoip-core/src/bridge/frame_pump.rs`](../../foundation/rvoip-core/src/bridge/frame_pump.rs) |
+| `ConnectionAdapter` trait (where `NotImplemented` stubs live) | [`../../foundation/rvoip-core/src/adapter.rs`](../../foundation/rvoip-core/src/adapter.rs) |
+| `MediaFrame` (gets `payload_type` field in §4.3) | [`../../foundation/rvoip-core/src/stream.rs`](../../foundation/rvoip-core/src/stream.rs) |
 | Auth gate in coordinator | [`src/state/coordinator.rs`](src/state/coordinator.rs) |
 
 ---

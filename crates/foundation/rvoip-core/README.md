@@ -24,11 +24,11 @@ features `vcon-signing` (vCon JWS signing) and `harness`
 
 The rvoip 3 vision and rationale live alongside this crate's source:
 
-- [`voip-3-conversation-model.md`](voip-3-conversation-model.md) — vocabulary
-- [`PRD.md`](PRD.md) — product scope
-- [`INTERFACE_DESIGN.md`](INTERFACE_DESIGN.md) — crate architecture
-- [`GAP_PLAN.md`](GAP_PLAN.md) — implementation status
-- [`CONVERSATION_PROTOCOL.md`](CONVERSATION_PROTOCOL.md) — UCTP wire spec
+- [`voip-3-conversation-model.md`](../../../docs/voip-3-conversation-model.md) — vocabulary
+- [`PRD.md`](../../../docs/PRD.md) — product scope
+- [`INTERFACE_DESIGN.md`](../../../docs/INTERFACE_DESIGN.md) — crate architecture
+- [`GAP_PLAN.md`](../../../docs/GAP_PLAN.md) — implementation status
+- [`CONVERSATION_PROTOCOL.md`](../../../docs/CONVERSATION_PROTOCOL.md) — UCTP wire spec
 
 ## Install
 

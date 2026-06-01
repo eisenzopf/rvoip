@@ -11,7 +11,7 @@
 //!
 //! Throughput is reported in bytes/sec so per-byte regressions (e.g. an
 //! added copy in the parse path) show up directly. See
-//! `crates/rvoip-sip/docs/PROFILING.md` for the broader workflow.
+//! `crates/sip/rvoip-sip/docs/PROFILING.md` for the broader workflow.
 
 use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};

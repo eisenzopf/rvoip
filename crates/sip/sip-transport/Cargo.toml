@@ -96,7 +96,7 @@ name = "resolver_hickory_e2e"
 path = "tests/resolver_hickory_e2e.rs"
 required-features = ["dns"]
 
-# Performance benchmarks. See `crates/rvoip-sip/docs/PROFILING.md`.
+# Performance benchmarks. See `crates/sip/rvoip-sip/docs/PROFILING.md`.
 [[bench]]
 name = "udp_loopback"
 harness = false

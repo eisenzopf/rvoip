@@ -7,7 +7,7 @@
 //! harness, and the vCon container builder — feature-gated so
 //! consumers pull only what they need.
 //!
-//! See `crates/rvoip-core/PRD.md`, `INTERFACE_DESIGN.md`, and
+//! See `docs/PRD.md`, `INTERFACE_DESIGN.md`, and
 //! `CONVERSATION_PROTOCOL.md` for the architectural context.
 //!
 //! ## Quick start

@@ -7,7 +7,7 @@
 //! each field holds at most one optional value, never a collection, so the
 //! single-writer-many-readers RwLock model adds overhead with no benefit.
 //! ArcSwap reads are wait-free atomic loads; writes are a single
-//! compare-and-swap. See `crates/rvoip-sip/docs/PROFILING.md` Scenario 8
+//! compare-and-swap. See `crates/sip/rvoip-sip/docs/PROFILING.md` Scenario 8
 //! ("SessionRegistry contention") for the side-by-side benchmark this
 //! choice is grounded in.
 

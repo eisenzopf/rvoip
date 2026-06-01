@@ -6,7 +6,7 @@
 // Cargo.toml). Re-implement on top of rvoip-sip's CallbackPeer API
 // when audio-core's integration layer is rewritten — see
 // ~/.claude/plans/we-are-preparing-to-abstract-marshmallow.md and
-// crates/rvoip-sip/examples/callback_peer/ for the target shape.
+// crates/sip/rvoip-sip/examples/callback_peer/ for the target shape.
 #![cfg(any())]
 
 #[cfg(feature = "client-integration")]

@@ -450,10 +450,10 @@ future readers can see *why* each item was deferred) and the
 
 **Original blocker:** *"One-line wrapper change blocked on upstream `rvoip-core` adding `IdentityAssurance::DtlsFingerprint` variant."*
 
-**Investigation finding:** The `IdentityAssurance` enum in [`crates/foundation/rvoip-core/src/identity.rs`](../../../crates/foundation/rvoip-core/src/identity.rs) line 51 is **non-exhaustive in practice** — every workspace consumer uses `if let` or `matches!`, no exhaustive `match`. Adding a `DtlsFingerprint { algorithm, value }` variant is a 5-line change that breaks zero existing tests. This was conservatively classified as "upstream-blocked" but is actually a safe single-PR change spanning rvoip-core + rvoip-webrtc.
+**Investigation finding:** The `IdentityAssurance` enum in [`crates/foundation/rvoip-core/src/identity.rs`](../../../../crates/foundation/rvoip-core/src/identity.rs) line 51 is **non-exhaustive in practice** — every workspace consumer uses `if let` or `matches!`, no exhaustive `match`. Adding a `DtlsFingerprint { algorithm, value }` variant is a 5-line change that breaks zero existing tests. This was conservatively classified as "upstream-blocked" but is actually a safe single-PR change spanning rvoip-core + rvoip-webrtc.
 
 **Recommended next steps (Phase D2, ~1 day):**
-1. Append `DtlsFingerprint { algorithm: String, value: String }` to [`crates/foundation/rvoip-core/src/identity.rs`](../../../crates/foundation/rvoip-core/src/identity.rs) line 70.
+1. Append `DtlsFingerprint { algorithm: String, value: String }` to [`crates/foundation/rvoip-core/src/identity.rs`](../../../../crates/foundation/rvoip-core/src/identity.rs) line 70.
 2. Update [`src/adapter.rs::verify_request_signature`](../src/adapter.rs) (~line 994) to call the existing `remote_dtls_fingerprint(conn_id)` and return the variant when at least one fingerprint is present.
 3. Add `WebRtcConfig::pinned_fingerprints: Vec<DtlsFingerprint>` config knob; enforce in `apply_remote_offer` / `apply_remote_answer` (use the existing `WebRtcError::FingerprintNotPinned` variant shipped in G2).
 4. New `tests/identity_pin.rs` + `tests/identity_assurance.rs`.
@@ -478,7 +478,7 @@ future readers can see *why* each item was deferred) and the
 
 **Original blocker:** *"Blocked on `Orchestrator::bridge_connections` SIP path landing in `rvoip-core`."*
 
-**Investigation finding:** The blocker is **misdiagnosed**. `Orchestrator::bridge_connections` is *already feature-complete* at [`crates/foundation/rvoip-core/src/orchestrator.rs`](../../../crates/foundation/rvoip-core/src/orchestrator.rs) lines 653–756 — it polls both adapters, allocates a G.711↔Opus transcoder via `media-core::Transcoder` (also feature-complete), and spawns bidirectional pumps. The *real* blocker is [`crates/sip/rvoip-sip/src/adapter.rs`](../../../crates/sip/rvoip-sip/src/adapter.rs) line 303: `SipAdapter::streams()` returns `vec![]` because the SIP side has no `MediaStream` wrapper around its RTP sessions.
+**Investigation finding:** The blocker is **misdiagnosed**. `Orchestrator::bridge_connections` is *already feature-complete* at [`crates/foundation/rvoip-core/src/orchestrator.rs`](../../../../crates/foundation/rvoip-core/src/orchestrator.rs) lines 653–756 — it polls both adapters, allocates a G.711↔Opus transcoder via `media-core::Transcoder` (also feature-complete), and spawns bidirectional pumps. The *real* blocker is [`crates/sip/rvoip-sip/src/adapter.rs`](../../../../crates/sip/rvoip-sip/src/adapter.rs) line 303: `SipAdapter::streams()` returns `vec![]` because the SIP side has no `MediaStream` wrapper around its RTP sessions.
 
 **Recommended next steps (Phase D4, ~7 days):**
 1. Add `RtpMediaStream` in `crates/sip/rvoip-sip/src/media_stream.rs` — mirrors the shape of [`src/media/stream.rs::WebRtcMediaStream`](../src/media/stream.rs), wraps the existing SIP RTP session with `frames_in`/`frames_out` channels.

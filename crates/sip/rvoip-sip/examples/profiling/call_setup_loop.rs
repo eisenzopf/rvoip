@@ -3,7 +3,7 @@
 //! Same loopback shape as `benches/call_setup.rs` but runs continuously
 //! for `RVOIP_PROFILE_DURATION` seconds (default 30) so `samply` /
 //! `cargo-flamegraph` have enough samples. See
-//! `crates/rvoip-sip/docs/PROFILING.md`.
+//! `crates/sip/rvoip-sip/docs/PROFILING.md`.
 //!
 //! ```bash
 //! cargo build --profile flamegraph -p rvoip-sip --example profiling_call_setup_loop

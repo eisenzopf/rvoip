@@ -4,7 +4,7 @@
 //! speaking the UCTP application protocol. ALPN = `h3`, mount path
 //! defaults to `/uctp`.
 //!
-//! See `crates/rvoip-uctp/UCTP_IMPLEMENTATION_PLAN.md` §5.
+//! See `crates/uctp/rvoip-uctp/UCTP_IMPLEMENTATION_PLAN.md` §5.
 
 pub mod adapter;
 pub mod client;

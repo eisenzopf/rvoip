@@ -3,7 +3,7 @@
 //! `rvoip_core::ConnectionAdapter` implementation over raw QUIC, speaking
 //! the UCTP application protocol. ALPN = `uctp/1`.
 //!
-//! See `crates/rvoip-uctp/UCTP_IMPLEMENTATION_PLAN.md` §4 for the design.
+//! See `crates/uctp/rvoip-uctp/UCTP_IMPLEMENTATION_PLAN.md` §4 for the design.
 
 pub mod adapter;
 pub mod client;

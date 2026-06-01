@@ -4504,7 +4504,7 @@ impl UnifiedCoordinator {
         // Create transport manager first (rvoip-sip-dialog's own transport manager).
         //
         // TCP is enabled by default — the URI-aware
-        // `MultiplexedTransport` (`crates/rvoip-sip-dialog/src/transaction/transport/multiplexed.rs`)
+        // `MultiplexedTransport` (`crates/sip/rvoip-sip-dialog/src/transaction/transport/multiplexed.rs`)
         // routes outbound INVITEs to the right flavour based on the
         // Request-URI's scheme + `;transport=` parameter.
         //
