@@ -1,8 +1,8 @@
 //! SDP Packet Time Attribute Parsers
 //!
 //! Implements parsers for ptime and maxptime attributes as defined in RFC 8866.
-//! Format: a=ptime:<packet time>
-//! Format: a=maxptime:<maximum packet time>
+//! Format: `a=ptime:<packet time>`
+//! Format: `a=maxptime:<maximum packet time>`
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::{positive_integer, to_result};
@@ -42,7 +42,7 @@ fn maxptime_parser(input: &str) -> IResult<&str, u32> {
     ))(input)
 }
 
-/// Parses ptime attribute: a=ptime:<packet time>
+/// Parses ptime attribute: `a=ptime:<packet time>`
 pub fn parse_ptime(value: &str) -> Result<u32> {
     let trimmed = value.trim();
 
@@ -68,7 +68,7 @@ pub fn parse_ptime(value: &str) -> Result<u32> {
     )
 }
 
-/// Parses maxptime attribute: a=maxptime:<maximum packet time>
+/// Parses maxptime attribute: `a=maxptime:<maximum packet time>`
 pub fn parse_maxptime(value: &str) -> Result<u32> {
     let trimmed = value.trim();
 

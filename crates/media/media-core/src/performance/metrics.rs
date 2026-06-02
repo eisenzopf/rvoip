@@ -50,7 +50,7 @@ impl PaddedAtomicU64 {
 /// Concurrent, lock-free sibling to [`PerformanceMetrics`].
 ///
 /// All six hot-path counters are cache-line-padded
-/// ([`PaddedAtomicU64`]) so concurrent writers update independent
+/// (`PaddedAtomicU64`) so concurrent writers update independent
 /// memory and don't trigger MESI line-bounce. Replaces the previous
 /// `Arc<tokio::RwLock<PerformanceMetrics>>` which serialised every
 /// per-frame call through one async lock — at /8 and /16 concurrent

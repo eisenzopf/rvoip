@@ -82,7 +82,7 @@ impl SessionSubscriptions {
     /// Drop every subscription that names `connid` — either as
     /// publisher (the Stream went away) or as subscriber (the
     /// subscriber's Connection ended). Called from
-    /// [`crate::Orchestrator::forget_connection`] so cleanup happens
+    /// `crate::Orchestrator::forget_connection` so cleanup happens
     /// eagerly without requiring callers to track teardown order.
     pub fn drop_connection(&self, connid: &ConnectionId) {
         // Walk every (publisher, strm_id) entry. If the publisher is
@@ -154,7 +154,7 @@ impl SubscriptionRegistry {
     }
 
     /// Drop every reference to `connid` across every Session's table.
-    /// Called by [`crate::Orchestrator::forget_connection`].
+    /// Called by `crate::Orchestrator::forget_connection`.
     pub fn drop_connection(&self, connid: &ConnectionId) {
         // Snapshot session ids so we don't hold the outer DashMap lock
         // while mutating individual SessionSubscriptions.
@@ -272,7 +272,7 @@ impl PublisherRegistry {
 
     /// Drop every registration that names `connid` as publisher (i.e.,
     /// the connection ended). Called by
-    /// [`crate::Orchestrator::forget_connection`].
+    /// `crate::Orchestrator::forget_connection`.
     pub fn drop_publisher(&self, connid: &ConnectionId) {
         // Collect keys to remove; we can't mutate `inner` while
         // iterating it under DashMap.

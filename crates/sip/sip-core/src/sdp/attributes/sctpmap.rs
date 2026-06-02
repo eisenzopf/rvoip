@@ -2,12 +2,12 @@
 //!
 //! Implements parser for legacy SCTP Map attributes as defined in draft-ietf-mmusic-sctp-sdp.
 //! These are now deprecated in favor of the sctp-port attribute in RFC 8841.
-//! Format: a=sctpmap:<port> <app> <streams>
+//! Format: `a=sctpmap:<port> <app> <streams>`
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::is_valid_token;
 
-/// Parses sctpmap attribute: a=sctpmap:<port> <app> <streams>
+/// Parses sctpmap attribute: `a=sctpmap:<port> <app> <streams>`
 /// Legacy attribute for SCTP in WebRTC data channels (obsolete by RFC 8841)
 ///
 /// Example: a=sctpmap:5000 webrtc-datachannel 1024

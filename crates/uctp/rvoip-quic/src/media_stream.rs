@@ -43,7 +43,7 @@ impl QuicDatagramMediaStream {
     /// Construct the stream and spawn the outbound pump task. The
     /// returned `Arc<Self>` exposes [`MediaStream::frames_in`] /
     /// [`MediaStream::frames_out`] to consumers; the adapter retains
-    /// a clone for feeding inbound frames via [`inbound_tx`].
+    /// a clone for feeding inbound frames via `inbound_tx`.
     pub fn start(
         id: StreamId,
         kind: StreamKind,

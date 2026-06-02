@@ -1,7 +1,7 @@
 //! DTLS-SRTP fingerprint extraction for identity binding (H7.4).
 //!
 //! Reads `a=fingerprint:<algo> <hex-digest>` lines from a stored SDP and
-//! exposes them as a typed struct. The rvoip-core [`IdentityAssurance`]
+//! exposes them as a typed struct. The rvoip-core `IdentityAssurance`
 //! enum doesn't yet have a `DtlsFingerprint` variant, so the adapter surfaces
 //! these via [`crate::adapter::WebRtcAdapter::remote_dtls_fingerprint`] for
 //! callers that want to pin / verify the peer cert out-of-band.

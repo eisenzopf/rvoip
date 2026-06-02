@@ -49,7 +49,7 @@ fn setup_parser(input: &str) -> IResult<&str, &str> {
     })(input)
 }
 
-/// Parses fingerprint attribute: a=fingerprint:<hash-function> <fingerprint>
+/// Parses fingerprint attribute: `a=fingerprint:<hash-function> <fingerprint>`
 pub fn parse_fingerprint(value: &str) -> Result<(String, String)> {
     let value = value.trim();
     match fingerprint_parser(value) {
@@ -82,7 +82,7 @@ pub fn parse_fingerprint(value: &str) -> Result<(String, String)> {
     }
 }
 
-/// Parses setup attribute: a=setup:<role>
+/// Parses setup attribute: `a=setup:<role>`
 pub fn parse_setup(value: &str) -> Result<String> {
     let value = value.trim();
     match setup_parser(value) {

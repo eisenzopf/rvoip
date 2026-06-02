@@ -7,7 +7,7 @@
 //! the bridge down promptly.
 //!
 //! Gap plan §4.2 v1 punch list — also holds the per-direction swap
-//! channels used by [`Self::swap_transcoders`] to hot-swap the pump
+//! channels used by `Self::swap_transcoders` to hot-swap the pump
 //! transcoders after a mid-call codec renegotiation. Senders are
 //! `Some(_)` for bridges built via the swap-aware path; the legacy
 //! `new` constructor leaves them `None` for backward compatibility.
@@ -81,7 +81,7 @@ impl CrossBridgeHandle {
     }
 
     /// Atomically swap the transcoders on both directions. Used by
-    /// [`Orchestrator::renegotiate_media`] after a successful
+    /// `Orchestrator::renegotiate_media` after a successful
     /// adapter-level renegotiation: the new (from_pt, to_pt) pairs
     /// reflect the post-renegotiation codecs on each leg.
     ///

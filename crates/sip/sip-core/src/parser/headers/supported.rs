@@ -25,7 +25,7 @@ fn ws_comma_ws(input: &[u8]) -> ParseResult<'_, &[u8]> {
 
 /// Parses a list of option-tags (tokens) separated by commas,
 /// handling whitespace, empty elements, and trailing commas.
-/// Returns a Vec<String> containing the parsed option-tags.
+/// Returns a `Vec<String>` containing the parsed option-tags.
 pub fn parse_supported(input: &[u8]) -> ParseResult<'_, Vec<String>> {
     // Handle empty input explicitly
     if input.is_empty() {

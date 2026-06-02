@@ -15,7 +15,7 @@ use rvoip_sip_transport::transport::TransportType;
 ///
 /// The redactor takes the rendered SIP message text and returns a
 /// trace-friendly variant. Consulted in
-/// [`SipTraceRuntime::publish`] before the static
+/// `SipTraceRuntime::publish` before the static
 /// `format_sip_trace_message` transform runs, so application-specific
 /// scrubs (e.g. drop `X-Customer-Token`) compose with the built-in
 /// auth-header redaction.

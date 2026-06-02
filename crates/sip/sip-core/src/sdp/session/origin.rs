@@ -57,7 +57,7 @@ pub fn parse_origin_nom(input: &str) -> IResult<&str, Origin> {
 }
 
 /// Parses a session origin line (o=) into an Origin struct.
-/// Format: o=<username> <sess-id> <sess-version> <nettype> <addrtype> <unicast-address>
+/// Format: `o=<username> <sess-id> <sess-version> <nettype> <addrtype> <unicast-address>`
 pub fn parse_origin_line(value: &str) -> Result<Origin> {
     // Try using the nom parser first
     if let Ok((remainder, origin)) = parse_origin_nom(value) {

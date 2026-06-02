@@ -100,7 +100,7 @@ pub fn unescape_quoted_string(input: &[u8]) -> Vec<u8> {
 
 /// High-level quoted string parser that both parses and unescapes the content,
 /// providing full RFC compliance for quoted strings.
-/// Returns the properly unescaped string content as Vec<u8>.
+/// Returns the properly unescaped string content as `Vec<u8>`.
 pub fn parse_quoted_string(input: &[u8]) -> ParseResult<'_, Vec<u8>> {
     map(quoted_string, unescape_quoted_string)(input)
 }
@@ -146,7 +146,7 @@ pub fn unescape_comment(input: &[u8]) -> Vec<u8> {
 
 /// High-level comment parser that both parses and unescapes the content,
 /// providing full RFC compliance for comments.
-/// Returns the properly unescaped comment content as Vec<u8>.
+/// Returns the properly unescaped comment content as `Vec<u8>`.
 pub fn parse_comment(input: &[u8]) -> ParseResult<'_, Vec<u8>> {
     map(comment, unescape_comment)(input)
 }

@@ -18,13 +18,13 @@
 ---
 
 > [!NOTE]
-> **Release status.** `rvoip-sip` and its supporting crates are a **beta
-> candidate** for bounded SIP client, server, PBX, gateway, and B2BUA
-> scenarios. The rest of the workspace — WebRTC, QUIC, WebTransport,
-> WebSocket, UCTP, vCon, identity, AI harness — is **alpha** and not
-> published to crates.io in this release.
-> The [rvoip 3 vision](docs/voip-3-conversation-model.md)
-> describes the destination; what ships today is its SIP slice.
+> **Release status.** Maturity is encoded in the version number (no `-alpha`/`-beta`
+> suffixes): **`0.1.x` = alpha, `0.2.x` = beta, `1.0` = stable**. The SIP product
+> (`rvoip-sip` + its spine) is a **beta candidate at `0.2.0`** for bounded SIP client,
+> server, PBX, gateway, and B2BUA scenarios. The rest of the workspace — WebRTC, QUIC,
+> WebTransport, WebSocket, UCTP, vCon, identity, AI harness — is **alpha, published at
+> `0.1.0`** (API-unstable; expect breaking changes before `1.0`).
+> The [rvoip 3 vision](docs/voip-3-conversation-model.md) describes the destination.
 
 ## ⚡ rvoip in one breath
 
@@ -67,7 +67,7 @@ switching stacks.
 
 ```toml
 [dependencies]
-rvoip-sip = "0.2.0-beta.1"
+rvoip-sip = "0.2.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -130,8 +130,8 @@ PBX interop), see [`crates/sip/rvoip-sip/examples/`](crates/sip/rvoip-sip/exampl
 <a id="feature-support"></a>
 ## 📊 Feature support
 
-> ✅ **Beta** = in the beta closure, RFC-correct, tested · 🚧 **Alpha** = in
-> the workspace, not on crates.io · 🔮 **Roadmap** = planned, not yet implemented
+> ✅ **Beta** (`0.2.0`) = RFC-correct, tested · 🚧 **Alpha** (`0.1.0`) = published,
+> API-unstable · 🔮 **Roadmap** = planned, not yet implemented
 
 ### 📞 SIP methods (RFC 3261 + extensions)
 
@@ -250,10 +250,11 @@ without the substrates knowing about each other.
 
 ## 📦 Crate matrix
 
-### ✅ Beta — published to crates.io as `0.2.0-beta.1`
+### ✅ Beta — published to crates.io as `0.2.0`
 
 | Crate | Purpose |
 | --- | --- |
+| **[rvoip](crates/rvoip)** | Facade — opt into transports/extensions via features (default `sip`) |
 | **[rvoip-sip](crates/sip/rvoip-sip)** | SIP umbrella — `Endpoint` / `StreamPeer` / `CallbackPeer` / `UnifiedCoordinator` |
 | [rvoip-sip-core](crates/sip/sip-core) | RFC 3261 message parsing, SDP, URIs |
 | [rvoip-sip-transport](crates/sip/sip-transport) | UDP / TCP / TLS / WebSocket transport |
@@ -268,15 +269,14 @@ without the substrates knowing about each other.
 | [rvoip-codec-core](crates/media/codec-core) | G.711 codec implementation |
 | [rvoip-auth-core](crates/identity/auth-core) | OAuth2 + Bearer + token primitives |
 
-### 🚧 Alpha — in the workspace, not yet on crates.io
+### 🚧 Alpha — published to crates.io at `0.1.0`
 
-`publish = false` on these until each reaches the beta bar. They're fully
-buildable in this repo for evaluation, and `rvoip-vcon` + `rvoip-harness`
-publish at `0.1.0-alpha.1` to satisfy `rvoip-core`'s optional features.
+These publish at `0.1.0` (API-unstable) so the [`rvoip`](crates/rvoip) facade can expose
+them behind feature flags (`webrtc`, `uctp`, `voip-3`, `sip-stir-shaken`, `client`). Expect
+breaking changes before each graduates to beta.
 
 | Crate | Why it's alpha |
 | --- | --- |
-| [rvoip](crates/rvoip) | Umbrella — held until more substrates reach beta |
 | [rvoip-client](crates/rvoip-client) | Client SDK — API still in motion |
 | [rvoip-uctp](crates/uctp/rvoip-uctp) | UCTP protocol design ongoing ([GAP_PLAN](docs/GAP_PLAN.md)) |
 | [rvoip-quic](crates/uctp/rvoip-quic) | New QUIC substrate adapter |
@@ -371,11 +371,9 @@ cargo test -p rvoip-sip -p rvoip-sip-core -p rvoip-sip-dialog \
             -p rvoip-sip-transport -p rvoip-sip-proxy -p rvoip-sip-registrar
 ```
 
-Beta-readiness checks (used by CI before publication):
+Run the workspace test suite:
 
 ```sh
-scripts/check-publish-readiness.sh   # metadata + publish-flag audit
-scripts/publish-dry-run.sh           # cargo publish --dry-run, topological order
 scripts/test_all.sh                  # workspace-wide test runner
 ```
 

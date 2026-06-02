@@ -18,7 +18,7 @@
 //!
 //! ## Format
 //!
-//! ```
+//! ```text
 //! // Example format:
 //! // In-Reply-To: 70710@saturn.bell-tel.com
 //! // In-Reply-To: 70710@saturn.bell-tel.com, 17320@venus.bell-tel.com
@@ -219,7 +219,7 @@ impl Deref for InReplyTo {
     /// Dereferences to the inner vector of CallId objects.
     ///
     /// This implementation allows using an InReplyTo header wherever a
-    /// Vec<CallId> reference is expected, providing direct access to all
+    /// `Vec<CallId>` reference is expected, providing direct access to all
     /// vector methods like `len()`, `iter()`, indexing, etc.
     ///
     /// # Examples

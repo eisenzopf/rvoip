@@ -329,7 +329,7 @@ impl Deref for RecordRoute {
     /// Dereferences to the inner vector of RecordRouteEntry objects.
     ///
     /// This implementation allows using a RecordRoute header wherever a
-    /// Vec<RecordRouteEntry> reference is expected, providing direct access
+    /// `Vec<RecordRouteEntry>` reference is expected, providing direct access
     /// to all vector methods like `len()`, `iter()`, indexing, etc.
     ///
     /// # Examples

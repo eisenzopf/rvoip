@@ -18,7 +18,7 @@
 //!
 //! ## Format
 //!
-//! ```
+//! ```text
 //! // Example format:
 //! // Max-Forwards: 70
 //! ```

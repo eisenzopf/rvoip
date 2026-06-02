@@ -1,7 +1,7 @@
 //! SDP ExtMap Attribute Parser
 //!
 //! Implements parser for RTP header extension map attributes as defined in RFC 8285.
-//! Format: a=extmap:<id>[/<direction>] <uri> [<extension parameters>]
+//! Format: `a=extmap:<id>[/<direction>] <uri> [<extension parameters>]`
 
 use crate::error::{Error, Result};
 
@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 
 
 
-/// Parses extmap attribute: a=extmap:<id>[/<direction>] <uri> [<extension parameters>]
+/// Parses extmap attribute: `a=extmap:<id>[/<direction>] <uri> [<extension parameters>]`
 pub fn parse_extmap(value: &str) -> Result<(u16, Option<String>, String, Option<String>)> {
     let value = value.trim();
 

@@ -92,7 +92,7 @@ pub struct Route {
 /// [`WebRtcConfig::pinned_fingerprints`](crate::config::WebRtcConfig::pinned_fingerprints)
 /// and, if the union is non-empty, rejects any peer whose negotiated
 /// fingerprint isn't in the union with
-/// [`WebRtcError::FingerprintNotPinned`](crate::errors::WebRtcError::FingerprintNotPinned).
+/// [`WebRtcError::FingerprintNotPinned`].
 ///
 /// `session_hint` is a free-form identifier the caller can use to scope
 /// pinning per tenant / per call (e.g. a WHIP `session_id` or a UCTP
@@ -321,7 +321,7 @@ impl WebRtcAdapter {
     /// returned list is unioned with [`WebRtcConfig::pinned_fingerprints`];
     /// when the union is non-empty, peers whose `a=fingerprint:` doesn't
     /// match are rejected with
-    /// [`WebRtcError::FingerprintNotPinned`](crate::errors::WebRtcError::FingerprintNotPinned).
+    /// [`WebRtcError::FingerprintNotPinned`].
     pub fn set_fingerprint_policy(&self, hook: Arc<dyn FingerprintPolicyHook>) {
         *self.fingerprint_policy.write() = Some(hook);
     }
@@ -417,7 +417,7 @@ impl WebRtcAdapter {
         &self.routes
     }
 
-    /// G4 — aggregate [`WebRtcStatsSnapshot`] fields across every live media
+    /// G4 — aggregate `WebRtcStatsSnapshot` fields across every live media
     /// stream on every route. Used by the Prometheus exporter and by
     /// dashboards that want a single rollup number per peer-connection.
     ///

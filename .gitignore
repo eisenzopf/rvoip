@@ -12,6 +12,11 @@ desktop.ini
 Cargo.lock
 publish_order.sh
 bump_version.sh
+# crates.io release tooling — run locally, never tracked in the repo.
+scripts/check-publish-readiness.sh
+scripts/publish-beta.sh
+scripts/publish-dry-run.sh
+scripts/prune-obsolete.sh
 Cargo.toml.backup
 test_vectors/
 *.db

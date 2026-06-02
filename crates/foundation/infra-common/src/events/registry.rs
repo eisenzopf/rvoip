@@ -76,7 +76,7 @@ impl<T: 'static + Send + Sync> AnyBroadcastSender for AnyBroadcastSenderImpl<T> 
     }
 }
 
-/// Debug implementation for Box<dyn AnyBroadcastSender>
+/// Debug implementation for `Box<dyn AnyBroadcastSender>`
 impl Debug for Box<dyn AnyBroadcastSender> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.as_ref().fmt_debug(f)

@@ -12,7 +12,7 @@ use nom::{
 };
 
 /// Parse a media description line using nom
-/// Format: m=<media> <port>[/<port-count>] <proto> <fmt> [<fmt>]*
+/// Format: `m=<media> <port>[/<port-count>] <proto> <fmt> [<fmt>]`*
 pub fn parse_media_description_nom(input: &str) -> IResult<&str, MediaDescription> {
     // m=<media> <port>[/<port-count>] <proto> <fmt> [<fmt>]*
     let (input, _) = opt(tag("m="))(input)?;

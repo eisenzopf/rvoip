@@ -2,14 +2,14 @@
 //!
 //! A5 Phase 2b-min kept a stateless per-flow ping task that wrote
 //! CRLFCRLF on a tokio interval and silently died on send failure.
-//! Phase 2c upgrades that task to a stateful [`OutboundFlow`] that:
+//! Phase 2c upgrades that task to a stateful `OutboundFlow` that:
 //!
 //! * arms a pong deadline after each ping,
 //! * folds in transport `KeepAlivePongReceived` / `ConnectionClosed`
 //!   events to either reset or fail the flow,
 //! * emits a single
 //!   [`SessionCoordinationEvent::OutboundFlowFailed`](crate::events::SessionCoordinationEvent::OutboundFlowFailed)
-//!   on the first transition to [`FlowState::Failed`] so session-core
+//!   on the first transition to `FlowState::Failed` so session-core
 //!   can trigger a fresh REGISTER (RFC 5626 §4.4.1 flow recovery).
 //!
 //! This module owns the state transitions and unit tests; the spawn +

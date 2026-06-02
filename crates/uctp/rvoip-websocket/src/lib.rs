@@ -12,7 +12,7 @@
 //!    Structurally identical to `rvoip-quic` but uses `tokio-tungstenite`.
 //!    No ALPN involvement (WS uses HTTP Upgrade).
 //!
-//! 2. **Media**: per-Connection WebRTC peer (via [`rvoip_webrtc`] when the
+//! 2. **Media**: per-Connection WebRTC peer (via `rvoip_webrtc` when the
 //!    `media-webrtc` feature is enabled). SDP/ICE/DTLS exchange rides inside
 //!    `connection.offer.substrate_setup`. `MediaFrame.payload` (already RTP-shaped)
 //!    bridges to outbound tracks and back via inbound pumps.

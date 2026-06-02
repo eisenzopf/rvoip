@@ -283,7 +283,7 @@ impl FromStr for Warning {
 ///
 /// This type is used to properly implement TypedHeaderTrait for a collection
 /// of Warning headers, as required by the TypedHeader::Warning variant which
-/// expects Vec<Warning>.
+/// expects `Vec<Warning>`.
 ///
 /// # Examples
 ///

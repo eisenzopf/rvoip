@@ -94,7 +94,7 @@ fn standard_audio_rtcp_feedback() -> Vec<RTCPFeedback> {
 ///
 /// Backward-compatible: uses the default Opus settings
 /// (`minptime=10;useinbandfec=1`). Prefer
-/// [`build_media_engine_with_config`] when you want to thread an
+/// `build_media_engine_with_config` when you want to thread an
 /// [`OpusSettings`](crate::config::OpusSettings) through.
 pub fn build_media_engine() -> Result<MediaEngine> {
     build_media_engine_with_opus(&crate::config::OpusSettings::default())

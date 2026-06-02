@@ -494,7 +494,7 @@ impl Deref for Path {
 
     /// Implements Deref to allow direct access to the underlying vector of path entries.
     ///
-    /// This allows operations like indexing (path[0]) to work directly on a Path instance.
+    /// This allows operations like indexing (path`[0]`) to work directly on a Path instance.
     fn deref(&self) -> &Self::Target {
         &self.0
     }

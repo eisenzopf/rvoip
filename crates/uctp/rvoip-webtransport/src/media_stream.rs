@@ -153,7 +153,7 @@ impl MediaStream for WebTransportDatagramMediaStream {
     }
 }
 
-/// Mirror of [`rvoip_quic::FanoutContext`] for the WT adapter. See
+/// Mirror of `rvoip_quic::FanoutContext` for the WT adapter. See
 /// that doc-comment.
 #[derive(Clone)]
 pub struct FanoutContext {
@@ -165,7 +165,7 @@ pub struct FanoutContext {
 /// Per-`web_transport_quinn::Session` datagram reader. One reader
 /// serves all `WebTransportDatagramMediaStream`s on this session.
 ///
-/// `fanout`: see [`rvoip_quic::FanoutContext`]; when `Some`, the reader
+/// `fanout`: see `rvoip_quic::FanoutContext`; when `Some`, the reader
 /// forwards every successfully-routed frame to
 /// `Orchestrator::fanout_frame(...)` so multi-party subscribers receive
 /// the publisher's media.

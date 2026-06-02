@@ -12,7 +12,7 @@
 //!
 //! - **Single-target stateful proxy.** One inbound INVITE / non-INVITE
 //!   request fans to exactly one downstream client transaction.
-//!   Multi-target forking lives in [`forking`] in Phase 7.
+//!   Multi-target forking lives in `forking` in Phase 7.
 //! - **Timer C** (§16.8) — INVITE proxy transaction times out at 3 min
 //!   by default; app-overridable.
 //! - **§16.6 request processing**: decrement `Max-Forwards`, push own

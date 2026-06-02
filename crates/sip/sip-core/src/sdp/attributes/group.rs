@@ -1,7 +1,7 @@
 //! SDP Group Attribute Parser
 //!
 //! Implements parser for group attributes as defined in RFC 5888.
-//! Format: a=group:<semantics> <identification-tag> ...
+//! Format: `a=group:<semantics> <identification-tag>` ...
 
 use crate::error::{Error, Result};
 

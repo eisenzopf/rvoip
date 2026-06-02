@@ -5,7 +5,7 @@ use std::fmt;
 /// SIP header, consisting of a name and value
 ///
 /// This struct represents a SIP header with a [`HeaderName`] and a [`HeaderValue`].
-/// It provides a more generic representation of headers compared to [`TypedHeader`],
+/// It provides a more generic representation of headers compared to [`TypedHeader`](crate::types::TypedHeader),
 /// and is primarily used during parsing and in cases where type-safety is not required.
 ///
 /// # Examples

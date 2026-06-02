@@ -4467,10 +4467,11 @@ impl UnifiedCoordinator {
 
         let registrar = Arc::new(registrar);
 
-        // Get the global event coordinator
-        let global_coordinator = rvoip_infra_common::events::global_coordinator()
-            .await
-            .clone();
+        // Subscribe the registration adapter to THIS coordinator's event bus — the
+        // same instance the dialog/transaction layer publishes inbound REGISTER to.
+        // Using the process-wide singleton here meant the adapter never saw REGISTER,
+        // so the registrar never answered and clients timed out.
+        let global_coordinator = self.global_coordinator.clone();
 
         // Create and start the registration adapter
         let adapter = Arc::new(RegistrationAdapter::new(

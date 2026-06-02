@@ -114,7 +114,7 @@ pub struct Orchestrator {
     sessions_by_connection: Arc<DashMap<ConnectionId, SessionId>>,
     /// P3 — per-Session vCon builder.
     session_vcons: Arc<DashMap<SessionId, Arc<crate::vcon::DefaultVconBuilder>>>,
-    /// P5 — provider registry (name → Arc<dyn Provider>). Populated
+    /// P5 — provider registry (name → `Arc<dyn Provider>`). Populated
     /// by `register_asr_provider` etc. before `attach_ai` /
     /// `start_recording` / `start_transcription` resolve the name.
     asr_providers: Arc<DashMap<String, Arc<dyn crate::harness::AsrProvider>>>,
@@ -815,7 +815,7 @@ impl Orchestrator {
     /// `Event::SessionStarted`. `invitees` populates the
     /// `Session::participants` set immediately; matching `Participant`
     /// entries are added to the Conversation when each invitee actually
-    /// joins via [`join_session`] (so identity_ref / kind / role land
+    /// joins via `join_session` (so identity_ref / kind / role land
     /// from a real join, not from the invite).
     #[instrument(skip(self, invitees), fields(conversation_id = %conversation_id, medium = ?medium, session_id))]
     pub async fn start_session(
@@ -1357,7 +1357,7 @@ impl Orchestrator {
         delivered
     }
 
-    /// Process-shared [`PublisherRegistry`] for the multi-party fanout
+    /// Process-shared `PublisherRegistry` for the multi-party fanout
     /// path. Adapters build an `OrchestratorSubscriptionHandler` from
     /// this registry plus the orchestrator itself; the registry is
     /// the bridge from "publisher emitted `stream.opened`" (registered

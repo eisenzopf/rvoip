@@ -12,7 +12,7 @@
 //!
 //! The Organization header has a simple format consisting of a token or quoted string:
 //!
-//! ```
+//! ```text
 //! // Example format:
 //! // Organization: Rudeless Ventures
 //! ```

@@ -22,7 +22,7 @@
 //!
 //! ## Format
 //!
-//! ```rust
+//! ```text
 //! // Supported: 100rel, timer, path
 //! // k: 100rel, path
 //! ```

@@ -108,7 +108,7 @@ pub fn parse_event_header_value(input: &[u8]) -> IResult<&[u8], Event, NomError<
 }
 
 /// Parses a full Event header line, including the "Event:" part.
-/// Example: "Event: <conference>;id=conf-xyz"
+/// Example: "Event: `<conference>`;id=conf-xyz"
 /// Returns types::headers::event::Event
 pub fn parse_event_header(input: &[u8]) -> IResult<&[u8], Event, NomError<&[u8]>> {
     preceded(

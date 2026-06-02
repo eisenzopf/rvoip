@@ -6,8 +6,8 @@
 //!
 //! This crate owns the protocol itself (envelopes, type catalog, state
 //! machine, capability negotiation) plus the substrate-agnostic helpers
-//! consumed by per-substrate adapter crates ([`rvoip-quic`],
-//! [`rvoip-webtransport`]). It does **not** own any accept/dial loops —
+//! consumed by per-substrate adapter crates (`rvoip-quic`,
+//! `rvoip-webtransport`). It does **not** own any accept/dial loops —
 //! those live in the adapter crates.
 //!
 //! See `UCTP_IMPLEMENTATION_PLAN.md` (this directory) for the v0 design

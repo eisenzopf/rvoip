@@ -1,7 +1,7 @@
 //! D3 — RTP packetizers for video codecs.
 //!
 //! Each codec has its own RFC-specified payload format; the modules here
-//! own the wire-level details so [`VideoSource`](crate::client::VideoSource)
+//! own the wire-level details so `VideoSource`
 //! implementations don't have to.
 
 pub mod vp8;

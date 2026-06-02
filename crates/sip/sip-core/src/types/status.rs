@@ -729,7 +729,7 @@ impl StatusCode {
 impl fmt::Display for StatusCode {
     /// Formats the status code as a string.
     ///
-    /// Formats the status code as "<numeric code> <reason phrase>",
+    /// Formats the status code as `"<numeric code> <reason phrase>"`,
     /// following the standard SIP protocol format.
     ///
     /// # Examples

@@ -3,7 +3,7 @@
 //! Validates RFC 7519 JWTs against a pre-configured signing key
 //! (symmetric HMAC, or asymmetric RSA / EC PEM), checks `exp`, and
 //! optionally enforces `iss` / `aud` constraints. On success, maps the
-//! token's `sub` claim onto a [`rvoip_core::identity::IdentityAssurance::UserAuthorized`]
+//! token's `sub` claim onto a `rvoip_core::identity::IdentityAssurance::UserAuthorized`
 //! with whatever `scope` / `scopes` claim the token carried.
 //!
 //! This is the first real (non-stub) [`BearerValidator`]; it makes the

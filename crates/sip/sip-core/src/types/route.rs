@@ -529,7 +529,7 @@ impl Deref for Route {
 
     /// Implements the Deref trait for Route.
     ///
-    /// This allows a Route instance to be treated as a reference to a Vec<ParserRouteValue>,
+    /// This allows a Route instance to be treated as a reference to a `Vec<ParserRouteValue>`,
     /// which enables using Vec methods directly on a Route instance.
     ///
     /// # Examples

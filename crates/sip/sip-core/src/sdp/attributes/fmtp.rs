@@ -1,7 +1,7 @@
 //! SDP Format Parameter (fmtp) Attribute Parser
 //!
 //! Implements parser for fmtp attributes as defined in RFC 8866.
-//! Format: a=fmtp:<format> <format specific parameters>
+//! Format: `a=fmtp:<format> <format specific parameters>`
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::token;
@@ -36,7 +36,7 @@ fn fmtp_parser(input: &str) -> IResult<&str, (String, String)> {
     ))(input)
 }
 
-/// Parses fmtp attribute: a=fmtp:<format> <format specific parameters>
+/// Parses fmtp attribute: `a=fmtp:<format> <format specific parameters>`
 pub fn parse_fmtp(value: &str) -> Result<ParsedAttribute> {
     match fmtp_parser(value.trim()) {
         Ok((_, (format, parameters))) => {

@@ -27,7 +27,7 @@ fn parse_bandwidth_nom(input: &str) -> IResult<&str, (String, u64)> {
 }
 
 /// Parse a bandwidth line (b=) into a BandwidthType and value.
-/// Format: b=<bwtype>:<bandwidth>
+/// Format: `b=<bwtype>:<bandwidth>`
 pub fn parse_bandwidth_line(value: &str) -> Result<ParsedAttribute> {
     // Try using the nom parser first
     let value_trimmed = value.trim();

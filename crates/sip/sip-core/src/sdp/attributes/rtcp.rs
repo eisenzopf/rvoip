@@ -61,7 +61,7 @@ pub fn parse_rtcp_mux(_value: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// Parses rtcp-fb attribute: a=rtcp-fb:<payload type> <feedback type> [<additional feedback parameters>]
+/// Parses rtcp-fb attribute: `a=rtcp-fb:<payload type> <feedback type> [<additional feedback parameters>]`
 pub fn parse_rtcp_fb(value: &str) -> Result<(String, String, Option<String>)> {
     match rtcp_fb_parser(value.trim()) {
         Ok((_, result)) => {

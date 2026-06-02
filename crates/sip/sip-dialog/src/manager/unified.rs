@@ -154,7 +154,7 @@ use super::core::DialogManager;
 /// ## Thread Safety
 ///
 /// UnifiedDialogManager is fully thread-safe and can be shared across async tasks
-/// using Arc<UnifiedDialogManager>.
+/// using `Arc<UnifiedDialogManager>`.
 #[derive(Debug, Clone)]
 pub struct UnifiedDialogManager {
     /// Core dialog manager (contains all the actual implementation)

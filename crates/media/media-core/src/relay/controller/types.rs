@@ -169,7 +169,7 @@ impl Default for AdvancedProcessorConfig {
 /// the per-frame `process_frame` / `analyze_frame` critical sections
 /// are CPU-only DSP work (no `.await`), and on the advanced-media
 /// hot path the tokio scheduler dip costs more than the lock itself.
-/// `metrics` uses [`ConcurrentPerformanceMetrics`] for the same
+/// `metrics` uses `ConcurrentPerformanceMetrics` for the same
 /// reason it does on the controller (lock-free padded atomics).
 #[derive(Debug)]
 pub struct AdvancedProcessorSet {

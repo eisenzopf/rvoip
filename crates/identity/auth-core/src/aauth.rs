@@ -10,14 +10,14 @@
 //!   validated by [`ActorTokenValidator`] introduced here.
 //!
 //! The combined result maps to
-//! [`rvoip_core::identity::IdentityAssurance::UserAuthorized`] with the
+//! `rvoip_core::identity::IdentityAssurance::UserAuthorized` with the
 //! subject's `sub` claim as `user_id` and the actor's `sub` claim as
 //! `identity`. Scopes union both tokens' `scope` / `scopes` claims.
 //!
 //! v0 ships an [`AAuthValidator`] backed by two [`crate::jwt::JwtValidator`]
 //! instances (one per token type). Production deployments swap in
 //! whatever AAuth issuer they negotiate with; the wire-protocol shape
-//! is fixed by the gap plan §5.1 spec change to [`crate::AuthResponse`]
+//! is fixed by the gap plan §5.1 spec change to `crate::AuthResponse`
 //! (`actor_token: Option<String>`).
 
 use std::sync::Arc;

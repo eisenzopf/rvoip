@@ -378,8 +378,8 @@ impl fmt::Display for Timer {
 
 /// Configuration for standard SIP transaction timer durations, based on RFC 3261.
 ///
-/// These settings control the behavior of timers managed by the [`TimerFactory`]
-/// and [`TimerManager`].
+/// These settings control the behavior of timers managed by the `TimerFactory`
+/// and `TimerManager`.
 ///
 /// # Example: Custom Timer Settings
 ///

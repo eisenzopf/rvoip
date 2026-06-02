@@ -61,8 +61,8 @@ pub const MAX_SESSIONS_PER_PEER: usize = 32;
 /// via [`UctpCoordinator::start_full_with_caps`] for adapters that
 /// want non-default tuning. Both fields have safe defaults from
 /// [`SIGNALING_SEND_TIMEOUT`] / [`MAX_SESSIONS_PER_PEER`], so callers
-/// that don't care can keep using the existing [`start`] /
-/// [`start_full`] entry points.
+/// that don't care can keep using the existing `start` /
+/// `start_full` entry points.
 #[derive(Clone, Debug)]
 pub struct UctpCoordinatorCaps {
     /// Soft timeout for outbound signaling sends. See [`SIGNALING_SEND_TIMEOUT`].
@@ -263,7 +263,7 @@ impl UctpCoordinator {
     ///
     /// Adapters that want to honor `stream.subscribe` envelopes inject
     /// an orchestrator-backed handler here; otherwise the
-    /// [`RejectingHandler`] keeps the legacy 503 reject.
+    /// `RejectingHandler` keeps the legacy 503 reject.
     pub fn start_full(
         transport: TransportLabel,
         in_rx: mpsc::Receiver<UctpEnvelope>,

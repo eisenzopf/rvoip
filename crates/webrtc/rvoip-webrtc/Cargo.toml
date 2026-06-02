@@ -1,7 +1,6 @@
 [package]
 name = "rvoip-webrtc"
-version = "0.1.0-alpha.1"
-publish = false  # Alpha-tier; pinned to upstream webrtc-rs 0.20.0-alpha.1.
+version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true
@@ -17,13 +16,12 @@ description = "rvoip-core WebRTC interop adapter built on webrtc-rs 0.20.0-alpha
 default = []
 signaling-whip = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http", "dep:serde_json"]
 signaling-ws = ["dep:tokio-tungstenite", "dep:serde_json"]
-client = []
+client = ["dep:serde_json"]
 comprehensive = ["client", "signaling-ws", "dep:serde_json"]
 # D3a — cpal-backed microphone capture + speaker playback, real Opus encoder.
 # Use to ship a "cargo add rvoip-webrtc; place a call from a laptop"
 # experience without writing platform glue. Pulls in `comprehensive`
-# (the existing client base — `client` alone has unsatisfied serde_json
-# uses in `client::native`).
+# (the full client base: signaling-ws on top of `client`).
 client-cpal = ["comprehensive", "dep:cpal", "dep:opus"]
 # D3 — `VideoSource` / `VideoSink` trait surface + RFC 7741/6184 packetizers
 # (pure Rust). Concrete encoder backends are gated separately so users

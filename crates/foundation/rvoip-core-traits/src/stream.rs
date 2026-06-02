@@ -25,7 +25,7 @@ pub struct MediaFrame {
     pub captured_at: DateTime<Utc>,
     /// RTP payload type for this frame, when known. Set by adapter
     /// inbound pumps that read the wire RTP header (SIP, WebRTC, QUIC,
-    /// WT). Used by the cross-transport [`crate::bridge::frame_pump`]
+    /// WT). Used by the cross-transport `crate::bridge::frame_pump`
     /// to route RFC 4733 telephone-events (typically PT 101) to the
     /// DTMF event sink instead of through the codec transcoder. `None`
     /// for construction sites that don't have a wire RTP header
@@ -59,7 +59,7 @@ pub trait MediaStream: Send + Sync {
     async fn close(self: Arc<Self>) -> Result<()>;
 }
 
-/// Cheap, cloneable reference a [`crate::Connection`] holds to its media flows.
+/// Cheap, cloneable reference a `crate::Connection` holds to its media flows.
 /// Wraps an `Arc<dyn MediaStream>` so the trait object can live in `Debug`
 /// types like `Connection` without forcing every adapter to implement Debug.
 #[derive(Clone)]

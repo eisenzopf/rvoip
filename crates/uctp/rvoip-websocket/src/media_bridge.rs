@@ -1,7 +1,7 @@
 //! `WebRtcMediaBridge` — co-located WebRTC media per UCTP Connection.
 //!
 //! With the `media-webrtc` feature, delegates ICE/DTLS-SRTP and RTP bridging
-//! to [`rvoip_webrtc`]. Without it, substrate setup methods return a documented
+//! to `rvoip_webrtc`. Without it, substrate setup methods return a documented
 //! error directing callers to enable the feature.
 
 use crate::errors::{Result, UctpWsError};

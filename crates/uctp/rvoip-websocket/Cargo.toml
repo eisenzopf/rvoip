@@ -1,7 +1,6 @@
 [package]
 name = "rvoip-websocket"
-version = "0.1.0-alpha.1"
-publish = false  # Alpha-tier; WebSocket substrate deferred per rvoip 3 v1.x.
+version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true

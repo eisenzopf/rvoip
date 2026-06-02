@@ -26,11 +26,11 @@ use std::fmt;
 ///
 /// ## Core Components
 ///
-/// - [`SipValue`](value::SipValue) - A JSON-like value representing any SIP data
-/// - [`SipJsonExt`](SipJsonExt) - Extension trait providing JSON operations on SIP types
+/// - [`SipValue`] - A JSON-like value representing any SIP data
+/// - [`SipJsonExt`] - Extension trait providing JSON operations on SIP types
 /// - [`SipMessageJson`](ext::SipMessageJson) - Convenience trait for common SIP headers
-/// - [`path`](path) module - Functions for path-based access
-/// - [`query`](query) module - Functions for query-based access
+/// - [`path`] module - Functions for path-based access
+/// - [`query`] module - Functions for query-based access
 ///
 /// ## Path Access vs. Query Access
 ///

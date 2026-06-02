@@ -3,7 +3,7 @@
 //! This module implements the Security Descriptions for SDP as defined in RFC 4568.
 //! SDES allows keys and related information to be transported over SDP.
 //!
-//! Reference: https://tools.ietf.org/html/rfc4568
+//! Reference: <https://tools.ietf.org/html/rfc4568>
 
 use crate::security::SecurityKeyExchange;
 use crate::srtp::crypto::SrtpCryptoKey;

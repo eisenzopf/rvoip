@@ -15,7 +15,7 @@
 //!
 //! The Allow header takes the form of a comma-separated list of SIP methods:
 //!
-//! ```
+//! ```text
 //! // Allow: INVITE, ACK, CANCEL, OPTIONS, BYE
 //! ```
 //!

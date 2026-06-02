@@ -986,7 +986,7 @@ impl DialogManager {
     /// identity per RFC 5626 §4.2; a second call for the same key
     /// stops the prior flow first (idempotent refresh on re-REGISTER).
     ///
-    /// Phase 2c: the spawned task drives an [`OutboundFlow`] state
+    /// Phase 2c: the spawned task drives an `OutboundFlow` state
     /// machine — after each ping it arms a pong deadline, and on
     /// pong-timeout / connection-closed / send-error it emits a single
     /// [`SessionCoordinationEvent::OutboundFlowFailed`] so session-core

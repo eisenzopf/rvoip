@@ -30,24 +30,24 @@
 //!
 //! ## Examples
 //!
-//! ```rust
-/// use rvoip_sip_core::prelude::*;
-/// use std::str::FromStr;
-///
-/// // Create a Contact with an address
-/// let uri = Uri::from_str("sip:john@example.com").unwrap();
-/// let address = Address::new_with_display_name("John Doe", uri);
-/// let contact_info = ContactParamInfo { address };
-/// let contact = Contact::new_params(vec![contact_info]);
-///
-/// // Create a wildcard Contact
-/// let wildcard = Contact::new_star();
-/// assert!(wildcard.is_star());
-///
-/// // Parse a Contact from a string
-/// let contact = Contact::from_str("\"Alice\" <sip:alice@example.com>;expires=3600").unwrap();
-/// assert_eq!(contact.expires(), Some(3600));
-/// ```
+//! ```text
+//! use rvoip_sip_core::prelude::*;
+//! use std::str::FromStr;
+//!
+//! // Create a Contact with an address
+//! let uri = Uri::from_str("sip:john@example.com").unwrap();
+//! let address = Address::new_with_display_name("John Doe", uri);
+//! let contact_info = ContactParamInfo { address };
+//! let contact = Contact::new_params(vec![contact_info]);
+//!
+//! // Create a wildcard Contact
+//! let wildcard = Contact::new_star();
+//! assert!(wildcard.is_star());
+//!
+//! // Parse a Contact from a string
+//! let contact = Contact::from_str("\"Alice\" <sip:alice@example.com>;expires=3600").unwrap();
+//! assert_eq!(contact.expires(), Some(3600));
+//! ```
 use crate::types::address::Address;
 // use crate::types::Param; // Removed duplicate import
 use crate::error::{Error, Result};

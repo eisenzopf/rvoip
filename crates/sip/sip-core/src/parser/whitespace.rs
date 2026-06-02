@@ -40,7 +40,7 @@ pub fn lws(input: &[u8]) -> ParseResult<'_, &[u8]> {
 }
 
 /// Parses optional whitespace (SWS) according to RFC 3261
-/// SWS = [LWS] ; optional linear whitespace
+/// SWS = `[LWS]` ; optional linear whitespace
 pub fn sws(input: &[u8]) -> ParseResult<'_, &[u8]> {
     opt(lws)(input).map(|(rem, opt_val)| (rem, opt_val.unwrap_or(&[])))
 }

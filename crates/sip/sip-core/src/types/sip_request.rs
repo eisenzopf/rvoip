@@ -164,7 +164,7 @@ impl Request {
         self
     }
 
-    /// Sets all headers from a Vec<TypedHeader> (used by parser)
+    /// Sets all headers from a `Vec<TypedHeader>` (used by parser)
     ///
     /// This method replaces all existing headers with the provided ones.
     ///

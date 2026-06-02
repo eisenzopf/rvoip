@@ -80,7 +80,7 @@ pub struct UctpWsConfig {
     /// Optional client config for outbound `originate` dials.
     pub client_url: Option<Url>,
     /// Per-peer resource caps (plan D1 / D2). See
-    /// [`rvoip_quic::UctpQuicConfig::coordinator_caps`].
+    /// `rvoip_quic::UctpQuicConfig::coordinator_caps`.
     pub coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
     /// Optional `rustls::ServerConfig` for TLS-terminating WSS. When
     /// `Some`, the accept loop wraps each `TcpStream` in

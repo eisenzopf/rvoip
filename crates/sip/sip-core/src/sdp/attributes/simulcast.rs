@@ -114,8 +114,8 @@ fn parse_simulcast_stream_versions(input: &str) -> IResult<&str, Vec<SimulcastVe
 
 /// Parse simulcast attribute as per RFC 8853
 ///
-/// Format: a=simulcast:<direction> <stream-versions>
-/// Where <stream-versions> is a semicolon-separated list of alternatives
+/// Format: `a=simulcast:<direction> <stream-versions>`
+/// Where `<stream-versions>` is a semicolon-separated list of alternatives
 /// and each alternative is a comma-separated list of RID identifiers.
 ///
 /// Example: a=simulcast:send 1;2,3 recv 4

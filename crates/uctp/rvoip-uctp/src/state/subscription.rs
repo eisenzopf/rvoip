@@ -120,7 +120,7 @@ pub struct PublisherInfo<'a> {
 /// the same server might. Used when no handler is configured.
 ///
 /// Pre-v0.x servers conflated `501` and `501` as `501`; per
-/// [`CONVERSATION_PROTOCOL.md`] §11.2 these are now distinct.
+/// `CONVERSATION_PROTOCOL.md` §11.2 these are now distinct.
 pub struct RejectingHandler;
 
 impl SubscriptionHandler for RejectingHandler {

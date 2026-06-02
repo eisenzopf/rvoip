@@ -914,11 +914,11 @@ impl DialogManager {
     /// pass it here together with the desired `Session-Expires` (typically
     /// set to `min_se` so the retry passes the first check).
     ///
-    /// Mirrors [`send_invite_with_auth`] — reuses the original dialog's
+    /// Mirrors `send_invite_with_auth` — reuses the original dialog's
     /// `Call-ID` + `From` tag, rebuilds as an initial INVITE (422 was a final
     /// response that did *not* establish a dialog), bumps CSeq via
     /// `Dialog::create_request_template`. The timer headers use the supplied
-    /// overrides instead of the global [`DialogManagerConfig`] values.
+    /// overrides instead of the global `DialogManagerConfig` values.
     pub async fn send_invite_with_session_timer_override(
         &self,
         dialog_id: &DialogId,
@@ -1030,11 +1030,11 @@ impl DialogManager {
     /// Send an *initial* INVITE on a freshly-created outgoing dialog, with
     /// caller-supplied extra headers appended to the wire request.
     ///
-    /// Mirrors [`send_invite_with_auth`] / [`send_invite_with_session_timer_override`]
+    /// Mirrors `send_invite_with_auth` / `send_invite_with_session_timer_override`
     /// in construction shape (rebuild the INVITE via `InviteBuilder`, inject
     /// global policy headers, send via `create_invite_client_transaction`)
     /// but is intended for the *first* transmission rather than a retry.
-    /// Callers go through [`crate::manager::unified::UnifiedManager::make_call_with_extra_headers`]
+    /// Callers go through `crate::manager::unified::UnifiedManager::make_call_with_extra_headers`
     /// rather than calling this directly; this method is the layer that
     /// actually puts the bytes on the wire.
     ///
@@ -1180,7 +1180,7 @@ impl DialogManager {
     }
 
     /// Send a freshly-built request via a new client transaction,
-    /// retrying with the next [`ResolvedTarget`] on transport-level
+    /// retrying with the next `ResolvedTarget` on transport-level
     /// failure (RFC 3263 §4.3).
     ///
     /// On a recoverable transport error from `send_request` (the
@@ -1193,7 +1193,7 @@ impl DialogManager {
     /// candidate would not help.
     ///
     /// For INVITE specifically, fires
-    /// [`RequestLifecycle::pre_send_request`] once per attempt so the
+    /// `RequestLifecycle::pre_send_request` once per attempt so the
     /// installed signer sees the per-attempt request (Via / branch
     /// differ across attempts).
     ///

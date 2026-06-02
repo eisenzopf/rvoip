@@ -82,11 +82,10 @@ default-members = [
 
 # ✨ WORKSPACE PACKAGE INHERITANCE - Define common metadata once!
 [workspace.package]
-# Beta-tier crates inherit this. Alpha-tier crates must override in
-# their own [package] with version = "0.1.0-alpha.1" to avoid the
-# accidental promotion to beta. See plan: ~/.claude/plans/
-# we-are-preparing-to-abstract-marshmallow.md.
-version = "0.2.0-beta.1"
+# Numeric maturity tiers (no -alpha/-beta suffixes): 0.1.x = alpha,
+# 0.2.x = beta, 1.0 = stable. Beta-tier crates inherit this 0.2.0;
+# alpha-tier crates override in their own [package] with version = "0.1.0".
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 homepage = "https://github.com/eisenzopf/rvoip"
@@ -184,35 +183,36 @@ collapsible_else_if = "allow"
 #
 # Package names are unchanged on crates.io (rvoip-sip-core, etc.) — only
 # the in-repo directory changed. See the grouped [workspace] members above.
-# Beta-tier crates (publish to crates.io as 0.2.0-beta.1).
-rvoip-sip-core      = { path = "crates/sip/sip-core", version = "0.2.0-beta.1" }
-rvoip-sip-transport = { path = "crates/sip/sip-transport", version = "0.2.0-beta.1" }
-rvoip-sip-dialog    = { path = "crates/sip/sip-dialog", version = "0.2.0-beta.1" }
-rvoip-sip-proxy     = { path = "crates/sip/sip-proxy", version = "0.2.0-beta.1" }
-rvoip-sip-registrar = { path = "crates/sip/sip-registrar", version = "0.2.0-beta.1" }
-rvoip-rtp-core      = { path = "crates/media/rtp-core", version = "0.2.0-beta.1" }
-rvoip-media-core    = { path = "crates/media/media-core", version = "0.2.0-beta.1" }
-rvoip-sip           = { path = "crates/sip/rvoip-sip", version = "0.2.0-beta.1" }
-rvoip-core          = { path = "crates/foundation/rvoip-core", version = "0.2.0-beta.1" }
-rvoip-codec-core    = { path = "crates/media/codec-core", version = "0.2.0-beta.1" }
-rvoip-infra-common  = { path = "crates/foundation/infra-common", version = "0.2.0-beta.1" }
-rvoip-auth-core     = { path = "crates/identity/auth-core", version = "0.2.0-beta.1" }
-rvoip-core-traits   = { path = "crates/foundation/rvoip-core-traits", version = "0.2.0-beta.1" }
+# Beta-tier crates (publish to crates.io as 0.2.0).
+rvoip-sip-core      = { path = "crates/sip/sip-core", version = "0.2.0" }
+rvoip-sip-transport = { path = "crates/sip/sip-transport", version = "0.2.0" }
+rvoip-sip-dialog    = { path = "crates/sip/sip-dialog", version = "0.2.0" }
+rvoip-sip-proxy     = { path = "crates/sip/sip-proxy", version = "0.2.0" }
+rvoip-sip-registrar = { path = "crates/sip/sip-registrar", version = "0.2.0" }
+rvoip-rtp-core      = { path = "crates/media/rtp-core", version = "0.2.0" }
+rvoip-media-core    = { path = "crates/media/media-core", version = "0.2.0" }
+rvoip-sip           = { path = "crates/sip/rvoip-sip", version = "0.2.0" }
+rvoip-core          = { path = "crates/foundation/rvoip-core", version = "0.2.0" }
+rvoip-codec-core    = { path = "crates/media/codec-core", version = "0.2.0" }
+rvoip-infra-common  = { path = "crates/foundation/infra-common", version = "0.2.0" }
+rvoip-auth-core     = { path = "crates/identity/auth-core", version = "0.2.0" }
+rvoip-core-traits   = { path = "crates/foundation/rvoip-core-traits", version = "0.2.0" }
 
-# Alpha-tier crates. Most are `publish = false` in their own Cargo.toml.
-# rvoip-vcon and rvoip-harness DO publish (at the alpha version) because
-# rvoip-core lists them as optional runtime deps — cargo verifies the
-# version exists on crates.io regardless of feature activation.
-rvoip-vcon          = { path = "crates/extensions/rvoip-vcon", version = "0.1.0-alpha.1" }
-rvoip-harness       = { path = "crates/extensions/rvoip-harness", version = "0.1.0-alpha.1" }
-rvoip               = { path = "crates/rvoip", version = "0.2.0-beta.1" }
-rvoip-uctp          = { path = "crates/uctp/rvoip-uctp", version = "0.1.0-alpha.1" }
-rvoip-quic          = { path = "crates/uctp/rvoip-quic", version = "0.1.0-alpha.1" }
-rvoip-webtransport  = { path = "crates/uctp/rvoip-webtransport", version = "0.1.0-alpha.1" }
-rvoip-websocket     = { path = "crates/uctp/rvoip-websocket", version = "0.1.0-alpha.1" }
-rvoip-webrtc        = { path = "crates/webrtc/rvoip-webrtc", version = "0.1.0-alpha.1" }
-rvoip-identity      = { path = "crates/identity/rvoip-identity", version = "0.1.0-alpha.1" }
-rvoip-client        = { path = "crates/rvoip-client", version = "0.1.0-alpha.1" }
+# Remaining internal crates — alpha-tier (0.1.0) except `rvoip` (the 0.2.0
+# beta facade). All publishable now. rvoip-core lists rvoip-vcon / rvoip-harness
+# as optional runtime deps, so their versions must resolve on crates.io
+# regardless of feature activation.
+rvoip-vcon          = { path = "crates/extensions/rvoip-vcon", version = "0.1.0" }
+rvoip-harness       = { path = "crates/extensions/rvoip-harness", version = "0.1.0" }
+rvoip               = { path = "crates/rvoip", version = "0.2.0" }
+rvoip-uctp          = { path = "crates/uctp/rvoip-uctp", version = "0.1.0" }
+rvoip-quic          = { path = "crates/uctp/rvoip-quic", version = "0.1.0" }
+rvoip-webtransport  = { path = "crates/uctp/rvoip-webtransport", version = "0.1.0" }
+rvoip-websocket     = { path = "crates/uctp/rvoip-websocket", version = "0.1.0" }
+rvoip-webrtc        = { path = "crates/webrtc/rvoip-webrtc", version = "0.1.0" }
+rvoip-identity      = { path = "crates/identity/rvoip-identity", version = "0.1.0" }
+rvoip-client        = { path = "crates/rvoip-client", version = "0.1.0" }
+rvoip-stir-shaken   = { path = "crates/extensions/rvoip-stir-shaken", version = "0.1.0" }
 rtc = "=0.20.0-alpha.1"
 
 # External dependencies

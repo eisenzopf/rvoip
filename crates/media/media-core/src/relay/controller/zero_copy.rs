@@ -84,11 +84,11 @@ impl MediaSessionController {
     /// Process RTP packet with traditional approach (for comparison)
     ///
     /// This method uses the traditional approach with allocations for comparison:
-    /// 1. Extract payload to Vec<u8> (COPY)
-    /// 2. Decode to Vec<i16> (COPY + ALLOCATION)
-    /// 3. Create AudioFrame with Vec<i16> (COPY)
-    /// 4. Process to Vec<i16> (COPY)
-    /// 5. Encode to Vec<u8> (COPY + ALLOCATION)
+    /// 1. Extract payload to `Vec<u8>` (COPY)
+    /// 2. Decode to `Vec<i16>` (COPY + ALLOCATION)
+    /// 3. Create AudioFrame with `Vec<i16>` (COPY)
+    /// 4. Process to `Vec<i16>` (COPY)
+    /// 5. Encode to `Vec<u8>` (COPY + ALLOCATION)
     /// 6. Create RTP packet with Bytes (COPY)
     pub async fn process_rtp_packet_traditional(
         &self,

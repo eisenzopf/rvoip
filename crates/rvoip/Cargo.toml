@@ -29,33 +29,54 @@ workspace = true
 rvoip-core         = { workspace = true }
 rvoip-core-traits  = { workspace = true }
 
-# SIP interop adapter — gated on the `sip` feature.
+# SIP interop adapter — `sip` feature.
 rvoip-sip          = { workspace = true, optional = true }
+# STIR/SHAKEN caller-ID attestation (SIP-only) — `sip-stir-shaken` feature.
+rvoip-stir-shaken  = { workspace = true, optional = true }
 
-# AI voice harness — gated on `harness`.
+# WebRTC interop adapter — `webrtc` feature.
+rvoip-webrtc       = { workspace = true, optional = true }
+
+# UCTP substrate adapters — `uctp` feature.
+rvoip-uctp         = { workspace = true, optional = true }
+rvoip-quic         = { workspace = true, optional = true }
+rvoip-webtransport = { workspace = true, optional = true }
+rvoip-websocket    = { workspace = true, optional = true }
+
+# voip-3 conversation-model extensions — reachable only via the `voip-3` feature.
+rvoip-vcon         = { workspace = true, optional = true }
+rvoip-identity     = { workspace = true, optional = true }
 rvoip-harness      = { workspace = true, optional = true }
 
-# vCon container — gated on `vcon`.
-rvoip-vcon         = { workspace = true, optional = true }
+# Client SDK — `client` feature.
+rvoip-client       = { workspace = true, optional = true }
 
 # ---------------------------------------------------------------------------
-# Feature flags — match `INTERFACE_DESIGN.md` §2.2
+# Feature flags. Maturity: `sip` is beta; every other surface is alpha (0.1.x).
+# Grouped by what each is tied to (see INTERFACE_DESIGN.md §2.2).
 # ---------------------------------------------------------------------------
 
 [features]
-default = ["sip", "vcon"]
+default = ["sip"]
 
-# SIP interop adapter.
-sip = ["dep:rvoip-sip"]
+# ── Transports / surfaces ──
+sip      = ["dep:rvoip-sip"]
+webrtc   = ["dep:rvoip-webrtc"]
+uctp     = ["dep:rvoip-uctp", "dep:rvoip-quic", "dep:rvoip-webtransport", "dep:rvoip-websocket"]
 
-# vCon container + signing.
-vcon = ["dep:rvoip-vcon"]
+# ── SIP add-on (requires SIP): RFC 8224 caller-ID attestation ──
+sip-stir-shaken = ["sip", "dep:rvoip-stir-shaken"]
 
-# In-process AI voice harness (ASR / TTS / DialogManager).
-harness = ["dep:rvoip-harness"]
+# ── Full rvoip-3 experience: every transport + the conversation-model extensions
+#    (vCon emission, identity backends, AI harness). vcon / identity / harness are
+#    reachable ONLY through this meta-feature, never as standalone features. ──
+voip-3 = ["sip", "webrtc", "uctp", "dep:rvoip-vcon", "dep:rvoip-identity", "dep:rvoip-harness"]
 
-# Everything compiled in for this beta (SIP product surface).
-full = ["sip", "vcon", "harness"]
+# ── Standalone cross-transport client SDK ──
+client = ["dep:rvoip-client"]
+
+# ── Everything ──
+full = ["voip-3", "sip-stir-shaken", "client"]
 
 [dev-dependencies]
 tokio              = { workspace = true }

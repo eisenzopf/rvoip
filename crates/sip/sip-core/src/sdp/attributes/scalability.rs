@@ -1,14 +1,14 @@
 //! SDP Scalability Mode Attribute Parser
 //!
 //! Implements parser for scalability mode attributes used in SVC media codecs
-//! Format: a=fmtp:<payload> scalability-mode=<mode>
+//! Format: `a=fmtp:<payload> scalability-mode=<mode>`
 //!
 //! Based on WebRTC specifications for SVC (Scalable Video Coding)
 //! as referenced in RFC 8851 and RFC 8853.
 
 use crate::error::{Error, Result};
 
-/// Parses scalability mode for AV1, H.264, and VP9: a=fmtp:<payload> scalability-mode=<mode>
+/// Parses scalability mode for AV1, H.264, and VP9: `a=fmtp:<payload> scalability-mode=<mode>`
 /// This is for Scalable Video Coding (SVC) scenarios, often used with simulcast
 ///
 /// Examples:

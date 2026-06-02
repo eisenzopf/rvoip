@@ -225,7 +225,7 @@ impl PoolStats {
 /// every per-frame call took a `std::Mutex<VecDeque>` guard, which
 /// was the dominant ceiling on `pipeline_concurrent/{8,16}` after the
 /// codec mutex was removed. Stats are now lock-free
-/// cache-line-padded atomics (see [`PaddedCounter`]) — the earlier
+/// cache-line-padded atomics (see `PaddedCounter`) — the earlier
 /// `parking_lot::Mutex<PoolStats>` showed up as the next bottleneck
 /// once the metrics RwLock was gated off in C17. Per-call increments
 /// on independent padded counters scaled cleanly to 16 worker

@@ -260,66 +260,66 @@ impl std::fmt::Display for CryptoAttribute {
 /// A parsed attribute, identified by its type
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum ParsedAttribute {
-    /// RTP format parameters, corresponds to a=rtpmap:<payload type> <encoding name>/<clock rate>[/<encoding parameters>]
+    /// RTP format parameters, corresponds to `a=rtpmap:<payload type> <encoding name>/<clock rate>[/<encoding parameters>]`
     RtpMap(RtpMapAttribute),
-    /// Format parameters, corresponds to a=fmtp:<format> <format specific parameters>
+    /// Format parameters, corresponds to `a=fmtp:<format> <format specific parameters>`
     Fmtp(FmtpAttribute),
     /// Media direction attributes: a=sendrecv, a=sendonly, a=recvonly, a=inactive
     Direction(MediaDirection),
-    /// Packetization time, corresponds to a=ptime:<packet time>
+    /// Packetization time, corresponds to `a=ptime:<packet time>`
     Ptime(u64),
-    /// Maximum packetization time, corresponds to a=maxptime:<maximum packet time>
+    /// Maximum packetization time, corresponds to `a=maxptime:<maximum packet time>`
     MaxPtime(u64),
-    /// ICE candidate, corresponds to a=candidate:<foundation> <component-id> <transport> <priority> <connection-address> <port> typ <cand-type> [raddr <rel-addr>] [rport <rel-port>] [tcptype <tcp-type>] [generation <generation>]
+    /// ICE candidate, corresponds to `a=candidate:<foundation> <component-id> <transport> <priority> <connection-address> <port> typ <cand-type> [raddr <rel-addr>] [rport <rel-port>] [tcptype <tcp-type>] [generation <generation>]`
     Candidate(CandidateAttribute),
-    /// SSRC attribute, corresponds to a=ssrc:<ssrc-id> <attribute>[:value]
+    /// SSRC attribute, corresponds to `a=ssrc:<ssrc-id> <attribute>[:value]`
     Ssrc(SsrcAttribute),
-    /// ICE username fragment, corresponds to a=ice-ufrag:<username>
+    /// ICE username fragment, corresponds to `a=ice-ufrag:<username>`
     IceUfrag(String),
-    /// ICE password, corresponds to a=ice-pwd:<password>
+    /// ICE password, corresponds to `a=ice-pwd:<password>`
     IcePwd(String),
-    /// DTLS fingerprint, corresponds to a=fingerprint:<hash-function> <fingerprint>
+    /// DTLS fingerprint, corresponds to `a=fingerprint:<hash-function> <fingerprint>`
     Fingerprint(String, String),
-    /// DTLS setup role, corresponds to a=setup:<role>
+    /// DTLS setup role, corresponds to `a=setup:<role>`
     Setup(String),
     /// SDES crypto attribute (RFC 4568 §9.1) for SRTP key exchange,
     /// corresponds to `a=crypto:<tag> <crypto-suite> <key-params> [<session-params>]`.
     /// One per offered/accepted crypto-suite — typically 1–4 lines per `m=`
     /// section, ranked by sender preference.
     Crypto(CryptoAttribute),
-    /// Media identification, corresponds to a=mid:<identification-tag>
+    /// Media identification, corresponds to `a=mid:<identification-tag>`
     Mid(String),
-    /// Media grouping, corresponds to a=group:<semantics> <id> <id> ...
+    /// Media grouping, corresponds to `a=group:<semantics> <id> <id>` ...
     Group(String, Vec<String>),
     /// RTCP multiplexing, corresponds to a=rtcp-mux
     RtcpMux,
-    /// RTCP feedback, corresponds to a=rtcp-fb:<payload type> <feedback type> [<feedback parameter>]
+    /// RTCP feedback, corresponds to `a=rtcp-fb:<payload type> <feedback type> [<feedback parameter>]`
     RtcpFb(String, String, Option<String>),
-    /// Header extension, corresponds to a=extmap:<id>[/<direction>] <URI> [<params>]
+    /// Header extension, corresponds to `a=extmap:<id>[/<direction>] <URI> [<params>]`
     ExtMap(u8, Option<String>, String, Option<String>),
-    /// Media stream identification, corresponds to a=msid:<stream id> [<track id>]
+    /// Media stream identification, corresponds to `a=msid:<stream id> [<track id>]`
     Msid(String, Option<String>),
-    /// Bandwidth information, corresponds to b=<bwtype>:<bandwidth>
+    /// Bandwidth information, corresponds to `b=<bwtype>:<bandwidth>`
     Bandwidth(String, u64),
-    /// Restriction identifier, corresponds to a=rid:<id> <direction> [pt=<formats>] [;<key=value>*]
+    /// Restriction identifier, corresponds to `a=rid:<id> <direction> [pt=<formats>] [;<key=value>*]`
     Rid(RidAttribute),
-    /// Simulcast attribute, corresponds to a=simulcast:<send list> <recv list>
+    /// Simulcast attribute, corresponds to `a=simulcast:<send list> <recv list>`
     Simulcast(Vec<String>, Vec<String>),
-    /// ICE options, corresponds to a=ice-options:<option-tag> [<option-tag>]*
+    /// ICE options, corresponds to `a=ice-options:<option-tag> [<option-tag>]`*
     IceOptions(Vec<String>),
     /// End of candidates, corresponds to a=end-of-candidates
     EndOfCandidates,
-    /// SCTP port, corresponds to a=sctp-port:<port>
+    /// SCTP port, corresponds to `a=sctp-port:<port>`
     SctpPort(u16),
-    /// Max message size, corresponds to a=max-message-size:<size>
+    /// Max message size, corresponds to `a=max-message-size:<size>`
     MaxMessageSize(u64),
-    /// SCTP map, corresponds to a=sctpmap:<number> <app> <max-num-of-streams>
+    /// SCTP map, corresponds to `a=sctpmap:<number> <app> <max-num-of-streams>`
     SctpMap(u16, String, u16),
-    /// Flag attribute, corresponds to a=<flag>
+    /// Flag attribute, corresponds to `a=<flag>`
     Flag(String),
-    /// Value attribute, corresponds to a=<n>:<value>
+    /// Value attribute, corresponds to `a=<n>:<value>`
     Value(String, String),
-    /// Other attribute, corresponds to a=<n>[:<value>]
+    /// Other attribute, corresponds to `a=<n>[:<value>]`
     Other(String, Option<String>),
 }
 

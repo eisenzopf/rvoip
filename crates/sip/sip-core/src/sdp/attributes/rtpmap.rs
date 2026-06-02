@@ -1,7 +1,7 @@
 //! SDP RTP Map Attribute Parser
 //!
 //! Implements parser for rtpmap attributes as defined in RFC 8866.
-//! Format: a=rtpmap:<payload type> <encoding name>/<clock rate>[/<encoding parameters>]
+//! Format: `a=rtpmap:<payload type> <encoding name>/<clock rate>[/<encoding parameters>]`
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::{positive_integer, token};
@@ -96,7 +96,7 @@ fn rtpmap_parser(input: &str) -> IResult<&str, (u8, String, u32, Option<String>)
     )
 }
 
-/// Parses rtpmap attribute: a=rtpmap:<payload type> <encoding name>/<clock rate>[/<encoding parameters>]
+/// Parses rtpmap attribute: `a=rtpmap:<payload type> <encoding name>/<clock rate>[/<encoding parameters>]`
 pub fn parse_rtpmap(value: &str) -> Result<ParsedAttribute> {
     match rtpmap_parser(value.trim()) {
         Ok((_, (payload_type, encoding_name, clock_rate, encoding_params))) => {

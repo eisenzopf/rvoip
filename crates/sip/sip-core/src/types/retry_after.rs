@@ -64,7 +64,7 @@ use std::time::Duration;
 /// Used to indicate how long a service is expected to be unavailable
 ///
 /// RFC 3261 Section 20.33:
-/// Retry-After = "Retry-After" HCOLON delta-seconds [ comment ] *( SEMI retry-param )
+/// Retry-After = "Retry-After" HCOLON delta-seconds `[ comment ]` *( SEMI retry-param )
 /// retry-param = ("duration" EQUAL delta-seconds) / generic-param
 ///
 /// The Retry-After header indicates the time interval after which the client should retry

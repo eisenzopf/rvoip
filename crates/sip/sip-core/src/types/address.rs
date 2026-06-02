@@ -57,7 +57,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-/// Represents a SIP Name Address (Display Name <URI>; params).
+/// Represents a SIP Name Address (Display Name `<URI>`; params).
 ///
 /// A SIP address consists of:
 /// - An optional display name (e.g., "John Doe")

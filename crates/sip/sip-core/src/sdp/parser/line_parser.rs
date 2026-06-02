@@ -83,7 +83,7 @@ pub fn parse_sdp_line(input: &str) -> IResult<&str, (char, &str)> {
 ///
 /// # Format
 ///
-/// b=<bwtype>:<bandwidth>
+/// `b=<bwtype>:<bandwidth>`
 ///
 /// Where:
 /// - bwtype: A token specifying the bandwidth type

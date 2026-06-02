@@ -4,7 +4,7 @@
 //!
 //! Adapters (rvoip-quic, rvoip-webtransport, …) build one of these at
 //! connection-acceptance time and hand it to
-//! [`UctpCoordinator::start_full`]. The handler resolves all three
+//! `UctpCoordinator::start_full`. The handler resolves all three
 //! §7.7 subscription forms:
 //!
 //! 1. **Explicit `strm_id`**: looked up against the publisher

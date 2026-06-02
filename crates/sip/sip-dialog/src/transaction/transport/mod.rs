@@ -792,7 +792,7 @@ impl TransportManager {
 
     /// Extract the active transports as a `TransportType`-keyed map.
     ///
-    /// Used by [`MultiplexedTransport::new`] to build a URI-aware
+    /// Used by `MultiplexedTransport::new` to build a URI-aware
     /// dispatcher: the multiplexer holds one underlying `Transport` per
     /// flavour and routes outbound requests by reading the Request-URI's
     /// scheme + `transport=` parameter.

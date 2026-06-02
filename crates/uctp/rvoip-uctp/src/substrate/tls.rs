@@ -29,7 +29,7 @@ pub fn self_signed_for_dev(
 
 /// Build a `rustls::ClientConfig` that trusts only the given certificate.
 /// This is the production-shape way to connect an agent to a
-/// pinned-cert orchestrator — preferred over [`dangerous_no_verify`].
+/// pinned-cert orchestrator — preferred over `dangerous_no_verify`.
 pub fn dev_client_config_trusting(
     cert: &CertificateDer<'_>,
 ) -> Result<rustls::ClientConfig, SubstrateError> {

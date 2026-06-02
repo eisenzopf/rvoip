@@ -76,13 +76,13 @@
 //! #### Security and Authentication Headers
 //!
 //! - [`auth::Authorization`] - Authentication credentials for a request (RFC 3261)
-//! - [`auth::WWWAuthenticate`] - Authentication challenge (RFC 3261)
+//! - [`auth::WwwAuthenticate`] - Authentication challenge (RFC 3261)
 //! - [`auth::ProxyAuthenticate`] - Authentication challenge from a proxy (RFC 3261)
 //! - [`auth::ProxyAuthorization`] - Authentication credentials for a proxy (RFC 3261)
 //!
 //! #### Miscellaneous Headers
 //!
-//! - [`server::Server`] - Information about the software used by the server (RFC 3261)
+//! - `Server` - Information about the software used by the server (RFC 3261)
 //! - [`warning::Warning`] - Additional information about the status of a response (RFC 3261)
 //! - [`multipart::MultipartBody`] - Support for multipart message bodies (RFC 5621)
 //! - [`multipart::MimePart`] - Individual part of a multipart message (RFC 5621)

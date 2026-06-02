@@ -31,7 +31,7 @@ fn ice_pwd_parser(input: &str) -> IResult<&str, &str> {
 }
 
 
-/// Parses ice-ufrag attribute: a=ice-ufrag:<ufrag>
+/// Parses ice-ufrag attribute: `a=ice-ufrag:<ufrag>`
 pub fn parse_ice_ufrag(value: &str) -> Result<String> {
     let trimmed = value.trim();
 
@@ -58,7 +58,7 @@ pub fn parse_ice_ufrag(value: &str) -> Result<String> {
     .map(|s| s.to_string())
 }
 
-/// Parses ice-pwd attribute: a=ice-pwd:<pwd>
+/// Parses ice-pwd attribute: `a=ice-pwd:<pwd>`
 pub fn parse_ice_pwd(value: &str) -> Result<String> {
     let trimmed = value.trim();
 
@@ -85,7 +85,7 @@ pub fn parse_ice_pwd(value: &str) -> Result<String> {
     .map(|s| s.to_string())
 }
 
-/// Parses ice-options attribute: a=ice-options:<option-tag> ...
+/// Parses ice-options attribute: `a=ice-options:<option-tag>` ...
 pub fn parse_ice_options(value: &str) -> Result<Vec<String>> {
     let trimmed = value.trim();
     if trimmed.is_empty() {

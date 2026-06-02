@@ -11,7 +11,7 @@
 //! 3. Validate the full token against the resolved [`DecodingKey`] +
 //!    the configured [`Validation`].
 //! 4. Map `sub` / `scope` / `scopes` to
-//!    [`rvoip_core::identity::IdentityAssurance::UserAuthorized`].
+//!    `rvoip_core::identity::IdentityAssurance::UserAuthorized`.
 //!
 //! The cache holds parsed keys, not raw JWKS bytes, so the validate hot
 //! path is signature-verify only. TTL defaults to 1 hour — typical

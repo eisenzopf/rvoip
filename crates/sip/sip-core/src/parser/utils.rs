@@ -3,7 +3,7 @@
 /// Unfolds Linear White Space (LWS) according to RFC 3261.
 /// Replaces CRLF followed immediately by WSP (SP/HTAB) with a single SP.
 /// Also compresses consecutive non-folding WSP into a single SP.
-/// Returns a new Vec<u8> with the unfolded bytes.
+/// Returns a new `Vec<u8>` with the unfolded bytes.
 pub fn unfold_lws(input: &[u8]) -> Vec<u8> {
     let mut unfolded = Vec::with_capacity(input.len());
     let mut i = 0;

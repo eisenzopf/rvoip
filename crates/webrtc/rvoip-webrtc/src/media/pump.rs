@@ -529,7 +529,7 @@ pub fn silent_rtp_packet_for_ssrc(ssrc: u32, seq: u16, timestamp: u32) -> rtp::P
 
 /// D3a — wrap an arbitrary Opus payload in a marshalled RTP packet.
 ///
-/// Used by [`CpalAudioSource`](crate::client::CpalAudioSource) to hand
+/// Used by `CpalAudioSource` to hand
 /// already-encoded Opus frames to the outbound pump. The PT is fixed at
 /// 111 to match the codec registered by
 /// [`build_media_engine`](crate::peer::builder::build_media_engine).

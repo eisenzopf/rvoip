@@ -21,7 +21,7 @@ fn parse_uint(input: &str) -> IResult<&str, u64> {
 
 /// Parses the sctp-port attribute
 ///
-/// Format: a=sctp-port:<port>
+/// Format: `a=sctp-port:<port>`
 ///
 /// The sctp-port attribute is used to indicate the SCTP port number to be used
 /// for data channels. A port value of 0 indicates that no SCTP association is
@@ -48,7 +48,7 @@ pub fn parse_sctp_port(value: &str) -> Result<u16> {
 
 /// Parses the max-message-size attribute
 ///
-/// Format: a=max-message-size:<size>
+/// Format: `a=max-message-size:<size>`
 ///
 /// The max-message-size attribute indicates the maximum size of the message
 /// that can be sent on a data channel in bytes. A value of 0 indicates that

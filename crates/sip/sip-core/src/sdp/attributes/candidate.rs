@@ -1,7 +1,7 @@
 //! SDP ICE Candidate Attribute Parser
 //!
 //! Implements parser for ICE candidate attributes as defined in RFC 8839.
-//! Format: a=candidate:<foundation> <component-id> <transport> <priority> <conn-addr> <port> typ <cand-type> [raddr <raddr>] [rport <rport>] *(extensions)
+//! Format: `a=candidate:<foundation> <component-id> <transport> <priority> <conn-addr> <port> typ <cand-type> [raddr <raddr>] [rport <rport>]` *(extensions)
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::{is_valid_hostname, is_valid_ipv4, is_valid_ipv6};

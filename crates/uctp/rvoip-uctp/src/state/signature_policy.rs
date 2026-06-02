@@ -4,7 +4,7 @@
 //! envelope `MessageType`s **require** an inline RFC 9421 signature
 //! (per CONVERSATION_PROTOCOL.md §5.5.1). The policy is opt-in: it
 //! only takes effect on coordinators built via
-//! [`UctpCoordinator::start_full_with_sig9421`].
+//! `UctpCoordinator::start_full_with_sig9421`.
 //!
 //! Decision matrix at dispatch time:
 //!

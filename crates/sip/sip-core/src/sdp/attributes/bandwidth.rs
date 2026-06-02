@@ -1,7 +1,7 @@
 //! SDP Bandwidth Attribute Parser
 //!
 //! Implements parser for bandwidth attributes as defined in RFC 8866.
-//! Format: b=<bwtype>:<bandwidth>
+//! Format: `b=<bwtype>:<bandwidth>`
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::{positive_integer, token};
@@ -32,7 +32,7 @@ fn bandwidth_parser(input: &str) -> IResult<&str, (String, u32)> {
     )(input)
 }
 
-/// Parses bandwidth attribute: b=<bwtype>:<bandwidth>
+/// Parses bandwidth attribute: `b=<bwtype>:<bandwidth>`
 pub fn parse_bandwidth(value: &str) -> Result<(String, u32)> {
     match bandwidth_parser(value.trim()) {
         Ok((_, (bwtype, bandwidth))) => {

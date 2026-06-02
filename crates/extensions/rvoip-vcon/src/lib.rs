@@ -32,7 +32,7 @@
 //!   v1 feature; this crate exposes the data model but doesn't
 //!   automatically redact PII.
 //! - HTTPS-resolvable vCon URIs (`VconRef::Url`) — the variant is
-//!   reserved in [`rvoip_core::vcon::VconRef`] but this crate only
+//!   reserved in `rvoip_core::vcon::VconRef` but this crate only
 //!   produces `Local { uuid }` references in v0.x.
 
 pub mod builder;

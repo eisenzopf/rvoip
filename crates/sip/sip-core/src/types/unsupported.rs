@@ -13,7 +13,7 @@
 //!
 //! ## Format
 //!
-//! ```rust
+//! ```text
 //! // Unsupported: timer, 100rel
 //! ```
 //!

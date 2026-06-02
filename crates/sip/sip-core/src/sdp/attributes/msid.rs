@@ -1,7 +1,7 @@
 //! SDP MSID Attribute Parser
 //!
 //! Implements parser for MSID (Media Stream Identification) attributes as defined in RFC 8830.
-//! Format: a=msid:<stream identifier> [<track identifier>]
+//! Format: `a=msid:<stream identifier> [<track identifier>]`
 
 use crate::error::{Error, Result};
 use nom::{
@@ -43,7 +43,7 @@ fn msid_parser(input: &str) -> IResult<&str, (String, Option<String>)> {
     )(input)
 }
 
-/// Parses msid attribute: a=msid:<stream identifier> [<track identifier>]
+/// Parses msid attribute: `a=msid:<stream identifier> [<track identifier>]`
 pub fn parse_msid(value: &str) -> Result<(String, Option<String>)> {
     // Trim whitespace (spaces, tabs, etc.) from start and end
     let trimmed = value.trim();

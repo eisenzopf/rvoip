@@ -37,7 +37,7 @@ use crate::types::auth::{AuthenticationInfo, AuthenticationInfoParam, Qop};
 ///
 /// Authentication-Info works together with other SIP authentication headers:
 ///
-/// ```rust
+/// ```text
 /// // Authentication flow diagram:
 /// //
 /// // Client                   Server

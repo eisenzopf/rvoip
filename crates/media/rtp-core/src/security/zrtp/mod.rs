@@ -5,7 +5,7 @@
 //! during call setup to establish SRTP keys, without requiring PKI or pre-provisioned
 //! certificates.
 //!
-//! Reference: https://tools.ietf.org/html/rfc6189
+//! Reference: <https://tools.ietf.org/html/rfc6189>
 
 use crate::security::SecurityKeyExchange;
 use crate::srtp::crypto::SrtpCryptoKey;

@@ -8,7 +8,7 @@
 //! - Public-key mode
 //! - DH key exchange mode
 //!
-//! Reference: https://tools.ietf.org/html/rfc3830
+//! Reference: <https://tools.ietf.org/html/rfc3830>
 
 use crate::security::SecurityKeyExchange;
 use crate::srtp::crypto::SrtpCryptoKey;

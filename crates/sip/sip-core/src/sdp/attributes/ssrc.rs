@@ -1,7 +1,7 @@
 //! SDP SSRC Attribute Parser
 //!
 //! Implements parser for SSRC attributes as defined in RFC 5576.
-//! Format: a=ssrc:<ssrc-id> <attribute>[:<value>]
+//! Format: `a=ssrc:<ssrc-id> <attribute>[:<value>]`
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::{positive_integer, token};
@@ -57,7 +57,7 @@ fn ssrc_parser(input: &str) -> IResult<&str, SsrcAttribute> {
     ))
 }
 
-/// Parses SSRC attribute: a=ssrc:<ssrc-id> <attribute>[:<value>]
+/// Parses SSRC attribute: `a=ssrc:<ssrc-id> <attribute>[:<value>]`
 pub fn parse_ssrc(value: &str) -> Result<ParsedAttribute> {
     match ssrc_parser(value.trim()) {
         Ok((_, ssrc)) => {

@@ -177,7 +177,7 @@ impl MediaSessionController {
 
     /// Send a DTMF digit per RFC 4733 §2.5.
     ///
-    /// Spawns a [`DtmfTransmitter`] task that emits the full packet
+    /// Spawns a `DtmfTransmitter` task that emits the full packet
     /// schedule — start (E=0, marker=1) + 20 ms continuations
     /// (incrementing duration, fixed timestamp) + three E=1
     /// retransmits (RFC 4733 §2.5.1.3). The receive-side dedup at

@@ -39,7 +39,7 @@ pub struct RidAttribute {
 
 /// Parse a RID (Restriction IDentifier) attribute as defined in RFC 8851.
 ///
-/// The format is: a=rid:<id> <direction> [pt=<fmt-list>] [;<key=value>]*
+/// The format is: `a=rid:<id> <direction> [pt=<fmt-list>] [;<key=value>]`*
 ///
 /// Returns a RidAttribute on success, or an error on failure.
 pub fn parse_rid(input: &str) -> Result<RidAttribute> {

@@ -172,7 +172,7 @@ pub trait SipJsonExt {
     /// Returns Null if the path doesn't exist.
     ///
     /// # Parameters
-    /// - `path`: A string path in dot notation (e.g., "headers.Via[0].branch")
+    /// - `path`: A string path in dot notation (e.g., "headers.Via`[0]`.branch")
     ///
     /// # Returns
     /// A SipValue representing the value at the specified path, or Null if not found

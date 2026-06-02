@@ -194,7 +194,7 @@ fn parse_connection_nom(input: &str) -> IResult<&str, ConnectionData> {
 }
 
 /// Parses a connection data line (c=) into a ConnectionData struct.
-/// Format: c=<nettype> <addrtype> <connection-address>
+/// Format: `c=<nettype> <addrtype> <connection-address>`
 pub fn parse_connection_line(value: &str) -> Result<ConnectionData> {
     // Try using the nom parser first
     if let Ok((_, conn_data)) = parse_connection_nom(value) {

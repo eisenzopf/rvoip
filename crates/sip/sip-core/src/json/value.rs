@@ -322,7 +322,7 @@ impl SipValue {
         }
     }
 
-    /// Get a value from a path, e.g. "headers.via[0].branch".
+    /// Get a value from a path, e.g. "headers.via`[0]`.branch".
     ///
     /// # Arguments
     /// * `path` - A dot-separated path string with optional array indices

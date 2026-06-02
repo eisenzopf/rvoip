@@ -690,7 +690,7 @@ impl SdpBuilder {
     ///   generates this — sip-core stays out of the crypto path).
     ///
     /// For optional `lifetime` / `MKI` / session-params, build a
-    /// [`CryptoAttribute`] manually and push it via
+    /// [`CryptoAttribute`](crate::types::sdp::CryptoAttribute) manually and push it via
     /// [`SdpBuilder::crypto_attribute`].
     ///
     /// # Example
@@ -717,7 +717,7 @@ impl SdpBuilder {
     }
 
     /// Add a session-level `a=crypto:` from a fully-built
-    /// [`CryptoAttribute`]. Use this when you need lifetime, MKI, or
+    /// [`CryptoAttribute`](crate::types::sdp::CryptoAttribute). Use this when you need lifetime, MKI, or
     /// session-params; otherwise [`SdpBuilder::crypto`] is more concise.
     pub fn crypto_attribute(mut self, attr: crate::types::sdp::CryptoAttribute) -> Self {
         self.session
@@ -1164,7 +1164,7 @@ impl<P> MediaBuilder<P> {
         self
     }
 
-    /// Add an `a=crypto:` from a fully-built [`CryptoAttribute`] on this
+    /// Add an `a=crypto:` from a fully-built [`CryptoAttribute`](crate::types::sdp::CryptoAttribute) on this
     /// media section. Use this when you need lifetime, MKI, or
     /// session-params; otherwise [`MediaBuilder::crypto`] is more concise.
     pub fn crypto_attribute(mut self, attr: crate::types::sdp::CryptoAttribute) -> Self {

@@ -108,7 +108,7 @@ pub struct WebRtcConfig {
     #[serde(default)]
     pub trickle_ice: bool,
 
-    /// When `true`, [`crate::adapter::WebRtcAdapter::hold`] / `resume` not only
+    /// When `true`, `crate::adapter::WebRtcAdapter::hold` / `resume` not only
     /// flip the transceiver direction but also produce a fresh local SDP via
     /// renegotiation. Remote peers that ignore mute will still stop sending.
     /// Defaults to `true`.
@@ -167,7 +167,7 @@ pub struct WebRtcConfig {
     #[serde(default)]
     pub pinned_fingerprints: Vec<DtlsFingerprint>,
 
-    /// When `true`, outbound peers created via [`crate::WebRtcAdapter::originate`]
+    /// When `true`, outbound peers created via `crate::WebRtcAdapter::originate`
     /// (WHEP `POST`, orchestrator-driven outbound) get a local video track
     /// attached *before* the offer SDP is generated, so the resulting offer
     /// advertises an `m=video` section. Default `false`, which preserves

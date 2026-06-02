@@ -1,7 +1,7 @@
 //! SDP Media Identification (MID) Attribute Parser
 //!
 //! Implements parser for MID attributes as defined in RFC 5888.
-//! Format: a=mid:<identification-tag>
+//! Format: `a=mid:<identification-tag>`
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::{to_result, token};
@@ -16,7 +16,7 @@ fn mid_parser(input: &str) -> IResult<&str, &str> {
     verify(token, |s: &str| !s.is_empty())(input)
 }
 
-/// Parses mid attribute: a=mid:<identification-tag>
+/// Parses mid attribute: `a=mid:<identification-tag>`
 pub fn parse_mid(value: &str) -> Result<String> {
     let trimmed = value.trim();
 

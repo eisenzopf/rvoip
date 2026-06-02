@@ -389,7 +389,7 @@ impl AdaptiveJitterBuffer {
     ///
     /// This follows the playout schedule and returns packets in the correct
     /// order, accounting for the configured jitter buffer delay.
-    /// Pull the next playout-ready packet. Sync — see [`add_packet`]
+    /// Pull the next playout-ready packet. Sync — see `add_packet`
     /// for the parking_lot guard rationale.
     pub fn get_next_packet(&mut self) -> Option<RtpPacket> {
         // If buffer is empty, wait for a packet

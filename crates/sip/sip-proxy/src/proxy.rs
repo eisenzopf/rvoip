@@ -201,7 +201,7 @@ impl RouteDecision {
 
 /// Configuration knobs for the stateful proxy. Apply via
 /// [`StatefulProxy::with_config`] or by constructing via
-/// [`StatefulProxy::builder`] (TODO Phase 7).
+/// `StatefulProxy::builder` (TODO Phase 7).
 #[derive(Debug, Clone)]
 pub struct ProxyConfig {
     /// Timer C duration. Defaults to [`DEFAULT_TIMER_C`].

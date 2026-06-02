@@ -1,13 +1,14 @@
 [package]
 name = "rvoip-stir-shaken"
-version = "0.1.0-alpha.1"
-publish = false  # Alpha-tier; standalone STIR/SHAKEN impl, not gated by SIP beta closure.
+version = "0.1.0"
 edition = "2021"
 authors = ["RVoIP Contributors"]
 description = "STIR/SHAKEN (RFC 8224 / RFC 8225 / ATIS-1000074) signing and verification for rvoip"
 license = "MIT"
 homepage = "https://github.com/eisenzopf/rvoip"
 repository = "https://github.com/eisenzopf/rvoip"
+keywords = ["sip", "stir-shaken", "voip", "telephony", "passport"]
+categories = ["network-programming", "authentication"]
 
 # Optional sibling crate consumed via path dependency by applications
 # that need STIR/SHAKEN signing / verification. Same packaging pattern

@@ -27,7 +27,7 @@ pub enum MessageType {
     AuthBye,
     /// Mid-session bearer refresh (plan D4). Peer ships a freshly-issued
     /// token before the prior one expires; coordinator validates and
-    /// updates [`PeerAuthState`]. On success, server replies with a
+    /// updates `PeerAuthState`. On success, server replies with a
     /// fresh `auth.session` envelope carrying the new expires_at. A
     /// failed refresh does NOT revoke the existing session — the peer
     /// can retry until its current token actually expires.

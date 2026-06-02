@@ -7,7 +7,7 @@
 //!
 //! A media type consists of a type and subtype, optionally followed by parameters:
 //!
-//! ```
+//! ```text
 //! // Example format:
 //! // type/subtype;parameter=value;another=parameter
 //! ```

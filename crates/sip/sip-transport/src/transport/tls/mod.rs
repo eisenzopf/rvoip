@@ -524,7 +524,7 @@ impl TlsTransport {
     }
 
     /// Connect to a remote address with an explicit SNI server name.
-    /// Prefer this over [`connect`] when the caller knows the URI's
+    /// Prefer this over `connect` when the caller knows the URI's
     /// host (e.g. `sips:alice@sip.example.com` → `"sip.example.com"`).
     pub async fn connect_with_server_name(
         &self,

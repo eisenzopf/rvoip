@@ -66,14 +66,14 @@ pub struct UctpWtConfig {
     pub client_endpoint: Option<Arc<quinn::Endpoint>>,
     pub client_tls: Option<Arc<rustls::ClientConfig>>,
     /// Multi-party `SubscriptionHandler` (v0.x MP2/MP2.6). See
-    /// [`UctpQuicConfig`](rvoip_quic::UctpQuicConfig::subscription_handler)
+    /// `UctpQuicConfig`
     /// for semantics — identical wiring.
     pub subscription_handler: Option<Arc<dyn rvoip_uctp::state::SubscriptionHandler>>,
     /// Orchestrator reference for multi-party media fanout (v0.x MP3b).
-    /// See [`UctpQuicConfig`](rvoip_quic::UctpQuicConfig::orchestrator).
+    /// See `UctpQuicConfig`.
     pub orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
     /// Per-peer resource caps (plan D1 / D2). See
-    /// [`rvoip_quic::UctpQuicConfig::coordinator_caps`] for semantics —
+    /// `rvoip_quic::UctpQuicConfig::coordinator_caps` for semantics —
     /// identical wiring.
     pub coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
 }

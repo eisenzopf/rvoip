@@ -51,7 +51,7 @@ use crate::json::{SipJsonError, SipJsonResult};
 ///
 /// # Parameters
 /// - `value`: The SipValue to navigate through
-/// - `path`: The path string in dot notation (e.g., "headers.via[0].branch")
+/// - `path`: The path string in dot notation (e.g., "headers.via`[0]`.branch")
 ///
 /// # Returns
 /// - `Some(&SipValue)` if the path exists
@@ -437,7 +437,7 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
 ///
 /// # Parameters
 /// - `value`: The mutable SipValue to modify
-/// - `path`: The path string in dot notation (e.g., "headers.Via[0].branch")
+/// - `path`: The path string in dot notation (e.g., "headers.Via`[0]`.branch")
 /// - `new_value`: The value to set at the specified path
 ///
 /// # Returns
@@ -652,7 +652,7 @@ fn set_path_internal(
 ///
 /// # Parameters
 /// - `value`: The mutable SipValue to modify
-/// - `path`: The path string in dot notation (e.g., "headers.Via[0].branch")
+/// - `path`: The path string in dot notation (e.g., "headers.Via`[0]`.branch")
 ///
 /// # Returns
 /// - `Ok(())` on success
