@@ -287,7 +287,7 @@ breaking changes before each graduates to beta.
 | [rvoip-harness](crates/extensions/rvoip-harness) | ASR / TTS / DialogManager provider traits — publishes |
 | [rvoip-identity](crates/identity/rvoip-identity) | OAuth 2.1 + OIDC + SIP Digest + Passkey backends |
 | [rvoip-stir-shaken](crates/extensions/rvoip-stir-shaken) | STIR/SHAKEN signing + verification |
-| [users-core](crates/identity/users-core) | Reference user-management service |
+| [rvoip-users-core](crates/identity/users-core) | Reference user-management service |
 
 <a id="roadmap"></a>
 ## 🗺️ Roadmap

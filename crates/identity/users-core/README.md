@@ -49,10 +49,10 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-users-core = "0.1"
+rvoip-users-core = "0.1"
 
 # If you want to use the REST API client examples
-users-core = { version = "0.1", features = ["client"] }
+rvoip-users-core = { version = "0.1", features = ["client"] }
 ```
 
 ## Quick Start

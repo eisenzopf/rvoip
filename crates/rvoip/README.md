@@ -90,7 +90,7 @@ and [`rvoip-auth-core`](../identity/auth-core).
 **Alpha — published at `0.1.0`** (opt-in surfaces): [`rvoip-webrtc`](../webrtc/rvoip-webrtc);
 the UCTP family ([`rvoip-uctp`](../uctp/rvoip-uctp) · [`rvoip-quic`](../uctp/rvoip-quic) · [`rvoip-webtransport`](../uctp/rvoip-webtransport) · [`rvoip-websocket`](../uctp/rvoip-websocket));
 [`rvoip-vcon`](../extensions/rvoip-vcon) · [`rvoip-harness`](../extensions/rvoip-harness) · [`rvoip-stir-shaken`](../extensions/rvoip-stir-shaken);
-[`rvoip-identity`](../identity/rvoip-identity) · [`users-core`](../identity/users-core); [`rvoip-client`](../rvoip-client).
+[`rvoip-identity`](../identity/rvoip-identity) · [`rvoip-users-core`](../identity/users-core); [`rvoip-client`](../rvoip-client).
 
 ## Documentation
 
