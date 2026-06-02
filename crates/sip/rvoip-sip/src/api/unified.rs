@@ -1814,8 +1814,9 @@ impl Config {
 
     /// Set the infra-common global event bus channel capacity.
     ///
-    /// The default is `10000`. Values below `1` are rejected by
-    /// [`Config::validate`].
+    /// The default is `256` ([`Config::DEFAULT_APP_EVENT_CHANNEL_CAPACITY`]); the
+    /// `EventCoordinatorConfig` native default of `10000` is overridden by the
+    /// unified layer. Values below `1` are rejected by [`Config::validate`].
     pub fn with_global_event_channel_capacity(mut self, capacity: usize) -> Self {
         self.global_event_channel_capacity = capacity;
         self

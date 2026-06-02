@@ -292,6 +292,23 @@ Known findings:
 
 Promotion requires repeated same-shape controls, not one profiled run.
 
+## Event Queue Capacities
+
+The signaling path uses several bounded queues. When unset, app-facing queues
+(`incoming_call_channel_capacity`, `state_event_channel_capacity`) default to `1000`; the
+lower-level SIP queues (`sip_transport_channel_capacity`, `transaction_event_channel_capacity`)
+default to `10000`; and the cross-crate event-bus and app-session-dispatcher queues
+(`global_event_channel_capacity`, `session_event_dispatcher_channel_capacity`) default to `256`
+(`Config::DEFAULT_APP_EVENT_CHANNEL_CAPACITY`). The cross-crate bus's own native default in
+`infra-common` is `10000`; the unified `Config` layer overrides it down to `256`, so high-CPS
+servers should raise it explicitly.
+
+`with_channel_capacity(N)` is the master knob: it sets the app-facing queues to `N` and the
+lower-level (transport / transaction / global / session) queues to `N * 10`. Use the individual
+`with_*_channel_capacity` setters when one queue needs a different size. The cross-crate event
+bus drops messages for receivers that lag past its capacity, so size
+`global_event_channel_capacity` for the server's active-call / event burst.
+
 ## Config Knob Matrix
 
 | Config API | `perf_listener` flag | SIPp matrix env | Default when unset | When to use |
@@ -303,7 +320,14 @@ Promotion requires repeated same-shape controls, not one profiled run.
 | `Config::with_high_cps_udp_auto_answer(N)` | `--high-cps-capacity N` | `RVOIP_SHARDING_CAPACITIES` | `perf_listener` uses `20000`; normal Config leaves profile off | Immediate-answer UDP server or SIPp matrix baseline. |
 | `Config::with_fast_auto_accept_incoming_calls(true)` | `--fast-auto-accept` | Always enabled by sharding runner | `false` | Benchmark or fixed service that accepts every INVITE immediately. |
 | `Config::with_signaling_only_media(9)` | `--signaling-only-media` | Always enabled by sharding runner | `MediaMode::Enabled` | Isolate SIP signaling from RTP allocation/socket bind cost. |
-| `Config::with_channel_capacity(N)` | Indirect through `--high-cps-capacity N` | `RVOIP_SHARDING_CAPACITIES` | Incoming/state `1000`, SIP/transaction/global/session queues `10000` | Size queues from expected active or burst-arriving calls. |
+| `Config::with_channel_capacity(N)` | Indirect through `--high-cps-capacity N` | `RVOIP_SHARDING_CAPACITIES` | Incoming/state `1000`; transport/transaction `10000`; global/session `256` | Master queue knob: sets incoming/state to `N` and transport/transaction/global/session to `N * 10`. |
+| `Config::with_global_event_channel_capacity(N)` | Indirect via `--high-cps-capacity` (`* 10`) | `RVOIP_SHARDING_CAPACITIES` (`* 10`) | `256` | Cross-crate event-bus (GlobalEventCoordinator broadcast + bridge) depth. Raise for high-CPS servers — the unified default sits below the bus's native `10000`. |
+| `Config::with_app_event_channel_capacity(N)` | None | None | `256` (both) | One knob that sets global event **and** session-dispatcher capacity together; use the two lower-level setters when they need different values. |
+| `Config::with_incoming_call_channel_capacity(N)` | Indirect via `--high-cps-capacity` | `RVOIP_SHARDING_CAPACITIES` | `1000` | Inbound-call notification queue (set to `N` directly by `with_channel_capacity`). |
+| `Config::with_state_event_channel_capacity(N)` | Indirect via `--high-cps-capacity` | `RVOIP_SHARDING_CAPACITIES` | `1000` | Call state-change event queue (set to `N` directly by `with_channel_capacity`). |
+| `Config::with_sip_transaction_command_channel_capacity(N)` | None (set by `with_high_cps_udp_auto_answer`) | None | `None` → high-CPS derives `(capacity / 8).clamp(128, 1000)` | Per-transaction command channel; lower it under command-channel pressure (recipe note: try `256` at 2k CPS). |
+| `Config::with_media_session_capacity(N)` | Via `--high-cps-capacity` (capped) | `RVOIP_SHARDING_CAPACITIES` (capped) | `None` | Pre-size media-core session and RTP allocator indexes for expected active media sessions. |
+| `Config::with_media_port_capacity(start, count)` / `with_media_ports(start, end)` | Via high-CPS profile | None | OS/default range | Bound the RTP media port range for the expected concurrent media sessions. |
 | `Config::with_server_capacity(N)` | None | None | `None` | Reserve server dialog/transaction lookup capacity without changing queues. |
 | `Config::with_server_call_admission_limit(N)` | YAML recipe / app Config | YAML recipe / app Config | `None` | Enforce hard server overload admission. At capacity, new inbound INVITEs receive SIP `503` until the server drops below the soft threshold. |
 | `Config::with_server_call_admission_soft_limit(N)` | YAML recipe / app Config | YAML recipe / app Config | `None` | Start pacing inbound admission before the hard overload limit. |
@@ -325,12 +349,23 @@ Promotion requires repeated same-shape controls, not one profiled run.
 | `Config::with_sip_dialog_dispatch_workers(N)` | `--sip-dialog-dispatch-workers N` | `RVOIP_SHARDING_DIALOG_WORKERS` | Single dialog event processor | Fan out dialog transaction events by stable call key. |
 | `Config::with_sip_dialog_dispatch_queue_capacity(N)` | `--sip-dialog-dispatch-queue-capacity N` | `RVOIP_SHARDING_DIALOG_DISPATCH_QUEUE_CAPACITY` | Dialog capacity hint | Dialog dispatch queue pressure. |
 | `Config::with_session_event_dispatcher_workers(N)` | `--session-event-dispatcher-workers N` | `RVOIP_SHARDING_SESSION_EVENT_WORKERS` | Logical CPU count capped at `16` | App-session event publication backlog. |
-| `Config::with_session_event_dispatcher_channel_capacity(N)` | `--session-event-dispatcher-queue-capacity N` | `RVOIP_SHARDING_SESSION_EVENT_QUEUE_CAPACITY` | `10000` | Per-worker app-session event publication queue pressure. |
-| `Config::with_sip_udp_diagnostics(true)` | `--diagnostics` | Always enabled by sharding runner | `false` | Summary counters for UDP, duplicate recovery, media setup, and cleanup. |
+| `Config::with_session_event_dispatcher_channel_capacity(N)` | `--session-event-dispatcher-queue-capacity N` | `RVOIP_SHARDING_SESSION_EVENT_QUEUE_CAPACITY` | `256` | Per-worker app-session event publication queue pressure. |
+| `Config::with_sip_udp_diagnostics(true)` | `--diagnostics` | Always enabled by sharding runner | `false` | UDP + duplicate-recovery summary counters. (`--diagnostics` also flips the two toggles below; in `Config` they are independent.) |
+| `Config::with_media_setup_diagnostics(true)` | `--diagnostics` (shared) | Always enabled by sharding runner | `false` | Media-setup summary counters; independently settable in `Config`. |
+| `Config::with_cleanup_diagnostics(true)` | `--diagnostics` (shared) | Always enabled by sharding runner | `false` | Session-cleanup summary counters. Distinct from `with_cleanup_diagnostic_events`, which emits per-event logs. |
+| `Config::with_perf_max_rss_growth_mb_per_hr(N)` | None | None | `None` (feature `perf-tests`) | RSS-growth ceiling for perf soak tests; aborts if exceeded. |
 | `Config::with_cleanup_diagnostic_events(true)` | `--diagnostic-events` | Use `RVOIP_SHARDING_EXTRA_LISTENER_ARGS` | `false` | Noisy cleanup event logs for focused investigations. |
 | `Config::with_srtp_diagnostics(true)`, `with_rtp_diagnostics(true)`, `with_media_sdp_diagnostics(true)` | `--wire-diagnostics` | Use `RVOIP_SHARDING_EXTRA_LISTENER_ARGS` | `false` | Noisy wire/media logs, not for high-CPS controls. |
 | `Config::with_sip_transaction_timing_diagnostics(true)` | `--transaction-timing-diagnostics` | `RVOIP_SHARDING_TRANSACTION_TIMING` | `false` | Transaction queue, dispatch, retransmit, and duplicate timing histograms. |
 | `Config::with_sip_dialog_timing_diagnostics(true)` | `--dialog-timing-diagnostics` | `RVOIP_SHARDING_DIALOG_TIMING` | `false` | Dialog ingress, BYE path, cleanup, and publish timing histograms. |
+
+`Config::with_pbx_media_server_performance(N)` and
+`Config::with_signaling_only_server_high_performance(N)` are Config-level equivalents of the
+`PerformanceConfig::pbx_media_server` / `PerformanceConfig::signaling_only_server_high_performance`
+presets above. The bundle setters `with_sip_udp_parse_config`,
+`with_sip_transport_dispatch_config`, `with_sip_transaction_dispatch_config`,
+`with_sip_dialog_dispatch_config`, and `with_sip_udp_socket_buffers` set several of the
+individual knobs above in a single call.
 
 ## Promotion Rules
 
