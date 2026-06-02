@@ -44,13 +44,18 @@ uuid.workspace = true
 [dev-dependencies]
 # Examples — sip_only_orchestrator demonstrates the cross-transport seam by
 # registering rvoip-sip's SipAdapter against a rvoip-core Orchestrator.
-rvoip-sip.workspace = true
+# Forward dev-deps (published LATER in the release order) are declared
+# path-only — NO version — so `cargo publish` strips them from the published
+# manifest instead of demanding they already exist on crates.io. They still
+# resolve locally by path for tests/examples. (A versioned dev-dep in a publish
+# cycle breaks the run even with --no-verify: packaging still checks the index.)
+rvoip-sip = { path = "../../sip/rvoip-sip" }
 # cross_transport_bridge proves SIP + WebRTC + QUIC adapters all
 # register with one Orchestrator and exercises bridge_connections
 # across transport pairs.
-rvoip-webrtc.workspace = true
-rvoip-quic.workspace = true
-rvoip-uctp.workspace = true
+rvoip-webrtc = { path = "../../webrtc/rvoip-webrtc" }
+rvoip-quic = { path = "../../uctp/rvoip-quic" }
+rvoip-uctp = { path = "../../uctp/rvoip-uctp" }
 rvoip-auth-core.workspace = true
 rvoip-media-core = { workspace = true, features = ["opus"] }
 quinn = { workspace = true }

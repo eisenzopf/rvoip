@@ -123,7 +123,9 @@ quinn.workspace = true
 parking_lot.workspace = true
 serde_json.workspace = true
 rcgen.workspace = true
-rvoip-sip = { workspace = true }
+# Forward dev-dep: path-only (no version) so `cargo publish` strips it from the
+# published manifest rather than requiring rvoip-sip on crates.io. See rvoip-core.
+rvoip-sip = { path = "../../sip/rvoip-sip" }
 rand = { workspace = true }
 
 [[test]]

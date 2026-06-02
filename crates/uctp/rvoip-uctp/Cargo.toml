@@ -55,10 +55,12 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
 
 # Phase 4 demo + bridge_smoke test consume the SIP family + adapter crates.
-rvoip-quic.workspace = true
-rvoip-webtransport.workspace = true
-rvoip-websocket.workspace = true
-rvoip-sip.workspace = true
+# Forward dev-deps: path-only (no version) so `cargo publish` strips them from
+# the published manifest rather than requiring them on crates.io. See rvoip-core.
+rvoip-quic = { path = "../rvoip-quic" }
+rvoip-webtransport = { path = "../rvoip-webtransport" }
+rvoip-websocket = { path = "../rvoip-websocket" }
+rvoip-sip = { path = "../../sip/rvoip-sip" }
 rvoip-media-core.workspace = true
 url = "2"
 
