@@ -1,11 +1,13 @@
 //! # rvoip — Universal real-time gateway library
 //!
-//! `rvoip` is the facade crate for the rvoip workspace. It bundles
-//! the voip-3 substrate (`rvoip-core`, `rvoip-core-traits`), the
-//! Universal Conversation Transport Protocol (UCTP) family of
-//! substrates, the SIP and WebRTC interop adapters, the AI voice
-//! harness, and the vCon container builder — feature-gated so
-//! consumers pull only what they need.
+//! `rvoip` is the facade crate for the rvoip workspace. This **beta**
+//! release exposes the SIP product: the voip-3 substrate
+//! (`rvoip-core`, `rvoip-core-traits`) plus the SIP interop adapter
+//! (`rvoip-sip`), with the optional vCon container builder and in-process
+//! AI voice harness — feature-gated so consumers pull only what they need.
+//! The remaining substrates (WebRTC, the UCTP family, identity backends,
+//! and the client SDK) are not part of this release and return in a later
+//! version.
 //!
 //! See `docs/PRD.md`, `INTERFACE_DESIGN.md`, and
 //! `CONVERSATION_PROTOCOL.md` for the architectural context.
@@ -32,25 +34,16 @@
 //!
 //! ## Cargo features
 //!
-//! Per `INTERFACE_DESIGN.md` §2.2:
-//!
 //! | Feature | Pulls in |
 //! |---|---|
-//! | `uctp` (default) | UCTP substrate adapters: quic, webtransport, websocket |
-//! | `sip` (default) | SIP interop adapter |
-//! | `webrtc` | WebRTC interop adapter (off by default) |
-//! | `vcon` (default) | vCon container builder + signing |
-//! | `identity` (default) | Identity provider backends |
-//! | `harness` | In-process AI voice harness |
-//! | `client` | Client-side API (`rvoip-client`) |
-//! | `aauth-experimental` | AAuth identity backend (experimental) |
-//! | `identity-fingerprint-binding` | DTLS-SRTP fingerprint binding |
+//! | `sip` (default) | SIP interop adapter (`rvoip-sip`) |
+//! | `vcon` (default) | vCon container builder + signing (`rvoip-vcon`) |
+//! | `harness` | In-process AI voice harness (`rvoip-harness`) |
 //! | `full` | All of the above |
 //!
 //! ## Module layout
 //!
-//! Per INTERFACE_DESIGN §15.3, per-protocol native surfaces live at
-//! `rvoip::sip`, `rvoip::webrtc`, `rvoip::uctp`. The unifying voip-3
+//! The SIP native surface lives at `rvoip::sip`. The unifying voip-3
 //! nouns (`Conversation`, `Session`, `Connection`, `Stream`,
 //! `Message`, `Participant`) are re-exported at the crate root from
 //! `rvoip-core-traits`.
@@ -83,46 +76,6 @@ pub mod sip {
 }
 
 // ---------------------------------------------------------------------------
-// WebRTC interop adapter
-// ---------------------------------------------------------------------------
-
-/// WebRTC interop adapter — bridges DTLS-SRTP / ICE peers into the
-/// UCTP `Session` abstraction. Off by default; enable the `webrtc`
-/// feature.
-#[cfg(feature = "webrtc")]
-pub mod webrtc {
-    pub use rvoip_webrtc::*;
-}
-
-// ---------------------------------------------------------------------------
-// UCTP substrates (umbrella module re-exporting all three substrate adapters)
-// ---------------------------------------------------------------------------
-
-/// UCTP substrate adapters and protocol primitives.
-///
-/// Per `CONVERSATION_PROTOCOL.md` §4, UCTP runs over QUIC,
-/// WebTransport, and WebSocket substrates. Each substrate has its
-/// own adapter crate; this module re-exports all three plus the
-/// wire-level protocol from `rvoip-uctp`.
-#[cfg(feature = "uctp")]
-pub mod uctp {
-    /// Envelope encode/decode, capability negotiation, session state
-    /// machine — protocol-level types shared across substrates.
-    pub use rvoip_uctp as protocol;
-
-    /// UCTP-over-QUIC substrate adapter.
-    pub use rvoip_quic as quic;
-
-    /// UCTP-over-WebTransport substrate adapter.
-    pub use rvoip_webtransport as webtransport;
-
-    /// UCTP-over-WebSocket substrate adapter (signaling on WebSocket,
-    /// media via co-located WebRTC PeerConnection per
-    /// `CONVERSATION_PROTOCOL.md` §4.3).
-    pub use rvoip_websocket as websocket;
-}
-
-// ---------------------------------------------------------------------------
 // AI voice harness
 // ---------------------------------------------------------------------------
 
@@ -144,33 +97,6 @@ pub mod harness {
 #[cfg(feature = "vcon")]
 pub mod vcon {
     pub use rvoip_vcon::*;
-}
-
-// ---------------------------------------------------------------------------
-// Identity provider backends
-// ---------------------------------------------------------------------------
-
-/// `IdentityProvider` backends — bearer, OAuth 2.1 + DPoP, OIDC,
-/// passkeys, AAuth. See `rvoip-identity`.
-#[cfg(feature = "identity")]
-pub mod identity {
-    pub use rvoip_identity::*;
-}
-
-// ---------------------------------------------------------------------------
-// Client SDK (separate crate, created by P12.3)
-// ---------------------------------------------------------------------------
-//
-// When the `client` feature is enabled, the client-side `Client`
-// surface from `rvoip-client` becomes available as `rvoip::client::*`.
-// The crate is created by P12.3; until then this module is a stub
-// behind the feature flag.
-
-/// Client-side API for mobile / web / desktop / embedded apps. See
-/// `rvoip-client`.
-#[cfg(feature = "client")]
-pub mod client {
-    pub use rvoip_client::*;
 }
 
 /// The version of the rvoip facade crate.

@@ -162,7 +162,7 @@ PBX interop), see [`crates/sip/rvoip-sip/examples/`](crates/sip/rvoip-sip/exampl
 | Conference mixing | 🚧 Alpha | N-way mixing primitives in `rvoip-media-core` |
 | Opus / G.722 / G.729 | 🔮 Post-beta | Codec hooks exist; full-media path is post-beta |
 | DTLS-SRTP | 🔮 Post-beta | Design in place, feature-flagged |
-| Echo cancel / AGC / VAD / NS | 🔮 Post-beta | Stubs in `rvoip-audio-core` (alpha) |
+| Echo cancel / AGC / VAD / NS | 🔮 Post-beta | Planned; not yet implemented |
 
 ### 🌐 Transport
 
@@ -287,7 +287,6 @@ publish at `0.1.0-alpha.1` to satisfy `rvoip-core`'s optional features.
 | [rvoip-harness](crates/extensions/rvoip-harness) | ASR / TTS / DialogManager provider traits — publishes |
 | [rvoip-identity](crates/identity/rvoip-identity) | OAuth 2.1 + OIDC + SIP Digest + Passkey backends |
 | [rvoip-stir-shaken](crates/extensions/rvoip-stir-shaken) | STIR/SHAKEN signing + verification |
-| [rvoip-audio-core](crates/sip/audio-core) | Device + format management for SIP-client devs |
 | [users-core](crates/identity/users-core) | Reference user-management service |
 
 <a id="roadmap"></a>

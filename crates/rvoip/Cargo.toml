@@ -1,7 +1,6 @@
 [package]
 name = "rvoip"
-version = "0.1.0-alpha.1"
-publish = false  # Alpha-tier; held until rvoip-sip stabilizes and more substrates reach beta.
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true
@@ -33,81 +32,30 @@ rvoip-core-traits  = { workspace = true }
 # SIP interop adapter — gated on the `sip` feature.
 rvoip-sip          = { workspace = true, optional = true }
 
-# WebRTC interop adapter — gated on `webrtc` (off by default).
-rvoip-webrtc       = { workspace = true, optional = true }
-
-# UCTP substrate adapters — gated on `uctp`.
-rvoip-uctp         = { workspace = true, optional = true }
-rvoip-quic         = { workspace = true, optional = true }
-rvoip-webtransport = { workspace = true, optional = true }
-rvoip-websocket    = { workspace = true, optional = true }
-
 # AI voice harness — gated on `harness`.
 rvoip-harness      = { workspace = true, optional = true }
 
 # vCon container — gated on `vcon`.
 rvoip-vcon         = { workspace = true, optional = true }
 
-# Identity provider backends — gated on `identity`.
-rvoip-identity     = { workspace = true, optional = true }
-
-# Client SDK — gated on `client`.
-rvoip-client       = { workspace = true, optional = true }
-
 # ---------------------------------------------------------------------------
 # Feature flags — match `INTERFACE_DESIGN.md` §2.2
 # ---------------------------------------------------------------------------
 
 [features]
-default = ["uctp", "sip", "vcon", "identity"]
-
-# UCTP substrate family (QUIC + WebTransport + WebSocket).
-uctp = [
-    "dep:rvoip-uctp",
-    "dep:rvoip-quic",
-    "dep:rvoip-webtransport",
-    "dep:rvoip-websocket",
-]
+default = ["sip", "vcon"]
 
 # SIP interop adapter.
 sip = ["dep:rvoip-sip"]
 
-# WebRTC interop adapter.
-webrtc = ["dep:rvoip-webrtc"]
-
 # vCon container + signing.
 vcon = ["dep:rvoip-vcon"]
-
-# Identity provider backends.
-identity = ["dep:rvoip-identity"]
 
 # In-process AI voice harness (ASR / TTS / DialogManager).
 harness = ["dep:rvoip-harness"]
 
-# Client-side SDK (rvoip-client crate, INTERFACE_DESIGN §15).
-client = ["dep:rvoip-client"]
-
-# Experimental: AAuth identity backend. Per
-# `INTERFACE_DESIGN.md` §8.5, AAuth's IETF draft is not yet stable;
-# the trait surface accommodates it but no production commitment.
-aauth-experimental = []
-
-# DTLS-SRTP fingerprint binding — feature-flagged in v1 per
-# `INTERFACE_DESIGN.md` §8.4. Off by default.
-identity-fingerprint-binding = []
-
-# Everything compiled in (the Thelve-shaped deployment).
-full = [
-    "uctp",
-    "sip",
-    "webrtc",
-    "vcon",
-    "identity",
-    "harness",
-    "client",
-    "aauth-experimental",
-    "identity-fingerprint-binding",
-]
+# Everything compiled in for this beta (SIP product surface).
+full = ["sip", "vcon", "harness"]
 
 [dev-dependencies]
 tokio              = { workspace = true }

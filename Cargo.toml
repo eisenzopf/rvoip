@@ -28,7 +28,6 @@ members = [
     "crates/sip/sip-dialog",
     "crates/sip/sip-proxy",
     "crates/sip/sip-registrar",
-    "crates/sip/audio-core",
 
     # webrtc/ — WebRTC interop product.
     "crates/webrtc/rvoip-webrtc",
@@ -206,8 +205,7 @@ rvoip-core-traits   = { path = "crates/foundation/rvoip-core-traits", version = 
 # version exists on crates.io regardless of feature activation.
 rvoip-vcon          = { path = "crates/extensions/rvoip-vcon", version = "0.1.0-alpha.1" }
 rvoip-harness       = { path = "crates/extensions/rvoip-harness", version = "0.1.0-alpha.1" }
-rvoip-audio-core    = { path = "crates/sip/audio-core", version = "0.1.0-alpha.1" }
-rvoip               = { path = "crates/rvoip", version = "0.1.0-alpha.1" }
+rvoip               = { path = "crates/rvoip", version = "0.2.0-beta.1" }
 rvoip-uctp          = { path = "crates/uctp/rvoip-uctp", version = "0.1.0-alpha.1" }
 rvoip-quic          = { path = "crates/uctp/rvoip-quic", version = "0.1.0-alpha.1" }
 rvoip-webtransport  = { path = "crates/uctp/rvoip-webtransport", version = "0.1.0-alpha.1" }
