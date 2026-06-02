@@ -69,8 +69,22 @@ run_test() {
 # deleted crates (rvoip-call-engine, rvoip-client-core, rvoip-dialog-core,
 # rvoip-session-core, rvoip-sip-client, rvoip-transaction-core, plus the
 # orphan rvoip-audio-core) — losing the array prevents that class of drift.
-mapfile -t CRATES < <(cargo metadata --no-deps --format-version 1 \
+# NOTE: `mapfile`/`readarray` is bash 4+ only — macOS ships bash 3.2 as
+# /bin/bash, where it silently fails and leaves CRATES empty (→ 0 tests run).
+# This read loop is portable to both.
+CRATES=()
+while IFS= read -r crate_name; do
+    [ -n "$crate_name" ] && CRATES+=("$crate_name")
+done < <(cargo metadata --no-deps --format-version 1 \
     | jq -r '.packages[].name' | sort)
+
+if [ "${#CRATES[@]}" -eq 0 ]; then
+    echo -e "${RED}ERROR: no workspace crates found — is 'cargo metadata' / 'jq' working?${NC}"
+    echo -e "${RED}Refusing to report success after running 0 tests.${NC}"
+    exit 1
+fi
+echo -e "${GREEN}Discovered ${#CRATES[@]} workspace crates to test.${NC}"
+echo ""
 
 # Optional: Clean build artifacts (comment out for faster runs)
 # echo -e "${YELLOW}Cleaning previous build artifacts...${NC}"
