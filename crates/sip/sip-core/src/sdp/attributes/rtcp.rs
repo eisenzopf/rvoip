@@ -14,7 +14,6 @@ use nom::{
     IResult,
 };
 
-
 /// Parser for payload type or wildcard
 fn payload_type_parser(input: &str) -> IResult<&str, String> {
     alt((

@@ -5,10 +5,7 @@
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::{to_result, token};
-use nom::{
-    combinator::verify,
-    IResult,
-};
+use nom::{combinator::verify, IResult};
 
 /// Parser for MID value
 fn mid_parser(input: &str) -> IResult<&str, &str> {

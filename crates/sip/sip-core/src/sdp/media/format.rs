@@ -51,7 +51,6 @@ pub(crate) fn parse_port_and_count(input: &str) -> IResult<&str, (u16, Option<u1
     ))(input)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,7 +202,6 @@ mod tests {
         assert_eq!(port, 49170, "Incorrect port number");
         assert_eq!(count, Some(2), "Incorrect port count");
     }
-
 
     #[test]
     fn test_parse_formats_from_rfc() {

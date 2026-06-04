@@ -1,7 +1,18 @@
-//! Lightweight SDP inspection helpers (no full parser).
+//! Lightweight SDP inspection helpers backed by the shared sip-core SDP parser.
+
+use rvoip_sip_core::sdp::parser::parse_attribute;
+use rvoip_sip_core::types::sdp::{ParsedAttribute, SdpSession};
+use std::str::FromStr;
 
 /// Returns true when SDP contains an `m=` line for `kind` (`audio`, `video`, …).
 pub fn sdp_has_media_line(sdp: &str, kind: &str) -> bool {
+    if let Ok(session) = SdpSession::from_str(sdp) {
+        return session
+            .media_descriptions
+            .iter()
+            .any(|media| media.media.eq_ignore_ascii_case(kind));
+    }
+
     sdp.lines().any(|line| {
         let line = line.trim();
         line.starts_with("m=") && line[2..].starts_with(kind)
@@ -10,9 +21,24 @@ pub fn sdp_has_media_line(sdp: &str, kind: &str) -> bool {
 
 /// Returns true when SDP advertises simulcast / multi-SSRC video semantics.
 pub fn sdp_indicates_simulcast(sdp: &str) -> bool {
-    sdp.contains("simulcast")
-        || sdp.contains("a=ssrc-group:FID")
-        || sdp.contains("a=rid:")
+    if let Ok(session) = SdpSession::from_str(sdp) {
+        return session.media_descriptions.iter().any(|media| {
+            media.generic_attributes.iter().any(|attr| {
+                matches!(
+                    attr,
+                    ParsedAttribute::Rid(_)
+                        | ParsedAttribute::Simulcast(_, _)
+                        | ParsedAttribute::SimulcastStructured(_)
+                ) || matches!(
+                    attr,
+                    ParsedAttribute::SsrcGroup(group)
+                        if group.semantics.eq_ignore_ascii_case("FID")
+                )
+            })
+        });
+    }
+
+    sdp.contains("simulcast") || sdp.contains("a=ssrc-group:FID") || sdp.contains("a=rid:")
 }
 
 /// Returns true when SDP advertises RFC 4733 telephone-event in any audio
@@ -20,6 +46,15 @@ pub fn sdp_indicates_simulcast(sdp: &str) -> bool {
 /// the answerer should attach a local PT 101 track in response to a remote
 /// offer.
 pub fn sdp_advertises_telephone_event(sdp: &str) -> bool {
+    if let Ok(session) = SdpSession::from_str(sdp) {
+        return session
+            .media_descriptions
+            .iter()
+            .filter(|media| media.media.eq_ignore_ascii_case("audio"))
+            .flat_map(|media| media.rtpmaps())
+            .any(|rtpmap| rtpmap.encoding_name.eq_ignore_ascii_case("telephone-event"));
+    }
+
     sdp.lines().any(|line| {
         let l = line.trim();
         l.starts_with("a=rtpmap:") && l.to_ascii_lowercase().contains("telephone-event")
@@ -28,6 +63,15 @@ pub fn sdp_advertises_telephone_event(sdp: &str) -> bool {
 
 /// Returns true when ICE candidates are embedded in SDP (full gather, not trickle-only).
 pub fn sdp_has_inline_ice_candidates(sdp: &str) -> bool {
+    if let Ok(session) = SdpSession::from_str(sdp) {
+        return session.media_descriptions.iter().any(|media| {
+            media
+                .generic_attributes
+                .iter()
+                .any(|attr| matches!(attr, ParsedAttribute::Candidate(_)))
+        });
+    }
+
     sdp.lines()
         .any(|line| line.trim().starts_with("a=candidate:"))
 }
@@ -48,9 +92,15 @@ pub fn redact_for_log(sdp: &str) -> String {
     for line in sdp.lines() {
         let trimmed = line.trim_end();
         if let Some(rest) = trimmed.strip_prefix("a=candidate:") {
+            let attr_line = format!("candidate:{rest}");
+            let parsed_candidate = matches!(
+                parse_attribute(&attr_line),
+                Ok(ParsedAttribute::Candidate(_))
+            );
+
             // candidate:<foundation> <component> <proto> <prio> <addr> <port> typ <type> ...
             let mut parts: Vec<&str> = rest.split_whitespace().collect();
-            if parts.len() >= 6 {
+            if (parsed_candidate || parts.len() >= 6) && parts.len() >= 6 {
                 parts[4] = "***";
                 parts[5] = "***";
             }
@@ -60,10 +110,10 @@ pub fn redact_for_log(sdp: &str) -> String {
             out.push_str(&trimmed[..9]);
             out.push_str("***");
         } else if let Some(rest) = trimmed.strip_prefix("a=ice-ufrag:") {
-            let _ = rest;
+            let _ = parse_attribute(&format!("ice-ufrag:{rest}"));
             out.push_str("a=ice-ufrag:***");
         } else if let Some(rest) = trimmed.strip_prefix("a=ice-pwd:") {
-            let _ = rest;
+            let _ = parse_attribute(&format!("ice-pwd:{rest}"));
             out.push_str("a=ice-pwd:***");
         } else if let Some(rest) = trimmed.strip_prefix("o=") {
             // o=<user> <sess-id> <sess-vers> <nettype> <addrtype> <addr>

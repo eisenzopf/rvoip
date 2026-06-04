@@ -5,9 +5,6 @@
 
 use crate::error::{Error, Result};
 
-
-
-
 /// Parser for the SDP Group Attribute
 /// Follows RFC 5888
 pub fn parse_group(input: &str) -> Result<(String, Vec<String>)> {
@@ -229,5 +226,4 @@ mod tests {
             "Parser should reject input without proper semantics"
         );
     }
-
 }

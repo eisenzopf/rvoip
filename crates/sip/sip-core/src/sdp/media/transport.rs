@@ -28,8 +28,6 @@ pub(crate) fn parse_transport_protocol(input: &str) -> IResult<&str, String> {
     ))(input)
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,8 +145,6 @@ mod tests {
         let result = parse_transport_protocol(input);
         assert!(result.is_err(), "Should reject incomplete protocol");
     }
-
-
 
     #[test]
     fn test_parse_rfc_examples() {

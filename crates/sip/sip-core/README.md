@@ -139,17 +139,13 @@ The SIP-Core sits at the protocol foundation layer, providing the building block
   - ✅ Reserved character handling and percent-encoding
 
 #### **SDP Support (RFC 8866; WebRTC Attributes Are Parser-Level Claims)**
-- ✅ **Session Description Parsing**: Full SDP session and media description support
-  - ✅ Session-level attributes (v=, o=, s=, c=, t=, etc.)
-  - ✅ Media-level attributes (m=, a=, c=, b=, etc.)
-  - ✅ Time descriptions with repeat intervals and time zones
-  - ✅ Connection data with multicast and TTL support
-- ✅ **WebRTC Attribute Parsing**: parser/serializer support for modern WebRTC attributes
+- ✅ **Session Description Parsing**: Practical SDP parser/serializer support with a documented coverage checklist
+  - ✅ Common session-level fields (`v=`, `o=`, `s=`, `c=`, `b=`, `t=`, etc.)
+  - ✅ Common media-level fields (`m=`, `a=`, `c=`, `b=`, etc.)
+  - 🚧 Known RFC gaps are tracked in [`src/sdp/README.md`](src/sdp/README.md#parser-and-builder-coverage-checklist)
+- 🚧 **WebRTC Attribute Parsing**: parser/serializer support for common WebRTC attributes
   - ✅ ICE attributes (candidate, ice-ufrag, ice-pwd, ice-options)
-  - ✅ DTLS-SRTP attributes (fingerprint, setup)
-  - ✅ Media stream identification (mid, msid, ssrc)
-  - ✅ RTP extensions (extmap, rtcp-fb, rtcp-mux)
-  - ✅ Data channel support (sctp-port, max-message-size)
+  - 🚧 DTLS-SRTP, BUNDLE, RTP extensions, RID, simulcast, and data-channel attributes need additional RFC fixture coverage
 
 #### **Production-Grade Parsing**
 - ✅ **Dual Parsing Modes**: Strict RFC compliance and lenient real-world compatibility
@@ -648,88 +644,108 @@ let sdp = sdp! {
 | Header Validation | ✅ Complete | Configurable strict/lenient validation |
 | Case Insensitive | ✅ Complete | Header names case-insensitive per RFC |
 
-## 🎵 **Complete SDP Support**
+## 🎵 **SDP Parser and Builder Coverage**
+
+The SDP implementation covers core RFC 8866 parsing/display plus the WebRTC SDP attributes needed by SIP and `rvoip-webrtc`. The authoritative coverage and gap checklist lives in [`src/sdp/README.md`](src/sdp/README.md#parser-and-builder-coverage-checklist).
 
 ### **Core SDP (RFC 8866)**
 
 | Field | Status | Description |
 |-------|--------|-------------|
-| `v=` | ✅ Complete | Version (always 0) |
-| `o=` | ✅ Complete | Origin with username, session ID, version, network type, and address |
-| `s=` | ✅ Complete | Session name |
-| `i=` | ✅ Complete | Session information |
-| `u=` | ✅ Complete | URI for additional information |
-| `e=` | ✅ Complete | Email address |
-| `p=` | ✅ Complete | Phone number |
-| `c=` | ✅ Complete | Connection data with multicast support |
-| `b=` | ✅ Complete | Bandwidth information |
-| `t=` | ✅ Complete | Time description |
-| `r=` | ✅ Complete | Repeat times |
-| `z=` | ✅ Complete | Time zone adjustments |
-| `k=` | ✅ Complete | Encryption keys |
-| `a=` | ✅ Complete | Attributes (60+ supported) |
-| `m=` | ✅ Complete | Media descriptions |
+| `v=` | ✅ Typed | Version (always 0) |
+| `o=` | ✅ Typed | Origin with username, session ID, version, network type, and address |
+| `s=` | 🚧 Partial | Session name; charset decoding is not implemented |
+| `i=` | ✅ Typed | Session-level and media-level information |
+| `u=` | ✅ Typed | URI for additional information |
+| `e=` | ✅ Typed | Repeatable email lines |
+| `p=` | ✅ Typed | Repeatable phone lines |
+| `c=` | ✅ Typed | Session connection and repeatable media connections |
+| `b=` | ✅ Typed | Bandwidth information |
+| `t=` | ✅ Typed | Time description |
+| `r=` | ✅ Typed | Repeat times |
+| `z=` | ✅ Typed | Time-zone adjustment lines, raw preserved |
+| `k=` | ✅ Typed | Deprecated encryption key lines, raw preserved |
+| `a=` | 🚧 Partial | Typed support for common attributes; unknown attributes are generic |
+| `m=` | ✅ Typed | Media, port count, protocol, and formats |
+| Field ordering | ✅ Strict mode | `parse_sdp_strict` enforces RFC 8866 order; default parsing is lenient |
 
 ### **Standard Attributes (RFC 8866)**
 
 | Attribute | Status | Description |
 |-----------|--------|-------------|
-| `rtpmap` | ✅ Complete | RTP payload type mapping |
-| `fmtp` | ✅ Complete | Format-specific parameters |
-| `ptime` | ✅ Complete | Preferred packetization time |
-| `maxptime` | ✅ Complete | Maximum packetization time |
-| `sendrecv` | ✅ Complete | Bidirectional media |
-| `sendonly` | ✅ Complete | Send-only media |
-| `recvonly` | ✅ Complete | Receive-only media |
-| `inactive` | ✅ Complete | Inactive media |
-| `orient` | ✅ Complete | Whiteboard orientation |
-| `type` | ✅ Complete | Conference type |
-| `charset` | ✅ Complete | Character set |
-| `sdplang` | ✅ Complete | SDP language |
-| `lang` | ✅ Complete | Media language |
+| `rtpmap` | ✅ Typed | RTP payload type mapping |
+| `fmtp` | ✅ Typed | Format-specific parameters |
+| `ptime` | ✅ Typed | Preferred packetization time |
+| `maxptime` | ✅ Typed | Maximum packetization time |
+| `sendrecv` | ✅ Typed | Bidirectional media |
+| `sendonly` | ✅ Typed | Send-only media |
+| `recvonly` | ✅ Typed | Receive-only media |
+| `inactive` | ✅ Typed | Inactive media |
+| `cat` | ✅ Typed | Category |
+| `keywds` | ✅ Typed | Keywords |
+| `tool` | ✅ Typed | Tool name/version |
+| `orient` | ✅ Typed | Orientation value |
+| `type` | ✅ Typed | Conference type value |
+| `charset` | ✅ Typed | Charset attribute preserved; no charset decoding |
+| `sdplang` | ✅ Typed | Session language tag |
+| `lang` | ✅ Typed | Media language tag |
+| `framerate` | ✅ Typed | Numeric frame rate |
+| `quality` | ✅ Typed | Integer quality `0..=10` |
 
 ### **WebRTC Extensions**
 
 | Category | Attribute | RFC | Status | Description |
 |----------|-----------|-----|--------|-------------|
-| **ICE** | `candidate` | RFC 8839 | ✅ Complete | ICE candidate with all types |
-| | `ice-ufrag` | RFC 8839 | ✅ Complete | ICE username fragment |
-| | `ice-pwd` | RFC 8839 | ✅ Complete | ICE password |
-| | `ice-options` | RFC 8839 | ✅ Complete | ICE options (trickle, etc.) |
-| | `end-of-candidates` | RFC 8840 | ✅ Complete | End of candidates marker |
-| **DTLS** | `fingerprint` | RFC 8122 | ✅ Complete | Certificate fingerprint |
-| | `setup` | RFC 4145 | ✅ Complete | DTLS setup role |
-| **Media** | `mid` | RFC 8843 | ✅ Complete | Media stream identification |
-| | `group` | RFC 5888 | ✅ Complete | Media grouping (BUNDLE) |
-| | `msid` | RFC 8830 | ✅ Complete | Media stream/track ID |
-| | `ssrc` | RFC 5576 | ✅ Complete | Synchronization source |
-| **RTP** | `rtcp-fb` | RFC 4585 | ✅ Complete | RTCP feedback parameters |
-| | `rtcp-mux` | RFC 5761 | ✅ Complete | RTCP multiplexing |
-| | `extmap` | RFC 8285 | ✅ Complete | RTP header extensions |
-| | `rid` | RFC 8851 | ✅ Complete | RTP stream identifier |
-| | `simulcast` | RFC 8853 | ✅ Complete | Simulcast stream configuration |
-| **Data** | `sctp-port` | RFC 8841 | ✅ Complete | SCTP port for data channels |
-| | `max-message-size` | RFC 8841 | ✅ Complete | Maximum data channel message size |
+| **ICE** | `candidate` | RFC 8839 | ✅ Typed | Candidate foundations, transport, address, type, and extensions |
+| | `ice-ufrag` | RFC 8839 | ✅ Typed | ICE username fragment |
+| | `ice-pwd` | RFC 8839 | ✅ Typed | ICE password |
+| | `ice-options` | RFC 8839 | ✅ Typed | ICE option tags |
+| | `ice-lite` | RFC 8839 | ✅ Typed | ICE lite marker |
+| | `remote-candidates` | RFC 8839 | ✅ Typed | Remote candidate triples |
+| | `end-of-candidates` | RFC 8840 | ✅ Typed | Trickle ICE end marker |
+| **DTLS** | `fingerprint` | RFC 8842/RFC 8122 | ✅ Typed | Hash and fingerprint |
+| | `setup` | RFC 8842/RFC 4145 | ✅ Typed | DTLS setup role |
+| | `tls-id` | RFC 8842 | ✅ Typed | DTLS association identifier |
+| **Media** | `mid` | RFC 8843 | ✅ Typed | Media identification |
+| | `group` | RFC 5888/RFC 8843 | ✅ Typed | Group semantics and mids |
+| | `bundle-only` | RFC 8843 | ✅ Typed | BUNDLE-only marker |
+| | `msid` | RFC 8830 | ✅ Typed | Stream and track IDs |
+| | `msid-semantic` | RFC 8830 | ✅ Typed | MSID semantic declaration |
+| | `ssrc` | RFC 5576 | ✅ Typed | SSRC attributes |
+| | `ssrc-group` | RFC 5576 | ✅ Typed | SSRC grouping |
+| **RTP** | `rtcp` | RFC 3605 | ✅ Typed | RTCP port/address |
+| | `rtcp-fb` | RFC 4585 | ✅ Typed | RTCP feedback |
+| | `rtcp-mux` | RFC 5761 | ✅ Typed | RTCP mux marker |
+| | `rtcp-rsize` | RFC 5506 | ✅ Typed | Reduced-size RTCP marker |
+| | `extmap` | RFC 8285 | ✅ Typed | RTP header extension mapping |
+| | `extmap-allow-mixed` | RFC 8285 | ✅ Typed | Mixed one-byte/two-byte marker |
+| | `rid` | RFC 8851 | ✅ Typed | Restriction identifiers |
+| | `simulcast` | RFC 8853 | ✅ Typed | Structured simulcast directions, alternatives, and pause markers |
+| **Data** | `sctp-port` | RFC 8841 | ✅ Typed | SCTP port |
+| | `max-message-size` | RFC 8841 | ✅ Typed | Max message size |
+| | `sctpmap` | RFC 8841 legacy | ✅ Typed | Legacy SCTP map |
+| | `dcmap` | RFC 8864 | ✅ Typed | Data-channel map |
+| | `dcsa` | RFC 8864 | ✅ Typed | Data-channel subprotocol attribute |
 
 ### **Media Types Support**
 
 | Media Type | Status | Formats | Description |
 |------------|--------|---------|-------------|
-| `audio` | ✅ Complete | All standard codecs | Audio streams |
-| `video` | ✅ Complete | All standard codecs | Video streams |
-| `application` | ✅ Complete | Data channels | WebRTC data channels |
-| `text` | ✅ Complete | Text formats | Text/messaging |
-| `message` | ✅ Complete | Message formats | Messaging applications |
-| Custom types | ✅ Complete | Token validation | Non-standard media types |
+| `audio` | ✅ Common | Payload identifiers | Audio streams |
+| `video` | ✅ Common | Payload identifiers | Video streams |
+| `application` | ✅ Common | Data-channel identifiers | WebRTC data channels |
+| `text` | ✅ Common | Format tokens | Text/messaging |
+| `message` | ✅ Common | Format tokens | Messaging applications |
+| Custom types | ✅ Common | Token parsing | Non-standard media types |
 
 ### **SDP Creation APIs**
 
 | Method | Status | Use Case |
 |--------|--------|----------|
-| Manual Construction | ✅ Complete | Maximum control and customization |
-| Builder Pattern | ✅ Complete | Type-safe programmatic generation |
-| Declarative Macro | ✅ Complete | Concise static definitions |
-| From String Parsing | ✅ Complete | Parse existing SDP content |
+| Manual Construction | ✅ Supported | Maximum control over currently modeled SDP structures |
+| Builder Pattern | 🚧 Common SDP | Type-safe programmatic generation for supported fields |
+| Declarative Macro | 🚧 Common SDP | Concise static definitions for supported fields |
+| From String Parsing | 🚧 Common SDP | Parse currently supported SDP syntax |
 
 ## What Can You Build?
 
@@ -823,10 +839,10 @@ The library includes a comprehensive URI implementation:
 
 For handling multimedia session information:
 
-- `SdpSession`: Full SDP session representation
+- `SdpSession`: SDP session representation for currently supported fields
 - `MediaDescription`: Media type, port, and attributes
 - `Connection`: Network connection information
-- Complete support for WebRTC attributes and data channels
+- Common WebRTC attribute and data-channel SDP parsing with documented gaps
 
 ## Advanced Usage
 
@@ -990,7 +1006,7 @@ cargo run --example uri_parsing
 - **IPv6 Support**: RFC 5118 IPv6 torture test compliance
 - **Parser Robustness**: 1,000+ test cases including malformed messages
 - **Header Validation**: Type-safe header construction with validation
-- **SDP Compliance**: RFC 8866 compliance with WebRTC extensions
+- **SDP Coverage**: common RFC 8866/WebRTC SDP parsing with documented gaps
 
 ### Production Readiness Achievements
 
@@ -1108,7 +1124,7 @@ match parse_message(&data) {
 
 ### Core RFCs Implemented
 - **RFC 3261**: SIP: Session Initiation Protocol - Complete implementation
-- **RFC 8866**: SDP: Session Description Protocol - Full support with WebRTC extensions
+- **RFC 8866**: SDP: Session Description Protocol - practical parser support; see the SDP coverage checklist for remaining gaps
 - **RFC 3265**: SIP-Specific Event Notification - NOTIFY/SUBSCRIBE framework (updated by RFC 6665)
 - **RFC 6665**: SIP-Specific Event Notification - Complete SUBSCRIBE/NOTIFY implementation with full subscription lifecycle
 - **RFC 3515**: The Session Initiation Protocol (SIP) Refer Method - Complete REFER with implicit NOTIFY subscription
@@ -1149,7 +1165,7 @@ For sip-core specific contributions:
 
 - ✅ **Complete RFC 3261 Implementation**: All required headers and message types
 - ✅ **Extensive Header Support**: 60+ headers with strong typing and validation
-- ✅ **Complete SDP Support**: RFC 8866 compliance with WebRTC extensions
+- 🚧 **SDP Support**: common RFC 8866/WebRTC SDP support with a documented gap checklist
 - ✅ **High Performance**: Optimized parsing with minimal memory allocation
 - ✅ **Developer Experience**: Multiple APIs from low-level to declarative macros
 - ✅ **Production Validation**: Handles real-world SIP traffic patterns
@@ -1165,7 +1181,7 @@ For sip-core specific contributions:
 - **Message Processing**: Parse and construct all SIP message types
 - **Header Management**: Complete header suite with type safety
 - **URI Handling**: All SIP, SIPS, and TEL URI schemes
-- **SDP Support**: Full session description with WebRTC extensions
+- **SDP Support**: Common session description support with WebRTC extension coverage tracked in `src/sdp/README.md`
 - **Authentication**: Complete digest authentication implementation
 - **Multipart Bodies**: MIME multipart message support
 

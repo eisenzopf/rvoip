@@ -33,9 +33,13 @@ pub fn parse_media_description_nom(input: &str) -> IResult<&str, MediaDescriptio
         MediaDescription {
             media: media_type,
             port,
+            port_count: _port_count,
             protocol,
             formats,
             connection_info: None,
+            connection_infos: Vec::new(),
+            media_info: None,
+            encryption_key: None,
             ptime: None,
             direction: None,
             generic_attributes: Vec::new(),
@@ -89,7 +93,7 @@ pub fn parse_media_description_line(value: &str) -> Result<MediaDescription> {
         }
     };
 
-    let _port_count = if port_parts.len() > 1 {
+    let port_count = if port_parts.len() > 1 {
         match port_parts[1].parse::<u16>() {
             Ok(c) => Some(c),
             Err(_) => {
@@ -113,9 +117,13 @@ pub fn parse_media_description_line(value: &str) -> Result<MediaDescription> {
     Ok(MediaDescription {
         media,
         port,
+        port_count,
         protocol,
         formats,
         connection_info: None,
+        connection_infos: Vec::new(),
+        media_info: None,
+        encryption_key: None,
         ptime: None,
         direction: None,
         generic_attributes: Vec::new(),

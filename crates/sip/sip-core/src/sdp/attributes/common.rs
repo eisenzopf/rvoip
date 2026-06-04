@@ -119,6 +119,15 @@ pub fn validate_attributes(attributes: &[ParsedAttribute]) -> Result<()> {
                     }
                 }
             }
+            ParsedAttribute::SimulcastStructured(descriptions) => {
+                for description in descriptions {
+                    for version in &description.versions {
+                        for alternative in &version.alternatives {
+                            simulcast_rids.push(alternative.rid.clone());
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -139,7 +148,7 @@ pub fn validate_attributes(attributes: &[ParsedAttribute]) -> Result<()> {
                     }
                 }
             }
-            ParsedAttribute::Simulcast(_, _) => {
+            ParsedAttribute::Simulcast(_, _) | ParsedAttribute::SimulcastStructured(_) => {
                 // Verify all RIDs referenced in simulcast exist
                 for rid in &simulcast_rids {
                     // The rid could have alternative formats in simulcast syntax

@@ -5,12 +5,7 @@
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::{positive_integer, token};
-use nom::{
-    character::complete::char,
-    combinator::map,
-    sequence::separated_pair,
-    IResult,
-};
+use nom::{character::complete::char, combinator::map, sequence::separated_pair, IResult};
 
 /// Parser for bandwidth type
 fn bwtype_parser(input: &str) -> IResult<&str, &str> {

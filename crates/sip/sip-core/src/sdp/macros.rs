@@ -113,7 +113,6 @@
 //!
 //! Both approaches validate the resulting SDP message against RFC 8866 requirements.
 
-
 #[cfg(test)]
 use crate::error::Result;
 #[cfg(test)]

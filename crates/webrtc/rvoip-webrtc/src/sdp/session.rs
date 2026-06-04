@@ -1,6 +1,8 @@
 //! SDP parse/serialize helpers.
 
 use rtc::peer_connection::sdp::{RTCSdpType, RTCSessionDescription};
+use rvoip_sip_core::types::sdp::SdpSession;
+use std::str::FromStr;
 
 use crate::errors::{Result, WebRtcError};
 
@@ -31,6 +33,16 @@ pub fn sdp_to_string(desc: &RTCSessionDescription) -> Result<String> {
 
 /// Extract the first audio codec name from an SDP body (best-effort for capability tests).
 pub fn audio_codecs_in_sdp(sdp: &str) -> Vec<String> {
+    if let Ok(session) = SdpSession::from_str(sdp) {
+        return session
+            .media_descriptions
+            .iter()
+            .filter(|media| media.media.eq_ignore_ascii_case("audio"))
+            .flat_map(|media| media.rtpmaps())
+            .map(|rtpmap| normalize_codec_name(&rtpmap.encoding_name))
+            .collect();
+    }
+
     let mut codecs = Vec::new();
     for line in sdp.lines() {
         if let Some(rest) = line.strip_prefix("a=rtpmap:") {

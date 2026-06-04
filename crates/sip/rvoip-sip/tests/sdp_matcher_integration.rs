@@ -172,7 +172,7 @@ fn ice_and_dtls_attributes_carried_verbatim() {
         .formats(&["0"])
         .rtpmap("0", "PCMU/8000")
         .attribute("ice-ufrag", Some("abcd1234"))
-        .attribute("ice-pwd", Some("supersecretpassword"))
+        .attribute("ice-pwd", Some("supersecretpassword123"))
         .attribute("fingerprint", Some("sha-256 AB:CD:EF"))
         .attribute("setup", Some("active"))
         .attribute("sendrecv", None::<String>)

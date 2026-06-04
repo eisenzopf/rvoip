@@ -5,12 +5,6 @@
 
 use crate::error::{Error, Result};
 
-
-
-
-
-
-
 /// Parses extmap attribute: `a=extmap:<id>[/<direction>] <uri> [<extension parameters>]`
 pub fn parse_extmap(value: &str) -> Result<(u16, Option<String>, String, Option<String>)> {
     let value = value.trim();
@@ -54,8 +48,8 @@ pub fn parse_extmap(value: &str) -> Result<(u16, Option<String>, String, Option<
     // URI is the second part
     let uri = parts[1].to_string();
 
-    // Basic URI validation - should start with urn: or http:
-    if !uri.starts_with("urn:") && !uri.starts_with("http:") {
+    // Basic URI validation - should start with urn:, http:, or https:.
+    if !uri.starts_with("urn:") && !uri.starts_with("http:") && !uri.starts_with("https:") {
         return Err(Error::SdpParsingError(format!(
             "Invalid extmap URI: {}",
             uri

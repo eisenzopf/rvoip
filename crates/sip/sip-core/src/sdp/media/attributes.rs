@@ -2,9 +2,9 @@
 //
 // Functions for working with media-level attributes
 
+use crate::error::Result;
 #[cfg(test)]
 use crate::sdp::attributes::MediaDirection;
-use crate::error::Result;
 use crate::types::sdp::{MediaDescription, ParsedAttribute};
 
 /// Update a media description with a parsed attribute
@@ -73,7 +73,6 @@ pub fn is_media_level_attribute(attribute: &str) -> bool {
             | "sctp-port"
     )
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -207,5 +206,4 @@ mod tests {
             );
         }
     }
-
 }

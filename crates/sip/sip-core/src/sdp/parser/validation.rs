@@ -12,7 +12,8 @@
 //! [Session Description Protocol](https://datatracker.ietf.org/doc/html/rfc8866).
 
 use crate::error::{Error, Result};
-use crate::types::sdp::SdpSession;
+use crate::types::sdp::{MediaDescription, ParsedAttribute, SdpSession};
+use std::collections::HashSet;
 
 // Re-export validation functions from session module
 pub use crate::sdp::session::validation::{
@@ -344,16 +345,7 @@ pub fn is_valid_address(addr: &str, addr_type: &str) -> bool {
 ///     repeat_times: Vec::new(),
 /// };
 ///
-/// let media = MediaDescription {
-///     media: "audio".to_string(),
-///     port: 49170,
-///     protocol: "RTP/AVP".to_string(),
-///     formats: vec!["0".to_string()],
-///     connection_info: None,
-///     ptime: None,
-///     direction: None,
-///     generic_attributes: Vec::new(),
-/// };
+/// let media = MediaDescription::new("audio", 49170, "RTP/AVP", vec!["0".to_string()]);
 ///
 /// let mut session = SdpSession::new(origin, "Test Session".to_string());
 /// session.version = "0".to_string();
@@ -412,16 +404,24 @@ pub fn validate_sdp(session: &SdpSession) -> Result<()> {
 
     // Validate media descriptions
     for media in &session.media_descriptions {
-        // Validate media connection info if present
-        if let Some(conn) = &media.connection_info {
-            validate_network_type(&conn.net_type)?;
-            validate_address_type(&conn.addr_type)?;
+        let media_connections: Vec<_> = if media.connection_infos.is_empty() {
+            media.connection_info.iter().collect()
+        } else {
+            media.connection_infos.iter().collect()
+        };
 
-            if !is_valid_address(&conn.connection_address, &conn.addr_type) {
-                return Err(Error::SdpValidationError(format!(
-                    "Invalid media connection address: {}",
-                    conn.connection_address
-                )));
+        // Validate media connection info if present
+        if !media_connections.is_empty() {
+            for conn in media_connections {
+                validate_network_type(&conn.net_type)?;
+                validate_address_type(&conn.addr_type)?;
+
+                if !is_valid_address(&conn.connection_address, &conn.addr_type) {
+                    return Err(Error::SdpValidationError(format!(
+                        "Invalid media connection address: {}",
+                        conn.connection_address
+                    )));
+                }
             }
         } else if !session_has_connection {
             // If no session-level connection and no media-level connection, that's an error
@@ -440,6 +440,207 @@ pub fn validate_sdp(session: &SdpSession) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Validates cross-attribute SDP semantics used by SIP negotiation and WebRTC inspection.
+///
+/// This validator is intentionally separate from parsing so lenient parsing can preserve
+/// real-world SDP while callers opt into stricter offer/answer checks when needed.
+pub fn validate_sdp_semantics(session: &SdpSession) -> Result<()> {
+    let mut all_mids = HashSet::new();
+
+    for media in &session.media_descriptions {
+        let mids: Vec<&str> = media
+            .generic_attributes
+            .iter()
+            .filter_map(|attr| match attr {
+                ParsedAttribute::Mid(mid) => Some(mid.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        if mids.len() > 1 {
+            return Err(Error::SdpValidationError(format!(
+                "Media section {} has multiple mid attributes",
+                media.media
+            )));
+        }
+
+        if let Some(mid) = mids.first() {
+            if !all_mids.insert((*mid).to_string()) {
+                return Err(Error::SdpValidationError(format!(
+                    "Duplicate mid attribute: {}",
+                    mid
+                )));
+            }
+        }
+
+        validate_media_ice_semantics(session, media)?;
+        validate_media_simulcast_semantics(media)?;
+        validate_media_dtls_sctp_semantics(session, media)?;
+    }
+
+    for attr in all_session_and_media_attributes(session) {
+        if let ParsedAttribute::Group(semantics, mids) = attr {
+            if semantics.eq_ignore_ascii_case("BUNDLE") {
+                for mid in mids {
+                    if !all_mids.contains(mid) {
+                        return Err(Error::SdpValidationError(format!(
+                            "BUNDLE group references missing mid: {}",
+                            mid
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_media_ice_semantics(session: &SdpSession, media: &MediaDescription) -> Result<()> {
+    let session_has_ufrag = has_attribute(&session.generic_attributes, |attr| {
+        matches!(attr, ParsedAttribute::IceUfrag(_))
+    });
+    let session_has_pwd = has_attribute(&session.generic_attributes, |attr| {
+        matches!(attr, ParsedAttribute::IcePwd(_))
+    });
+    let media_has_ufrag = has_attribute(&media.generic_attributes, |attr| {
+        matches!(attr, ParsedAttribute::IceUfrag(_))
+    });
+    let media_has_pwd = has_attribute(&media.generic_attributes, |attr| {
+        matches!(attr, ParsedAttribute::IcePwd(_))
+    });
+
+    if session_has_ufrag != session_has_pwd {
+        return Err(Error::SdpValidationError(
+            "Session-level ICE credentials must include both ice-ufrag and ice-pwd".to_string(),
+        ));
+    }
+    if media_has_ufrag != media_has_pwd {
+        return Err(Error::SdpValidationError(format!(
+            "Media section {} ICE credentials must include both ice-ufrag and ice-pwd",
+            media.media
+        )));
+    }
+
+    let has_candidate = has_attribute(&media.generic_attributes, |attr| {
+        matches!(attr, ParsedAttribute::Candidate(_))
+    });
+    if has_candidate && !(session_has_ufrag || media_has_ufrag) {
+        return Err(Error::SdpValidationError(format!(
+            "Media section {} has ICE candidates without ICE credentials",
+            media.media
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_media_simulcast_semantics(media: &MediaDescription) -> Result<()> {
+    let rid_ids: HashSet<String> = media
+        .generic_attributes
+        .iter()
+        .filter_map(|attr| match attr {
+            ParsedAttribute::Rid(rid) => Some(rid.id.clone()),
+            _ => None,
+        })
+        .collect();
+
+    for attr in &media.generic_attributes {
+        match attr {
+            ParsedAttribute::Simulcast(send, recv) => {
+                for stream_list in [send, recv] {
+                    for version in stream_list {
+                        for rid in version.split(',') {
+                            let rid = rid.trim_start_matches('~');
+                            if !rid.is_empty() && !rid_ids.contains(rid) {
+                                return Err(Error::SdpValidationError(format!(
+                                    "Simulcast references missing rid: {}",
+                                    rid
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+            ParsedAttribute::SimulcastStructured(descriptions) => {
+                for description in descriptions {
+                    for version in &description.versions {
+                        for alternative in &version.alternatives {
+                            if !rid_ids.contains(&alternative.rid) {
+                                return Err(Error::SdpValidationError(format!(
+                                    "Simulcast references missing rid: {}",
+                                    alternative.rid
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_media_dtls_sctp_semantics(
+    session: &SdpSession,
+    media: &MediaDescription,
+) -> Result<()> {
+    let protocol = media.protocol.to_ascii_uppercase();
+    let uses_dtls = protocol.contains("DTLS") || protocol.contains("TLS/RTP");
+    let uses_sctp = protocol.contains("SCTP");
+
+    if uses_dtls {
+        let has_fingerprint = has_attribute(&media.generic_attributes, |attr| {
+            matches!(attr, ParsedAttribute::Fingerprint(_, _))
+        }) || has_attribute(&session.generic_attributes, |attr| {
+            matches!(attr, ParsedAttribute::Fingerprint(_, _))
+        });
+        if !has_fingerprint {
+            return Err(Error::SdpValidationError(format!(
+                "Media section {} uses DTLS without fingerprint",
+                media.media
+            )));
+        }
+    }
+
+    if uses_sctp {
+        let has_sctp_mapping = has_attribute(&media.generic_attributes, |attr| {
+            matches!(
+                attr,
+                ParsedAttribute::SctpPort(_) | ParsedAttribute::SctpMap(_, _, _)
+            )
+        });
+        if !has_sctp_mapping {
+            return Err(Error::SdpValidationError(format!(
+                "Media section {} uses SCTP without sctp-port or sctpmap",
+                media.media
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn all_session_and_media_attributes<'a>(
+    session: &'a SdpSession,
+) -> impl Iterator<Item = &'a ParsedAttribute> + 'a {
+    session.generic_attributes.iter().chain(
+        session
+            .media_descriptions
+            .iter()
+            .flat_map(|media| media.generic_attributes.iter()),
+    )
+}
+
+fn has_attribute(
+    attributes: &[ParsedAttribute],
+    predicate: impl Fn(&ParsedAttribute) -> bool,
+) -> bool {
+    attributes.iter().any(predicate)
 }
 
 #[cfg(test)]
@@ -616,6 +817,7 @@ mod tests {
             ptime: None,
             direction: None,
             generic_attributes: Vec::new(),
+            ..MediaDescription::new("", 0, "", Vec::new())
         };
 
         let mut session = SdpSession::new(origin, "Test Session".to_string());
@@ -663,6 +865,7 @@ mod tests {
             ptime: None,
             direction: None,
             generic_attributes: Vec::new(),
+            ..MediaDescription::new("", 0, "", Vec::new())
         };
 
         let mut session = SdpSession::new(origin, "Test Session".to_string());
@@ -717,6 +920,7 @@ mod tests {
             ptime: None,
             direction: None,
             generic_attributes: Vec::new(),
+            ..MediaDescription::new("", 0, "", Vec::new())
         };
 
         let mut session = SdpSession::new(origin, "Test Session".to_string());
@@ -771,6 +975,7 @@ mod tests {
             ptime: None,
             direction: None,
             generic_attributes: Vec::new(),
+            ..MediaDescription::new("", 0, "", Vec::new())
         };
 
         let mut session = SdpSession::new(origin, "".to_string()); // Empty session name
@@ -819,6 +1024,7 @@ mod tests {
             ptime: None,
             direction: None,
             generic_attributes: Vec::new(),
+            ..MediaDescription::new("", 0, "", Vec::new())
         };
 
         let mut session = SdpSession::new(origin, "Test Session".to_string());
@@ -873,6 +1079,7 @@ mod tests {
             ptime: None,
             direction: None,
             generic_attributes: Vec::new(),
+            ..MediaDescription::new("", 0, "", Vec::new())
         };
 
         let mut session = SdpSession::new(origin, "Test Session".to_string());
@@ -919,6 +1126,7 @@ mod tests {
             ptime: None,
             direction: None,
             generic_attributes: Vec::new(),
+            ..MediaDescription::new("", 0, "", Vec::new())
         };
 
         let mut session = SdpSession::new(origin, "Test Session".to_string());
@@ -973,6 +1181,7 @@ mod tests {
             ptime: None,
             direction: None,
             generic_attributes: Vec::new(),
+            ..MediaDescription::new("", 0, "", Vec::new())
         };
 
         let mut session = SdpSession::new(origin, "Test Session".to_string());

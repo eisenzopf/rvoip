@@ -19,7 +19,6 @@ pub fn is_valid_username(username: &str) -> bool {
     })
 }
 
-
 /// Helper to validate hostname without nom (useful for direct string checks)
 pub fn is_valid_hostname(hostname: &str) -> bool {
     if hostname.is_empty() || hostname.len() > 255 {

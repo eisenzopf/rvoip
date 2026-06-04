@@ -56,7 +56,6 @@ pub struct SimulcastAttribute {
     pub stream_versions: Vec<SimulcastVersion>,
 }
 
-
 /// Parse a RID identifier according to RFC 8851
 /// A RID identifier is a token defined in RFC 8851 as
 /// consisting of alphanumeric characters, underscore, and hyphen
@@ -110,7 +109,6 @@ fn parse_simulcast_stream_versions(input: &str) -> IResult<&str, Vec<SimulcastVe
 
     separated_list1(char(';'), parse_simulcast_version)(input)
 }
-
 
 /// Parse simulcast attribute as per RFC 8853
 ///
@@ -583,5 +581,4 @@ mod tests {
         assert_eq!(attrs[0].stream_versions[0].alternatives[1].rid, "a2");
         assert_eq!(attrs[0].stream_versions[1].alternatives[0].rid, "a3");
     }
-
 }

@@ -1,6 +1,6 @@
 # SDP Parser and Generator
 
-This module provides a complete implementation for parsing, manipulating, and generating Session Description Protocol (SDP) messages according to [RFC 8866](https://tools.ietf.org/html/rfc8866) (which obsoletes [RFC 4566](https://tools.ietf.org/html/rfc4566)) and various extensions.
+This module provides practical parsing, manipulation, and generation support for Session Description Protocol (SDP) messages according to [RFC 8866](https://tools.ietf.org/html/rfc8866) (which obsoletes [RFC 4566](https://tools.ietf.org/html/rfc4566)) and common SIP/WebRTC extensions. The parser/model accepts and round-trips the core RFC 8866 line set and the WebRTC-facing attributes used by SIP today and `rvoip-webrtc` going forward; use the checklist below to track remaining conformance, validation, and fixture gaps.
 
 ## Overview
 
@@ -13,90 +13,90 @@ The SDP module consists of:
 - **Macros**: Declarative macro-based syntax for creating SDP sessions
 - **Generator**: Methods to convert SDP structures back to standard format
 
-## Compliance
+## Parser and Builder Coverage Checklist
 
-### Core SDP (RFC 8866)
+Last audited: 2026-06-03.
 
-| Feature | Status | RFC Reference |
-|---------|--------|---------------|
-| Version line (`v=`) | ✅ Fully Compliant | [RFC 8866 §5.1](https://tools.ietf.org/html/rfc8866#section-5.1) |
-| Origin (`o=`) | ✅ Fully Compliant | [RFC 8866 §5.2](https://tools.ietf.org/html/rfc8866#section-5.2) |
-| Session Name (`s=`) | ✅ Fully Compliant | [RFC 8866 §5.3](https://tools.ietf.org/html/rfc8866#section-5.3) |
-| Information (`i=`) | ✅ Fully Compliant | [RFC 8866 §5.4](https://tools.ietf.org/html/rfc8866#section-5.4) |
-| URI (`u=`) | ✅ Fully Compliant | [RFC 8866 §5.5](https://tools.ietf.org/html/rfc8866#section-5.5) |
-| Email (`e=`) | ✅ Fully Compliant | [RFC 8866 §5.6](https://tools.ietf.org/html/rfc8866#section-5.6) |
-| Phone (`p=`) | ✅ Fully Compliant | [RFC 8866 §5.7](https://tools.ietf.org/html/rfc8866#section-5.7) |
-| Connection Data (`c=`) | ✅ Fully Compliant | [RFC 8866 §5.7](https://tools.ietf.org/html/rfc8866#section-5.7) |
-| Bandwidth (`b=`) | ✅ Fully Compliant | [RFC 8866 §5.8](https://tools.ietf.org/html/rfc8866#section-5.8) |
-| Time Description (`t=`) | ✅ Fully Compliant | [RFC 8866 §5.9](https://tools.ietf.org/html/rfc8866#section-5.9) |
-| Repeat Times (`r=`) | ✅ Fully Compliant | [RFC 8866 §5.10](https://tools.ietf.org/html/rfc8866#section-5.10) |
-| Time Zones (`z=`) | ✅ Basic Support | [RFC 8866 §5.11](https://tools.ietf.org/html/rfc8866#section-5.11) |
-| Encryption Keys (`k=`) | ✅ Supported | [RFC 8866 §5.12](https://tools.ietf.org/html/rfc8866#section-5.12) |
-| Attributes (`a=`) | ✅ Fully Compliant | [RFC 8866 §5.13](https://tools.ietf.org/html/rfc8866#section-5.13) |
-| Media Descriptions (`m=`) | ✅ Fully Compliant | [RFC 8866 §5.14](https://tools.ietf.org/html/rfc8866#section-5.14) |
+Status legend:
 
-### Media Formats (RFC 8866, 3264, 4566)
+- `Typed`: parsed into a dedicated field or `ParsedAttribute` variant and displayed in SDP syntax.
+- `Generic`: accepted and preserved as a generic `a=` attribute, but no typed validation/accessor exists.
+- `Partial`: accepted for common cases, but known RFC grammar, semantic, builder-helper, or validation gaps remain.
+- `Missing`: not accepted, dropped, or serialized incorrectly.
 
-| Media Type | Status | Notes |
-|------------|--------|-------|
-| Audio | ✅ Fully Supported | Complete support for audio media types and formats |
-| Video | ✅ Fully Supported | Complete support for video media types and formats |
-| Application | ✅ Fully Supported | Includes data channels with WebRTC extensions |
-| Text | ✅ Supported | Basic support |
-| Message | ✅ Supported | Basic support |
-| Non-standard types | ✅ Supported | Validated as tokens |
+### Core SDP Lines (RFC 8866)
 
-### Standard Attributes (RFC 8866)
+| RFC field | Parser status | Builder/display status | Known gaps / next checks |
+|-----------|---------------|------------------------|--------------------------|
+| `v=` protocol version | Typed | Typed | Only version `0` accepted, as required. |
+| `o=` origin | Typed | Typed | Add more RFC 8866 ABNF edge-case fixtures. |
+| `s=` session name | Partial | Typed | Parser requires UTF-8 input and does not implement `a=charset` decoding for non-UTF-8 text fields. |
+| `i=` information | Typed | Typed | Session-level and media-level `i=` are preserved; charset decoding remains future work. |
+| `u=` URI | Typed | Typed | Stored as raw text; no URI syntax validation. |
+| `e=` email | Typed | Typed | Repeatable `e=` lines are preserved; legacy `email` mirrors the first entry. |
+| `p=` phone | Typed | Typed | Repeatable `p=` lines are preserved; legacy `phone` mirrors the first entry. |
+| `c=` connection | Typed | Typed | Session-level `c=` and repeatable media-level `c=` are preserved; deeper address grammar validation remains limited. |
+| `b=` bandwidth | Typed | Typed | Session/media multiple `b=` lines are accepted as `ParsedAttribute::Bandwidth`. |
+| `t=` active time | Typed | Typed | Multiple `t=` lines supported. Add ABNF edge-case fixtures. |
+| `r=` repeat time | Typed | Typed | Attached to the previous `t=` line. Add RFC duration-unit fixtures. |
+| `z=` time-zone adjustment | Typed | Typed | Raw `z=` syntax is preserved; structured adjustment-pair validation is still minimal. |
+| `k=` encryption key | Typed | Typed | Raw deprecated `k=` syntax is preserved; no key-type-specific validation is applied. |
+| `a=` attributes | Partial | Partial | Unknown attributes are accepted generically in lenient mode. Strict mode rejects malformed known attributes. |
+| `m=` media description | Typed | Typed | Media, port, optional port count, protocol, and formats are preserved. |
+| Field ordering | Typed | N/A | `parse_sdp_strict` enforces RFC 8866 ordering; default lenient parsing keeps SIP/WebRTC interoperability behavior. |
 
-| Attribute | Status | RFC Reference |
-|-----------|--------|---------------|
-| `rtpmap` | ✅ Fully Compliant | [RFC 8866 §6.6](https://tools.ietf.org/html/rfc8866#section-6.6) |
-| `fmtp` | ✅ Fully Compliant | [RFC 8866 §6.6](https://tools.ietf.org/html/rfc8866#section-6.6) |
-| `ptime` | ✅ Fully Compliant | [RFC 8866 §6.4](https://tools.ietf.org/html/rfc8866#section-6.4) |
-| `maxptime` | ✅ Fully Compliant | [RFC 8866 §6.4](https://tools.ietf.org/html/rfc8866#section-6.4) |
-| `recvonly`, `sendrecv`, `sendonly`, `inactive` | ✅ Fully Compliant | [RFC 8866 §6.7](https://tools.ietf.org/html/rfc8866#section-6.7) |
+### RFC 8866 Standard Attributes
 
-### WebRTC Extensions
+| Attribute | Parser status | Builder/display status | Known gaps / next checks |
+|-----------|---------------|------------------------|--------------------------|
+| `cat` | Typed | Typed | Stored as a non-empty string; add full ABNF fixtures. |
+| `keywds` | Typed | Typed | Stored as a non-empty string; add full ABNF fixtures. |
+| `tool` | Typed | Typed | Stored as a non-empty string; add full ABNF fixtures. |
+| `ptime` | Typed | Typed | Stored in a dedicated media field when media-level. |
+| `maxptime` | Typed | Typed | No dedicated accessor; stored as a generic typed attribute. |
+| `rtpmap` | Typed | Typed | Add ABNF fixtures for static/dynamic payload type edge cases and trailing data rejection. |
+| `sendrecv`, `sendonly`, `recvonly`, `inactive` | Typed | Typed | Session/media level supported. |
+| `orient` | Typed | Typed | Stored as text; no enum validation for allowed orientation values yet. |
+| `type` | Typed | Typed | Stored as text; no enum validation for RFC conference-type values yet. |
+| `charset` | Typed | Typed | Attribute is preserved; parser does not decode non-UTF-8 SDP bodies. |
+| `sdplang` | Typed | Typed | Preserved; no RFC 5646 language-tag validation yet. |
+| `lang` | Typed | Typed | Preserved; no RFC 5646 language-tag validation yet. |
+| `framerate` | Typed | Typed | Numeric syntax is checked and original text is preserved. |
+| `quality` | Typed | Typed | Parsed as `0..=10`. |
+| `fmtp` | Typed | Typed | Parameters are preserved as raw text. |
 
-| Feature | Status | RFC Reference |
-|---------|--------|---------------|
-| ICE Attributes | ✅ Fully Compliant | [RFC 8839](https://tools.ietf.org/html/rfc8839) |
-| DTLS-SRTP | ✅ Fully Compliant | [RFC 8842](https://tools.ietf.org/html/rfc8842) |
-| Media Stream Identification | ✅ Fully Compliant | [RFC 8830](https://tools.ietf.org/html/rfc8830) |
-| BUNDLE Grouping | ✅ Fully Compliant | [RFC 8843](https://tools.ietf.org/html/rfc8843) |
-| RTP Header Extensions | ✅ Fully Compliant | [RFC 8285](https://tools.ietf.org/html/rfc8285) |
-| RID (Restricted ID) | ✅ Fully Compliant | [RFC 8851](https://tools.ietf.org/html/rfc8851) |
-| Simulcast | ✅ Fully Compliant | [RFC 8853](https://tools.ietf.org/html/rfc8853) |
-| RTCP Feedback | ✅ Fully Compliant | [RFC 4585](https://tools.ietf.org/html/rfc4585) |
+### WebRTC-Relevant Extensions
 
-### WebRTC Attributes
+| Area / attribute | Parser status | Builder/display status | Known gaps / next checks |
+|------------------|---------------|------------------------|--------------------------|
+| ICE: `candidate` | Typed | Typed | UDP/TCP candidates and extension parameters are preserved. Add broader RFC 8839 and Trickle ICE corpus coverage. |
+| ICE: `ice-ufrag`, `ice-pwd`, `ice-options`, `ice-lite`, `remote-candidates`, `end-of-candidates` | Typed | Typed | Syntax accepted; add more RFC length/token fixtures and level/semantic checks where required. |
+| DTLS: `fingerprint`, `setup`, `tls-id` | Typed | Typed | Syntax parsed; semantic validator checks DTLS media fingerprint presence, but full hash/role policy remains caller-defined. |
+| BUNDLE: `group`, `mid`, `bundle-only` | Typed | Typed | `validate_sdp_semantics` checks unique mids and BUNDLE mids; add more browser and RFC example fixtures. |
+| MSID: `msid`, `msid-semantic` | Typed | Typed | Basic stream/track/semantic parse. Add RFC 8830 edge-case fixtures. |
+| RTP feedback: `rtcp`, `rtcp-fb`, `rtcp-mux`, `rtcp-rsize` | Typed | Typed | Common forms parse; detailed feedback parameter semantics remain limited. |
+| RTP header extensions: `extmap`, `extmap-allow-mixed` | Typed | Typed | `http`, `https`, and URN extension URIs parse; add more ID/direction boundary fixtures. |
+| Source attributes: `ssrc`, `ssrc-group` | Typed | Typed | Basic RFC 5576 parse; source-level semantic validation remains limited. |
+| RID: `rid` | Typed | Typed | RFC-style RID parses and simulcast references are checked by semantic validation. Add more parameter grammar fixtures. |
+| Simulcast: `simulcast` | Typed | Typed | Structured model preserves send/recv directions, alternatives, and paused state. |
+| Data channels: `sctp-port`, `max-message-size`, `sctpmap`, `dcmap`, `dcsa` | Typed | Typed | Modern, legacy, and RFC 8864 forms parse; add broader browser/data-channel fixture coverage. |
+| SDES-SRTP: `crypto` | Partial | Typed | Known suites parse into `Crypto`; unknown suites are preserved as generic values for compatibility. Add lifetime/MKI round-trip fixtures. |
+| Semantic checks | Partial | N/A | `validate_sdp_semantics` covers unique mids, BUNDLE mids, ICE credential pairing, simulcast RID references, DTLS fingerprint presence, and SCTP requirements. |
 
-| Attribute | Status | RFC Reference |
-|-----------|--------|---------------|
-| `candidate` | ✅ Fully Compliant | [RFC 8839](https://tools.ietf.org/html/rfc8839) |
-| `ice-ufrag` | ✅ Fully Compliant | [RFC 8839](https://tools.ietf.org/html/rfc8839) |
-| `ice-pwd` | ✅ Fully Compliant | [RFC 8839](https://tools.ietf.org/html/rfc8839) |
-| `ice-options` | ✅ Fully Compliant | [RFC 8839](https://tools.ietf.org/html/rfc8839) |
-| `fingerprint` | ✅ Fully Compliant | [RFC 8122](https://tools.ietf.org/html/rfc8122) |
-| `setup` | ✅ Fully Compliant | [RFC 4145](https://tools.ietf.org/html/rfc4145) |
-| `mid` | ✅ Fully Compliant | [RFC 8843](https://tools.ietf.org/html/rfc8843) |
-| `group` | ✅ Fully Compliant | [RFC 5888](https://tools.ietf.org/html/rfc5888) |
-| `msid` | ✅ Fully Compliant | [RFC 8830](https://tools.ietf.org/html/rfc8830) |
-| `rtcp-fb` | ✅ Fully Compliant | [RFC 4585](https://tools.ietf.org/html/rfc4585) |
-| `rtcp-mux` | ✅ Fully Compliant | [RFC 5761](https://tools.ietf.org/html/rfc5761) |
-| `extmap` | ✅ Fully Compliant | [RFC 8285](https://tools.ietf.org/html/rfc8285) |
-| `rid` | ✅ Fully Compliant | [RFC 8851](https://tools.ietf.org/html/rfc8851) |
-| `simulcast` | ✅ Fully Compliant | [RFC 8853](https://tools.ietf.org/html/rfc8853) |
-| `ssrc` | ✅ Fully Compliant | [RFC 5576](https://tools.ietf.org/html/rfc5576) |
-| `end-of-candidates` | ✅ Fully Compliant | [RFC 8840](https://tools.ietf.org/html/rfc8840) |
+### Gap-Filling Checklist
 
-### Data Channel Support (WebRTC)
-
-| Attribute | Status | RFC Reference |
-|-----------|--------|---------------|
-| `sctp-port` | ✅ Fully Compliant | [RFC 8841](https://tools.ietf.org/html/rfc8841) |
-| `max-message-size` | ✅ Fully Compliant | [RFC 8841](https://tools.ietf.org/html/rfc8841) |
-| `sctpmap` | ✅ Fully Compliant | [RFC 4960](https://tools.ietf.org/html/rfc4960) (deprecated by RFC 8841) |
+| Priority | Work item | Status | Why it matters / next check |
+|----------|-----------|--------|-----------------------------|
+| P0 | Accept and preserve RFC 8866 core line types, including `b=`, `z=`, `k=`, media `i=`, repeatable `e=`/`p=`, media-level `c=`, and `m=` port counts. | Done | Prevents repeats of the `b=` dispatcher miss and avoids lossy parse/display cycles. |
+| P0 | Split strict RFC ordering from lenient SIP/WebRTC interoperability parsing. | Done | `parse_sdp_strict` enforces fixed RFC line order; `parse_sdp` remains lenient. |
+| P0 | Add typed RFC 8866 standard attributes. | Done | `cat`, `keywds`, `tool`, `orient`, `type`, `charset`, `sdplang`, `lang`, `framerate`, and `quality` now have typed variants. |
+| P0 | Add typed WebRTC-relevant attributes. | Done | ICE, Trickle ICE, DTLS, BUNDLE, MSID, RTCP, extmap, RID, simulcast, SCTP, RFC 8864 data-channel, and SDES crypto forms are parser-visible. |
+| P1 | Add semantic validation helpers separately from syntax parsing. | Done | `validate_sdp_semantics` keeps policy checks opt-in and parse preservation lenient. |
+| P1 | Expand RFC 8866 ABNF fixtures for every core line and strict malformed permutation. | Open | Validates boundaries beyond the initial implementation tests. |
+| P1 | Expand WebRTC fixture corpus from browser offers/answers and RFC examples. | Open | WebRTC integration depends on combinations of ICE, DTLS, BUNDLE, RTP, RID, simulcast, and data-channel attributes. |
+| P1 | Add fuzz coverage for valid/invalid SDP line permutations and WebRTC attribute corpora. | Done | Existing SDP fuzz target now exercises lenient/strict modes, RFC-shaped core SDP, mixed line permutations, and a WebRTC corpus. Keep growing the seed corpus as new browser fixtures land. |
+| P2 | Add higher-level builder/accessor ergonomics for newer typed fields. | Open | Parser/model support exists; fluent builder helpers are still uneven across newer attributes. |
+| P2 | Decide charset decoding policy for non-UTF-8 SDP text fields. | Open | `a=charset` is preserved, but parser input is still UTF-8. |
 
 ## Usage Examples
 
@@ -256,16 +256,18 @@ For creating SDP messages, we provide three approaches:
 
 3. **Manual Construction**: Gives complete control over the SDP structure. Most verbose but allows full customization for advanced use cases.
 
-## Compliance Testing
+## Coverage Testing
 
-The implementation has thorough test coverage (over 1,300 tests) ensuring RFC compliance including:
+The implementation has broad test coverage for currently supported SDP behavior, including:
 
-- Complete session-level and media-level attribute parsing
-- Validation of required fields and field ordering
-- Support for IPv4, IPv6, and multicast addresses
-- WebRTC-specific attributes and extensions
+- Common session-level and media-level line parsing
+- Validation of required fields and selected ordering constraints
+- Support for IPv4, IPv6, and multicast connection addresses
+- Common SIP/WebRTC attributes and extensions
 - Handling of malformed SDP messages with appropriate errors
-- Round-trip testing (parse → serialize → parse)
+- Round-trip tests for supported fields
+
+The checklist above is the source of truth for remaining RFC grammar, semantic, data model, and round-trip gaps.
 
 ## Known Limitations
 
@@ -273,7 +275,7 @@ The implementation has thorough test coverage (over 1,300 tests) ensuring RFC co
 
 2. **IP Address Validation**: While the parser handles IPv4, IPv6, and multicast addresses, its validation is more lenient than strict RFC requirements in some cases, accepting addresses that might not be technically valid.
 
-3. **Limited SDP Munging Helpers**: Advanced WebRTC operations that require SDP manipulation (munging) don't have dedicated helper methods, though all the necessary parsing and structure is in place.
+3. **Limited SDP Munging Helpers**: Advanced WebRTC operations that require SDP manipulation (munging) don't have dedicated helper methods. Some WebRTC-related SDP structures are still represented generically or partially.
 
 4. **Minimal Documentation for Custom Attributes**: While the library supports parsing unknown/custom attributes, there's limited guidance on how to extend for custom attributes.
 
@@ -302,4 +304,4 @@ The library follows an extensible pattern that makes it straightforward to add s
 - [RFC 8853: Simulcast for SDP](https://tools.ietf.org/html/rfc8853)
 - [RFC 5576: Source-Specific Media Attributes in SDP](https://tools.ietf.org/html/rfc5576)
 - [RFC 4585: Extended RTP Profile for RTCP-Based Feedback](https://tools.ietf.org/html/rfc4585)
-- [RFC 5761: Multiplexing RTP and RTCP](https://tools.ietf.org/html/rfc5761) 
+- [RFC 5761: Multiplexing RTP and RTCP](https://tools.ietf.org/html/rfc5761)

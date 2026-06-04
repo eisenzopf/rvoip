@@ -109,11 +109,11 @@
 //! ```
 
 #[cfg(test)]
-use bytes::Bytes;
-#[cfg(test)]
 use crate::sdp::attributes::MediaDirection;
 #[cfg(test)]
 use crate::types::sdp::ParsedAttribute;
+#[cfg(test)]
+use bytes::Bytes;
 mod attribute_parser;
 mod line_parser;
 mod media_parser;
@@ -127,20 +127,18 @@ pub use self::attribute_parser::parse_attribute;
 pub use self::line_parser::parse_bandwidth_line;
 pub use self::line_parser::parse_sdp_line;
 pub use self::media_parser::parse_media_description_line;
-pub use self::sdp_parser::parse_sdp;
+pub use self::sdp_parser::{parse_sdp, parse_sdp_strict, parse_sdp_with_mode, SdpParseMode};
 pub use self::time_parser::{
     parse_repeat_time_line, parse_time_description_line, parse_time_with_unit,
 };
 pub use self::validation::{
     is_valid_address, is_valid_hostname, is_valid_ipv4, is_valid_ipv6, validate_address_type,
-    validate_network_type, validate_sdp,
+    validate_network_type, validate_sdp, validate_sdp_semantics,
 };
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_parse_simple_sdp() {

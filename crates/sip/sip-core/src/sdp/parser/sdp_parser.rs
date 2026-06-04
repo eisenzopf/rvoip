@@ -14,7 +14,7 @@
 //! 1. Validating that the content is valid UTF-8 text
 //! 2. Splitting the content into lines
 //! 3. Parsing each line according to its type (v=, o=, s=, etc.)
-//! 4. Enforcing the required field order according to the RFC
+//! 4. Enforcing RFC field order when strict mode is requested
 //! 5. Building a structured representation of the SDP session
 //! 6. Validating the completeness and correctness of the data
 //!
@@ -42,26 +42,30 @@
 //!
 //! ## Field Order
 //!
-//! The SDP specification mandates a specific order for fields:
+//! The SDP specification mandates a specific order for fields. This parser
+//! preserves the historical lenient behavior by default, and enforces RFC 8866
+//! ordering when callers use [`parse_sdp_strict`] or [`parse_sdp_with_mode`] with
+//! [`SdpParseMode::Strict`]:
 //!
 //! 1. Session-level fields must appear in a specific order:
 //!    - v= (version) must be first
 //!    - o= (origin) must be second
 //!    - s= (session name) must be third
-//!    - Other session-level fields follow in a more relaxed order
+//!    - Optional session-level fields follow the RFC order
 //!
 //! 2. Media-level sections must follow all session-level fields,
 //!    and each media-level section begins with an m= line.
 
+use crate::error::{Error, Result};
 #[cfg(test)]
 use crate::sdp::attributes::MediaDirection;
-#[cfg(test)]
-use crate::types::sdp::Origin;
-use crate::error::{Error, Result};
 use crate::sdp::parser::attribute_parser;
 use crate::sdp::parser::validation;
+use crate::sdp::session::parse_bandwidth_line as parse_session_bandwidth_line;
+#[cfg(test)]
+use crate::types::sdp::Origin;
 use crate::types::sdp::{
-    MediaDescription, ParsedAttribute, SdpSession,
+    EncryptionKey, MediaDescription, ParsedAttribute, SdpSession, TimeZoneAdjustment,
 };
 use bytes::Bytes;
 use std::str::{self};
@@ -70,6 +74,17 @@ use super::line_parser::parse_sdp_line;
 use super::media_parser::parse_media_description_line;
 use super::session_parser;
 use super::time_parser::{parse_repeat_time_line, parse_time_description_line};
+
+/// SDP parser behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SdpParseMode {
+    /// Interoperability mode. Unknown or malformed `a=` attributes are preserved
+    /// as generic attributes, and optional field ordering is not enforced.
+    Lenient,
+    /// RFC conformance mode. SDP lines must appear in RFC 8866 order, and typed
+    /// attribute parser errors are returned to the caller.
+    Strict,
+}
 
 /// Parses the entire SDP content from bytes into an SdpSession struct.
 ///
@@ -121,6 +136,16 @@ use super::time_parser::{parse_repeat_time_line, parse_time_description_line};
 /// assert_eq!(media.port, 49170);
 /// ```
 pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
+    parse_sdp_with_mode(content, SdpParseMode::Lenient)
+}
+
+/// Parses SDP content using strict RFC 8866 conformance checks.
+pub fn parse_sdp_strict(content: &Bytes) -> Result<SdpSession> {
+    parse_sdp_with_mode(content, SdpParseMode::Strict)
+}
+
+/// Parses SDP content using the requested parse mode.
+pub fn parse_sdp_with_mode(content: &Bytes, mode: SdpParseMode) -> Result<SdpSession> {
     // Convert bytes to string first
     let sdp_str = match str::from_utf8(content) {
         Ok(s) => s,
@@ -134,6 +159,10 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
     // Split the content into lines
     let lines: Vec<&str> = sdp_str.lines().collect();
 
+    if mode == SdpParseMode::Strict {
+        validate_strict_field_order(&lines)?;
+    }
+
     // Define the state for tracking the current parsing section
     #[derive(PartialEq)]
     enum SdpParseSection {
@@ -141,18 +170,7 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
         MediaDescription,
     }
 
-    // Define the state for tracking field order according to RFC 8866
-    #[derive(PartialEq, PartialOrd)]
-    enum FieldOrder {
-        Version,      // v= (must be first)
-        Origin,       // o= (must be second)
-        SessionName,  // s= (must be third)
-        SessionLevel, // All other session-level fields (more lenient ordering)
-        Media,        // m= (starts media section, must be after session fields)
-    }
-
     let mut parse_section = SdpParseSection::SessionHeader;
-    let mut field_position = FieldOrder::Version; // Must start with version
 
     // Initialize a session with default values
     let mut session = session_parser::init_session_description();
@@ -182,70 +200,6 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                 )))
             }
         };
-
-        // Check field order according to RFC 8866, but be lenient where possible
-        match key {
-            'v' => {
-                // Version must be the first field
-                if field_position != FieldOrder::Version {
-                    return Err(Error::SdpParsingError(
-                        "v= must be the first line in SDP".to_string(),
-                    ));
-                }
-                field_position = FieldOrder::Origin;
-            }
-            'o' => {
-                // Origin must come after version but before any m= line
-                if field_position < FieldOrder::Origin {
-                    return Err(Error::SdpParsingError("o= must come after v=".to_string()));
-                }
-                if field_position > FieldOrder::SessionLevel {
-                    return Err(Error::SdpParsingError("o= must come before m=".to_string()));
-                }
-                field_position = FieldOrder::SessionName;
-            }
-            's' => {
-                // Session name must come after origin but before any m= line
-                if field_position < FieldOrder::SessionName {
-                    return Err(Error::SdpParsingError("s= must come after o=".to_string()));
-                }
-                if field_position > FieldOrder::SessionLevel {
-                    return Err(Error::SdpParsingError("s= must come before m=".to_string()));
-                }
-                field_position = FieldOrder::SessionLevel;
-            }
-            'm' => {
-                // Media must come after session-level fields
-                if field_position < FieldOrder::SessionLevel {
-                    return Err(Error::SdpParsingError(
-                        "m= must come after v=, o=, and s=".to_string(),
-                    ));
-                }
-
-                // Check if at least one timing description is present before media section
-                if session.time_descriptions.is_empty() {
-                    return Err(Error::SdpParsingError(
-                        "m= must come after at least one t= line".to_string(),
-                    ));
-                }
-
-                field_position = FieldOrder::Media;
-            }
-            _ => {
-                // For all other fields, just ensure they come after v=, o=, s= and in the right section
-                if field_position < FieldOrder::SessionName {
-                    return Err(Error::SdpParsingError(format!(
-                        "{}= must come after v=, o=, and s=",
-                        key
-                    )));
-                }
-
-                // Once we're in the session level fields or media section, be lenient with ordering
-                if parse_section == SdpParseSection::SessionHeader {
-                    field_position = FieldOrder::SessionLevel;
-                }
-            }
-        }
 
         // Process the line based on its type
         match key {
@@ -294,28 +248,32 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
             }
 
             // i= (Session Information)
-            'i' => {
-                match parse_section {
-                    SdpParseSection::SessionHeader => {
-                        if session.session_info.is_some() {
-                            return Err(Error::SdpParsingError(
-                                "Multiple session-level i= lines found".to_string(),
-                            ));
-                        }
-                        session.session_info = Some(value.to_string());
+            'i' => match parse_section {
+                SdpParseSection::SessionHeader => {
+                    if session.session_info.is_some() {
+                        return Err(Error::SdpParsingError(
+                            "Multiple session-level i= lines found".to_string(),
+                        ));
                     }
-                    SdpParseSection::MediaDescription => {
-                        if current_media_description.is_some() {
-                            // Media description doesn't have an information field in this codebase
-                            // Just ignore it or add it as an attribute
-                        } else {
+                    session.session_info = Some(value.to_string());
+                }
+                SdpParseSection::MediaDescription => {
+                    if let Some(md) = &mut current_media_description {
+                        if md.media_info.is_some() && mode == SdpParseMode::Strict {
                             return Err(Error::SdpParsingError(
-                                "i= line found outside of media section".to_string(),
+                                "Multiple media-level i= lines found".to_string(),
                             ));
                         }
+                        if md.media_info.is_none() {
+                            md.media_info = Some(value.to_string());
+                        }
+                    } else {
+                        return Err(Error::SdpParsingError(
+                            "i= line found outside of media section".to_string(),
+                        ));
                     }
                 }
-            }
+            },
 
             // u= (URI)
             'u' => {
@@ -330,42 +288,42 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
 
             // e= (Email Address)
             'e' => {
-                if session.email.is_some() {
-                    return Err(Error::SdpParsingError(
-                        "Multiple e= lines found".to_string(),
-                    ));
+                let email = value.to_string();
+                if session.email.is_none() {
+                    session.email = Some(email.clone());
                 }
-                session.email = Some(value.to_string());
+                session.emails.push(email);
             }
 
             // p= (Phone Number)
             'p' => {
-                if session.phone.is_some() {
-                    return Err(Error::SdpParsingError(
-                        "Multiple p= lines found".to_string(),
-                    ));
+                let phone = value.to_string();
+                if session.phone.is_none() {
+                    session.phone = Some(phone.clone());
                 }
-                session.phone = Some(value.to_string());
+                session.phones.push(phone);
             }
 
             // c= (Connection Data)
             'c' => match parse_section {
                 SdpParseSection::SessionHeader => {
-                    if session.connection_info.is_some() {
+                    if session.connection_info.is_some() && mode == SdpParseMode::Strict {
                         return Err(Error::SdpParsingError(
                             "Multiple session-level c= lines found".to_string(),
                         ));
                     }
-                    session.connection_info = Some(session_parser::parse_connection_line(value)?);
+                    if session.connection_info.is_none() {
+                        session.connection_info =
+                            Some(session_parser::parse_connection_line(value)?);
+                    }
                 }
                 SdpParseSection::MediaDescription => {
                     if let Some(md) = &mut current_media_description {
-                        if md.connection_info.is_some() {
-                            return Err(Error::SdpParsingError(
-                                "Multiple media-level c= lines found".to_string(),
-                            ));
+                        let conn = session_parser::parse_connection_line(value)?;
+                        if md.connection_info.is_none() {
+                            md.connection_info = Some(conn.clone());
                         }
-                        md.connection_info = Some(session_parser::parse_connection_line(value)?);
+                        md.connection_infos.push(conn);
                     } else {
                         return Err(Error::SdpParsingError(
                             "c= line found outside of media section".to_string(),
@@ -373,6 +331,25 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                     }
                 }
             },
+
+            // b= (Bandwidth Information)
+            'b' => {
+                let bandwidth = parse_session_bandwidth_line(value)?;
+                match parse_section {
+                    SdpParseSection::SessionHeader => {
+                        session.generic_attributes.push(bandwidth);
+                    }
+                    SdpParseSection::MediaDescription => {
+                        if let Some(md) = &mut current_media_description {
+                            md.generic_attributes.push(bandwidth);
+                        } else {
+                            return Err(Error::SdpParsingError(
+                                "b= line found outside of media section".to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
 
             // t= (Timing)
             't' => {
@@ -395,24 +372,37 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
 
             // z= (Time Zones)
             'z' => {
-                // Time zones not directly supported in the type, add as an attribute
-                session = session.with_attribute(ParsedAttribute::Value(
-                    "time-zones".to_string(),
-                    value.to_string(),
-                ));
+                session.time_zones.push(TimeZoneAdjustment {
+                    raw: value.to_string(),
+                });
             }
 
             // k= (Encryption Key)
             'k' => {
-                // Encryption key not directly supported in the type, add as an attribute
-                let attr = ParsedAttribute::Value("encryption-key".to_string(), value.to_string());
+                let key = EncryptionKey {
+                    raw: value.to_string(),
+                };
                 match parse_section {
                     SdpParseSection::SessionHeader => {
-                        session = session.with_attribute(attr);
+                        if session.encryption_key.is_some() && mode == SdpParseMode::Strict {
+                            return Err(Error::SdpParsingError(
+                                "Multiple session-level k= lines found".to_string(),
+                            ));
+                        }
+                        if session.encryption_key.is_none() {
+                            session.encryption_key = Some(key);
+                        }
                     }
                     SdpParseSection::MediaDescription => {
                         if let Some(md) = &mut current_media_description {
-                            *md = md.clone().with_attribute(attr);
+                            if md.encryption_key.is_some() && mode == SdpParseMode::Strict {
+                                return Err(Error::SdpParsingError(
+                                    "Multiple media-level k= lines found".to_string(),
+                                ));
+                            }
+                            if md.encryption_key.is_none() {
+                                md.encryption_key = Some(key);
+                            }
                         } else {
                             return Err(Error::SdpParsingError(
                                 "k= line found outside of media section".to_string(),
@@ -429,7 +419,13 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                 let key = parts.next().unwrap_or("").trim();
                 let val = parts.next().unwrap_or("").trim();
 
-                handle_attribute(&mut session, current_media_description.as_mut(), key, val)?;
+                handle_attribute(
+                    &mut session,
+                    current_media_description.as_mut(),
+                    key,
+                    val,
+                    mode,
+                )?;
             }
 
             // m= (Media Description)
@@ -480,6 +476,131 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
     validation::validate_sdp(&session)?;
 
     Ok(session)
+}
+
+fn validate_strict_field_order(lines: &[&str]) -> Result<()> {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Section {
+        Session,
+        Media,
+    }
+
+    let mut section = Section::Session;
+    let mut session_rank: Option<u8> = None;
+    let mut media_rank: u8 = 0;
+    let mut saw_time_description = false;
+    let mut saw_nonempty = false;
+
+    for raw_line in lines {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let (key, _) = match parse_sdp_line(line) {
+            Ok((_, result)) => result,
+            Err(_) => {
+                return Err(Error::SdpParsingError(format!(
+                    "Failed to parse SDP line: {}",
+                    line
+                )))
+            }
+        };
+
+        saw_nonempty = true;
+
+        if key == 'm' {
+            if section == Section::Session && !saw_time_description {
+                return Err(Error::SdpParsingError(
+                    "m= must come after at least one t= line in strict mode".to_string(),
+                ));
+            }
+            section = Section::Media;
+            media_rank = 0;
+            session_rank = Some(13);
+            continue;
+        }
+
+        match section {
+            Section::Session => {
+                let rank = match key {
+                    'v' => 0,
+                    'o' => 1,
+                    's' => 2,
+                    'i' => 3,
+                    'u' => 4,
+                    'e' => 5,
+                    'p' => 6,
+                    'c' => 7,
+                    'b' => 8,
+                    't' | 'r' => 9,
+                    'z' => 10,
+                    'k' => 11,
+                    'a' => 12,
+                    _ => {
+                        return Err(Error::SdpParsingError(format!(
+                            "Unknown SDP line type: {}",
+                            key
+                        )))
+                    }
+                };
+
+                if session_rank.is_none() && key != 'v' {
+                    return Err(Error::SdpParsingError(
+                        "v= must be the first line in SDP strict mode".to_string(),
+                    ));
+                }
+
+                if key == 'r' && !saw_time_description {
+                    return Err(Error::SdpParsingError(
+                        "r= must follow a t= line in strict mode".to_string(),
+                    ));
+                }
+                if key == 't' {
+                    saw_time_description = true;
+                }
+
+                if let Some(previous) = session_rank {
+                    if rank < previous {
+                        return Err(Error::SdpParsingError(format!(
+                            "{}= is out of RFC 8866 session field order",
+                            key
+                        )));
+                    }
+                }
+                session_rank = Some(rank);
+            }
+            Section::Media => {
+                let rank = match key {
+                    'i' => 1,
+                    'c' => 2,
+                    'b' => 3,
+                    'k' => 4,
+                    'a' => 5,
+                    _ => {
+                        return Err(Error::SdpParsingError(format!(
+                            "{}= is not valid inside a media section in strict mode",
+                            key
+                        )))
+                    }
+                };
+
+                if rank < media_rank {
+                    return Err(Error::SdpParsingError(format!(
+                        "{}= is out of RFC 8866 media field order",
+                        key
+                    )));
+                }
+                media_rank = rank;
+            }
+        }
+    }
+
+    if !saw_nonempty {
+        return Err(Error::SdpParsingError("Empty SDP content".to_string()));
+    }
+
+    Ok(())
 }
 
 /// Handles parsing and processing of an SDP attribute line.
@@ -535,19 +656,50 @@ fn handle_attribute(
     current_media: Option<&mut MediaDescription>,
     key: &str,
     value: &str,
+    mode: SdpParseMode,
 ) -> Result<()> {
-    // Attributes that require values but are missing them should be rejected
-    match key {
-        "rtpmap" | "fmtp" | "candidate" | "ssrc" | "mid" | "msid" | "ice-ufrag" | "ice-pwd"
-        | "fingerprint" | "setup" | "rid" | "extmap" => {
-            if value.is_empty() {
-                return Err(Error::SdpParsingError(format!(
-                    "Attribute '{}' requires a value but none was provided",
-                    key
-                )));
-            }
-        }
-        _ => {}
+    let requires_value = matches!(
+        key,
+        "rtpmap"
+            | "fmtp"
+            | "candidate"
+            | "ssrc"
+            | "mid"
+            | "msid"
+            | "ice-ufrag"
+            | "ice-pwd"
+            | "ice-options"
+            | "remote-candidates"
+            | "fingerprint"
+            | "setup"
+            | "tls-id"
+            | "rid"
+            | "extmap"
+            | "rtcp"
+            | "rtcp-fb"
+            | "msid-semantic"
+            | "sctpmap"
+            | "sctp-port"
+            | "max-message-size"
+            | "dcmap"
+            | "dcsa"
+            | "cat"
+            | "keywds"
+            | "tool"
+            | "orient"
+            | "type"
+            | "charset"
+            | "sdplang"
+            | "lang"
+            | "framerate"
+            | "quality"
+    );
+
+    if value.is_empty() && requires_value && mode == SdpParseMode::Strict {
+        return Err(Error::SdpParsingError(format!(
+            "Attribute '{}' requires a value but none was provided",
+            key
+        )));
     }
 
     // Create a formatted attribute line for the parser
@@ -557,7 +709,11 @@ fn handle_attribute(
         format!("{}:{}", key, value)
     };
 
-    let parsed_attr = attribute_parser::parse_attribute(&attr_line)?;
+    let parsed_attr = match attribute_parser::parse_attribute(&attr_line) {
+        Ok(attr) => attr,
+        Err(_) if mode == SdpParseMode::Lenient => preserve_attribute(key, value),
+        Err(err) => return Err(err),
+    };
 
     if let Some(media) = current_media {
         // Media-level attributes
@@ -578,6 +734,14 @@ fn handle_attribute(
     }
 
     Ok(())
+}
+
+fn preserve_attribute(key: &str, value: &str) -> ParsedAttribute {
+    if value.is_empty() {
+        ParsedAttribute::Flag(key.to_string())
+    } else {
+        ParsedAttribute::Value(key.to_string(), value.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -761,7 +925,7 @@ o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5
 c=IN IP4 224.2.17.12
 t=0 0
 ";
-        let result = parse_sdp(&Bytes::from(sdp_str));
+        let result = parse_sdp_strict(&Bytes::from(sdp_str));
         assert!(result.is_err(), "s= before o= should be rejected");
 
         // Test o= before v=
@@ -772,7 +936,7 @@ s=SDP Test
 c=IN IP4 224.2.17.12
 t=0 0
 ";
-        let result = parse_sdp(&Bytes::from(sdp_str));
+        let result = parse_sdp_strict(&Bytes::from(sdp_str));
         assert!(result.is_err(), "o= before v= should be rejected");
 
         // Test m= before t=
@@ -784,7 +948,7 @@ c=IN IP4 224.2.17.12
 m=audio 49170 RTP/AVP 0
 t=0 0
 ";
-        let result = parse_sdp(&Bytes::from(sdp_str));
+        let result = parse_sdp_strict(&Bytes::from(sdp_str));
         assert!(result.is_err(), "m= before t= should be rejected");
     }
 
@@ -1046,8 +1210,8 @@ m=audio 49170 RTP/AVP 0
 c=IN IP4 224.2.17.12
 c=IN IP4 224.2.17.13
 ";
-        let result = parse_sdp(&Bytes::from(sdp_str));
-        assert!(result.is_err());
+        let result = parse_sdp(&Bytes::from(sdp_str)).unwrap();
+        assert_eq!(result.media_descriptions[0].connection_infos.len(), 2);
     }
 
     #[test]
@@ -1064,16 +1228,156 @@ c=IN IP4 224.2.17.13
 
         // Test session attribute handling
         let mut session = SdpSession::new(origin, "Test Session");
-        assert!(handle_attribute(&mut session, None, "sendrecv", "").is_ok());
+        assert!(handle_attribute(&mut session, None, "sendrecv", "", SdpParseMode::Strict).is_ok());
         assert!(matches!(session.direction, Some(MediaDirection::SendRecv)));
 
         // Test media attribute handling
         let mut md = MediaDescription::new("audio", 49170, "RTP/AVP", vec!["0".to_string()]);
-        assert!(handle_attribute(&mut session, Some(&mut md), "ptime", "20").is_ok());
+        assert!(handle_attribute(
+            &mut session,
+            Some(&mut md),
+            "ptime",
+            "20",
+            SdpParseMode::Strict
+        )
+        .is_ok());
         assert_eq!(md.ptime, Some(20));
 
         // Test attribute requiring value
-        let result = handle_attribute(&mut session, None, "rtpmap", "");
+        let result = handle_attribute(&mut session, None, "rtpmap", "", SdpParseMode::Strict);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_session_level_bandwidth_line() {
+        let sdp_str = "\
+v=0
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5
+s=SDP Test
+c=IN IP4 224.2.17.12
+b=AS:128
+t=0 0
+";
+        let result = parse_sdp(&Bytes::from(sdp_str)).unwrap();
+
+        assert!(result.generic_attributes.iter().any(|attr| matches!(
+            attr,
+            ParsedAttribute::Bandwidth(bwtype, bandwidth)
+                if bwtype == "AS" && *bandwidth == 128
+        )));
+    }
+
+    #[test]
+    fn test_parse_media_level_bandwidth_line() {
+        let sdp_str = "\
+v=0
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5
+s=SDP Test
+c=IN IP4 224.2.17.12
+t=0 0
+m=audio 49170 RTP/AVP 0 101
+b=TIAS:64000
+a=rtpmap:0 PCMU/8000
+a=rtpmap:101 telephone-event/8000
+";
+        let result = parse_sdp(&Bytes::from(sdp_str)).unwrap();
+
+        let audio = &result.media_descriptions[0];
+        assert!(audio.generic_attributes.iter().any(|attr| matches!(
+            attr,
+            ParsedAttribute::Bandwidth(bwtype, bandwidth)
+                if bwtype == "TIAS" && *bandwidth == 64000
+        )));
+        assert_eq!(audio.rtpmaps().count(), 2);
+    }
+
+    #[test]
+    fn test_parse_repeatable_contacts_media_info_connections_z_k_and_port_count() {
+        let sdp_str = "\
+v=0
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5
+s=SDP Test
+i=Session information
+u=https://example.com/session
+e=one@example.com
+e=two@example.com
+p=+1 555 0100
+p=+1 555 0101
+c=IN IP4 203.0.113.1
+b=AS:128
+t=0 0
+z=2882844526 -1h 2898848070 0
+k=prompt
+a=tool:rvoip-test
+m=audio 49170/2 RTP/AVP 0
+i=Audio stream
+c=IN IP4 203.0.113.2
+c=IN IP4 203.0.113.3
+b=TIAS:64000
+k=clear:media-key
+a=rtpmap:0 PCMU/8000
+";
+        let session = parse_sdp(&Bytes::from(sdp_str)).unwrap();
+
+        assert_eq!(session.emails, vec!["one@example.com", "two@example.com"]);
+        assert_eq!(session.email.as_deref(), Some("one@example.com"));
+        assert_eq!(session.phones, vec!["+1 555 0100", "+1 555 0101"]);
+        assert_eq!(session.phone.as_deref(), Some("+1 555 0100"));
+        assert_eq!(session.time_zones.len(), 1);
+        assert_eq!(
+            session.encryption_key.as_ref().map(|key| key.raw.as_str()),
+            Some("prompt")
+        );
+
+        let audio = &session.media_descriptions[0];
+        assert_eq!(audio.port, 49170);
+        assert_eq!(audio.port_count, Some(2));
+        assert_eq!(audio.media_info.as_deref(), Some("Audio stream"));
+        assert_eq!(audio.connection_infos.len(), 2);
+        assert_eq!(
+            audio.encryption_key.as_ref().map(|key| key.raw.as_str()),
+            Some("clear:media-key")
+        );
+
+        let rendered = session.to_string();
+        let reparsed = parse_sdp(&Bytes::from(rendered)).unwrap();
+        assert_eq!(reparsed.emails.len(), 2);
+        assert_eq!(reparsed.media_descriptions[0].connection_infos.len(), 2);
+        assert_eq!(reparsed.media_descriptions[0].port_count, Some(2));
+    }
+
+    #[test]
+    fn test_lenient_preserves_malformed_typed_attribute() {
+        let sdp_str = "\
+v=0
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5
+s=SDP Test
+c=IN IP4 224.2.17.12
+t=0 0
+m=audio 49170 RTP/AVP 0
+a=rtpmap:not-valid
+";
+        let session = parse_sdp(&Bytes::from(sdp_str)).unwrap();
+        assert!(session.media_descriptions[0]
+            .generic_attributes
+            .iter()
+            .any(|attr| matches!(attr, ParsedAttribute::Value(key, value)
+                if key == "rtpmap" && value == "not-valid")));
+
+        assert!(parse_sdp_strict(&Bytes::from(sdp_str)).is_err());
+    }
+
+    #[test]
+    fn test_strict_enforces_optional_field_order() {
+        let sdp_str = "\
+v=0
+o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5
+s=SDP Test
+c=IN IP4 224.2.17.12
+e=jdoe@example.com
+t=0 0
+";
+        assert!(parse_sdp(&Bytes::from(sdp_str)).is_ok());
+        assert!(parse_sdp_strict(&Bytes::from(sdp_str)).is_err());
     }
 }

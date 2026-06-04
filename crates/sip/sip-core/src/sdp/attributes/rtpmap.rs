@@ -117,7 +117,6 @@ pub fn parse_rtpmap(value: &str) -> Result<ParsedAttribute> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_rtpmap_attribute_comprehensive() {

@@ -7,9 +7,11 @@
 //! - Round-trip tests (parse -> serialize -> parse)
 
 use crate::sdp::attributes::MediaDirection;
+use crate::sdp::parse_sdp_strict;
 use crate::types::sdp::{
     ConnectionData, MediaDescription, Origin, ParsedAttribute, SdpSession, TimeDescription,
 };
+use bytes::Bytes;
 
 use std::str::FromStr;
 
@@ -345,7 +347,7 @@ mod tests {
                               v=0\r\n\
                               o=- 123 456 IN IP4 127.0.0.1\r\n\
                               t=0 0\r\n";
-        let result = SdpSession::from_str(incorrect_order);
+        let result = parse_sdp_strict(&Bytes::copy_from_slice(incorrect_order.as_bytes()));
         assert!(
             result.is_err(),
             "Parser should reject SDP with incorrect field order"
@@ -357,7 +359,7 @@ mod tests {
                                   o=- 123 456 IN IP4 127.0.0.1\r\n\
                                   s=Bad Order\r\n\
                                   t=0 0\r\n";
-        let result = SdpSession::from_str(media_before_session);
+        let result = parse_sdp_strict(&Bytes::copy_from_slice(media_before_session.as_bytes()));
         assert!(
             result.is_err(),
             "Parser should reject SDP with media before all session fields"
@@ -485,7 +487,7 @@ mod tests {
                          s=Invalid Attribute\r\n\
                          t=0 0\r\n\
                          a=rtpmap\r\n"; // Missing value
-        let result = SdpSession::from_str(invalid_attr);
+        let result = parse_sdp_strict(&Bytes::copy_from_slice(invalid_attr.as_bytes()));
         assert!(
             result.is_err(),
             "Parser should reject SDP with invalid rtpmap attribute"
@@ -498,7 +500,7 @@ mod tests {
                            t=0 0\r\n\
                            m=audio 9 RTP/AVP 0\r\n\
                            a=rtpmap:0 PCMU/unexpected/format/with/too/many/parts\r\n";
-        let result = SdpSession::from_str(invalid_rtpmap);
+        let result = parse_sdp_strict(&Bytes::copy_from_slice(invalid_rtpmap.as_bytes()));
         assert!(
             result.is_err(),
             "Parser should reject SDP with invalid rtpmap format"
@@ -858,7 +860,7 @@ mod api_tests {
     use crate::error::Result;
     use crate::sdp;
     use crate::sdp::builder::SdpBuilder;
-     // Import the macros explicitly
+    // Import the macros explicitly
     use crate::types::sdp::{
         ConnectionData, FmtpAttribute, MediaDescription, Origin, ParsedAttribute, RtpMapAttribute,
         SdpSession, TimeDescription,

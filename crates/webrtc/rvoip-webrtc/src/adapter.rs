@@ -1,5 +1,6 @@
 //! `WebRtcAdapter` — `rvoip_core::ConnectionAdapter` for WebRTC interop.
 
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
@@ -8,20 +9,19 @@ use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
 use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
-use std::sync::atomic::{AtomicU64, Ordering};
 use rvoip_core::adapter::{
     AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest,
     RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
-use rvoip_core::connection::{
-    Connection, ConnectionState, Direction, Transport, TransportHandle,
-};
+use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::{ConnectionId, StreamId};
 use rvoip_core::message::Message;
 use rvoip_core::stream::MediaStream;
+use rvoip_sip_core::types::sdp::SdpSession;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, instrument, warn};
 use webrtc::data_channel::DataChannel;
@@ -155,8 +155,15 @@ impl WebRtcAdapter {
             let events_tx = adapter.events_tx.clone();
             let live = Arc::clone(&adapter.live_sessions);
             tokio::spawn(async move {
-                Self::run_reaper(routes, events_tx, reaper_cancel, ttl_secs, metrics_reaped, live)
-                    .await;
+                Self::run_reaper(
+                    routes,
+                    events_tx,
+                    reaper_cancel,
+                    ttl_secs,
+                    metrics_reaped,
+                    live,
+                )
+                .await;
             });
         }
 
@@ -167,10 +174,7 @@ impl WebRtcAdapter {
         // `crate::media::stats::spawn_webrtc_stats_collector`. The
         // orchestrator feeds these into its `QualityAggregator` so
         // `Event::SessionEnded` reports include WebRTC-side numbers.
-        Self::spawn_quality_emitter(
-            Arc::clone(&adapter.routes),
-            adapter.events_tx.clone(),
-        );
+        Self::spawn_quality_emitter(Arc::clone(&adapter.routes), adapter.events_tx.clone());
 
         adapter
     }
@@ -332,6 +336,11 @@ impl WebRtcAdapter {
         *self.fingerprint_policy.write() = None;
     }
 
+    fn parse_shared_sdp(sdp: &str) -> Result<SdpSession> {
+        SdpSession::from_str(sdp)
+            .map_err(|err| WebRtcError::Sdp(format!("shared SDP parse failed: {err}")))
+    }
+
     /// D2 — evaluate the union of static + dynamic pin lists against the
     /// remote SDP's fingerprints. `Ok(())` when allowed (including when no
     /// pinning is in effect); `Err(FingerprintNotPinned)` when the remote
@@ -356,8 +365,12 @@ impl WebRtcAdapter {
         if remote.is_empty() {
             return Err(WebRtcError::FingerprintNotPinned);
         }
-        let normalize =
-            |fp: &crate::identity::DtlsFingerprint| (fp.algorithm.to_ascii_lowercase(), fp.value.to_ascii_lowercase());
+        let normalize = |fp: &crate::identity::DtlsFingerprint| {
+            (
+                fp.algorithm.to_ascii_lowercase(),
+                fp.value.to_ascii_lowercase(),
+            )
+        };
         let allowed_norm: std::collections::HashSet<_> = allowed.iter().map(normalize).collect();
         if !remote.iter().any(|r| allowed_norm.contains(&normalize(r))) {
             return Err(WebRtcError::FingerprintNotPinned);
@@ -383,9 +396,7 @@ impl WebRtcAdapter {
                 .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                return Ok(SessionSlotGuard {
-                    live: Some(live),
-                });
+                return Ok(SessionSlotGuard { live: Some(live) });
             }
         }
     }
@@ -578,7 +589,14 @@ impl WebRtcAdapter {
 
         let stream_id = StreamId::new();
         let has_remote = remote.is_some();
-        let media = from_tracks(stream_id.clone(), codec, local, local_ssrc, payload_type, remote);
+        let media = from_tracks(
+            stream_id.clone(),
+            codec,
+            local,
+            local_ssrc,
+            payload_type,
+            remote,
+        );
         if has_remote {
             media.enable_webrtc_stats(
                 Arc::clone(route.peer.peer_connection()),
@@ -646,9 +664,7 @@ impl WebRtcAdapter {
                 //    channel, the underlying transceiver still exposes
                 //    the receiver's track. Scan and attach. Idempotent
                 //    via `WebRtcMediaStream::attach_remote`.
-                if let Some(audio) =
-                    peer_track.discover_remote_track(RtpCodecKind::Audio).await
-                {
+                if let Some(audio) = peer_track.discover_remote_track(RtpCodecKind::Audio).await {
                     attach_track_to_streams_matching(
                         &routes_track,
                         &conn_track,
@@ -657,9 +673,7 @@ impl WebRtcAdapter {
                     )
                     .await;
                 }
-                if let Some(video) =
-                    peer_track.discover_remote_track(RtpCodecKind::Video).await
-                {
+                if let Some(video) = peer_track.discover_remote_track(RtpCodecKind::Video).await {
                     attach_track_to_streams_matching(
                         &routes_track,
                         &conn_track,
@@ -753,11 +767,8 @@ impl WebRtcAdapter {
     }
 
     /// Apply a remote SDP answer to an outbound (offerer) connection.
-    pub async fn apply_remote_answer(
-        &self,
-        conn: ConnectionId,
-        answer_sdp: &str,
-    ) -> Result<()> {
+    pub async fn apply_remote_answer(&self, conn: ConnectionId, answer_sdp: &str) -> Result<()> {
+        let _parsed_answer = Self::parse_shared_sdp(answer_sdp)?;
         // D2 — enforce pinned fingerprints against the answer's `a=fingerprint:`
         // lines before handing it to webrtc-rs. Rejecting here avoids
         // completing the DTLS handshake with an un-pinned peer.
@@ -777,6 +788,7 @@ impl WebRtcAdapter {
         let slot = self.reserve_session_slot()?;
         self.metrics_inbound.fetch_add(1, Ordering::Relaxed);
         let conn_id = ConnectionId::new();
+        let _parsed_offer = Self::parse_shared_sdp(offer_sdp)?;
         // D2 — enforce pinned fingerprints against the offer's
         // `a=fingerprint:` lines BEFORE allocating a peer connection, so
         // an un-pinned peer never triggers DTLS negotiation costs.
@@ -853,6 +865,7 @@ impl WebRtcAdapter {
         conn: ConnectionId,
         offer_sdp: &str,
     ) -> Result<String> {
+        let _parsed_offer = Self::parse_shared_sdp(offer_sdp)?;
         let route = self.route(&conn)?;
         if route.peer.role() != PeerRole::Answerer {
             return Err(WebRtcError::Adapter(
@@ -1135,7 +1148,10 @@ impl ConnectionAdapter for WebRtcAdapter {
         } else {
             let dc = tokio::time::timeout(
                 Duration::from_secs(2),
-                route.peer.peer_connection().create_data_channel("rvoip-messages", None),
+                route
+                    .peer
+                    .peer_connection()
+                    .create_data_channel("rvoip-messages", None),
             )
             .await
             .map_err(|_| RvoipError::Adapter("create_data_channel timed out".into()))?
@@ -1220,9 +1236,7 @@ impl ConnectionAdapter for WebRtcAdapter {
         // before this point. Returns `Anonymous` when there's no remote SDP
         // yet (outbound originate before the answer lands) or the route is
         // unknown.
-        let fps = self
-            .remote_dtls_fingerprint(&conn)
-            .unwrap_or_default();
+        let fps = self.remote_dtls_fingerprint(&conn).unwrap_or_default();
         match fps.into_iter().next() {
             Some(fp) => Ok(IdentityAssurance::DtlsFingerprint {
                 algorithm: fp.algorithm,

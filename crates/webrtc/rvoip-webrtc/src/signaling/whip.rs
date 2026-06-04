@@ -40,15 +40,14 @@ use axum::{
 use dashmap::DashMap;
 use rvoip_core::adapter::ConnectionAdapter;
 use rvoip_core::ids::ConnectionId;
+use rvoip_sip_core::sdp::parser::parse_attribute;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 use webrtc::peer_connection::RTCIceCandidateInit;
 
 use crate::adapter::WebRtcAdapter;
 use crate::errors::{Result, WebRtcError};
-use crate::signaling::auth::{
-    extract_bearer, AnonymousAuth, AuthRejection, WhipAuthHook,
-};
+use crate::signaling::auth::{extract_bearer, AnonymousAuth, AuthRejection, WhipAuthHook};
 
 const CT_TRICKLE: &str = "application/trickle-ice-sdpfrag";
 const CT_SDP: &str = "application/sdp";
@@ -148,13 +147,8 @@ pub async fn serve_listener_with_shutdown(
     adapter: Arc<WebRtcAdapter>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    serve_listener_with_auth_and_shutdown(
-        listener,
-        adapter,
-        Arc::new(AnonymousAuth),
-        shutdown,
-    )
-    .await
+    serve_listener_with_auth_and_shutdown(listener, adapter, Arc::new(AnonymousAuth), shutdown)
+        .await
 }
 
 /// Same as [`serve_listener_with_auth`] plus graceful shutdown.
@@ -304,10 +298,8 @@ async fn readyz(State(state): State<WhipState>) -> Response {
 /// inbound + outbound RTP counters and the selected-pair RTT/bitrate gauges.
 async fn metrics(State(state): State<WhipState>) -> Response {
     let (_n, snapshot) = state.adapter.aggregated_stats();
-    let body = crate::observability::render_prometheus_with_stats(
-        &state.adapter.metrics(),
-        &snapshot,
-    );
+    let body =
+        crate::observability::render_prometheus_with_stats(&state.adapter.metrics(), &snapshot);
     let mut headers = HeaderMap::new();
     if let Ok(v) = HeaderValue::from_str("text/plain; version=0.0.4; charset=utf-8") {
         headers.insert("content-type", v);
@@ -434,9 +426,7 @@ async fn whip_post(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    if let Err(resp) =
-        check_auth(&state, "POST", &format!("/whip/{tag}"), &headers, addr).await
-    {
+    if let Err(resp) = check_auth(&state, "POST", &format!("/whip/{tag}"), &headers, addr).await {
         return resp;
     }
     if !state.allow_request(addr.ip()) {
@@ -465,13 +455,12 @@ async fn whip_post(
         Ok(id) => id,
         Err(e) => {
             state.adapter.note_signaling_error();
-            let status = if matches!(e, WebRtcError::Adapter(_))
-                && e.to_string().contains("cap reached")
-            {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
+            let status =
+                if matches!(e, WebRtcError::Adapter(_)) && e.to_string().contains("cap reached") {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
             return (status, e.to_string()).into_response();
         }
     };
@@ -556,12 +545,7 @@ async fn whip_patch(
         return (StatusCode::BAD_REQUEST, "empty WHIP ICE restart offer body").into_response();
     }
     match state.adapter.apply_ice_restart_offer(id, &body).await {
-        Ok(sdp) => (
-            StatusCode::OK,
-            [("content-type", CT_SDP)],
-            sdp,
-        )
-            .into_response(),
+        Ok(sdp) => (StatusCode::OK, [("content-type", CT_SDP)], sdp).into_response(),
         Err(WebRtcError::ConnectionNotFound) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
             state.adapter.note_signaling_error();
@@ -584,6 +568,8 @@ async fn apply_sdpfrag(
     for line in body.lines() {
         let line = line.trim();
         if let Some(mid) = line.strip_prefix("a=mid:") {
+            parse_attribute(&format!("mid:{}", mid.trim()))
+                .map_err(|err| WebRtcError::Sdp(format!("invalid sdpfrag mid: {err}")))?;
             current_mid = Some(mid.trim().to_owned());
         } else if line.starts_with("m=") {
             if applied > 0 || current_mid.is_some() {
@@ -591,6 +577,8 @@ async fn apply_sdpfrag(
             }
             current_mid = None;
         } else if let Some(cand) = line.strip_prefix("a=candidate:") {
+            parse_attribute(&format!("candidate:{cand}"))
+                .map_err(|err| WebRtcError::Sdp(format!("invalid sdpfrag candidate: {err}")))?;
             let init = RTCIceCandidateInit {
                 candidate: format!("candidate:{cand}"),
                 sdp_mid: current_mid.clone(),
@@ -612,9 +600,7 @@ async fn whep_post(
     headers: HeaderMap,
     _body: String,
 ) -> Response {
-    if let Err(resp) =
-        check_auth(&state, "POST", &format!("/whep/{tag}"), &headers, addr).await
-    {
+    if let Err(resp) = check_auth(&state, "POST", &format!("/whep/{tag}"), &headers, addr).await {
         return resp;
     }
     if !state.allow_request(addr.ip()) {
@@ -693,8 +679,14 @@ async fn whip_delete(
     Path(conn_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(resp) =
-        check_auth(&state, "DELETE", &format!("/whip/{conn_id}"), &headers, addr).await
+    if let Err(resp) = check_auth(
+        &state,
+        "DELETE",
+        &format!("/whip/{conn_id}"),
+        &headers,
+        addr,
+    )
+    .await
     {
         return resp;
     }

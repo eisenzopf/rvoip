@@ -6,11 +6,7 @@
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::to_result;
-use nom::{
-    bytes::complete::take_while1,
-    combinator::verify,
-    IResult,
-};
+use nom::{bytes::complete::take_while1, combinator::verify, IResult};
 
 /// Parser for ICE username fragment (ufrag)
 /// The ufrag must be between 4 and 256 characters
@@ -29,7 +25,6 @@ fn ice_pwd_parser(input: &str) -> IResult<&str, &str> {
         |s: &str| s.len() >= 22 && s.len() <= 256,
     )(input)
 }
-
 
 /// Parses ice-ufrag attribute: `a=ice-ufrag:<ufrag>`
 pub fn parse_ice_ufrag(value: &str) -> Result<String> {
@@ -262,7 +257,6 @@ mod tests {
         let result = parse_end_of_candidates("anything").unwrap();
         assert!(result);
     }
-
 
     #[test]
     fn test_real_world_examples() {

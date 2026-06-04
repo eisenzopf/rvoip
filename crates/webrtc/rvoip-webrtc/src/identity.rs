@@ -10,7 +10,9 @@
 //! `verify_request_signature` can return it directly — for now it stays
 //! `Anonymous`.
 
+use rvoip_sip_core::types::sdp::{ParsedAttribute, SdpSession};
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 /// One `a=fingerprint:` line extracted from an SDP.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -35,9 +37,28 @@ impl DtlsFingerprint {
 /// Extract every `a=fingerprint:` line from an SDP body. Returns them in the
 /// order they appear (session level first, then per-media).
 pub fn extract_fingerprints(sdp: &str) -> Vec<DtlsFingerprint> {
+    if let Ok(session) = SdpSession::from_str(sdp) {
+        let mut fingerprints = Vec::new();
+        collect_fingerprints(&session.generic_attributes, &mut fingerprints);
+        for media in &session.media_descriptions {
+            collect_fingerprints(&media.generic_attributes, &mut fingerprints);
+        }
+        return fingerprints;
+    }
+
     sdp.lines()
         .filter_map(DtlsFingerprint::parse_line)
         .collect()
+}
+
+fn collect_fingerprints(attributes: &[ParsedAttribute], out: &mut Vec<DtlsFingerprint>) {
+    out.extend(attributes.iter().filter_map(|attr| match attr {
+        ParsedAttribute::Fingerprint(algorithm, value) => Some(DtlsFingerprint {
+            algorithm: algorithm.to_ascii_lowercase(),
+            value: value.to_ascii_lowercase(),
+        }),
+        _ => None,
+    }));
 }
 
 #[cfg(test)]

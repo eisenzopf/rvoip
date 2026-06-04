@@ -226,7 +226,6 @@ pub fn parse_time_with_unit(value: &str) -> Result<u64> {
     Ok(seconds)
 }
 
-
 /// Parse a time description using nom (internal implementation)
 ///
 /// # Format

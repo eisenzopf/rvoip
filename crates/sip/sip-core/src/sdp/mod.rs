@@ -341,8 +341,8 @@ mod tests;
 
 pub use crate::sdp;
 pub use builder::SdpBuilder;
-pub use parser::parse_sdp;
-pub use parser::validate_sdp; // Directly use the sdp macro
+pub use parser::{parse_sdp, parse_sdp_strict, parse_sdp_with_mode, SdpParseMode};
+pub use parser::{validate_sdp, validate_sdp_semantics}; // Directly use the sdp macro
 
 // For backward compatibility
 pub mod media_parser {
@@ -369,7 +369,8 @@ pub use integration::*; // Re-export integration helpers
 pub mod prelude {
     pub use super::attributes::MediaDirection;
     pub use super::integration::*;
-    pub use super::parse_sdp;
     pub use super::SdpBuilder;
+    pub use super::{parse_sdp, parse_sdp_strict, parse_sdp_with_mode, SdpParseMode};
+    pub use super::{validate_sdp, validate_sdp_semantics};
     pub use crate::sdp; // Use the sdp macro from crate root // Make integration helpers available in prelude
 }

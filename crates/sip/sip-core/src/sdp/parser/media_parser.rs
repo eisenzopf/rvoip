@@ -112,9 +112,18 @@ pub fn parse_media_description_line(value: &str) -> Result<MediaDescription> {
         }
     };
 
+    let port_count = if port_parts.len() > 1 {
+        Some(port_parts[1].parse::<u16>().map_err(|_| {
+            Error::SdpParsingError(format!("Invalid port count: {}", port_parts[1]))
+        })?)
+    } else {
+        None
+    };
+
     // Create the media description
     let mut md =
         MediaDescription::new(parts[0].to_string(), port, parts[2].to_string(), Vec::new());
+    md.port_count = port_count;
 
     // Parse formats
     for part in parts.iter().skip(3) {

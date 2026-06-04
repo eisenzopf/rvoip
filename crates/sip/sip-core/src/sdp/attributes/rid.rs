@@ -30,13 +30,6 @@ pub struct RidAttribute {
     pub restrictions: HashMap<String, String>,
 }
 
-
-
-
-
-
-
-
 /// Parse a RID (Restriction IDentifier) attribute as defined in RFC 8851.
 ///
 /// The format is: `a=rid:<id> <direction> [pt=<fmt-list>] [;<key=value>]`*
@@ -490,7 +483,6 @@ mod tests {
             "Should reject restriction without key"
         );
     }
-
 
     #[test]
     fn test_strict_rfc_compliance() {

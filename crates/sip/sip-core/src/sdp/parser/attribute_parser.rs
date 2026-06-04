@@ -22,17 +22,26 @@ use std::str::FromStr;
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::MediaDirection;
-use crate::types::sdp::ParsedAttribute;
+use crate::types::sdp::{
+    DcMapAttribute, DcsaAttribute, ParsedAttribute, RemoteCandidateAttribute, RtcpAttribute,
+    SimulcastAlternative as SdpSimulcastAlternative,
+    SimulcastDescription as SdpSimulcastDescription, SimulcastVersion as SdpSimulcastVersion,
+    SsrcGroupAttribute,
+};
 
 // Import specialized parse functions
 use crate::sdp::attributes::candidate::parse_candidate;
+use crate::sdp::attributes::datachannel;
+use crate::sdp::attributes::dtls;
 use crate::sdp::attributes::extmap;
 use crate::sdp::attributes::fmtp::parse_fmtp;
 use crate::sdp::attributes::group;
+use crate::sdp::attributes::ice;
 use crate::sdp::attributes::mid;
 use crate::sdp::attributes::msid;
 use crate::sdp::attributes::ptime;
 use crate::sdp::attributes::rid;
+use crate::sdp::attributes::rid::RidDirection;
 use crate::sdp::attributes::rtcp;
 use crate::sdp::attributes::rtpmap::parse_rtpmap;
 use crate::sdp::attributes::sctpmap::parse_sctpmap;
@@ -127,28 +136,24 @@ pub fn parse_attribute(value: &str) -> Result<ParsedAttribute> {
             }
 
             // ICE attributes
-            "ice-ufrag" => Ok(ParsedAttribute::IceUfrag(val.to_string())),
-            "ice-pwd" => Ok(ParsedAttribute::IcePwd(val.to_string())),
+            "ice-ufrag" => Ok(ParsedAttribute::IceUfrag(ice::parse_ice_ufrag(val)?)),
+            "ice-pwd" => Ok(ParsedAttribute::IcePwd(ice::parse_ice_pwd(val)?)),
             "ice-options" => {
-                let options = val.split_whitespace().map(|s| s.to_string()).collect();
+                let options = ice::parse_ice_options(val)?;
                 Ok(ParsedAttribute::IceOptions(options))
             }
             "candidate" => parse_candidate(val),
+            "remote-candidates" => Ok(ParsedAttribute::RemoteCandidates(parse_remote_candidates(
+                val,
+            )?)),
 
             // DTLS attributes
             "fingerprint" => {
-                let parts: Vec<&str> = val.splitn(2, ' ').collect();
-                if parts.len() < 2 {
-                    return Err(Error::SdpParsingError(
-                        "Invalid fingerprint format".to_string(),
-                    ));
-                }
-                Ok(ParsedAttribute::Fingerprint(
-                    parts[0].to_string(),
-                    parts[1].to_string(),
-                ))
+                let (hash, fingerprint) = dtls::parse_fingerprint(val)?;
+                Ok(ParsedAttribute::Fingerprint(hash, fingerprint))
             }
-            "setup" => Ok(ParsedAttribute::Setup(val.to_string())),
+            "setup" => Ok(ParsedAttribute::Setup(dtls::parse_setup(val)?)),
+            "tls-id" => Ok(ParsedAttribute::TlsId(parse_nonempty_value("tls-id", val)?)),
 
             // SDES-SRTP `a=crypto:` (RFC 4568 §9.1).
             // Wire form: `<tag> <crypto-suite> inline:<base64-key>[|<lifetime>][|<MKI>:<MKI_LEN>] [<session-params>]`
@@ -202,6 +207,10 @@ pub fn parse_attribute(value: &str) -> Result<ParsedAttribute> {
                 let (stream_id, track_id) = msid::parse_msid(val)?;
                 Ok(ParsedAttribute::Msid(stream_id, track_id))
             }
+            "msid-semantic" => {
+                let (semantic, tokens) = parse_msid_semantic(val)?;
+                Ok(ParsedAttribute::MsidSemantic(semantic, tokens))
+            }
             "ssrc" => parse_ssrc(val),
 
             // Grouping attributes
@@ -211,6 +220,7 @@ pub fn parse_attribute(value: &str) -> Result<ParsedAttribute> {
             }
 
             // RTCP attributes
+            "rtcp" => Ok(ParsedAttribute::Rtcp(parse_rtcp_attribute(val)?)),
             "rtcp-fb" => {
                 let (pt, fb_type, fb_param) = rtcp::parse_rtcp_fb(val)?;
                 Ok(ParsedAttribute::RtcpFb(pt, fb_type, fb_param))
@@ -234,22 +244,48 @@ pub fn parse_attribute(value: &str) -> Result<ParsedAttribute> {
                 let rid_attr = rid::parse_rid(val)?;
                 Ok(ParsedAttribute::Rid(rid_attr))
             }
-            "simulcast" => {
-                let (send, recv) = simulcast::parse_simulcast_compat(val)?;
-                Ok(ParsedAttribute::Simulcast(send, recv))
-            }
+            "simulcast" => Ok(ParsedAttribute::SimulcastStructured(
+                parse_structured_simulcast(val)?,
+            )),
+            "ssrc-group" => Ok(ParsedAttribute::SsrcGroup(parse_ssrc_group(val)?)),
 
             // Data channel attributes
             "sctpmap" => {
                 let (port, app, streams) = parse_sctpmap(val)?;
                 Ok(ParsedAttribute::SctpMap(port, app, streams as u16))
             }
-            "sctp-port" => Ok(ParsedAttribute::SctpPort(val.parse().map_err(|_| {
-                Error::SdpParsingError(format!("Invalid sctp-port: {}", val))
-            })?)),
-            "max-message-size" => Ok(ParsedAttribute::MaxMessageSize(val.parse().map_err(
-                |_| Error::SdpParsingError(format!("Invalid max-message-size: {}", val)),
+            "sctp-port" => Ok(ParsedAttribute::SctpPort(datachannel::parse_sctp_port(
+                val,
             )?)),
+            "max-message-size" => Ok(ParsedAttribute::MaxMessageSize(
+                datachannel::parse_max_message_size(val)?,
+            )),
+            "dcmap" => Ok(ParsedAttribute::DcMap(parse_dcmap(val)?)),
+            "dcsa" => Ok(ParsedAttribute::Dcsa(parse_dcsa(val)?)),
+
+            // RFC 8866 standard attributes
+            "cat" => Ok(ParsedAttribute::Category(parse_nonempty_value("cat", val)?)),
+            "keywds" => Ok(ParsedAttribute::Keywords(parse_nonempty_value(
+                "keywds", val,
+            )?)),
+            "tool" => Ok(ParsedAttribute::Tool(parse_nonempty_value("tool", val)?)),
+            "orient" => Ok(ParsedAttribute::Orientation(parse_nonempty_value(
+                "orient", val,
+            )?)),
+            "type" => Ok(ParsedAttribute::ConferenceType(parse_nonempty_value(
+                "type", val,
+            )?)),
+            "charset" => Ok(ParsedAttribute::Charset(parse_nonempty_value(
+                "charset", val,
+            )?)),
+            "sdplang" => Ok(ParsedAttribute::SdpLanguage(parse_nonempty_value(
+                "sdplang", val,
+            )?)),
+            "lang" => Ok(ParsedAttribute::Language(parse_nonempty_value(
+                "lang", val,
+            )?)),
+            "framerate" => Ok(ParsedAttribute::Framerate(parse_framerate(val)?)),
+            "quality" => Ok(ParsedAttribute::Quality(parse_quality(val)?)),
 
             // Generic key-value attribute if no specialized parser
             _ => Ok(ParsedAttribute::Value(key.to_string(), val.to_string())),
@@ -265,10 +301,15 @@ pub fn parse_attribute(value: &str) -> Result<ParsedAttribute> {
 
             // RTCP multiplexing
             "rtcp-mux" => Ok(ParsedAttribute::RtcpMux),
+            "rtcp-rsize" => Ok(ParsedAttribute::RtcpRsize),
 
             // ICE attributes
             "end-of-candidates" => Ok(ParsedAttribute::EndOfCandidates),
-            "ice-lite" => Ok(ParsedAttribute::Flag("ice-lite".to_string())),
+            "ice-lite" => Ok(ParsedAttribute::IceLite),
+
+            // BUNDLE and RTP header extension markers
+            "bundle-only" => Ok(ParsedAttribute::BundleOnly),
+            "extmap-allow-mixed" => Ok(ParsedAttribute::ExtMapAllowMixed),
 
             // Generic flag attribute if no specialized parser
             _ => Ok(ParsedAttribute::Flag(value.to_string())),
@@ -276,11 +317,211 @@ pub fn parse_attribute(value: &str) -> Result<ParsedAttribute> {
     }
 }
 
+fn parse_nonempty_value(attribute: &str, value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(Error::SdpParsingError(format!(
+            "Attribute '{}' requires a non-empty value",
+            attribute
+        )));
+    }
+    Ok(value.to_string())
+}
+
+fn parse_remote_candidates(value: &str) -> Result<Vec<RemoteCandidateAttribute>> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.is_empty() || parts.len() % 3 != 0 {
+        return Err(Error::SdpParsingError(format!(
+            "Invalid remote-candidates format: {}",
+            value
+        )));
+    }
+
+    let mut candidates = Vec::new();
+    for chunk in parts.chunks(3) {
+        let component_id = chunk[0].parse::<u32>().map_err(|_| {
+            Error::SdpParsingError(format!(
+                "Invalid remote-candidates component id: {}",
+                chunk[0]
+            ))
+        })?;
+        let port = chunk[2].parse::<u16>().map_err(|_| {
+            Error::SdpParsingError(format!("Invalid remote-candidates port: {}", chunk[2]))
+        })?;
+        candidates.push(RemoteCandidateAttribute {
+            component_id,
+            connection_address: chunk[1].to_string(),
+            port,
+        });
+    }
+
+    Ok(candidates)
+}
+
+fn parse_msid_semantic(value: &str) -> Result<(String, Vec<String>)> {
+    let mut parts = value.split_whitespace();
+    let semantic = parts
+        .next()
+        .ok_or_else(|| Error::SdpParsingError("Missing msid-semantic semantic".to_string()))?;
+    Ok((
+        semantic.to_string(),
+        parts.map(|part| part.to_string()).collect(),
+    ))
+}
+
+fn parse_rtcp_attribute(value: &str) -> Result<RtcpAttribute> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err(Error::SdpParsingError("Missing rtcp port".to_string()));
+    }
+
+    let port = parts[0]
+        .parse::<u16>()
+        .map_err(|_| Error::SdpParsingError(format!("Invalid rtcp port: {}", parts[0])))?;
+
+    match parts.len() {
+        1 => Ok(RtcpAttribute {
+            port,
+            net_type: None,
+            addr_type: None,
+            connection_address: None,
+        }),
+        4 => Ok(RtcpAttribute {
+            port,
+            net_type: Some(parts[1].to_string()),
+            addr_type: Some(parts[2].to_string()),
+            connection_address: Some(parts[3].to_string()),
+        }),
+        _ => Err(Error::SdpParsingError(format!(
+            "Invalid rtcp attribute format: {}",
+            value
+        ))),
+    }
+}
+
+fn parse_structured_simulcast(value: &str) -> Result<Vec<SdpSimulcastDescription>> {
+    let parsed = simulcast::parse_simulcast_struct(value)?;
+    Ok(parsed
+        .into_iter()
+        .map(|desc| SdpSimulcastDescription {
+            direction: match desc.direction {
+                simulcast::SimulcastDirection::Send => RidDirection::Send,
+                simulcast::SimulcastDirection::Recv => RidDirection::Recv,
+            },
+            versions: desc
+                .stream_versions
+                .into_iter()
+                .map(|version| SdpSimulcastVersion {
+                    alternatives: version
+                        .alternatives
+                        .into_iter()
+                        .map(|alternative| SdpSimulcastAlternative {
+                            rid: alternative.rid,
+                            paused: matches!(
+                                alternative.status,
+                                simulcast::SimulcastStatus::Paused
+                            ),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        })
+        .collect())
+}
+
+fn parse_ssrc_group(value: &str) -> Result<SsrcGroupAttribute> {
+    let mut parts = value.split_whitespace();
+    let semantics = parts
+        .next()
+        .ok_or_else(|| Error::SdpParsingError("Missing ssrc-group semantics".to_string()))?;
+    let mut ssrcs = Vec::new();
+    for part in parts {
+        ssrcs.push(
+            part.parse::<u32>().map_err(|_| {
+                Error::SdpParsingError(format!("Invalid ssrc-group SSRC: {}", part))
+            })?,
+        );
+    }
+    if ssrcs.is_empty() {
+        return Err(Error::SdpParsingError(format!(
+            "ssrc-group requires at least one SSRC: {}",
+            value
+        )));
+    }
+    Ok(SsrcGroupAttribute {
+        semantics: semantics.to_string(),
+        ssrcs,
+    })
+}
+
+fn parse_dcmap(value: &str) -> Result<DcMapAttribute> {
+    let mut parts = value.split_whitespace();
+    let stream_id = parts
+        .next()
+        .ok_or_else(|| Error::SdpParsingError("Missing dcmap stream id".to_string()))?
+        .parse::<u16>()
+        .map_err(|_| Error::SdpParsingError(format!("Invalid dcmap stream id: {}", value)))?;
+
+    let parameters = parts
+        .map(|part| {
+            let mut kv = part.splitn(2, '=');
+            let key = kv.next().unwrap_or("").to_string();
+            let value = kv.next().map(|value| value.to_string());
+            (key, value)
+        })
+        .collect();
+
+    Ok(DcMapAttribute {
+        stream_id,
+        parameters,
+    })
+}
+
+fn parse_dcsa(value: &str) -> Result<DcsaAttribute> {
+    let mut parts = value.trim().splitn(2, char::is_whitespace);
+    let stream_id = parts
+        .next()
+        .ok_or_else(|| Error::SdpParsingError("Missing dcsa stream id".to_string()))?
+        .parse::<u16>()
+        .map_err(|_| Error::SdpParsingError(format!("Invalid dcsa stream id: {}", value)))?;
+    let attribute = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| Error::SdpParsingError("Missing dcsa attribute".to_string()))?;
+
+    Ok(DcsaAttribute {
+        stream_id,
+        attribute: attribute.to_string(),
+    })
+}
+
+fn parse_framerate(value: &str) -> Result<String> {
+    let value = parse_nonempty_value("framerate", value)?;
+    value
+        .parse::<f32>()
+        .map_err(|_| Error::SdpParsingError(format!("Invalid framerate value: {}", value)))?;
+    Ok(value)
+}
+
+fn parse_quality(value: &str) -> Result<u8> {
+    let value = value.trim();
+    let quality = value
+        .parse::<u8>()
+        .map_err(|_| Error::SdpParsingError(format!("Invalid quality value: {}", value)))?;
+    if quality > 10 {
+        return Err(Error::SdpParsingError(format!(
+            "quality must be in the range 0-10: {}",
+            quality
+        )));
+    }
+    Ok(quality)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sdp::attributes::rid::RidDirection;
-    
 
     // --- Flag Attribute Tests ---
 
@@ -324,7 +565,7 @@ mod tests {
 
         assert!(matches!(
             parse_attribute("ice-lite").unwrap(),
-            ParsedAttribute::Flag(flag) if flag == "ice-lite"
+            ParsedAttribute::IceLite
         ));
     }
 
@@ -674,26 +915,118 @@ mod tests {
     fn test_parse_simulcast() {
         // Test simulcast attribute (RFC 8853)
         let result = parse_attribute("simulcast:send low;mid;high").unwrap();
-        if let ParsedAttribute::Simulcast(send, recv) = result {
-            assert_eq!(send.len(), 3);
-            assert_eq!(send[0], "low");
-            assert_eq!(send[1], "mid");
-            assert_eq!(send[2], "high");
-            assert!(recv.is_empty());
+        if let ParsedAttribute::SimulcastStructured(descriptions) = result {
+            assert_eq!(descriptions.len(), 1);
+            assert_eq!(descriptions[0].versions.len(), 3);
+            assert_eq!(descriptions[0].versions[0].alternatives[0].rid, "low");
+            assert_eq!(descriptions[0].versions[1].alternatives[0].rid, "mid");
+            assert_eq!(descriptions[0].versions[2].alternatives[0].rid, "high");
         } else {
-            panic!("Expected Simulcast attribute");
+            panic!("Expected structured Simulcast attribute");
         }
 
         // Test simulcast with both send and receive streams
         let result = parse_attribute("simulcast:send low,high recv low").unwrap();
-        if let ParsedAttribute::Simulcast(send, recv) = result {
-            assert_eq!(send.len(), 1); // Changed from 2 to 1 as the parser treats "low,high" as a single stream
-            assert_eq!(send[0], "low,high");
-            assert_eq!(recv.len(), 1);
-            assert_eq!(recv[0], "low");
+        if let ParsedAttribute::SimulcastStructured(descriptions) = result {
+            assert_eq!(descriptions.len(), 2);
+            assert_eq!(descriptions[0].versions.len(), 1);
+            assert_eq!(descriptions[0].versions[0].alternatives.len(), 2);
+            assert_eq!(descriptions[0].versions[0].alternatives[0].rid, "low");
+            assert_eq!(descriptions[0].versions[0].alternatives[1].rid, "high");
+            assert_eq!(descriptions[1].versions[0].alternatives[0].rid, "low");
         } else {
-            panic!("Expected Simulcast attribute");
+            panic!("Expected structured Simulcast attribute");
         }
+    }
+
+    #[test]
+    fn test_parse_standard_and_webrtc_extension_attributes() {
+        assert!(matches!(
+            parse_attribute("remote-candidates:1 192.0.2.1 5000 2 192.0.2.1 5001").unwrap(),
+            ParsedAttribute::RemoteCandidates(candidates)
+                if candidates.len() == 2 && candidates[0].component_id == 1
+        ));
+        assert!(matches!(
+            parse_attribute("tls-id:abc123").unwrap(),
+            ParsedAttribute::TlsId(id) if id == "abc123"
+        ));
+        assert!(matches!(
+            parse_attribute("bundle-only").unwrap(),
+            ParsedAttribute::BundleOnly
+        ));
+        assert!(matches!(
+            parse_attribute("msid-semantic:WMS *").unwrap(),
+            ParsedAttribute::MsidSemantic(semantic, tokens)
+                if semantic == "WMS" && tokens == vec!["*".to_string()]
+        ));
+        assert!(matches!(
+            parse_attribute("rtcp:9 IN IP4 0.0.0.0").unwrap(),
+            ParsedAttribute::Rtcp(rtcp)
+                if rtcp.port == 9 && rtcp.connection_address.as_deref() == Some("0.0.0.0")
+        ));
+        assert!(matches!(
+            parse_attribute("rtcp-rsize").unwrap(),
+            ParsedAttribute::RtcpRsize
+        ));
+        assert!(matches!(
+            parse_attribute("extmap-allow-mixed").unwrap(),
+            ParsedAttribute::ExtMapAllowMixed
+        ));
+        assert!(matches!(
+            parse_attribute("ssrc-group:FID 1234 5678").unwrap(),
+            ParsedAttribute::SsrcGroup(group)
+                if group.semantics == "FID" && group.ssrcs == vec![1234, 5678]
+        ));
+        assert!(matches!(
+            parse_attribute("dcmap:0 label=\"chat\" ordered=true").unwrap(),
+            ParsedAttribute::DcMap(dcmap)
+                if dcmap.stream_id == 0 && dcmap.parameters.len() == 2
+        ));
+        assert!(matches!(
+            parse_attribute("dcsa:0 fmtp:webrtc-datachannel max-message-size=262144").unwrap(),
+            ParsedAttribute::Dcsa(dcsa)
+                if dcsa.stream_id == 0 && dcsa.attribute.starts_with("fmtp:")
+        ));
+        assert!(matches!(
+            parse_attribute("cat:meeting").unwrap(),
+            ParsedAttribute::Category(value) if value == "meeting"
+        ));
+        assert!(matches!(
+            parse_attribute("keywds:voice video").unwrap(),
+            ParsedAttribute::Keywords(value) if value == "voice video"
+        ));
+        assert!(matches!(
+            parse_attribute("tool:rvoip").unwrap(),
+            ParsedAttribute::Tool(value) if value == "rvoip"
+        ));
+        assert!(matches!(
+            parse_attribute("orient:portrait").unwrap(),
+            ParsedAttribute::Orientation(value) if value == "portrait"
+        ));
+        assert!(matches!(
+            parse_attribute("type:broadcast").unwrap(),
+            ParsedAttribute::ConferenceType(value) if value == "broadcast"
+        ));
+        assert!(matches!(
+            parse_attribute("charset:UTF-8").unwrap(),
+            ParsedAttribute::Charset(value) if value == "UTF-8"
+        ));
+        assert!(matches!(
+            parse_attribute("sdplang:en-US").unwrap(),
+            ParsedAttribute::SdpLanguage(value) if value == "en-US"
+        ));
+        assert!(matches!(
+            parse_attribute("lang:en").unwrap(),
+            ParsedAttribute::Language(value) if value == "en"
+        ));
+        assert!(matches!(
+            parse_attribute("framerate:29.97").unwrap(),
+            ParsedAttribute::Framerate(value) if value == "29.97"
+        ));
+        assert!(matches!(
+            parse_attribute("quality:10").unwrap(),
+            ParsedAttribute::Quality(10)
+        ));
     }
 
     #[test]

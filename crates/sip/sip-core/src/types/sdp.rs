@@ -107,6 +107,16 @@ pub struct CandidateAttribute {
     pub extensions: Vec<(String, Option<String>)>,
 }
 
+/// ICE remote-candidates attribute (RFC 8839).
+///
+/// Format: `a=remote-candidates:<component-id> <connection-address> <port> ...`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteCandidateAttribute {
+    pub component_id: u32,
+    pub connection_address: String,
+    pub port: u16,
+}
+
 /// Represents a parsed SSRC attribute (RFC 5576).
 ///
 /// Format: `a=ssrc:<ssrc-id> <attribute>[:<value>]`
@@ -118,6 +128,74 @@ pub struct SsrcAttribute {
     pub attribute: String,
     /// Optional attribute value
     pub value: Option<String>,
+}
+
+/// Represents an RTCP attribute (RFC 3605 / WebRTC SDP usage).
+///
+/// Format: `a=rtcp:<port> [<nettype> <addrtype> <connection-address>]`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RtcpAttribute {
+    pub port: u16,
+    pub net_type: Option<String>,
+    pub addr_type: Option<String>,
+    pub connection_address: Option<String>,
+}
+
+/// Represents an `a=ssrc-group:` attribute (RFC 5576).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SsrcGroupAttribute {
+    pub semantics: String,
+    pub ssrcs: Vec<u32>,
+}
+
+/// One RID alternative in a simulcast stream version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimulcastAlternative {
+    pub rid: String,
+    pub paused: bool,
+}
+
+/// One semicolon-delimited simulcast stream version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimulcastVersion {
+    pub alternatives: Vec<SimulcastAlternative>,
+}
+
+/// Directional simulcast description preserving versions, alternatives, and paused markers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimulcastDescription {
+    pub direction: RidDirection,
+    pub versions: Vec<SimulcastVersion>,
+}
+
+/// RFC 8864 data channel mapping attribute.
+///
+/// Format: `a=dcmap:<stream-id> [label="..."] [subprotocol="..."] ...`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DcMapAttribute {
+    pub stream_id: u16,
+    pub parameters: Vec<(String, Option<String>)>,
+}
+
+/// RFC 8864 data channel subprotocol attribute.
+///
+/// Format: `a=dcsa:<stream-id> <attribute-line-without-a=>`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DcsaAttribute {
+    pub stream_id: u16,
+    pub attribute: String,
+}
+
+/// RFC 8866 `z=` time-zone adjustment line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeZoneAdjustment {
+    pub raw: String,
+}
+
+/// RFC 8866 `k=` encryption key line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EncryptionKey {
+    pub raw: String,
 }
 
 /// SDES crypto suites (RFC 4568 §6.2.1, RFC 6188 for AES-256 names).
@@ -278,10 +356,16 @@ pub enum ParsedAttribute {
     IceUfrag(String),
     /// ICE password, corresponds to `a=ice-pwd:<password>`
     IcePwd(String),
+    /// ICE options-lite marker, corresponds to `a=ice-lite`
+    IceLite,
+    /// ICE remote candidates, corresponds to `a=remote-candidates:...`
+    RemoteCandidates(Vec<RemoteCandidateAttribute>),
     /// DTLS fingerprint, corresponds to `a=fingerprint:<hash-function> <fingerprint>`
     Fingerprint(String, String),
     /// DTLS setup role, corresponds to `a=setup:<role>`
     Setup(String),
+    /// DTLS association identifier, corresponds to `a=tls-id:<id>`
+    TlsId(String),
     /// SDES crypto attribute (RFC 4568 §9.1) for SRTP key exchange,
     /// corresponds to `a=crypto:<tag> <crypto-suite> <key-params> [<session-params>]`.
     /// One per offered/accepted crypto-suite — typically 1–4 lines per `m=`
@@ -291,12 +375,22 @@ pub enum ParsedAttribute {
     Mid(String),
     /// Media grouping, corresponds to `a=group:<semantics> <id> <id>` ...
     Group(String, Vec<String>),
+    /// BUNDLE-only marker, corresponds to `a=bundle-only`
+    BundleOnly,
+    /// MSID semantic declaration, corresponds to `a=msid-semantic:<semantic> [token]...`
+    MsidSemantic(String, Vec<String>),
+    /// RTCP port/address, corresponds to `a=rtcp:<port> [<nettype> <addrtype> <address>]`
+    Rtcp(RtcpAttribute),
     /// RTCP multiplexing, corresponds to a=rtcp-mux
     RtcpMux,
+    /// Reduced-size RTCP, corresponds to a=rtcp-rsize
+    RtcpRsize,
     /// RTCP feedback, corresponds to `a=rtcp-fb:<payload type> <feedback type> [<feedback parameter>]`
     RtcpFb(String, String, Option<String>),
     /// Header extension, corresponds to `a=extmap:<id>[/<direction>] <URI> [<params>]`
     ExtMap(u8, Option<String>, String, Option<String>),
+    /// Extmap mixed one-byte/two-byte marker, corresponds to `a=extmap-allow-mixed`
+    ExtMapAllowMixed,
     /// Media stream identification, corresponds to `a=msid:<stream id> [<track id>]`
     Msid(String, Option<String>),
     /// Bandwidth information, corresponds to `b=<bwtype>:<bandwidth>`
@@ -305,6 +399,10 @@ pub enum ParsedAttribute {
     Rid(RidAttribute),
     /// Simulcast attribute, corresponds to `a=simulcast:<send list> <recv list>`
     Simulcast(Vec<String>, Vec<String>),
+    /// Structured simulcast attribute preserving alternatives and paused state.
+    SimulcastStructured(Vec<SimulcastDescription>),
+    /// SSRC grouping, corresponds to `a=ssrc-group:<semantics> <ssrc-id>...`
+    SsrcGroup(SsrcGroupAttribute),
     /// ICE options, corresponds to `a=ice-options:<option-tag> [<option-tag>]`*
     IceOptions(Vec<String>),
     /// End of candidates, corresponds to a=end-of-candidates
@@ -315,6 +413,30 @@ pub enum ParsedAttribute {
     MaxMessageSize(u64),
     /// SCTP map, corresponds to `a=sctpmap:<number> <app> <max-num-of-streams>`
     SctpMap(u16, String, u16),
+    /// Data channel map, corresponds to `a=dcmap:<stream-id> ...`
+    DcMap(DcMapAttribute),
+    /// Data channel subprotocol attribute, corresponds to `a=dcsa:<stream-id> <attribute>`
+    Dcsa(DcsaAttribute),
+    /// Standard RFC 8866 category attribute, corresponds to `a=cat:<category>`
+    Category(String),
+    /// Standard RFC 8866 keywords attribute, corresponds to `a=keywds:<keywords>`
+    Keywords(String),
+    /// Standard RFC 8866 tool attribute, corresponds to `a=tool:<tool>`
+    Tool(String),
+    /// Standard RFC 8866 orientation attribute, corresponds to `a=orient:<orientation>`
+    Orientation(String),
+    /// Standard RFC 8866 conference type attribute, corresponds to `a=type:<conference-type>`
+    ConferenceType(String),
+    /// Standard RFC 8866 charset attribute, corresponds to `a=charset:<charset>`
+    Charset(String),
+    /// Standard RFC 8866 SDP language attribute, corresponds to `a=sdplang:<language-tag>`
+    SdpLanguage(String),
+    /// Standard RFC 8866 media language attribute, corresponds to `a=lang:<language-tag>`
+    Language(String),
+    /// Standard RFC 8866 framerate attribute, corresponds to `a=framerate:<rate>`
+    Framerate(String),
+    /// Standard RFC 8866 quality attribute, corresponds to `a=quality:<0-10>`
+    Quality(u8),
     /// Flag attribute, corresponds to `a=<flag>`
     Flag(String),
     /// Value attribute, corresponds to `a=<n>:<value>`
@@ -403,12 +525,20 @@ pub struct SdpSession {
     pub uri: Option<String>,
     /// Contact email address (e=)
     pub email: Option<String>,
+    /// All contact email address lines (e=). `email` mirrors the first entry.
+    pub emails: Vec<String>,
     /// Contact phone number (p=)
     pub phone: Option<String>,
+    /// All contact phone number lines (p=). `phone` mirrors the first entry.
+    pub phones: Vec<String>,
     /// Optional connection information (c=)
     pub connection_info: Option<ConnectionData>,
     /// Time descriptions (t=)
     pub time_descriptions: Vec<TimeDescription>,
+    /// Time-zone adjustment lines (z=)
+    pub time_zones: Vec<TimeZoneAdjustment>,
+    /// Session-level encryption key line (k=)
+    pub encryption_key: Option<EncryptionKey>,
     /// Media descriptions (m=)
     pub media_descriptions: Vec<MediaDescription>,
     /// Session-level media direction
@@ -445,9 +575,13 @@ impl SdpSession {
             session_info: None,
             uri: None,
             email: None,
+            emails: Vec::new(),
             phone: None,
+            phones: Vec::new(),
             connection_info: None,
             time_descriptions: Vec::new(),
+            time_zones: Vec::new(),
+            encryption_key: None,
             media_descriptions: Vec::new(),
             direction: None,
             generic_attributes: Vec::new(),
@@ -502,6 +636,26 @@ impl SdpSession {
     /// ```
     pub fn with_connection_data(mut self, conn: ConnectionData) -> Self {
         self.connection_info = Some(conn);
+        self
+    }
+
+    /// Adds a session-level email contact line (`e=`).
+    pub fn with_email(mut self, email: impl Into<String>) -> Self {
+        let email = email.into();
+        if self.email.is_none() {
+            self.email = Some(email.clone());
+        }
+        self.emails.push(email);
+        self
+    }
+
+    /// Adds a session-level phone contact line (`p=`).
+    pub fn with_phone(mut self, phone: impl Into<String>) -> Self {
+        let phone = phone.into();
+        if self.phone.is_none() {
+            self.phone = Some(phone.clone());
+        }
+        self.phones.push(phone);
         self
     }
 
@@ -663,12 +817,20 @@ pub struct MediaDescription {
     pub media: String,
     /// Transport port number
     pub port: u16,
+    /// Optional number of ports from `m=<media> <port>/<number-of-ports> ...`
+    pub port_count: Option<u16>,
     /// Transport protocol (e.g., "RTP/AVP", "RTP/SAVP", "UDP/TLS/RTP/SAVP")
     pub protocol: String,
     /// Media format descriptions (payload types or format identifiers)
     pub formats: Vec<String>,
     /// Media-specific connection information (overrides session-level)
     pub connection_info: Option<ConnectionData>,
+    /// All media-level connection lines. `connection_info` mirrors the first entry.
+    pub connection_infos: Vec<ConnectionData>,
+    /// Media-level information line (i=)
+    pub media_info: Option<String>,
+    /// Media-level encryption key line (k=)
+    pub encryption_key: Option<EncryptionKey>,
 
     // --- Media-level Attributes ---
     /// Packetization time in milliseconds (a=ptime)
@@ -712,9 +874,13 @@ impl MediaDescription {
         Self {
             media: media.into(),
             port,
+            port_count: None,
             protocol: protocol.into(),
             formats,
             connection_info: None,
+            connection_infos: Vec::new(),
+            media_info: None,
+            encryption_key: None,
             ptime: None,
             direction: None,
             generic_attributes: Vec::new(),
@@ -738,7 +904,22 @@ impl MediaDescription {
     /// let media = media.with_connection_data(conn);
     /// ```
     pub fn with_connection_data(mut self, conn: ConnectionData) -> Self {
-        self.connection_info = Some(conn);
+        if self.connection_info.is_none() {
+            self.connection_info = Some(conn.clone());
+        }
+        self.connection_infos.push(conn);
+        self
+    }
+
+    /// Sets the media-level information line (`i=`).
+    pub fn with_media_info(mut self, info: impl Into<String>) -> Self {
+        self.media_info = Some(info.into());
+        self
+    }
+
+    /// Sets the media-level encryption key line (`k=`).
+    pub fn with_encryption_key(mut self, key: EncryptionKey) -> Self {
+        self.encryption_key = Some(key);
         self
     }
 
@@ -978,10 +1159,26 @@ impl fmt::Display for ParsedAttribute {
             }
             ParsedAttribute::IceUfrag(ufrag) => write!(f, "a=ice-ufrag:{}", ufrag),
             ParsedAttribute::IcePwd(pwd) => write!(f, "a=ice-pwd:{}", pwd),
+            ParsedAttribute::IceLite => write!(f, "a=ice-lite"),
+            ParsedAttribute::RemoteCandidates(candidates) => {
+                write!(f, "a=remote-candidates:")?;
+                for (idx, candidate) in candidates.iter().enumerate() {
+                    if idx > 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(
+                        f,
+                        "{} {} {}",
+                        candidate.component_id, candidate.connection_address, candidate.port
+                    )?;
+                }
+                Ok(())
+            }
             ParsedAttribute::Fingerprint(hash, fingerprint) => {
                 write!(f, "a=fingerprint:{} {}", hash, fingerprint)
             }
             ParsedAttribute::Setup(role) => write!(f, "a=setup:{}", role),
+            ParsedAttribute::TlsId(id) => write!(f, "a=tls-id:{}", id),
             ParsedAttribute::Crypto(crypto) => write!(f, "{}", crypto),
             ParsedAttribute::Mid(id) => write!(f, "a=mid:{}", id),
             ParsedAttribute::Group(semantics, ids) => {
@@ -991,7 +1188,25 @@ impl fmt::Display for ParsedAttribute {
                 }
                 Ok(())
             }
+            ParsedAttribute::BundleOnly => write!(f, "a=bundle-only"),
+            ParsedAttribute::MsidSemantic(semantic, tokens) => {
+                write!(f, "a=msid-semantic:{}", semantic)?;
+                for token in tokens {
+                    write!(f, " {}", token)?;
+                }
+                Ok(())
+            }
+            ParsedAttribute::Rtcp(rtcp) => {
+                write!(f, "a=rtcp:{}", rtcp.port)?;
+                if let (Some(net), Some(addr_type), Some(addr)) =
+                    (&rtcp.net_type, &rtcp.addr_type, &rtcp.connection_address)
+                {
+                    write!(f, " {} {} {}", net, addr_type, addr)?;
+                }
+                Ok(())
+            }
             ParsedAttribute::RtcpMux => write!(f, "a=rtcp-mux"),
+            ParsedAttribute::RtcpRsize => write!(f, "a=rtcp-rsize"),
             ParsedAttribute::RtcpFb(pt, feedback_type, param) => {
                 write!(f, "a=rtcp-fb:{} {}", pt, feedback_type)?;
                 if let Some(p) = param {
@@ -1010,6 +1225,7 @@ impl fmt::Display for ParsedAttribute {
                 }
                 Ok(())
             }
+            ParsedAttribute::ExtMapAllowMixed => write!(f, "a=extmap-allow-mixed"),
             ParsedAttribute::Msid(stream_id, track_id) => {
                 write!(f, "a=msid:{}", stream_id)?;
                 if let Some(id) = track_id {
@@ -1060,6 +1276,41 @@ impl fmt::Display for ParsedAttribute {
 
                 Ok(())
             }
+            ParsedAttribute::SimulcastStructured(descriptions) => {
+                write!(f, "a=simulcast:")?;
+                for (desc_idx, desc) in descriptions.iter().enumerate() {
+                    if desc_idx > 0 {
+                        write!(f, " ")?;
+                    }
+                    let direction = match desc.direction {
+                        RidDirection::Send => "send",
+                        RidDirection::Recv => "recv",
+                    };
+                    write!(f, "{} ", direction)?;
+                    for (version_idx, version) in desc.versions.iter().enumerate() {
+                        if version_idx > 0 {
+                            write!(f, ";")?;
+                        }
+                        for (alt_idx, alt) in version.alternatives.iter().enumerate() {
+                            if alt_idx > 0 {
+                                write!(f, ",")?;
+                            }
+                            if alt.paused {
+                                write!(f, "~")?;
+                            }
+                            write!(f, "{}", alt.rid)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            ParsedAttribute::SsrcGroup(group) => {
+                write!(f, "a=ssrc-group:{}", group.semantics)?;
+                for ssrc in &group.ssrcs {
+                    write!(f, " {}", ssrc)?;
+                }
+                Ok(())
+            }
             ParsedAttribute::IceOptions(options) => {
                 write!(f, "a=ice-options:{}", options.join(" "))
             }
@@ -1069,9 +1320,32 @@ impl fmt::Display for ParsedAttribute {
             ParsedAttribute::SctpMap(number, app, streams) => {
                 write!(f, "a=sctpmap:{} {} {}", number, app, streams)
             }
+            ParsedAttribute::DcMap(dcmap) => {
+                write!(f, "a=dcmap:{}", dcmap.stream_id)?;
+                for (key, value) in &dcmap.parameters {
+                    write!(f, " {}", key)?;
+                    if let Some(value) = value {
+                        write!(f, "={}", value)?;
+                    }
+                }
+                Ok(())
+            }
+            ParsedAttribute::Dcsa(dcsa) => {
+                write!(f, "a=dcsa:{} {}", dcsa.stream_id, dcsa.attribute)
+            }
             ParsedAttribute::Bandwidth(bwtype, bandwidth) => {
                 write!(f, "b={}:{}", bwtype, bandwidth)
             }
+            ParsedAttribute::Category(value) => write!(f, "a=cat:{}", value),
+            ParsedAttribute::Keywords(value) => write!(f, "a=keywds:{}", value),
+            ParsedAttribute::Tool(value) => write!(f, "a=tool:{}", value),
+            ParsedAttribute::Orientation(value) => write!(f, "a=orient:{}", value),
+            ParsedAttribute::ConferenceType(value) => write!(f, "a=type:{}", value),
+            ParsedAttribute::Charset(value) => write!(f, "a=charset:{}", value),
+            ParsedAttribute::SdpLanguage(value) => write!(f, "a=sdplang:{}", value),
+            ParsedAttribute::Language(value) => write!(f, "a=lang:{}", value),
+            ParsedAttribute::Framerate(value) => write!(f, "a=framerate:{}", value),
+            ParsedAttribute::Quality(value) => write!(f, "a=quality:{}", value),
             ParsedAttribute::Flag(name) => write!(f, "a={}", name),
             ParsedAttribute::Value(name, value) => write!(f, "a={}:{}", name, value),
             ParsedAttribute::Other(name, value) => {
@@ -1124,21 +1398,69 @@ impl fmt::Display for TimeDescription {
     }
 }
 
+impl fmt::Display for RepeatTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.repeat_interval, self.active_duration)?;
+        for offset in &self.offsets {
+            write!(f, " {}", offset)?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for TimeZoneAdjustment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.raw)
+    }
+}
+
+impl fmt::Display for EncryptionKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.raw)
+    }
+}
+
 impl fmt::Display for MediaDescription {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // m=
+        let port = if let Some(port_count) = self.port_count {
+            format!("{}/{}", self.port, port_count)
+        } else {
+            self.port.to_string()
+        };
         write!(
             f,
             "m={} {} {} {}\r\n",
             self.media,
-            self.port,
+            port,
             self.protocol,
             self.formats.join(" ")
         )?;
 
+        // Optional i=
+        if let Some(info) = &self.media_info {
+            write!(f, "i={}\r\n", info)?;
+        }
+
         // Optional c=
-        if let Some(conn) = &self.connection_info {
+        if !self.connection_infos.is_empty() {
+            for conn in &self.connection_infos {
+                write!(f, "c={}\r\n", conn)?;
+            }
+        } else if let Some(conn) = &self.connection_info {
             write!(f, "c={}\r\n", conn)?;
+        }
+
+        // Optional b= lines, which RFC 8866 orders before k= and a=.
+        for attr in &self.generic_attributes {
+            if matches!(attr, ParsedAttribute::Bandwidth(_, _)) {
+                write!(f, "{}\r\n", attr)?;
+            }
+        }
+
+        // Optional k=
+        if let Some(key) = &self.encryption_key {
+            write!(f, "k={}\r\n", key)?;
         }
 
         // Dedicated Attributes for Media
@@ -1161,7 +1483,9 @@ impl fmt::Display for MediaDescription {
             // Avoid re-printing attributes handled by dedicated fields
             if matches!(
                 attr,
-                ParsedAttribute::Ptime(_) | ParsedAttribute::Direction(_)
+                ParsedAttribute::Ptime(_)
+                    | ParsedAttribute::Direction(_)
+                    | ParsedAttribute::Bandwidth(_, _)
             ) {
                 continue;
             }
@@ -1178,14 +1502,56 @@ impl fmt::Display for SdpSession {
         write!(f, "o={}\r\n", self.origin)?;
         write!(f, "s={}\r\n", self.session_name)?;
 
+        if let Some(info) = &self.session_info {
+            write!(f, "i={}\r\n", info)?;
+        }
+
+        if let Some(uri) = &self.uri {
+            write!(f, "u={}\r\n", uri)?;
+        }
+
+        if !self.emails.is_empty() {
+            for email in &self.emails {
+                write!(f, "e={}\r\n", email)?;
+            }
+        } else if let Some(email) = &self.email {
+            write!(f, "e={}\r\n", email)?;
+        }
+
+        if !self.phones.is_empty() {
+            for phone in &self.phones {
+                write!(f, "p={}\r\n", phone)?;
+            }
+        } else if let Some(phone) = &self.phone {
+            write!(f, "p={}\r\n", phone)?;
+        }
+
         // Optional session c=
         if let Some(conn) = &self.connection_info {
             write!(f, "c={}\r\n", conn)?;
         }
 
+        // Optional b= lines, which RFC 8866 orders before t=.
+        for attr in &self.generic_attributes {
+            if matches!(attr, ParsedAttribute::Bandwidth(_, _)) {
+                write!(f, "{}\r\n", attr)?;
+            }
+        }
+
         // t=
         for time in &self.time_descriptions {
             write!(f, "t={}\r\n", time)?;
+            for repeat in &time.repeat_times {
+                write!(f, "r={}\r\n", repeat)?;
+            }
+        }
+
+        for time_zone in &self.time_zones {
+            write!(f, "z={}\r\n", time_zone)?;
+        }
+
+        if let Some(key) = &self.encryption_key {
+            write!(f, "k={}\r\n", key)?;
         }
 
         // Dedicated Session Attributes
@@ -1203,7 +1569,10 @@ impl fmt::Display for SdpSession {
         // Other session-level attributes
         for attr in &self.generic_attributes {
             // Avoid re-printing attributes handled by dedicated fields
-            if matches!(attr, ParsedAttribute::Direction(_)) {
+            if matches!(
+                attr,
+                ParsedAttribute::Direction(_) | ParsedAttribute::Bandwidth(_, _)
+            ) {
                 continue;
             }
             write!(f, "{}\r\n", attr)?;
