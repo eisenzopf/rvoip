@@ -85,7 +85,7 @@ default-members = [
 # Numeric maturity tiers (no -alpha/-beta suffixes): 0.1.x = alpha,
 # 0.2.x = beta, 1.0 = stable. Beta-tier crates inherit this 0.2.0;
 # alpha-tier crates override in their own [package] with version = "0.1.0".
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "MIT"
 homepage = "https://github.com/eisenzopf/rvoip"
@@ -184,7 +184,7 @@ collapsible_else_if = "allow"
 # Package names are unchanged on crates.io (rvoip-sip-core, etc.) — only
 # the in-repo directory changed. See the grouped [workspace] members above.
 # Beta-tier crates (publish to crates.io as 0.2.0).
-rvoip-sip-core      = { path = "crates/sip/sip-core", version = "0.2.0" }
+rvoip-sip-core      = { path = "crates/sip/sip-core", version = "0.2.1" }
 rvoip-sip-transport = { path = "crates/sip/sip-transport", version = "0.2.0" }
 rvoip-sip-dialog    = { path = "crates/sip/sip-dialog", version = "0.2.0" }
 rvoip-sip-proxy     = { path = "crates/sip/sip-proxy", version = "0.2.0" }
