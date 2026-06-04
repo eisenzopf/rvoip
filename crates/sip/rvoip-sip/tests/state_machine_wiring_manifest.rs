@@ -137,11 +137,11 @@ fn direct_wired_source_paths_match_manifest() {
     let unified = include_str!("../src/api/unified.rs");
     let bridge = include_str!("../src/server/bridge.rs");
 
-    assert!(message_builder.contains("send_message_oob_with_options"));
+    assert!(message_builder.contains("send_message_oob_with_optional_auth"));
     assert!(!message_builder.contains("SendOutboundMessage"));
-    assert!(options_builder.contains("send_options_oob_with_options"));
+    assert!(options_builder.contains("send_options_oob_with_optional_auth"));
     assert!(!options_builder.contains("SendOutboundOptions"));
-    assert!(subscribe_builder.contains("send_subscribe_oob_with_options"));
+    assert!(subscribe_builder.contains("send_subscribe_oob_with_optional_auth"));
     assert!(!subscribe_builder.contains("SendOutboundSubscribe"));
     assert!(!subscribe_builder.contains("stage_outbound_options"));
     assert!(unified.contains("bridge_rtp_sessions"));

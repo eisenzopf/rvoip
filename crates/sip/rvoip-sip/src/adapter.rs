@@ -115,11 +115,7 @@ impl SipAdapter {
             .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))
     }
 
-    async fn build_connection(
-        &self,
-        conn_id: ConnectionId,
-        direction: Direction,
-    ) -> Connection {
+    async fn build_connection(&self, conn_id: ConnectionId, direction: Direction) -> Connection {
         // Eagerly construct (and cache) one SipMediaStream so consumers
         // can read `connection.streams` synchronously off the
         // `Event::ConnectionInbound` event — QUIC/WT parity, gap plan §2.2.

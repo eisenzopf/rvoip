@@ -30,11 +30,13 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::adapters::SessionApiCrossCrateEvent;
+use crate::api::endpoint::SipAccount;
 use crate::api::events::{Event, MediaSecurityState, SipTrace};
 use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::IncomingCall;
 use crate::api::performance::PerformanceConfig;
 use crate::api::unified::{Config, MediaMode, UnifiedCoordinator};
+use crate::auth::SipClientAuth;
 use crate::errors::{Result, SessionError};
 
 // Re-export Config so callers can import it from this module
@@ -486,6 +488,24 @@ impl PeerControl {
     ) -> crate::api::send::RegisterBuilder {
         self.coordinator.register(registrar, username, password)
     }
+
+    /// Begin building an outbound REGISTER from a shared SIP account.
+    pub fn register_account(&self, account: &SipAccount) -> crate::api::send::RegisterBuilder {
+        let mut builder = self
+            .register(
+                account.registrar.clone(),
+                account.effective_auth_username().to_string(),
+                account.password.clone(),
+            )
+            .with_expires(account.expires);
+        if let Some(from_uri) = &account.from_uri {
+            builder = builder.with_from_uri(from_uri.clone());
+        }
+        if let Some(contact_uri) = &account.contact_uri {
+            builder = builder.with_contact_uri(contact_uri.clone());
+        }
+        builder
+    }
 }
 
 // ===== StreamPeer =====
@@ -648,6 +668,11 @@ impl StreamPeer {
         password: impl Into<String>,
     ) -> crate::api::send::RegisterBuilder {
         self.control.register(registrar, username, password)
+    }
+
+    /// Begin building an outbound REGISTER from a shared SIP account.
+    pub fn register_account(&self, account: &SipAccount) -> crate::api::send::RegisterBuilder {
+        self.control.register_account(account)
     }
 
     /// Wait for the next incoming call.
@@ -1295,10 +1320,10 @@ impl StreamPeerBuilder {
         self
     }
 
-    /// Set per-peer default SIP digest credentials used for RFC 3261 §22.2
-    /// INVITE auth retry. When the server challenges an outgoing INVITE with
-    /// 401/407, these credentials are applied automatically so the call can
-    /// recover without intervention.
+    /// Set per-peer default SIP Digest credentials used for UAC 401/407 retry.
+    ///
+    /// These credentials are the Digest shorthand. Use [`Self::with_auth`] for
+    /// Bearer, Basic, AKA, or multi-challenge negotiation.
     ///
     /// Per-call override via `control.invite(...).with_credentials(...)`.
     ///
@@ -1317,6 +1342,34 @@ impl StreamPeerBuilder {
     /// ```
     pub fn with_credentials(mut self, username: &str, password: &str) -> Self {
         self.config.credentials = Some(crate::types::Credentials::new(username, password));
+        self
+    }
+
+    /// Set per-peer default UAC SIP auth used for 401/407 retry.
+    ///
+    /// Use [`SipClientAuth::any`] when the peer may offer multiple schemes and
+    /// the UAC should negotiate among Digest, Bearer, Basic, and AKA options.
+    pub fn with_auth(mut self, auth: SipClientAuth) -> Self {
+        self.config.auth = Some(auth);
+        self
+    }
+
+    /// Set per-peer Bearer auth used for UAC 401/407 retry.
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.config.auth = Some(SipClientAuth::bearer_token(token));
+        self
+    }
+
+    /// Set per-peer Basic auth used for UAC 401/407 retry.
+    ///
+    /// Basic remains cleartext-disabled unless the auth value explicitly opts
+    /// in via [`SipClientAuth::allow_basic_over_cleartext`].
+    pub fn with_basic_credentials(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.config.auth = Some(SipClientAuth::basic(username, password));
         self
     }
 

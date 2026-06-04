@@ -234,6 +234,7 @@ pub struct RegisterRequestOptions {
     pub contact_uri: String,
     pub expires: u32,
     pub authorization: Option<String>,
+    pub proxy_authorization: Option<String>,
     pub call_id: Option<String>,
     pub cseq: Option<u32>,
     pub outbound_contact: Option<rvoip_sip_core::types::outbound::OutboundContactParams>,
@@ -1502,6 +1503,7 @@ impl UnifiedDialogApi {
             contact_uri: contact_uri.to_string(),
             expires,
             authorization,
+            proxy_authorization: None,
             call_id: None,
             cseq: None,
             outbound_contact: None,
@@ -1536,6 +1538,7 @@ impl UnifiedDialogApi {
             contact_uri: contact_uri.to_string(),
             expires,
             authorization,
+            proxy_authorization: None,
             call_id: None,
             cseq: None,
             outbound_contact: Some(outbound_params.clone()),
@@ -1577,12 +1580,13 @@ impl UnifiedDialogApi {
         let cseq = options.cseq.unwrap_or(1);
 
         debug!(
-            "Building REGISTER request to {} (refresh={}, expires={}, cseq={}, auth={}, outbound={}, outbound_proxy={})",
+            "Building REGISTER request to {} (refresh={}, expires={}, cseq={}, auth={}, proxy_auth={}, outbound={}, outbound_proxy={})",
             options.registrar_uri,
             options.refresh,
             options.expires,
             cseq,
             options.authorization.is_some(),
+            options.proxy_authorization.is_some(),
             options.outbound_contact.is_some(),
             options.outbound_proxy_uri.is_some()
         );
@@ -1628,6 +1632,14 @@ impl UnifiedDialogApi {
                 HeaderValue::Raw(auth.into_bytes()),
             ));
             debug!("Added Authorization header to REGISTER");
+        }
+
+        if let Some(auth) = options.proxy_authorization {
+            builder = builder.header(TypedHeader::Other(
+                HeaderName::ProxyAuthorization,
+                HeaderValue::Raw(auth.into_bytes()),
+            ));
+            debug!("Added Proxy-Authorization header to REGISTER");
         }
 
         // SIP_API_DESIGN_2 §5.2 — application-staged extras ride after

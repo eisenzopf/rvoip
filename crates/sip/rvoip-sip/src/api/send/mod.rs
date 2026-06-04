@@ -8,7 +8,7 @@
 //! verb-named entry point:
 //!
 //! ```text
-//! coord.invite(from, to).with_credentials(c).send().await
+//! coord.invite(from, to).with_auth(auth).send().await
 //! coord.register(reg, user, pw).with_expires(3600).send().await
 //! coord.refer(&sess, target).with_replaces(rep).send().await
 //! ```

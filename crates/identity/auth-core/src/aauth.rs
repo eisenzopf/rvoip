@@ -221,7 +221,10 @@ mod tests {
                     vec!["calls.write".to_string(), "calls.transfer".to_string()]
                 );
             }
-            other => panic!("expected UserAuthorized; got {:?}", discriminant_label(&other)),
+            other => panic!(
+                "expected UserAuthorized; got {:?}",
+                discriminant_label(&other)
+            ),
         }
     }
 

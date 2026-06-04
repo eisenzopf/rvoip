@@ -34,6 +34,7 @@ use crate::api::unified::{
     Config, MediaMode, Registration, RegistrationHandle, RegistrationInfo, RegistrationStatus,
     SipTlsMode,
 };
+use crate::auth::SipClientAuth;
 use crate::errors::{Result, SessionError};
 use crate::types::Credentials;
 
@@ -1085,11 +1086,127 @@ impl From<RegistrationInfo> for EndpointRegistrationInfo {
     }
 }
 
+/// Canonical PBX-style SIP account and Digest-auth configuration.
+///
+/// `SipAccount` is the high-level account shape shared by endpoint,
+/// stream-peer, callback-peer, registration, and challenged outbound-request
+/// flows. `username` is the address-of-record user. `auth_username` is only
+/// needed when the Digest username differs from the AOR user.
+///
+/// Use [`EndpointBuilder::auth`] with [`SipClientAuth`]
+/// for non-Digest schemes such as Bearer, Basic, or AKA.
+#[derive(Debug, Clone)]
+pub struct SipAccount {
+    /// SIP URI of the registrar, for example `sip:pbx.example.com` or
+    /// `sips:pbx.example.com:5061`.
+    pub registrar: String,
+    /// Address-of-record user, usually the extension or SIP username.
+    pub username: String,
+    /// Optional Digest-auth username when it differs from [`username`](Self::username).
+    pub auth_username: Option<String>,
+    /// Digest-auth password.
+    pub password: String,
+    /// Registration expiry in seconds.
+    pub expires: u32,
+    /// Optional From/AoR URI override.
+    pub from_uri: Option<String>,
+    /// Optional Contact URI override.
+    pub contact_uri: Option<String>,
+}
+
+impl SipAccount {
+    /// Create a complete SIP account.
+    pub fn new(
+        registrar: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        Self {
+            registrar: registrar.into(),
+            username: username.into(),
+            auth_username: None,
+            password: password.into(),
+            expires: 3600,
+            from_uri: None,
+            contact_uri: None,
+        }
+    }
+
+    /// Return the Digest-auth username, falling back to the AOR username.
+    pub fn effective_auth_username(&self) -> &str {
+        self.auth_username
+            .as_deref()
+            .unwrap_or(self.username.as_str())
+    }
+
+    /// Build reusable Digest credentials for challenged outbound requests.
+    pub fn credentials(&self) -> Credentials {
+        Credentials::new(self.effective_auth_username(), self.password.clone())
+    }
+
+    /// Build the registration model represented by this account.
+    pub fn registration(&self) -> Registration {
+        let mut registration = Registration::new(
+            self.registrar.clone(),
+            self.effective_auth_username().to_string(),
+            self.password.clone(),
+        )
+        .expires(self.expires);
+        if let Some(from_uri) = &self.from_uri {
+            registration = registration.from_uri(from_uri.clone());
+        }
+        if let Some(contact_uri) = &self.contact_uri {
+            registration = registration.contact_uri(contact_uri.clone());
+        }
+        registration
+    }
+
+    /// Build the compatibility endpoint account model represented by this account.
+    pub fn endpoint_account(&self) -> EndpointAccount {
+        EndpointAccount {
+            registrar: self.registrar.clone(),
+            username: self.username.clone(),
+            auth_username: self.auth_username.clone(),
+            password: self.password.clone(),
+            expires: self.expires,
+            from_uri: self.from_uri.clone(),
+            contact_uri: self.contact_uri.clone(),
+        }
+    }
+
+    /// Set the Digest-auth username.
+    pub fn auth_username(mut self, username: impl Into<String>) -> Self {
+        self.auth_username = Some(username.into());
+        self
+    }
+
+    /// Set the registration expiry in seconds.
+    pub fn expires(mut self, seconds: u32) -> Self {
+        self.expires = seconds;
+        self
+    }
+
+    /// Override the SIP From/AoR URI.
+    pub fn from_uri(mut self, uri: impl Into<String>) -> Self {
+        self.from_uri = Some(uri.into());
+        self
+    }
+
+    /// Override the SIP Contact URI.
+    pub fn contact_uri(mut self, uri: impl Into<String>) -> Self {
+        self.contact_uri = Some(uri.into());
+        self
+    }
+}
+
 /// Account information used by [`EndpointBuilder`].
 ///
 /// `EndpointAccount` describes the SIP registrar credentials and optional
 /// identity overrides. It maps directly to [`Registration`] plus the default
 /// INVITE digest credentials stored on [`Config`].
+///
+/// Prefer [`SipAccount`] for new code. `EndpointAccount` is retained for
+/// backwards compatibility.
 #[derive(Debug, Clone)]
 pub struct EndpointAccount {
     /// SIP URI of the registrar, for example `sip:pbx.example.com` or
@@ -1160,6 +1277,26 @@ impl EndpointAccount {
     pub fn contact_uri(mut self, uri: impl Into<String>) -> Self {
         self.contact_uri = Some(uri.into());
         self
+    }
+}
+
+impl From<SipAccount> for EndpointAccount {
+    fn from(account: SipAccount) -> Self {
+        account.endpoint_account()
+    }
+}
+
+impl From<EndpointAccount> for SipAccount {
+    fn from(account: EndpointAccount) -> Self {
+        Self {
+            registrar: account.registrar,
+            username: account.username,
+            auth_username: account.auth_username,
+            password: account.password,
+            expires: account.expires,
+            from_uri: account.from_uri,
+            contact_uri: account.contact_uri,
+        }
     }
 }
 
@@ -1442,6 +1579,7 @@ pub struct EndpointBuilder {
     account_username: Option<String>,
     auth_username: Option<String>,
     password: Option<String>,
+    auth: Option<SipClientAuth>,
     registrar: Option<String>,
     expires: u32,
     sip_trace: Option<crate::api::events::SipTraceConfig>,
@@ -1492,6 +1630,7 @@ impl EndpointBuilder {
             account_username: None,
             auth_username: None,
             password: None,
+            auth: None,
             registrar: None,
             expires: 3600,
             sip_trace: None,
@@ -1655,6 +1794,11 @@ impl EndpointBuilder {
         self
     }
 
+    /// Set all account and Digest-auth fields at once.
+    pub fn sip_account(self, account: SipAccount) -> Self {
+        self.endpoint_account(account.into())
+    }
+
     /// Set the digest-auth username when it differs from the account username.
     pub fn auth_username(mut self, username: impl Into<String>) -> Self {
         self.auth_username = Some(username.into());
@@ -1664,6 +1808,34 @@ impl EndpointBuilder {
     /// Set the digest-auth password.
     pub fn password(mut self, password: impl Into<String>) -> Self {
         self.password = Some(password.into());
+        self
+    }
+
+    /// Set general UAC SIP auth for outbound 401/407 retry.
+    ///
+    /// Use [`SipClientAuth::any`] when the peer may offer multiple schemes and
+    /// the UAC should negotiate among Digest, Bearer, Basic, and AKA options.
+    pub fn auth(mut self, auth: SipClientAuth) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    /// Set Bearer auth for UAC outbound 401/407 retry.
+    pub fn bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.auth = Some(SipClientAuth::bearer_token(token));
+        self
+    }
+
+    /// Set Basic auth for UAC outbound 401/407 retry.
+    ///
+    /// Basic remains cleartext-disabled unless the auth value explicitly opts
+    /// in via [`SipClientAuth::allow_basic_over_cleartext`].
+    pub fn basic_credentials(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.auth = Some(SipClientAuth::basic(username, password));
         self
     }
 
@@ -1983,6 +2155,9 @@ impl EndpointBuilder {
             let auth_username = self.auth_username.as_deref().unwrap_or(username);
             config.credentials = Some(Credentials::new(auth_username, password));
         }
+        if let Some(auth) = self.auth {
+            config.auth = Some(auth);
+        }
 
         if let Some(performance) = self.performance {
             config = config.try_with_performance_config(performance)?;
@@ -2300,7 +2475,7 @@ async fn wait_for_registration_result(
                 None => {
                     return Err(SessionError::Other(
                         "event stream closed while waiting for registration".to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -2463,6 +2638,42 @@ mod tests {
             registration.contact_uri.as_deref(),
             Some("sip:1001@192.0.2.10:5060")
         );
+    }
+
+    #[test]
+    fn sip_account_derives_compatible_registration_endpoint_account_and_credentials() {
+        let account = SipAccount::new("sip:pbx.example.test", "1001", "secret")
+            .auth_username("auth1001")
+            .expires(600)
+            .from_uri("sip:1001@pbx.example.test")
+            .contact_uri("sip:1001@192.0.2.10:5060");
+
+        let credentials = account.credentials();
+        assert_eq!(credentials.username, "auth1001");
+        assert_eq!(credentials.password, "secret");
+
+        let registration = account.registration();
+        assert_eq!(registration.registrar, "sip:pbx.example.test");
+        assert_eq!(registration.username, "auth1001");
+        assert_eq!(registration.password, "secret");
+        assert_eq!(registration.expires, 600);
+        assert_eq!(
+            registration.from_uri.as_deref(),
+            Some("sip:1001@pbx.example.test")
+        );
+        assert_eq!(
+            registration.contact_uri.as_deref(),
+            Some("sip:1001@192.0.2.10:5060")
+        );
+
+        let endpoint_account = account.endpoint_account();
+        assert_eq!(endpoint_account.username, "1001");
+        assert_eq!(endpoint_account.auth_username.as_deref(), Some("auth1001"));
+
+        let legacy: EndpointAccount = account.clone().into();
+        let round_trip: SipAccount = legacy.into();
+        assert_eq!(round_trip.effective_auth_username(), "auth1001");
+        assert_eq!(round_trip.username, "1001");
     }
 
     #[test]

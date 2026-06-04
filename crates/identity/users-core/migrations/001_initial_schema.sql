@@ -38,6 +38,33 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+-- Revoked access tokens table.
+-- Access tokens are intentionally short-lived, but deployments that require
+-- immediate revocation can reject token JTIs through this table until expiry.
+CREATE TABLE IF NOT EXISTS revoked_access_tokens (
+    jti TEXT PRIMARY KEY,
+    user_id TEXT,
+    expires_at TIMESTAMP NOT NULL,
+    revoked_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- SIP Digest credentials table
+-- Stores HA1 material for SIP Digest. These are separate from login
+-- password_hash values because Argon2 password hashes cannot be used for SIP
+-- Digest response validation.
+CREATE TABLE IF NOT EXISTS sip_digest_credentials (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    sip_username TEXT NOT NULL,
+    realm TEXT NOT NULL,
+    algorithm TEXT NOT NULL,
+    ha1 TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(sip_username, realm, algorithm),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 -- Sessions table (optional, for session management)
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
@@ -57,5 +84,8 @@ CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
 CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_jti ON refresh_tokens(jti);
+CREATE INDEX IF NOT EXISTS idx_revoked_access_tokens_expires_at ON revoked_access_tokens(expires_at);
+CREATE INDEX IF NOT EXISTS idx_sip_digest_credentials_user_id ON sip_digest_credentials(user_id);
+CREATE INDEX IF NOT EXISTS idx_sip_digest_credentials_lookup ON sip_digest_credentials(sip_username, realm, algorithm);
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);

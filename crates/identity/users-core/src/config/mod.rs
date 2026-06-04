@@ -50,10 +50,80 @@ impl Default for TlsSettings {
 impl UsersConfig {
     /// Load configuration from environment
     pub fn from_env() -> crate::Result<Self> {
-        // In a real implementation, this would use the config crate
-        // For now, return a default configuration
-        Ok(Self::default())
+        let mut config = Self::default();
+
+        if let Ok(value) = std::env::var("RVOIP_USERS_DATABASE_URL") {
+            config.database_url = value;
+        }
+        if let Ok(value) = std::env::var("RVOIP_USERS_API_BIND_ADDRESS") {
+            config.api_bind_address = value;
+        }
+        if let Ok(value) = std::env::var("RVOIP_USERS_JWT_ISSUER") {
+            config.jwt.issuer = value;
+        }
+        if let Ok(value) = std::env::var("RVOIP_USERS_JWT_AUDIENCE") {
+            config.jwt.audience = value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect();
+        }
+        if let Ok(value) = std::env::var("RVOIP_USERS_JWT_ACCESS_TTL_SECONDS") {
+            config.jwt.access_ttl_seconds =
+                parse_env_u64("RVOIP_USERS_JWT_ACCESS_TTL_SECONDS", &value)?;
+        }
+        if let Ok(value) = std::env::var("RVOIP_USERS_JWT_REFRESH_TTL_SECONDS") {
+            config.jwt.refresh_ttl_seconds =
+                parse_env_u64("RVOIP_USERS_JWT_REFRESH_TTL_SECONDS", &value)?;
+        }
+        if let Ok(value) = std::env::var("RVOIP_USERS_JWT_ALGORITHM") {
+            config.jwt.algorithm = value;
+        }
+        if let Ok(value) = std::env::var("RVOIP_USERS_JWT_SIGNING_KEY") {
+            config.jwt.signing_key = Some(value);
+        }
+        if let Ok(value) = std::env::var("RVOIP_USERS_PASSWORD_MIN_LENGTH") {
+            config.password.min_length =
+                parse_env_usize("RVOIP_USERS_PASSWORD_MIN_LENGTH", &value)?;
+        }
+        if let Ok(value) = std::env::var("RVOIP_USERS_REQUIRE_SPECIAL") {
+            config.password.require_special =
+                parse_env_bool("RVOIP_USERS_REQUIRE_SPECIAL", &value)?;
+        }
+        if let Ok(value) = std::env::var("RVOIP_USERS_TLS_ENABLED") {
+            config.tls.enabled = parse_env_bool("RVOIP_USERS_TLS_ENABLED", &value)?;
+        }
+        if let Ok(value) = std::env::var("RVOIP_USERS_TLS_REQUIRE") {
+            config.tls.require_tls = parse_env_bool("RVOIP_USERS_TLS_REQUIRE", &value)?;
+        }
+        if let Ok(value) = std::env::var("RVOIP_USERS_TLS_CERT_PATH") {
+            config.tls.cert_path = value;
+        }
+        if let Ok(value) = std::env::var("RVOIP_USERS_TLS_KEY_PATH") {
+            config.tls.key_path = value;
+        }
+
+        Ok(config)
     }
+}
+
+fn parse_env_u64(name: &str, value: &str) -> crate::Result<u64> {
+    value
+        .parse()
+        .map_err(|err| crate::Error::Config(format!("{name}: {err}")))
+}
+
+fn parse_env_usize(name: &str, value: &str) -> crate::Result<usize> {
+    value
+        .parse()
+        .map_err(|err| crate::Error::Config(format!("{name}: {err}")))
+}
+
+fn parse_env_bool(name: &str, value: &str) -> crate::Result<bool> {
+    value
+        .parse()
+        .map_err(|err| crate::Error::Config(format!("{name}: {err}")))
 }
 
 impl Default for UsersConfig {

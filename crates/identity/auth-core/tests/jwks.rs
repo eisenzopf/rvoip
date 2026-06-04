@@ -8,6 +8,7 @@
 //! The test keypair is *test-only* and embedded as PEM; it has no
 //! existence outside this file.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -67,6 +68,15 @@ struct Claims {
     aud: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    realm_access: Option<RoleAccessClaims>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource_access: Option<HashMap<String, RoleAccessClaims>>,
+}
+
+#[derive(Serialize)]
+struct RoleAccessClaims {
+    roles: Vec<String>,
 }
 
 fn mint(sub: &str, exp_in_secs: i64, aud: Option<&str>, scope: Option<&str>) -> String {
@@ -87,6 +97,36 @@ fn mint_with_kid(
         exp: Utc::now().timestamp() + exp_in_secs,
         aud: aud.map(|s| s.into()),
         scope: scope.map(|s| s.into()),
+        realm_access: None,
+        resource_access: None,
+    };
+    encode(
+        &header,
+        &claims,
+        &EncodingKey::from_rsa_pem(TEST_PRIVATE_PEM.as_bytes()).expect("rsa pem"),
+    )
+    .expect("encode JWT")
+}
+
+fn mint_with_keycloak_roles() -> String {
+    let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+    header.kid = Some(TEST_KID.to_string());
+    let mut resource_access = HashMap::new();
+    resource_access.insert(
+        "rvoip-sip".to_string(),
+        RoleAccessClaims {
+            roles: vec!["registrar".to_string(), "caller".to_string()],
+        },
+    );
+    let claims = Claims {
+        sub: "id_keycloak".into(),
+        exp: Utc::now().timestamp() + 3600,
+        aud: Some("rvoip-sip".into()),
+        scope: Some("profile email".into()),
+        realm_access: Some(RoleAccessClaims {
+            roles: vec!["admin".to_string()],
+        }),
+        resource_access: Some(resource_access),
     };
     encode(
         &header,
@@ -137,6 +177,31 @@ async fn valid_jwt_resolved_via_jwks_yields_user_authorized() {
         } => {
             assert_eq!(identity.as_str(), "id_bob");
             assert_eq!(scopes, vec!["read:calls"]);
+        }
+        other => panic!("expected UserAuthorized, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn keycloak_roles_map_to_scopes() {
+    let server = setup_server(jwks_body(TEST_KID)).await;
+    let validator = JwksJwtValidator::new(jwks_url(&server)).with_audience(["rvoip-sip"]);
+
+    let assurance = validator
+        .validate(&mint_with_keycloak_roles())
+        .await
+        .expect("ok");
+
+    match assurance {
+        IdentityAssurance::UserAuthorized {
+            identity, scopes, ..
+        } => {
+            assert_eq!(identity.as_str(), "id_keycloak");
+            assert!(scopes.contains(&"profile".to_string()));
+            assert!(scopes.contains(&"email".to_string()));
+            assert!(scopes.contains(&"realm:admin".to_string()));
+            assert!(scopes.contains(&"rvoip-sip:registrar".to_string()));
+            assert!(scopes.contains(&"rvoip-sip:caller".to_string()));
         }
         other => panic!("expected UserAuthorized, got {:?}", other),
     }

@@ -216,6 +216,7 @@ impl RegisterRefreshBuilder {
             contact_uri,
             expires,
             authorization: None,
+            proxy_authorization: None,
             call_id,
             cseq,
             outbound_contact: None,

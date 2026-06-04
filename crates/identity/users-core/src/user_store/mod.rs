@@ -6,6 +6,17 @@ use chrono::Utc;
 use sqlx_core::{query::query, raw_sql::raw_sql, row::Row};
 use sqlx_sqlite::{SqlitePool, SqliteRow};
 
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "001_initial_schema",
+        include_str!("../../migrations/001_initial_schema.sql"),
+    ),
+    (
+        "002_auth_security_tables",
+        include_str!("../../migrations/002_auth_security_tables.sql"),
+    ),
+];
+
 /// User storage trait
 #[async_trait]
 pub trait UserStore: Send + Sync {
@@ -30,12 +41,7 @@ impl SqliteUserStore {
             .await
             .map_err(|e| Error::Database(e))?;
 
-        // Run migrations
-        let migration_sql = include_str!("../../migrations/001_initial_schema.sql");
-        raw_sql(migration_sql)
-            .execute(&pool)
-            .await
-            .map_err(|e| Error::Database(e))?;
+        run_migrations(&pool).await?;
 
         Ok(Self { pool })
     }
@@ -44,6 +50,36 @@ impl SqliteUserStore {
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+}
+
+async fn run_migrations(pool: &SqlitePool) -> Result<()> {
+    raw_sql(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            id TEXT PRIMARY KEY,
+            applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );",
+    )
+    .execute(pool)
+    .await?;
+
+    for (id, sql) in MIGRATIONS {
+        let applied = query("SELECT 1 FROM schema_migrations WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?
+            .is_some();
+        if applied {
+            continue;
+        }
+
+        raw_sql(sql).execute(pool).await?;
+        query("INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)")
+            .bind(id)
+            .execute(pool)
+            .await?;
+    }
+
+    Ok(())
 }
 
 // Implement UserStore trait

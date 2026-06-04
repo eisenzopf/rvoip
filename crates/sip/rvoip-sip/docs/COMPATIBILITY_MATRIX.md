@@ -42,16 +42,36 @@ revision `865430d4`.
 | BYE | Supported | Supported | Supported | Interop tested | Cleanup tests, PBX matrix, SIPp. |
 | CANCEL | Supported | Supported | Supported | Interop tested | `cancel_integration.rs`, ring-cancel PBX rows. |
 | REGISTER | Supported | Supported | Supported | Interop tested | `registration_test.rs`, `register_423_retry.rs`, PBX registration rows. |
-| OPTIONS | Supported | Supported | Supported | Supported | `options` send/response tests and SIPp scenario. |
+| OPTIONS | Supported | Supported | Supported | Supported | `options` send/response tests, SIPp scenario, and credentialed OOB auth retry test. |
 | re-INVITE | Supported | Supported | Supported | Supported | Hold/resume PBX rows, glare retry tests. |
 | UPDATE | Supported | Supported | Supported | Supported | Update send tests and glare/session-timer coverage. |
 | PRACK | Supported | Partial | Stack managed | Partial | PRACK integration and dialog tests; broader PBX 100rel matrix pending. |
 | REFER | Supported | Supported | Supported | Interop tested | Blind-transfer PBX rows, REFER/NOTIFY progress tests. |
 | NOTIFY | Supported | Supported | Supported | Supported | REFER progress, subscription, and notify-send tests. |
 | INFO | Supported | Supported | Supported | Supported | INFO auth retry and DTMF tests. |
-| SUBSCRIBE | Supported | Partial | Supported | Partial | Subscription dialog tests; event-package matrix incomplete. |
-| MESSAGE | Supported | Partial | Supported | Partial | Message send/receive tests; direct interop gate is not a beta headline. |
+| SUBSCRIBE | Supported | Partial | Supported | Partial | Subscription dialog tests and credentialed OOB auth retry test; event-package matrix incomplete. |
+| MESSAGE | Supported | Partial | Supported | Partial | Message send/receive tests and credentialed OOB auth retry test; direct interop gate is not a beta headline. |
 | PUBLISH | Parser only | Not supported | Not supported | Post-beta | Parser-only/non-claim until wired end to end. |
+
+## Authentication
+
+Developer-facing auth API and crate-boundary guidance is in
+`crates/sip/rvoip-sip/docs/AUTHENTICATION.md`.
+
+| Feature | Beta status | Evidence | Notes |
+|---------|-------------|----------|-------|
+| SIP Digest MD5 / MD5-sess | Supported | `auth-core` digest tests, REGISTER/INVITE/OOB auth retry tests, PBX registration rows | Common PBX baseline. |
+| SIP Digest SHA-256 / SHA-256-sess | Supported | `auth-core` digest tests | Supported for challenge/response computation and validation. |
+| SIP Digest SHA-512-256 / SHA-512-256-sess | Supported | `auth-core` digest tests and `SipDigestAuthService` tests | Unsupported algorithm tokens fail clearly rather than falling back to MD5. |
+| `401 WWW-Authenticate` | Supported | REGISTER, INVITE, in-dialog, and OOB auth retry tests | Retries use `Authorization`. |
+| `407 Proxy-Authenticate` | Supported | REGISTER 407, INVITE 407, and OOB 407 auth retry tests | Retries use `Proxy-Authorization`. |
+| Digest `qop=auth` | Supported | REGISTER, INVITE, OOB, and server-side validation tests | Nonce-count is monotonic per nonce. |
+| Digest `qop=auth-int` | Supported where the request body is available | `auth-core`, `SipDigestAuthService`, and MESSAGE OOB auth-int tests | MESSAGE and INVITE bodies are included in HA2 when offered. |
+| Digest `stale=true` nonce recovery | Supported | INVITE 407 stale recovery and OOB stale recovery tests | Exactly one additional stale retry is allowed with a fresh nonce. |
+| SIP Basic auth | Supported, explicit opt-in | `SipAuthService` unit tests and OOB MESSAGE retry tests | Legacy compatibility only. UAC/UAS reject cleartext Basic unless the caller explicitly opts in or the request is over `sips:`. |
+| SIP Bearer auth | Supported | `SipAuthService` Bearer tests and OOB MESSAGE retry tests | UAC responds to Bearer challenges; UAS delegates validation to `auth-core` Bearer/JWT/JWKS/AAuth validators and exposes `AuthIdentity`. |
+| IMS AKA / AKAv1-MD5 / AKAv2-MD5 | Provider-backed | Public `AkaClientProvider` / `AkaVectorProvider` API and challenge builders | AKA is negotiated as a Digest-family scheme. Production vector issuance/USIM/Milenage integration is supplied by the application/provider. |
+| Multi-challenge negotiation | Supported | Composite-auth unit and OOB integration tests | UAC `SipClientAuth::any(...)` prefers AKA, then Bearer, then Digest, then Basic among configured compatible options. |
 
 ## Transport
 

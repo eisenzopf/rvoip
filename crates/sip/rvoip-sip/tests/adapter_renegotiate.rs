@@ -43,13 +43,10 @@ async fn fresh_adapter() -> Arc<SipAdapter> {
 async fn renegotiate_media_rejects_empty_capabilities() {
     let sip = fresh_adapter().await;
     let caps = CapabilityDescriptor::default(); // empty audio_codecs
-    let err = <SipAdapter as ConnectionAdapter>::renegotiate_media(
-        &*sip,
-        ConnectionId::new(),
-        caps,
-    )
-    .await
-    .unwrap_err();
+    let err =
+        <SipAdapter as ConnectionAdapter>::renegotiate_media(&*sip, ConnectionId::new(), caps)
+            .await
+            .unwrap_err();
     assert!(
         matches!(err, RvoipError::UnsupportedCodec(_)),
         "empty capabilities must surface UnsupportedCodec; got {err:?}"
@@ -68,13 +65,10 @@ async fn renegotiate_media_returns_connection_not_found_for_unknown_conn() {
         }],
         ..Default::default()
     };
-    let err = <SipAdapter as ConnectionAdapter>::renegotiate_media(
-        &*sip,
-        ConnectionId::new(),
-        caps,
-    )
-    .await
-    .unwrap_err();
+    let err =
+        <SipAdapter as ConnectionAdapter>::renegotiate_media(&*sip, ConnectionId::new(), caps)
+            .await
+            .unwrap_err();
     assert!(
         matches!(err, RvoipError::ConnectionNotFound(_)),
         "unknown ConnectionId must surface ConnectionNotFound; got {err:?}"

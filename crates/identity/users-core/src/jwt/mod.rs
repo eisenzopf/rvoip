@@ -1,7 +1,9 @@
 //! JWT token issuance
 
 use crate::{Error, Result, User};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use rsa::{pkcs1::DecodeRsaPrivateKey, pkcs8::DecodePrivateKey, traits::PublicKeyParts};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -168,6 +170,28 @@ impl JwtIssuer {
         Ok(token_data.claims)
     }
 
+    pub fn validate_access_token(&self, token: &str) -> Result<UserClaims> {
+        let mut validation = Validation::new(self.header.alg);
+        validation.set_issuer(&[self.config.issuer.clone()]);
+        validation.set_audience(&self.config.audience);
+        validation.validate_exp = true;
+
+        let token_data = decode::<UserClaims>(token, &self.decoding_key, &validation)
+            .map_err(|e| Error::Jwt(e))?;
+
+        Ok(token_data.claims)
+    }
+
+    /// Issuer configured for generated tokens.
+    pub fn issuer(&self) -> &str {
+        &self.config.issuer
+    }
+
+    /// Audiences configured for generated access tokens.
+    pub fn audience(&self) -> &[String] {
+        &self.config.audience
+    }
+
     /// Algorithm configured for issued JWTs.
     pub fn algorithm(&self) -> Algorithm {
         self.header.alg
@@ -178,23 +202,35 @@ impl JwtIssuer {
         &self.decoding_key
     }
 
-    /// Get the public key in JWK format (for auth-core)
-    pub fn public_key_jwk(&self) -> serde_json::Value {
-        if self.config.algorithm == "RS256" {
-            return serde_json::json!({
-                "kty": "RSA",
-                "use": "sig",
-                "kid": self.header.kid.as_ref().unwrap(),
-                "alg": self.config.algorithm,
-            });
+    /// Get the public key in JWK format for asymmetric JWT validation.
+    ///
+    /// HS256 uses a symmetric secret and is intentionally not exposed through
+    /// JWKS. Use an in-process HMAC validator or configure RS256 for public
+    /// JWKS-based validation.
+    pub fn public_key_jwk(&self) -> Result<serde_json::Value> {
+        if self.config.algorithm != "RS256" {
+            return Err(Error::Config(format!(
+                "{} uses symmetric signing; public JWKS is only available for RS256",
+                self.config.algorithm
+            )));
         }
 
-        serde_json::json!({
-            "kty": "oct",
+        let signing_key = self.config.signing_key.as_ref().ok_or_else(|| {
+            Error::Config("RS256 public JWK requires the configured signing key".to_string())
+        })?;
+        let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(signing_key)
+            .or_else(|_| rsa::RsaPrivateKey::from_pkcs1_pem(signing_key))
+            .map_err(|err| Error::Config(format!("invalid RSA signing key for JWK: {err}")))?;
+        let public_key = private_key.to_public_key();
+
+        Ok(serde_json::json!({
+            "kty": "RSA",
             "use": "sig",
             "kid": self.header.kid.as_ref().unwrap(),
             "alg": self.config.algorithm,
-        })
+            "n": URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be()),
+            "e": URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be()),
+        }))
     }
 
     /// Get the public key in PEM format

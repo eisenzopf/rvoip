@@ -350,7 +350,10 @@ impl DialogAdapter {
             .or_else(|| session.local_uri.clone())
             .ok_or_else(|| SessionError::InternalError("contact_uri not set for refresh".into()))?;
         let expires = session.registration_expires.unwrap_or(3600);
-        let credentials = session.credentials.clone();
+        let auth = session
+            .auth
+            .clone()
+            .or_else(|| session.credentials.clone().map(Into::into));
         drop(session);
 
         let mut attempt_expires = expires;
@@ -362,7 +365,7 @@ impl DialogAdapter {
                     &from_uri,
                     &contact_uri,
                     attempt_expires,
-                    credentials.as_ref(),
+                    auth.as_ref(),
                     Vec::new(),
                 )
                 .await?
@@ -2138,7 +2141,7 @@ impl DialogAdapter {
         from_uri: &str,
         contact_uri: &str,
         expires: u32,
-        credentials: Option<&crate::types::Credentials>,
+        auth: Option<&crate::auth::SipClientAuth>,
         extras: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<RegisterAttemptOutcome> {
         tracing::info!(
@@ -2148,28 +2151,37 @@ impl DialogAdapter {
             expires
         );
 
-        // Build authorization header if credentials provided
-        let authorization = if let Some(creds) = credentials {
+        // Build authorization header if auth material provided.
+        let (authorization, proxy_authorization) = if let Some(auth) = auth {
             // Get challenge from session
             let mut session = self.store.get_session(session_id).await?;
-            if let Some(challenge) = session.auth_challenge.clone() {
+            if let Some(challenge_raw) = session.auth_challenge_raw.clone().or_else(|| {
+                session.auth_challenge.as_ref().map(|challenge| {
+                    rvoip_auth_core::DigestAuthenticator::new(challenge.realm.clone())
+                        .format_www_authenticate(challenge)
+                })
+            }) {
                 // RFC 7616 §3.4.5 — bump the per-(realm, nonce) NC
                 // counter before computing. REGISTER reuses one nonce
                 // across many refreshes, so this is exactly the path
                 // where carriers reject `nc=00000001` repeats.
-                let nc_key = (challenge.realm.clone(), challenge.nonce.clone());
-                let nc_value = *session
-                    .digest_nc
-                    .entry(nc_key)
-                    .and_modify(|n| *n += 1)
-                    .or_insert(1);
+                let digest_challenge = session.auth_challenge.clone().or_else(|| {
+                    rvoip_auth_core::DigestAuthenticator::parse_challenge(&challenge_raw).ok()
+                });
+                let nc_value = if let Some(challenge) = digest_challenge.as_ref() {
+                    let nc_key = (challenge.realm.clone(), challenge.nonce.clone());
+                    *session
+                        .digest_nc
+                        .entry(nc_key)
+                        .and_modify(|n| *n += 1)
+                        .or_insert(1)
+                } else {
+                    1
+                };
                 self.store.update_session(session.clone()).await?;
 
                 tracing::info!(
-                    "🔍 CLIENT: Computing digest for user={}, realm={}, nonce={}, uri={}, nc={}",
-                    creds.username,
-                    challenge.realm,
-                    challenge.nonce,
+                    "🔍 CLIENT: Computing auth for REGISTER uri={}, nc={}",
                     registrar_uri,
                     nc_value
                 );
@@ -2177,38 +2189,36 @@ impl DialogAdapter {
                 // REGISTER body is empty; pass `None` so the qop
                 // selector picks `auth` (or legacy if no qop offered)
                 // rather than `auth-int`.
-                let computed = crate::auth::DigestAuth::compute_response_with_state(
-                    &creds.username,
-                    &creds.password,
-                    &challenge,
+                let selected = auth.authorization_for_challenge(
+                    &challenge_raw,
                     "REGISTER",
                     registrar_uri,
                     nc_value,
                     None,
+                    registrar_uri.to_ascii_lowercase().starts_with("sips:"),
                 )?;
 
                 tracing::info!(
-                    "🔍 CLIENT: Computed response hash: {} (cnonce: {:?}, qop: {:?})",
-                    computed.response,
-                    computed.cnonce,
-                    computed.qop
+                    "🔍 CLIENT: Computed REGISTER auth using {:?}",
+                    selected.scheme
                 );
 
-                let auth_header = crate::auth::DigestAuth::format_authorization_with_state(
-                    &creds.username,
-                    &challenge,
-                    registrar_uri,
-                    &computed,
-                );
-
-                tracing::debug!("Computed digest auth for user {}", creds.username);
-                Some(auth_header)
+                let status = session
+                    .pending_auth
+                    .as_ref()
+                    .map(|(status, _)| *status)
+                    .unwrap_or(401);
+                if status == 407 {
+                    (None, Some(selected.value))
+                } else {
+                    (Some(selected.value), None)
+                }
             } else {
                 tracing::debug!("No challenge stored, sending without auth");
-                None
+                (None, None)
             }
         } else {
-            None
+            (None, None)
         };
 
         // RFC 3581 NAT discovery: if the dialog manager has learned a
@@ -2263,6 +2273,7 @@ impl DialogAdapter {
                 contact_uri: rewritten_contact,
                 expires,
                 authorization,
+                proxy_authorization,
                 call_id: Some(registration_call_id),
                 cseq: Some(registration_cseq),
                 outbound_contact: self.outbound_contact_params.clone(),
@@ -2304,10 +2315,15 @@ impl DialogAdapter {
                 } else {
                     rvoip_sip_core::types::header::HeaderName::WwwAuthenticate
                 };
-                if let Some(challenge) = response.raw_header_value(&header_name) {
+                let challenges = response
+                    .raw_headers(&header_name)
+                    .into_iter()
+                    .filter_map(|bytes| String::from_utf8(bytes).ok())
+                    .collect::<Vec<_>>();
+                if !challenges.is_empty() {
                     Ok(RegisterAttemptOutcome::AuthChallenge {
                         status_code: response.status_code(),
-                        challenge,
+                        challenge: challenges.join(", "),
                     })
                 } else {
                     tracing::warn!(

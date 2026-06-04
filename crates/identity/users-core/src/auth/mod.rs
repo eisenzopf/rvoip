@@ -2,7 +2,7 @@
 
 use crate::config::PasswordConfig;
 use crate::jwt::RefreshTokenClaims;
-use crate::{ApiKeyStore, CreateUserRequest, Error, JwtIssuer, Result, User, UserStore};
+use crate::{ApiKey, ApiKeyStore, CreateUserRequest, Error, JwtIssuer, Result, User, UserStore};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use password_hash::{rand_core::OsRng, SaltString};
 use sqlx_core::{query::query, row::Row};
@@ -18,7 +18,7 @@ pub struct AuthenticationService {
     #[allow(dead_code)] // reserved / not yet read
     password_config: PasswordConfig,
     argon2: Argon2<'static>,
-    pool: Option<SqlitePool>, // For refresh token management
+    pub(crate) pool: Option<SqlitePool>, // For refresh token management
 }
 
 /// Result of authentication
@@ -140,6 +140,35 @@ impl AuthenticationService {
         username: &str,
         password: &str,
     ) -> Result<AuthenticationResult> {
+        let user = self.verify_password_user(username, password).await?;
+
+        // Generate tokens
+        let access_token = self.jwt_issuer.create_access_token(&user)?;
+        let refresh_token = self.jwt_issuer.create_refresh_token(&user.id)?;
+
+        // Store refresh token JTI if pool is available
+        if let Some(pool) = &self.pool {
+            let claims = self.jwt_issuer.validate_refresh_token(&refresh_token)?;
+            self.store_refresh_token(pool, &claims).await?;
+        }
+
+        // Update last login
+        self.update_last_login(&user.id).await?;
+
+        Ok(AuthenticationResult {
+            user,
+            access_token,
+            refresh_token,
+            expires_in: std::time::Duration::from_secs(self.jwt_issuer.config.access_ttl_seconds),
+        })
+    }
+
+    /// Verify username/password credentials without issuing tokens.
+    pub async fn verify_password_only(&self, username: &str, password: &str) -> Result<User> {
+        self.verify_password_user(username, password).await
+    }
+
+    async fn verify_password_user(&self, username: &str, password: &str) -> Result<User> {
         use std::time::Duration;
 
         // Always fetch user (or use dummy)
@@ -185,26 +214,7 @@ impl AuthenticationService {
                 if !user.active {
                     return Err(Error::InvalidCredentials);
                 }
-
-                // Generate tokens
-                let access_token = self.jwt_issuer.create_access_token(&user)?;
-                let refresh_token = self.jwt_issuer.create_refresh_token(&user.id)?;
-
-                // Store refresh token JTI if pool is available
-                if let Some(pool) = &self.pool {
-                    let claims = self.jwt_issuer.validate_refresh_token(&refresh_token)?;
-                    self.store_refresh_token(pool, &claims).await?;
-                }
-
-                // Update last login
-                self.update_last_login(&user.id).await?;
-
-                Ok(AuthenticationResult {
-                    user,
-                    access_token,
-                    refresh_token,
-                    expires_in: Duration::from_secs(self.jwt_issuer.config.access_ttl_seconds),
-                })
+                Ok(user)
             }
             _ => {
                 // Failed login - could record for rate limiting here
@@ -215,24 +225,7 @@ impl AuthenticationService {
 
     /// Authenticate with API key
     pub async fn authenticate_api_key(&self, api_key: &str) -> Result<AuthenticationResult> {
-        // Validate API key
-        let key_info = self
-            .api_key_store
-            .validate_api_key(api_key)
-            .await?
-            .ok_or(Error::InvalidCredentials)?;
-
-        // Get associated user
-        let user = self
-            .user_store
-            .get_user(&key_info.user_id)
-            .await?
-            .ok_or(Error::UserNotFound(key_info.user_id.clone()))?;
-
-        // Check if account is active
-        if !user.active {
-            return Err(Error::InvalidCredentials);
-        }
+        let (user, _) = self.verify_api_key_only(api_key).await?;
 
         // Generate tokens (API keys get shorter-lived tokens)
         let access_token = self.jwt_issuer.create_access_token(&user)?;
@@ -244,6 +237,27 @@ impl AuthenticationService {
             refresh_token,
             expires_in: std::time::Duration::from_secs(300), // 5 minutes for API keys
         })
+    }
+
+    /// Verify an API key without issuing tokens.
+    pub async fn verify_api_key_only(&self, api_key: &str) -> Result<(User, ApiKey)> {
+        let key_info = self
+            .api_key_store
+            .validate_api_key(api_key)
+            .await?
+            .ok_or(Error::InvalidCredentials)?;
+
+        let user = self
+            .user_store
+            .get_user(&key_info.user_id)
+            .await?
+            .ok_or_else(|| Error::UserNotFound(key_info.user_id.clone()))?;
+
+        if !user.active {
+            return Err(Error::InvalidCredentials);
+        }
+
+        Ok((user, key_info))
     }
 
     /// Refresh access token
@@ -290,6 +304,73 @@ impl AuthenticationService {
             .await?;
         }
         Ok(())
+    }
+
+    /// Revoke a single access token until its normal expiry.
+    ///
+    /// Access tokens are stateless and short-lived. This stores the token's
+    /// `jti` in the reference SQLite service so validators that enable
+    /// revocation checks can reject it immediately.
+    pub async fn revoke_access_token(&self, access_token: &str) -> Result<()> {
+        let claims = self.jwt_issuer.validate_access_token(access_token)?;
+        let expires_at = chrono::DateTime::<chrono::Utc>::from_timestamp(claims.exp as i64, 0)
+            .ok_or_else(|| {
+                Error::Validation("access token exp is outside supported range".to_string())
+            })?;
+        self.revoke_access_token_jti(&claims.jti, Some(&claims.sub), expires_at)
+            .await
+    }
+
+    /// Revoke an access-token JWT ID until expiry.
+    pub async fn revoke_access_token_jti(
+        &self,
+        jti: &str,
+        user_id: Option<&str>,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        if let Some(pool) = &self.pool {
+            query(
+                "INSERT INTO revoked_access_tokens (jti, user_id, expires_at, revoked_at)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT(jti) DO UPDATE SET
+                    user_id = excluded.user_id,
+                    expires_at = excluded.expires_at,
+                    revoked_at = excluded.revoked_at",
+            )
+            .bind(jti)
+            .bind(user_id)
+            .bind(expires_at)
+            .bind(chrono::Utc::now())
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Check whether an access-token JWT ID is currently revoked.
+    pub async fn is_access_token_revoked(&self, jti: &str) -> Result<bool> {
+        let Some(pool) = &self.pool else {
+            return Ok(false);
+        };
+        let row = query("SELECT expires_at FROM revoked_access_tokens WHERE jti = ?")
+            .bind(jti)
+            .fetch_optional(pool)
+            .await?;
+
+        let Some(row) = row else {
+            return Ok(false);
+        };
+
+        let expires_at: chrono::DateTime<chrono::Utc> = row.get("expires_at");
+        if expires_at > chrono::Utc::now() {
+            return Ok(true);
+        }
+
+        query("DELETE FROM revoked_access_tokens WHERE jti = ?")
+            .bind(jti)
+            .execute(pool)
+            .await?;
+        Ok(false)
     }
 
     /// Change user password

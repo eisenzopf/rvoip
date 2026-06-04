@@ -81,6 +81,12 @@ Asterisk registered-flow TLS/SRTP is provider-gated: set
 
 ## Endpoint Notes
 
+The shared harness constructs one `SipAccount` per participant and derives
+`Config.credentials`, `Registration`, `EndpointAccount`, and the StreamPeer /
+CallbackPeer registration builders from that account. This keeps PBX digest
+username, AOR username, password, From URI, Contact URI, and expiry in one
+place across the three API surfaces.
+
 `Endpoint` intentionally remains a simple account API. Advanced scenarios still
 use `SessionHandle` for per-call operations such as `hold`, `resume`,
 `send_dtmf`, and `transfer_blind_and_wait_for_outcome`. Ring/cancel and reject

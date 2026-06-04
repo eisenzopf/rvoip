@@ -47,7 +47,17 @@ impl CreateApiKeyRequest {
             .map_err(|e| crate::Error::Validation(format!("Invalid API key name: {}", e)))?;
 
         // Validate permissions
-        const ALLOWED_PERMISSIONS: &[&str] = &["read", "write", "delete", "admin", "*"];
+        const ALLOWED_PERMISSIONS: &[&str] = &[
+            "read",
+            "write",
+            "delete",
+            "admin",
+            "sip.register",
+            "sip.call",
+            "sip.message",
+            "sip.presence",
+            "*",
+        ];
         for perm in &self.permissions {
             if !ALLOWED_PERMISSIONS.contains(&perm.as_str()) {
                 return Err(crate::Error::Validation(format!(

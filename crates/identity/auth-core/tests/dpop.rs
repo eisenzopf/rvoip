@@ -166,7 +166,10 @@ fn rfc7638_thumbprint_matches_canonical_form() {
     let tp_a2 = jwk_thumbprint(&jwk_a).expect("thumbprint a2");
     let tp_b = jwk_thumbprint(&jwk_b).expect("thumbprint b");
     assert_eq!(tp_a, tp_a2, "same JWK must produce same thumbprint");
-    assert_ne!(tp_a, tp_b, "different JWKs must produce different thumbprints");
+    assert_ne!(
+        tp_a, tp_b,
+        "different JWKs must produce different thumbprints"
+    );
     // Length: SHA-256 base64url-no-pad = 43.
     assert_eq!(tp_a.len(), 43);
 }

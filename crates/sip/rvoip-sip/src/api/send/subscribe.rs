@@ -7,6 +7,7 @@ use rvoip_sip_core::types::Method;
 use crate::api::handle::CallId;
 use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
+use crate::auth::SipClientAuth;
 use crate::errors::Result;
 use crate::types::Credentials;
 
@@ -54,6 +55,7 @@ pub struct SubscribeBuilder {
     contact_uri: Option<String>,
     accept: Option<String>,
     credentials: Option<Credentials>,
+    auth: Option<SipClientAuth>,
     state: BuilderHeaderState,
 }
 
@@ -72,6 +74,7 @@ impl SubscribeBuilder {
             contact_uri: None,
             accept: None,
             credentials: None,
+            auth: None,
             state: BuilderHeaderState::default(),
         }
     }
@@ -96,9 +99,35 @@ impl SubscribeBuilder {
         self.accept = Some(ct.into());
         self
     }
-    /// Attach digest credentials for 401/407 retry.
+    /// Attach Digest credentials for UAC 401/407 retry.
     pub fn with_credentials(mut self, c: Credentials) -> Self {
         self.credentials = Some(c);
+        self
+    }
+    /// Attach general UAC SIP auth for 401/407 retry.
+    ///
+    /// Use [`SipClientAuth::any`] when the peer may offer multiple schemes and
+    /// the UAC should negotiate among Digest, Bearer, Basic, and AKA options.
+    pub fn with_auth(mut self, auth: SipClientAuth) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+    /// Attach a Bearer token for UAC 401/407 retry.
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.auth = Some(SipClientAuth::bearer_token(token));
+        self
+    }
+    /// Attach Basic credentials for UAC 401/407 retry.
+    ///
+    /// Basic is cleartext-disabled by default. Use
+    /// `with_auth(SipClientAuth::basic(...).allow_basic_over_cleartext(true))`
+    /// only for explicit legacy cleartext interop.
+    pub fn with_basic_credentials(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.auth = Some(SipClientAuth::basic(username, password));
         self
     }
 
@@ -126,10 +155,7 @@ impl SubscribeBuilder {
             .from_uri
             .clone()
             .unwrap_or_else(|| self.coord.config_local_uri());
-        let authorization = self
-            .credentials
-            .as_ref()
-            .map(|c| format!("Digest username=\"{}\"", c.username));
+        let auth = self.auth.or_else(|| self.credentials.map(Into::into));
         let extra_headers = take_staged(&mut self.state);
         let opts = rvoip_sip_dialog::api::unified::SubscribeRequestOptions {
             event: self.event_package.clone(),
@@ -137,7 +163,7 @@ impl SubscribeBuilder {
             accept: self.accept.clone(),
             from_uri: Some(from_uri.clone()),
             contact_uri: self.contact_uri.clone(),
-            authorization,
+            authorization: None,
             refresh: false,
             extra_headers,
         };
@@ -148,8 +174,7 @@ impl SubscribeBuilder {
         // the direct adapter route so it cannot dead-end on SessionNotFound.
         let response = self
             .coord
-            .dialog_adapter()
-            .send_subscribe_oob_with_options(&self.target, opts)
+            .send_subscribe_oob_with_optional_auth(&self.target, opts, auth)
             .await?;
         let id = response
             .call_id()
@@ -187,6 +212,7 @@ pub struct SubscribeRefreshBuilder {
     handle: SubscriptionHandle,
     expires: Option<u32>,
     credentials: Option<Credentials>,
+    auth: Option<SipClientAuth>,
     state: BuilderHeaderState,
 }
 
@@ -196,6 +222,7 @@ impl SubscribeRefreshBuilder {
             handle,
             expires: None,
             credentials: None,
+            auth: None,
             state: BuilderHeaderState::default(),
         }
     }
@@ -206,9 +233,35 @@ impl SubscribeRefreshBuilder {
         self.expires = Some(secs);
         self
     }
-    /// Attach digest credentials for 401/407 retry.
+    /// Attach Digest credentials for UAC 401/407 retry.
     pub fn with_credentials(mut self, c: Credentials) -> Self {
         self.credentials = Some(c);
+        self
+    }
+    /// Attach general UAC SIP auth for 401/407 retry.
+    ///
+    /// Use [`SipClientAuth::any`] when the peer may offer multiple schemes and
+    /// the UAC should negotiate among Digest, Bearer, Basic, and AKA options.
+    pub fn with_auth(mut self, auth: SipClientAuth) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+    /// Attach a Bearer token for UAC 401/407 retry.
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.auth = Some(SipClientAuth::bearer_token(token));
+        self
+    }
+    /// Attach Basic credentials for UAC 401/407 retry.
+    ///
+    /// Basic is cleartext-disabled by default. Use
+    /// `with_auth(SipClientAuth::basic(...).allow_basic_over_cleartext(true))`
+    /// only for explicit legacy cleartext interop.
+    pub fn with_basic_credentials(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.auth = Some(SipClientAuth::basic(username, password));
         self
     }
 
@@ -222,10 +275,7 @@ impl SubscribeRefreshBuilder {
                     .to_string(),
             )
         })?;
-        let authorization = self
-            .credentials
-            .as_ref()
-            .map(|c| format!("Digest username=\"{}\"", c.username));
+        let auth = self.auth.or_else(|| self.credentials.map(Into::into));
         let extra_headers = take_staged(&mut self.state);
         let opts = rvoip_sip_dialog::api::unified::SubscribeRequestOptions {
             event: self.handle.event_package.clone(),
@@ -235,13 +285,12 @@ impl SubscribeRefreshBuilder {
             accept: self.handle.accept.clone(),
             from_uri: Some(self.handle.from_uri.clone()),
             contact_uri: self.handle.contact_uri.clone(),
-            authorization,
+            authorization: None,
             refresh: true,
             extra_headers,
         };
         coord
-            .dialog_adapter()
-            .send_subscribe_oob_with_options(&self.handle.target, opts)
+            .send_subscribe_oob_with_optional_auth(&self.handle.target, opts, auth)
             .await?;
         Ok(())
     }

@@ -26,7 +26,9 @@ async fn originate_populates_connection_streams_eagerly() {
     let coord = UnifiedCoordinator::new(SipConfig::local("eager-streams-test", sip_port))
         .await
         .expect("sip coordinator");
-    let sip = SipAdapter::new(Arc::clone(&coord)).await.expect("sip adapter");
+    let sip = SipAdapter::new(Arc::clone(&coord))
+        .await
+        .expect("sip adapter");
 
     let caps = <SipAdapter as ConnectionAdapter>::capabilities(&*sip);
     let handle = <SipAdapter as ConnectionAdapter>::originate(
@@ -55,7 +57,11 @@ async fn originate_populates_connection_streams_eagerly() {
     let lookup = <SipAdapter as ConnectionAdapter>::streams(&*sip, handle.connection.id.clone())
         .await
         .expect("streams lookup");
-    assert_eq!(lookup.len(), 1, "streams() must return the eagerly-cached stream");
+    assert_eq!(
+        lookup.len(),
+        1,
+        "streams() must return the eagerly-cached stream"
+    );
     assert_eq!(
         lookup[0].id(),
         handle.connection.streams[0].id(),

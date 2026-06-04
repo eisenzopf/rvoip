@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use rvoip_sip_core::types::auth::{
-    Algorithm, Challenge, DigestParam, ProxyAuthenticate, Qop, WwwAuthenticate,
+    Algorithm, AuthParam, Challenge, DigestParam, ProxyAuthenticate, Qop, WwwAuthenticate,
 };
 use rvoip_sip_core::types::headers::TypedHeader;
 use rvoip_sip_core::types::Method;
@@ -21,6 +21,10 @@ pub enum AuthScheme {
     Digest,
     /// Bearer-token authentication (RFC 6750).
     Bearer,
+    /// Basic authentication.
+    Basic,
+    /// IMS AKA authentication (`AKAv1-MD5` / `AKAv2-MD5`).
+    Aka,
 }
 
 /// Builds and sends an authentication challenge — 401 Unauthorized
@@ -37,6 +41,9 @@ pub struct AuthChallengeBuilder {
     qop: Option<String>,
     stale: bool,
     opaque: Option<String>,
+    scope: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
     proxy: bool,
     state: BuilderHeaderState,
 }
@@ -59,6 +66,9 @@ impl AuthChallengeBuilder {
             qop: None,
             stale: false,
             opaque: None,
+            scope: None,
+            error: None,
+            error_description: None,
             proxy: false,
             state: BuilderHeaderState::default(),
         }
@@ -94,6 +104,32 @@ impl AuthChallengeBuilder {
         self.opaque = Some(s.into());
         self
     }
+    /// Set Bearer `scope`.
+    pub fn with_scope(mut self, s: impl Into<String>) -> Self {
+        self.scope = Some(s.into());
+        self
+    }
+    /// Set Bearer `error`.
+    pub fn with_error(mut self, s: impl Into<String>) -> Self {
+        self.error = Some(s.into());
+        self
+    }
+    /// Set Bearer `error_description`.
+    pub fn with_error_description(mut self, s: impl Into<String>) -> Self {
+        self.error_description = Some(s.into());
+        self
+    }
+
+    /// Set Digest challenge parameters from `rvoip-auth-core`.
+    pub fn with_digest_challenge(mut self, challenge: &crate::auth::DigestChallenge) -> Self {
+        self.realm = Some(challenge.realm.clone());
+        self.nonce = Some(challenge.nonce.clone());
+        self.algorithm = Some(challenge.algorithm.as_str().to_string());
+        self.opaque = challenge.opaque.clone();
+        self.qop = challenge.qop.as_ref().map(|qop| qop.join(","));
+        self
+    }
+
     /// Issue this as a proxy challenge (407 / `Proxy-Authenticate`)
     /// instead of a UA challenge (401 / `WWW-Authenticate`).
     pub fn as_proxy_challenge(mut self, proxy: bool) -> Self {
@@ -108,12 +144,14 @@ impl AuthChallengeBuilder {
         let realm = self.realm.clone().ok_or_else(|| {
             SessionError::InvalidInput("AuthChallengeBuilder requires with_realm(..)".to_string())
         })?;
-        let nonce = self.nonce.clone().ok_or_else(|| {
-            SessionError::InvalidInput("AuthChallengeBuilder requires with_nonce(..)".to_string())
-        })?;
 
         match self.scheme {
             AuthScheme::Digest => {
+                let nonce = self.nonce.clone().ok_or_else(|| {
+                    SessionError::InvalidInput(
+                        "Digest AuthChallengeBuilder requires with_nonce(..)".to_string(),
+                    )
+                })?;
                 let mut params = vec![DigestParam::Realm(realm), DigestParam::Nonce(nonce)];
                 if let Some(alg) = self.algorithm.as_ref() {
                     // Map common algorithm names (MD5, MD5-sess, SHA-256,
@@ -162,10 +200,72 @@ impl AuthChallengeBuilder {
             AuthScheme::Bearer => {
                 let challenge = Challenge::Bearer {
                     realm,
-                    scope: None,
-                    error: None,
-                    error_description: None,
+                    scope: self.scope.clone(),
+                    error: self.error.clone(),
+                    error_description: self.error_description.clone(),
                 };
+                if self.proxy {
+                    Ok(TypedHeader::ProxyAuthenticate(ProxyAuthenticate(vec![
+                        challenge,
+                    ])))
+                } else {
+                    Ok(TypedHeader::WwwAuthenticate(WwwAuthenticate(vec![
+                        challenge,
+                    ])))
+                }
+            }
+            AuthScheme::Basic => {
+                let challenge = Challenge::Basic {
+                    params: vec![AuthParam {
+                        name: "realm".to_string(),
+                        value: realm,
+                    }],
+                };
+                if self.proxy {
+                    Ok(TypedHeader::ProxyAuthenticate(ProxyAuthenticate(vec![
+                        challenge,
+                    ])))
+                } else {
+                    Ok(TypedHeader::WwwAuthenticate(WwwAuthenticate(vec![
+                        challenge,
+                    ])))
+                }
+            }
+            AuthScheme::Aka => {
+                let nonce = self.nonce.clone().ok_or_else(|| {
+                    SessionError::InvalidInput(
+                        "AKA AuthChallengeBuilder requires with_nonce(..)".to_string(),
+                    )
+                })?;
+                let algorithm = self
+                    .algorithm
+                    .clone()
+                    .unwrap_or_else(|| "AKAv1-MD5".to_string());
+                let mut params = vec![
+                    DigestParam::Realm(realm),
+                    DigestParam::Nonce(nonce),
+                    DigestParam::Algorithm(Algorithm::Other(algorithm)),
+                ];
+                if let Some(qop) = self.qop.as_ref() {
+                    let parsed = qop
+                        .split(',')
+                        .map(|s| match s.trim().to_ascii_lowercase().as_str() {
+                            "auth" => Qop::Auth,
+                            "auth-int" => Qop::AuthInt,
+                            other => Qop::Other(other.to_string()),
+                        })
+                        .collect::<Vec<_>>();
+                    if !parsed.is_empty() {
+                        params.push(DigestParam::Qop(parsed));
+                    }
+                }
+                if self.stale {
+                    params.push(DigestParam::Stale(true));
+                }
+                if let Some(opaque) = self.opaque.clone() {
+                    params.push(DigestParam::Opaque(opaque));
+                }
+                let challenge = Challenge::Digest { params };
                 if self.proxy {
                     Ok(TypedHeader::ProxyAuthenticate(ProxyAuthenticate(vec![
                         challenge,

@@ -78,11 +78,27 @@ pub enum SessionError {
     #[error("server challenged INVITE but no credentials are on file")]
     MissingCredentialsForInviteAuth,
 
+    /// RFC 3261 §22.2 — the server challenged an outbound request with 401/407
+    /// but the request flow has no credentials on file.
+    #[error("server challenged {method} but no credentials are on file")]
+    MissingCredentialsForRequestAuth {
+        /// SIP method that was challenged.
+        method: rvoip_sip_core::Method,
+    },
+
     /// RFC 3261 §22.2 — INVITE auth has already been retried once and the
     /// server challenged again. Prevents loops against a broken server or
     /// wrong credentials.
     #[error("INVITE auth retry limit exceeded")]
     InviteAuthRetryExhausted,
+
+    /// RFC 3261 §22.2 — outbound request auth has already been retried once and
+    /// the server challenged again.
+    #[error("{method} auth retry limit exceeded")]
+    RequestAuthRetryExhausted {
+        /// SIP method whose auth retry limit was exceeded.
+        method: rvoip_sip_core::Method,
+    },
 
     /// An unexpected internal invariant was violated.
     #[error("Internal error: {0}")]
@@ -116,7 +132,7 @@ pub enum SessionError {
     /// staged a header that violates the per-method policy. The most
     /// common case is staging a stack-managed name (Call-ID, CSeq,
     /// Via, Max-Forwards) or a method-shaped name that has a
-    /// dedicated setter (e.g. Authorization → `with_credentials`).
+    /// dedicated setter (e.g. Authorization -> `with_credentials` / `with_auth`).
     #[error("header policy violation on {method}: {header} — {reason}")]
     HeaderPolicy {
         /// SIP method whose per-method header policy was violated.

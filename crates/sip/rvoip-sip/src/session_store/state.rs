@@ -248,6 +248,7 @@ pub struct SessionState {
     pub registration_pub_gruu: Option<String>, // Registrar-assigned public GRUU
     pub registration_temp_gruu: Option<String>, // Registrar-assigned temporary GRUU
     pub credentials: Option<crate::types::Credentials>, // User credentials for authentication
+    pub auth: Option<crate::auth::SipClientAuth>, // General UAC auth for 401/407 retries
     /// Optional `P-Asserted-Identity` URI (RFC 3325 §9.1) to attach to the
     /// outgoing INVITE for this session. When `Some`, the `SendINVITE` action
     /// routes through `dialog_adapter.send_invite_with_extra_headers` so the
@@ -265,6 +266,12 @@ pub struct SessionState {
     pub extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     pub is_registered: bool, // Whether registration is complete
     pub auth_challenge: Option<crate::auth::DigestChallenge>, // Cached authentication challenge from 401
+    pub auth_challenge_raw: Option<String>, // Cached raw challenge for non-Digest auth schemes
+    /// Whether the latest cached challenge carried `stale=true`.
+    pub auth_challenge_stale: bool,
+    /// Previous nonce replaced by the latest cached challenge. Used to allow
+    /// exactly one stale-nonce recovery retry with a fresh nonce.
+    pub auth_challenge_replaces_nonce: Option<String>,
     pub registration_retry_count: u32, // Number of retries attempted (prevent infinite loops)
 
     // RFC 7616 §3.4.5 — per-(realm, nonce) digest nonce-count cursor.
@@ -370,10 +377,14 @@ impl SessionState {
             registration_pub_gruu: None,
             registration_temp_gruu: None,
             credentials: None,
+            auth: None,
             pai_uri: None,
             extra_headers: Vec::new(),
             is_registered: false,
             auth_challenge: None,
+            auth_challenge_raw: None,
+            auth_challenge_stale: false,
+            auth_challenge_replaces_nonce: None,
             registration_retry_count: 0,
             digest_nc: HashMap::new(),
             created_at: now,

@@ -18,9 +18,9 @@
 //! issuers rotate keys on the order of days, so 1h cache + on-miss
 //! refresh handles rotation without thundering-herd refetches.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
@@ -32,6 +32,9 @@ use tracing::{debug, warn};
 use url::Url;
 
 use crate::bearer::{BearerAuthError, BearerValidator};
+use crate::providers::{
+    CredentialAuthError, TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
+};
 
 /// Default JWKS cache TTL. Issuers typically rotate signing keys on
 /// the order of days; 1h covers normal operation without burning
@@ -66,9 +69,29 @@ struct JwksKey {
 struct TokenClaims {
     sub: String,
     #[serde(default)]
+    iss: Option<String>,
+    #[serde(default)]
+    iat: Option<u64>,
+    #[serde(default)]
+    exp: Option<u64>,
+    #[serde(default)]
+    jti: Option<String>,
+    #[serde(default)]
     scope: Option<String>,
     #[serde(default)]
     scopes: Option<Vec<String>>,
+    #[serde(default)]
+    roles: Option<Vec<String>>,
+    #[serde(default)]
+    realm_access: Option<RoleAccess>,
+    #[serde(default)]
+    resource_access: Option<HashMap<String, RoleAccess>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RoleAccess {
+    #[serde(default)]
+    roles: Vec<String>,
 }
 
 /// Bearer validator that resolves signing keys from a remote JWKS
@@ -84,6 +107,7 @@ struct Inner {
     client: reqwest::Client,
     cache: Cache<String, DecodingKey>,
     validation: Validation,
+    revocation_checker: Option<Arc<dyn TokenRevocationChecker>>,
 }
 
 impl JwksJwtValidator {
@@ -116,6 +140,7 @@ impl JwksJwtValidator {
                     .time_to_live(DEFAULT_JWKS_CACHE_TTL)
                     .build(),
                 validation,
+                revocation_checker: None,
             }),
         }
     }
@@ -134,6 +159,7 @@ impl JwksJwtValidator {
                 client: inner.client.clone(),
                 cache: new_cache,
                 validation: inner.validation.clone(),
+                revocation_checker: inner.revocation_checker.clone(),
             }),
         }
     }
@@ -158,6 +184,7 @@ impl JwksJwtValidator {
                 client: inner.client.clone(),
                 cache: inner.cache.clone(),
                 validation,
+                revocation_checker: inner.revocation_checker.clone(),
             }),
         }
     }
@@ -182,6 +209,7 @@ impl JwksJwtValidator {
                 client: inner.client.clone(),
                 cache: inner.cache.clone(),
                 validation,
+                revocation_checker: inner.revocation_checker.clone(),
             }),
         }
     }
@@ -197,6 +225,24 @@ impl JwksJwtValidator {
                 client: inner.client.clone(),
                 cache: inner.cache.clone(),
                 validation,
+                revocation_checker: inner.revocation_checker.clone(),
+            }),
+        }
+    }
+
+    /// Reject JWTs whose `jti` appears in a revocation store.
+    ///
+    /// When configured, tokens without a `jti` claim are rejected because they
+    /// cannot participate in revocation checks.
+    pub fn with_revocation_checker(self, checker: Arc<dyn TokenRevocationChecker>) -> Self {
+        let inner = &*self.inner;
+        Self {
+            inner: Arc::new(Inner {
+                jwks_url: inner.jwks_url.clone(),
+                client: inner.client.clone(),
+                cache: inner.cache.clone(),
+                validation: inner.validation.clone(),
+                revocation_checker: Some(checker),
             }),
         }
     }
@@ -238,9 +284,11 @@ impl JwksJwtValidator {
                 }
             }
         }
-        self.inner.cache.get(kid).await.ok_or_else(|| {
-            BearerAuthError::Invalid(format!("no signing key for kid={}", kid))
-        })
+        self.inner
+            .cache
+            .get(kid)
+            .await
+            .ok_or_else(|| BearerAuthError::Invalid(format!("no signing key for kid={}", kid)))
     }
 
     async fn fetch_jwks(&self) -> Result<JwksDocument, BearerAuthError> {
@@ -304,9 +352,7 @@ fn decoding_key_from_jwk(jwk: &JwksKey) -> Result<DecodingKey, BearerAuthError> 
                 "oct (symmetric) keys in JWKS not supported; use HMAC JwtValidator directly".into(),
             ))
         }
-        other => Err(BearerAuthError::Invalid(format!(
-            "unsupported kty={other}"
-        ))),
+        other => Err(BearerAuthError::Invalid(format!("unsupported kty={other}"))),
     }
 }
 
@@ -318,8 +364,8 @@ impl BearerValidator for JwksJwtValidator {
         }
         // 1. Parse header to extract kid. Tokens without a kid can't
         // be resolved against JWKS; reject them up front.
-        let header = decode_header(token)
-            .map_err(|e| BearerAuthError::Invalid(format!("header: {e}")))?;
+        let header =
+            decode_header(token).map_err(|e| BearerAuthError::Invalid(format!("header: {e}")))?;
         let kid = header
             .kid
             .as_ref()
@@ -332,20 +378,22 @@ impl BearerValidator for JwksJwtValidator {
         let data = decode::<TokenClaims>(token, &key, &self.inner.validation)
             .map_err(|e| BearerAuthError::Invalid(e.to_string()))?;
         let claims = data.claims;
+        let revocation_context = revocation_context_from_claims(&claims);
+        check_revocation(
+            self.inner.revocation_checker.as_ref(),
+            revocation_context.as_ref(),
+        )
+        .await?;
 
         // 4. Map claims to IdentityAssurance::UserAuthorized.
         let identity = IdentityId::from_string(claims.sub);
-        let mut scopes: Vec<String> = Vec::new();
-        if let Some(scope) = claims.scope {
-            scopes.extend(scope.split_whitespace().map(|s| s.to_string()));
-        }
-        if let Some(list) = claims.scopes {
-            for s in list {
-                if !scopes.contains(&s) {
-                    scopes.push(s);
-                }
-            }
-        }
+        let scopes = scopes_from_claims(
+            claims.scope,
+            claims.scopes,
+            claims.roles,
+            claims.realm_access,
+            claims.resource_access,
+        );
         Ok(IdentityAssurance::UserAuthorized {
             identity: identity.clone(),
             user_id: identity,
@@ -354,3 +402,83 @@ impl BearerValidator for JwksJwtValidator {
     }
 }
 
+async fn check_revocation(
+    checker: Option<&Arc<dyn TokenRevocationChecker>>,
+    context: Option<&TokenRevocationContext>,
+) -> Result<(), BearerAuthError> {
+    let Some(checker) = checker else {
+        return Ok(());
+    };
+    let Some(context) = context else {
+        return Err(BearerAuthError::Invalid(
+            "token missing jti for revocation check".into(),
+        ));
+    };
+    match checker.check_token(context).await {
+        Ok(TokenRevocationStatus::Active) => Ok(()),
+        Ok(TokenRevocationStatus::Revoked) => Err(BearerAuthError::Invalid("token revoked".into())),
+        Err(CredentialAuthError::Invalid) | Err(CredentialAuthError::PolicyRejected(_)) => Err(
+            BearerAuthError::Invalid("revocation check rejected token".into()),
+        ),
+        Err(CredentialAuthError::Unavailable(err)) => Err(BearerAuthError::Unavailable(err)),
+    }
+}
+
+fn revocation_context_from_claims(claims: &TokenClaims) -> Option<TokenRevocationContext> {
+    let token_id = claims.jti.clone()?;
+    let mut context = TokenRevocationContext::new(token_id).with_subject(claims.sub.clone());
+    if let Some(issuer) = claims.iss.clone() {
+        context = context.with_issuer(issuer);
+    }
+    context = context.with_times(
+        claims.iat.and_then(unix_seconds_to_system_time),
+        claims.exp.and_then(unix_seconds_to_system_time),
+    );
+    Some(context)
+}
+
+fn unix_seconds_to_system_time(seconds: u64) -> Option<SystemTime> {
+    UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
+}
+
+fn scopes_from_claims(
+    scope: Option<String>,
+    scopes: Option<Vec<String>>,
+    roles: Option<Vec<String>>,
+    realm_access: Option<RoleAccess>,
+    resource_access: Option<HashMap<String, RoleAccess>>,
+) -> Vec<String> {
+    let mut values = Vec::new();
+    if let Some(scope) = scope {
+        values.extend(scope.split_whitespace().map(str::to_string));
+    }
+    if let Some(scopes) = scopes {
+        for scope in scopes {
+            push_unique(&mut values, scope);
+        }
+    }
+    if let Some(roles) = roles {
+        for role in roles {
+            push_unique(&mut values, format!("role:{role}"));
+        }
+    }
+    if let Some(realm_access) = realm_access {
+        for role in realm_access.roles {
+            push_unique(&mut values, format!("realm:{role}"));
+        }
+    }
+    if let Some(resource_access) = resource_access {
+        for (client, access) in resource_access {
+            for role in access.roles {
+                push_unique(&mut values, format!("{client}:{role}"));
+            }
+        }
+    }
+    values
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}

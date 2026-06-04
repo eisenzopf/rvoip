@@ -37,11 +37,10 @@ use std::time::Duration;
 
 use rvoip_media_core::types::AudioFrame;
 use rvoip_sip::{
-    types::Credentials, AudioSender, CallHandlerDecision, CallId, CallbackPeer,
-    CallbackPeerControl, Config, Endpoint, EndpointAccount, EndpointProfile, Event, EventReceiver,
-    MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState, Registration,
-    RegistrationHandle, SessionHandle, SipContactMode, SrtpSuitePolicy, StreamPeer,
-    TransferOutcome, TransferWaitMode,
+    AudioSender, CallHandlerDecision, CallId, CallbackPeer, CallbackPeerControl, Config, Endpoint,
+    EndpointAccount, EndpointProfile, Event, EventReceiver, MediaSecurityKeying,
+    MediaSecurityProfile, MediaSecurityState, Registration, RegistrationHandle, SessionHandle,
+    SipAccount, SipContactMode, SrtpSuitePolicy, StreamPeer, TransferOutcome, TransferWaitMode,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -518,7 +517,7 @@ impl EndpointConfig {
         } else {
             SipContactMode::ReachableContact
         };
-        config.credentials = Some(Credentials::new(&self.auth_username, &self.password));
+        config.credentials = Some(self.sip_account().credentials());
         config.media_port_start = self.media_port_start;
         config.media_port_end = self.media_port_end;
         config.media_public_addr = Some(SocketAddr::new(self.media_advertised_ip, 0));
@@ -569,13 +568,15 @@ impl EndpointConfig {
     }
 
     pub fn registration(&self) -> Registration {
-        Registration::new(self.registrar_uri(), &self.auth_username, &self.password)
-            .from_uri(self.aor_uri())
-            .contact_uri(self.contact_uri())
+        self.sip_account().registration()
     }
 
     pub fn endpoint_account(&self) -> EndpointAccount {
-        EndpointAccount::new(self.registrar_uri(), &self.username, &self.password)
+        self.sip_account().endpoint_account()
+    }
+
+    pub fn sip_account(&self) -> SipAccount {
+        SipAccount::new(self.registrar_uri(), &self.username, &self.password)
             .auth_username(&self.auth_username)
             .from_uri(self.aor_uri())
             .contact_uri(self.contact_uri())
@@ -1051,17 +1052,7 @@ pub async fn register_stream_peer(
     cfg: &EndpointConfig,
 ) -> ExampleResult<RegistrationHandle> {
     print_registration_context(cfg);
-    let reg = cfg.registration();
-    let mut b = peer
-        .register(reg.registrar, reg.username, reg.password)
-        .with_expires(reg.expires);
-    if let Some(from) = reg.from_uri {
-        b = b.with_from_uri(from);
-    }
-    if let Some(contact) = reg.contact_uri {
-        b = b.with_contact_uri(contact);
-    }
-    let handle = b.send().await?;
+    let handle = peer.register_account(&cfg.sip_account()).send().await?;
     wait_for_stream_registration(peer, &handle, &cfg.username).await?;
     println!("[{}] Registered.", cfg.username);
     Ok(handle)
@@ -1092,18 +1083,11 @@ pub async fn register_callback_endpoint(
     runtime: &mut CallbackRuntime,
 ) -> ExampleResult<RegistrationHandle> {
     print_registration_context(&runtime.cfg);
-    let reg = runtime.cfg.registration();
-    let mut b = runtime
+    let handle = runtime
         .control
-        .register(reg.registrar, reg.username, reg.password)
-        .with_expires(reg.expires);
-    if let Some(from) = reg.from_uri {
-        b = b.with_from_uri(from);
-    }
-    if let Some(contact) = reg.contact_uri {
-        b = b.with_contact_uri(contact);
-    }
-    let handle = b.send().await?;
+        .register_account(&runtime.cfg.sip_account())
+        .send()
+        .await?;
     for _ in 0..50 {
         if runtime.control.is_registered(&handle).await? {
             wait_for_registration_success(&mut runtime.events, Duration::from_secs(10)).await?;
@@ -1340,7 +1324,9 @@ async fn run_stream_peer_two_party(
             sleep(Duration::from_secs(1)).await;
         }
         _ => {
-            return Err(format!("unsupported StreamPeer role {:?} for {:?}", role, scenario).into())
+            return Err(
+                format!("unsupported StreamPeer role {:?} for {:?}", role, scenario).into(),
+            );
         }
     }
     Ok(())
@@ -2478,7 +2464,7 @@ where
                 None => {
                     return Err(
                         format!("event stream closed while waiting for {}", event_name).into(),
-                    )
+                    );
                 }
             }
         }
@@ -2501,7 +2487,7 @@ pub async fn wait_for_established(
         loop {
             match events.recv().await {
                 Some(CallbackEvent::Established(handle)) if handle.id() == call_id => {
-                    return Ok(handle)
+                    return Ok(handle);
                 }
                 Some(CallbackEvent::Failed {
                     call_id: failed_id,

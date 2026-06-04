@@ -7,6 +7,7 @@ use rvoip_sip_core::types::Method;
 use crate::api::handle::CallId;
 use crate::api::headers::{BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
+use crate::auth::SipClientAuth;
 use crate::errors::Result;
 use crate::types::Credentials;
 
@@ -56,6 +57,8 @@ pub struct OutboundCallOptionsSnapshot {
     pub sdp: Option<String>,
     /// Digest credentials used for 401/407 retry.
     pub credentials: Option<Credentials>,
+    /// General SIP auth used for 401/407 retry.
+    pub auth: Option<SipClientAuth>,
     /// `P-Asserted-Identity` (RFC 3325) override mode for this call.
     pub pai_override: PaiOverride,
     /// `Contact:` URI override advertised on the INVITE.
@@ -92,6 +95,7 @@ pub struct OutboundCallBuilder {
     to: String,
     sdp: Option<String>,
     credentials: Option<Credentials>,
+    auth: Option<SipClientAuth>,
     pai: PaiOverride,
     contact_uri: Option<String>,
     outbound_proxy: ProxyOverride,
@@ -116,6 +120,7 @@ impl OutboundCallBuilder {
             to: to.into(),
             sdp: None,
             credentials: None,
+            auth: None,
             pai: PaiOverride::default(),
             contact_uri: None,
             outbound_proxy: ProxyOverride::default(),
@@ -135,9 +140,38 @@ impl OutboundCallBuilder {
         self
     }
 
-    /// Attach digest credentials for 401/407 retry.
+    /// Attach Digest credentials for UAC 401/407 retry.
     pub fn with_credentials(mut self, creds: Credentials) -> Self {
         self.credentials = Some(creds);
+        self
+    }
+
+    /// Attach general UAC SIP auth for 401/407 retry.
+    ///
+    /// Use [`SipClientAuth::any`] when the peer may offer multiple schemes and
+    /// the UAC should negotiate among Digest, Bearer, Basic, and AKA options.
+    pub fn with_auth(mut self, auth: SipClientAuth) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    /// Attach a Bearer token for UAC 401/407 retry.
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.auth = Some(SipClientAuth::bearer_token(token));
+        self
+    }
+
+    /// Attach Basic credentials for UAC 401/407 retry.
+    ///
+    /// Basic is cleartext-disabled by default. Use
+    /// `with_auth(SipClientAuth::basic(...).allow_basic_over_cleartext(true))`
+    /// only for explicit legacy cleartext interop.
+    pub fn with_basic_credentials(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.auth = Some(SipClientAuth::basic(username, password));
         self
     }
 
@@ -256,6 +290,11 @@ impl OutboundCallBuilder {
             .credentials
             .clone()
             .or_else(|| self.coord.config_credentials());
+        let auth = self
+            .auth
+            .clone()
+            .or_else(|| self.coord.config_auth())
+            .or_else(|| credentials.clone().map(Into::into));
 
         // Build the snapshot — folds every override into a frozen
         // struct that the state-machine handler reads back verbatim.
@@ -264,6 +303,7 @@ impl OutboundCallBuilder {
             to: to.clone(),
             sdp: self.sdp,
             credentials,
+            auth,
             pai_override: self.pai,
             contact_uri: self.contact_uri,
             outbound_proxy_override: self.outbound_proxy,
@@ -294,6 +334,7 @@ impl OutboundCallBuilder {
             .await?;
 
         if snapshot.credentials.is_some()
+            || snapshot.auth.is_some()
             || pai_uri.is_some()
             || snapshot.transfer_leg.is_some()
             || !snapshot.extra_headers.is_empty()
@@ -301,6 +342,9 @@ impl OutboundCallBuilder {
             let mut session = self.coord.session_state(&session_id).await?;
             if let Some(c) = snapshot.credentials.clone() {
                 session.credentials = Some(c);
+            }
+            if let Some(auth) = snapshot.auth.clone() {
+                session.auth = Some(auth);
             }
             if let Some(pai) = pai_uri {
                 session.pai_uri = Some(pai);

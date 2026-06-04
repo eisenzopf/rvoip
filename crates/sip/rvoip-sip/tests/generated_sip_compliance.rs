@@ -70,6 +70,20 @@ fn invite_proxy_auth_response(request: &Request, nonce: &str) -> Vec<u8> {
     response_bytes(response)
 }
 
+fn invite_proxy_auth_response_with_stale(request: &Request, nonce: &str, stale: bool) -> Vec<u8> {
+    let mut response = create_response(request, StatusCode::ProxyAuthenticationRequired);
+    let mut challenge =
+        format!(r#"Digest realm="testrealm", nonce="{nonce}", algorithm=MD5, qop="auth""#);
+    if stale {
+        challenge.push_str(", stale=true");
+    }
+    response.headers.push(TypedHeader::Other(
+        HeaderName::ProxyAuthenticate,
+        HeaderValue::Raw(challenge.into_bytes()),
+    ));
+    response_bytes(response)
+}
+
 async fn wait_for_call_failed(
     events: &mut EventReceiver,
     call_id: &rvoip_sip::CallId,
@@ -569,6 +583,82 @@ async fn generated_sip_compliance_invite_407_second_challenge_fails_fast() {
     assert!(captured[1]
         .header(&HeaderName::ProxyAuthorization)
         .is_some());
+
+    uas.abort();
+}
+
+#[tokio::test]
+async fn generated_sip_compliance_invite_407_stale_challenge_retries_with_fresh_nonce() {
+    let uas_port = random_port(39200);
+    let client_port = uas_port + 1200;
+    let socket = Arc::new(
+        UdpSocket::bind(format!("127.0.0.1:{uas_port}"))
+            .await
+            .expect("mock uas bind"),
+    );
+    let invite_count = Arc::new(AtomicU32::new(0));
+    let ack_count = Arc::new(AtomicU32::new(0));
+    let captured = Arc::new(Mutex::new(Vec::<Request>::new()));
+
+    let task_socket = socket.clone();
+    let task_invite_count = invite_count.clone();
+    let task_ack_count = ack_count.clone();
+    let task_captured = captured.clone();
+    let uas = tokio::spawn(async move {
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let Some((request, from)) = recv_request(&task_socket, &mut buf).await else {
+                continue;
+            };
+
+            match request.method() {
+                Method::Invite => {
+                    let index = task_invite_count.fetch_add(1, Ordering::SeqCst);
+                    task_captured.lock().await.push(request.clone());
+                    let bytes = match index {
+                        0 => invite_proxy_auth_response_with_stale(&request, "stale-old", false),
+                        1 => invite_proxy_auth_response_with_stale(&request, "stale-fresh", true),
+                        _ => response_bytes(create_response(&request, StatusCode::BusyHere)),
+                    };
+                    let _ = task_socket.send_to(&bytes, from).await;
+                }
+                Method::Ack => {
+                    task_ack_count.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let mut cfg = config("alice", client_port);
+    cfg.credentials = Some(Credentials::new("alice", "password"));
+    let peer = StreamPeer::with_config(cfg).await.expect("peer");
+    let _ = peer
+        .control()
+        .invite(format!("sip:bob@127.0.0.1:{uas_port}"))
+        .send()
+        .await;
+
+    wait_for_count(&invite_count, 3, "INVITE stale auth recovery").await;
+    wait_for_count(&ack_count, 2, "ACKs for both 407 challenges").await;
+    let captured = captured.lock().await;
+    assert_eq!(captured.len(), 3);
+    assert!(captured[1]
+        .raw_header_value(&HeaderName::ProxyAuthorization)
+        .expect("first retry Proxy-Authorization")
+        .contains(r#"nonce="stale-old""#));
+    let second_retry = captured[2]
+        .raw_header_value(&HeaderName::ProxyAuthorization)
+        .expect("stale retry Proxy-Authorization");
+    assert!(
+        second_retry.contains(r#"nonce="stale-fresh""#),
+        "stale retry must use fresh nonce: {second_retry}"
+    );
+    assert!(
+        second_retry.contains("nc=00000001"),
+        "fresh nonce must reset nonce-count: {second_retry}"
+    );
+    assert!(captured[2].cseq().unwrap().seq > captured[1].cseq().unwrap().seq);
 
     uas.abort();
 }

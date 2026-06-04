@@ -6,7 +6,7 @@
 //!   CSeq, Via, Max-Forwards, Content-Length, Route, Record-Route).
 //!   Applications cannot stage these; doing so would desync the dialog.
 //! - **MethodShaped** — exists in sip-core, but the builder offers a
-//!   dedicated typed setter (Authorization → `with_credentials`,
+//!   dedicated typed setter (Authorization → `with_credentials` / `with_auth`,
 //!   Contact → `with_contact_uri`, Expires → `with_expires`, …).
 //! - **ApplicationControlled** — applications may stage freely
 //!   (`Diversion`, `History-Info`, `Subject`, `X-*`, etc.).
@@ -133,7 +133,7 @@ fn method_shaped_setter(method: Method, name: &HeaderName) -> Option<&'static st
         (M::Invite | M::Register | M::Subscribe, H::Contact) => Some("with_contact_uri"),
 
         // Authorization: shaped on every UAC request that accepts
-        // `with_credentials`. The Bye/Cancel path doesn't expose creds
+        // `with_credentials` or `with_auth`. The Bye/Cancel path doesn't expose creds
         // (stack-managed on in-dialog) but is harmless to flag here.
         (
             M::Invite | M::Register | M::Subscribe | M::Message | M::Options | M::Refer,

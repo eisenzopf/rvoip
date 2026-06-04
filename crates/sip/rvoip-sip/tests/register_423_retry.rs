@@ -46,6 +46,9 @@ const INFO_CLIENT_CONTACT: &str = "sip:alice@127.0.0.1:35185";
 const FAIL_REGISTRAR_PORT: u16 = 35186;
 const FAIL_CLIENT_PORT: u16 = 35187;
 const FAIL_CLIENT_CONTACT: &str = "sip:alice@127.0.0.1:35187";
+const PROXY_AUTH_REGISTRAR_PORT: u16 = 35188;
+const PROXY_AUTH_CLIENT_PORT: u16 = 35189;
+const PROXY_AUTH_CLIENT_CONTACT: &str = "sip:alice@127.0.0.1:35189";
 
 /// Extract the `Expires` header value from a request as a u32.
 fn extract_expires(req: &Request) -> Option<u32> {
@@ -468,6 +471,150 @@ async fn register_401_retry_reuses_call_id_and_increments_cseq() {
             .await
             .expect("is_registered query"),
         "session should be marked registered after 200 OK to auth retry"
+    );
+
+    registrar_handle.abort();
+}
+
+#[tokio::test]
+async fn register_407_retry_uses_proxy_authorization() {
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_max_level(tracing::Level::WARN)
+        .try_init();
+
+    let registrar_addr = format!("127.0.0.1:{}", PROXY_AUTH_REGISTRAR_PORT);
+    let sock = Arc::new(
+        UdpSocket::bind(&registrar_addr)
+            .await
+            .expect("proxy auth mock registrar bind"),
+    );
+
+    let register_count = Arc::new(AtomicU32::new(0));
+    let register_headers_seen =
+        Arc::new(Mutex::new(
+            Vec::<(bool, bool, Option<bool>, Option<String>)>::new(),
+        ));
+
+    let sock_task = sock.clone();
+    let register_count_task = register_count.clone();
+    let register_headers_task = register_headers_seen.clone();
+    let registrar_handle = tokio::spawn(async move {
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let (n, from) = match sock_task.recv_from(&mut buf).await {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            let msg = match parse_message(&buf[..n]) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let request = match msg {
+                Message::Request(r) if r.method() == Method::Register => r,
+                _ => continue,
+            };
+
+            let count = register_count_task.fetch_add(1, Ordering::SeqCst);
+            rvoip_sip_core::validation::validate_wire_request(&request)
+                .expect("REGISTER should be wire-valid");
+            let authorization = request.raw_header_value(&HeaderName::Authorization);
+            let proxy_authorization = request.raw_header_value(&HeaderName::ProxyAuthorization);
+            let proxy_auth_validation = proxy_authorization.as_ref().map(|header| {
+                let parsed = DigestAuthenticator::parse_authorization(header)
+                    .expect("Proxy-Authorization should parse");
+                let valid = DigestAuthenticator::new("testrealm")
+                    .validate_response(&parsed, "REGISTER", "password")
+                    .expect("Proxy-Authorization should validate");
+                (valid, parsed.uri)
+            });
+
+            register_headers_task.lock().await.push((
+                authorization.is_some(),
+                proxy_authorization.is_some(),
+                proxy_auth_validation.as_ref().map(|(valid, _)| *valid),
+                proxy_auth_validation.map(|(_, uri)| uri),
+            ));
+
+            if count == 0 {
+                let mut resp = create_response(&request, StatusCode::ProxyAuthenticationRequired);
+                resp.headers.push(TypedHeader::Other(
+                    HeaderName::ProxyAuthenticate,
+                    HeaderValue::Raw(
+                        br#"Digest realm="testrealm", nonce="proxy-nonce", algorithm=MD5, qop="auth""#
+                            .to_vec(),
+                    ),
+                ));
+                let bytes = Message::Response(resp).to_bytes();
+                let _ = sock_task.send_to(&bytes, from).await;
+            } else {
+                let mut resp = create_response(&request, StatusCode::Ok);
+                if let Some(contact) = request.header(&HeaderName::Contact) {
+                    resp.headers.push(contact.clone());
+                }
+                resp.headers.push(TypedHeader::Other(
+                    HeaderName::Expires,
+                    HeaderValue::Raw("3600".as_bytes().to_vec()),
+                ));
+                let bytes = Message::Response(resp).to_bytes();
+                let _ = sock_task.send_to(&bytes, from).await;
+            }
+        }
+    });
+
+    let mut config = Config::local("alice", PROXY_AUTH_CLIENT_PORT);
+    config.media_port_start = 40130;
+    config.media_port_end = 40140;
+
+    let peer = StreamPeer::with_config(config).await.expect("peer");
+    let handle = peer
+        .register(
+            format!("sip:127.0.0.1:{}", PROXY_AUTH_REGISTRAR_PORT),
+            "alice",
+            "password",
+        )
+        .with_contact_uri(PROXY_AUTH_CLIENT_CONTACT)
+        .send()
+        .await
+        .expect("register");
+
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if register_count.load(Ordering::SeqCst) >= 2 {
+                return;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("mock never saw proxy auth retry");
+
+    sleep(Duration::from_millis(500)).await;
+
+    let headers_seen = register_headers_seen.lock().await;
+    assert_eq!(headers_seen.len(), 2);
+    assert!(
+        !headers_seen[0].0 && !headers_seen[0].1,
+        "initial REGISTER should not include auth headers"
+    );
+    assert!(
+        !headers_seen[1].0,
+        "407 REGISTER retry must not include Authorization"
+    );
+    assert!(
+        headers_seen[1].1,
+        "407 REGISTER retry must include Proxy-Authorization"
+    );
+    assert_eq!(headers_seen[1].2, Some(true));
+    assert_eq!(
+        headers_seen[1].3.as_deref(),
+        Some(format!("sip:127.0.0.1:{}", PROXY_AUTH_REGISTRAR_PORT).as_str())
+    );
+    assert!(
+        peer.is_registered(&handle)
+            .await
+            .expect("is_registered query"),
+        "session should be marked registered after 200 OK to proxy auth retry"
     );
 
     registrar_handle.abort();

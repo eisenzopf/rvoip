@@ -52,6 +52,34 @@
 //! event streams, inspect registration lifecycle metadata, or build your own
 //! peer abstraction.
 //!
+//! ## Authentication
+//!
+//! SIP access authentication is negotiated in SIP headers, not in SDP. A UAS
+//! challenges a request with `401 WWW-Authenticate`; the UAC retries with
+//! `Authorization`. A proxy challenges with `407 Proxy-Authenticate`; the UAC
+//! retries with `Proxy-Authorization`. SDP only affects authentication for
+//! Digest `qop=auth-int`, where the request body is included in the Digest
+//! response hash.
+//!
+//! The main entry points are:
+//!
+//! | Need | API |
+//! | --- | --- |
+//! | PBX-style Digest account | [`SipAccount`] with [`EndpointBuilder::sip_account`] |
+//! | UAC auth for challenged outbound requests | [`SipClientAuth`], [`Config::auth`], or per-request `.with_auth(...)` |
+//! | UAS challenge and validation | [`SipAuthService`] plus inbound `authenticate_with(...)` helpers |
+//! | Digest-only compatibility | [`SipDigestAuthService`] |
+//!
+//! [`SipClientAuth::any`] negotiates among configured compatible schemes and
+//! prefers AKA, then Bearer, then Digest, then Basic. Digest supports
+//! MD5/MD5-sess/SHA-256/SHA-256-sess/SHA-512-256/SHA-512-256-sess with
+//! `qop=auth` and `qop=auth-int` where the request body is available. Bearer
+//! validation is delegated to `rvoip-auth-core` validators. Basic is legacy
+//! compatibility and is rejected on cleartext SIP unless explicitly enabled.
+//! IMS AKA is provider-backed; applications supply the client/vector provider.
+//!
+//! See [`auth`] for the full scheme, side, and algorithm guide.
+//!
 //! ## Endpoint: PBX Account or Softphone
 //!
 //! [`Endpoint`] wraps [`StreamPeer`] with account/profile setup and bare
@@ -341,7 +369,7 @@
 //! | If you say… | Use | Example |
 //! |---|---|---|
 //! | "I just want to make a call, library handles SIP" | Pure Config | `coord.invite(None, target).send()` |
-//! | "I need credentials on outbound calls" | One builder | `coord.invite(from, to).with_credentials(c).send()` |
+//! | "I need outbound auth" | One builder | `coord.invite(from, to).with_auth(auth).send()` |
 //! | "I need to attach one custom X-* header" | One builder | `coord.invite(from, to).with_raw_header("X-Foo", "bar")?.send()` |
 //! | "I'm building a B2BUA — carry headers across legs" | Builder + carry-through | `coord.invite(...).with_headers_from(&inbound, &[...])?.send()` |
 //! | "I need lenient validation for messy upstream" | `with_strictness(Lenient)` | `coord.invite(...).with_strictness(BuilderStrictness::Lenient).send()` |
@@ -404,7 +432,7 @@
 //!   `Content-Length`, `Record-Route`, `Route`. Hard-rejected at
 //!   `with_header()` time regardless of `BuilderStrictness`.
 //! - **MethodShaped**: `Contact` (initial INVITE/REGISTER/SUBSCRIBE),
-//!   `Authorization` (UAC requests with `with_credentials`),
+//!   `Authorization` (UAC requests with `with_credentials` / `with_auth`),
 //!   `Expires` (REGISTER/SUBSCRIBE), `Refer-To` (REFER), `Event` /
 //!   `Subscription-State` (SUBSCRIBE/NOTIFY). Rejected under
 //!   `BuilderStrictness::Strict`; downgraded to a `tracing::warn!`
@@ -438,11 +466,11 @@ pub mod media_stream;
 pub mod server;
 
 // These modules remain public for existing internal-style integrations, but
-// they are hidden from generated docs. Application code should use the
-// UnifiedCoordinator, StreamPeer, CallbackPeer, and SessionHandle surfaces.
+// most are hidden from generated docs. Application code should use the
+// UnifiedCoordinator, StreamPeer, CallbackPeer, SessionHandle, and auth
+// surfaces documented at the crate root.
 #[doc(hidden)]
 pub mod adapters;
-#[doc(hidden)]
 pub mod auth;
 #[doc(hidden)]
 pub mod cleanup_diag;
@@ -472,7 +500,7 @@ pub use api::endpoint::{
     EndpointConfig, EndpointControl, EndpointEvent, EndpointEvents, EndpointIncomingCall,
     EndpointMediaConfig, EndpointNetworkConfig, EndpointProfile, EndpointProfileName,
     EndpointRegistrationInfo, EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode,
-    EndpointTransport,
+    EndpointTransport, SipAccount,
 };
 pub use api::performance::{PerformanceConfig, PerformanceRecipe, PerformanceRecipeBook};
 pub use api::stream_peer::{EventReceiver, PeerControl, StreamPeer, StreamPeerBuilder};
@@ -497,6 +525,19 @@ pub use api::incoming::{
     IncomingCall, IncomingCallGuard, IncomingRegister, IncomingRequest, IncomingResponse,
 };
 pub use api::trace_redactor::{PassthroughRedactor, RedactionDecision, TraceRedactor};
+pub use auth::{
+    AAuthValidator, AkaClientConfig, AkaClientProvider, AkaVectorProvider, ApiKeyVerifier,
+    AuditFailurePolicy, AuthAuditEvent, AuthAuditOutcome, AuthAuditScheme, AuthAuditSink,
+    AuthDecision, AuthFailureReason, AuthIdentity, AuthRateLimitKey, AuthRateLimitKind,
+    AuthRateLimitVerdict, AuthRateLimiter, BearerAuthError, BearerValidator, ClientAuthHeader,
+    CredentialAuthError, DigestAlgorithm, DigestAuth, DigestAuthenticator, DigestChallenge,
+    DigestChallengeDetails, DigestComputed, DigestNonceStatus, DigestReplayStore, DigestResponse,
+    DigestSecret, DigestSecretProvider, JwksJwtValidator, JwtValidator,
+    OAuth2IntrospectionValidator, PasswordVerifier, SipAuthChallenge, SipAuthContext,
+    SipAuthDecision, SipAuthScheme, SipAuthService, SipAuthSource, SipClientAuth,
+    SipDigestAuthService, SipIncomingAuthenticator, TokenRevocationChecker, TokenRevocationContext,
+    TokenRevocationStatus,
+};
 
 /// SIP_API_DESIGN_2 §3.6 — convenience body constructors. Each
 /// helper returns `(content_type, Bytes)` for attachment to a SIP
@@ -565,11 +606,12 @@ pub mod prelude {
         EventReceiver, HeaderName, IncomingCall, IncomingCallGuard, MediaMode, MediaSecurityKeying,
         MediaSecurityProfile, MediaSecurityState, PeerControl, PerformanceConfig,
         PerformanceRecipeBook, Registration, RegistrationHandle, RegistrationInfo,
-        RegistrationStatus, Result, SessionError, SessionHandle, SipContactMode, SipReason,
-        SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection, SrtpSuitePolicy, StreamPeer,
-        StreamPeerBuilder, SubscriptionState, TransferDialogMatcher, TransferKind,
-        TransferLifecycleOptions, TransferOutcome, TransferTargetEvidence, TransferWaitMode,
-        TypedHeader,
+        RegistrationStatus, Result, SessionError, SessionHandle, SipAccount, SipAuthDecision,
+        SipAuthScheme, SipAuthService, SipAuthSource, SipClientAuth, SipContactMode,
+        SipDigestAuthService, SipReason, SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection,
+        SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState, TransferDialogMatcher,
+        TransferKind, TransferLifecycleOptions, TransferOutcome, TransferTargetEvidence,
+        TransferWaitMode, TypedHeader,
     };
 }
 

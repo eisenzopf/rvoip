@@ -20,6 +20,7 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod jwt;
+pub mod sip_digest_credentials;
 pub mod types;
 pub mod user_store;
 pub mod validation;
@@ -29,8 +30,17 @@ pub use auth::{AuthenticationResult, AuthenticationService, TokenPair};
 pub use config::UsersConfig;
 pub use error::{Error, Result};
 pub use jwt::{JwtIssuer, UserClaims};
+pub use sip_digest_credentials::{
+    CreateSipDigestCredentialRequest, SipDigestAlgorithmFamily, SipDigestCredential,
+};
 pub use types::{CreateUserRequest, UpdateUserRequest, User, UserFilter};
 pub use user_store::{SqliteUserStore, UserStore};
+
+#[cfg(feature = "auth-core")]
+pub mod auth_core_bridge;
+
+#[cfg(feature = "auth-core")]
+pub use auth_core_bridge::UsersCoreAuthProvider;
 
 /// Initialize the users-core service
 pub async fn init(config: UsersConfig) -> Result<AuthenticationService> {

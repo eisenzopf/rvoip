@@ -1,9 +1,7 @@
 //! SIP Digest Authentication per RFC 2617, RFC 7616, and RFC 8760.
 //!
-//! Supports `MD5`, `MD5-sess`, `SHA-256`, and `SHA-256-sess`. Other
-//! algorithm tokens (notably RFC 8760 `SHA-512-256` / `SHA-512-256-sess`)
-//! are recognised in the parser but degrade to `MD5` with a warning —
-//! add explicit handling when a deployment requests them.
+//! Supports `MD5`, `MD5-sess`, `SHA-256`, `SHA-256-sess`,
+//! `SHA-512-256`, and `SHA-512-256-sess`.
 //!
 //! ## Sprint 3 nonce-count hardening (RFC 7616 §3.4.5)
 //!
@@ -15,9 +13,10 @@
 //! incrementing counter plus the request body (for `auth-int`).
 
 use crate::error::{AuthError, Result};
+use crate::providers::DigestSecret;
 use hex;
 use rand::Rng;
-use sha2::{Digest as Sha2Digest, Sha256};
+use sha2::{Digest as Sha2Digest, Sha256, Sha512_256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Digest authentication algorithm.
@@ -30,6 +29,8 @@ pub enum DigestAlgorithm {
     MD5Sess,
     SHA256,
     SHA256Sess,
+    SHA512256,
+    SHA512256Sess,
 }
 
 impl DigestAlgorithm {
@@ -39,21 +40,25 @@ impl DigestAlgorithm {
             Self::MD5Sess => "MD5-sess",
             Self::SHA256 => "SHA-256",
             Self::SHA256Sess => "SHA-256-sess",
+            Self::SHA512256 => "SHA-512-256",
+            Self::SHA512256Sess => "SHA-512-256-sess",
         }
     }
 
     /// Whether the algorithm is a `-sess` variant requiring HA1 to fold
     /// in `nonce:cnonce` (RFC 7616 §3.4.2).
     pub fn is_sess(&self) -> bool {
-        matches!(self, Self::MD5Sess | Self::SHA256Sess)
+        matches!(self, Self::MD5Sess | Self::SHA256Sess | Self::SHA512256Sess)
     }
 
     /// Hash an input slice with the algorithm's underlying hash function.
-    /// MD5 / MD5-sess → MD5; SHA-256 / SHA-256-sess → SHA-256.
+    /// MD5 / MD5-sess → MD5; SHA-256 / SHA-256-sess → SHA-256;
+    /// SHA-512-256 / SHA-512-256-sess → SHA-512/256.
     fn hash(&self, input: &[u8]) -> String {
         match self {
             Self::MD5 | Self::MD5Sess => hex::encode(md5::compute(input).0),
             Self::SHA256 | Self::SHA256Sess => hex::encode(Sha256::digest(input)),
+            Self::SHA512256 | Self::SHA512256Sess => hex::encode(Sha512_256::digest(input)),
         }
     }
 }
@@ -64,23 +69,30 @@ impl std::fmt::Display for DigestAlgorithm {
     }
 }
 
-fn parse_algorithm(value: &str) -> DigestAlgorithm {
+fn parse_algorithm(value: &str) -> Result<DigestAlgorithm> {
     let value = value.trim();
     if value.eq_ignore_ascii_case("MD5") {
-        DigestAlgorithm::MD5
+        Ok(DigestAlgorithm::MD5)
     } else if value.eq_ignore_ascii_case("MD5-sess") {
-        DigestAlgorithm::MD5Sess
+        Ok(DigestAlgorithm::MD5Sess)
     } else if value.eq_ignore_ascii_case("SHA-256") {
-        DigestAlgorithm::SHA256
+        Ok(DigestAlgorithm::SHA256)
     } else if value.eq_ignore_ascii_case("SHA-256-sess") {
-        DigestAlgorithm::SHA256Sess
+        Ok(DigestAlgorithm::SHA256Sess)
+    } else if value.eq_ignore_ascii_case("SHA-512-256") {
+        Ok(DigestAlgorithm::SHA512256)
+    } else if value.eq_ignore_ascii_case("SHA-512-256-sess") {
+        Ok(DigestAlgorithm::SHA512256Sess)
     } else {
-        tracing::warn!(
-            "Unknown digest algorithm '{}' — falling back to MD5 (RFC 8760 SHA-512-256 not yet wired)",
+        Err(AuthError::InvalidChallenge(format!(
+            "Unsupported digest algorithm '{}'",
             value
-        );
-        DigestAlgorithm::MD5
+        )))
     }
+}
+
+fn parse_bool(value: &str) -> bool {
+    matches!(value.trim(), "true" | "TRUE" | "True" | "1")
 }
 
 fn split_auth_params(params: &str) -> Vec<&str> {
@@ -139,7 +151,7 @@ fn parse_qop_options(value: &str) -> Vec<String> {
 }
 
 /// Digest challenge issued by server (401/407 response).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DigestChallenge {
     pub realm: String,
     pub nonce: String,
@@ -148,8 +160,18 @@ pub struct DigestChallenge {
     pub opaque: Option<String>,
 }
 
+/// Parsed digest challenge plus metadata that is useful for negotiation.
+///
+/// This is additive to keep [`DigestChallenge`] source-compatible for
+/// callers that construct challenge literals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DigestChallengeDetails {
+    pub challenge: DigestChallenge,
+    pub stale: bool,
+}
+
 /// Parsed Authorization header on the server side.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DigestResponse {
     pub username: String,
     pub realm: String,
@@ -181,6 +203,7 @@ pub struct DigestComputed {
 }
 
 /// SIP Digest authenticator for generating challenges and validating responses.
+#[derive(Debug, Clone)]
 pub struct DigestAuthenticator {
     realm: String,
     algorithm: DigestAlgorithm,
@@ -194,6 +217,12 @@ impl DigestAuthenticator {
         }
     }
 
+    /// Select the algorithm used in newly generated challenges.
+    pub fn with_algorithm(mut self, algorithm: DigestAlgorithm) -> Self {
+        self.algorithm = algorithm;
+        self
+    }
+
     pub fn generate_challenge(&self) -> DigestChallenge {
         DigestChallenge {
             realm: self.realm.clone(),
@@ -205,6 +234,15 @@ impl DigestAuthenticator {
     }
 
     pub fn format_www_authenticate(&self, challenge: &DigestChallenge) -> String {
+        self.format_www_authenticate_with_stale(challenge, false)
+    }
+
+    /// Format a digest challenge with an optional RFC 7616 `stale=true` flag.
+    pub fn format_www_authenticate_with_stale(
+        &self,
+        challenge: &DigestChallenge,
+        stale: bool,
+    ) -> String {
         let mut parts = vec![
             format!(r#"realm="{}""#, challenge.realm),
             format!(r#"nonce="{}""#, challenge.nonce),
@@ -219,14 +257,19 @@ impl DigestAuthenticator {
             parts.push(format!(r#"opaque="{}""#, opaque));
         }
 
+        if stale {
+            parts.push("stale=true".to_string());
+        }
+
         format!("Digest {}", parts.join(", "))
     }
 
     /// Validate a digest response against the stored password.
     ///
     /// Honors the algorithm carried on the response (`MD5` /
-    /// `MD5-sess` / `SHA-256` / `SHA-256-sess`) — clients sending
-    /// SHA-256 are validated with SHA-256, not silently downgraded.
+    /// `MD5-sess` / `SHA-256` / `SHA-256-sess` / `SHA-512-256` /
+    /// `SHA-512-256-sess`) — clients sending SHA-based digests are
+    /// validated with the advertised hash, not silently downgraded.
     pub fn validate_response(
         &self,
         response: &DigestResponse,
@@ -245,10 +288,45 @@ impl DigestAuthenticator {
         password: &str,
         body: Option<&[u8]>,
     ) -> Result<bool> {
+        self.validate_response_with_secret_and_body(
+            response,
+            method,
+            &DigestSecret::PlaintextPassword(password.to_string()),
+            body,
+        )
+    }
+
+    /// Validate a digest response against provider-supplied secret material.
+    ///
+    /// [`DigestSecret::Ha1`] lets a server validate SIP Digest without storing
+    /// plaintext SIP passwords. The HA1 value must be the base
+    /// `H(username:realm:password)` value; `-sess` algorithms fold nonce and
+    /// cnonce in this method.
+    pub fn validate_response_with_secret(
+        &self,
+        response: &DigestResponse,
+        method: &str,
+        secret: &DigestSecret,
+    ) -> Result<bool> {
+        self.validate_response_with_secret_and_body(response, method, secret, None)
+    }
+
+    /// Like [`Self::validate_response_with_secret`] but also accepts the
+    /// request body for `qop=auth-int` validation.
+    pub fn validate_response_with_secret_and_body(
+        &self,
+        response: &DigestResponse,
+        method: &str,
+        secret: &DigestSecret,
+        body: Option<&[u8]>,
+    ) -> Result<bool> {
         let algorithm = response.algorithm;
         // HA1
-        let basic_ha1 = algorithm
-            .hash(format!("{}:{}:{}", response.username, response.realm, password).as_bytes());
+        let basic_ha1 = match secret {
+            DigestSecret::PlaintextPassword(password) => algorithm
+                .hash(format!("{}:{}:{}", response.username, response.realm, password).as_bytes()),
+            DigestSecret::Ha1(ha1) => ha1.clone(),
+        };
         let ha1 = if algorithm.is_sess() {
             let cnonce = response.cnonce.as_deref().ok_or_else(|| {
                 AuthError::InvalidResponse("Missing cnonce for -sess algorithm".into())
@@ -265,15 +343,27 @@ impl DigestAuthenticator {
                 let body_hash = algorithm.hash(body_bytes);
                 algorithm.hash(format!("{}:{}:{}", method, response.uri, body_hash).as_bytes())
             }
-            _ => algorithm.hash(format!("{}:{}", method, response.uri).as_bytes()),
+            Some("auth") | None => {
+                algorithm.hash(format!("{}:{}", method, response.uri).as_bytes())
+            }
+            Some(other) => {
+                return Err(AuthError::InvalidResponse(format!(
+                    "Unsupported digest qop '{}'",
+                    other
+                )))
+            }
         };
 
         // Expected response
-        let expected = if let (Some(qop), Some(nc), Some(cnonce)) = (
-            response.qop.as_ref(),
-            response.nc.as_ref(),
-            response.cnonce.as_ref(),
-        ) {
+        let expected = if let Some(qop) = response.qop.as_ref() {
+            let nc = response
+                .nc
+                .as_ref()
+                .ok_or_else(|| AuthError::InvalidResponse("Missing nc for qop".into()))?;
+            let cnonce = response
+                .cnonce
+                .as_ref()
+                .ok_or_else(|| AuthError::InvalidResponse("Missing cnonce for qop".into()))?;
             algorithm.hash(
                 format!(
                     "{}:{}:{}:{}:{}:{}",
@@ -290,6 +380,12 @@ impl DigestAuthenticator {
 
     /// Parse WWW-Authenticate header to extract challenge.
     pub fn parse_challenge(header: &str) -> Result<DigestChallenge> {
+        Ok(Self::parse_challenge_details(header)?.challenge)
+    }
+
+    /// Parse WWW-Authenticate / Proxy-Authenticate header to extract the
+    /// challenge plus metadata such as `stale=true`.
+    pub fn parse_challenge_details(header: &str) -> Result<DigestChallengeDetails> {
         let header = header.trim();
 
         let params_str = if header.starts_with("Digest ") || header.starts_with("digest ") {
@@ -305,6 +401,7 @@ impl DigestAuthenticator {
         let mut algorithm = DigestAlgorithm::MD5;
         let mut qop = None;
         let mut opaque = None;
+        let mut stale = false;
 
         for param in split_auth_params(params_str) {
             let param = param.trim();
@@ -315,22 +412,26 @@ impl DigestAuthenticator {
                 match key.as_str() {
                     "realm" => realm = Some(value),
                     "nonce" => nonce = Some(value),
-                    "algorithm" => algorithm = parse_algorithm(&value),
+                    "algorithm" => algorithm = parse_algorithm(&value)?,
                     "qop" => {
                         qop = Some(parse_qop_options(&value));
                     }
                     "opaque" => opaque = Some(value),
+                    "stale" => stale = parse_bool(&value),
                     _ => {}
                 }
             }
         }
 
-        Ok(DigestChallenge {
-            realm: realm.ok_or_else(|| AuthError::InvalidChallenge("Missing realm".into()))?,
-            nonce: nonce.ok_or_else(|| AuthError::InvalidChallenge("Missing nonce".into()))?,
-            algorithm,
-            qop,
-            opaque,
+        Ok(DigestChallengeDetails {
+            challenge: DigestChallenge {
+                realm: realm.ok_or_else(|| AuthError::InvalidChallenge("Missing realm".into()))?,
+                nonce: nonce.ok_or_else(|| AuthError::InvalidChallenge("Missing nonce".into()))?,
+                algorithm,
+                qop,
+                opaque,
+            },
+            stale,
         })
     }
 
@@ -367,7 +468,10 @@ impl DigestAuthenticator {
                     "nonce" => nonce = Some(value),
                     "uri" => uri = Some(value),
                     "response" => response = Some(value),
-                    "algorithm" => algorithm = parse_algorithm(&value),
+                    "algorithm" => {
+                        algorithm = parse_algorithm(&value)
+                            .map_err(|e| AuthError::InvalidResponse(e.to_string()))?
+                    }
                     "cnonce" => cnonce = Some(value),
                     "qop" => qop = Some(value.to_ascii_lowercase()),
                     "nc" => nc = Some(value),
@@ -469,15 +573,18 @@ impl DigestClient {
         // qop selection (RFC 7616 §3.4): prefer auth-int when the
         // server offers it AND the caller supplied a body; else auth;
         // else legacy (no qop).
-        let chosen_qop = challenge.qop.as_ref().and_then(|opts| {
-            if body.is_some() && opts.iter().any(|q| q == "auth-int") {
+        let chosen_qop = match challenge.qop.as_ref() {
+            Some(opts) if body.is_some() && opts.iter().any(|q| q == "auth-int") => {
                 Some("auth-int".to_string())
-            } else if opts.iter().any(|q| q == "auth") {
-                Some("auth".to_string())
-            } else {
-                None
             }
-        });
+            Some(opts) if opts.iter().any(|q| q == "auth") => Some("auth".to_string()),
+            Some(_) => {
+                return Err(AuthError::InvalidChallenge(
+                    "Digest challenge did not offer supported qop".into(),
+                ))
+            }
+            None => None,
+        };
 
         // HA2 (RFC 7616 §3.4.3).
         let ha2 = match chosen_qop.as_deref() {
@@ -608,15 +715,52 @@ mod tests {
 
     #[test]
     fn algorithm_parser_recognises_known_tokens() {
-        assert_eq!(parse_algorithm("MD5"), DigestAlgorithm::MD5);
-        assert_eq!(parse_algorithm("md5"), DigestAlgorithm::MD5);
-        assert_eq!(parse_algorithm("MD5-sess"), DigestAlgorithm::MD5Sess);
-        assert_eq!(parse_algorithm("md5-sess"), DigestAlgorithm::MD5Sess);
-        assert_eq!(parse_algorithm("SHA-256"), DigestAlgorithm::SHA256);
-        assert_eq!(parse_algorithm("SHA-256-sess"), DigestAlgorithm::SHA256Sess);
-        // Unknown falls back to MD5 with a warning (RFC 8760 SHA-512-256 deferred).
-        assert_eq!(parse_algorithm("SHA-512-256"), DigestAlgorithm::MD5);
-        assert_eq!(parse_algorithm("garbage"), DigestAlgorithm::MD5);
+        assert_eq!(parse_algorithm("MD5").unwrap(), DigestAlgorithm::MD5);
+        assert_eq!(parse_algorithm("md5").unwrap(), DigestAlgorithm::MD5);
+        assert_eq!(
+            parse_algorithm("MD5-sess").unwrap(),
+            DigestAlgorithm::MD5Sess
+        );
+        assert_eq!(
+            parse_algorithm("md5-sess").unwrap(),
+            DigestAlgorithm::MD5Sess
+        );
+        assert_eq!(parse_algorithm("SHA-256").unwrap(), DigestAlgorithm::SHA256);
+        assert_eq!(
+            parse_algorithm("SHA-256-sess").unwrap(),
+            DigestAlgorithm::SHA256Sess
+        );
+        assert_eq!(
+            parse_algorithm("SHA-512-256").unwrap(),
+            DigestAlgorithm::SHA512256
+        );
+        assert_eq!(
+            parse_algorithm("SHA-512-256-sess").unwrap(),
+            DigestAlgorithm::SHA512256Sess
+        );
+    }
+
+    #[test]
+    fn algorithm_parser_rejects_unknown_tokens() {
+        assert!(parse_algorithm("garbage").is_err());
+        assert!(DigestAuthenticator::parse_challenge(
+            r#"Digest realm="example.com", nonce="fixed", algorithm=SHA-999"#
+        )
+        .is_err());
+        assert!(
+            DigestAuthenticator::parse_authorization(
+                r#"Digest username="alice", realm="example.com", nonce="fixed", uri="sip:example.com", response="abcd", algorithm=SHA-999"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn omitted_algorithm_defaults_to_md5() {
+        let challenge =
+            DigestAuthenticator::parse_challenge(r#"Digest realm="example.com", nonce="fixed""#)
+                .unwrap();
+        assert_eq!(challenge.algorithm, DigestAlgorithm::MD5);
     }
 
     #[test]
@@ -630,6 +774,24 @@ mod tests {
         assert_eq!(
             challenge.qop,
             Some(vec!["auth".to_string(), "auth-int".to_string()])
+        );
+    }
+
+    #[test]
+    fn challenge_details_parser_exposes_stale_flag() {
+        let details = DigestAuthenticator::parse_challenge_details(
+            r#"Digest realm="example.com", nonce="fixed", algorithm=MD5, stale=true"#,
+        )
+        .unwrap();
+
+        assert!(details.stale);
+        assert_eq!(details.challenge.nonce, "fixed");
+
+        let auth = DigestAuthenticator::new("example.com");
+        let header = auth.format_www_authenticate_with_stale(&details.challenge, true);
+        assert!(
+            header.contains("stale=true"),
+            "formatted challenge was: {header}"
         );
     }
 
@@ -778,7 +940,53 @@ mod tests {
     }
 
     #[test]
-    fn sha256_sess_uses_session_key_ha1() {
+    fn digest_secret_ha1_validates_without_plaintext_password() {
+        let auth = DigestAuthenticator::new("example.com");
+        let challenge = DigestChallenge {
+            realm: "example.com".to_string(),
+            nonce: "fixed-nonce".to_string(),
+            algorithm: DigestAlgorithm::SHA512256,
+            qop: Some(vec!["auth".to_string()]),
+            opaque: None,
+        };
+        let computed = DigestClient::compute_response_with_state(
+            "alice",
+            "secret",
+            &challenge,
+            "REGISTER",
+            "sip:example.com",
+            1,
+            None,
+        )
+        .unwrap();
+        let response = DigestResponse {
+            username: "alice".to_string(),
+            realm: "example.com".to_string(),
+            nonce: "fixed-nonce".to_string(),
+            uri: "sip:example.com".to_string(),
+            response: computed.response,
+            algorithm: DigestAlgorithm::SHA512256,
+            cnonce: computed.cnonce,
+            qop: computed.qop,
+            nc: computed.nc,
+            opaque: None,
+        };
+        let ha1 = DigestAlgorithm::SHA512256.hash(b"alice:example.com:secret");
+
+        assert!(auth
+            .validate_response_with_secret(&response, "REGISTER", &crate::DigestSecret::Ha1(ha1))
+            .unwrap());
+        assert!(!auth
+            .validate_response_with_secret(
+                &response,
+                "REGISTER",
+                &crate::DigestSecret::Ha1("wrong".to_string())
+            )
+            .unwrap());
+    }
+
+    #[test]
+    fn sess_algorithms_use_session_key_ha1() {
         // Same inputs except algorithm. -sess HA1 folds in nonce +
         // cnonce, so the response must differ.
         let mk = |alg| DigestChallenge {
@@ -796,6 +1004,8 @@ mod tests {
         for alg in [
             DigestAlgorithm::SHA256,
             DigestAlgorithm::SHA256Sess,
+            DigestAlgorithm::SHA512256,
+            DigestAlgorithm::SHA512256Sess,
             DigestAlgorithm::MD5,
             DigestAlgorithm::MD5Sess,
         ] {
@@ -912,6 +1122,54 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r2.qop.as_deref(), Some("auth"));
+    }
+
+    #[test]
+    fn qop_selector_rejects_unsupported_qop_only_challenge() {
+        let challenge = DigestChallenge {
+            realm: "example.com".to_string(),
+            nonce: "fixed-nonce".to_string(),
+            algorithm: DigestAlgorithm::MD5,
+            qop: Some(vec!["auth-conf".to_string()]),
+            opaque: None,
+        };
+
+        let err = DigestClient::compute_response_with_state(
+            "alice",
+            "secret",
+            &challenge,
+            "INVITE",
+            "sip:bob@example.com",
+            1,
+            None,
+        )
+        .expect_err("unsupported qop must fail");
+
+        assert!(
+            err.to_string().contains("supported qop"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validation_rejects_qop_without_nonce_count_or_cnonce() {
+        let auth = DigestAuthenticator::new("example.com");
+        let response = DigestResponse {
+            username: "alice".to_string(),
+            realm: "example.com".to_string(),
+            nonce: "fixed".to_string(),
+            uri: "sip:bob@example.com".to_string(),
+            response: "abcd".to_string(),
+            algorithm: DigestAlgorithm::MD5,
+            cnonce: None,
+            qop: Some("auth".to_string()),
+            nc: Some("00000001".to_string()),
+            opaque: None,
+        };
+
+        assert!(auth
+            .validate_response(&response, "INVITE", "secret")
+            .is_err());
     }
 
     #[test]

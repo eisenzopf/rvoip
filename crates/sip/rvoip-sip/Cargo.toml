@@ -278,6 +278,22 @@ name = "pbx_analyze"
 path = "examples/pbx/analyze.rs"
 required-features = ["dev-insecure-tls"]
 
+[[example]]
+name = "auth_users_core_service"
+path = "examples/auth/users_core_service.rs"
+
+[[example]]
+name = "auth_endpoint_register_users_core"
+path = "examples/auth/endpoint_register_users_core.rs"
+
+[[example]]
+name = "auth_enterprise_hooks"
+path = "examples/auth/enterprise_hooks.rs"
+
+[[example]]
+name = "auth_keycloak_bearer_provider"
+path = "examples/auth/keycloak_bearer_provider.rs"
+
 
 [dependencies]
 # Core dependencies
@@ -303,6 +319,7 @@ rvoip-sip-transport.workspace = true
 rvoip-media-core.workspace = true
 rvoip-sip-core.workspace = true
 rvoip-rtp-core.workspace = true
+rvoip-core-traits.workspace = true
 # RFC 4568 SDES — base64 encoding of `a=crypto: inline:` master keys.
 base64 = "0.21"
 rvoip-auth-core.workspace = true
@@ -335,8 +352,11 @@ tracing-subscriber = "0.3"
 dotenvy = "0.15"
 rvoip-sip-transport.workspace = true
 rvoip-sip-registrar.workspace = true
+rvoip-users-core = { workspace = true, features = ["auth-core"] }
+rvoip-keycloak.workspace = true
 serial_test = { workspace = true }
 tempfile = "3.14"
+url = "2.5"
 # Self-signed cert generation for the TLS-call integration test.
 rcgen = "0.14"
 # Tests that exercise SIP TLS need to install the rustls default crypto

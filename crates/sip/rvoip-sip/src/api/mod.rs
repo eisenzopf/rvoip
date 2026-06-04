@@ -398,6 +398,6 @@ pub use endpoint::{
     EndpointConfig, EndpointControl, EndpointEvent, EndpointEvents, EndpointIncomingCall,
     EndpointMediaConfig, EndpointNetworkConfig, EndpointProfile, EndpointProfileName,
     EndpointRegistrationInfo, EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode,
-    EndpointTransport,
+    EndpointTransport, SipAccount,
 };
 pub use performance::{PerformanceConfig, PerformanceRecipe, PerformanceRecipeBook};

@@ -181,6 +181,16 @@ impl RegisterResponseBuilder {
         self
     }
 
+    /// Set Digest challenge parameters from `rvoip-auth-core`.
+    pub fn with_digest_challenge(mut self, challenge: &crate::auth::DigestChallenge) -> Self {
+        self.challenge_realm = Some(challenge.realm.clone());
+        self.challenge_nonce = Some(challenge.nonce.clone());
+        self.challenge_algorithm = Some(challenge.algorithm.as_str().to_string());
+        self.challenge_opaque = challenge.opaque.clone();
+        self.challenge_qop = challenge.qop.as_ref().map(|qop| qop.join(","));
+        self
+    }
+
     /// Mark this challenge as a proxy challenge (407 instead of 401).
     pub fn as_proxy_challenge(mut self, proxy: bool) -> Self {
         if let RegisterResponseKind::Challenge(scheme, _) = self.kind {
@@ -265,6 +275,54 @@ impl RegisterResponseBuilder {
                     )
                 })?;
                 let rendered = format!("Bearer realm=\"{}\"", realm);
+                if proxy {
+                    (
+                        407u16,
+                        "Proxy Authentication Required".to_string(),
+                        Some(rendered),
+                    )
+                } else {
+                    (401u16, "Unauthorized".to_string(), Some(rendered))
+                }
+            }
+            RegisterResponseKind::Challenge(AuthScheme::Basic, proxy) => {
+                let realm = self.challenge_realm.clone().ok_or_else(|| {
+                    SessionError::InvalidInput(
+                        "Basic challenge requires with_realm(..)".to_string(),
+                    )
+                })?;
+                let rendered = format!("Basic realm=\"{}\"", realm);
+                if proxy {
+                    (
+                        407u16,
+                        "Proxy Authentication Required".to_string(),
+                        Some(rendered),
+                    )
+                } else {
+                    (401u16, "Unauthorized".to_string(), Some(rendered))
+                }
+            }
+            RegisterResponseKind::Challenge(AuthScheme::Aka, proxy) => {
+                let realm = self.challenge_realm.clone().ok_or_else(|| {
+                    SessionError::InvalidInput("AKA challenge requires with_realm(..)".to_string())
+                })?;
+                let nonce = self.challenge_nonce.clone().ok_or_else(|| {
+                    SessionError::InvalidInput("AKA challenge requires with_nonce(..)".to_string())
+                })?;
+                let algorithm = self
+                    .challenge_algorithm
+                    .clone()
+                    .unwrap_or_else(|| "AKAv1-MD5".to_string());
+                let mut rendered = format!(
+                    "Digest realm=\"{}\", nonce=\"{}\", algorithm={}",
+                    realm, nonce, algorithm
+                );
+                if let Some(qop) = self.challenge_qop.as_ref() {
+                    rendered.push_str(&format!(", qop=\"{}\"", qop));
+                }
+                if self.challenge_stale {
+                    rendered.push_str(", stale=true");
+                }
                 if proxy {
                     (
                         407u16,

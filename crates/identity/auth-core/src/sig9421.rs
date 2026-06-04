@@ -161,9 +161,7 @@ impl Sig9421Verifier {
             .ok_or(Sig9421Error::MalformedEnvelope)?;
 
         // 1. Pull the signature field.
-        let sig_value = obj
-            .get("signature")
-            .ok_or(Sig9421Error::MissingSignature)?;
+        let sig_value = obj.get("signature").ok_or(Sig9421Error::MissingSignature)?;
         let signature: EnvelopeSignature = serde_json::from_value(sig_value.clone())
             .map_err(|e| Sig9421Error::MalformedSignature(e.to_string()))?;
 
@@ -323,11 +321,7 @@ mod tests {
         })
     }
 
-    fn sign_envelope(
-        envelope: &mut serde_json::Value,
-        keyid: &str,
-        kp: &Ed25519KeyPair,
-    ) {
+    fn sign_envelope(envelope: &mut serde_json::Value, keyid: &str, kp: &Ed25519KeyPair) {
         // Strip any existing signature, canonicalize, sign, re-attach.
         let obj = envelope.as_object_mut().unwrap();
         obj.remove("signature");

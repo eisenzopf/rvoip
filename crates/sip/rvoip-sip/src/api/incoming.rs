@@ -20,7 +20,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use rvoip_sip_core::types::headers::{HeaderName, TypedHeader};
+use rvoip_sip_core::types::headers::{HeaderAccess, HeaderName, TypedHeader};
 use rvoip_sip_core::{Request, Response};
 
 use crate::api::events::Event;
@@ -150,6 +150,42 @@ impl IncomingCall {
     /// synthesized (tests) or under a future lean-mode feature flag.
     pub fn raw_request(&self) -> Option<&Arc<Request>> {
         self.request.as_ref()
+    }
+
+    /// Authenticate this inbound INVITE with a UAS SIP auth service.
+    ///
+    /// Pass [`SipAuthService`](crate::SipAuthService) for Digest, Bearer,
+    /// Basic, AKA, or multi-challenge validation. Pass
+    /// [`SipDigestAuthService`](crate::SipDigestAuthService) for Digest-only
+    /// compatibility.
+    pub async fn authenticate_with<A>(
+        &self,
+        auth: &A,
+    ) -> Result<<A as crate::auth::SipIncomingAuthenticator>::Decision>
+    where
+        A: crate::auth::SipIncomingAuthenticator + Sync,
+    {
+        let request = self.request.as_ref().ok_or_else(|| {
+            SessionError::InvalidInput(
+                "IncomingCall.authenticate_with() requires a parsed inbound INVITE".to_string(),
+            )
+        })?;
+        let (authorization, source) = selected_authorization(request);
+        let request_uri = request.uri().to_string();
+        let body = if request.body().is_empty() {
+            None
+        } else {
+            Some(request.body())
+        };
+        auth.authenticate_incoming(
+            authorization.as_deref(),
+            "INVITE",
+            &request_uri,
+            body,
+            source,
+            request_is_tls(request),
+        )
+        .await
     }
 
     /// Zero-alloc header iteration — preferred over the boxed trait
@@ -757,7 +793,7 @@ impl IncomingCallGuard {
                     None => {
                         return Err(SessionError::Other(
                             "Event channel closed while waiting for reject".to_string(),
-                        ))
+                        ));
                     }
                 }
             }
@@ -850,7 +886,7 @@ impl IncomingCallGuard {
                     None => {
                         return Err(SessionError::Other(
                             "Event channel closed while waiting for cancellation".to_string(),
-                        ))
+                        ));
                     }
                 }
             }
@@ -883,13 +919,13 @@ fn cancellation_result_from_snapshot(snapshot: &CallLifecycleSnapshot) -> Option
             return Some(Err(SessionError::Other(format!(
                 "incoming call failed before cancellation: {} {}",
                 status_code, reason
-            ))))
+            ))));
         }
         Some(CallTerminalInfo::Ended { reason }) => {
             return Some(Err(SessionError::Other(format!(
                 "incoming call ended before cancellation: {}",
                 reason
-            ))))
+            ))));
         }
         None => {}
     }
@@ -1061,6 +1097,42 @@ impl IncomingRequest {
             self.method.clone(),
             scheme,
         ))
+    }
+
+    /// Authenticate this inbound request with a UAS SIP auth service.
+    ///
+    /// Pass [`SipAuthService`](crate::SipAuthService) for Digest, Bearer,
+    /// Basic, AKA, or multi-challenge validation. Pass
+    /// [`SipDigestAuthService`](crate::SipDigestAuthService) for Digest-only
+    /// compatibility.
+    pub async fn authenticate_with<A>(
+        &self,
+        auth: &A,
+    ) -> Result<<A as crate::auth::SipIncomingAuthenticator>::Decision>
+    where
+        A: crate::auth::SipIncomingAuthenticator + Sync,
+    {
+        let request = self.request.as_ref().ok_or_else(|| {
+            SessionError::InvalidInput(
+                "IncomingRequest.authenticate_with() requires a parsed inbound request".to_string(),
+            )
+        })?;
+        let (authorization, source) = selected_authorization(request);
+        let request_uri = request.uri().to_string();
+        let body = if request.body().is_empty() {
+            None
+        } else {
+            Some(request.body())
+        };
+        auth.authenticate_incoming(
+            authorization.as_deref(),
+            self.method.as_str(),
+            &request_uri,
+            body,
+            source,
+            request_is_tls(request),
+        )
+        .await
     }
 
     /// Rehydrate the coordinator hook so response builders can
@@ -1378,6 +1450,53 @@ impl IncomingRegister {
         )
     }
 
+    /// Authenticate this inbound REGISTER with a UAS SIP auth service.
+    ///
+    /// Pass [`SipAuthService`](crate::SipAuthService) for Digest, Bearer,
+    /// Basic, AKA, or multi-challenge validation. Pass
+    /// [`SipDigestAuthService`](crate::SipDigestAuthService) for Digest-only
+    /// compatibility.
+    pub async fn authenticate_with<A>(
+        &self,
+        auth: &A,
+    ) -> Result<<A as crate::auth::SipIncomingAuthenticator>::Decision>
+    where
+        A: crate::auth::SipIncomingAuthenticator + Sync,
+    {
+        let request_uri = self
+            .request
+            .as_ref()
+            .map(|request| request.uri().to_string())
+            .unwrap_or_else(|| self.to_uri.clone());
+        let body = self
+            .request
+            .as_ref()
+            .and_then(|request| (!request.body().is_empty()).then(|| request.body()));
+        let (authorization, source) = self
+            .request
+            .as_ref()
+            .map(|request| selected_authorization(request))
+            .unwrap_or_else(|| {
+                (
+                    self.authorization.clone(),
+                    crate::auth::SipAuthSource::Origin,
+                )
+            });
+        let is_tls = self
+            .request
+            .as_ref()
+            .is_some_and(|request| request_is_tls(request));
+        auth.authenticate_incoming(
+            authorization.as_deref(),
+            "REGISTER",
+            &request_uri,
+            body,
+            source,
+            is_tls,
+        )
+        .await
+    }
+
     /// Begin a generic non-2xx REGISTER response (404, 423 Interval
     /// Too Brief with `Min-Expires`, 503 Service Unavailable, …).
     pub fn reject_builder(&self, status: u16) -> crate::api::respond::RegisterResponseBuilder {
@@ -1531,6 +1650,24 @@ impl SipHeaderView for IncomingRegister {
             None => Vec::new(),
         }
     }
+}
+
+fn selected_authorization(request: &Request) -> (Option<String>, crate::auth::SipAuthSource) {
+    if let Some(value) = request.raw_header_value(&HeaderName::Authorization) {
+        return (Some(value), crate::auth::SipAuthSource::Origin);
+    }
+    if let Some(value) = request.raw_header_value(&HeaderName::ProxyAuthorization) {
+        return (Some(value), crate::auth::SipAuthSource::Proxy);
+    }
+    (None, crate::auth::SipAuthSource::Origin)
+}
+
+fn request_is_tls(request: &Request) -> bool {
+    request
+        .uri()
+        .to_string()
+        .to_ascii_lowercase()
+        .starts_with("sips:")
 }
 
 #[cfg(test)]

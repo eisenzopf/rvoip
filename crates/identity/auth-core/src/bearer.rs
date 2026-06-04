@@ -1,9 +1,9 @@
 //! Bearer-token validation surface.
 //!
-//! v0 ships a single stub implementation ([`bearer_stub`]) that returns
-//! `IdentityAssurance::Pseudonymous` for any non-empty token. Real
-//! DPoP / JWT / OIDC / AAuth / RFC 9421 validators land later as
-//! additional implementations of [`BearerValidator`].
+//! The [`BearerValidator`] trait is implemented by JWT, JWKS/OIDC, AAuth, and
+//! test/demo validators. [`bearer_stub`] remains available for local tests, but
+//! production deployments should use a real validator such as
+//! [`crate::JwtValidator`] or [`crate::JwksJwtValidator`].
 //!
 //! Named `BearerAuthError` (not `AuthError`) to avoid colliding with
 //! the crate's existing SIP Digest [`crate::AuthError`] type.

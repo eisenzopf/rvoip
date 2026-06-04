@@ -59,6 +59,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::api::dialog_package::{DialogInfo, DialogInfoDocument};
+use crate::api::endpoint::SipAccount;
 use crate::api::events::{
     Event, MediaSecurityState, SipTrace, SubscriptionState, TransferTargetEvidence,
 };
@@ -66,6 +67,7 @@ use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::{IncomingCall, IncomingCallGuard};
 use crate::api::performance::PerformanceConfig;
 use crate::api::unified::{Config, MediaMode, RegistrationHandle, UnifiedCoordinator};
+use crate::auth::SipClientAuth;
 use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result, SessionError};
 
@@ -251,6 +253,47 @@ impl CallbackPeerBuilder {
             unregistration_failed: None,
             sip_trace: None,
         }
+    }
+
+    /// Set peer-level UAC SIP auth used for outbound 401/407 retry.
+    ///
+    /// Use [`SipClientAuth::any`] when the peer may offer multiple schemes and
+    /// the UAC should negotiate among Digest, Bearer, Basic, and AKA options.
+    pub fn with_auth(mut self, auth: SipClientAuth) -> Self {
+        self.config.auth = Some(auth);
+        self
+    }
+
+    /// Set peer-level Digest credentials used for UAC outbound 401/407 retry.
+    ///
+    /// This is the Digest shorthand. Use [`Self::with_auth`] for Bearer,
+    /// Basic, AKA, or multi-challenge negotiation.
+    pub fn with_credentials(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.config.credentials = Some(crate::types::Credentials::new(username, password));
+        self
+    }
+
+    /// Set peer-level Bearer auth used for UAC outbound 401/407 retry.
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.config.auth = Some(SipClientAuth::bearer_token(token));
+        self
+    }
+
+    /// Set peer-level Basic auth used for UAC outbound 401/407 retry.
+    ///
+    /// Basic remains cleartext-disabled unless the auth value explicitly opts
+    /// in via [`SipClientAuth::allow_basic_over_cleartext`].
+    pub fn with_basic_credentials(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.config.auth = Some(SipClientAuth::basic(username, password));
+        self
     }
 
     /// Handle every public event before more specific typed hooks run.
@@ -1281,6 +1324,24 @@ impl CallbackPeerControl {
         self.coordinator.register(registrar, username, password)
     }
 
+    /// Begin building an outbound REGISTER from a shared SIP account.
+    pub fn register_account(&self, account: &SipAccount) -> crate::api::send::RegisterBuilder {
+        let mut builder = self
+            .register(
+                account.registrar.clone(),
+                account.effective_auth_username().to_string(),
+                account.password.clone(),
+            )
+            .with_expires(account.expires);
+        if let Some(from_uri) = &account.from_uri {
+            builder = builder.with_from_uri(from_uri.clone());
+        }
+        if let Some(contact_uri) = &account.contact_uri {
+            builder = builder.with_contact_uri(contact_uri.clone());
+        }
+        builder
+    }
+
     /// Query whether a registration handle is currently registered.
     ///
     /// This is a coarse boolean. Use
@@ -1491,18 +1552,18 @@ impl CallbackPeer<CallbackBuilderHandler> {
 impl<H: CallHandler> CallbackPeer<H> {
     /// Create a new `CallbackPeer`.
     ///
-    /// Set `config.credentials` to enable automatic RFC 3261 §22.2 INVITE
-    /// digest-auth retry on 401/407 challenges from the server:
+    /// Set `config.auth` for general UAC 401/407 retry across supported SIP
+    /// auth schemes, or `config.credentials` as the Digest shorthand:
     ///
     /// # Examples
     ///
     /// ```rust,no_run
     /// # async fn example() -> rvoip_sip::Result<()> {
-    /// use rvoip_sip::{CallbackPeer, Config, types::Credentials};
+    /// use rvoip_sip::{CallbackPeer, Config, SipClientAuth};
     /// use rvoip_sip::api::handlers::AutoAnswerHandler;
     ///
     /// let config = Config {
-    ///     credentials: Some(Credentials::new("alice", "secret")),
+    ///     auth: Some(SipClientAuth::digest("alice", "secret")),
     ///     ..Config::default()
     /// };
     /// let peer = CallbackPeer::new(AutoAnswerHandler, config).await?;
@@ -1510,8 +1571,9 @@ impl<H: CallHandler> CallbackPeer<H> {
     /// # }
     /// ```
     ///
-    /// For per-call overrides, use `coordinator().invite(...).with_credentials(...)`
-    /// via [`coordinator()`](Self::coordinator).
+    /// For per-call overrides, use `coordinator().invite(...).with_auth(...)`
+    /// or the Digest shorthand `.with_credentials(...)` via
+    /// [`coordinator()`](Self::coordinator).
     pub async fn new(handler: H, config: Config) -> Result<Self> {
         let local_uri = config.local_uri.clone();
         let coordinator = UnifiedCoordinator::new(config).await?;
@@ -1598,6 +1660,11 @@ impl<H: CallHandler> CallbackPeer<H> {
         password: impl Into<String>,
     ) -> crate::api::send::RegisterBuilder {
         self.coordinator.register(registrar, username, password)
+    }
+
+    /// Begin building an outbound REGISTER from a shared SIP account.
+    pub fn register_account(&self, account: &SipAccount) -> crate::api::send::RegisterBuilder {
+        self.control().register_account(account)
     }
 
     /// Query whether a registration handle is currently registered.

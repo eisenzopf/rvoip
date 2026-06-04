@@ -52,8 +52,8 @@ const REWRITTEN_PAI: &str = "<sip:sbc-rewritten@sbc.example>";
 // Sensitive header that traces must redact but the wire must keep.
 // We use a custom `X-Internal-Token` (application-controlled, no policy
 // restriction) rather than `Authorization` — the canonical INVITE
-// builder routes Authorization through `with_credentials` instead of
-// `with_raw_header`, so this example uses the custom header to
+// builder routes Authorization through `with_credentials` / `with_auth`
+// instead of `with_raw_header`, so this example uses the custom header to
 // demonstrate the redactor without tripping the §5.1 policy guard.
 const SECRET_TOKEN: &str = "tok-deadbeef-secret";
 const TOKEN_HEADER: &str = "X-Internal-Token";

@@ -349,7 +349,7 @@ async fn refresh(
 }
 
 async fn jwks(State(state): State<ApiState>) -> Result<Json<serde_json::Value>, AppError> {
-    let jwk = state.auth_service.jwt_issuer().public_key_jwk();
+    let jwk = state.auth_service.jwt_issuer().public_key_jwk()?;
     Ok(Json(serde_json::json!({
         "keys": [jwk]
     })))

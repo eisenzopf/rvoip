@@ -178,8 +178,7 @@ impl DpopValidator {
     pub async fn validate(&self, proof_jwt: &str) -> Result<ValidatedDpop, DpopError> {
         // 1. Header inspection without signature check (need to learn
         // the jwk and alg before we can verify).
-        let header =
-            decode_header(proof_jwt).map_err(|e| DpopError::Header(e.to_string()))?;
+        let header = decode_header(proof_jwt).map_err(|e| DpopError::Header(e.to_string()))?;
         if header.typ.as_deref() != Some("dpop+jwt") {
             return Err(DpopError::Header(format!(
                 "typ must be \"dpop+jwt\", got {:?}",

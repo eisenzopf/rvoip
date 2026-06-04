@@ -47,6 +47,7 @@ members = [
     "crates/extensions/rvoip-vcon",
     "crates/extensions/rvoip-harness",
     "crates/extensions/rvoip-stir-shaken",
+    "crates/extensions/rvoip-keycloak",
 ]
 
 exclude = [
@@ -197,6 +198,7 @@ rvoip-codec-core    = { path = "crates/media/codec-core", version = "0.2.1" }
 rvoip-infra-common  = { path = "crates/foundation/infra-common", version = "0.2.1" }
 rvoip-auth-core     = { path = "crates/identity/auth-core", version = "0.2.1" }
 rvoip-core-traits   = { path = "crates/foundation/rvoip-core-traits", version = "0.2.1" }
+rvoip-users-core    = { path = "crates/identity/users-core", version = "0.1.0" }
 
 # Remaining internal crates — alpha-tier (0.1.0) except `rvoip` (the 0.2.1
 # beta facade). All publishable now. rvoip-core lists rvoip-vcon / rvoip-harness
@@ -213,6 +215,7 @@ rvoip-webrtc        = { path = "crates/webrtc/rvoip-webrtc", version = "0.1.0" }
 rvoip-identity      = { path = "crates/identity/rvoip-identity", version = "0.1.0" }
 rvoip-client        = { path = "crates/rvoip-client", version = "0.1.0" }
 rvoip-stir-shaken   = { path = "crates/extensions/rvoip-stir-shaken", version = "0.1.0" }
+rvoip-keycloak      = { path = "crates/extensions/rvoip-keycloak", version = "0.1.0" }
 rtc = "=0.20.0-alpha.1"
 
 # External dependencies

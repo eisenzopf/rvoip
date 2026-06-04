@@ -8,6 +8,7 @@ use rvoip_sip_core::types::Method;
 use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::incoming::IncomingResponse;
 use crate::api::unified::UnifiedCoordinator;
+use crate::auth::SipClientAuth;
 use crate::errors::Result;
 use crate::types::Credentials;
 
@@ -19,6 +20,7 @@ pub struct OptionsBuilder {
     from_uri: Option<String>,
     accept: Option<String>,
     credentials: Option<Credentials>,
+    auth: Option<SipClientAuth>,
     timeout: Option<Duration>,
     state: BuilderHeaderState,
 }
@@ -31,6 +33,7 @@ impl OptionsBuilder {
             from_uri: None,
             accept: None,
             credentials: None,
+            auth: None,
             timeout: None,
             state: BuilderHeaderState::default(),
         }
@@ -46,9 +49,35 @@ impl OptionsBuilder {
         self.accept = Some(ct.into());
         self
     }
-    /// Attach digest credentials for 401/407 retry.
+    /// Attach Digest credentials for UAC 401/407 retry.
     pub fn with_credentials(mut self, c: Credentials) -> Self {
         self.credentials = Some(c);
+        self
+    }
+    /// Attach general UAC SIP auth for 401/407 retry.
+    ///
+    /// Use [`SipClientAuth::any`] when the peer may offer multiple schemes and
+    /// the UAC should negotiate among Digest, Bearer, Basic, and AKA options.
+    pub fn with_auth(mut self, auth: SipClientAuth) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+    /// Attach a Bearer token for UAC 401/407 retry.
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.auth = Some(SipClientAuth::bearer_token(token));
+        self
+    }
+    /// Attach Basic credentials for UAC 401/407 retry.
+    ///
+    /// Basic is cleartext-disabled by default. Use
+    /// `with_auth(SipClientAuth::basic(...).allow_basic_over_cleartext(true))`
+    /// only for explicit legacy cleartext interop.
+    pub fn with_basic_credentials(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.auth = Some(SipClientAuth::basic(username, password));
         self
     }
     /// Set how long to await the OPTIONS response before timing out.
@@ -72,15 +101,10 @@ impl OptionsBuilder {
             timeout: self.timeout,
             extra_headers,
         };
-        // Credentials are staged on the builder for parity with other
-        // UAC builders but rvoip-sip-dialog's options surface doesn't carry
-        // an authorization slot for OPTIONS yet; the 401 retry path
-        // remains application-driven.
-        let _ = self.credentials;
+        let auth = self.auth.or_else(|| self.credentials.map(Into::into));
         let response = self
             .coord
-            .dialog_adapter()
-            .send_options_oob_with_options(opts)
+            .send_options_oob_with_optional_auth(opts, auth)
             .await?;
         let status_code: u16 = response.status_code();
         let reason_phrase = response.reason_phrase().to_string();

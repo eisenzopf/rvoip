@@ -5,12 +5,10 @@
 //! [`support::registrar`] / [`support::ringing_uas`] — a single tokio
 //! task pulls from a `UdpSocket` and dispatches per captured method.
 //!
-//! Today this harness has no §10 test consumer because the WithAuth
-//! action variants for non-INVITE / non-REGISTER methods don't exist
-//! yet (R2 follow-on work; see `SIP_API_DESIGN_2_REMAINING_WORK.md`).
-//! It lives here so that when R2 ships, the auth-retry assertions for
-//! SUBSCRIBE / MESSAGE / OPTIONS / re-INVITE can re-use the same
-//! capture / reply pattern as the other §10 tests.
+//! This harness backs auth-retry assertions for challenged methods. In-dialog
+//! requests use the state-machine `SendRequestWithAuth` path; out-of-dialog
+//! MESSAGE / OPTIONS / SUBSCRIBE builders use coordinator-side direct retry
+//! helpers and the same capture / reply pattern.
 
 #![allow(dead_code)]
 
@@ -36,6 +34,26 @@ pub enum ChallengeReply {
     Challenge401 { realm: String, nonce: String },
     /// 407 Proxy Authentication Required with Proxy-Authenticate digest.
     Challenge407 { realm: String, nonce: String },
+    /// 401 Unauthorized with a configurable Digest challenge.
+    Challenge401Full {
+        realm: String,
+        nonce: String,
+        algorithm: String,
+        qop: Option<String>,
+        stale: bool,
+    },
+    /// 407 Proxy Authentication Required with a configurable Digest challenge.
+    Challenge407Full {
+        realm: String,
+        nonce: String,
+        algorithm: String,
+        qop: Option<String>,
+        stale: bool,
+    },
+    /// 401 Unauthorized with a raw WWW-Authenticate value.
+    Challenge401Raw(String),
+    /// 407 Proxy Authentication Required with a raw Proxy-Authenticate value.
+    Challenge407Raw(String),
     /// 200 OK.
     Ok,
 }
@@ -139,13 +157,7 @@ fn build_challenge(request: &Request, plan: ChallengeReply) -> Message {
             let mut resp = create_response(request, StatusCode::Unauthorized);
             resp.headers.push(TypedHeader::Other(
                 HeaderName::WwwAuthenticate,
-                HeaderValue::Raw(
-                    format!(
-                        "Digest realm=\"{}\", nonce=\"{}\", algorithm=MD5",
-                        realm, nonce
-                    )
-                    .into_bytes(),
-                ),
+                HeaderValue::Raw(digest_challenge(&realm, &nonce, "MD5", None, false).into_bytes()),
             ));
             Message::Response(resp)
         }
@@ -153,16 +165,77 @@ fn build_challenge(request: &Request, plan: ChallengeReply) -> Message {
             let mut resp = create_response(request, StatusCode::ProxyAuthenticationRequired);
             resp.headers.push(TypedHeader::Other(
                 HeaderName::ProxyAuthenticate,
+                HeaderValue::Raw(digest_challenge(&realm, &nonce, "MD5", None, false).into_bytes()),
+            ));
+            Message::Response(resp)
+        }
+        ChallengeReply::Challenge401Full {
+            realm,
+            nonce,
+            algorithm,
+            qop,
+            stale,
+        } => {
+            let mut resp = create_response(request, StatusCode::Unauthorized);
+            resp.headers.push(TypedHeader::Other(
+                HeaderName::WwwAuthenticate,
                 HeaderValue::Raw(
-                    format!(
-                        "Digest realm=\"{}\", nonce=\"{}\", algorithm=MD5",
-                        realm, nonce
-                    )
-                    .into_bytes(),
+                    digest_challenge(&realm, &nonce, &algorithm, qop.as_deref(), stale)
+                        .into_bytes(),
                 ),
+            ));
+            Message::Response(resp)
+        }
+        ChallengeReply::Challenge407Full {
+            realm,
+            nonce,
+            algorithm,
+            qop,
+            stale,
+        } => {
+            let mut resp = create_response(request, StatusCode::ProxyAuthenticationRequired);
+            resp.headers.push(TypedHeader::Other(
+                HeaderName::ProxyAuthenticate,
+                HeaderValue::Raw(
+                    digest_challenge(&realm, &nonce, &algorithm, qop.as_deref(), stale)
+                        .into_bytes(),
+                ),
+            ));
+            Message::Response(resp)
+        }
+        ChallengeReply::Challenge401Raw(value) => {
+            let mut resp = create_response(request, StatusCode::Unauthorized);
+            resp.headers.push(TypedHeader::Other(
+                HeaderName::WwwAuthenticate,
+                HeaderValue::Raw(value.into_bytes()),
+            ));
+            Message::Response(resp)
+        }
+        ChallengeReply::Challenge407Raw(value) => {
+            let mut resp = create_response(request, StatusCode::ProxyAuthenticationRequired);
+            resp.headers.push(TypedHeader::Other(
+                HeaderName::ProxyAuthenticate,
+                HeaderValue::Raw(value.into_bytes()),
             ));
             Message::Response(resp)
         }
         ChallengeReply::Ok => Message::Response(create_response(request, StatusCode::Ok)),
     }
+}
+
+fn digest_challenge(
+    realm: &str,
+    nonce: &str,
+    algorithm: &str,
+    qop: Option<&str>,
+    stale: bool,
+) -> String {
+    let mut out = format!(r#"Digest realm="{realm}", nonce="{nonce}", algorithm={algorithm}"#);
+    if let Some(qop) = qop {
+        out.push_str(&format!(r#", qop="{qop}""#));
+    }
+    if stale {
+        out.push_str(", stale=true");
+    }
+    out
 }

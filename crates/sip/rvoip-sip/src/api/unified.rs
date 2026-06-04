@@ -57,6 +57,7 @@
 
 use crate::adapters::{DialogAdapter, MediaAdapter};
 use crate::api::lifecycle::{CallLifecycleSnapshot, LifecycleIndex, SessionEventPublisher};
+use crate::auth::SipClientAuth;
 use crate::errors::{Result, SessionError};
 use crate::session_registry::SessionRegistry;
 use crate::session_store::SessionStore;
@@ -71,6 +72,8 @@ use rvoip_rtp_core::transport::{
     DEFAULT_RTP_PORT_RANGE_END, DEFAULT_RTP_PORT_RANGE_START, MIN_PORT,
 };
 use rvoip_sip_core::types::sdp::CryptoSuite;
+use rvoip_sip_core::types::{headers::HeaderAccess, headers::HeaderName, Method};
+use rvoip_sip_core::Response;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -270,13 +273,23 @@ pub struct Config {
     /// seconds. Default 90 per RFC 4028 §5.
     pub session_timer_min_se: u32,
 
-    /// Default credentials to apply to every outgoing call for RFC 3261 §22.2
-    /// INVITE digest auth retry. When the server responds 401/407 to our
-    /// INVITE, rvoip-sip looks here (or at per-call credentials passed
-    /// via `control.invite(...).with_credentials(...)`) to compute the digest response. When
-    /// `None`, a 401/407 on INVITE surfaces as `CallFailed` instead of
-    /// retrying. Default: `None`.
+    /// Default Digest credentials for UAC 401/407 retry.
+    ///
+    /// This is the Digest shorthand. When a supported outbound request is
+    /// challenged and no per-request auth was supplied, `rvoip-sip` can use
+    /// these credentials to compute a Digest response. Use
+    /// [`Config::auth`](Self::auth) for Bearer, Basic, AKA, or
+    /// multi-challenge negotiation. Default: `None`.
     pub credentials: Option<crate::types::Credentials>,
+
+    /// General UAC auth configuration used for 401/407 retries across
+    /// supported SIP access-auth schemes.
+    ///
+    /// Configure this with [`crate::SipClientAuth`] for Digest, Bearer, Basic,
+    /// AKA, or [`crate::SipClientAuth::any`] multi-challenge negotiation.
+    /// `credentials` remains the Digest shorthand; precedence is per-request
+    /// auth, then this field, then `credentials`.
+    pub auth: Option<crate::auth::SipClientAuth>,
 
     /// Default `P-Asserted-Identity` URI (RFC 3325 §9.1) to attach to every
     /// outgoing INVITE. Carrier trunks (Twilio, Vonage, Bandwidth, most PBX
@@ -948,6 +961,7 @@ impl Config {
             session_timer_secs: None,
             session_timer_min_se: 90,
             credentials: None,
+            auth: None,
             pai_uri: None,
             sip_trace: crate::api::events::SipTraceConfig::default(),
             trace_redaction: None,
@@ -1048,6 +1062,7 @@ impl Config {
             session_timer_secs: None,
             session_timer_min_se: 90,
             credentials: None,
+            auth: None,
             pai_uri: None,
             sip_trace: crate::api::events::SipTraceConfig::default(),
             trace_redaction: None,
@@ -2555,6 +2570,15 @@ impl UnifiedCoordinator {
         self.config.credentials.clone()
     }
 
+    /// Read-only access to [`Config::auth`] so outbound builders can fall
+    /// back to peer-level full-auth configuration.
+    pub fn config_auth(&self) -> Option<crate::auth::SipClientAuth> {
+        self.config
+            .auth
+            .clone()
+            .or_else(|| self.config.credentials.clone().map(Into::into))
+    }
+
     /// Feature-gated retained-object counts for perf leak investigations.
     ///
     /// This is intentionally not a stable application API. It exists so
@@ -2684,6 +2708,264 @@ impl UnifiedCoordinator {
     /// external consumers.
     pub(crate) fn dialog_adapter(&self) -> &Arc<DialogAdapter> {
         &self.dialog_adapter
+    }
+
+    /// Send out-of-dialog MESSAGE and retry when a configured UAC auth option
+    /// can answer a 401/407 challenge.
+    pub(crate) async fn send_message_oob_with_optional_auth(
+        &self,
+        opts: rvoip_sip_dialog::api::unified::MessageRequestOptions,
+        auth: Option<SipClientAuth>,
+    ) -> Result<Response> {
+        let response = self
+            .dialog_adapter
+            .send_message_oob_with_options(opts.clone())
+            .await?;
+        let body = if opts.body.is_empty() {
+            None
+        } else {
+            Some(opts.body.as_ref())
+        };
+        let Some(retry) = self.build_oob_auth_retry_header(
+            Method::Message,
+            &response,
+            &opts.to_uri,
+            body,
+            auth.as_ref(),
+        )?
+        else {
+            return Ok(response);
+        };
+
+        let retry_response = self
+            .dialog_adapter
+            .send_message_oob_with_auth(
+                opts.clone(),
+                &retry.header_name,
+                retry.header_value.clone(),
+            )
+            .await?;
+        self.maybe_retry_oob_stale(
+            Method::Message,
+            retry_response,
+            retry,
+            || opts.to_uri.clone(),
+            body,
+            auth.as_ref(),
+            |header_name, header_value| {
+                let opts = opts.clone();
+                async move {
+                    self.dialog_adapter
+                        .send_message_oob_with_auth(opts, &header_name, header_value)
+                        .await
+                }
+            },
+        )
+        .await
+    }
+
+    /// Send out-of-dialog OPTIONS and retry when a configured UAC auth option
+    /// can answer a 401/407 challenge.
+    pub(crate) async fn send_options_oob_with_optional_auth(
+        &self,
+        opts: rvoip_sip_dialog::api::unified::OptionsRequestOptions,
+        auth: Option<SipClientAuth>,
+    ) -> Result<Response> {
+        let response = self
+            .dialog_adapter
+            .send_options_oob_with_options(opts.clone())
+            .await?;
+        let Some(retry) = self.build_oob_auth_retry_header(
+            Method::Options,
+            &response,
+            &opts.to_uri,
+            None,
+            auth.as_ref(),
+        )?
+        else {
+            return Ok(response);
+        };
+
+        let retry_response = self
+            .dialog_adapter
+            .send_options_oob_with_auth(
+                opts.clone(),
+                &retry.header_name,
+                retry.header_value.clone(),
+            )
+            .await?;
+        self.maybe_retry_oob_stale(
+            Method::Options,
+            retry_response,
+            retry,
+            || opts.to_uri.clone(),
+            None,
+            auth.as_ref(),
+            |header_name, header_value| {
+                let opts = opts.clone();
+                async move {
+                    self.dialog_adapter
+                        .send_options_oob_with_auth(opts, &header_name, header_value)
+                        .await
+                }
+            },
+        )
+        .await
+    }
+
+    /// Send out-of-dialog SUBSCRIBE and retry when a configured UAC auth option
+    /// can answer a 401/407 challenge.
+    pub(crate) async fn send_subscribe_oob_with_optional_auth(
+        &self,
+        target: &str,
+        opts: rvoip_sip_dialog::api::unified::SubscribeRequestOptions,
+        auth: Option<SipClientAuth>,
+    ) -> Result<Response> {
+        let response = self
+            .dialog_adapter
+            .send_subscribe_oob_with_options(target, opts.clone())
+            .await?;
+        let Some(retry) = self.build_oob_auth_retry_header(
+            Method::Subscribe,
+            &response,
+            target,
+            None,
+            auth.as_ref(),
+        )?
+        else {
+            return Ok(response);
+        };
+
+        let retry_response = self
+            .dialog_adapter
+            .send_subscribe_oob_with_auth(
+                target,
+                opts.clone(),
+                &retry.header_name,
+                retry.header_value.clone(),
+            )
+            .await?;
+        self.maybe_retry_oob_stale(
+            Method::Subscribe,
+            retry_response,
+            retry,
+            || target.to_string(),
+            None,
+            auth.as_ref(),
+            |header_name, header_value| {
+                let opts = opts.clone();
+                async move {
+                    self.dialog_adapter
+                        .send_subscribe_oob_with_auth(target, opts, &header_name, header_value)
+                        .await
+                }
+            },
+        )
+        .await
+    }
+
+    fn build_oob_auth_retry_header(
+        &self,
+        method: Method,
+        response: &Response,
+        request_uri: &str,
+        body: Option<&[u8]>,
+        auth: Option<&SipClientAuth>,
+    ) -> Result<Option<OobAuthRetry>> {
+        let status = response.status_code();
+        if status != 401 && status != 407 {
+            return Ok(None);
+        }
+        let Some(auth) = auth else {
+            return Ok(None);
+        };
+
+        let (challenge_header_name, auth_header_name) = if status == 407 {
+            (HeaderName::ProxyAuthenticate, "Proxy-Authorization")
+        } else {
+            (HeaderName::WwwAuthenticate, "Authorization")
+        };
+        let challenge_values = response
+            .raw_headers(&challenge_header_name)
+            .into_iter()
+            .filter_map(|bytes| String::from_utf8(bytes).ok())
+            .collect::<Vec<_>>();
+        if challenge_values.is_empty() {
+            return Err(SessionError::AuthError(format!(
+                "{} challenge response missing {}",
+                method,
+                challenge_header_name.as_str()
+            )));
+        }
+        let challenge_value = challenge_values.join(", ");
+        if challenge_value.trim().is_empty() {
+            return Err(SessionError::AuthError(format!(
+                "{} challenge response missing {}",
+                method,
+                challenge_header_name.as_str()
+            )));
+        }
+        let selected = auth.authorization_for_challenge(
+            &challenge_value,
+            method.as_str(),
+            request_uri,
+            1,
+            body,
+            request_uri.to_ascii_lowercase().starts_with("sips:"),
+        )?;
+        let nonce = selected
+            .digest_challenge
+            .as_ref()
+            .map(|challenge| challenge.nonce.clone())
+            .unwrap_or_default();
+        Ok(Some(OobAuthRetry {
+            header_name: auth_header_name.to_string(),
+            header_value: selected.value,
+            nonce,
+            stale: selected.stale,
+        }))
+    }
+
+    async fn maybe_retry_oob_stale<F, Fut>(
+        &self,
+        method: Method,
+        retry_response: Response,
+        previous_retry: OobAuthRetry,
+        request_uri: impl FnOnce() -> String,
+        body: Option<&[u8]>,
+        auth: Option<&SipClientAuth>,
+        send_retry: F,
+    ) -> Result<Response>
+    where
+        F: FnOnce(String, String) -> Fut,
+        Fut: std::future::Future<Output = Result<Response>>,
+    {
+        if retry_response.status_code() != 401 && retry_response.status_code() != 407 {
+            return Ok(retry_response);
+        }
+
+        let request_uri = request_uri();
+        let Some(stale_retry) = self.build_oob_auth_retry_header(
+            method.clone(),
+            &retry_response,
+            &request_uri,
+            body,
+            auth,
+        )?
+        else {
+            ensure_retry_not_challenged(method, &retry_response)?;
+            return Ok(retry_response);
+        };
+
+        if !stale_retry.stale || stale_retry.nonce == previous_retry.nonce {
+            ensure_retry_not_challenged(method, &retry_response)?;
+            return Ok(retry_response);
+        }
+
+        let second_retry_response =
+            send_retry(stale_retry.header_name, stale_retry.header_value).await?;
+        ensure_retry_not_challenged(method, &second_retry_response)?;
+        Ok(second_retry_response)
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -2874,6 +3156,22 @@ impl UnifiedCoordinator {
     ) -> crate::api::respond::ProvisionalBuilder {
         crate::api::respond::ProvisionalBuilder::new(self.clone(), session.clone(), code)
     }
+}
+
+#[derive(Debug, Clone)]
+struct OobAuthRetry {
+    header_name: String,
+    header_value: String,
+    nonce: String,
+    stale: bool,
+}
+
+fn ensure_retry_not_challenged(method: Method, response: &Response) -> Result<()> {
+    let status = response.status_code();
+    if status == 401 || status == 407 {
+        return Err(SessionError::RequestAuthRetryExhausted { method });
+    }
+    Ok(())
 }
 
 impl UnifiedCoordinator {
@@ -4907,6 +5205,7 @@ impl UnifiedCoordinator {
                     contact_uri: contact_uri.to_string(),
                     expires,
                     authorization: None,
+                    proxy_authorization: None,
                     call_id: None,
                     cseq: None,
                     outbound_contact: None,

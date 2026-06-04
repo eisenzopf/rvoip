@@ -628,7 +628,7 @@ pub enum Event {
 
     /// Registration failed.
     ///
-    /// Final failure after any supported retry path, such as digest auth retry
+    /// Final failure after any supported retry path, such as auth retry
     /// or 423 Interval Too Brief retry.
     RegistrationFailed {
         /// Registrar URI used for the failed REGISTER.

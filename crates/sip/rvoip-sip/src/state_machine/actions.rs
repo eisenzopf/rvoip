@@ -69,11 +69,12 @@ async fn execute_register_action(
             .or_else(|| session.local_uri.clone())
             .ok_or_else(|| "contact_uri not set for registration".to_string())?,
     };
-    let credentials = match mode {
+    let auth = match mode {
         RegisterActionMode::Register => None,
-        RegisterActionMode::RegisterWithAuth | RegisterActionMode::Unregister => {
-            session.credentials.clone()
-        }
+        RegisterActionMode::RegisterWithAuth | RegisterActionMode::Unregister => session
+            .auth
+            .clone()
+            .or_else(|| session.credentials.clone().map(Into::into)),
     };
     let mut expires = match mode {
         RegisterActionMode::Unregister => 0,
@@ -100,7 +101,7 @@ async fn execute_register_action(
                 &from_uri,
                 &contact_uri,
                 expires,
-                credentials.as_ref(),
+                auth.as_ref(),
                 staged_extras.clone(),
             )
             .await?;
@@ -149,6 +150,8 @@ async fn execute_register_action(
                 status_code,
                 challenge,
             } => {
+                let challenge_details =
+                    rvoip_auth_core::DigestAuthenticator::parse_challenge_details(&challenge).ok();
                 if mode == RegisterActionMode::Unregister {
                     dialog_adapter
                         .apply_unregistration_failure(
@@ -168,7 +171,22 @@ async fn execute_register_action(
                     .get_session(&session_id)
                     .await?
                     .registration_retry_count;
-                if retry_count >= 1 {
+                let previous_nonce = session_store
+                    .get_session(&session_id)
+                    .await?
+                    .auth_challenge
+                    .as_ref()
+                    .map(|challenge| challenge.nonce.clone());
+                let stale_recovery = retry_count == 1
+                    && challenge_details
+                        .as_ref()
+                        .is_some_and(|details| details.stale)
+                    && previous_nonce.as_deref().is_some_and(|nonce| {
+                        challenge_details
+                            .as_ref()
+                            .is_some_and(|details| nonce != details.challenge.nonce)
+                    });
+                if retry_count >= 1 && !stale_recovery {
                     tracing::error!(
                         "❌ REGISTER auth failed (retry count {}); invalid credentials",
                         retry_count
@@ -1375,22 +1393,40 @@ pub(crate) async fn execute_action(
                 "Action::StoreAuthChallenge for session {}",
                 session.session_id
             );
-            // Parse the challenge payload stashed in session.pending_auth by the
-            // executor (for AuthRequired events) and write the parsed
-            // `DigestChallenge` into session.auth_challenge. Both INVITE and
-            // REGISTER auth paths consume this field.
+            // Store the challenge payload stashed in session.pending_auth by the
+            // executor (for AuthRequired events). Digest challenges are also
+            // parsed into session.auth_challenge for nonce-count/stale handling;
+            // non-Digest schemes use the raw challenge string.
             //
             // Fallback: the legacy REGISTER shortcut in DialogAdapter may have
             // already populated session.auth_challenge directly (Phase 2 will
             // remove that path). If pending_auth is None and auth_challenge is
             // already set, treat this action as a no-op.
             if let Some((_, ref challenge_str)) = session.pending_auth {
-                let parsed = rvoip_auth_core::DigestAuthenticator::parse_challenge(challenge_str)?;
-                info!(
-                    "Stored auth challenge for session {} (realm={}, nonce={})",
-                    session.session_id, parsed.realm, parsed.nonce
-                );
-                session.auth_challenge = Some(parsed);
+                let previous_nonce = session
+                    .auth_challenge
+                    .as_ref()
+                    .map(|challenge| challenge.nonce.clone());
+                session.auth_challenge_raw = Some(challenge_str.clone());
+                if let Ok(parsed) =
+                    rvoip_auth_core::DigestAuthenticator::parse_challenge_details(challenge_str)
+                {
+                    info!(
+                        "Stored digest auth challenge for session {} (realm={}, nonce={})",
+                        session.session_id, parsed.challenge.realm, parsed.challenge.nonce
+                    );
+                    session.auth_challenge_stale = parsed.stale;
+                    session.auth_challenge_replaces_nonce = previous_nonce;
+                    session.auth_challenge = Some(parsed.challenge);
+                } else {
+                    info!(
+                        "Stored non-digest auth challenge for session {}",
+                        session.session_id
+                    );
+                    session.auth_challenge_stale = false;
+                    session.auth_challenge_replaces_nonce = previous_nonce;
+                    session.auth_challenge = None;
+                }
                 // Persist so the next action — `SendREGISTERWithAuth` or
                 // `SendINVITEWithAuth` — sees the challenge when it re-reads
                 // the session from the store inside the dialog adapter.
@@ -1408,7 +1444,7 @@ pub(crate) async fn execute_action(
             }
         }
         Action::SendINVITEWithAuth => {
-            // RFC 3261 §22.2 — compute a digest Authorization header and
+            // RFC 3261 §22.2 — compute an Authorization header and
             // re-issue the INVITE on the same dialog (same Call-ID, bumped
             // CSeq) via DialogAdapter::resend_invite_with_auth. Capped at one
             // retry to prevent loops when credentials are wrong.
@@ -1417,23 +1453,38 @@ pub(crate) async fn execute_action(
                 session.session_id
             );
             const CAP: u8 = 1;
-            if session.invite_auth_retry_count >= CAP {
+            if !auth_retry_allowed(
+                session.invite_auth_retry_count,
+                CAP,
+                session.auth_challenge.as_ref(),
+                session.auth_challenge_stale,
+                session.auth_challenge_replaces_nonce.as_deref(),
+            ) {
                 return Err(Box::new(
                     crate::errors::SessionError::InviteAuthRetryExhausted,
                 ));
             }
             session.invite_auth_retry_count += 1;
 
-            let challenge = session.auth_challenge.clone().ok_or_else(|| {
-                format!(
-                    "SendINVITEWithAuth: no auth_challenge on session {}",
+            let (status, challenge_raw) = session
+                .pending_auth
+                .clone()
+                .unwrap_or_else(|| (401, session.auth_challenge_raw.clone().unwrap_or_default()));
+            if challenge_raw.is_empty() {
+                return Err(format!(
+                    "SendINVITEWithAuth: no auth challenge on session {}",
                     session.session_id
                 )
-            })?;
-            let creds = session.credentials.clone().ok_or_else(|| {
-                Box::new(crate::errors::SessionError::MissingCredentialsForInviteAuth)
-                    as Box<dyn std::error::Error + Send + Sync>
-            })?;
+                .into());
+            }
+            let auth = session
+                .auth
+                .clone()
+                .or_else(|| session.credentials.clone().map(Into::into))
+                .ok_or_else(|| {
+                    Box::new(crate::errors::SessionError::MissingCredentialsForInviteAuth)
+                        as Box<dyn std::error::Error + Send + Sync>
+                })?;
             let request_uri = session.remote_uri.clone().ok_or_else(|| {
                 format!(
                     "SendINVITEWithAuth: no remote_uri on session {}",
@@ -1445,34 +1496,35 @@ pub(crate) async fn execute_action(
             // counter before computing. A carrier reusing the same
             // nonce across multiple requests rejects `nc` repeats as
             // replays, so the counter must monotonically grow.
-            let nc_key = (challenge.realm.clone(), challenge.nonce.clone());
-            let nc_value = *session
-                .digest_nc
-                .entry(nc_key)
-                .and_modify(|n| *n += 1)
-                .or_insert(1);
+            let digest_challenge_for_nc = session.auth_challenge.clone().or_else(|| {
+                rvoip_auth_core::DigestAuthenticator::parse_challenge(&challenge_raw).ok()
+            });
+            let nc_value = if let Some(challenge) = digest_challenge_for_nc.as_ref() {
+                let nc_key = (challenge.realm.clone(), challenge.nonce.clone());
+                *session
+                    .digest_nc
+                    .entry(nc_key)
+                    .and_modify(|n| *n += 1)
+                    .or_insert(1)
+            } else {
+                1
+            };
             // INVITE body is the local SDP offer — fold it into HA2
             // when the server's challenge offers `qop=auth-int`. RFC
             // 7616 §3.4.3.
             let body_owned = session.local_sdp.clone();
             let body_bytes = body_owned.as_deref().map(|s| s.as_bytes());
-            let computed = rvoip_auth_core::DigestClient::compute_response_with_state(
-                &creds.username,
-                &creds.password,
-                &challenge,
+            let selected_auth = auth.authorization_for_challenge(
+                &challenge_raw,
                 "INVITE",
                 &request_uri,
                 nc_value,
                 body_bytes,
+                request_uri.to_ascii_lowercase().starts_with("sips:"),
             )?;
-            let header_value = rvoip_auth_core::DigestClient::format_authorization_with_state(
-                &creds.username,
-                &challenge,
-                &request_uri,
-                &computed,
-            );
+            let header_value = selected_auth.value;
 
-            let (status, _) = session.pending_auth.take().unwrap_or((401, String::new()));
+            session.pending_auth.take();
             let header_name = if status == 407 {
                 "Proxy-Authorization"
             } else {
@@ -1513,32 +1565,52 @@ pub(crate) async fn execute_action(
             // methods. Reads `session.pending_auth_method` to discriminate
             // which `pending_<method>_options` to re-issue (falls back to
             // inspecting which stash is set when method is missing or
-            // empty), computes the digest via auth-core, and dispatches
-            // via the matching `DialogAdapter::send_<method>_with_auth`.
+            // empty), computes the selected auth scheme, and dispatches via
+            // the matching `DialogAdapter::send_<method>_with_auth`.
             info!(
                 "Action::SendRequestWithAuth for session {} (method={:?})",
                 session.session_id, session.pending_auth_method
             );
             const CAP: u8 = 1;
-            if session.request_auth_retry_count >= CAP {
-                return Err(format!(
-                    "request auth retry cap ({}) exceeded for session {}",
-                    CAP, session.session_id
-                )
-                .into());
+            if !auth_retry_allowed(
+                session.request_auth_retry_count,
+                CAP,
+                session.auth_challenge.as_ref(),
+                session.auth_challenge_stale,
+                session.auth_challenge_replaces_nonce.as_deref(),
+            ) {
+                let method = resolve_auth_method(session);
+                return Err(Box::new(
+                    crate::errors::SessionError::RequestAuthRetryExhausted {
+                        method: auth_method_for_error(&method),
+                    },
+                ));
             }
             session.request_auth_retry_count += 1;
 
-            let challenge = session.auth_challenge.clone().ok_or_else(|| {
-                format!(
-                    "SendRequestWithAuth: no auth_challenge on session {}",
+            let (status, challenge_raw) = session
+                .pending_auth
+                .clone()
+                .unwrap_or_else(|| (401, session.auth_challenge_raw.clone().unwrap_or_default()));
+            if challenge_raw.is_empty() {
+                return Err(format!(
+                    "SendRequestWithAuth: no auth challenge on session {}",
                     session.session_id
                 )
-            })?;
-            let creds = session.credentials.clone().ok_or_else(|| {
-                Box::new(crate::errors::SessionError::MissingCredentialsForInviteAuth)
-                    as Box<dyn std::error::Error + Send + Sync>
-            })?;
+                .into());
+            }
+            let auth = session
+                .auth
+                .clone()
+                .or_else(|| session.credentials.clone().map(Into::into))
+                .ok_or_else(|| {
+                    let method = resolve_auth_method(session);
+                    Box::new(
+                        crate::errors::SessionError::MissingCredentialsForRequestAuth {
+                            method: auth_method_for_error(&method),
+                        },
+                    ) as Box<dyn std::error::Error + Send + Sync>
+                })?;
 
             // Resolve the method. Prefer the explicit field; fall back
             // to inspecting which stash is set. The conflict guard
@@ -1546,7 +1618,7 @@ pub(crate) async fn execute_action(
             // populated per session.
             let method = resolve_auth_method(session);
 
-            let (status, _) = session.pending_auth.take().unwrap_or((401, String::new()));
+            session.pending_auth.take();
             let header_name = if status == 407 {
                 "Proxy-Authorization"
             } else {
@@ -1565,12 +1637,19 @@ pub(crate) async fn execute_action(
             })?;
 
             // RFC 7616 §3.4.5 — per-(realm, nonce) NC counter.
-            let nc_key = (challenge.realm.clone(), challenge.nonce.clone());
-            let nc_value = *session
-                .digest_nc
-                .entry(nc_key)
-                .and_modify(|n| *n += 1)
-                .or_insert(1);
+            let digest_challenge_for_nc = session.auth_challenge.clone().or_else(|| {
+                rvoip_auth_core::DigestAuthenticator::parse_challenge(&challenge_raw).ok()
+            });
+            let nc_value = if let Some(challenge) = digest_challenge_for_nc.as_ref() {
+                let nc_key = (challenge.realm.clone(), challenge.nonce.clone());
+                *session
+                    .digest_nc
+                    .entry(nc_key)
+                    .and_modify(|n| *n += 1)
+                    .or_insert(1)
+            } else {
+                1
+            };
 
             // Most non-INVITE methods don't carry a body that's folded
             // into HA2 under qop=auth-int. The exceptions are MESSAGE
@@ -1586,21 +1665,15 @@ pub(crate) async fn execute_action(
             };
             let body_bytes_ref = body_bytes_owned.as_deref();
 
-            let computed = rvoip_auth_core::DigestClient::compute_response_with_state(
-                &creds.username,
-                &creds.password,
-                &challenge,
+            let selected_auth = auth.authorization_for_challenge(
+                &challenge_raw,
                 &method,
                 &request_uri,
                 nc_value,
                 body_bytes_ref,
+                request_uri.to_ascii_lowercase().starts_with("sips:"),
             )?;
-            let header_value = rvoip_auth_core::DigestClient::format_authorization_with_state(
-                &creds.username,
-                &challenge,
-                &request_uri,
-                &computed,
-            );
+            let header_value = selected_auth.value;
 
             // Dispatch per method. Each branch reads the matching
             // `pending_<method>_options` stash so the application
@@ -2679,6 +2752,39 @@ fn resolve_auth_method(session: &crate::session_store::SessionState) -> String {
     // Default fallback — caller will treat the unknown method as an
     // error.
     String::new()
+}
+
+fn auth_method_for_error(method: &str) -> rvoip_sip_core::Method {
+    match method {
+        "BYE" => rvoip_sip_core::Method::Bye,
+        "REFER" => rvoip_sip_core::Method::Refer,
+        "NOTIFY" => rvoip_sip_core::Method::Notify,
+        "INFO" => rvoip_sip_core::Method::Info,
+        "UPDATE" => rvoip_sip_core::Method::Update,
+        "MESSAGE" => rvoip_sip_core::Method::Message,
+        "OPTIONS" => rvoip_sip_core::Method::Options,
+        "SUBSCRIBE" => rvoip_sip_core::Method::Subscribe,
+        other => rvoip_sip_core::Method::Extension(other.to_string()),
+    }
+}
+
+fn auth_retry_allowed(
+    retry_count: u8,
+    cap: u8,
+    challenge: Option<&crate::auth::DigestChallenge>,
+    challenge_stale: bool,
+    replaces_nonce: Option<&str>,
+) -> bool {
+    if retry_count < cap {
+        return true;
+    }
+    if retry_count != cap || !challenge_stale {
+        return false;
+    }
+    let Some(challenge) = challenge else {
+        return false;
+    };
+    replaces_nonce.is_some_and(|previous| previous != challenge.nonce)
 }
 
 /// SIP_API_DESIGN_2 R2 — pick the request-URI to fold into HA2 for the
