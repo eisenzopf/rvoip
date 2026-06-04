@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-auth-core"
-version.workspace = true  # 0.2.0 — beta-tier; inherits from [workspace.package]
+version.workspace = true  # 0.2.1 — beta-tier; inherits from [workspace.package]
 edition.workspace = true
 authors.workspace = true
 description = "OAuth2 and token-based authentication for RVoIP services"
