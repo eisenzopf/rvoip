@@ -73,12 +73,7 @@ impl VconBuilder {
     }
 
     /// Append a text dialog segment (chat / IM / transcript turn).
-    pub fn text(
-        mut self,
-        start: DateTime<Utc>,
-        party: u32,
-        body: impl Into<String>,
-    ) -> Self {
+    pub fn text(mut self, start: DateTime<Utc>, party: u32, body: impl Into<String>) -> Self {
         self.vcon.dialog.push(Dialog {
             kind: DialogKind::Text,
             start,

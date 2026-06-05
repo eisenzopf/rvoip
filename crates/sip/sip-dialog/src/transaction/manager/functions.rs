@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use tracing::{debug, trace, warn};
 use rvoip_sip_core::prelude::*;
+use tracing::{debug, trace, warn};
 
 use crate::diagnostics;
 use crate::transaction::client::TransactionExt as ClientTransactionExt;
@@ -476,6 +476,7 @@ impl TransactionManager {
         self.transaction_destinations.remove(tx_id);
         self.pending_inbound_bytes.remove(tx_id);
         self.pending_inbound_inserted_at.remove(tx_id);
+        self.pending_inbound_transport.remove(tx_id);
         self.pending_inbound_timing.remove(tx_id);
 
         // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
@@ -702,6 +703,7 @@ impl TransactionManager {
                 self.transaction_destinations.remove(&key);
                 self.pending_inbound_bytes.remove(&key);
                 self.pending_inbound_inserted_at.remove(&key);
+                self.pending_inbound_transport.remove(&key);
                 self.pending_inbound_timing.remove(&key);
                 terminated_transaction_ids.push(key);
                 cleaned_count += 1;

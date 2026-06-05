@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use rvoip_core::adapter::ConnectionAdapter;
 use rvoip_auth_core::bearer_stub;
+use rvoip_core::adapter::ConnectionAdapter;
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads::auth;
 use rvoip_uctp::substrate::{dispatch_by_alpn, self_signed_for_dev};
@@ -23,7 +23,12 @@ fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-fn server_endpoint(addr: SocketAddr) -> (Arc<quinn::Endpoint>, rustls::pki_types::CertificateDer<'static>) {
+fn server_endpoint(
+    addr: SocketAddr,
+) -> (
+    Arc<quinn::Endpoint>,
+    rustls::pki_types::CertificateDer<'static>,
+) {
     let (cert_der, key_der) = self_signed_for_dev(&["localhost".into()]).expect("self_signed");
     let mut tls = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -61,8 +66,7 @@ async fn loopback_auth_handshake_via_wt_adapter() {
     let (server_ep, cert_der) = server_endpoint("127.0.0.1:0".parse().unwrap());
     let server_addr = server_ep.local_addr().expect("local_addr");
 
-    let mut routes = dispatch_by_alpn(Arc::clone(&server_ep), &[ALPN_H3])
-        .expect("dispatcher");
+    let mut routes = dispatch_by_alpn(Arc::clone(&server_ep), &[ALPN_H3]).expect("dispatcher");
     let accept_rx = routes.take(ALPN_H3).expect("h3 channel");
 
     let cfg = UctpWtConfig::new(Arc::clone(&server_ep), accept_rx, bearer_stub());
@@ -70,19 +74,14 @@ async fn loopback_auth_handshake_via_wt_adapter() {
     let _events = adapter.subscribe_events();
 
     let client_ep = client_endpoint();
-    let client_cfg = rvoip_uctp::substrate::dev_client_config_trusting(&cert_der)
-        .expect("client cfg");
+    let client_cfg =
+        rvoip_uctp::substrate::dev_client_config_trusting(&cert_der).expect("client cfg");
 
-    let url = Url::parse(&format!("https://localhost:{}/uctp", server_addr.port()))
-        .expect("parse url");
-    let client = UctpWtClient::connect(
-        &client_ep,
-        server_addr,
-        &url,
-        Arc::new(client_cfg),
-    )
-    .await
-    .expect("client connect");
+    let url =
+        Url::parse(&format!("https://localhost:{}/uctp", server_addr.port())).expect("parse url");
+    let client = UctpWtClient::connect(&client_ep, server_addr, &url, Arc::new(client_cfg))
+        .await
+        .expect("client connect");
 
     let mut inbound = client.take_inbound().expect("first take");
 
@@ -106,7 +105,7 @@ async fn loopback_auth_handshake_via_wt_adapter() {
         connid: None,
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
-    signature: None,
+        signature: None,
     };
     client.send(env).await.expect("send");
 

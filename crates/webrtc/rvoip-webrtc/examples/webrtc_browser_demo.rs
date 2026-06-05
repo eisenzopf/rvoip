@@ -204,7 +204,10 @@ async fn spawn_static_server(
 ) -> Result<std::net::SocketAddr, Box<dyn std::error::Error>> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
     let app = Router::new()
-        .route("/", get(|| async { axum::response::Redirect::temporary("/whip-publish.html") }))
+        .route(
+            "/",
+            get(|| async { axum::response::Redirect::temporary("/whip-publish.html") }),
+        )
         .route(
             "/:file",
             get(move |Path(file): Path<String>| {

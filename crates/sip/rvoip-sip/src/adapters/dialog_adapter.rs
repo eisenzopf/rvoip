@@ -31,7 +31,7 @@ use rvoip_infra_common::events::{
     coordinator::GlobalEventCoordinator,
     cross_crate::{RvoipCrossCrateEvent, SessionToDialogEvent},
 };
-use rvoip_sip_core::{Response, StatusCode};
+use rvoip_sip_core::{Response, StatusCode, Uri};
 use rvoip_sip_dialog::{
     api::unified::{
         ByeRequestOptions, CancelRequestOptions, InfoRequestOptions, MessageRequestOptions,
@@ -41,6 +41,7 @@ use rvoip_sip_dialog::{
     transaction::TransactionKey,
     DialogId as RvoipDialogId,
 };
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -211,6 +212,42 @@ impl DialogAdapter {
                 tracing::warn!("Failed to publish app-level dialog adapter event: {}", e);
             }
         });
+    }
+
+    pub(crate) fn outbound_transport_context_for_uri(
+        &self,
+        request_uri: &str,
+    ) -> crate::auth::SipTransportSecurityContext {
+        let Ok(uri) = Uri::from_str(request_uri) else {
+            return crate::auth::SipTransportSecurityContext::from_request_uri_transport_hint(
+                request_uri,
+            );
+        };
+        let transaction_manager = self
+            .dialog_api
+            .dialog_manager()
+            .core()
+            .transaction_manager();
+        let transport = transaction_manager.get_best_transport_for_uri(&uri);
+        let mut context =
+            crate::auth::SipTransportSecurityContext::from_transport_name(transport.to_string());
+        if let Some(info) = transaction_manager.get_transport_info(transport) {
+            context.local_addr = info.local_addr.map(|addr| addr.to_string());
+        }
+        context
+    }
+
+    pub(crate) fn outbound_transport_context_for_response(
+        &self,
+        response: &Response,
+        fallback_request_uri: &str,
+    ) -> crate::auth::SipTransportSecurityContext {
+        self.dialog_api
+            .outbound_transport_context_for_response(response)
+            .map(|context| {
+                crate::auth::SipTransportSecurityContext::from_transport_context(&context)
+            })
+            .unwrap_or_else(|| self.outbound_transport_context_for_uri(fallback_request_uri))
     }
 
     pub(crate) fn abort_registration_refresh(&self, session_id: &SessionId) {
@@ -848,10 +885,10 @@ impl DialogAdapter {
         Ok("sip:remote@example.com".to_string())
     }
 
-    /// RFC 3261 §22.2 — resend an INVITE with digest `Authorization` (or
+    /// RFC 3261 §22.2 — resend an INVITE with `Authorization` (or
     /// `Proxy-Authorization`) header on the same dialog after the server
     /// challenged with 401/407. The `SendINVITEWithAuth` state-machine action
-    /// owns the digest computation; this is a thin passthrough to dialog-core.
+    /// owns auth header computation; this is a thin passthrough to dialog-core.
     ///
     /// Both REGISTER and INVITE 401/407 challenges flow through the state
     /// machine via `DialogToSessionEvent::AuthRequired` → `EventType::AuthRequired`;
@@ -1665,7 +1702,8 @@ impl DialogAdapter {
     // extras via `apply_outbound_extras_policy_with_auth`, then injects
     // the stack-computed auth header at the end before handing off to
     // dialog-core. Called by `Action::SendRequestWithAuth` after the
-    // digest is computed against the cached challenge.
+    // matching client auth scheme computes the response for the cached
+    // challenge.
     // ─────────────────────────────────────────────────────────────────────
 
     pub async fn send_bye_with_auth(
@@ -2178,6 +2216,11 @@ impl DialogAdapter {
                 } else {
                     1
                 };
+                let transport_context = session
+                    .pending_auth_transport
+                    .clone()
+                    .unwrap_or_else(|| self.outbound_transport_context_for_uri(registrar_uri));
+                session.pending_auth_transport = None;
                 self.store.update_session(session.clone()).await?;
 
                 tracing::info!(
@@ -2189,13 +2232,13 @@ impl DialogAdapter {
                 // REGISTER body is empty; pass `None` so the qop
                 // selector picks `auth` (or legacy if no qop offered)
                 // rather than `auth-int`.
-                let selected = auth.authorization_for_challenge(
+                let selected = auth.authorization_for_challenge_with_transport_context(
                     &challenge_raw,
                     "REGISTER",
                     registrar_uri,
                     nc_value,
                     None,
-                    registrar_uri.to_ascii_lowercase().starts_with("sips:"),
+                    &transport_context,
                 )?;
 
                 tracing::info!(
@@ -2289,6 +2332,17 @@ impl DialogAdapter {
             response.status_code(),
             session_id.0
         );
+
+        let register_transport = self
+            .dialog_api
+            .outbound_transport_context_for_response(&response)
+            .map(|context| {
+                crate::auth::SipTransportSecurityContext::from_transport_context(&context)
+            });
+        if let Ok(mut session) = self.store.get_session(session_id).await {
+            session.pending_auth_transport = register_transport;
+            self.store.update_session(session).await?;
+        }
 
         match response.status_code() {
             200..=299 => {

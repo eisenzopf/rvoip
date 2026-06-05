@@ -24,7 +24,7 @@ use tokio::time::{sleep, timeout};
 use rvoip_sip_core::parser::parse_message;
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::types::header::HeaderName;
-use rvoip_sip_core::types::headers::HeaderValue;
+use rvoip_sip_core::types::headers::{HeaderAccess, HeaderValue};
 
 use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
 
@@ -63,6 +63,11 @@ pub enum ChallengeReply {
 #[derive(Clone, Debug)]
 pub struct CapturedAuthRequest {
     pub method: String,
+    pub cseq: u32,
+    pub call_id: String,
+    pub from_tag: Option<String>,
+    pub to_header: Option<String>,
+    pub via_header: Option<String>,
     pub raw: String,
 }
 
@@ -135,6 +140,16 @@ where
             let idx = count_task.fetch_add(1, Ordering::SeqCst);
             captured_task.lock().await.push(CapturedAuthRequest {
                 method: request.method().to_string(),
+                cseq: request.cseq().map(|cseq| cseq.sequence()).unwrap_or(0),
+                call_id: request
+                    .call_id()
+                    .map(|call_id| call_id.value())
+                    .unwrap_or_default(),
+                from_tag: request
+                    .from()
+                    .and_then(|from| from.tag().map(str::to_string)),
+                to_header: request.raw_header_value(&HeaderName::To),
+                via_header: request.raw_header_value(&HeaderName::Via),
                 raw: String::from_utf8_lossy(bytes_slice).into_owned(),
             });
             let plan = reply(idx);

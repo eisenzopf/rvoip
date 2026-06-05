@@ -66,9 +66,7 @@ impl SessionMachine {
 
             // Inviting → Ended on Cancel.
             (UctpSessionState::Inviting, SessionInput::CancelSent)
-            | (UctpSessionState::Inviting, SessionInput::CancelReceived) => {
-                UctpSessionState::Ended
-            }
+            | (UctpSessionState::Inviting, SessionInput::CancelReceived) => UctpSessionState::Ended,
 
             // Active → Ending on either side's End.
             (UctpSessionState::Active, SessionInput::EndSent)

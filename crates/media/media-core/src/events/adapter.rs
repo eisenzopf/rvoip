@@ -6,15 +6,15 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::{debug, error, info};
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
 use rvoip_infra_common::events::cross_crate::{
     CrossCrateEvent, MediaQualityMetrics, MediaToRtpEvent, MediaToSessionEvent,
     RvoipCrossCrateEvent, SessionToMediaEvent,
 };
 use rvoip_infra_common::planes::LayerTaskManager;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::{debug, error, info};
 
 use crate::integration::events::IntegrationEventType;
 use crate::session::events::{MediaSessionEventType, QualitySeverity};
@@ -186,7 +186,10 @@ impl MediaEventAdapter {
                 },
             )),
 
-            MediaSessionEventType::QualityIssue { metrics: _, severity } => {
+            MediaSessionEventType::QualityIssue {
+                metrics: _,
+                severity,
+            } => {
                 let mos_score = match severity {
                     QualitySeverity::Minor => 3.5,
                     QualitySeverity::Moderate => 3.0,

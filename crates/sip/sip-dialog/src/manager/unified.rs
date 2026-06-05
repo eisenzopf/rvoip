@@ -539,6 +539,13 @@ impl UnifiedDialogManager {
             (destination, request)
         };
 
+        let request_key = crate::manager::core::outbound_request_key(&request);
+        let next_hop =
+            crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request);
+        let selected_transport = self
+            .core
+            .transaction_manager()
+            .get_best_transport_for_uri(&next_hop);
         let transaction_id = self
             .core
             .transaction_manager()
@@ -554,6 +561,12 @@ impl UnifiedDialogManager {
             .send_request(&transaction_id)
             .await
             .map_err(|e| ApiError::internal(format!("Failed to send SUBSCRIBE: {}", e)))?;
+        self.core.record_outbound_transport_context(
+            &transaction_id,
+            request_key,
+            selected_transport,
+            destination,
+        );
 
         let response = self
             .core
@@ -708,6 +721,13 @@ impl UnifiedDialogManager {
             (destination, request)
         };
 
+        let request_key = crate::manager::core::outbound_request_key(&request);
+        let next_hop =
+            crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request);
+        let selected_transport = self
+            .core
+            .transaction_manager()
+            .get_best_transport_for_uri(&next_hop);
         let transaction_id = self
             .core
             .transaction_manager()
@@ -726,6 +746,12 @@ impl UnifiedDialogManager {
             .send_request(&transaction_id)
             .await
             .map_err(|e| ApiError::internal(format!("Failed to send SUBSCRIBE refresh: {}", e)))?;
+        self.core.record_outbound_transport_context(
+            &transaction_id,
+            request_key,
+            selected_transport,
+            destination,
+        );
 
         if expires == 0 {
             self.core

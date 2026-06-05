@@ -100,6 +100,9 @@ impl MessageBuilder {
             content_type: self.content_type,
             body,
             authorization: None,
+            cseq: None,
+            call_id: None,
+            from_tag: None,
             extra_headers,
         };
         self.coord

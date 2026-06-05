@@ -48,8 +48,9 @@ async fn pinned_fingerprint_matching_real_offer_is_accepted() {
     let remote_fps = adapter
         .remote_dtls_fingerprint(&conn_id)
         .expect("remote fp");
-    assert!(remote_fps.iter().any(|r| r.algorithm == fp.algorithm
-        && r.value.eq_ignore_ascii_case(&fp.value)));
+    assert!(remote_fps
+        .iter()
+        .any(|r| r.algorithm == fp.algorithm && r.value.eq_ignore_ascii_case(&fp.value)));
 }
 
 #[tokio::test]

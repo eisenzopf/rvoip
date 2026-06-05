@@ -108,7 +108,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        assert!(expiry >= now + 3500 && expiry <= now + 3700, "expiry near now+1h");
+        assert!(
+            expiry >= now + 3500 && expiry <= now + 3700,
+            "expiry near now+1h"
+        );
         assert!(cfg.credential.is_some());
     }
 

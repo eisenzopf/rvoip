@@ -216,7 +216,6 @@ impl fmt::Display for SessionExpires {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_session_expires_new() {

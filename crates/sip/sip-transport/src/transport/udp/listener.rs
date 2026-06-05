@@ -6,10 +6,10 @@ use tracing::trace;
 // `error!` is only reached from the `#[cfg(test)] pub fn default()`
 // fallback path below; gate the import the same way to avoid an
 // unused-import warning in the lib build.
-#[cfg(test)]
-use tracing::error;
 use super::socket::{bind_std_udp_socket, UdpSocketOptions};
 use crate::error::{Error, Result};
+#[cfg(test)]
+use tracing::error;
 
 // Reserved for the upcoming oversized-datagram drop path; kept so the
 // constant has one canonical home when that lands.

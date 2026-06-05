@@ -641,10 +641,7 @@ impl Event {
                     identity_id: None,
                 }
             }
-            ActiveSpeakerChanged {
-                connection_id,
-                ..
-            } => {
+            ActiveSpeakerChanged { connection_id, .. } => {
                 // No dedicated wire variant yet — surface as MediaQuality
                 // with zero loss so downstream crates that don't know
                 // about ActiveSpeaker still see *something* on the bus.

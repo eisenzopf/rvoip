@@ -11,7 +11,8 @@
 //! (CARVE_PLAN §3) land in subsequent steps.
 
 use crate::adapter::{
-    AdapterEvent, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest, PlaybackHandle, TransferTarget,
+    AdapterEvent, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest, PlaybackHandle,
+    TransferTarget,
 };
 use crate::bridge::{codec_to_pt, frame_pump, BridgeManager, CrossBridgeHandle};
 use crate::capability::{CapabilityDescriptor, CapabilityIntersection};
@@ -120,8 +121,7 @@ pub struct Orchestrator {
     asr_providers: Arc<DashMap<String, Arc<dyn crate::harness::AsrProvider>>>,
     tts_providers: Arc<DashMap<String, Arc<dyn crate::harness::TtsProvider>>>,
     dialog_managers: Arc<DashMap<String, Arc<dyn crate::harness::DialogManager>>>,
-    recording_sinks:
-        Arc<DashMap<String, Arc<dyn crate::harness::RecordingSink>>>,
+    recording_sinks: Arc<DashMap<String, Arc<dyn crate::harness::RecordingSink>>>,
     /// P5 — live recording sessions. Drop the JoinHandle on
     /// `stop_recording` to abort the pump.
     recordings: Arc<DashMap<crate::ids::RecordingId, RecordingHandle>>,
@@ -149,8 +149,7 @@ pub struct Orchestrator {
     /// P6 — per-tenant quotas. Empty map = unlimited everywhere.
     tenant_quotas: Arc<DashMap<TenantId, crate::config::TenantQuotas>>,
     /// P6 — per-tenant Conversation index.
-    conversations_by_tenant:
-        Arc<DashMap<TenantId, dashmap::DashSet<ConversationId>>>,
+    conversations_by_tenant: Arc<DashMap<TenantId, dashmap::DashSet<ConversationId>>>,
     /// V2.B — per-tenant admission semaphores. When a tenant has a
     /// quota for `max_concurrent_recordings`, an `Arc<Semaphore>` is
     /// installed here with that capacity; `start_recording` acquires
@@ -560,8 +559,8 @@ impl Orchestrator {
     pub fn capacity_report(&self) -> Event {
         let active_connections = self.connections.len() as u64;
         let active_bridges = self.cross_bridges.len() as u64;
-        let admission_in_use = (self.config.max_concurrent_setups
-            - self.admission.available_permits()) as u64;
+        let admission_in_use =
+            (self.config.max_concurrent_setups - self.admission.available_permits()) as u64;
         let active_sessions = self.sessions.len() as u64;
         let active_conversations = self.conversations.len() as u64;
         let active_recordings = self.recordings.len() as u64;
@@ -708,11 +707,13 @@ impl Orchestrator {
     }
 
     fn check_session_quota(&self, conv_id: &ConversationId) -> Result<()> {
-        let Some(tenant) = self
-            .conversations
-            .get(conv_id)
-            .map(|e| e.value().read().expect("conv lock poisoned").tenant_id.clone())
-        else {
+        let Some(tenant) = self.conversations.get(conv_id).map(|e| {
+            e.value()
+                .read()
+                .expect("conv lock poisoned")
+                .tenant_id
+                .clone()
+        }) else {
             return Ok(());
         };
         let Some(quotas) = self.tenant_quotas.get(&tenant).map(|e| *e.value()) else {
@@ -754,11 +755,7 @@ impl Orchestrator {
     /// `Event::ConversationClosed`. Closing an already-Closed
     /// Conversation is a no-op (idempotent).
     #[instrument(skip(self), fields(conversation_id = %id, force))]
-    pub async fn close_conversation(
-        &self,
-        id: ConversationId,
-        force: bool,
-    ) -> Result<()> {
+    pub async fn close_conversation(&self, id: ConversationId, force: bool) -> Result<()> {
         let conv_arc = self
             .conversations
             .get(&id)
@@ -882,11 +879,7 @@ impl Orchestrator {
     /// emits `Event::SessionEnded`. Idempotent: ending an already-
     /// Ended or Failed Session returns `Ok(())`.
     #[instrument(skip(self), fields(session_id = %session_id, reason = ?reason))]
-    pub async fn end_session(
-        &self,
-        session_id: SessionId,
-        reason: EndReason,
-    ) -> Result<()> {
+    pub async fn end_session(&self, session_id: SessionId, reason: EndReason) -> Result<()> {
         let sess_arc = self
             .sessions
             .get(&session_id)
@@ -913,10 +906,13 @@ impl Orchestrator {
         // P3 — finalize the Session's vCon: snapshot, encode, persist,
         // emit VconReady. Best-effort — a store failure logs but does
         // not block SessionEnded emission.
-        let tenant_id = self
-            .conversations
-            .get(&conv_id)
-            .map(|e| e.value().read().expect("conv lock poisoned").tenant_id.clone());
+        let tenant_id = self.conversations.get(&conv_id).map(|e| {
+            e.value()
+                .read()
+                .expect("conv lock poisoned")
+                .tenant_id
+                .clone()
+        });
         if let (Some((_, builder)), Some(tenant_id)) =
             (self.session_vcons.remove(&session_id), tenant_id)
         {
@@ -1039,7 +1035,11 @@ impl Orchestrator {
         }
 
         // P3 — auto-collect the joining party into the Session's vCon.
-        if let Some(builder) = self.session_vcons.get(&session_id).map(|e| Arc::clone(e.value())) {
+        if let Some(builder) = self
+            .session_vcons
+            .get(&session_id)
+            .map(|e| Arc::clone(e.value()))
+        {
             builder.add_party(crate::vcon::VconParty {
                 participant_id: participant_id.clone(),
                 display_name: None,
@@ -1085,7 +1085,11 @@ impl Orchestrator {
             .map(|e| Arc::clone(e.value()))
         {
             let mut conv = conv_arc.write().expect("conversation lock poisoned");
-            if let Some(p) = conv.participants.iter_mut().find(|p| p.id == participant_id) {
+            if let Some(p) = conv
+                .participants
+                .iter_mut()
+                .find(|p| p.id == participant_id)
+            {
                 p.left_at = Some(now);
             }
             conv.last_activity_at = now;
@@ -1112,10 +1116,7 @@ impl Orchestrator {
     /// across the borrow; the caller manages the `RwLock`. Returns
     /// `None` if the Conversation was never opened or has already been
     /// purged.
-    pub fn conversation(
-        &self,
-        id: &ConversationId,
-    ) -> Option<Arc<RwLock<Conversation>>> {
+    pub fn conversation(&self, id: &ConversationId) -> Option<Arc<RwLock<Conversation>>> {
         self.conversations.get(id).map(|e| Arc::clone(e.value()))
     }
 
@@ -1141,8 +1142,7 @@ impl Orchestrator {
         let (auto_end, conv_id) = {
             let mut sess = sess_arc.write().expect("session lock poisoned");
             sess.connections.remove(conn);
-            let auto_end =
-                sess.state == SessionState::Active && sess.connections.is_empty();
+            let auto_end = sess.state == SessionState::Active && sess.connections.is_empty();
             (auto_end, sess.conversation_id.clone())
         };
         if !auto_end {
@@ -1242,8 +1242,7 @@ impl Orchestrator {
         }
         // MP3c: drop all per-subscription MediaStreams owned by this
         // Session.
-        self.subscriber_streams
-            .retain(|(s, _, _, _), _| s != sid);
+        self.subscriber_streams.retain(|(s, _, _, _), _| s != sid);
     }
 
     /// Fan a publisher's `MediaFrame` out to every subscriber of
@@ -1313,15 +1312,12 @@ impl Orchestrator {
                     .and_then(|entry| entry.codec.clone())
                     .unwrap_or_else(crate::capability::default_audio_codec);
                 match adapter
-                    .allocate_subscriber_stream(
-                        subscriber_connid.clone(),
-                        frame.kind,
-                        codec,
-                    )
+                    .allocate_subscriber_stream(subscriber_connid.clone(), frame.kind, codec)
                     .await
                 {
                     Ok(stream) => {
-                        self.subscriber_streams.insert(key.clone(), Arc::clone(&stream));
+                        self.subscriber_streams
+                            .insert(key.clone(), Arc::clone(&stream));
                         Some(stream)
                     }
                     Err(RvoipError::NotImplemented(_)) => {
@@ -1524,8 +1520,7 @@ impl Orchestrator {
                     entry.add(&snapshot, None);
                 }
                 metrics::gauge!("rvoip_media_jitter_ms").set(snapshot.jitter_ms as f64);
-                metrics::gauge!("rvoip_media_packet_loss_pct")
-                    .set(snapshot.packet_loss_pct as f64);
+                metrics::gauge!("rvoip_media_packet_loss_pct").set(snapshot.packet_loss_pct as f64);
                 self.emit(Event::MediaQuality {
                     connection_id,
                     snapshot,
@@ -1759,7 +1754,8 @@ impl Orchestrator {
     /// Legacy name retained for compatibility — alias of
     /// [`Self::send_message_to_connection`].
     pub async fn send_message(&self, connection_id: ConnectionId, message: Message) -> Result<()> {
-        self.send_message_to_connection(connection_id, message).await
+        self.send_message_to_connection(connection_id, message)
+            .await
     }
 
     /// P4 — send a Message to a single Connection (single-substrate hop).
@@ -1889,12 +1885,7 @@ impl Orchestrator {
 
     /// P9 — record a per-tenant usage unit. Emits `UsageRecord` on
     /// the bus so downstream billing pipelines can aggregate.
-    pub fn record_usage(
-        &self,
-        tenant_id: TenantId,
-        kind: crate::events::UsageKind,
-        units: u64,
-    ) {
+    pub fn record_usage(&self, tenant_id: TenantId, kind: crate::events::UsageKind, units: u64) {
         self.emit(Event::UsageRecord {
             tenant_id,
             kind,
@@ -1967,12 +1958,7 @@ impl Orchestrator {
     ) -> Result<()> {
         let adapter = self.adapter_for(&connection_id)?;
         adapter
-            .send_step_up_request(
-                connection_id.clone(),
-                required.clone(),
-                Vec::new(),
-                None,
-            )
+            .send_step_up_request(connection_id.clone(), required.clone(), Vec::new(), None)
             .await?;
         self.emit(Event::IdentityStepUpRequested {
             connection_id,
@@ -2046,9 +2032,7 @@ impl Orchestrator {
             .recording_sinks
             .get(&sink_name)
             .map(|e| Arc::clone(e.value()))
-            .ok_or_else(|| {
-                RvoipError::AdmissionRejected("recording sink not registered")
-            })?;
+            .ok_or_else(|| RvoipError::AdmissionRejected("recording sink not registered"))?;
 
         // Resolve target → list of Connections to tap.
         let (conns, tenant_id) = match target {
@@ -2084,7 +2068,11 @@ impl Orchestrator {
                         let s = e.value().read().expect("sess lock poisoned");
                         let conns = s.connections.keys().cloned().collect::<Vec<_>>();
                         let tid = self.conversations.get(&s.conversation_id).map(|c| {
-                            c.value().read().expect("conv lock poisoned").tenant_id.clone()
+                            c.value()
+                                .read()
+                                .expect("conv lock poisoned")
+                                .tenant_id
+                                .clone()
                         });
                         (conns, tid)
                     })
@@ -2139,9 +2127,7 @@ impl Orchestrator {
                             tokio::spawn(async move {
                                 let mut rx = stream.frames_in();
                                 while let Some(frame) = rx.recv().await {
-                                    if paused_clone
-                                        .load(std::sync::atomic::Ordering::Relaxed)
-                                    {
+                                    if paused_clone.load(std::sync::atomic::Ordering::Relaxed) {
                                         // Drop frame silently while paused.
                                         continue;
                                     }
@@ -2213,10 +2199,7 @@ impl Orchestrator {
     /// frames", not "abandon frames already accepted". For strict
     /// drain-on-pause semantics, follow `pause_recording` with
     /// `stop_recording` (no resume) instead.
-    pub async fn pause_recording(
-        &self,
-        id: crate::ids::RecordingId,
-    ) -> Result<()> {
+    pub async fn pause_recording(&self, id: crate::ids::RecordingId) -> Result<()> {
         let entry = self
             .recordings
             .get(&id)
@@ -2227,10 +2210,7 @@ impl Orchestrator {
             .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
-    pub async fn resume_recording(
-        &self,
-        id: crate::ids::RecordingId,
-    ) -> Result<()> {
+    pub async fn resume_recording(&self, id: crate::ids::RecordingId) -> Result<()> {
         let entry = self
             .recordings
             .get(&id)
@@ -2255,9 +2235,7 @@ impl Orchestrator {
             .asr_providers
             .get(&provider_name)
             .map(|e| Arc::clone(e.value()))
-            .ok_or_else(|| {
-                RvoipError::AdmissionRejected("ASR provider not registered")
-            })?;
+            .ok_or_else(|| RvoipError::AdmissionRejected("ASR provider not registered"))?;
         let conn = match target {
             RecordingTarget::Connection(c) => c,
             RecordingTarget::Session(sid) => self
@@ -2293,9 +2271,7 @@ impl Orchestrator {
                 let me = Arc::clone(&me);
                 tokio::spawn(async move {
                     if let Ok(adapter) = me.adapter_for(&conn_for_push) {
-                        if let Ok(streams) =
-                            adapter.streams(conn_for_push).await
-                        {
+                        if let Ok(streams) = adapter.streams(conn_for_push).await {
                             for s in streams
                                 .into_iter()
                                 .filter(|s| s.kind() == StreamKind::Audio)
@@ -2337,10 +2313,7 @@ impl Orchestrator {
         Ok(tid)
     }
 
-    pub async fn stop_transcription(
-        &self,
-        id: crate::ids::TranscriptionId,
-    ) -> Result<()> {
+    pub async fn stop_transcription(&self, id: crate::ids::TranscriptionId) -> Result<()> {
         if let Some((_, h)) = self.transcriptions.remove(&id) {
             h.abort.abort();
             Ok(())
@@ -2446,9 +2419,8 @@ impl Orchestrator {
 
         let aid = crate::ids::AiAttachmentId::new();
         let speaking = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let speak_cancel: Arc<
-            tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-        > = Arc::new(tokio::sync::Mutex::new(None));
+        let speak_cancel: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
 
         let me = Arc::clone(self);
         let connection_id_for_task = connection_id.clone();
@@ -2458,10 +2430,7 @@ impl Orchestrator {
         let task = tokio::spawn(async move {
             let connection_id = connection_id_for_task;
             let stream: Arc<dyn crate::harness::AsrStream> = match asr
-                .open_stream(
-                    connection_id.clone(),
-                    crate::harness::AsrConfig::default(),
-                )
+                .open_stream(connection_id.clone(), crate::harness::AsrConfig::default())
                 .await
             {
                 Ok(s) => Arc::from(s),
@@ -2496,13 +2465,10 @@ impl Orchestrator {
                 // P5 barge-in: if user speech detected while we're
                 // speaking, cancel current playback + fire event.
                 if speaking_for_task.load(std::sync::atomic::Ordering::Relaxed) {
-                    if let Some(tx) =
-                        speak_cancel_for_task.lock().await.take()
-                    {
+                    if let Some(tx) = speak_cancel_for_task.lock().await.take() {
                         let _ = tx.send(());
                     }
-                    speaking_for_task
-                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    speaking_for_task.store(false, std::sync::atomic::Ordering::Relaxed);
                     me.emit(Event::BargeInDetected {
                         connection_id: connection_id.clone(),
                         ai_attachment_id: aid_for_task.clone(),
@@ -2531,19 +2497,14 @@ impl Orchestrator {
                             Ok(p) => p,
                             Err(_) => continue,
                         };
-                        let (cancel_tx, mut cancel_rx) =
-                            tokio::sync::oneshot::channel::<()>();
+                        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
                         *speak_cancel_for_task.lock().await = Some(cancel_tx);
-                        speaking_for_task
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        speaking_for_task.store(true, std::sync::atomic::Ordering::Relaxed);
 
                         if let Ok(adapter) = me.adapter_for(&connection_id) {
-                            if let Ok(streams) =
-                                adapter.streams(connection_id.clone()).await
-                            {
-                                let out = streams
-                                    .into_iter()
-                                    .find(|s| s.kind() == StreamKind::Audio);
+                            if let Ok(streams) = adapter.streams(connection_id.clone()).await {
+                                let out =
+                                    streams.into_iter().find(|s| s.kind() == StreamKind::Audio);
                                 if let Some(audio) = out {
                                     let tx = audio.frames_out();
                                     loop {
@@ -2563,8 +2524,7 @@ impl Orchestrator {
                                 }
                             }
                         }
-                        speaking_for_task
-                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        speaking_for_task.store(false, std::sync::atomic::Ordering::Relaxed);
                         // Drain any stale cancel sender (defensive).
                         let _ = speak_cancel_for_task.lock().await.take();
                     }
@@ -2647,7 +2607,8 @@ impl Orchestrator {
             _ => (None, None),
         };
         if let Some(rx) = rx_for_channel {
-            self.listener_channels.insert(lid.clone(), Mutex::new(Some(rx)));
+            self.listener_channels
+                .insert(lid.clone(), Mutex::new(Some(rx)));
         }
         let lid_for_task = lid.clone();
         let task = tokio::spawn(async move {
@@ -2659,7 +2620,10 @@ impl Orchestrator {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
-                for s in streams.into_iter().filter(|s| s.kind() == StreamKind::Audio) {
+                for s in streams
+                    .into_iter()
+                    .filter(|s| s.kind() == StreamKind::Audio)
+                {
                     let tx_clone = tx_for_channel.clone();
                     let lid_clone = lid_for_task.clone();
                     tokio::spawn(async move {
@@ -2704,10 +2668,7 @@ impl Orchestrator {
             .and_then(|e| e.value().lock().expect("listener lock poisoned").take())
     }
 
-    pub async fn detach(
-        &self,
-        attachment: crate::commands::AttachmentRef,
-    ) -> Result<()> {
+    pub async fn detach(&self, attachment: crate::commands::AttachmentRef) -> Result<()> {
         use crate::commands::AttachmentRef;
         match attachment {
             AttachmentRef::Ai(id) => {
@@ -2736,9 +2697,7 @@ impl Orchestrator {
                 });
                 Ok(())
             }
-            AttachmentRef::Recording(id) => {
-                self.stop_recording(id).await.map(|_| ())
-            }
+            AttachmentRef::Recording(id) => self.stop_recording(id).await.map(|_| ()),
         }
     }
 
@@ -2780,9 +2739,7 @@ impl Orchestrator {
                     let bridge_id_opt: Option<BridgeId> = {
                         self.cross_bridges
                             .iter()
-                            .find(|e| {
-                                e.value().a == connection_id || e.value().b == connection_id
-                            })
+                            .find(|e| e.value().a == connection_id || e.value().b == connection_id)
                             .map(|e| e.key().clone())
                     };
                     if let Some(bridge_id) = bridge_id_opt {
@@ -2858,11 +2815,7 @@ impl Orchestrator {
     /// P2 — mute one direction (Send / Receive / Both) on a Connection.
     /// Dispatches through the registered adapter; adapters that don't
     /// implement mute return `RvoipError::NotImplemented`.
-    pub async fn mute(
-        &self,
-        connection_id: ConnectionId,
-        direction: MuteDirection,
-    ) -> Result<()> {
+    pub async fn mute(&self, connection_id: ConnectionId, direction: MuteDirection) -> Result<()> {
         let adapter = self.adapter_for(&connection_id)?;
         adapter.mute(connection_id, direction).await
     }
@@ -2918,9 +2871,7 @@ impl Orchestrator {
         for entry in self.cross_bridges.iter() {
             let h = entry.value();
             if h.a == a || h.b == a || h.a == b || h.b == b {
-                return Err(RvoipError::AdmissionRejected(
-                    "connection already bridged",
-                ));
+                return Err(RvoipError::AdmissionRejected("connection already bridged"));
             }
         }
 
@@ -2949,8 +2900,12 @@ impl Orchestrator {
         let (a_audio, b_audio) = loop {
             let a_streams = a_adapter.streams(a.clone()).await?;
             let b_streams = b_adapter.streams(b.clone()).await?;
-            let a_audio = a_streams.into_iter().find(|s| s.kind() == StreamKind::Audio);
-            let b_audio = b_streams.into_iter().find(|s| s.kind() == StreamKind::Audio);
+            let a_audio = a_streams
+                .into_iter()
+                .find(|s| s.kind() == StreamKind::Audio);
+            let b_audio = b_streams
+                .into_iter()
+                .find(|s| s.kind() == StreamKind::Audio);
             match (a_audio, b_audio) {
                 (Some(a_s), Some(b_s)) => break (a_s, b_s),
                 _ if start.elapsed() >= deadline => {
@@ -3080,7 +3035,13 @@ fn tenant_id_for_index(
 ) -> TenantId {
     conversations
         .get(id)
-        .map(|e| e.value().read().expect("conv lock poisoned").tenant_id.clone())
+        .map(|e| {
+            e.value()
+                .read()
+                .expect("conv lock poisoned")
+                .tenant_id
+                .clone()
+        })
         .unwrap_or_default()
 }
 

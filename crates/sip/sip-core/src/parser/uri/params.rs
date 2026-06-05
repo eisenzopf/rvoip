@@ -201,8 +201,6 @@ pub fn uri_parameters(input: &[u8]) -> ParseResult<'_, Vec<Param>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    
 
     #[test]
     fn test_other_param_unescaped() {

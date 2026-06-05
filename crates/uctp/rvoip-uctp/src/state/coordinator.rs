@@ -15,16 +15,16 @@ use tracing::{debug, debug_span, info, info_span, instrument, warn, Instrument};
 
 use crate::substrate::correlation::Pending;
 
-use rvoip_auth_core::BearerValidator;
-use rvoip_core::capability::{
-    negotiate_streams, CapabilityDescriptor, CodecInfo, NegotiationOutcome, StreamOffer,
-};
-use rvoip_core::identity::IdentityAssurance;
 use crate::envelope::UctpEnvelope;
 use crate::errors::{Result, UctpError};
 use crate::ids::{ConnectionId, EnvelopeId, SessionId};
 use crate::payloads;
 use crate::types::MessageType;
+use rvoip_auth_core::BearerValidator;
+use rvoip_core::capability::{
+    negotiate_streams, CapabilityDescriptor, CodecInfo, NegotiationOutcome, StreamOffer,
+};
+use rvoip_core::identity::IdentityAssurance;
 
 use super::connection::{ConnectionInput, ConnectionMachine};
 use super::events::UctpSessionEvent;
@@ -481,8 +481,8 @@ impl UctpCoordinator {
                 reason: "shutdown".into(),
             };
             if let Ok(value) = serde_json::to_value(payload) {
-                let env = UctpEnvelope::new(MessageType::SessionEnd, value)
-                    .with_sid(sid.to_string());
+                let env =
+                    UctpEnvelope::new(MessageType::SessionEnd, value).with_sid(sid.to_string());
                 // Use the timeout-wrapped path: if the substrate writer
                 // is wedged we still want to return rather than hang.
                 let _ = self.send_out(env).await;
@@ -533,8 +533,7 @@ impl UctpCoordinator {
             .connections
             .iter()
             .filter(|entry| {
-                entry.value().lock().state()
-                    == super::connection::UctpConnectionState::Negotiating
+                entry.value().lock().state() == super::connection::UctpConnectionState::Negotiating
             })
             .count();
         metrics::gauge!(
@@ -766,9 +765,7 @@ impl UctpCoordinator {
                     MessageType::DtmfSend => self.handle_dtmf_send(env).await,
                     MessageType::ConnectionQuality => self.handle_connection_quality(env).await,
                     MessageType::AuthRefresh => self.handle_auth_refresh(env).await,
-                    MessageType::IdentityStepUpResponse => {
-                        self.handle_step_up_response(env).await
-                    }
+                    MessageType::IdentityStepUpResponse => self.handle_step_up_response(env).await,
                     // `identity.step-up-request` is server→client per
                     // CONVERSATION_PROTOCOL.md §5.8 — silently drop on
                     // the inbound dispatcher (the server does not
@@ -842,10 +839,7 @@ impl UctpCoordinator {
     /// / connid for caller diagnostics) and returns `false` so the
     /// caller can short-circuit the handler.
     async fn require_authenticated(&self, env: &UctpEnvelope) -> Result<bool> {
-        let is_authed = matches!(
-            &*self.peer_auth.lock(),
-            PeerAuthState::Authenticated { .. }
-        );
+        let is_authed = matches!(&*self.peer_auth.lock(), PeerAuthState::Authenticated { .. });
         if is_authed {
             return Ok(true);
         }
@@ -886,12 +880,7 @@ impl UctpCoordinator {
         // connection as unrecoverable: log, trigger shutdown, and
         // surface Closed. (Plan D2 — was a hard-coded const; now
         // configurable per-coordinator via [`UctpCoordinatorCaps`].)
-        match tokio::time::timeout(
-            self.caps.signaling_send_timeout,
-            self.out_tx.send(env),
-        )
-        .await
-        {
+        match tokio::time::timeout(self.caps.signaling_send_timeout, self.out_tx.send(env)).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(_)) => Err(UctpError::Closed),
             Err(_) => {
@@ -990,11 +979,7 @@ impl UctpCoordinator {
     /// Emit `error 404 not-found` for an envelope addressed to an unknown
     /// session or connection id, per plan §3.5. Returns `Ok(())` so
     /// callers can `return self.not_found(...).await` in a single line.
-    async fn not_found(
-        &self,
-        env: &UctpEnvelope,
-        kind: &'static str,
-    ) -> Result<()> {
+    async fn not_found(&self, env: &UctpEnvelope, kind: &'static str) -> Result<()> {
         self.emit_error_full(
             env.id.clone(),
             404,
@@ -1080,11 +1065,9 @@ impl UctpCoordinator {
                     participant_id: session.participant_id.clone(),
                     assurance: assurance.clone(),
                 };
-                let reply = UctpEnvelope::new(
-                    MessageType::AuthSession,
-                    serde_json::to_value(&session)?,
-                )
-                .with_in_reply_to(env.id);
+                let reply =
+                    UctpEnvelope::new(MessageType::AuthSession, serde_json::to_value(&session)?)
+                        .with_in_reply_to(env.id);
                 self.send_out(reply).await?;
                 self.emit_event(UctpSessionEvent::Authenticated {
                     identity_id: session.identity_id,
@@ -1103,10 +1086,7 @@ impl UctpCoordinator {
 
     async fn handle_session_invite(&self, env: UctpEnvelope) -> Result<()> {
         let payload: payloads::session::SessionInvite = env.decode_payload()?;
-        let sid_str = env
-            .sid
-            .clone()
-            .ok_or(UctpError::MissingField("sid"))?;
+        let sid_str = env.sid.clone().ok_or(UctpError::MissingField("sid"))?;
         let sid = SessionId::from_string(sid_str.clone());
 
         let span = info_span!(
@@ -1182,7 +1162,8 @@ impl UctpCoordinator {
                 )
                 .record(started.elapsed().as_secs_f64());
             }
-            self.emit_event(UctpSessionEvent::SessionConnected { sid }).await?;
+            self.emit_event(UctpSessionEvent::SessionConnected { sid })
+                .await?;
         }
         Ok(())
     }
@@ -1211,7 +1192,10 @@ impl UctpCoordinator {
 
     async fn handle_connection_offer(&self, env: UctpEnvelope) -> Result<()> {
         let payload: payloads::connection::ConnectionOffer = env.decode_payload()?;
-        let connid_str = env.connid.clone().ok_or(UctpError::MissingField("connid"))?;
+        let connid_str = env
+            .connid
+            .clone()
+            .ok_or(UctpError::MissingField("connid"))?;
         let connid = ConnectionId::from_string(connid_str.clone());
 
         // §8.1 capability negotiation: walk the offer's streams against
@@ -1318,7 +1302,10 @@ impl UctpCoordinator {
     }
 
     async fn handle_connection_answer(&self, env: UctpEnvelope) -> Result<()> {
-        let connid_str = env.connid.clone().ok_or(UctpError::MissingField("connid"))?;
+        let connid_str = env
+            .connid
+            .clone()
+            .ok_or(UctpError::MissingField("connid"))?;
         let connid = ConnectionId::from_string(connid_str);
         if !self.connections.contains_key(&connid) {
             return self.not_found(&env, "unknown-connid").await;
@@ -1357,7 +1344,10 @@ impl UctpCoordinator {
     /// driver-side counterpart of this handler.
     async fn handle_connection_update(&self, env: UctpEnvelope) -> Result<()> {
         let payload: payloads::connection::ConnectionUpdate = env.decode_payload()?;
-        let connid_str = env.connid.clone().ok_or(UctpError::MissingField("connid"))?;
+        let connid_str = env
+            .connid
+            .clone()
+            .ok_or(UctpError::MissingField("connid"))?;
         let connid = ConnectionId::from_string(connid_str.clone());
         if !self.connections.contains_key(&connid) {
             return self.not_found(&env, "unknown-connid").await;
@@ -1415,10 +1405,8 @@ impl UctpCoordinator {
                         // ordering to one). Peers that initiated the
                         // renegotiation use this to drive their
                         // adapter-side codec swap.
-                        let chosen: Vec<String> = results
-                            .into_iter()
-                            .filter_map(|r| r.chosen_codec)
-                            .collect();
+                        let chosen: Vec<String> =
+                            results.into_iter().filter_map(|r| r.chosen_codec).collect();
                         let reply_payload = payloads::connection::ConnectionUpdate {
                             action: "renegotiate-media".into(),
                             streams: stream_ids,
@@ -1454,7 +1442,10 @@ impl UctpCoordinator {
     }
 
     async fn handle_connection_ready(&self, env: UctpEnvelope) -> Result<()> {
-        let connid_str = env.connid.clone().ok_or(UctpError::MissingField("connid"))?;
+        let connid_str = env
+            .connid
+            .clone()
+            .ok_or(UctpError::MissingField("connid"))?;
         let connid = ConnectionId::from_string(connid_str.clone());
         let sid_str = env.sid.clone().ok_or(UctpError::MissingField("sid"))?;
         let sid = SessionId::from_string(sid_str.clone());
@@ -1514,26 +1505,23 @@ impl UctpCoordinator {
                 .with_sid(sid_str.clone())
                 .with_connid(connid_str.clone());
                 self.send_out(opened_env).await?;
-                let codec = stream.chosen_codec.as_ref().map(|name| {
-                    rvoip_core::capability::CodecInfo::from_name_with_defaults(name)
-                });
-                self.subscription_handler.register_publisher(
-                    super::subscription::PublisherInfo {
+                let codec = stream
+                    .chosen_codec
+                    .as_ref()
+                    .map(|name| rvoip_core::capability::CodecInfo::from_name_with_defaults(name));
+                self.subscription_handler
+                    .register_publisher(super::subscription::PublisherInfo {
                         sid: &sid,
                         strm_id: &stream.strm_id,
                         connection: &connid,
                         participant: &stream.participant,
                         kind: &stream.kind,
                         codec,
-                    },
-                );
+                    });
             }
 
-            self.emit_event(UctpSessionEvent::ConnectionConnected {
-                sid,
-                connid,
-            })
-            .await
+            self.emit_event(UctpSessionEvent::ConnectionConnected { sid, connid })
+                .await
         }
         .instrument(lifetime_span)
         .await
@@ -1542,7 +1530,10 @@ impl UctpCoordinator {
     async fn handle_stream_subscribe(&self, env: UctpEnvelope) -> Result<()> {
         let payload: payloads::stream::StreamSubscribe = env.decode_payload()?;
         let sid_str = env.sid.clone().ok_or(UctpError::MissingField("sid"))?;
-        let connid_str = env.connid.clone().ok_or(UctpError::MissingField("connid"))?;
+        let connid_str = env
+            .connid
+            .clone()
+            .ok_or(UctpError::MissingField("connid"))?;
         let sid = SessionId::from_string(sid_str);
         let subscriber = ConnectionId::from_string(connid_str);
 
@@ -1564,7 +1555,11 @@ impl UctpCoordinator {
                 self.emit_error_full(
                     env.id.clone(),
                     code,
-                    if code == 404 { "not-found" } else { "transient" },
+                    if code == 404 {
+                        "not-found"
+                    } else {
+                        "transient"
+                    },
                     &reason,
                     Some(sid.to_string()),
                     Some(subscriber.to_string()),
@@ -1577,7 +1572,10 @@ impl UctpCoordinator {
     async fn handle_stream_unsubscribe(&self, env: UctpEnvelope) -> Result<()> {
         let payload: payloads::stream::StreamUnsubscribe = env.decode_payload()?;
         let sid_str = env.sid.clone().ok_or(UctpError::MissingField("sid"))?;
-        let connid_str = env.connid.clone().ok_or(UctpError::MissingField("connid"))?;
+        let connid_str = env
+            .connid
+            .clone()
+            .ok_or(UctpError::MissingField("connid"))?;
         let sid = SessionId::from_string(sid_str);
         let subscriber = ConnectionId::from_string(connid_str);
 
@@ -1599,7 +1597,11 @@ impl UctpCoordinator {
                 self.emit_error_full(
                     env.id.clone(),
                     code,
-                    if code == 404 { "not-found" } else { "transient" },
+                    if code == 404 {
+                        "not-found"
+                    } else {
+                        "transient"
+                    },
                     &reason,
                     Some(sid.to_string()),
                     Some(subscriber.to_string()),
@@ -1680,7 +1682,10 @@ impl UctpCoordinator {
     /// scoped handlers.
     async fn handle_dtmf_send(&self, env: UctpEnvelope) -> Result<()> {
         let payload: payloads::control::DtmfSend = env.decode_payload()?;
-        let connid_str = env.connid.clone().ok_or(UctpError::MissingField("connid"))?;
+        let connid_str = env
+            .connid
+            .clone()
+            .ok_or(UctpError::MissingField("connid"))?;
         let connid = ConnectionId::from_string(connid_str);
         if !self.connections.contains_key(&connid) {
             return self.not_found(&env, "unknown-connid").await;
@@ -1750,11 +1755,9 @@ impl UctpCoordinator {
                     participant_id: participant_id.clone(),
                     assurance: assurance.clone(),
                 };
-                let reply = UctpEnvelope::new(
-                    MessageType::AuthSession,
-                    serde_json::to_value(&session)?,
-                )
-                .with_in_reply_to(env.id);
+                let reply =
+                    UctpEnvelope::new(MessageType::AuthSession, serde_json::to_value(&session)?)
+                        .with_in_reply_to(env.id);
                 self.send_out(reply).await?;
                 self.emit_event(UctpSessionEvent::Authenticated {
                     identity_id,
@@ -1787,7 +1790,10 @@ impl UctpCoordinator {
     /// distinguish "no MOS reported" from "MOS == 0.0").
     async fn handle_connection_quality(&self, env: UctpEnvelope) -> Result<()> {
         let payload: payloads::connection::ConnectionQuality = env.decode_payload()?;
-        let connid_str = env.connid.clone().ok_or(UctpError::MissingField("connid"))?;
+        let connid_str = env
+            .connid
+            .clone()
+            .ok_or(UctpError::MissingField("connid"))?;
         let connid = ConnectionId::from_string(connid_str);
         if !self.connections.contains_key(&connid) {
             return self.not_found(&env, "unknown-connid").await;
@@ -1827,4 +1833,3 @@ fn assurance_label(a: &rvoip_core::identity::IdentityAssurance) -> &'static str 
         DtlsFingerprint { .. } => "pseudonymous",
     }
 }
-

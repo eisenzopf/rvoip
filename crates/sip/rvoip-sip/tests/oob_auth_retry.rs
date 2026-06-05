@@ -35,6 +35,28 @@ fn assert_digest_retry(captured: &[CapturedAuthRequest], method: &str, nonce: &s
     assert_eq!(captured[0].method, method);
     assert_eq!(captured[1].method, method);
     assert!(
+        captured[1].cseq > captured[0].cseq,
+        "RFC 3261 §22.2 retry must increment CSeq for {method}: initial={}, retry={}",
+        captured[0].cseq,
+        captured[1].cseq
+    );
+    assert_eq!(
+        captured[1].call_id, captured[0].call_id,
+        "RFC 3261 §8.1.3.5 retry should preserve Call-ID for {method}"
+    );
+    assert_eq!(
+        captured[1].from_tag, captured[0].from_tag,
+        "RFC 3261 §8.1.3.5 retry should preserve From tag for {method}"
+    );
+    assert_eq!(
+        captured[1].to_header, captured[0].to_header,
+        "RFC 3261 §8.1.3.5 retry should preserve To for {method}"
+    );
+    assert_ne!(
+        captured[1].via_header, captured[0].via_header,
+        "RFC 3261 §22.2 auth retry should use a fresh client transaction Via for {method}"
+    );
+    assert!(
         !captured[0].raw.contains("Authorization:"),
         "initial {method} must not carry Authorization: {}",
         captured[0].raw
@@ -90,6 +112,28 @@ fn assert_proxy_digest_retry(captured: &[CapturedAuthRequest], method: &str, non
     );
     assert_eq!(captured[0].method, method);
     assert_eq!(captured[1].method, method);
+    assert!(
+        captured[1].cseq > captured[0].cseq,
+        "RFC 3261 §22.2 retry must increment CSeq for {method}: initial={}, retry={}",
+        captured[0].cseq,
+        captured[1].cseq
+    );
+    assert_eq!(
+        captured[1].call_id, captured[0].call_id,
+        "RFC 3261 §8.1.3.5 retry should preserve Call-ID for {method}"
+    );
+    assert_eq!(
+        captured[1].from_tag, captured[0].from_tag,
+        "RFC 3261 §8.1.3.5 retry should preserve From tag for {method}"
+    );
+    assert_eq!(
+        captured[1].to_header, captured[0].to_header,
+        "RFC 3261 §8.1.3.5 retry should preserve To for {method}"
+    );
+    assert_ne!(
+        captured[1].via_header, captured[0].via_header,
+        "RFC 3261 §22.2 auth retry should use a fresh client transaction Via for {method}"
+    );
     assert!(
         !captured[0].raw.contains("Authorization:"),
         "initial {method} must not carry auth headers: {}",
@@ -181,7 +225,7 @@ async fn message_with_bearer_token_retries_with_bearer_authorization() -> Result
     coord
         .message(format!("sip:bob@{}", uas.addr))
         .with_body("hello")
-        .with_bearer_token("token-123")
+        .with_auth(SipClientAuth::bearer_token("token-123").allow_bearer_over_cleartext(true))
         .send()
         .await?;
 
@@ -277,7 +321,7 @@ async fn message_composite_auth_picks_bearer_over_digest() -> Result<()> {
         .with_body("hello")
         .with_auth(SipClientAuth::any([
             SipClientAuth::digest("alice", "password"),
-            SipClientAuth::bearer_token("stronger-token"),
+            SipClientAuth::bearer_token("stronger-token").allow_bearer_over_cleartext(true),
         ]))
         .send()
         .await?;
@@ -374,6 +418,37 @@ async fn message_with_credentials_recovers_once_from_stale_nonce() -> Result<()>
 
     let captured = uas.wait_for_n(3, Duration::from_secs(8)).await;
     assert_eq!(captured.len(), 3);
+    assert!(
+        captured[1].cseq > captured[0].cseq && captured[2].cseq > captured[1].cseq,
+        "RFC 3261 §22.2 stale retry must increment CSeq each time: initial={}, retry={}, stale_retry={}",
+        captured[0].cseq,
+        captured[1].cseq,
+        captured[2].cseq
+    );
+    assert!(
+        captured
+            .iter()
+            .all(|capture| capture.call_id == captured[0].call_id),
+        "RFC 3261 §8.1.3.5 stale retry should preserve Call-ID across all attempts"
+    );
+    assert!(
+        captured
+            .iter()
+            .all(|capture| capture.from_tag == captured[0].from_tag),
+        "RFC 3261 §8.1.3.5 stale retry should preserve From tag across all attempts"
+    );
+    assert!(
+        captured
+            .iter()
+            .all(|capture| capture.to_header == captured[0].to_header),
+        "RFC 3261 §8.1.3.5 stale retry should preserve To across all attempts"
+    );
+    assert!(
+        captured
+            .windows(2)
+            .all(|pair| pair[1].via_header != pair[0].via_header),
+        "RFC 3261 §22.2 stale retry should use a fresh client transaction Via on each retry"
+    );
     assert!(captured[1].raw.contains(r#"nonce="old-nonce""#));
     assert!(captured[2].raw.contains(r#"nonce="fresh-nonce""#));
     assert!(captured[2].raw.contains("nc=00000001"));

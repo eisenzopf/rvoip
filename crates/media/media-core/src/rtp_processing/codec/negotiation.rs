@@ -3,13 +3,13 @@
 //! This module handles codec negotiation between media endpoints,
 //! including capability matching and format selection.
 
-use std::collections::HashMap;
-use tracing::{debug};
 use super::registry::get_global_registry;
 use crate::api::{
     error::MediaError,
     types::{MediaCodec, MediaDirection},
 };
+use std::collections::HashMap;
+use tracing::debug;
 
 /// Codec negotiation result
 #[derive(Debug, Clone, PartialEq)]

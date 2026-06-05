@@ -26,14 +26,14 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use rvoip_auth_core::bearer_stub;
 use rvoip_core::{Config, Orchestrator, Transport};
 use rvoip_quic::{UctpQuicAdapter, UctpQuicConfig};
 use rvoip_sip::api::unified::{Config as SipConfig, UnifiedCoordinator};
 use rvoip_sip::SipAdapter;
-use rvoip_auth_core::bearer_stub;
 use rvoip_uctp::substrate::{dispatch_by_alpn, make_server_endpoint, self_signed_for_dev};
-use rvoip_webtransport::{UctpWtAdapter, UctpWtConfig};
 use rvoip_websocket::{UctpWsAdapter, UctpWsConfig};
+use rvoip_webtransport::{UctpWtAdapter, UctpWtConfig};
 use tokio::net::TcpListener;
 
 const ALPN_UCTP: &[u8] = b"uctp/1";
@@ -230,7 +230,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             if pending.len() == 2 {
                 let a = pending.remove(0);
                 let b = pending.remove(0);
-                match orch_for_bridge.bridge_connections(a.clone(), b.clone()).await {
+                match orch_for_bridge
+                    .bridge_connections(a.clone(), b.clone())
+                    .await
+                {
                     Ok(bid) => println!(
                         "[orchestrator_bridge] auto-bridged {} <-> {} as {}",
                         a, b, bid

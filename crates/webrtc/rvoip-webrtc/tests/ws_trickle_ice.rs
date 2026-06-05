@@ -22,7 +22,9 @@ async fn ws_inbound_trickle_candidate_is_applied() {
     let addr = listener.local_addr().expect("addr");
     let server_adapter_for_serve = Arc::clone(&server_adapter);
     let server_handle = tokio::spawn(async move {
-        serve_listener(listener, server_adapter_for_serve).await.ok();
+        serve_listener(listener, server_adapter_for_serve)
+            .await
+            .ok();
     });
 
     // Client-side offerer (separate adapter — just for SDP generation).
@@ -56,13 +58,12 @@ async fn ws_inbound_trickle_candidate_is_applied() {
         .expect("answer timeout")
         .expect("ws closed")
         .expect("ws err");
-    let parsed: SignalingMessage = serde_json::from_str(
-        answer_msg
-            .to_text()
-            .expect("text"),
-    )
-    .expect("decode answer");
-    assert_eq!(parsed.msg_type, "answer", "first reply should be the answer");
+    let parsed: SignalingMessage =
+        serde_json::from_str(answer_msg.to_text().expect("text")).expect("decode answer");
+    assert_eq!(
+        parsed.msg_type, "answer",
+        "first reply should be the answer"
+    );
     let server_conn_id = parsed.connection_id.clone();
     assert!(!server_conn_id.is_empty());
 

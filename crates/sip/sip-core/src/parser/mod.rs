@@ -93,7 +93,6 @@ mod tests {
     use super::*;
     use crate::types::header::HeaderName;
     use crate::types::{Method, StatusCode};
-    
 
     #[test]
     fn test_parse_result_type() {
@@ -233,9 +232,7 @@ mod tests {
     fn test_header_exports() {
         // Test that header parsers are correctly re-exported
         use super::headers::via::parse_via_params;
-        use super::headers::{
-            parse_contact, parse_cseq, parse_from,
-        };
+        use super::headers::{parse_contact, parse_cseq, parse_from};
 
         // Via - uncommented for debugging
         let input = b"SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds";
@@ -261,7 +258,6 @@ mod tests {
     // Add specific test for Via headers
     #[test]
     fn test_via_headers() {
-        
         use super::headers::via::parse_via_params;
 
         // Test basic Via header

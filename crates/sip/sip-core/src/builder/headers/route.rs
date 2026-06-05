@@ -1,10 +1,7 @@
+use crate::parser::headers::route::RouteEntry;
 #[cfg(test)]
 use crate::types::headers::HeaderName;
-use crate::parser::headers::route::RouteEntry;
-use crate::types::{
-    address::Address,
-    headers::TypedHeader, route::Route, uri::Uri,
-};
+use crate::types::{address::Address, headers::TypedHeader, route::Route, uri::Uri};
 use crate::{RequestBuilder, ResponseBuilder};
 
 /// Route header builder

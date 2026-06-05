@@ -1904,6 +1904,10 @@ impl<H: CallHandler> CallbackPeer<H> {
                         .session_registry
                         .peek_pending_incoming_request()
                         .await;
+                    let transport = coordinator
+                        .session_registry
+                        .peek_pending_incoming_transport()
+                        .await;
                     let incoming = match parsed {
                         Some(req) => IncomingCall::with_request(
                             call_id.clone(),
@@ -1920,7 +1924,13 @@ impl<H: CallHandler> CallbackPeer<H> {
                             sdp,
                             coordinator.clone(),
                         ),
-                    };
+                    }
+                    .with_transport_context(
+                        transport
+                            .as_deref()
+                            .cloned()
+                            .unwrap_or_else(crate::auth::SipTransportSecurityContext::unknown),
+                    );
                     let decision = handler.on_incoming_call(incoming).await;
                     // These coordinator calls are idempotent — if the handler
                     // already resolved the call, the session has transitioned

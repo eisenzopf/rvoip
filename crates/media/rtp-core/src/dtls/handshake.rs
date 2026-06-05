@@ -38,8 +38,7 @@ use rand::Rng;
 
 use super::message::extension::{Extension, SrtpProtectionProfile, UseSrtpExtension};
 use super::message::handshake::{
-    ClientHello,
-    HandshakeMessage, HandshakeType, HelloVerifyRequest, ServerHello,
+    ClientHello, HandshakeMessage, HandshakeType, HelloVerifyRequest, ServerHello,
 };
 use super::{DtlsRole, DtlsVersion, Result};
 
@@ -430,7 +429,6 @@ impl HandshakeState {
         // Return a copy of our carefully maintained handshake_messages buffer
         self.handshake_messages.clone()
     }
-
 
     /// Process a handshake message as a client
     fn process_message_client(

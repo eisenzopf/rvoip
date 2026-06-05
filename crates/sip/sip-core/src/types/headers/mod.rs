@@ -3,7 +3,6 @@
 // This module contains all the SIP header implementations.
 // Each header type is implemented in its own file.
 
-
 // Define sub-modules
 pub mod common;
 pub mod header;

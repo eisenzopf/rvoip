@@ -1,11 +1,11 @@
 // RFC 3261 Section 22.2 Authorization
 
-#[cfg(test)]
-use crate::types::auth::Credentials;
 use super::auth::credentials::credentials;
 use crate::parser::whitespace::{lws, sws};
 use crate::parser::ParseResult;
 use crate::types::auth::Authorization as AuthorizationHeader;
+#[cfg(test)]
+use crate::types::auth::Credentials;
 use nom::combinator::opt;
 use nom::error::{Error as NomError, ErrorKind};
 
@@ -40,7 +40,6 @@ pub fn parse_authorization(input: &[u8]) -> ParseResult<'_, AuthorizationHeader>
 mod tests {
     use super::*;
     use crate::types::auth::{Algorithm, DigestParam as DigestRespParam, Qop};
-    
 
     #[test]
     fn test_parse_authorization_digest() {

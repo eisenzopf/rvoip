@@ -15,6 +15,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::transaction::transport::multiplexed::select_transport_for_uri;
 use crate::transaction::{TransactionEvent, TransactionKey, TransactionManager, TransactionState};
+use rvoip_infra_common::events::cross_crate::SipTransportContext;
 use rvoip_sip_core::{Method, Request, Response, Uri};
 use rvoip_sip_transport::transport::TransportType;
 
@@ -86,6 +87,18 @@ fn terminated_bye_lookup_hard_max(index_capacity: usize) -> usize {
     index_capacity
         .saturating_mul(TERMINATED_BYE_LOOKUP_HARD_MAX_MULTIPLIER)
         .max(MIN_TERMINATED_BYE_LOOKUP_HARD_MAX)
+}
+
+pub(crate) fn outbound_request_key(request: &Request) -> Option<String> {
+    let call_id = request.call_id()?.value();
+    let cseq = request.cseq()?;
+    Some(format!("{}:{}:{}", call_id, cseq.method, cseq.sequence()))
+}
+
+fn outbound_response_key(response: &Response) -> Option<String> {
+    let call_id = response.call_id()?.value();
+    let cseq = response.cseq()?;
+    Some(format!("{}:{}:{}", call_id, cseq.method, cseq.sequence()))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -297,6 +310,17 @@ pub struct DialogManager {
 
     /// Transaction to dialog mapping
     pub(crate) transaction_to_dialog: Arc<DashMap<TransactionKey, DialogId>>,
+
+    /// Outbound transport context recorded after `send_request` succeeds,
+    /// keyed by transaction id. This is used by higher layers when a later
+    /// 401/407 challenge needs transport-truth policy input for Basic/Bearer.
+    pub(crate) outbound_transport_by_transaction: Arc<DashMap<TransactionKey, SipTransportContext>>,
+
+    /// Same outbound transport context keyed by SIP request identity
+    /// (`Call-ID`, `CSeq` method, `CSeq` number). Non-dialog sends such as
+    /// REGISTER return only a response to public callers, so this index lets
+    /// the response locate the request transport without changing API shape.
+    pub(crate) outbound_transport_by_request_key: Arc<DashMap<String, SipTransportContext>>,
 
     /// Transaction to call-affinity route hash. Dialog dispatch records the
     /// call route from request-bearing events so later lifecycle events for
@@ -671,6 +695,8 @@ impl DialogManager {
             terminated_bye_insert_count: Arc::new(AtomicUsize::new(0)),
             terminated_bye_lookup_hard_max: terminated_bye_lookup_hard_max(index_capacity),
             transaction_to_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
+            outbound_transport_by_transaction: Arc::new(DashMap::with_capacity(index_capacity)),
+            outbound_transport_by_request_key: Arc::new(DashMap::with_capacity(index_capacity)),
             transaction_dialog_route_hash: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_invite_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_server_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
@@ -1220,6 +1246,8 @@ impl DialogManager {
             terminated_bye_insert_count: Arc::new(AtomicUsize::new(0)),
             terminated_bye_lookup_hard_max: terminated_bye_lookup_hard_max(index_capacity),
             transaction_to_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
+            outbound_transport_by_transaction: Arc::new(DashMap::with_capacity(index_capacity)),
+            outbound_transport_by_request_key: Arc::new(DashMap::with_capacity(index_capacity)),
             transaction_dialog_route_hash: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_invite_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_server_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
@@ -1681,11 +1709,71 @@ impl DialogManager {
         }
     }
 
+    /// Record the transport context for an outbound request after the
+    /// transaction manager accepted `send_request`. This is the point where
+    /// RFC 3263 candidate selection and local transport availability have
+    /// converged, so auth policy can later decide whether Basic/Bearer retry
+    /// headers are allowed on the actual hop used for the challenged request.
+    pub(crate) fn record_outbound_transport_context(
+        &self,
+        transaction_id: &TransactionKey,
+        request_key: Option<String>,
+        transport: TransportType,
+        remote_addr: SocketAddr,
+    ) {
+        if self.outbound_transport_by_request_key.len() > 8192 {
+            self.outbound_transport_by_request_key.clear();
+        }
+
+        let local_addr = self
+            .transaction_manager
+            .get_transport_info(transport)
+            .and_then(|info| info.local_addr)
+            .unwrap_or(self.local_address);
+        let context = SipTransportContext::new(
+            transport.to_string(),
+            local_addr.to_string(),
+            remote_addr.to_string(),
+            matches!(transport, TransportType::Tls | TransportType::Wss),
+        );
+
+        self.outbound_transport_by_transaction
+            .insert(transaction_id.clone(), context.clone());
+        if let Some(key) = request_key {
+            self.outbound_transport_by_request_key.insert(key, context);
+        }
+    }
+
+    /// Transport context recorded for an outbound transaction, if available.
+    pub fn outbound_transport_context_for_transaction(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Option<SipTransportContext> {
+        self.outbound_transport_by_transaction
+            .get(transaction_id)
+            .map(|entry| entry.value().clone())
+    }
+
+    /// Transport context recorded for the request matched by a response's
+    /// `Call-ID` and `CSeq`.
+    pub fn outbound_transport_context_for_response(
+        &self,
+        response: &Response,
+    ) -> Option<SipTransportContext> {
+        outbound_response_key(response).and_then(|key| {
+            self.outbound_transport_by_request_key
+                .get(&key)
+                .map(|entry| entry.value().clone())
+        })
+    }
+
     pub(crate) fn unlink_transaction_from_dialog_indexed(
         &self,
         transaction_id: &TransactionKey,
     ) -> Option<DialogId> {
         self.transaction_dialog_route_hash.remove(transaction_id);
+        self.outbound_transport_by_transaction
+            .remove(transaction_id);
         let removed_dialog_id = self
             .transaction_to_dialog
             .remove(transaction_id)
@@ -2273,6 +2361,8 @@ impl DialogManager {
         self.terminated_bye_lookup.clear();
         self.terminated_bye_insert_count.store(0, Ordering::Relaxed);
         self.transaction_to_dialog.clear();
+        self.outbound_transport_by_transaction.clear();
+        self.outbound_transport_by_request_key.clear();
         self.transaction_dialog_route_hash.clear();
         self.dialog_invite_transactions.clear();
         self.dialog_server_transactions.clear();
@@ -2965,6 +3055,12 @@ impl DialogManager {
             (destination, request)
         };
 
+        let request_key = outbound_request_key(&request);
+        let next_hop =
+            crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request);
+        let selected_transport = self
+            .transaction_manager
+            .get_best_transport_for_uri(&next_hop);
         let transaction_id = self
             .transaction_manager
             .create_non_invite_client_transaction(request, destination)
@@ -2985,6 +3081,12 @@ impl DialogManager {
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to send BYE: {}", e),
             })?;
+        self.record_outbound_transport_context(
+            &transaction_id,
+            request_key,
+            selected_transport,
+            destination,
+        );
 
         Ok(transaction_id)
     }
@@ -3066,6 +3168,12 @@ impl DialogManager {
             (destination, request)
         };
 
+        let request_key = outbound_request_key(&request);
+        let next_hop =
+            crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request);
+        let selected_transport = self
+            .transaction_manager
+            .get_best_transport_for_uri(&next_hop);
         let transaction_id = self
             .transaction_manager
             .create_non_invite_client_transaction(request, destination)
@@ -3082,6 +3190,12 @@ impl DialogManager {
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to send INFO: {}", e),
             })?;
+        self.record_outbound_transport_context(
+            &transaction_id,
+            request_key,
+            selected_transport,
+            destination,
+        );
 
         Ok(transaction_id)
     }
@@ -3265,7 +3379,7 @@ mod outbound_flow_handler_tests {
     //! loop.
     use super::*;
     use crate::manager::outbound_flow::{FlowState, OutboundFlow};
-    use rvoip_sip_core::builder::SimpleRequestBuilder;
+    use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
     use rvoip_sip_transport::error::Result as TransportResult;
     use rvoip_sip_transport::{Transport, TransportEvent};
     use std::net::SocketAddr;
@@ -3273,6 +3387,30 @@ mod outbound_flow_handler_tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
+
+    #[test]
+    fn outbound_transport_lookup_keys_match_response_identity() {
+        let request = SimpleRequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", None)
+            .to("Alice", "sip:alice@example.com", None)
+            .call_id("register-call-id")
+            .cseq(42)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-register"))
+            .max_forwards(70)
+            .build();
+        let response = SimpleResponseBuilder::response_from_request(
+            &request,
+            rvoip_sip_core::StatusCode::Unauthorized,
+            None,
+        )
+        .build();
+
+        assert_eq!(
+            outbound_request_key(&request),
+            outbound_response_key(&response)
+        );
+    }
 
     #[derive(Debug)]
     struct NoopTransport {

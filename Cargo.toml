@@ -48,6 +48,14 @@ members = [
     "crates/extensions/rvoip-harness",
     "crates/extensions/rvoip-stir-shaken",
     "crates/extensions/rvoip-keycloak",
+    "crates/extensions/rvoip-redis",
+    "crates/extensions/rvoip-audit",
+    "crates/extensions/rvoip-oidc",
+    "crates/extensions/rvoip-ldap",
+    "crates/extensions/rvoip-scim",
+    "crates/extensions/rvoip-saml",
+    "crates/extensions/rvoip-webauthn",
+    "crates/extensions/rvoip-ims-aka",
 ]
 
 exclude = [
@@ -216,6 +224,14 @@ rvoip-identity      = { path = "crates/identity/rvoip-identity", version = "0.1.
 rvoip-client        = { path = "crates/rvoip-client", version = "0.1.0" }
 rvoip-stir-shaken   = { path = "crates/extensions/rvoip-stir-shaken", version = "0.1.0" }
 rvoip-keycloak      = { path = "crates/extensions/rvoip-keycloak", version = "0.1.0" }
+rvoip-redis         = { path = "crates/extensions/rvoip-redis", version = "0.1.0" }
+rvoip-audit         = { path = "crates/extensions/rvoip-audit", version = "0.1.0" }
+rvoip-oidc          = { path = "crates/extensions/rvoip-oidc", version = "0.1.0" }
+rvoip-ldap          = { path = "crates/extensions/rvoip-ldap", version = "0.1.0" }
+rvoip-scim          = { path = "crates/extensions/rvoip-scim", version = "0.1.0" }
+rvoip-saml          = { path = "crates/extensions/rvoip-saml", version = "0.1.0" }
+rvoip-webauthn      = { path = "crates/extensions/rvoip-webauthn", version = "0.1.0" }
+rvoip-ims-aka       = { path = "crates/extensions/rvoip-ims-aka", version = "0.1.0" }
 rtc = "=0.20.0-alpha.1"
 
 # External dependencies

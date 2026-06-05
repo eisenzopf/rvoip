@@ -14,6 +14,7 @@ pub struct ApiKey {
     #[serde(skip_serializing)]
     pub key_hash: String,
     pub permissions: Vec<String>,
+    pub active: bool,
     pub expires_at: Option<DateTime<Utc>>,
     pub last_used: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -24,6 +25,11 @@ pub struct ApiKey {
 pub trait ApiKeyStore: Send + Sync {
     async fn create_api_key(&self, request: CreateApiKeyRequest) -> Result<(ApiKey, String)>;
     async fn validate_api_key(&self, key: &str) -> Result<Option<ApiKey>>;
+    async fn set_api_key_active(&self, _id: &str, _active: bool) -> Result<()> {
+        Err(crate::Error::Validation(
+            "API key active-state updates are not supported by this store".to_string(),
+        ))
+    }
     async fn revoke_api_key(&self, id: &str) -> Result<()>;
     async fn list_api_keys(&self, user_id: &str) -> Result<Vec<ApiKey>>;
 }

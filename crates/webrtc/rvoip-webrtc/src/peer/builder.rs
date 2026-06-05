@@ -1,9 +1,9 @@
 //! `PeerConnectionBuilder` wiring — MediaEngine, interceptors, configuration.
 
 use rtc::interceptor::Registry;
-pub use rtc::peer_connection::configuration::media_engine::MIME_TYPE_TELEPHONE_EVENT;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
+pub use rtc::peer_connection::configuration::media_engine::MIME_TYPE_TELEPHONE_EVENT;
 use rtc::peer_connection::configuration::{
     RTCConfiguration, RTCConfigurationBuilder, RTCIceServer, RTCIceTransportPolicy,
 };
@@ -20,8 +20,7 @@ pub const HDREXT_SDES_MID: &str = "urn:ietf:params:rtp-hdrext:sdes:mid";
 pub const HDREXT_SDES_RID: &str = "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id";
 pub const HDREXT_SDES_RRID: &str = "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id";
 pub const HDREXT_AUDIO_LEVEL: &str = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
-pub const HDREXT_ABS_SEND_TIME: &str =
-    "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time";
+pub const HDREXT_ABS_SEND_TIME: &str = "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time";
 pub const HDREXT_TWCC: &str =
     "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
 use webrtc::peer_connection::PeerConnectionBuilder;
@@ -213,8 +212,8 @@ pub fn build_media_engine_with_opus(
         mime_type: MIME_TYPE_H264.to_owned(),
         clock_rate: 90000,
         channels: 0,
-        sdp_fmtp_line:
-            "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".to_owned(),
+        sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+            .to_owned(),
         rtcp_feedback: video_feedback,
     };
     media_engine.register_codec(

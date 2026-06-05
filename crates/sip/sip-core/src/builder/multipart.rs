@@ -1,7 +1,7 @@
-#[cfg(test)]
-use crate::types::TypedHeader;
 use crate::types::header::{Header, HeaderName};
 use crate::types::multipart::{MimePart, MultipartBody};
+#[cfg(test)]
+use crate::types::TypedHeader;
 use bytes::Bytes;
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
@@ -590,7 +590,6 @@ impl MultipartBodyBuilder {
         self.parts.push(part);
         self
     }
-
 
     /// Generates a random boundary string if one hasn't been set.
     ///

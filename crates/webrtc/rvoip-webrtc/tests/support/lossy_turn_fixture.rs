@@ -34,9 +34,7 @@ pub struct LossyTurnFixture {
 impl LossyTurnFixture {
     pub async fn start(loss_rate: f64, seed: u64) -> Option<Self> {
         let coturn = CoturnFixture::start().await?;
-        let upstream: SocketAddr = format!("127.0.0.1:{}", coturn.host_port())
-            .parse()
-            .ok()?;
+        let upstream: SocketAddr = format!("127.0.0.1:{}", coturn.host_port()).parse().ok()?;
         let proxy_addr = spawn_lossy_turn_proxy(upstream, loss_rate, seed).await?;
         Some(Self { coturn, proxy_addr })
     }

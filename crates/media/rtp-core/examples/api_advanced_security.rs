@@ -9,12 +9,9 @@
 
 use rvoip_rtp_core::api::common::{
     advanced_security::{
-        error_recovery::{
-            ErrorRecoveryManager, FailureType, FallbackConfig,
-        },
+        error_recovery::{ErrorRecoveryManager, FailureType, FallbackConfig},
         key_management::{
-            KeyManager, KeyRotationPolicy, KeySyndicationConfig,
-            SecurityPolicy, StreamType,
+            KeyManager, KeyRotationPolicy, KeySyndicationConfig, SecurityPolicy, StreamType,
         },
     },
     config::{KeyExchangeMethod, SecurityConfig},

@@ -189,8 +189,8 @@ async fn whip_link_header_auto_populated_from_ice_servers() {
 async fn whip_patch_ice_restart_without_if_match_returns_428() {
     let (adapter, base) = start_anonymous_server().await;
     let _ = &adapter; // unused-binding warning shut
-    // Need a real connection id for the PATCH path. Just use a fake one —
-    // the If-Match check fires before the connection lookup.
+                      // Need a real connection id for the PATCH path. Just use a fake one —
+                      // the If-Match check fires before the connection lookup.
     let resp = http()
         .patch(format!("{base}/whip/nonexistent"))
         .header("content-type", "application/sdp")

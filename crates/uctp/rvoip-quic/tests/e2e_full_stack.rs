@@ -62,7 +62,10 @@ fn install_crypto_provider() {
 
 fn server_endpoint(
     addr: SocketAddr,
-) -> (Arc<quinn::Endpoint>, rustls::pki_types::CertificateDer<'static>) {
+) -> (
+    Arc<quinn::Endpoint>,
+    rustls::pki_types::CertificateDer<'static>,
+) {
     let (cert_der, key_der) = self_signed_for_dev(&["localhost".into()]).expect("self_signed");
     let mut tls = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -97,7 +100,10 @@ async fn dial_authenticated(
     client_ep: &quinn::Endpoint,
     server_addr: SocketAddr,
     cert: &rustls::pki_types::CertificateDer<'static>,
-) -> (Arc<UctpQuicClient>, tokio::sync::mpsc::Receiver<UctpEnvelope>) {
+) -> (
+    Arc<UctpQuicClient>,
+    tokio::sync::mpsc::Receiver<UctpEnvelope>,
+) {
     let client_cfg = dev_client_config_trusting(cert).expect("client cfg");
     let client = UctpQuicClient::connect(client_ep, server_addr, "localhost", Arc::new(client_cfg))
         .await
@@ -186,7 +192,11 @@ async fn e2e_quic_session_lifecycle_emits_vcon_and_rvoip_vcon_doc_roundtrips() {
     //    exist before the gap-plan sweep. ===
     let tenant = TenantId::new();
     let cid = orchestrator
-        .open_conversation(tenant.clone(), ConversationPolicy::default(), HashMap::new())
+        .open_conversation(
+            tenant.clone(),
+            ConversationPolicy::default(),
+            HashMap::new(),
+        )
         .await
         .expect("open_conversation");
     let alice = ParticipantId::new();
@@ -202,8 +212,7 @@ async fn e2e_quic_session_lifecycle_emits_vcon_and_rvoip_vcon_doc_roundtrips() {
 
     // === 3. Client connects + auth handshake (rvoip-uctp wire). ===
     let client_ep = client_endpoint();
-    let (client, mut client_inbound) =
-        dial_authenticated(&client_ep, server_addr, &cert_der).await;
+    let (client, mut client_inbound) = dial_authenticated(&client_ep, server_addr, &cert_der).await;
 
     // === 4. Client sends `session.invite` — server emits
     //    Event::ConnectionInbound. ===
@@ -309,8 +318,7 @@ async fn e2e_quic_session_lifecycle_emits_vcon_and_rvoip_vcon_doc_roundtrips() {
     let mut vcon_handle: Option<rvoip_core::store::VconHandle> = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     while tokio::time::Instant::now() < deadline {
-        let Ok(Ok(ev)) =
-            tokio::time::timeout(Duration::from_millis(200), events.recv()).await
+        let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_millis(200), events.recv()).await
         else {
             continue;
         };
@@ -318,7 +326,9 @@ async fn e2e_quic_session_lifecycle_emits_vcon_and_rvoip_vcon_doc_roundtrips() {
             Event::SessionEnded { session_id, .. } if session_id == sid => {
                 saw_session_ended = true;
             }
-            Event::VconReady { session_id, handle, .. } if session_id == sid => {
+            Event::VconReady {
+                session_id, handle, ..
+            } if session_id == sid => {
                 vcon_handle = Some(handle);
             }
             _ => continue,
@@ -327,7 +337,10 @@ async fn e2e_quic_session_lifecycle_emits_vcon_and_rvoip_vcon_doc_roundtrips() {
             break;
         }
     }
-    assert!(saw_session_ended, "SessionEnded must fire after end_session");
+    assert!(
+        saw_session_ended,
+        "SessionEnded must fire after end_session"
+    );
     let handle = vcon_handle.expect("VconReady must fire after SessionEnded");
     assert!(
         handle.url.starts_with("memory:vcon/"),

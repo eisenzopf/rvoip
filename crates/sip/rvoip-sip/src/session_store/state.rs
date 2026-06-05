@@ -137,6 +137,12 @@ pub struct SessionState {
     // inspecting which `pending_*_options` stash is set.
     pub pending_auth_method: Option<String>,
 
+    // Post-send outbound transport context for the challenged request, when
+    // dialog-core could report it. Used by UAC auth retry policy so Basic and
+    // Bearer decisions are based on the hop that actually carried the first
+    // request.
+    pub pending_auth_transport: Option<crate::auth::SipTransportSecurityContext>,
+
     // SIP_API_DESIGN_2 R2 — retry cap counter for the generic
     // `SendRequestWithAuth` action. Mirrors `invite_auth_retry_count`
     // but covers BYE / REFER / NOTIFY / INFO / UPDATE / MESSAGE /
@@ -332,6 +338,7 @@ impl SessionState {
             early_media_sdp: None,
             pending_auth: None,
             pending_auth_method: None,
+            pending_auth_transport: None,
             request_auth_retry_count: 0,
             invite_auth_retry_count: 0,
             redirect_targets: Vec::new(),

@@ -12,9 +12,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, error};
 
-use crate::api::client::security::{
-    ClientSecurityConfig, ClientSecurityContext,
-};
+use crate::api::client::security::{ClientSecurityConfig, ClientSecurityContext};
 use crate::api::common::config::{SecurityInfo, SrtpProfile};
 use crate::api::common::error::SecurityError;
 use crate::api::server::security::SocketHandle;
@@ -74,7 +72,6 @@ impl DefaultClientSecurityContext {
     async fn init_connection(&self) -> Result<(), SecurityError> {
         connection::init_connection(&self.config, &self.socket, &self.connection).await
     }
-
 }
 
 #[async_trait]
@@ -435,4 +432,3 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
         &self.config
     }
 }
-

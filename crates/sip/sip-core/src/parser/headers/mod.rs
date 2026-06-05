@@ -138,7 +138,7 @@ mod tests {
     use crate::parser::ParseResult;
     use crate::types::event::EventType;
     use crate::types::event::ParamValue;
-    
+
     use crate::types::MinSE; // For the new test
     use nom::error::VerboseError;
 

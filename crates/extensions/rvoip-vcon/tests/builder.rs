@@ -143,20 +143,12 @@ fn jws_sign_and_verify_round_trip() {
         .build();
     let original_uuid = vcon.uuid;
 
-    let signed = sign_jws(
-        &vcon,
-        &EncodingKey::from_secret(secret),
-        Algorithm::HS256,
-    )
-    .expect("sign");
+    let signed =
+        sign_jws(&vcon, &EncodingKey::from_secret(secret), Algorithm::HS256).expect("sign");
     assert!(signed.split('.').count() == 3, "JWS compact form is x.y.z");
 
-    let restored = verify_jws(
-        &signed,
-        &DecodingKey::from_secret(secret),
-        Algorithm::HS256,
-    )
-    .expect("verify");
+    let restored =
+        verify_jws(&signed, &DecodingKey::from_secret(secret), Algorithm::HS256).expect("verify");
     assert_eq!(restored.uuid, original_uuid);
     assert_eq!(restored.subject.as_deref(), Some("JWS round-trip"));
 }
@@ -170,12 +162,7 @@ fn jws_verify_rejects_tampered_payload() {
             ..Default::default()
         })
         .build();
-    let signed = sign_jws(
-        &vcon,
-        &EncodingKey::from_secret(secret),
-        Algorithm::HS256,
-    )
-    .unwrap();
+    let signed = sign_jws(&vcon, &EncodingKey::from_secret(secret), Algorithm::HS256).unwrap();
 
     // Tamper: flip a character mid-payload (second segment is base64
     // of the JSON body).

@@ -5,6 +5,10 @@ This document mirrors the `cargo doc` guidance for SIP authentication in
 owns the work, and which crate provides the underlying crypto or token
 validation.
 
+For a layer-by-layer implementers guide covering internal users-core providers,
+external IdPs, LDAP/AD, Redis, audit sinks, and custom provider traits, see
+`AUTH_IDENTITY_PROVIDER_IMPLEMENTERS_GUIDE.md`.
+
 ## Protocol Scope
 
 SIP access authentication is negotiated in SIP headers:
@@ -48,6 +52,35 @@ selection.
 `SipClientAuth::any(...)` chooses the strongest configured compatible challenge
 in this order: AKA, Bearer, Digest, Basic. Basic still obeys its TLS/cleartext
 policy after selection.
+
+## Bearer Validator Policy
+
+`SipAuthService` does not infer JWT/OIDC trust policy from a SIP realm. The
+configured `BearerValidator` is authoritative for token trust. Enterprise
+deployments should configure validators to enforce, at minimum:
+
+- issuer (`iss`) for every JWT/JWKS/OIDC validator;
+- audience (`aud`) or an equivalent client/resource indicator;
+- expiry and not-before time checks;
+- allowed signing algorithms and expected `kid` behavior;
+- token revocation through `TokenRevocationChecker`, OAuth2 introspection, or
+  short access-token TTLs when immediate revocation is not required;
+- scope/role mapping needed by the application before allowing the SIP action.
+
+The `rvoip-keycloak` extension configures issuer from discovered OIDC metadata
+and applies configured audience and JWKS cache TTLs. Custom validators must
+make the same trust decisions explicitly.
+
+## Rate-Limit Failure Policy
+
+`SipAuthService::with_rate_limiter(...)` is fail-closed. If the rate-limit or
+lockout provider is unavailable, authentication fails before credential
+validation. This protects password, Basic, Digest, Bearer, API-key, and
+REGISTER flows from bypassing lockout policy during infrastructure outages.
+
+Audit sinks are different: `with_audit_failure_policy(...)` defaults to
+fail-open so logging outages do not break traffic unless the deployment
+explicitly selects `AuditFailurePolicy::FailClosed`.
 
 ## UAC Behavior
 

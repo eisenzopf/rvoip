@@ -47,7 +47,7 @@ async fn default_subscription_handler_rejects_with_501() {
             "by_participant": "part_alice",
             "subscriptions": [{"strm_id": "strm_z"}]
         }),
-    signature: None,
+        signature: None,
     };
     in_tx.send(env).await.unwrap();
 

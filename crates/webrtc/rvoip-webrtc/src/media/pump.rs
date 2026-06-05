@@ -161,20 +161,17 @@ impl InboundStats {
         let mut any_outbound = false;
         for outbound in report.outbound_rtp_streams() {
             any_outbound = true;
-            packets_sent =
-                packets_sent.saturating_add(outbound.sent_rtp_stream_stats.packets_sent);
-            bytes_sent =
-                bytes_sent.saturating_add(outbound.sent_rtp_stream_stats.bytes_sent);
-            retx_packets =
-                retx_packets.saturating_add(outbound.retransmitted_packets_sent);
-            retx_bytes =
-                retx_bytes.saturating_add(outbound.retransmitted_bytes_sent);
+            packets_sent = packets_sent.saturating_add(outbound.sent_rtp_stream_stats.packets_sent);
+            bytes_sent = bytes_sent.saturating_add(outbound.sent_rtp_stream_stats.bytes_sent);
+            retx_packets = retx_packets.saturating_add(outbound.retransmitted_packets_sent);
+            retx_bytes = retx_bytes.saturating_add(outbound.retransmitted_bytes_sent);
             nack_count = nack_count.saturating_add(outbound.nack_count as u64);
             pli_count = pli_count.saturating_add(outbound.pli_count as u64);
             fir_count = fir_count.saturating_add(outbound.fir_count as u64);
         }
         if any_outbound {
-            self.webrtc_packets_sent.store(packets_sent, Ordering::Relaxed);
+            self.webrtc_packets_sent
+                .store(packets_sent, Ordering::Relaxed);
             self.webrtc_bytes_sent.store(bytes_sent, Ordering::Relaxed);
             self.webrtc_retransmitted_packets
                 .store(retx_packets, Ordering::Relaxed);
@@ -194,8 +191,7 @@ impl InboundStats {
             use rtc::statistics::report::RTCStatsReportEntry;
             match entry {
                 RTCStatsReportEntry::LocalCandidate(c) => {
-                    local_types
-                        .insert(c.stats.id.clone(), candidate_type_label(&c.candidate_type));
+                    local_types.insert(c.stats.id.clone(), candidate_type_label(&c.candidate_type));
                 }
                 RTCStatsReportEntry::RemoteCandidate(c) => {
                     remote_types
@@ -206,20 +202,18 @@ impl InboundStats {
         }
 
         if let Some(pair) = report.candidate_pairs().find(|p| p.nominated) {
-            let curr_rtt = if pair.current_round_trip_time.is_finite()
-                && pair.current_round_trip_time > 0.0
-            {
-                Some(pair.current_round_trip_time * 1000.0)
-            } else {
-                None
-            };
-            let total_rtt = if pair.total_round_trip_time.is_finite()
-                && pair.total_round_trip_time > 0.0
-            {
-                Some(pair.total_round_trip_time * 1000.0)
-            } else {
-                None
-            };
+            let curr_rtt =
+                if pair.current_round_trip_time.is_finite() && pair.current_round_trip_time > 0.0 {
+                    Some(pair.current_round_trip_time * 1000.0)
+                } else {
+                    None
+                };
+            let total_rtt =
+                if pair.total_round_trip_time.is_finite() && pair.total_round_trip_time > 0.0 {
+                    Some(pair.total_round_trip_time * 1000.0)
+                } else {
+                    None
+                };
             let avail_out = if pair.available_outgoing_bitrate.is_finite()
                 && pair.available_outgoing_bitrate > 0.0
             {
@@ -284,12 +278,8 @@ impl InboundStats {
             outbound: OutboundStats {
                 packets_sent: self.webrtc_packets_sent.load(Ordering::Relaxed),
                 bytes_sent: self.webrtc_bytes_sent.load(Ordering::Relaxed),
-                retransmitted_packets: self
-                    .webrtc_retransmitted_packets
-                    .load(Ordering::Relaxed),
-                retransmitted_bytes: self
-                    .webrtc_retransmitted_bytes
-                    .load(Ordering::Relaxed),
+                retransmitted_packets: self.webrtc_retransmitted_packets.load(Ordering::Relaxed),
+                retransmitted_bytes: self.webrtc_retransmitted_bytes.load(Ordering::Relaxed),
                 nack_count: self.webrtc_nack_count.load(Ordering::Relaxed),
                 pli_count: self.webrtc_pli_count.load(Ordering::Relaxed),
                 fir_count: self.webrtc_fir_count.load(Ordering::Relaxed),
@@ -303,9 +293,7 @@ impl InboundStats {
 /// `"host"`/`"srflx"`/`"prflx"`/`"relay"` label without coupling to the
 /// concrete enum variant names (which differ between rtc-0.20-alpha
 /// revisions).
-fn candidate_type_label(
-    t: &rtc::peer_connection::transport::RTCIceCandidateType,
-) -> String {
+fn candidate_type_label(t: &rtc::peer_connection::transport::RTCIceCandidateType) -> String {
     let s = format!("{:?}", t).to_ascii_lowercase();
     if s.contains("relay") {
         "relay".into()
@@ -380,8 +368,7 @@ pub fn spawn_inbound_pump(
                         Ok(Err(_)) => break, // downstream dropped — stop pumping
                         Err(_) => {
                             // Slow consumer; drop the frame and count it.
-                            let dropped =
-                                stats.frames_dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                            let dropped = stats.frames_dropped.fetch_add(1, Ordering::Relaxed) + 1;
                             if dropped.is_power_of_two() {
                                 warn!(
                                     dropped,

@@ -214,6 +214,7 @@
 //! ```
 
 use std::collections::{BTreeMap, HashMap};
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -389,6 +390,213 @@ impl AuthAttemptScheme {
     }
 }
 
+/// UAS-side authentication policy for [`SipAuthService`].
+///
+/// This policy is additive to provider configuration. Providers answer
+/// credentials; policy decides which schemes and transport/security posture are
+/// acceptable before provider validation is trusted.
+#[derive(Debug, Clone)]
+pub struct SipAuthPolicy {
+    enabled_schemes: Option<Vec<SipAuthScheme>>,
+    minimum_digest_algorithm: Option<DigestAlgorithm>,
+    allow_basic_over_cleartext: bool,
+    allow_bearer_over_cleartext: bool,
+    require_digest_replay_store: bool,
+    audit_failure_policy: AuditFailurePolicy,
+}
+
+impl SipAuthPolicy {
+    /// Create the default policy.
+    ///
+    /// Defaults permit any configured scheme, reject Basic and Bearer over
+    /// cleartext, allow MD5 Digest for PBX compatibility, do not require shared
+    /// replay storage, and fail open on audit sink errors.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Restrict UAS auth to the listed schemes.
+    pub fn allow_only(mut self, schemes: impl IntoIterator<Item = SipAuthScheme>) -> Self {
+        self.enabled_schemes = Some(schemes.into_iter().collect());
+        self
+    }
+
+    /// Require Digest responses to use at least this algorithm strength.
+    ///
+    /// Strength order is MD5, MD5-sess, SHA-256, SHA-256-sess, SHA-512-256,
+    /// SHA-512-256-sess.
+    pub fn with_minimum_digest_algorithm(mut self, algorithm: DigestAlgorithm) -> Self {
+        self.minimum_digest_algorithm = Some(algorithm);
+        self
+    }
+
+    /// Permit Basic credentials on cleartext SIP transports.
+    pub fn allow_basic_over_cleartext(mut self, allow: bool) -> Self {
+        self.allow_basic_over_cleartext = allow;
+        self
+    }
+
+    /// Permit Bearer tokens on cleartext SIP transports.
+    pub fn allow_bearer_over_cleartext(mut self, allow: bool) -> Self {
+        self.allow_bearer_over_cleartext = allow;
+        self
+    }
+
+    /// Require a configured [`DigestReplayStore`] before accepting Digest.
+    pub fn require_digest_replay_store(mut self, require: bool) -> Self {
+        self.require_digest_replay_store = require;
+        self
+    }
+
+    /// Select whether audit sink failures fail open or fail closed.
+    pub fn with_audit_failure_policy(mut self, policy: AuditFailurePolicy) -> Self {
+        self.audit_failure_policy = policy;
+        self
+    }
+
+    fn scheme_allowed(&self, scheme: SipAuthScheme) -> bool {
+        self.enabled_schemes
+            .as_ref()
+            .is_none_or(|schemes| schemes.iter().any(|candidate| *candidate == scheme))
+    }
+
+    fn digest_algorithm_allowed(&self, algorithm: DigestAlgorithm) -> bool {
+        self.minimum_digest_algorithm.is_none_or(|minimum| {
+            digest_algorithm_strength(algorithm) >= digest_algorithm_strength(minimum)
+        })
+    }
+}
+
+impl Default for SipAuthPolicy {
+    fn default() -> Self {
+        Self {
+            enabled_schemes: None,
+            minimum_digest_algorithm: None,
+            allow_basic_over_cleartext: false,
+            allow_bearer_over_cleartext: false,
+            require_digest_replay_store: false,
+            audit_failure_policy: AuditFailurePolicy::FailOpen,
+        }
+    }
+}
+
+/// Transport security context for auth policy decisions.
+///
+/// Prefer values derived from the actual receiving/sending transport. The
+/// `from_request_uri_hint` constructor exists only as a compatibility fallback
+/// until every event path carries transport metadata.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SipTransportSecurityContext {
+    /// Transport flavor, for example `UDP`, `TCP`, `TLS`, `WS`, or `WSS`.
+    pub transport: Option<String>,
+    /// Local socket/address, if known.
+    pub local_addr: Option<String>,
+    /// Remote socket/address, if known.
+    pub remote_addr: Option<String>,
+    /// Whether the transport is protected for sending credentials such as
+    /// Basic passwords or Bearer tokens.
+    pub secure: bool,
+}
+
+impl SipTransportSecurityContext {
+    /// Unknown or cleartext transport. This is intentionally fail-closed for
+    /// Basic/Bearer cleartext policy.
+    pub fn unknown() -> Self {
+        Self::default()
+    }
+
+    /// Compatibility constructor from the legacy boolean parameter.
+    pub fn from_is_tls(is_tls: bool) -> Self {
+        if is_tls {
+            Self::secure("TLS")
+        } else {
+            Self::unknown()
+        }
+    }
+
+    /// Build from a concrete transport flavor.
+    pub fn from_transport_name(transport: impl Into<String>) -> Self {
+        let transport = transport.into();
+        let secure = transport_name_is_secure(&transport);
+        Self {
+            transport: Some(transport),
+            local_addr: None,
+            remote_addr: None,
+            secure,
+        }
+    }
+
+    /// Build from cross-crate SIP transport metadata.
+    pub fn from_transport_context(
+        context: &rvoip_infra_common::events::cross_crate::SipTransportContext,
+    ) -> Self {
+        Self {
+            transport: Some(context.transport.clone()),
+            local_addr: Some(context.local_addr.clone()),
+            remote_addr: Some(context.remote_addr.clone()),
+            secure: context.secure,
+        }
+    }
+
+    /// Compatibility fallback from request URI scheme.
+    ///
+    /// This is weaker than transport-truth metadata because a `sips:` URI is
+    /// not itself proof that this hop arrived or will be sent over TLS/WSS.
+    pub fn from_request_uri_hint(request_uri: &str) -> Self {
+        if request_uri.to_ascii_lowercase().starts_with("sips:") {
+            Self::secure("SIPS-URI")
+        } else {
+            Self::unknown()
+        }
+    }
+
+    /// Compatibility fallback from SIP URI syntax, including `;transport=`.
+    ///
+    /// This handles URI-selected transports such as
+    /// `sip:bob@example.com;transport=tls` and `;transport=wss`. It is still a
+    /// syntactic hint, not proof of the actual selected outbound transport.
+    pub fn from_request_uri_transport_hint(request_uri: &str) -> Self {
+        let Ok(uri) = rvoip_sip_core::Uri::from_str(request_uri) else {
+            return Self::from_request_uri_hint(request_uri);
+        };
+        let transport = rvoip_sip_transport::resolver::select_transport_for_uri(&uri);
+        Self::from_transport_name(transport.to_string())
+    }
+
+    /// Secure transport context with a named transport.
+    pub fn secure(transport: impl Into<String>) -> Self {
+        Self {
+            transport: Some(transport.into()),
+            local_addr: None,
+            remote_addr: None,
+            secure: true,
+        }
+    }
+
+    /// Attach local and remote non-secret address metadata.
+    pub fn with_addrs(
+        mut self,
+        local_addr: impl Into<String>,
+        remote_addr: impl Into<String>,
+    ) -> Self {
+        self.local_addr = Some(local_addr.into());
+        self.remote_addr = Some(remote_addr.into());
+        self
+    }
+
+    /// Whether this context is secure enough for credential-bearing schemes.
+    pub fn is_secure(&self) -> bool {
+        self.secure
+    }
+}
+
+fn transport_name_is_secure(transport: &str) -> bool {
+    matches!(
+        transport.trim().to_ascii_uppercase().as_str(),
+        "TLS" | "WSS" | "SIPS" | "SIPS-URI"
+    )
+}
+
 /// UAC-side authentication configuration for challenged outbound requests.
 ///
 /// Attach this to default configuration with [`Config::auth`](crate::Config::auth)
@@ -403,6 +611,12 @@ pub enum SipClientAuth {
     /// Bearer token. Sent after a Bearer challenge unless the request builder
     /// explicitly authors a preemptive Authorization header.
     BearerToken(String),
+    /// Bearer token with explicit cleartext SIP opt-in.
+    ///
+    /// Prefer [`SipClientAuth::bearer_token`] on TLS/WSS transports. This
+    /// variant exists for controlled legacy test/deployment environments where
+    /// sending a bearer token over cleartext SIP has been explicitly accepted.
+    BearerTokenCleartextAllowed(String),
     /// Basic credentials. Disabled over cleartext unless the instance opts in.
     Basic {
         /// Basic username.
@@ -432,6 +646,25 @@ impl SipClientAuth {
     /// a lower-level caller explicitly authors a preemptive header.
     pub fn bearer_token(token: impl Into<String>) -> Self {
         Self::BearerToken(token.into())
+    }
+
+    /// Permit Bearer tokens on non-TLS SIP transports.
+    ///
+    /// This is an explicit legacy interoperability opt-in. Leave it disabled
+    /// unless the application has a deployment-specific reason to accept
+    /// cleartext bearer tokens on the wire.
+    pub fn allow_bearer_over_cleartext(self, allow: bool) -> Self {
+        match self {
+            Self::BearerToken(token) if allow => Self::BearerTokenCleartextAllowed(token),
+            Self::BearerTokenCleartextAllowed(token) if !allow => Self::BearerToken(token),
+            Self::Composite(auths) => Self::Composite(
+                auths
+                    .into_iter()
+                    .map(|auth| auth.allow_bearer_over_cleartext(allow))
+                    .collect(),
+            ),
+            _ => self,
+        }
     }
 
     /// Build Basic username/password credentials.
@@ -489,6 +722,27 @@ impl SipClientAuth {
         body: Option<&[u8]>,
         is_tls: bool,
     ) -> Result<ClientAuthHeader> {
+        self.authorization_for_challenge_with_transport_context(
+            challenge_header,
+            method,
+            request_uri,
+            nonce_count,
+            body,
+            &SipTransportSecurityContext::from_is_tls(is_tls),
+        )
+    }
+
+    /// Build an Authorization / Proxy-Authorization header value for the
+    /// selected challenge using transport-truth security context.
+    pub fn authorization_for_challenge_with_transport_context(
+        &self,
+        challenge_header: &str,
+        method: &str,
+        request_uri: &str,
+        nonce_count: u32,
+        body: Option<&[u8]>,
+        transport: &SipTransportSecurityContext,
+    ) -> Result<ClientAuthHeader> {
         match self {
             SipClientAuth::Digest(credentials) => {
                 let challenge = extract_digest_challenge(challenge_header).ok_or_else(|| {
@@ -525,6 +779,29 @@ impl SipClientAuth {
                         "Bearer token cannot answer a non-Bearer challenge".to_string(),
                     ));
                 }
+                if !transport.is_secure() {
+                    return Err(SessionError::AuthError(
+                        "Bearer authentication over cleartext SIP is disabled".to_string(),
+                    ));
+                }
+                if token.is_empty() {
+                    return Err(SessionError::AuthError(
+                        "Bearer token cannot be empty".to_string(),
+                    ));
+                }
+                Ok(ClientAuthHeader {
+                    value: format!("Bearer {token}"),
+                    scheme: SipAuthScheme::Bearer,
+                    digest_challenge: None,
+                    stale: false,
+                })
+            }
+            SipClientAuth::BearerTokenCleartextAllowed(token) => {
+                if !contains_auth_scheme(challenge_header, "Bearer") {
+                    return Err(SessionError::AuthError(
+                        "Bearer token cannot answer a non-Bearer challenge".to_string(),
+                    ));
+                }
                 if token.is_empty() {
                     return Err(SessionError::AuthError(
                         "Bearer token cannot be empty".to_string(),
@@ -547,7 +824,7 @@ impl SipClientAuth {
                         "Basic credentials cannot answer a non-Basic challenge".to_string(),
                     ));
                 }
-                if !is_tls && !*allow_cleartext {
+                if !transport.is_secure() && !*allow_cleartext {
                     return Err(SessionError::AuthError(
                         "Basic authentication over cleartext SIP is disabled".to_string(),
                     ));
@@ -582,7 +859,7 @@ impl SipClientAuth {
                 request_uri,
                 nonce_count,
                 body,
-                is_tls,
+                transport,
             ),
         }
     }
@@ -695,8 +972,15 @@ pub trait AkaVectorProvider: Send + Sync {
 /// `IncomingRegister::authenticate_with`. Missing or rejected credentials
 /// return challenges for the enabled schemes; accepted credentials return an
 /// [`AuthIdentity`].
+///
+/// Bearer validators are responsible for token trust policy: issuer, audience
+/// or resource indicators, expiry, accepted algorithms, `kid` behavior,
+/// revocation/introspection strategy, and application-required scopes. A SIP
+/// auth realm only labels the challenge; it is not a substitute for validator
+/// policy.
 #[derive(Clone)]
 pub struct SipAuthService {
+    policy: SipAuthPolicy,
     digest: Option<SipDigestAuthService>,
     digest_provider: Option<DigestProviderAuthStore>,
     bearer: Option<Arc<dyn BearerValidator>>,
@@ -704,6 +988,7 @@ pub struct SipAuthService {
     bearer_scope: Option<String>,
     basic: Option<BasicAuthStore>,
     aka: Option<Arc<dyn AkaVectorProvider>>,
+    allow_bearer_over_cleartext: bool,
     allow_basic_over_cleartext: bool,
     audit_sink: Option<Arc<dyn AuthAuditSink>>,
     audit_failure_policy: AuditFailurePolicy,
@@ -716,6 +1001,7 @@ impl SipAuthService {
     /// methods.
     pub fn new() -> Self {
         Self {
+            policy: SipAuthPolicy::default(),
             digest: None,
             digest_provider: None,
             bearer: None,
@@ -723,6 +1009,7 @@ impl SipAuthService {
             bearer_scope: None,
             basic: None,
             aka: None,
+            allow_bearer_over_cleartext: false,
             allow_basic_over_cleartext: false,
             audit_sink: None,
             audit_failure_policy: AuditFailurePolicy::FailOpen,
@@ -734,6 +1021,15 @@ impl SipAuthService {
     /// Create a UAS service with a Digest realm.
     pub fn digest(realm: impl Into<String>) -> Self {
         Self::new().with_digest_service(SipDigestAuthService::new(realm))
+    }
+
+    /// Apply UAS authentication policy.
+    pub fn with_policy(mut self, policy: SipAuthPolicy) -> Self {
+        self.allow_basic_over_cleartext = policy.allow_basic_over_cleartext;
+        self.allow_bearer_over_cleartext = policy.allow_bearer_over_cleartext;
+        self.audit_failure_policy = policy.audit_failure_policy;
+        self.policy = policy;
+        self
     }
 
     /// Add a Digest service.
@@ -802,7 +1098,8 @@ impl SipAuthService {
 
     /// Add rate-limit/lockout policy for inbound auth attempts.
     ///
-    /// Rate-limiter provider errors fail closed.
+    /// Rate-limiter provider errors fail closed. Authentication fails before
+    /// credential validation if the limiter cannot answer.
     pub fn with_rate_limiter(mut self, rate_limiter: Arc<dyn AuthRateLimiter>) -> Self {
         self.rate_limiter = Some(rate_limiter);
         self
@@ -811,7 +1108,9 @@ impl SipAuthService {
     /// Add a Bearer validator for UAS token validation.
     ///
     /// The validator comes from `rvoip-auth-core`; this facade maps successful
-    /// validation into [`AuthIdentity`].
+    /// validation into [`AuthIdentity`]. The validator must enforce issuer,
+    /// audience/resource, expiry, allowed algorithms, `kid` handling,
+    /// revocation/introspection requirements, and application scopes.
     pub fn with_bearer_validator(
         mut self,
         realm: impl Into<String>,
@@ -887,6 +1186,16 @@ impl SipAuthService {
         self
     }
 
+    /// Permit Bearer validation on non-TLS SIP transports.
+    ///
+    /// This is an explicit legacy interoperability opt-in. Leave it disabled
+    /// unless the application has a deployment-specific reason to accept
+    /// cleartext bearer tokens on the wire.
+    pub fn allow_bearer_over_cleartext(mut self, allow: bool) -> Self {
+        self.allow_bearer_over_cleartext = allow;
+        self
+    }
+
     /// Permit Basic validation on non-TLS SIP transports.
     pub fn allow_basic_over_cleartext(mut self, allow: bool) -> Self {
         self.allow_basic_over_cleartext = allow;
@@ -931,13 +1240,35 @@ impl SipAuthService {
         source: SipAuthSource,
         is_tls: bool,
     ) -> Result<SipAuthDecision> {
-        self.authenticate_authorization_with_context(
+        self.authenticate_authorization_with_transport_context(
             authorization,
             method,
             request_uri,
             body,
             source,
-            is_tls,
+            &SipTransportSecurityContext::from_is_tls(is_tls),
+        )
+        .await
+    }
+
+    /// Validate an optional inbound auth header using transport-truth security
+    /// context for Basic/Bearer cleartext policy decisions.
+    pub async fn authenticate_authorization_with_transport_context(
+        &self,
+        authorization: Option<&str>,
+        method: &str,
+        request_uri: &str,
+        body: Option<&[u8]>,
+        source: SipAuthSource,
+        transport: &SipTransportSecurityContext,
+    ) -> Result<SipAuthDecision> {
+        self.authenticate_authorization_with_context_and_transport(
+            authorization,
+            method,
+            request_uri,
+            body,
+            source,
+            transport,
             &SipAuthContext::default(),
         )
         .await
@@ -953,6 +1284,30 @@ impl SipAuthService {
         body: Option<&[u8]>,
         source: SipAuthSource,
         is_tls: bool,
+        context: &SipAuthContext,
+    ) -> Result<SipAuthDecision> {
+        self.authenticate_authorization_with_context_and_transport(
+            authorization,
+            method,
+            request_uri,
+            body,
+            source,
+            &SipTransportSecurityContext::from_is_tls(is_tls),
+            context,
+        )
+        .await
+    }
+
+    /// Validate an optional inbound auth header with audit/rate-limit context
+    /// and transport-truth security context.
+    pub async fn authenticate_authorization_with_context_and_transport(
+        &self,
+        authorization: Option<&str>,
+        method: &str,
+        request_uri: &str,
+        body: Option<&[u8]>,
+        source: SipAuthSource,
+        transport: &SipTransportSecurityContext,
         context: &SipAuthContext,
     ) -> Result<SipAuthDecision> {
         let attempt = auth_attempt_scheme(authorization);
@@ -999,38 +1354,94 @@ impl SipAuthService {
                 let trimmed = authorization.trim();
                 match attempt {
                     AuthAttemptScheme::Digest => {
-                        self.authenticate_digest_with_reason(
-                            trimmed,
-                            method,
-                            request_uri,
-                            body,
-                            source,
-                        )
-                        .await
+                        if !self.policy.scheme_allowed(SipAuthScheme::Digest) {
+                            Ok((
+                                self.rejected_async(source).await?,
+                                Some(AuthFailureReason::PolicyRejected),
+                            ))
+                        } else if self.policy.require_digest_replay_store
+                            && self.digest_replay_store.is_none()
+                        {
+                            Ok((
+                                self.rejected_async(source).await?,
+                                Some(AuthFailureReason::PolicyRejected),
+                            ))
+                        } else if let Ok(response) =
+                            DigestAuthenticator::parse_authorization(trimmed)
+                        {
+                            if !self.policy.digest_algorithm_allowed(response.algorithm) {
+                                Ok((
+                                    self.rejected_async(source).await?,
+                                    Some(AuthFailureReason::PolicyRejected),
+                                ))
+                            } else {
+                                self.authenticate_digest_with_reason(
+                                    trimmed,
+                                    method,
+                                    request_uri,
+                                    body,
+                                    source,
+                                )
+                                .await
+                            }
+                        } else {
+                            self.authenticate_digest_with_reason(
+                                trimmed,
+                                method,
+                                request_uri,
+                                body,
+                                source,
+                            )
+                            .await
+                        }
                     }
                     AuthAttemptScheme::Bearer => {
-                        self.authenticate_bearer_with_reason(trimmed, source).await
-                    }
-                    AuthAttemptScheme::Basic => {
-                        if !is_tls && !self.allow_basic_over_cleartext {
+                        if !self.policy.scheme_allowed(SipAuthScheme::Bearer) {
+                            Ok((
+                                self.rejected_async(source).await?,
+                                Some(AuthFailureReason::PolicyRejected),
+                            ))
+                        } else if !transport.is_secure() && !self.allow_bearer_over_cleartext {
                             Ok((
                                 self.rejected_async(source).await?,
                                 Some(AuthFailureReason::PolicyRejected),
                             ))
                         } else {
-                            self.authenticate_basic_with_reason(trimmed, source, is_tls)
+                            self.authenticate_bearer_with_reason(trimmed, source).await
+                        }
+                    }
+                    AuthAttemptScheme::Basic => {
+                        if !self.policy.scheme_allowed(SipAuthScheme::Basic) {
+                            Ok((
+                                self.rejected_async(source).await?,
+                                Some(AuthFailureReason::PolicyRejected),
+                            ))
+                        } else if !transport.is_secure() && !self.allow_basic_over_cleartext {
+                            Ok((
+                                self.rejected_async(source).await?,
+                                Some(AuthFailureReason::PolicyRejected),
+                            ))
+                        } else {
+                            self.authenticate_basic_with_reason(trimmed, source, transport)
                                 .await
                         }
                     }
                     AuthAttemptScheme::Aka => {
-                        self.authenticate_aka_with_reason(
-                            trimmed,
-                            method,
-                            request_uri,
-                            body,
-                            source,
-                        )
-                        .await
+                        if !self.policy.scheme_allowed(SipAuthScheme::Aka) {
+                            Ok((
+                                self.rejected_async(source).await?,
+                                Some(AuthFailureReason::PolicyRejected),
+                            ))
+                        } else {
+                            self.authenticate_aka_with_reason(
+                                trimmed,
+                                method,
+                                request_uri,
+                                body,
+                                source,
+                            )
+                            .await
+                        }
                     }
                     AuthAttemptScheme::Unknown | AuthAttemptScheme::Missing => Ok((
                         self.rejected_async(source).await?,
@@ -1198,27 +1609,35 @@ impl SipAuthService {
         digest_value: String,
     ) -> Vec<SipAuthChallenge> {
         let mut challenges = Vec::new();
-        if let Some(aka) = &self.aka {
-            challenges.push(aka.challenge(source));
+        if self.policy.scheme_allowed(SipAuthScheme::Aka) {
+            if let Some(aka) = &self.aka {
+                challenges.push(aka.challenge(source));
+            }
         }
-        if let Some(bearer) = &self.bearer_realm {
+        if self.policy.scheme_allowed(SipAuthScheme::Bearer) {
+            if let Some(bearer) = &self.bearer_realm {
+                challenges.push(SipAuthChallenge {
+                    scheme: SipAuthScheme::Bearer,
+                    value: bearer_challenge_value(bearer, self.bearer_scope.as_deref(), None, None),
+                    source,
+                });
+            }
+        }
+        if self.policy.scheme_allowed(SipAuthScheme::Digest) {
             challenges.push(SipAuthChallenge {
-                scheme: SipAuthScheme::Bearer,
-                value: bearer_challenge_value(bearer, self.bearer_scope.as_deref(), None, None),
+                scheme: SipAuthScheme::Digest,
+                value: digest_value,
                 source,
             });
         }
-        challenges.push(SipAuthChallenge {
-            scheme: SipAuthScheme::Digest,
-            value: digest_value,
-            source,
-        });
-        if let Some(basic) = &self.basic {
-            challenges.push(SipAuthChallenge {
-                scheme: SipAuthScheme::Basic,
-                value: format!("Basic realm=\"{}\"", basic.realm),
-                source,
-            });
+        if self.policy.scheme_allowed(SipAuthScheme::Basic) {
+            if let Some(basic) = &self.basic {
+                challenges.push(SipAuthChallenge {
+                    scheme: SipAuthScheme::Basic,
+                    value: format!("Basic realm=\"{}\"", basic.realm),
+                    source,
+                });
+            }
         }
         challenges
     }
@@ -1229,37 +1648,49 @@ impl SipAuthService {
     /// [`SipAuthSource::Proxy`] for `Proxy-Authenticate` / `407`.
     pub fn challenges(&self, source: SipAuthSource) -> Vec<SipAuthChallenge> {
         let mut challenges = Vec::new();
-        if let Some(aka) = &self.aka {
-            challenges.push(aka.challenge(source));
+        if self.policy.scheme_allowed(SipAuthScheme::Aka) {
+            if let Some(aka) = &self.aka {
+                challenges.push(aka.challenge(source));
+            }
         }
-        if let Some(bearer) = &self.bearer_realm {
-            challenges.push(SipAuthChallenge {
-                scheme: SipAuthScheme::Bearer,
-                value: bearer_challenge_value(bearer, self.bearer_scope.as_deref(), None, None),
-                source,
-            });
+        if self.policy.scheme_allowed(SipAuthScheme::Bearer) {
+            if let Some(bearer) = &self.bearer_realm {
+                challenges.push(SipAuthChallenge {
+                    scheme: SipAuthScheme::Bearer,
+                    value: bearer_challenge_value(bearer, self.bearer_scope.as_deref(), None, None),
+                    source,
+                });
+            }
         }
-        if let Some(digest) = &self.digest_provider {
-            let challenge = digest.challenge();
-            challenges.push(SipAuthChallenge {
-                scheme: SipAuthScheme::Digest,
-                value: digest.www_authenticate(&challenge),
-                source,
-            });
-        } else if let Some(digest) = &self.digest {
-            let challenge = digest.challenge();
-            challenges.push(SipAuthChallenge {
-                scheme: SipAuthScheme::Digest,
-                value: digest.www_authenticate(&challenge),
-                source,
-            });
+        if self.policy.scheme_allowed(SipAuthScheme::Digest) {
+            if let Some(digest) = &self.digest_provider {
+                let challenge = digest.challenge();
+                if self.policy.digest_algorithm_allowed(challenge.algorithm) {
+                    challenges.push(SipAuthChallenge {
+                        scheme: SipAuthScheme::Digest,
+                        value: digest.www_authenticate(&challenge),
+                        source,
+                    });
+                }
+            } else if let Some(digest) = &self.digest {
+                let challenge = digest.challenge();
+                if self.policy.digest_algorithm_allowed(challenge.algorithm) {
+                    challenges.push(SipAuthChallenge {
+                        scheme: SipAuthScheme::Digest,
+                        value: digest.www_authenticate(&challenge),
+                        source,
+                    });
+                }
+            }
         }
-        if let Some(basic) = &self.basic {
-            challenges.push(SipAuthChallenge {
-                scheme: SipAuthScheme::Basic,
-                value: format!("Basic realm=\"{}\"", basic.realm),
-                source,
-            });
+        if self.policy.scheme_allowed(SipAuthScheme::Basic) {
+            if let Some(basic) = &self.basic {
+                challenges.push(SipAuthChallenge {
+                    scheme: SipAuthScheme::Basic,
+                    value: format!("Basic realm=\"{}\"", basic.realm),
+                    source,
+                });
+            }
         }
         challenges
     }
@@ -1268,43 +1699,55 @@ impl SipAuthService {
     /// shared replay storage.
     pub async fn challenges_async(&self, source: SipAuthSource) -> Result<Vec<SipAuthChallenge>> {
         let mut challenges = Vec::new();
-        if let Some(aka) = &self.aka {
-            challenges.push(aka.challenge(source));
+        if self.policy.scheme_allowed(SipAuthScheme::Aka) {
+            if let Some(aka) = &self.aka {
+                challenges.push(aka.challenge(source));
+            }
         }
-        if let Some(bearer) = &self.bearer_realm {
-            challenges.push(SipAuthChallenge {
-                scheme: SipAuthScheme::Bearer,
-                value: bearer_challenge_value(bearer, self.bearer_scope.as_deref(), None, None),
-                source,
-            });
+        if self.policy.scheme_allowed(SipAuthScheme::Bearer) {
+            if let Some(bearer) = &self.bearer_realm {
+                challenges.push(SipAuthChallenge {
+                    scheme: SipAuthScheme::Bearer,
+                    value: bearer_challenge_value(bearer, self.bearer_scope.as_deref(), None, None),
+                    source,
+                });
+            }
         }
-        if let Some(digest) = &self.digest_provider {
-            let challenge = digest.challenge_async().await?;
-            challenges.push(SipAuthChallenge {
-                scheme: SipAuthScheme::Digest,
-                value: digest.www_authenticate(&challenge),
-                source,
-            });
-        } else if let Some(digest) = &self.digest {
-            let challenge = if let Some(replay_store) = &self.digest_replay_store {
-                digest
-                    .challenge_with_replay_store(replay_store.clone())
-                    .await?
-            } else {
-                digest.challenge()
-            };
-            challenges.push(SipAuthChallenge {
-                scheme: SipAuthScheme::Digest,
-                value: digest.www_authenticate(&challenge),
-                source,
-            });
+        if self.policy.scheme_allowed(SipAuthScheme::Digest) {
+            if let Some(digest) = &self.digest_provider {
+                let challenge = digest.challenge_async().await?;
+                if self.policy.digest_algorithm_allowed(challenge.algorithm) {
+                    challenges.push(SipAuthChallenge {
+                        scheme: SipAuthScheme::Digest,
+                        value: digest.www_authenticate(&challenge),
+                        source,
+                    });
+                }
+            } else if let Some(digest) = &self.digest {
+                let challenge = if let Some(replay_store) = &self.digest_replay_store {
+                    digest
+                        .challenge_with_replay_store(replay_store.clone())
+                        .await?
+                } else {
+                    digest.challenge()
+                };
+                if self.policy.digest_algorithm_allowed(challenge.algorithm) {
+                    challenges.push(SipAuthChallenge {
+                        scheme: SipAuthScheme::Digest,
+                        value: digest.www_authenticate(&challenge),
+                        source,
+                    });
+                }
+            }
         }
-        if let Some(basic) = &self.basic {
-            challenges.push(SipAuthChallenge {
-                scheme: SipAuthScheme::Basic,
-                value: format!("Basic realm=\"{}\"", basic.realm),
-                source,
-            });
+        if self.policy.scheme_allowed(SipAuthScheme::Basic) {
+            if let Some(basic) = &self.basic {
+                challenges.push(SipAuthChallenge {
+                    scheme: SipAuthScheme::Basic,
+                    value: format!("Basic realm=\"{}\"", basic.realm),
+                    source,
+                });
+            }
         }
         Ok(challenges)
     }
@@ -1439,7 +1882,7 @@ impl SipAuthService {
         &self,
         authorization: &str,
         source: SipAuthSource,
-        is_tls: bool,
+        transport: &SipTransportSecurityContext,
     ) -> Result<(SipAuthDecision, Option<AuthFailureReason>)> {
         let Some(basic) = &self.basic else {
             return Ok((
@@ -1447,7 +1890,7 @@ impl SipAuthService {
                 Some(AuthFailureReason::UnsupportedScheme),
             ));
         };
-        if !is_tls && !self.allow_basic_over_cleartext {
+        if !transport.is_secure() && !self.allow_basic_over_cleartext {
             return Ok((
                 self.rejected_async(source).await?,
                 Some(AuthFailureReason::PolicyRejected),
@@ -1587,6 +2030,32 @@ pub trait SipIncomingAuthenticator {
         source: SipAuthSource,
         is_tls: bool,
     ) -> Result<Self::Decision>;
+
+    /// Validate the selected inbound auth header with transport-truth security
+    /// context.
+    ///
+    /// The default bridges to the legacy boolean TLS method. Auth services
+    /// that enforce scheme policy should override this method so callers can
+    /// pass concrete TLS/WSS metadata without losing detail.
+    async fn authenticate_incoming_with_transport_context(
+        &self,
+        authorization: Option<&str>,
+        method: &str,
+        request_uri: &str,
+        body: Option<&[u8]>,
+        source: SipAuthSource,
+        transport: &SipTransportSecurityContext,
+    ) -> Result<Self::Decision> {
+        self.authenticate_incoming(
+            authorization,
+            method,
+            request_uri,
+            body,
+            source,
+            transport.is_secure(),
+        )
+        .await
+    }
 }
 
 #[async_trait]
@@ -1622,11 +2091,32 @@ impl SipIncomingAuthenticator for SipAuthService {
         self.authenticate_authorization(authorization, method, request_uri, body, source, is_tls)
             .await
     }
+
+    async fn authenticate_incoming_with_transport_context(
+        &self,
+        authorization: Option<&str>,
+        method: &str,
+        request_uri: &str,
+        body: Option<&[u8]>,
+        source: SipAuthSource,
+        transport: &SipTransportSecurityContext,
+    ) -> Result<Self::Decision> {
+        self.authenticate_authorization_with_transport_context(
+            authorization,
+            method,
+            request_uri,
+            body,
+            source,
+            transport,
+        )
+        .await
+    }
 }
 
 impl std::fmt::Debug for SipAuthService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SipAuthService")
+            .field("policy", &self.policy)
             .field("digest", &self.digest.is_some())
             .field("digest_provider", &self.digest_provider.is_some())
             .field("bearer", &self.bearer.is_some())
@@ -1634,6 +2124,10 @@ impl std::fmt::Debug for SipAuthService {
             .field("bearer_scope", &self.bearer_scope)
             .field("basic", &self.basic.as_ref().map(|b| &b.realm))
             .field("aka", &self.aka.is_some())
+            .field(
+                "allow_bearer_over_cleartext",
+                &self.allow_bearer_over_cleartext,
+            )
             .field(
                 "allow_basic_over_cleartext",
                 &self.allow_basic_over_cleartext,
@@ -2111,10 +2605,14 @@ fn bearer_challenge_value(
 }
 
 fn contains_auth_scheme(value: &str, scheme: &str) -> bool {
-    value
-        .split(',')
-        .any(|part| part.trim_start().starts_with(scheme))
-        || value.trim_start().starts_with(scheme)
+    split_auth_challenges(value).into_iter().any(|challenge| {
+        let trimmed = challenge.trim_start();
+        let token = trimmed
+            .split_once(char::is_whitespace)
+            .map(|(token, _)| token)
+            .unwrap_or(trimmed);
+        token.eq_ignore_ascii_case(scheme)
+    })
 }
 
 fn contains_aka_challenge(value: &str) -> bool {
@@ -2231,24 +2729,29 @@ fn select_composite_client_auth(
     request_uri: &str,
     nonce_count: u32,
     body: Option<&[u8]>,
-    is_tls: bool,
+    transport: &SipTransportSecurityContext,
 ) -> Result<ClientAuthHeader> {
     let priorities: &[fn(&SipClientAuth) -> bool] = &[
         |auth| matches!(auth, SipClientAuth::Aka(_)),
-        |auth| matches!(auth, SipClientAuth::BearerToken(_)),
+        |auth| {
+            matches!(
+                auth,
+                SipClientAuth::BearerToken(_) | SipClientAuth::BearerTokenCleartextAllowed(_)
+            )
+        },
         |auth| matches!(auth, SipClientAuth::Digest(_)),
         |auth| matches!(auth, SipClientAuth::Basic { .. }),
     ];
 
     for matches_priority in priorities {
         for auth in auths.iter().filter(|auth| matches_priority(auth)) {
-            if let Ok(header) = auth.authorization_for_challenge(
+            if let Ok(header) = auth.authorization_for_challenge_with_transport_context(
                 challenge_header,
                 method,
                 request_uri,
                 nonce_count,
                 body,
-                is_tls,
+                transport,
             ) {
                 return Ok(header);
             }
@@ -2670,6 +3173,7 @@ impl std::fmt::Debug for SipDigestAuthService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::sync::Mutex;
 
     struct StaticPasswordVerifier;
@@ -2893,6 +3397,18 @@ mod tests {
             user_id: identity,
             scopes: vec!["sip.register".to_string()],
         }
+    }
+
+    fn auth_token_strategy() -> impl Strategy<Value = String> {
+        proptest::string::string_regex("[A-Za-z0-9._~-]{1,16}").unwrap()
+    }
+
+    fn quoted_auth_value_strategy() -> impl Strategy<Value = String> {
+        prop::collection::vec(
+            proptest::string::string_regex("[A-Za-z0-9._~-]{1,12}").unwrap(),
+            1..4,
+        )
+        .prop_map(|parts| parts.join(","))
     }
 
     fn authorization_for(
@@ -3209,6 +3725,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sip_auth_service_accepts_basic_with_secure_transport_context() {
+        let mut service = SipAuthService::new().with_basic_realm("legacy");
+        service.add_basic_user("alice", "secret");
+        let token = BASE64_STANDARD.encode("alice:secret");
+
+        let decision = service
+            .authenticate_authorization_with_transport_context(
+                Some(&format!("Basic {token}")),
+                "OPTIONS",
+                "sip:bob@example.test",
+                None,
+                SipAuthSource::Origin,
+                &SipTransportSecurityContext::from_transport_name("WSS"),
+            )
+            .await
+            .expect("basic validation with transport context");
+
+        assert!(matches!(
+            decision,
+            SipAuthDecision::Authorized(AuthIdentity {
+                scheme: SipAuthScheme::Basic,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
     async fn sip_auth_service_accepts_basic_password_verifier() {
         let service = SipAuthService::new()
             .with_basic_verifier("legacy", Arc::new(StaticPasswordVerifier))
@@ -3244,13 +3787,13 @@ mod tests {
             SipAuthService::new().with_bearer_validator("api", rvoip_auth_core::bearer_stub());
 
         let decision = service
-            .authenticate_authorization(
+            .authenticate_authorization_with_transport_context(
                 Some("Bearer token-123"),
                 "MESSAGE",
                 "sip:bob@example.test",
                 None,
                 SipAuthSource::Proxy,
-                false,
+                &SipTransportSecurityContext::from_transport_name("TLS"),
             )
             .await
             .expect("bearer validation");
@@ -3263,6 +3806,142 @@ mod tests {
             }
             other => panic!("expected bearer authorization, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn sip_auth_service_rejects_bearer_over_cleartext_by_default() {
+        let service =
+            SipAuthService::new().with_bearer_validator("api", rvoip_auth_core::bearer_stub());
+
+        let decision = service
+            .authenticate_authorization(
+                Some("Bearer token-123"),
+                "MESSAGE",
+                "sip:bob@example.test",
+                None,
+                SipAuthSource::Origin,
+                false,
+            )
+            .await
+            .expect("bearer cleartext policy");
+
+        assert!(matches!(decision, SipAuthDecision::Rejected { .. }));
+    }
+
+    #[tokio::test]
+    async fn sip_auth_service_accepts_bearer_cleartext_when_explicitly_allowed() {
+        let service = SipAuthService::new()
+            .with_bearer_validator("api", rvoip_auth_core::bearer_stub())
+            .allow_bearer_over_cleartext(true);
+
+        let decision = service
+            .authenticate_authorization(
+                Some("Bearer token-123"),
+                "MESSAGE",
+                "sip:bob@example.test",
+                None,
+                SipAuthSource::Origin,
+                false,
+            )
+            .await
+            .expect("bearer cleartext opt-in");
+
+        assert!(matches!(
+            decision,
+            SipAuthDecision::Authorized(AuthIdentity {
+                scheme: SipAuthScheme::Bearer,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn sip_auth_policy_filters_challenges_and_rejects_disabled_scheme() {
+        let mut service = SipAuthService::digest("example.test")
+            .with_bearer_validator("api", rvoip_auth_core::bearer_stub())
+            .with_basic_realm("legacy")
+            .with_policy(SipAuthPolicy::new().allow_only([SipAuthScheme::Bearer]));
+        service.add_digest_user("alice", "secret");
+        service.add_basic_user("alice", "secret");
+
+        let challenges = service.challenges(SipAuthSource::Origin);
+        assert_eq!(challenges.len(), 1);
+        assert_eq!(challenges[0].scheme, SipAuthScheme::Bearer);
+
+        let token = BASE64_STANDARD.encode("alice:secret");
+        let decision = service
+            .authenticate_authorization_with_transport_context(
+                Some(&format!("Basic {token}")),
+                "OPTIONS",
+                "sip:bob@example.test",
+                None,
+                SipAuthSource::Origin,
+                &SipTransportSecurityContext::from_transport_name("TLS"),
+            )
+            .await
+            .expect("policy rejection");
+        assert!(matches!(decision, SipAuthDecision::Rejected { .. }));
+    }
+
+    #[tokio::test]
+    async fn sip_auth_policy_rejects_digest_below_minimum_algorithm() {
+        let mut service = SipAuthService::digest("example.test").with_policy(
+            SipAuthPolicy::new().with_minimum_digest_algorithm(DigestAlgorithm::SHA256),
+        );
+        service.add_digest_user("alice", "secret");
+        let challenge = SipDigestAuthService::new("example.test").challenge();
+        let authorization = authorization_for(
+            "alice",
+            "secret",
+            &challenge,
+            "OPTIONS",
+            "sip:bob@example.test",
+            None,
+        );
+
+        let decision = service
+            .authenticate_authorization(
+                Some(&authorization),
+                "OPTIONS",
+                "sip:bob@example.test",
+                None,
+                SipAuthSource::Origin,
+                false,
+            )
+            .await
+            .expect("minimum digest policy");
+
+        assert!(matches!(decision, SipAuthDecision::Rejected { .. }));
+    }
+
+    #[tokio::test]
+    async fn sip_auth_policy_can_require_digest_replay_store() {
+        let mut service = SipAuthService::digest("example.test")
+            .with_policy(SipAuthPolicy::new().require_digest_replay_store(true));
+        service.add_digest_user("alice", "secret");
+        let challenge = SipDigestAuthService::new("example.test").challenge();
+        let authorization = authorization_for(
+            "alice",
+            "secret",
+            &challenge,
+            "OPTIONS",
+            "sip:bob@example.test",
+            None,
+        );
+
+        let decision = service
+            .authenticate_authorization(
+                Some(&authorization),
+                "OPTIONS",
+                "sip:bob@example.test",
+                None,
+                SipAuthSource::Origin,
+                false,
+            )
+            .await
+            .expect("required replay-store policy");
+
+        assert!(matches!(decision, SipAuthDecision::Rejected { .. }));
     }
 
     #[tokio::test]
@@ -3502,13 +4181,13 @@ mod tests {
             .with_audit_sink(sink.clone().into_arc());
 
         let err = service
-            .authenticate_authorization(
+            .authenticate_authorization_with_transport_context(
                 Some("Bearer token"),
                 "MESSAGE",
                 "sip:bob@example.test",
                 None,
                 SipAuthSource::Origin,
-                false,
+                &SipTransportSecurityContext::from_transport_name("TLS"),
             )
             .await
             .expect_err("provider failure should return error");
@@ -3687,6 +4366,132 @@ mod tests {
     }
 
     #[test]
+    fn sip_transport_security_context_classifies_secure_transports() {
+        assert!(SipTransportSecurityContext::from_transport_name("TLS").is_secure());
+        assert!(SipTransportSecurityContext::from_transport_name("wss").is_secure());
+        assert!(
+            SipTransportSecurityContext::from_request_uri_hint("sips:bob@example.test").is_secure()
+        );
+        assert!(
+            SipTransportSecurityContext::from_request_uri_transport_hint(
+                "sip:bob@example.test;transport=tls"
+            )
+            .is_secure()
+        );
+        assert!(
+            SipTransportSecurityContext::from_request_uri_transport_hint(
+                "sip:bob@example.test;transport=wss"
+            )
+            .is_secure()
+        );
+        assert!(!SipTransportSecurityContext::from_transport_name("UDP").is_secure());
+        assert!(
+            !SipTransportSecurityContext::from_request_uri_hint("sip:bob@example.test").is_secure()
+        );
+    }
+
+    #[test]
+    fn sip_client_auth_basic_uses_transport_context_policy() {
+        let auth = SipClientAuth::basic("alice", "secret");
+        let cleartext = auth.authorization_for_challenge_with_transport_context(
+            r#"Basic realm="legacy""#,
+            "OPTIONS",
+            "sip:bob@example.test",
+            1,
+            None,
+            &SipTransportSecurityContext::unknown(),
+        );
+        assert!(
+            format!("{:?}", cleartext.expect_err("cleartext Basic must fail"))
+                .contains("cleartext")
+        );
+
+        let secure = auth
+            .authorization_for_challenge_with_transport_context(
+                r#"Basic realm="legacy""#,
+                "OPTIONS",
+                "sip:bob@example.test",
+                1,
+                None,
+                &SipTransportSecurityContext::from_transport_name("TLS"),
+            )
+            .expect("secure transport permits Basic");
+        assert_eq!(secure.scheme, SipAuthScheme::Basic);
+        assert!(secure.value.starts_with("Basic "));
+    }
+
+    #[test]
+    fn sip_client_auth_bearer_uses_transport_context_policy() {
+        let auth = SipClientAuth::bearer_token("token-123");
+        let cleartext = auth.authorization_for_challenge_with_transport_context(
+            r#"Bearer realm="api""#,
+            "OPTIONS",
+            "sip:bob@example.test",
+            1,
+            None,
+            &SipTransportSecurityContext::unknown(),
+        );
+        assert!(
+            format!("{:?}", cleartext.expect_err("cleartext Bearer must fail"))
+                .contains("cleartext")
+        );
+
+        let secure = auth
+            .authorization_for_challenge_with_transport_context(
+                r#"Bearer realm="api""#,
+                "OPTIONS",
+                "sip:bob@example.test",
+                1,
+                None,
+                &SipTransportSecurityContext::from_transport_name("TLS"),
+            )
+            .expect("secure transport permits Bearer");
+        assert_eq!(secure.scheme, SipAuthScheme::Bearer);
+        assert_eq!(secure.value, "Bearer token-123");
+
+        let cleartext_allowed = SipClientAuth::bearer_token("token-123")
+            .allow_bearer_over_cleartext(true)
+            .authorization_for_challenge_with_transport_context(
+                r#"Bearer realm="api""#,
+                "OPTIONS",
+                "sip:bob@example.test",
+                1,
+                None,
+                &SipTransportSecurityContext::unknown(),
+            )
+            .expect("explicit cleartext opt-in permits Bearer");
+        assert_eq!(cleartext_allowed.value, "Bearer token-123");
+    }
+
+    #[test]
+    fn sip_client_auth_matches_schemes_case_insensitively() {
+        let bearer = SipClientAuth::bearer_token("token-123")
+            .authorization_for_challenge_with_transport_context(
+                r#"bearer realm="api""#,
+                "OPTIONS",
+                "sip:bob@example.test",
+                1,
+                None,
+                &SipTransportSecurityContext::from_transport_name("TLS"),
+            )
+            .expect("lowercase bearer challenge must match");
+        assert_eq!(bearer.scheme, SipAuthScheme::Bearer);
+
+        let basic = SipClientAuth::basic("alice", "secret")
+            .allow_basic_over_cleartext(true)
+            .authorization_for_challenge(
+                r#"bAsIc realm="legacy""#,
+                "OPTIONS",
+                "sip:bob@example.test",
+                1,
+                None,
+                false,
+            )
+            .expect("mixed-case basic challenge must match");
+        assert_eq!(basic.scheme, SipAuthScheme::Basic);
+    }
+
+    #[test]
     fn sip_client_auth_composite_selects_strongest_compatible_scheme() {
         let auth = SipClientAuth::any([
             SipClientAuth::digest("alice", "secret"),
@@ -3694,18 +4499,71 @@ mod tests {
             SipClientAuth::basic("alice", "secret").allow_basic_over_cleartext(true),
         ]);
         let header = auth
-            .authorization_for_challenge(
+            .authorization_for_challenge_with_transport_context(
                 r#"Digest realm="pbx", nonce="n1", algorithm=MD5, Bearer realm="api", Basic realm="legacy""#,
                 "OPTIONS",
                 "sip:bob@example.test",
                 1,
                 None,
-                false,
+                &SipTransportSecurityContext::from_transport_name("TLS"),
             )
             .expect("composite auth");
 
         assert_eq!(header.scheme, SipAuthScheme::Bearer);
         assert_eq!(header.value, "Bearer token-123");
+    }
+
+    #[test]
+    fn sip_client_auth_composite_handles_quoted_commas_in_challenge_lists() {
+        let auth = SipClientAuth::any([
+            SipClientAuth::digest("alice", "secret"),
+            SipClientAuth::bearer_token("token-123"),
+            SipClientAuth::basic("alice", "secret").allow_basic_over_cleartext(true),
+        ]);
+        let header = auth
+            .authorization_for_challenge_with_transport_context(
+                r#"Basic realm="legacy,with,commas", Digest realm="pbx", nonce="n1", algorithm=MD5, qop="auth,auth-int", Bearer realm="api", scope="sip.invite,sip.message""#,
+                "OPTIONS",
+                "sip:bob@example.test",
+                1,
+                None,
+                &SipTransportSecurityContext::from_transport_name("TLS"),
+            )
+            .expect("composite auth with quoted commas");
+
+        assert_eq!(header.scheme, SipAuthScheme::Bearer);
+        assert_eq!(header.value, "Bearer token-123");
+    }
+
+    proptest! {
+        #[test]
+        fn auth_challenge_splitter_preserves_quoted_commas(
+            basic_realm in quoted_auth_value_strategy(),
+            digest_realm in quoted_auth_value_strategy(),
+            nonce in auth_token_strategy(),
+            bearer_scope in quoted_auth_value_strategy(),
+        ) {
+            let header = format!(
+                r#"Basic realm="{basic_realm}", Digest realm="{digest_realm}", nonce="{nonce}", algorithm=SHA-256, qop="auth,auth-int", Bearer realm="api", scope="{bearer_scope}""#
+            );
+
+            let challenges = split_auth_challenges(&header);
+            prop_assert_eq!(
+                challenges.len(),
+                3,
+                "challenge splitter must not split quoted commas: {:?}",
+                challenges
+            );
+            prop_assert!(challenges[0].starts_with("Basic "));
+            prop_assert!(challenges[1].starts_with("Digest "));
+            prop_assert!(challenges[2].starts_with("Bearer "));
+
+            let digest = extract_digest_challenge(&header).expect("Digest challenge");
+            let parsed = DigestAuthenticator::parse_challenge(&digest).expect("parse Digest challenge");
+            prop_assert_eq!(parsed.realm, digest_realm);
+            prop_assert_eq!(parsed.nonce, nonce);
+            prop_assert_eq!(parsed.algorithm, DigestAlgorithm::SHA256);
+        }
     }
 
     #[test]
@@ -3748,5 +4606,46 @@ mod tests {
         assert_eq!(header.scheme, SipAuthScheme::Digest);
         assert_eq!(response.algorithm, DigestAlgorithm::SHA512256);
         assert_eq!(response.nonce, "strong");
+    }
+
+    #[test]
+    fn sip_client_auth_digest_skips_malformed_challenge_when_valid_digest_exists() {
+        let auth = SipClientAuth::digest("alice", "secret");
+        let header = auth
+            .authorization_for_challenge(
+                r#"Digest realm="pbx", algorithm=SHA-512-256, Digest realm="pbx", nonce="valid", algorithm=SHA-256, qop="auth""#,
+                "OPTIONS",
+                "sip:bob@example.test",
+                1,
+                None,
+                false,
+            )
+            .expect("valid Digest alternative should be selected");
+        let response =
+            DigestAuthenticator::parse_authorization(&header.value).expect("parse authorization");
+
+        assert_eq!(header.scheme, SipAuthScheme::Digest);
+        assert_eq!(response.algorithm, DigestAlgorithm::SHA256);
+        assert_eq!(response.nonce, "valid");
+    }
+
+    #[test]
+    fn sip_client_auth_digest_rejects_malformed_only_challenge() {
+        let err = SipClientAuth::digest("alice", "secret")
+            .authorization_for_challenge(
+                r#"Digest realm="pbx", algorithm=SHA-512-256"#,
+                "OPTIONS",
+                "sip:bob@example.test",
+                1,
+                None,
+                false,
+            )
+            .expect_err("malformed-only Digest challenge must fail");
+
+        assert!(
+            format!("{err:?}").contains("Invalid digest challenge")
+                || format!("{err:?}").contains("nonce"),
+            "unexpected error for malformed Digest challenge: {err:?}"
+        );
     }
 }

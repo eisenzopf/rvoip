@@ -43,7 +43,11 @@ impl Recorder for CaptureRecorder {
             .labels()
             .map(|l| (l.key().to_string(), l.value().to_string()))
             .collect();
-        Counter::from_arc(Arc::new(CaptureCounter { state, name, labels }))
+        Counter::from_arc(Arc::new(CaptureCounter {
+            state,
+            name,
+            labels,
+        }))
     }
 
     fn register_gauge(&self, key: &Key, _metadata: &Metadata<'_>) -> Gauge {
@@ -53,7 +57,11 @@ impl Recorder for CaptureRecorder {
             .labels()
             .map(|l| (l.key().to_string(), l.value().to_string()))
             .collect();
-        Gauge::from_arc(Arc::new(CaptureGauge { state, name, labels }))
+        Gauge::from_arc(Arc::new(CaptureGauge {
+            state,
+            name,
+            labels,
+        }))
     }
 
     fn register_histogram(&self, key: &Key, _metadata: &Metadata<'_>) -> Histogram {
@@ -63,7 +71,11 @@ impl Recorder for CaptureRecorder {
             .labels()
             .map(|l| (l.key().to_string(), l.value().to_string()))
             .collect();
-        Histogram::from_arc(Arc::new(CaptureHistogram { state, name, labels }))
+        Histogram::from_arc(Arc::new(CaptureHistogram {
+            state,
+            name,
+            labels,
+        }))
     }
 }
 
@@ -153,7 +165,7 @@ fn invite_env(sid: &str) -> UctpEnvelope {
         connid: None,
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -172,7 +184,7 @@ fn accept_env(sid: &str) -> UctpEnvelope {
         connid: None,
         in_reply_to: Some("env_inv".into()),
         payload: serde_json::to_value(payload).unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -200,8 +212,12 @@ async fn observability_emits_counter_gauge_histogram() {
 
     // (a) `uctp_envelopes_total{type="session.invite"}` increments.
     assert!(
-        counters.iter().any(|(name, labels, _)| name == "uctp_envelopes_total"
-            && labels.iter().any(|(k, v)| k == "type" && v == "session.invite")),
+        counters
+            .iter()
+            .any(|(name, labels, _)| name == "uctp_envelopes_total"
+                && labels
+                    .iter()
+                    .any(|(k, v)| k == "type" && v == "session.invite")),
         "expected uctp_envelopes_total{{type=session.invite}}; got {:?}",
         *counters
     );

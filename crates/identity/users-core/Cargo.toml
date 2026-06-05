@@ -23,6 +23,7 @@ name = "users_core"
 default = []
 auth-core = ["dep:rvoip-auth-core", "dep:rvoip-core-traits"]
 client = ["reqwest"]
+postgres = ["dep:sqlx-postgres"]
 
 [dependencies]
 # Async runtime
@@ -31,6 +32,7 @@ tokio = { workspace = true, features = ["full"] }
 # Database
 sqlx-core = { version = "0.8", default-features = false, features = ["_rt-tokio", "json"] }
 sqlx-sqlite = { version = "0.8", default-features = false, features = ["bundled", "chrono", "json", "uuid"] }
+sqlx-postgres = { version = "0.8", default-features = false, features = ["chrono", "json", "uuid"], optional = true }
 
 # Password hashing
 argon2 = "0.5"

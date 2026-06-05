@@ -1,8 +1,5 @@
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
-use crate::types::{
-    via::Via,
-    Param, TypedHeader,
-};
+use crate::types::{via::Via, Param, TypedHeader};
 
 /// Extension trait for adding Via headers to SIP message builders.
 ///

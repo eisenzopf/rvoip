@@ -88,13 +88,14 @@ impl PerfectNegotiation {
     ///
     /// Returns the action the caller should take for a freshly arrived
     /// remote offer.
-    pub async fn decide_remote_offer(
-        &self,
-        peer: &Arc<RvoipPeerConnection>,
-    ) -> NegotiationAction {
+    pub async fn decide_remote_offer(&self, peer: &Arc<RvoipPeerConnection>) -> NegotiationAction {
         let making_offer = self.making_offer.load(Ordering::Acquire);
         let stable = peer.signaling_is_stable().await;
-        let ready_for_offer = !making_offer && (stable || self.is_setting_remote_answer_pending.load(Ordering::Acquire));
+        let ready_for_offer = !making_offer
+            && (stable
+                || self
+                    .is_setting_remote_answer_pending
+                    .load(Ordering::Acquire));
         let offer_collision = !ready_for_offer;
 
         if offer_collision && !self.polite {

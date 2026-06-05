@@ -44,10 +44,7 @@ pub struct TlsConfig {
 impl TlsConfig {
     /// Load cert chain + private key from PEM files. Both files must be PEM
     /// (`-----BEGIN CERTIFICATE-----` and `-----BEGIN PRIVATE KEY-----`).
-    pub async fn from_pem_files(
-        cert: impl AsRef<Path>,
-        key: impl AsRef<Path>,
-    ) -> Result<Self> {
+    pub async fn from_pem_files(cert: impl AsRef<Path>, key: impl AsRef<Path>) -> Result<Self> {
         let cert_path = cert.as_ref().to_path_buf();
         let key_path = key.as_ref().to_path_buf();
 

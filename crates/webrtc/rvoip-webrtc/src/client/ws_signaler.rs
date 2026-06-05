@@ -71,9 +71,8 @@ impl WsSignaler {
     }
 }
 
-type WsClient = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type WsClient =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn connect_with_retry(url: &str, config: &WsSignalerConfig) -> Result<WsClient> {
     let max_attempts = config.retry_max_attempts.max(1);
@@ -136,9 +135,11 @@ async fn recv_signaling(
 async fn send_text(ws: &mut WsClient, msg: &SignalingMessage) -> Result<()> {
     let payload = serde_json::to_string(msg)
         .map_err(|e| WebRtcError::Signaling(format!("serialize {}: {e}", msg.msg_type)))?;
-    ws.send(tokio_tungstenite::tungstenite::Message::Text(payload.into()))
-        .await
-        .map_err(|e| WebRtcError::Signaling(format!("ws send: {e}")))?;
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        payload.into(),
+    ))
+    .await
+    .map_err(|e| WebRtcError::Signaling(format!("ws send: {e}")))?;
     Ok(())
 }
 

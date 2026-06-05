@@ -153,8 +153,7 @@ fn render_prometheus_with_stats_includes_outbound_series() {
             nominated: true,
         }),
     };
-    let body =
-        rvoip_webrtc::observability::render_prometheus_with_stats(&metrics, &snap);
+    let body = rvoip_webrtc::observability::render_prometheus_with_stats(&metrics, &snap);
     assert!(body.contains("rvoip_webrtc_outbound_packets_total 50"));
     assert!(body.contains("rvoip_webrtc_nack_count_total 3"));
     assert!(body.contains("rvoip_webrtc_selected_pair_rtt_ms 8.0000"));
@@ -167,10 +166,7 @@ async fn mdns_local_candidate_is_dropped_by_default() {
 
     // Default policy is Drop.
     let adapter = WebRtcAdapter::new(WebRtcConfig::loopback());
-    assert_eq!(
-        adapter.mdns_candidate_policy(),
-        MdnsCandidatePolicy::Drop
-    );
+    assert_eq!(adapter.mdns_candidate_policy(), MdnsCandidatePolicy::Drop);
 
     // Spin up a server route via apply_remote_offer.
     let offer = fresh_offer().await;
@@ -198,10 +194,7 @@ async fn mdns_pass_policy_forwards_to_webrtc_rs() {
     let mut config = WebRtcConfig::loopback();
     config.mdns_candidate_policy = MdnsCandidatePolicy::Pass;
     let adapter = WebRtcAdapter::new(config);
-    assert_eq!(
-        adapter.mdns_candidate_policy(),
-        MdnsCandidatePolicy::Pass
-    );
+    assert_eq!(adapter.mdns_candidate_policy(), MdnsCandidatePolicy::Pass);
 
     let offer = fresh_offer().await;
     let conn_id = adapter.apply_remote_offer(&offer).await.expect("offer");
@@ -261,7 +254,10 @@ async fn remote_dtls_fingerprint_extracts_from_inbound_sdp() {
         "unexpected fingerprint algo: {}",
         first.algorithm
     );
-    assert!(first.value.contains(':'), "fingerprint value should be colon-separated hex");
+    assert!(
+        first.value.contains(':'),
+        "fingerprint value should be colon-separated hex"
+    );
 }
 
 #[tokio::test]
@@ -284,9 +280,7 @@ async fn remote_dtls_fingerprint_returns_empty_for_outbound_before_answer() {
     .expect("originate");
     let conn_id = handle.connection.id.clone();
 
-    let fps = adapter
-        .remote_dtls_fingerprint(&conn_id)
-        .expect("lookup");
+    let fps = adapter.remote_dtls_fingerprint(&conn_id).expect("lookup");
     assert!(
         fps.is_empty(),
         "outbound originate has no remote SDP yet, so no fingerprints"

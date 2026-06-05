@@ -48,12 +48,12 @@
 //! assert_eq!(parsed_date.timestamp().date_naive().year(), 2023);
 //! ```
 
+use crate::error::{Error, Result};
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 #[cfg(test)]
 use chrono::Datelike;
 #[cfg(test)]
 use chrono::Timelike;
-use crate::error::{Error, Result};
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;

@@ -145,9 +145,7 @@ pub use config::Config;
 pub use connection::{Connection, ConnectionState, Direction, Transport};
 pub use conversation::{Conversation, ConversationPolicy, ConversationState};
 pub use error::{Result, RvoipError};
-pub use events::{
-    AnomalyKind, ConnectionProgressKind, Event, SessionQualityReport, UsageKind,
-};
+pub use events::{AnomalyKind, ConnectionProgressKind, Event, SessionQualityReport, UsageKind};
 pub use identity::{
     Credential, CredentialKind, Device, DtlsFingerprint, Identity, IdentityAssurance,
     IdentityProvider, Jwk,

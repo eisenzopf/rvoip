@@ -3,11 +3,11 @@
 //! This module handles RTP header extensions for media processing,
 //! including audio level detection and other media-related extensions.
 
+use crate::api::error::MediaError;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug};
-use crate::api::error::MediaError;
+use tracing::debug;
 
 /// Header extension format types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

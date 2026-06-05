@@ -32,15 +32,15 @@ pub mod server;
 pub mod client;
 
 pub use adapter::{WebRtcAdapter, WebRtcMetrics, WebRtcTransportHandle, ADAPTER_EVENT_CAP};
-pub use media::WebRtcStatsSnapshot;
-pub use webrtc::peer_connection::{RTCIceCandidate, RTCIceCandidateInit};
 pub use config::{IceServerConfig, OpusSettings, WebRtcConfig};
 pub use errors::{Result, WebRtcError};
+pub use media::WebRtcStatsSnapshot;
 pub use peer::{
     connect_loopback, DataChannelOptions, IceCandidateLog, PeerRole, RvoipDataChannel,
     RvoipPeerConnection, WebRtcFeatureSupport,
 };
 pub use sdp::{sdp_has_inline_ice_candidates, sdp_has_media_line, sdp_indicates_simulcast};
+pub use webrtc::peer_connection::{RTCIceCandidate, RTCIceCandidateInit};
 
 #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
 pub use server::{WebRtcServer, WebRtcServerBuilder};

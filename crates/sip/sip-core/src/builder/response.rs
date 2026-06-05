@@ -2,12 +2,9 @@ use bytes::Bytes;
 use std::str::FromStr;
 
 use crate::types::{
-    content_length::ContentLength,
-    content_type::ContentType,
-    headers::header_access::HeaderAccess,
-    sip_request::Request,
-    sip_response::Response,
-    via::Via, HeaderName, HeaderValue, Method, StatusCode, TypedHeader,
+    content_length::ContentLength, content_type::ContentType, headers::header_access::HeaderAccess,
+    sip_request::Request, sip_response::Response, via::Via, HeaderName, HeaderValue, Method,
+    StatusCode, TypedHeader,
 };
 
 /// # SIP Response Builder

@@ -30,13 +30,10 @@ async fn rollback_after_local_offer_returns_to_stable() {
         .expect("rollback should succeed from have-local-offer");
 
     // After rollback we can issue a new offer.
-    let second = tokio::time::timeout(
-        Duration::from_secs(5),
-        offerer.create_offer_and_gather(),
-    )
-    .await
-    .expect("create second offer timeout")
-    .expect("create second offer");
+    let second = tokio::time::timeout(Duration::from_secs(5), offerer.create_offer_and_gather())
+        .await
+        .expect("create second offer timeout")
+        .expect("create second offer");
     assert!(second.contains("m=audio"));
 }
 

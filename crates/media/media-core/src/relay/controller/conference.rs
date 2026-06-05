@@ -3,9 +3,6 @@
 //! This module provides conference audio mixing capabilities for
 //! multi-party calls.
 
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tracing::{info};
 use crate::error::{Error, Result};
 use crate::processing::audio::AudioMixer;
 use crate::types::conference::{
@@ -13,6 +10,9 @@ use crate::types::conference::{
     ParticipantId,
 };
 use crate::types::{AudioFrame, DialogId};
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tracing::info;
 
 use super::{MediaSessionController, MediaSessionStatus};
 

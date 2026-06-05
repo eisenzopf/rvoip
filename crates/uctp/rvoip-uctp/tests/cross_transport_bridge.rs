@@ -41,7 +41,10 @@ fn install_crypto_provider() {
 
 fn server_endpoint(
     addr: SocketAddr,
-) -> (Arc<quinn::Endpoint>, rustls::pki_types::CertificateDer<'static>) {
+) -> (
+    Arc<quinn::Endpoint>,
+    rustls::pki_types::CertificateDer<'static>,
+) {
     let (cert_der, key_der) = self_signed_for_dev(&["localhost".into()]).expect("self_signed");
     let mut tls = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -102,7 +105,7 @@ fn auth_response(in_reply_to: String) -> UctpEnvelope {
         serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "test-token".into(),
-        actor_token: None,
+            actor_token: None,
         })
         .unwrap(),
     )
@@ -111,7 +114,11 @@ fn auth_response(in_reply_to: String) -> UctpEnvelope {
 
 /// Two-step assertion that an inbound envelope has the expected type.
 fn assert_msg(env: &UctpEnvelope, expected: MessageType) {
-    assert_eq!(env.msg_type, expected, "expected {:?} got {:?}", expected, env.msg_type);
+    assert_eq!(
+        env.msg_type, expected,
+        "expected {:?} got {:?}",
+        expected, env.msg_type
+    );
 }
 
 fn invite(sid: &str, participant: &str) -> UctpEnvelope {
@@ -132,7 +139,7 @@ fn invite(sid: &str, participant: &str) -> UctpEnvelope {
             capabilities_offer: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -210,8 +217,8 @@ async fn quic_to_wt_bridge_flows_frames_end_to_end() {
 
     // --- WT client dials in + sends session.invite ---
     let wt_client_ep = client_endpoint();
-    let wt_url = Url::parse(&format!("https://localhost:{}/uctp", server_addr.port()))
-        .expect("parse url");
+    let wt_url =
+        Url::parse(&format!("https://localhost:{}/uctp", server_addr.port())).expect("parse url");
     let wt_client = UctpWtClient::connect(
         &wt_client_ep,
         server_addr,
@@ -312,7 +319,9 @@ async fn quic_to_wt_bridge_flows_frames_end_to_end() {
     let quic_router = Arc::new(parking_lot::RwLock::new(vec![Arc::clone(
         &quic_client_stream,
     )]));
-    let wt_router = Arc::new(parking_lot::RwLock::new(vec![Arc::clone(&wt_client_stream)]));
+    let wt_router = Arc::new(parking_lot::RwLock::new(vec![Arc::clone(
+        &wt_client_stream,
+    )]));
     quic_spawn_datagram_reader(quic_client.connection.clone(), quic_router, None);
     wt_spawn_datagram_reader(wt_client.session.clone(), wt_router, None);
 
@@ -327,7 +336,7 @@ async fn quic_to_wt_bridge_flows_frames_end_to_end() {
             payload: Bytes::from(vec![0xCA, 0xFE, 0xBA, 0xBE, i]),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
-        payload_type: None,
+            payload_type: None,
         };
         quic_out.send(frame).await.expect("inject");
     }
@@ -477,7 +486,7 @@ async fn wt_to_wt_bridge_flows_frames_end_to_end() {
             payload: Bytes::from(vec![0xFE, 0xED, 0xBE, 0xEF, i]),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
-        payload_type: None,
+            payload_type: None,
         };
         out_a.send(frame).await.expect("inject");
     }

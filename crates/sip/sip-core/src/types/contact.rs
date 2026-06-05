@@ -51,7 +51,7 @@
 use crate::types::address::Address;
 // use crate::types::Param; // Removed duplicate import
 use crate::error::{Error, Result};
- // For FromStr
+// For FromStr
 use crate::types::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use ordered_float::NotNan;
 use serde::{Deserialize, Serialize};

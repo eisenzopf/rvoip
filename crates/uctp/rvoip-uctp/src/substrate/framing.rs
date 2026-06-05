@@ -24,23 +24,21 @@ pub fn length_prefixed_codec() -> LengthDelimitedCodec {
 }
 
 /// Wrap a read half so each item is a decoded [`UctpEnvelope`].
-pub fn envelope_reader<R>(
-    rx: R,
-) -> impl Stream<Item = Result<UctpEnvelope, SubstrateError>>
+pub fn envelope_reader<R>(rx: R) -> impl Stream<Item = Result<UctpEnvelope, SubstrateError>>
 where
     R: AsyncRead + Send + Unpin,
 {
-    FramedRead::new(rx, length_prefixed_codec()).map(|frame| -> Result<UctpEnvelope, SubstrateError> {
-        let bytes = frame.map_err(SubstrateError::from)?;
-        let env: UctpEnvelope = serde_json::from_slice(&bytes)?;
-        Ok(env)
-    })
+    FramedRead::new(rx, length_prefixed_codec()).map(
+        |frame| -> Result<UctpEnvelope, SubstrateError> {
+            let bytes = frame.map_err(SubstrateError::from)?;
+            let env: UctpEnvelope = serde_json::from_slice(&bytes)?;
+            Ok(env)
+        },
+    )
 }
 
 /// Wrap a write half so caller can `.send(env).await`.
-pub fn envelope_writer<W>(
-    tx: W,
-) -> impl Sink<UctpEnvelope, Error = SubstrateError>
+pub fn envelope_writer<W>(tx: W) -> impl Sink<UctpEnvelope, Error = SubstrateError>
 where
     W: AsyncWrite + Send + Unpin,
 {
@@ -79,7 +77,7 @@ mod tests {
             connid: None,
             in_reply_to: None,
             payload: serde_json::json!({"hi": "there"}),
-        signature: None,
+            signature: None,
         };
 
         writer.send(env.clone()).await.expect("send");

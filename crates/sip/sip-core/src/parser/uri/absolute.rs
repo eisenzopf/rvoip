@@ -14,10 +14,7 @@ use crate::parser::ParseResult;
 
 // uric-no-slash = unreserved / escaped / ";" / "?" / ":" / "@" / "&" / "=" / "+" / "$" / ","
 
-
 // --- URI Components ---
-
-
 
 // opaque-part = uric-no-slash *uric
 
@@ -339,7 +336,6 @@ mod tests {
             );
         }
     }
-
 
     #[test]
     fn test_absolute_uri_hierarchical() {

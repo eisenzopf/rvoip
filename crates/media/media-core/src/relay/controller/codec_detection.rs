@@ -4,13 +4,13 @@
 //! different codecs than what was negotiated during SDP. This is the "just in case"
 //! mechanism to handle unexpected codec formats gracefully.
 
+use crate::codec::mapping::CodecMapper;
+use crate::types::DialogId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
-use crate::codec::mapping::CodecMapper;
-use crate::types::DialogId;
 
 /// Detection state for a specific dialog
 #[derive(Debug, Clone)]

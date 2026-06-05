@@ -280,8 +280,6 @@ impl SrtpContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    
 
     #[test]
     fn test_srtp_context_creation() {

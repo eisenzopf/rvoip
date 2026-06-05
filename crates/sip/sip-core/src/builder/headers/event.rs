@@ -1,7 +1,7 @@
-#[cfg(test)]
-use crate::types::headers::TypedHeader;
 use crate::builder::headers::HeaderSetter;
 use crate::types::event::{Event, EventType, ParamValue, Params};
+#[cfg(test)]
+use crate::types::headers::TypedHeader;
 
 /// # SIP Event Header Builder
 ///
@@ -362,10 +362,9 @@ mod tests {
     use super::*;
     use crate::types::headers::HeaderName;
     use crate::types::method::Method;
-    
+
     use crate::types::StatusCode;
     use crate::{RequestBuilder, ResponseBuilder}; // Assuming these are your primary builders
-    
 
     #[test]
     fn test_set_full_event_object() {

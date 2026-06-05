@@ -1,8 +1,8 @@
-#[cfg(test)]
-use crate::types::TypedHeader;
 use crate::builder::headers::content_type::ContentTypeBuilderExt;
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::types::sdp::SdpSession;
+#[cfg(test)]
+use crate::types::TypedHeader;
 use bytes::Bytes;
 
 /// Content Body Builder for SIP Messages
@@ -402,8 +402,7 @@ impl ContentBuilderExt for SimpleResponseBuilder {
 mod tests {
     use super::*;
     use crate::builder::request::SimpleRequestBuilder;
-    
-    
+
     use crate::types::method::Method;
     use std::str::FromStr;
 

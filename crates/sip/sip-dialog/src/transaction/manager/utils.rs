@@ -14,10 +14,10 @@
 /// to focus on higher-level transaction state management.
 use std::net::SocketAddr;
 
-use tracing::debug;
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::TypedHeader;
 use rvoip_sip_transport::transport::TransportType;
+use tracing::debug;
 
 use crate::transaction::transport::multiplexed::select_transport_for_uri;
 

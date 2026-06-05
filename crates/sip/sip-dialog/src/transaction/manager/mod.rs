@@ -181,6 +181,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, trace, warn};
 
+use rvoip_infra_common::events::cross_crate::SipTransportContext;
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::{Host, TypedHeader};
 use rvoip_sip_transport::diagnostics as udp_diagnostics;
@@ -191,7 +192,7 @@ use rvoip_sip_transport::{
 
 use crate::diagnostics;
 use crate::transaction::client::{
-    ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction, 
+    ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction,
 };
 use crate::transaction::error::{Error, Result};
 use crate::transaction::method::{cancel, update};
@@ -210,8 +211,8 @@ use crate::transaction::transport::{
 };
 use crate::transaction::utils::transaction_key_from_message;
 use crate::transaction::{
-    InternalTransactionCommand, Transaction, TransactionEvent, TransactionKey,
-    TransactionKind, TransactionState, DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
+    InternalTransactionCommand, Transaction, TransactionEvent, TransactionKey, TransactionKind,
+    TransactionState, DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
 };
 
 // Type aliases without Sync requirement. `BoxedTransaction` and
@@ -250,6 +251,7 @@ pub struct TransactionManagerRetentionCounts {
     pub subscriber_to_transactions: usize,
     pub transaction_to_subscribers: usize,
     pub pending_inbound_bytes: usize,
+    pub pending_inbound_transport: usize,
     pub pending_inbound_timing: usize,
 }
 
@@ -444,6 +446,7 @@ pub struct TransactionManager {
     /// See `SIP_API_DESIGN_2.md` §7.5.
     pub(crate) pending_inbound_bytes: Arc<DashMap<TransactionKey, bytes::Bytes>>,
     pending_inbound_inserted_at: Arc<DashMap<TransactionKey, Instant>>,
+    pub(crate) pending_inbound_transport: Arc<DashMap<TransactionKey, SipTransportContext>>,
     /// Optional receive timing diagnostics keyed by transaction. Populated only
     /// when transport diagnostics are enabled and consumed by dialog-core
     /// instrumentation when it emits higher-level events or BYE responses.
@@ -1009,6 +1012,7 @@ impl TransactionManager {
             subscriber_to_transactions: self.subscriber_to_transactions.len(),
             transaction_to_subscribers: self.transaction_to_subscribers.len(),
             pending_inbound_bytes: self.pending_inbound_bytes.len(),
+            pending_inbound_transport: self.pending_inbound_transport.len(),
             pending_inbound_timing: self.pending_inbound_timing.len(),
         }
     }
@@ -1038,6 +1042,19 @@ impl TransactionManager {
     pub fn peek_inbound_bytes(&self, key: &TransactionKey) -> Option<bytes::Bytes> {
         // `Bytes::clone` is a refcount bump — no heap alloc.
         self.pending_inbound_bytes
+            .get(key)
+            .map(|r| r.value().clone())
+    }
+
+    /// Take (and remove) transport metadata for an inbound message keyed by
+    /// transaction.
+    pub fn take_inbound_transport(&self, key: &TransactionKey) -> Option<SipTransportContext> {
+        self.pending_inbound_transport.remove(key).map(|(_, v)| v)
+    }
+
+    /// Peek at transport metadata for an inbound message without removing it.
+    pub fn peek_inbound_transport(&self, key: &TransactionKey) -> Option<SipTransportContext> {
+        self.pending_inbound_transport
             .get(key)
             .map(|r| r.value().clone())
     }
@@ -1174,6 +1191,7 @@ impl TransactionManager {
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
             transaction_dispatch_queue_capacity: events_capacity,
@@ -1311,6 +1329,7 @@ impl TransactionManager {
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
             transaction_dispatch_queue_capacity: events_capacity,
@@ -1529,6 +1548,7 @@ impl TransactionManager {
             sip_trace,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             transaction_dispatch_workers,
             transaction_dispatch_queue_capacity,
@@ -1643,6 +1663,7 @@ impl TransactionManager {
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
             transaction_dispatch_queue_capacity: 100,
@@ -1730,6 +1751,7 @@ impl TransactionManager {
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
             transaction_dispatch_queue_capacity: 10,
@@ -2538,6 +2560,7 @@ impl TransactionManager {
         self.transaction_destinations.clear();
         self.pending_inbound_bytes.clear();
         self.pending_inbound_inserted_at.clear();
+        self.pending_inbound_transport.clear();
         self.pending_inbound_timing.clear();
 
         // Step 5: Emit TransactionEvent::ShutdownComplete
@@ -2715,6 +2738,9 @@ impl TransactionManager {
                         .pending_inbound_inserted_at
                         .remove(transaction_id);
                     manager_instance
+                        .pending_inbound_transport
+                        .remove(transaction_id);
+                    manager_instance
                         .pending_inbound_timing
                         .remove(transaction_id);
                     manager_instance.enqueue_terminated_transaction_cleanup(transaction_id.clone());
@@ -2826,6 +2852,7 @@ impl TransactionManager {
         self.terminated_transactions.remove(transaction_id);
         self.pending_inbound_bytes.remove(transaction_id);
         self.pending_inbound_inserted_at.remove(transaction_id);
+        self.pending_inbound_transport.remove(transaction_id);
         self.pending_inbound_timing.remove(transaction_id);
 
         // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
@@ -3837,6 +3864,7 @@ impl TransactionManager {
             if should_remove {
                 self.pending_inbound_bytes.remove(&key);
                 self.pending_inbound_inserted_at.remove(&key);
+                self.pending_inbound_transport.remove(&key);
                 self.pending_inbound_timing.remove(&key);
             }
         }

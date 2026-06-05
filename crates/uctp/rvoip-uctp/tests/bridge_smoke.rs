@@ -29,8 +29,8 @@ use rvoip_uctp::substrate::{
     dev_client_config_trusting, dispatch_by_alpn, make_server_endpoint, self_signed_for_dev,
 };
 use rvoip_uctp::types::MessageType;
-use rvoip_webtransport::{UctpWtAdapter, UctpWtConfig};
 use rvoip_websocket::{UctpWsAdapter, UctpWsClient, UctpWsConfig};
+use rvoip_webtransport::{UctpWtAdapter, UctpWtConfig};
 use tokio::net::TcpListener;
 use url::Url;
 
@@ -64,8 +64,8 @@ async fn bridge_smoke_three_adapters_register_and_fire_events() {
     );
     let server_addr = quinn_ep.local_addr().expect("local_addr");
 
-    let mut routes = dispatch_by_alpn(Arc::clone(&quinn_ep), &[ALPN_UCTP, ALPN_H3])
-        .expect("dispatcher");
+    let mut routes =
+        dispatch_by_alpn(Arc::clone(&quinn_ep), &[ALPN_UCTP, ALPN_H3]).expect("dispatcher");
     let quic_rx = routes.take(ALPN_UCTP).unwrap();
     let wt_rx = routes.take(ALPN_H3).unwrap();
 
@@ -94,10 +94,13 @@ async fn bridge_smoke_three_adapters_register_and_fire_events() {
 
     // SIP on its own UDP port. Kernel-assigned port 0 keeps the test
     // runnable in parallel with other workspace tests.
-    let sip_coordinator =
-        UnifiedCoordinator::new(SipConfig::on("bridge-smoke", "127.0.0.1".parse().unwrap(), 0))
-            .await
-            .expect("sip coordinator");
+    let sip_coordinator = UnifiedCoordinator::new(SipConfig::on(
+        "bridge-smoke",
+        "127.0.0.1".parse().unwrap(),
+        0,
+    ))
+    .await
+    .expect("sip coordinator");
     let sip_adapter = SipAdapter::new(sip_coordinator).await.expect("sip adapter");
 
     // --- 3. Register, verify cross-transport visibility ---
@@ -129,14 +132,10 @@ async fn bridge_smoke_three_adapters_register_and_fire_events() {
     )
     .expect("client endpoint");
     let client_cfg = dev_client_config_trusting(&cert_der).expect("client cfg");
-    let client = UctpQuicClient::connect(
-        &client_ep,
-        server_addr,
-        "localhost",
-        Arc::new(client_cfg),
-    )
-    .await
-    .expect("client connect");
+    let client =
+        UctpQuicClient::connect(&client_ep, server_addr, "localhost", Arc::new(client_cfg))
+            .await
+            .expect("client connect");
 
     // A1: drive the bearer auth handshake before sending session.invite.
     drive_quic_auth(&client).await;
@@ -249,7 +248,8 @@ async fn drive_quic_auth(client: &Arc<UctpQuicClient>) {
         serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "test-token".into(),
-            actor_token: None,        })
+            actor_token: None,
+        })
         .unwrap(),
     )
     .with_in_reply_to(challenge.id);
@@ -289,7 +289,8 @@ async fn drive_ws_auth(client: &Arc<UctpWsClient>) {
         serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "test-token".into(),
-            actor_token: None,        })
+            actor_token: None,
+        })
         .unwrap(),
     )
     .with_in_reply_to(challenge.id);

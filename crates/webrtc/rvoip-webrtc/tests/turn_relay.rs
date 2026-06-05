@@ -42,13 +42,10 @@ async fn relay_policy_config_is_accepted_and_peer_still_builds() {
     peer.add_local_audio_track().await.expect("audio");
 
     // Offer creation should succeed.
-    let sdp = tokio::time::timeout(
-        Duration::from_secs(10),
-        peer.create_offer_and_gather(),
-    )
-    .await
-    .expect("gather timeout")
-    .expect("offer");
+    let sdp = tokio::time::timeout(Duration::from_secs(10), peer.create_offer_and_gather())
+        .await
+        .expect("gather timeout")
+        .expect("offer");
     assert!(sdp.contains("m=audio"));
 }
 
@@ -80,11 +77,7 @@ async fn turn_url_passes_through_config_to_webrtc_rs() {
     // Verify the IceServerConfig with TURN credentials is preserved through
     // round-trip into the peer connection. We can't easily inspect webrtc-rs's
     // internal config, but we can assert the config retains the URL.
-    let cfg = WebRtcConfig::loopback().with_turn(
-        "turn:turn.example.com:3478",
-        "alice",
-        "secret",
-    );
+    let cfg = WebRtcConfig::loopback().with_turn("turn:turn.example.com:3478", "alice", "secret");
     assert_eq!(cfg.ice_servers.len(), 1);
     let turn = &cfg.ice_servers[0];
     assert_eq!(turn.urls[0], "turn:turn.example.com:3478");

@@ -61,8 +61,7 @@ pub trait TtsPlayback: Send + Sync {
 
 #[async_trait]
 pub trait TtsProvider: Send + Sync {
-    async fn synthesize(&self, request: TtsRequest)
-        -> Result<Box<dyn TtsPlayback>>;
+    async fn synthesize(&self, request: TtsRequest) -> Result<Box<dyn TtsPlayback>>;
 }
 
 // --- DialogManager -----------------------------------------------------

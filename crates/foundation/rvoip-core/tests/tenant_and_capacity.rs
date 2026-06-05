@@ -24,7 +24,11 @@ async fn tenant_quota_rejects_exceeding_start_session() {
     .expect("set_tenant_quotas");
 
     let cid = orch
-        .open_conversation(tenant.clone(), ConversationPolicy::default(), HashMap::new())
+        .open_conversation(
+            tenant.clone(),
+            ConversationPolicy::default(),
+            HashMap::new(),
+        )
         .await
         .unwrap();
     // First session goes through; we have to join to make it Active.

@@ -11,8 +11,8 @@ use tracing::{debug, error, info, trace, warn};
 use crate::transaction::TransactionKey;
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
 use rvoip_infra_common::events::cross_crate::{
-    CallState, CrossCrateEvent, DialogToSessionEvent, RvoipCrossCrateEvent,
-    SessionToDialogEvent, TerminationReason,
+    CallState, CrossCrateEvent, DialogToSessionEvent, RvoipCrossCrateEvent, SessionToDialogEvent,
+    TerminationReason,
 };
 use rvoip_sip_core::Method;
 
@@ -205,7 +205,10 @@ impl DialogEventHub {
                 }
             }
 
-            DialogEvent::Terminated { dialog_id, reason: _ } => {
+            DialogEvent::Terminated {
+                dialog_id,
+                reason: _,
+            } => {
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
                     Some(RvoipCrossCrateEvent::DialogToSession(
                         DialogToSessionEvent::CallTerminated {
@@ -315,6 +318,10 @@ impl DialogEventHub {
                             rvoip_sip_core::Message::Request(request.clone()).to_bytes(),
                         ))
                     });
+                let transport = self
+                    .dialog_manager
+                    .transaction_manager()
+                    .take_inbound_transport(&transaction_id);
 
                 Some(RvoipCrossCrateEvent::DialogToSession(
                     DialogToSessionEvent::IncomingCall {
@@ -327,6 +334,7 @@ impl DialogEventHub {
                         transaction_id: transaction_id.to_string(),
                         source_addr: source.to_string(),
                         raw_request,
+                        transport,
                         // STIR/SHAKEN Phase 1: verification is performed in
                         // `events/adapter.rs` (the legacy `convert_*` path
                         // that owns the raw bytes lifecycle). This bridge
@@ -363,7 +371,10 @@ impl DialogEventHub {
                 }
             }
 
-            SessionCoordinationEvent::CallTerminating { dialog_id, reason: _ } => {
+            SessionCoordinationEvent::CallTerminating {
+                dialog_id,
+                reason: _,
+            } => {
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
                     Some(RvoipCrossCrateEvent::DialogToSession(
                         DialogToSessionEvent::CallTerminated {
@@ -619,14 +630,14 @@ impl DialogEventHub {
                             ))
                         }
                         401 | 407 => {
-                            // RFC 3261 §22.2 — digest auth challenge. If the
+                            // RFC 3261 §22.2 — SIP auth challenge. If the
                             // response carries a WWW-Authenticate (401) or
                             // Proxy-Authenticate (407) header, surface it as
-                            // `AuthRequired` so session-core can compute a
-                            // digest response and retry. Method-agnostic:
+                            // `AuthRequired` so session-core can negotiate a
+                            // configured auth response and retry. Method-agnostic:
                             // this path fires for INVITE, REGISTER, and any
-                            // future auth-challenged request. Malformed 401/
-                            // 407 without a parseable challenge falls through
+                            // future auth-challenged request. A 401/407
+                            // without a challenge header falls through
                             // to CallFailed below.
                             //
                             // SIP_API_DESIGN_2 R2 — also extract the SIP
@@ -646,7 +657,13 @@ impl DialogEventHub {
                                 .cseq()
                                 .map(|c| c.method.to_string())
                                 .unwrap_or_default();
-                            if let Some(challenge) = response.raw_header_value(&header_name) {
+                            let challenges = response
+                                .raw_headers(&header_name)
+                                .into_iter()
+                                .filter_map(|bytes| String::from_utf8(bytes).ok())
+                                .collect::<Vec<_>>();
+                            if !challenges.is_empty() {
+                                let challenge = challenges.join(", ");
                                 let realm = extract_digest_realm(&challenge);
                                 Some(RvoipCrossCrateEvent::DialogToSession(
                                     DialogToSessionEvent::AuthRequired {
@@ -655,6 +672,11 @@ impl DialogEventHub {
                                         challenge,
                                         realm,
                                         method,
+                                        outbound_transport: self
+                                            .dialog_manager
+                                            .outbound_transport_context_for_transaction(
+                                                &transaction_id,
+                                            ),
                                     },
                                 ))
                             } else {
@@ -732,6 +754,10 @@ impl DialogEventHub {
                             referred_by,
                             replaces,
                             raw_request,
+                            transport: self
+                                .dialog_manager
+                                .transaction_manager()
+                                .take_inbound_transport(&transaction_id),
                         },
                     ))
                 } else {
@@ -783,7 +809,10 @@ impl DialogEventHub {
                 }
             }
 
-            SessionCoordinationEvent::CallTerminating { dialog_id, reason: _ } => {
+            SessionCoordinationEvent::CallTerminating {
+                dialog_id,
+                reason: _,
+            } => {
                 // When BYE completes, notify session-core that dialog is terminating
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
                     debug!(
@@ -893,6 +922,10 @@ impl DialogEventHub {
                     .transaction_manager()
                     .take_inbound_bytes(&transaction_id)
                     .or_else(|| Some(bytes::Bytes::from(request.to_string().into_bytes())));
+                let transport = self
+                    .dialog_manager
+                    .transaction_manager()
+                    .take_inbound_transport(&transaction_id);
                 let session_id = match self.dialog_manager.get_session_id(&dialog_id) {
                     Some(s) => s,
                     None => {
@@ -920,6 +953,7 @@ impl DialogEventHub {
                                 sdp,
                                 method: method.to_string(),
                                 raw_request,
+                                transport,
                             },
                         ))
                     }
@@ -927,12 +961,14 @@ impl DialogEventHub {
                         DialogToSessionEvent::InfoReceived {
                             session_id,
                             raw_request,
+                            transport,
                         },
                     )),
                     Method::Message => Some(RvoipCrossCrateEvent::DialogToSession(
                         DialogToSessionEvent::MessageReceived {
                             session_id,
                             raw_request,
+                            transport,
                         },
                     )),
                     _ => {
@@ -960,6 +996,10 @@ impl DialogEventHub {
                     .transaction_manager()
                     .take_inbound_bytes(&transaction_id)
                     .or_else(|| Some(bytes::Bytes::from(request.to_string().into_bytes())));
+                let transport = self
+                    .dialog_manager
+                    .transaction_manager()
+                    .take_inbound_transport(&transaction_id);
                 // CapabilityQuery in today's dialog-core does not carry
                 // a dialog id; OPTIONS therefore surfaces as
                 // out-of-dialog (empty session_id, which the cross-
@@ -968,6 +1008,7 @@ impl DialogEventHub {
                     DialogToSessionEvent::OptionsReceived {
                         session_id: String::new(),
                         raw_request,
+                        transport,
                     },
                 ))
             }

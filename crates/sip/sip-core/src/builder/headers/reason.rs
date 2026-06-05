@@ -1,6 +1,6 @@
+use super::HeaderSetter;
 #[cfg(test)]
 use crate::types::headers::TypedHeader;
-use super::HeaderSetter;
 use crate::types::reason::Reason;
 
 /// Reason header builder
@@ -375,7 +375,6 @@ mod tests {
     use crate::types::Method;
     use crate::types::StatusCode;
     use crate::{RequestBuilder, ResponseBuilder};
-    
 
     #[test]
     fn test_request_reason() {

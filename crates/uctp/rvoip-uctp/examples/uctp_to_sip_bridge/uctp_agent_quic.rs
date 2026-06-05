@@ -12,12 +12,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustls::pki_types::CertificateDer;
 use rvoip_quic::UctpQuicClient;
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads::{auth, session};
 use rvoip_uctp::substrate::dev_client_config_trusting;
 use rvoip_uctp::types::MessageType;
-use rustls::pki_types::CertificateDer;
 
 const CERT_DER_PATH: &str = "/tmp/uctp_demo_cert.der";
 const SERVER_ADDR: &str = "127.0.0.1:4433";
@@ -88,7 +88,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "demo-token".into(),
-            actor_token: None,        })?,
+            actor_token: None,
+        })?,
     )
     .with_in_reply_to(challenge.id);
     client.send(response).await?;
@@ -96,10 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let auth_session = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
         .await?
         .ok_or("server closed before auth.session")?;
-    println!(
-        "[uctp_agent_quic] received {:?}",
-        auth_session.msg_type
-    );
+    println!("[uctp_agent_quic] received {:?}", auth_session.msg_type);
 
     // Initiate an outbound session.invite (cross-transport target — would
     // bridge to SIP via the orchestrator in v0.x).

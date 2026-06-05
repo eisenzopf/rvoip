@@ -341,7 +341,11 @@ async fn test_transport_with_transaction_core_tcp() {
     assert!(client_event.is_some(), "Client didn't receive any event");
 
     // Check the received event
-    if let Some(TransactionEvent::NewResponse { response, source: _ }) = client_event {
+    if let Some(TransactionEvent::NewResponse {
+        response,
+        source: _,
+    }) = client_event
+    {
         assert_eq!(response.status_code(), StatusCode::Trying.as_u16());
         assert_eq!(response.call_id().unwrap().to_string(), "call2@example.com");
     } else {
@@ -418,7 +422,11 @@ async fn test_transport_with_transaction_core_ws() {
     assert!(client_event.is_some(), "Client didn't receive any event");
 
     // Check the received event
-    if let Some(TransactionEvent::NewResponse { response, source: _ }) = client_event {
+    if let Some(TransactionEvent::NewResponse {
+        response,
+        source: _,
+    }) = client_event
+    {
         assert_eq!(response.status_code(), StatusCode::Ok.as_u16());
         assert_eq!(response.call_id().unwrap().to_string(), "call3@example.com");
     } else {

@@ -8,6 +8,7 @@
 //! is the §10-named entry point; companion redactor unit-style tests
 //! live in `sip_api_design_2_section_10_skeletons.rs`.
 
+use proptest::prelude::*;
 use rvoip_infra_common::events::cross_crate::{format_sip_trace_message, SipTraceConfig};
 use rvoip_sip::api::trace_redactor::{
     apply_message_redactor, PassthroughRedactor, RedactionDecision, TraceRedactor,
@@ -121,4 +122,47 @@ fn default_trace_policy_redacts_identity_tokens_and_sdp_keying() {
     assert!(!scrubbed.contains("carrier-secret-token"));
     assert!(!scrubbed.contains("sdes-master-key"));
     assert!(!scrubbed.contains("ice-secret"));
+}
+
+fn secret_fragment_strategy() -> impl Strategy<Value = String> {
+    proptest::string::string_regex("[A-Za-z0-9._~+=/-]{1,48}").unwrap()
+}
+
+proptest! {
+    #[test]
+    fn auth_redactor_never_leaks_generated_authorization_values(
+        auth_fragment in secret_fragment_strategy(),
+        proxy_fragment in secret_fragment_strategy(),
+        call_fragment in secret_fragment_strategy(),
+    ) {
+        let auth_secret = format!("auth-secret-{auth_fragment}");
+        let proxy_secret = format!("proxy-secret-{proxy_fragment}");
+        let call_id = format!("call-{call_fragment}@example.test");
+        let raw = format!(
+            "MESSAGE sip:bob@example.com SIP/2.0\r\n\
+             Authorization: Digest username=\"alice\", response=\"{auth_secret}\"\r\n\
+             Proxy-Authorization: Bearer {proxy_secret}\r\n\
+             Call-ID: {call_id}\r\n\
+             Content-Length: 0\r\n\
+             \r\n"
+        );
+
+        let scrubbed = apply_message_redactor(&AuthRedactor, &raw);
+
+        prop_assert!(scrubbed.contains("Authorization: <redacted>"));
+        prop_assert!(scrubbed.contains("Proxy-Authorization: <redacted>"));
+        prop_assert!(
+            !scrubbed.contains(&auth_secret),
+            "Authorization secret leaked: {}",
+            scrubbed
+        );
+        prop_assert!(
+            !scrubbed.contains(&proxy_secret),
+            "Proxy-Authorization secret leaked: {}",
+            scrubbed
+        );
+        let expected_call_id = format!("Call-ID: {}", call_id);
+        prop_assert!(scrubbed.contains(&expected_call_id));
+        prop_assert!(scrubbed.contains("Content-Length: 0"));
+    }
 }

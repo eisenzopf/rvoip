@@ -1,8 +1,8 @@
+use super::HeaderSetter;
 #[cfg(test)]
 use crate::types::headers::HeaderName;
 #[cfg(test)]
 use crate::types::headers::TypedHeader;
-use super::HeaderSetter;
 use crate::types::{
     uri::Uri,
     warning::{Warning, WarningHeader},
@@ -423,7 +423,6 @@ mod tests {
     use super::*;
     use crate::types::{uri::Uri, StatusCode};
     use crate::ResponseBuilder;
-    
 
     #[test]
     fn test_warning_custom() {

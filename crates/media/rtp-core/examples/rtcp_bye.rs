@@ -5,8 +5,7 @@
 
 use bytes::Bytes;
 use rvoip_rtp_core::{
-    packet::rtcp::RtcpPacket,
-    RtpEvent, RtpSession, RtpSessionConfig, RtpSessionEvent,
+    packet::rtcp::RtcpPacket, RtpEvent, RtpSession, RtpSessionConfig, RtpSessionEvent,
 };
 use std::time::Duration;
 use tokio::time;

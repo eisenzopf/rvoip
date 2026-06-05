@@ -6,17 +6,17 @@ use std::time::Duration;
 
 use parking_lot::Mutex as SyncMutex;
 use rtc::media_stream::MediaStreamTrack;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters};
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtc::rtp_transceiver::rtp_sender::{
+    RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelState};
 use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
 use webrtc::media_stream::track_local::TrackLocal;
 use webrtc::media_stream::track_remote::TrackRemote;
 use webrtc::peer_connection::PeerConnection;
-use webrtc::peer_connection::{
-    RTCIceCandidate, RTCIceCandidateInit, RTCSdpType,
-};
+use webrtc::peer_connection::{RTCIceCandidate, RTCIceCandidateInit, RTCSdpType};
 use webrtc::rtp_transceiver::RTCRtpTransceiverDirection;
 
 use crate::config::WebRtcConfig;
@@ -143,7 +143,10 @@ impl RvoipPeerConnection {
     /// the offerer. When the offer is Opus-only (typical Firefox / Chrome
     /// audio-only offer) we skip the DTMF attach to keep the local
     /// transceiver count matched to the offer's m-lines.
-    pub async fn prepare_answerer_media_for_offer(self: &Arc<Self>, remote_sdp: &str) -> Result<()> {
+    pub async fn prepare_answerer_media_for_offer(
+        self: &Arc<Self>,
+        remote_sdp: &str,
+    ) -> Result<()> {
         if sdp_has_media_line(remote_sdp, "audio") {
             self.add_local_audio_track().await?;
             if sdp_advertises_telephone_event(remote_sdp) {
@@ -436,11 +439,17 @@ impl RvoipPeerConnection {
         dc: &Arc<dyn DataChannel>,
         timeout: Duration,
     ) -> Option<DataChannelEvent> {
-        tokio::time::timeout(timeout, dc.poll()).await.ok().flatten()
+        tokio::time::timeout(timeout, dc.poll())
+            .await
+            .ok()
+            .flatten()
     }
 
     /// Wait until a data channel reports `OnOpen`.
-    pub async fn wait_data_channel_open(dc: &Arc<dyn DataChannel>, timeout: Duration) -> Result<()> {
+    pub async fn wait_data_channel_open(
+        dc: &Arc<dyn DataChannel>,
+        timeout: Duration,
+    ) -> Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let state = dc
@@ -454,7 +463,9 @@ impl RvoipPeerConnection {
                 state,
                 RTCDataChannelState::Closing | RTCDataChannelState::Closed
             ) {
-                return Err(WebRtcError::Webrtc("data channel closed before open".into()));
+                return Err(WebRtcError::Webrtc(
+                    "data channel closed before open".into(),
+                ));
             }
 
             if tokio::time::Instant::now() >= deadline {
@@ -470,7 +481,9 @@ impl RvoipPeerConnection {
                         return Err(WebRtcError::Webrtc("data channel error".into()));
                     }
                     DataChannelEvent::OnClose => {
-                        return Err(WebRtcError::Webrtc("data channel closed before open".into()));
+                        return Err(WebRtcError::Webrtc(
+                            "data channel closed before open".into(),
+                        ));
                     }
                     _ => {}
                 }
@@ -625,21 +638,18 @@ impl RvoipPeerConnection {
     pub async fn rollback_local(self: &Arc<Self>) -> Result<()> {
         let rollback = rtc::peer_connection::sdp::RTCSessionDescription::rollback(None)
             .map_err(|e| WebRtcError::Webrtc(format!("build rollback: {e}")))?;
-        self.pc
-            .set_local_description(rollback)
-            .await
-            .map_err(|e| {
-                // Translate the "already stable" error into our typed variant.
-                let msg = e.to_string();
-                if msg.contains("InvalidModificationError")
-                    || msg.contains("InvalidState")
-                    || msg.contains("stable")
-                {
-                    WebRtcError::InvalidState("rollback called in stable signaling state")
-                } else {
-                    WebRtcError::Webrtc(format!("rollback: {e}"))
-                }
-            })?;
+        self.pc.set_local_description(rollback).await.map_err(|e| {
+            // Translate the "already stable" error into our typed variant.
+            let msg = e.to_string();
+            if msg.contains("InvalidModificationError")
+                || msg.contains("InvalidState")
+                || msg.contains("stable")
+            {
+                WebRtcError::InvalidState("rollback called in stable signaling state")
+            } else {
+                WebRtcError::Webrtc(format!("rollback: {e}"))
+            }
+        })?;
         Ok(())
     }
 
@@ -711,7 +721,6 @@ impl RvoipPeerConnection {
 
     /// Discover a remote track of `kind` from transceivers.
     pub async fn discover_remote_track(&self, kind: RtpCodecKind) -> Option<Arc<dyn TrackRemote>> {
-
         for tx in self.pc.get_transceivers().await {
             let Ok(Some(receiver)) = tx.receiver().await else {
                 continue;
@@ -770,8 +779,14 @@ impl RvoipPeerConnection {
 
     /// Returns whether a remote track of each kind has been observed.
     pub async fn remote_media_ready(&self) -> (bool, bool) {
-        let audio = self.discover_remote_track(RtpCodecKind::Audio).await.is_some();
-        let video = self.discover_remote_track(RtpCodecKind::Video).await.is_some();
+        let audio = self
+            .discover_remote_track(RtpCodecKind::Audio)
+            .await
+            .is_some();
+        let video = self
+            .discover_remote_track(RtpCodecKind::Video)
+            .await
+            .is_some();
         (audio, video)
     }
 
@@ -794,8 +809,7 @@ impl RvoipPeerConnection {
                 return Some(track);
             }
 
-            let pkt =
-                crate::media::pump::silent_rtp_packet_for_ssrc(ssrc, seq, seq as u32 * 960);
+            let pkt = crate::media::pump::silent_rtp_packet_for_ssrc(ssrc, seq, seq as u32 * 960);
             let _ = local.write_rtp(pkt).await;
             seq = seq.wrapping_add(1);
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -903,7 +917,6 @@ impl RvoipPeerConnection {
     }
 
     async fn set_audio_direction(&self, direction: RTCRtpTransceiverDirection) -> Result<()> {
-
         for tx in self.pc.get_transceivers().await {
             let Some(sender) = tx.sender().await? else {
                 continue;

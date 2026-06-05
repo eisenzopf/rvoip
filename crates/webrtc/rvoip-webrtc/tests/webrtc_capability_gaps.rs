@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use rvoip_webrtc::client::{IceCandidate, Signaler, WsSignaler};
-use rvoip_webrtc::peer::{connect_loopback, WebRtcFeatureSupport, RvoipPeerConnection};
-use rvoip_webrtc::signaling::websocket::{serve_listener, SignalingMessage};
+use rvoip_webrtc::peer::{connect_loopback, RvoipPeerConnection, WebRtcFeatureSupport};
 use rvoip_webrtc::sdp::{sdp_has_inline_ice_candidates, sdp_indicates_simulcast};
+use rvoip_webrtc::signaling::websocket::{serve_listener, SignalingMessage};
 use rvoip_webrtc::{IceServerConfig, WebRtcAdapter, WebRtcConfig};
 
 #[test]
@@ -52,8 +52,14 @@ async fn loopback_sdp_uses_full_gather_not_simulcast() {
     offerer.add_local_video_track().await.expect("video");
 
     let offer_sdp = offerer.create_offer_and_gather().await.expect("offer");
-    assert!(sdp_has_inline_ice_candidates(&offer_sdp), "v1 embeds ICE in SDP");
-    assert!(!sdp_indicates_simulcast(&offer_sdp), "simulcast not negotiated");
+    assert!(
+        sdp_has_inline_ice_candidates(&offer_sdp),
+        "v1 embeds ICE in SDP"
+    );
+    assert!(
+        !sdp_indicates_simulcast(&offer_sdp),
+        "simulcast not negotiated"
+    );
 
     assert!(
         !offerer.gathered_ice_candidates().is_empty(),

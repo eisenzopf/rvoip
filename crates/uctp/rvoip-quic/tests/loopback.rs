@@ -10,17 +10,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use rvoip_core::adapter::ConnectionAdapter;
 use rvoip_auth_core::bearer_stub;
+use rvoip_core::adapter::ConnectionAdapter;
+use rvoip_quic::{UctpQuicAdapter, UctpQuicClient, UctpQuicConfig};
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads::auth;
 use rvoip_uctp::substrate::{dispatch_by_alpn, self_signed_for_dev};
 use rvoip_uctp::types::MessageType;
-use rvoip_quic::{UctpQuicAdapter, UctpQuicClient, UctpQuicConfig};
 
 const ALPN_UCTP: &[u8] = b"uctp/1";
 
-fn server_endpoint(addr: SocketAddr) -> (Arc<quinn::Endpoint>, rustls::pki_types::CertificateDer<'static>) {
+fn server_endpoint(
+    addr: SocketAddr,
+) -> (
+    Arc<quinn::Endpoint>,
+    rustls::pki_types::CertificateDer<'static>,
+) {
     let (cert_der, key_der) = self_signed_for_dev(&["localhost".into()]).expect("self_signed");
     let mut tls = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -65,8 +70,7 @@ async fn loopback_auth_handshake_via_adapter() {
     let (server_ep, cert_der) = server_endpoint("127.0.0.1:0".parse().unwrap());
     let server_addr = server_ep.local_addr().expect("local_addr");
 
-    let mut routes = dispatch_by_alpn(Arc::clone(&server_ep), &[ALPN_UCTP])
-        .expect("dispatcher");
+    let mut routes = dispatch_by_alpn(Arc::clone(&server_ep), &[ALPN_UCTP]).expect("dispatcher");
     let accept_rx = routes.take(ALPN_UCTP).expect("uctp/1 channel");
 
     let cfg = UctpQuicConfig::new(Arc::clone(&server_ep), accept_rx, bearer_stub());
@@ -75,17 +79,13 @@ async fn loopback_auth_handshake_via_adapter() {
 
     // --- Client side ---
     let client_ep = client_endpoint();
-    let client_cfg = rvoip_uctp::substrate::dev_client_config_trusting(&cert_der)
-        .expect("client cfg");
+    let client_cfg =
+        rvoip_uctp::substrate::dev_client_config_trusting(&cert_der).expect("client cfg");
 
-    let client = UctpQuicClient::connect(
-        &client_ep,
-        server_addr,
-        "localhost",
-        Arc::new(client_cfg),
-    )
-    .await
-    .expect("client connect");
+    let client =
+        UctpQuicClient::connect(&client_ep, server_addr, "localhost", Arc::new(client_cfg))
+            .await
+            .expect("client connect");
 
     let mut inbound = client.take_inbound().expect("first take");
 
@@ -110,7 +110,7 @@ async fn loopback_auth_handshake_via_adapter() {
         connid: None,
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
-    signature: None,
+        signature: None,
     };
     client.send(env).await.expect("send");
 
@@ -143,16 +143,12 @@ async fn loopback_five_envelopes_each_direction_in_order() {
     let _adapter = UctpQuicAdapter::new(cfg).await.expect("adapter");
 
     let client_ep = client_endpoint();
-    let client_cfg = rvoip_uctp::substrate::dev_client_config_trusting(&cert_der)
-        .expect("client cfg");
-    let client = UctpQuicClient::connect(
-        &client_ep,
-        server_addr,
-        "localhost",
-        Arc::new(client_cfg),
-    )
-    .await
-    .expect("client connect");
+    let client_cfg =
+        rvoip_uctp::substrate::dev_client_config_trusting(&cert_der).expect("client cfg");
+    let client =
+        UctpQuicClient::connect(&client_ep, server_addr, "localhost", Arc::new(client_cfg))
+            .await
+            .expect("client connect");
 
     let mut inbound = client.take_inbound().expect("first take");
 
@@ -177,7 +173,7 @@ async fn loopback_five_envelopes_each_direction_in_order() {
             connid: None,
             in_reply_to: None,
             payload: serde_json::to_value(payload).unwrap(),
-        signature: None,
+            signature: None,
         };
         client.send(env).await.expect("send");
     }
@@ -280,7 +276,7 @@ async fn loopback_datagram_pump_round_trip() {
             payload: Bytes::from(vec![i]),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
-        payload_type: None,
+            payload_type: None,
         };
         client_out.send(frame).await.expect("client send");
     }
@@ -293,7 +289,11 @@ async fn loopback_datagram_pump_round_trip() {
             .expect("server stream closed");
         received.push(frame.payload[0]);
     }
-    assert_eq!(received, (0u8..10).collect::<Vec<_>>(), "ordering broken on client→server");
+    assert_eq!(
+        received,
+        (0u8..10).collect::<Vec<_>>(),
+        "ordering broken on client→server"
+    );
 
     // Server → client: 10 frames.
     let server_out = rvoip_core::stream::MediaStream::frames_out(server_stream.as_ref());
@@ -305,7 +305,7 @@ async fn loopback_datagram_pump_round_trip() {
             payload: Bytes::from(vec![100 + i]),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
-        payload_type: None,
+            payload_type: None,
         };
         server_out.send(frame).await.expect("server send");
     }

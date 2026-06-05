@@ -69,10 +69,7 @@ impl WebRtcServerBuilder {
     /// Register a [`WhipAuthHook`](crate::signaling::auth::WhipAuthHook) for the
     /// WHIP/WHEP server (G2). Default = anonymous (every request accepted).
     #[cfg(feature = "signaling-whip")]
-    pub fn with_whip_auth(
-        mut self,
-        auth: Arc<dyn crate::signaling::auth::WhipAuthHook>,
-    ) -> Self {
+    pub fn with_whip_auth(mut self, auth: Arc<dyn crate::signaling::auth::WhipAuthHook>) -> Self {
         self.whip_auth = Some(auth);
         self
     }
@@ -80,10 +77,7 @@ impl WebRtcServerBuilder {
     /// Register a [`WsAuthHook`](crate::signaling::auth::WsAuthHook) for the
     /// WebSocket server (G2). Default = anonymous.
     #[cfg(feature = "signaling-ws")]
-    pub fn with_ws_auth(
-        mut self,
-        auth: Arc<dyn crate::signaling::auth::WsAuthHook>,
-    ) -> Self {
+    pub fn with_ws_auth(mut self, auth: Arc<dyn crate::signaling::auth::WsAuthHook>) -> Self {
         self.ws_auth = Some(auth);
         self
     }
@@ -328,7 +322,12 @@ impl WebRtcServer {
         self.shutdown.notify_waiters();
 
         // End active routes (let downstream consumers see `Ended`).
-        let route_ids: Vec<_> = self.adapter.routes().iter().map(|e| e.key().clone()).collect();
+        let route_ids: Vec<_> = self
+            .adapter
+            .routes()
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
         for id in route_ids {
             let _ = rvoip_core::adapter::ConnectionAdapter::end(
                 &*self.adapter,

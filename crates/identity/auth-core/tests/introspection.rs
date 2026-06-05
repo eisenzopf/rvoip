@@ -77,3 +77,26 @@ async fn issuer_or_audience_mismatch_rejects() {
     let result = validator.validate("opaque-token").await;
     assert!(matches!(result, Err(BearerAuthError::Invalid(err)) if err.contains("issuer")));
 }
+
+#[tokio::test]
+async fn audience_mismatch_rejects_when_issuer_matches() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/introspect"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "active": true,
+            "sub": "id_alice",
+            "iss": "https://idp.example.com",
+            "aud": ["wrong-audience"]
+        })))
+        .mount(&server)
+        .await;
+
+    let validator =
+        OAuth2IntrospectionValidator::new(format!("{}/introspect", server.uri()).parse().unwrap())
+            .with_issuer(["https://idp.example.com"])
+            .with_audience(["rvoip-sip"]);
+
+    let result = validator.validate("opaque-token").await;
+    assert!(matches!(result, Err(BearerAuthError::Invalid(err)) if err.contains("audience")));
+}

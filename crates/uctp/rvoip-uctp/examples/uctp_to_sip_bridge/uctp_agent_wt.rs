@@ -13,12 +13,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustls::pki_types::CertificateDer;
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads::{auth, session};
 use rvoip_uctp::substrate::dev_client_config_trusting;
 use rvoip_uctp::types::MessageType;
 use rvoip_webtransport::UctpWtClient;
-use rustls::pki_types::CertificateDer;
 use url::Url;
 
 const CERT_DER_PATH: &str = "/tmp/uctp_demo_cert.der";
@@ -89,7 +89,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "demo-token-wt".into(),
-            actor_token: None,        })?,
+            actor_token: None,
+        })?,
     )
     .with_in_reply_to(challenge.id);
     client.send(response).await?;

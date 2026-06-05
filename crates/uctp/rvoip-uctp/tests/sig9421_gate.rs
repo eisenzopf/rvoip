@@ -20,15 +20,15 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ring::signature::{Ed25519KeyPair, KeyPair};
+use rvoip_auth_core::bearer_stub;
 use rvoip_auth_core::sig9421::{
     jcs_canonicalize, EnvelopeSignature, Sig9421Verifier, StaticKeyResolver,
 };
-use rvoip_auth_core::bearer_stub;
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads::{auth, control};
 use rvoip_uctp::state::{
-    default_v0_descriptor, rejecting_handler, Sig9421Policy, UctpCoordinator,
-    UctpCoordinatorCaps, ENVELOPE_CHANNEL_CAP,
+    default_v0_descriptor, rejecting_handler, Sig9421Policy, UctpCoordinator, UctpCoordinatorCaps,
+    ENVELOPE_CHANNEL_CAP,
 };
 use rvoip_uctp::types::MessageType;
 use tokio::sync::mpsc;

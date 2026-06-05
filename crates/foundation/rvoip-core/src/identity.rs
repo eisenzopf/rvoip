@@ -110,10 +110,7 @@ pub trait IdentityProvider: Send + Sync {
 
     /// P7 — derive (or look up) the DTLS-SRTP fingerprint bound to an
     /// Identity. None when the identity has no fingerprint binding.
-    async fn derive_dtls_fingerprint(
-        &self,
-        _id: IdentityId,
-    ) -> Result<Option<DtlsFingerprint>> {
+    async fn derive_dtls_fingerprint(&self, _id: IdentityId) -> Result<Option<DtlsFingerprint>> {
         Err(crate::error::RvoipError::NotImplemented(
             "IdentityProvider::derive_dtls_fingerprint",
         ))

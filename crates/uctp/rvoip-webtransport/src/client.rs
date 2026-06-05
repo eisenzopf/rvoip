@@ -32,8 +32,9 @@ impl UctpWtClient {
         if tls.alpn_protocols.is_empty() {
             tls.alpn_protocols = vec![b"h3".to_vec()];
         }
-        let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
-            .map_err(|e| rvoip_uctp::errors::SubstrateError::Tls(rustls::Error::General(e.to_string())))?;
+        let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|e| {
+            rvoip_uctp::errors::SubstrateError::Tls(rustls::Error::General(e.to_string()))
+        })?;
         let mut qc = quinn::ClientConfig::new(Arc::new(crypto));
         let mut t = quinn::TransportConfig::default();
         t.max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into().unwrap()));
@@ -45,7 +46,9 @@ impl UctpWtClient {
 
         let connecting = endpoint
             .connect_with(qc, server, server_name)
-            .map_err(|e| rvoip_uctp::errors::SubstrateError::Tls(rustls::Error::General(e.to_string())))?;
+            .map_err(|e| {
+                rvoip_uctp::errors::SubstrateError::Tls(rustls::Error::General(e.to_string()))
+            })?;
         let conn = connecting
             .await
             .map_err(rvoip_uctp::errors::SubstrateError::Quinn)?;

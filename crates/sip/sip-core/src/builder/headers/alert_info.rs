@@ -1,8 +1,8 @@
+use super::HeaderSetter;
 #[cfg(test)]
 use crate::types::headers::HeaderName;
 #[cfg(test)]
 use crate::types::headers::TypedHeader;
-use super::HeaderSetter;
 use crate::types::{
     alert_info::{AlertInfo, AlertInfoHeader},
     uri::Uri,

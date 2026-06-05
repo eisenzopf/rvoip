@@ -83,7 +83,9 @@ impl SignalingPool {
         }
         let now = Instant::now();
         #[cfg(feature = "signaling-ws")]
-        self.inner.ws_entries.retain(|_url, entry| entry.idle_for(now) < ttl);
+        self.inner
+            .ws_entries
+            .retain(|_url, entry| entry.idle_for(now) < ttl);
     }
 
     /// Number of cached WS signaler entries (useful for tests + ops).

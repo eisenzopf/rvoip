@@ -53,7 +53,10 @@ fn install_crypto_provider() {
 
 fn server_endpoint(
     addr: SocketAddr,
-) -> (Arc<quinn::Endpoint>, rustls::pki_types::CertificateDer<'static>) {
+) -> (
+    Arc<quinn::Endpoint>,
+    rustls::pki_types::CertificateDer<'static>,
+) {
     let (cert_der, key_der) = self_signed_for_dev(&["localhost".into()]).expect("self_signed");
     let mut tls = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -116,7 +119,7 @@ async fn dial_and_invite(
             capabilities: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     };
     client.send(hello).await.expect("send hello");
     let challenge = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
@@ -136,10 +139,10 @@ async fn dial_and_invite(
         payload: serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "test-token".into(),
-        actor_token: None,
+            actor_token: None,
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     };
     client.send(response).await.expect("send response");
     let session_reply = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
@@ -165,7 +168,7 @@ async fn dial_and_invite(
             capabilities_offer: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     };
     client.send(env).await.expect("send invite");
     client
@@ -284,10 +287,8 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
     spawn_datagram_reader(client_b.connection.clone(), router_b, None);
 
     // --- Inject 10 frames from client A; observe all of them on client B in order. ---
-    let client_a_out =
-        rvoip_core::stream::MediaStream::frames_out(client_a_stream.as_ref());
-    let mut client_b_in =
-        rvoip_core::stream::MediaStream::frames_in(client_b_stream.as_ref());
+    let client_a_out = rvoip_core::stream::MediaStream::frames_out(client_a_stream.as_ref());
+    let mut client_b_in = rvoip_core::stream::MediaStream::frames_in(client_b_stream.as_ref());
 
     for i in 0u8..10 {
         let frame = MediaFrame {
@@ -296,7 +297,7 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
             payload: Bytes::from(vec![0xDE, 0xAD, 0xBE, 0xEF, i]),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
-        payload_type: None,
+            payload_type: None,
         };
         client_a_out.send(frame).await.expect("inject frame");
     }

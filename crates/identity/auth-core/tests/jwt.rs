@@ -151,6 +151,21 @@ async fn token_signed_with_different_secret_rejects() {
 }
 
 #[tokio::test]
+async fn token_with_unexpected_algorithm_rejects() {
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let claims = TestClaims::default();
+    let token = encode(
+        &Header::new(Algorithm::HS384),
+        &claims,
+        &EncodingKey::from_secret(HMAC_SECRET),
+    )
+    .expect("encode HS384 token");
+
+    let result = validator.validate(&token).await;
+    assert!(matches!(result, Err(BearerAuthError::Invalid(_))));
+}
+
+#[tokio::test]
 async fn expired_token_rejects() {
     let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
     let claims = TestClaims {

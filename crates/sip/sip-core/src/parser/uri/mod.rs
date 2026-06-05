@@ -34,7 +34,6 @@ use crate::parser::ParseResult;
 use crate::types::uri::Scheme;
 use crate::types::uri::{Host, Uri};
 
-
 // SIP-URI = "sip:" [ userinfo ] hostport uri-parameters [ headers ]
 pub fn parse_sip_uri(bytes: &[u8]) -> ParseResult<'_, Uri> {
     let bytes_slice = bytes;
@@ -562,7 +561,7 @@ mod tests {
     use crate::types::param::Param;
     use crate::types::uri::Host;
     use crate::types::uri::Scheme;
-    
+
     use std::net::{IpAddr, Ipv4Addr};
 
     #[test]

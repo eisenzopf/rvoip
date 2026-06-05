@@ -1,3 +1,4 @@
+use super::TcpConnection;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -5,7 +6,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::time::interval;
 use tracing::{debug, error, info, trace};
-use super::TcpConnection;
 
 /// Configuration for the TCP connection pool
 #[derive(Clone, Debug)]

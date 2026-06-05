@@ -1,8 +1,8 @@
-#[cfg(test)]
-use crate::types::TypedHeader;
 use super::HeaderSetter;
 use crate::parser::headers::accept_language::LanguageInfo;
 use crate::types::accept_language::AcceptLanguage;
+#[cfg(test)]
+use crate::types::TypedHeader;
 use ordered_float::NotNan;
 
 /// Accept-Language Header Builder for SIP Messages

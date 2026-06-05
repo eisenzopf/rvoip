@@ -25,12 +25,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::mpsc;
-use tracing::{debug, error, warn};
 use rvoip_infra_common::events::cross_crate::SipTraceDirection;
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{Transport, TransportEvent};
+use tokio::sync::mpsc;
+use tracing::{debug, error, warn};
 
 use crate::diagnostics;
 use crate::transaction::error::{Error, Result};
@@ -38,9 +38,7 @@ use crate::transaction::runner::HasLifecycle;
 use crate::transaction::server::ServerTransaction;
 use crate::transaction::state::TransactionLifecycle;
 use crate::transaction::utils::{create_ack_from_invite, transaction_key_from_message};
-use crate::transaction::{
-    TransactionEvent, TransactionKey, TransactionKind, TransactionState,
-};
+use crate::transaction::{TransactionEvent, TransactionKey, TransactionKind, TransactionState};
 
 use super::types::*;
 use super::TransactionManager;
@@ -796,6 +794,21 @@ impl TransactionManager {
                                 .insert(key.clone(), Instant::now());
                         }
                     }
+                }
+                if let Some(key) = transaction_key.as_ref() {
+                    self.pending_inbound_transport.insert(
+                        key.clone(),
+                        rvoip_infra_common::events::cross_crate::SipTransportContext::new(
+                            transport_type.to_string(),
+                            destination.to_string(),
+                            source.to_string(),
+                            matches!(
+                                transport_type,
+                                rvoip_sip_transport::transport::TransportType::Tls
+                                    | rvoip_sip_transport::transport::TransportType::Wss
+                            ),
+                        ),
+                    );
                 }
                 if let (Some(key), Some(timing)) = (transaction_key.as_ref(), timing) {
                     let cache_timing = matches!(

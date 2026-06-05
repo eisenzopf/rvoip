@@ -1,8 +1,8 @@
+use super::HeaderSetter;
 #[cfg(test)]
 use crate::types::headers::HeaderName;
 #[cfg(test)]
 use crate::types::headers::TypedHeader;
-use super::HeaderSetter;
 use crate::types::rseq::RSeq;
 
 /// RSeq header builder
@@ -216,7 +216,6 @@ mod tests {
     use super::*;
     use crate::types::StatusCode;
     use crate::ResponseBuilder;
-    
 
     #[test]
     fn test_response_rseq() {

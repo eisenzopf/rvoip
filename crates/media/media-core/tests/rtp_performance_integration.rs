@@ -5,7 +5,9 @@
 //! the complete RTP → Audio Processing → RTP pipeline.
 
 use rvoip_media_core::performance::{
-    pool::{AudioFramePool, PoolConfig}, simd::SimdProcessor, zero_copy::ZeroCopyAudioFrame,
+    pool::{AudioFramePool, PoolConfig},
+    simd::SimdProcessor,
+    zero_copy::ZeroCopyAudioFrame,
 };
 
 // Import rtp-core types

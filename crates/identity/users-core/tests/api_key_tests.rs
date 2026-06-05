@@ -49,6 +49,7 @@ async fn test_create_api_key() {
     assert_eq!(api_key.user_id, user_id);
     assert_eq!(api_key.name, "Test API Key");
     assert_eq!(api_key.permissions, vec!["read", "write"]);
+    assert!(api_key.active);
     assert!(api_key.expires_at.is_none());
     assert!(api_key.last_used.is_none());
 
@@ -79,6 +80,7 @@ async fn test_validate_api_key() {
     let validated = validated.unwrap();
     assert_eq!(validated.id, created_key.id);
     assert_eq!(validated.name, "Validation Test");
+    assert!(validated.active);
     assert!(validated.last_used.is_some()); // Should be updated after validation
 
     // Validate with incorrect key
@@ -116,6 +118,41 @@ async fn test_expired_api_key() {
         users_core::Error::ApiKeyExpired => {}
         _ => panic!("Expected ApiKeyExpired error"),
     }
+}
+
+#[tokio::test]
+async fn test_disabled_api_key_does_not_validate_and_remains_listed() {
+    let (store, user_id, _temp_dir) = create_test_db_with_user().await;
+
+    let (api_key, raw_key) = store
+        .create_api_key(CreateApiKeyRequest {
+            user_id: user_id.clone(),
+            name: "Suspendable Key".to_string(),
+            permissions: vec!["read".to_string()],
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(store.validate_api_key(&raw_key).await.unwrap().is_some());
+
+    store.set_api_key_active(&api_key.id, false).await.unwrap();
+    assert!(
+        store.validate_api_key(&raw_key).await.unwrap().is_none(),
+        "disabled API keys must validate as absent"
+    );
+    let listed = store.list_api_keys(&user_id).await.unwrap();
+    let listed_key = listed.iter().find(|key| key.id == api_key.id).unwrap();
+    assert!(
+        !listed_key.active,
+        "disabled API keys should remain visible to administrators"
+    );
+
+    store.set_api_key_active(&api_key.id, true).await.unwrap();
+    assert!(
+        store.validate_api_key(&raw_key).await.unwrap().is_some(),
+        "re-enabled API keys should validate again"
+    );
 }
 
 #[tokio::test]

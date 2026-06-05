@@ -1,16 +1,16 @@
 use futures_util::stream::SplitStream;
 use futures_util::StreamExt;
+#[cfg(feature = "ws")]
+use http::HeaderValue;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::{debug, error, info};
-#[cfg(feature = "ws")]
-use http::HeaderValue;
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 #[cfg(feature = "ws")]
 use tokio_tungstenite::{tungstenite, WebSocketStream};
+use tracing::{debug, error, info};
 
 #[cfg(feature = "wss")]
 use tokio_rustls::rustls::ServerConfig;

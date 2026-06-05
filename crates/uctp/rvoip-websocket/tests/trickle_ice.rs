@@ -37,10 +37,7 @@ async fn trickle_ice_candidate_api_round_trips_between_bridges() {
     let answerer = WebRtcMediaBridge::new_answerer().await.expect("answerer");
 
     // Drive the SDP exchange so the peers have descriptions.
-    let offer = offerer
-        .local_substrate_setup()
-        .await
-        .expect("offerer SDP");
+    let offer = offerer.local_substrate_setup().await.expect("offerer SDP");
     answerer
         .set_remote_substrate_setup(offer)
         .await
@@ -58,9 +55,11 @@ async fn trickle_ice_candidate_api_round_trips_between_bridges() {
     // mode the channel may be drained / closed and return None — we
     // treat that as a structural success because the API is wired.
     // If a candidate arrives it must serialize / deserialize cleanly.
-    if let Ok(Some(init)) =
-        tokio::time::timeout(Duration::from_millis(500), offerer.next_local_ice_candidate())
-            .await
+    if let Ok(Some(init)) = tokio::time::timeout(
+        Duration::from_millis(500),
+        offerer.next_local_ice_candidate(),
+    )
+    .await
     {
         let wire = serde_json::to_string(&init).expect("serialize");
         let parsed: IceCandidateInit = serde_json::from_str(&wire).expect("round-trip");

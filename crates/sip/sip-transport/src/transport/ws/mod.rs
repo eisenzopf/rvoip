@@ -6,7 +6,10 @@ pub use connection::WebSocketConnection;
 pub use listener::WebSocketListener;
 pub(crate) use stream::SipWsStream;
 
+use crate::error::{Error, Result};
+use crate::transport::{Transport, TransportEvent, TransportType};
 use futures_util::StreamExt;
+use rvoip_sip_core::Message;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
@@ -17,9 +20,6 @@ use tokio::sync::{mpsc, Mutex};
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite;
 use tracing::{debug, error, info, warn};
-use crate::error::{Error, Result};
-use crate::transport::{Transport, TransportEvent, TransportType};
-use rvoip_sip_core::Message;
 
 #[cfg(feature = "wss")]
 pub use crate::transport::tls::TlsClientConfig;

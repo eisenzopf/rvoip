@@ -2,11 +2,7 @@
 // Require = "Require" HCOLON option-tag *(COMMA option-tag)
 // option-tag = token
 
-use nom::{
-    bytes::complete::tag,
-    combinator::map_res,
-    sequence::delimited,
-};
+use nom::{bytes::complete::tag, combinator::map_res, sequence::delimited};
 use std::str;
 
 // Import from new modules

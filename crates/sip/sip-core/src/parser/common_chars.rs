@@ -95,7 +95,6 @@ pub fn take_till_crlf(input: &[u8]) -> ParseResult<'_, &[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_alpha() {

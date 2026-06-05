@@ -9,14 +9,12 @@ use std::time::Duration;
 use chrono::Utc;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
+use rvoip_auth_core::BearerValidator;
 use rvoip_core::adapter::{AdapterEvent, EndReason};
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
-use rvoip_core::connection::{
-    Connection, ConnectionState, Direction, Transport, TransportHandle,
-};
+use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
 use rvoip_core::stream::{MediaStream, MediaStreamHandle, StreamKind};
-use rvoip_auth_core::BearerValidator;
 
 use crate::adapter::Route;
 use crate::media_stream::QuicDatagramMediaStream;
@@ -157,8 +155,9 @@ async fn spawn_peer_session(
     // `frames_in()` end never receives anything from the wire — the
     // outbound pump in `QuicDatagramMediaStream::start` already
     // handles the outgoing side via `conn.send_datagram`.
-    let streams_router: Arc<parking_lot::RwLock<Vec<Arc<crate::media_stream::QuicDatagramMediaStream>>>> =
-        Arc::new(parking_lot::RwLock::new(Vec::new()));
+    let streams_router: Arc<
+        parking_lot::RwLock<Vec<Arc<crate::media_stream::QuicDatagramMediaStream>>>,
+    > = Arc::new(parking_lot::RwLock::new(Vec::new()));
     let reader_spawned = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // Clone the outbound sender BEFORE handing it to the coordinator so
@@ -244,11 +243,8 @@ async fn spawn_peer_session(
             // follow-up `AdapterEvent::Authenticated` it emits carries the
             // identity_id / participant_id / assurance triple tied to the
             // just-created Connection. See plan §7 G1 / A3.
-            let mut latest_auth: Option<(
-                String,
-                String,
-                rvoip_core::identity::IdentityAssurance,
-            )> = None;
+            let mut latest_auth: Option<(String, String, rvoip_core::identity::IdentityAssurance)> =
+                None;
 
             while let Some(event) = coord_events_rx.recv().await {
                 let adapter_event: Option<AdapterEvent> = match event {
@@ -294,13 +290,13 @@ async fn spawn_peer_session(
                             // is plumbed in (MP3b). The publisher is *this*
                             // connection; sid is the one we just learned
                             // from the inbound invite.
-                            let fanout = orchestrator
-                                .as_ref()
-                                .map(|orch| crate::media_stream::FanoutContext {
+                            let fanout = orchestrator.as_ref().map(|orch| {
+                                crate::media_stream::FanoutContext {
                                     orchestrator: Arc::clone(orch),
                                     sid: sid.clone(),
                                     publisher_connid: id.clone(),
-                                });
+                                }
+                            });
                             crate::media_stream::spawn_datagram_reader(
                                 conn_for_translator.clone(),
                                 Arc::clone(&streams_router),
@@ -329,9 +325,7 @@ async fn spawn_peer_session(
                                 // above); the allocator hands out 2,
                                 // 3, ... for subsequent per-subscriber
                                 // streams.
-                                next_local_id: Arc::new(
-                                    std::sync::atomic::AtomicU16::new(2),
-                                ),
+                                next_local_id: Arc::new(std::sync::atomic::AtomicU16::new(2)),
                                 streams_router: Arc::clone(&streams_router),
                             },
                         );
@@ -347,8 +341,7 @@ async fn spawn_peer_session(
                         // (shouldn't happen post-A1, but be defensive)
                         // simply doesn't get the follow-up — the
                         // orchestrator sees the bare InboundConnection.
-                        if let Some((identity_id, participant_id, assurance)) =
-                            latest_auth.clone()
+                        if let Some((identity_id, participant_id, assurance)) = latest_auth.clone()
                         {
                             let _ = events_tx
                                 .send(AdapterEvent::Authenticated {
@@ -364,9 +357,7 @@ async fn spawn_peer_session(
                     }
                     UctpSessionEvent::SessionConnected { sid } => {
                         match by_uctp_sid.get(sid.as_str()).map(|r| r.clone()) {
-                            Some(connection_id) => {
-                                Some(AdapterEvent::Connected { connection_id })
-                            }
+                            Some(connection_id) => Some(AdapterEvent::Connected { connection_id }),
                             None => Some(AdapterEvent::Native {
                                 kind: "uctp.session_connected_orphan",
                                 detail: sid.to_string(),
@@ -374,7 +365,9 @@ async fn spawn_peer_session(
                         }
                     }
                     UctpSessionEvent::ConnectionConnected { connid, .. } => {
-                        Some(AdapterEvent::Connected { connection_id: connid })
+                        Some(AdapterEvent::Connected {
+                            connection_id: connid,
+                        })
                     }
                     UctpSessionEvent::ConnectionEnded { connid, reason, .. } => {
                         Some(AdapterEvent::Ended {
@@ -453,11 +446,8 @@ async fn spawn_peer_session(
     // Periodic quinn stats sampler. Lives in rvoip-uctp so QUIC and
     // WT adapters emit identical metric series for per-transport
     // comparison.
-    let stats_pump = rvoip_uctp::substrate::spawn_stats_sampler(
-        conn.clone(),
-        "quic",
-        quinn_stats_interval,
-    );
+    let stats_pump =
+        rvoip_uctp::substrate::spawn_stats_sampler(conn.clone(), "quic", quinn_stats_interval);
 
     let _ = inbound_pump.await;
     let _ = outbound_pump.await;

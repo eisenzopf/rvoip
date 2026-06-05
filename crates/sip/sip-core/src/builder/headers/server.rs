@@ -1,8 +1,8 @@
+use super::HeaderSetter;
 #[cfg(test)]
 use crate::types::headers::HeaderName;
 #[cfg(test)]
 use crate::types::headers::TypedHeader;
-use super::HeaderSetter;
 use crate::types::server::ServerInfo;
 
 /// Server header builder
@@ -229,7 +229,6 @@ mod tests {
     use super::*;
     use crate::types::StatusCode;
     use crate::ResponseBuilder;
-    
 
     #[test]
     fn test_response_server() {

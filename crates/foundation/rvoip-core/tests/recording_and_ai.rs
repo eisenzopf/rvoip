@@ -21,7 +21,7 @@ use rvoip_core::message::Message;
 use rvoip_core::orchestrator::Orchestrator;
 use rvoip_core::session::SessionMedium;
 use rvoip_core::stream::{MediaFrame, MediaStream, QualitySnapshot, StreamKind};
-use rvoip_harness::{NoOpAsrProvider, NoOpTtsProvider, ListenOnlyDialog, VecRecordingSink};
+use rvoip_harness::{ListenOnlyDialog, NoOpAsrProvider, NoOpTtsProvider, VecRecordingSink};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -162,7 +162,12 @@ impl ConnectionAdapter for OneStreamAdapter {
     }
 }
 
-async fn setup() -> (Arc<Orchestrator>, mpsc::Sender<AdapterEvent>, Arc<TestStream>, ConnectionId) {
+async fn setup() -> (
+    Arc<Orchestrator>,
+    mpsc::Sender<AdapterEvent>,
+    Arc<TestStream>,
+    ConnectionId,
+) {
     let orch = Orchestrator::new(Config::default());
     let (adapter, tx, stream) = OneStreamAdapter::new();
     orch.register(adapter).unwrap();

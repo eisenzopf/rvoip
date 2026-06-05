@@ -55,7 +55,9 @@ impl ComprehensiveReport {
         match medium {
             SessionMedium::Audio => base,
             SessionMedium::Video | SessionMedium::AudioVideo => {
-                base && self.sdp_has_video && self.local_video_track && self.remote_video_track
+                base && self.sdp_has_video
+                    && self.local_video_track
+                    && self.remote_video_track
                     && self.server_confirmed_video
             }
         }
@@ -118,7 +120,10 @@ impl ComprehensiveReport {
 }
 
 /// Run the comprehensive validation suite (default chat message).
-pub async fn run_client_checks(session: &SessionHandle, medium: SessionMedium) -> Result<ComprehensiveReport> {
+pub async fn run_client_checks(
+    session: &SessionHandle,
+    medium: SessionMedium,
+) -> Result<ComprehensiveReport> {
     run_client_checks_with_chat(session, medium, "Hello from comprehensive suite!").await
 }
 
@@ -134,9 +139,7 @@ pub async fn run_client_checks_with_chat(
     report.sdp_has_video = answer_sdp.contains("m=video");
     report.sdp_full_ice = crate::sdp::sdp_has_inline_ice_candidates(answer_sdp);
 
-    session
-        .wait_connected(Duration::from_secs(15))
-        .await?;
+    session.wait_connected(Duration::from_secs(15)).await?;
     report.ice_connected = true;
 
     let peer = session.peer();
@@ -158,7 +161,8 @@ pub async fn run_client_checks_with_chat(
     dc.send_text(&chat_msg)
         .await
         .map_err(|e| WebRtcError::Webrtc(format!("dc chat send: {e}")))?;
-    let chat_reply = RvoipPeerConnection::recv_data_channel_text(dc, Duration::from_secs(10)).await?;
+    let chat_reply =
+        RvoipPeerConnection::recv_data_channel_text(dc, Duration::from_secs(10)).await?;
     report.chat_echo = chat_reply == format!("{CHAT_ECHO_PREFIX}{chat_body}");
 
     let include_video = matches!(medium, SessionMedium::Video | SessionMedium::AudioVideo);
@@ -219,7 +223,8 @@ pub async fn prepare_offer_media(
             peer.add_local_video_track().await?;
         }
     }
-    peer.create_data_channel(DC_LABEL, crate::peer::DataChannelOptions::reliable()).await
+    peer.create_data_channel(DC_LABEL, crate::peer::DataChannelOptions::reliable())
+        .await
 }
 
 /// Server-side handlers for comprehensive demo: DC echo + bidirectional fixture media.

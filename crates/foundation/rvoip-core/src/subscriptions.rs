@@ -49,7 +49,12 @@ impl SessionSubscriptions {
     /// Remove `subscriber` from the set for `(publisher, strm_id)`.
     /// Idempotent. Returns `true` if the subscriber was actually
     /// present.
-    pub fn remove(&self, publisher: &ConnectionId, strm_id: &StreamId, subscriber: &ConnectionId) -> bool {
+    pub fn remove(
+        &self,
+        publisher: &ConnectionId,
+        strm_id: &StreamId,
+        subscriber: &ConnectionId,
+    ) -> bool {
         let key = (publisher.clone(), strm_id.clone());
         let removed = if let Some(entry) = self.inner.get(&key) {
             entry.remove(subscriber).is_some()
@@ -72,7 +77,11 @@ impl SessionSubscriptions {
     /// Look up subscribers for `(publisher, strm_id)`. Returns a
     /// snapshot — callers that fan out datagrams iterate this without
     /// holding the table lock.
-    pub fn subscribers_for(&self, publisher: &ConnectionId, strm_id: &StreamId) -> Vec<ConnectionId> {
+    pub fn subscribers_for(
+        &self,
+        publisher: &ConnectionId,
+        strm_id: &StreamId,
+    ) -> Vec<ConnectionId> {
         match self.inner.get(&(publisher.clone(), strm_id.clone())) {
             Some(set) => set.iter().map(|e| e.clone()).collect(),
             None => Vec::new(),
@@ -88,11 +97,8 @@ impl SessionSubscriptions {
         // Walk every (publisher, strm_id) entry. If the publisher is
         // this connid, remove the whole entry. Otherwise remove this
         // connid from the subscriber set.
-        let keys: Vec<(ConnectionId, StreamId)> = self
-            .inner
-            .iter()
-            .map(|e| e.key().clone())
-            .collect();
+        let keys: Vec<(ConnectionId, StreamId)> =
+            self.inner.iter().map(|e| e.key().clone()).collect();
         for key in keys {
             if key.0 == *connid {
                 self.inner.remove(&key);
@@ -228,8 +234,7 @@ impl PublisherRegistry {
     /// registrations overwrite cleanly.
     pub fn register(&self, sid: SessionId, strm_id: String, entry: PublisherEntry) {
         let participant_key = (sid.clone(), entry.participant.clone());
-        self.inner
-            .insert((sid.clone(), strm_id.clone()), entry);
+        self.inner.insert((sid.clone(), strm_id.clone()), entry);
         // Keep by_participant in sync. Push without dedup; if the
         // adapter announces the same stream twice we tolerate the
         // duplicate (the primary table overwrote anyway).
@@ -287,7 +292,10 @@ impl PublisherRegistry {
             .collect();
         for (sid, strm, participant) in to_remove {
             self.inner.remove(&(sid.clone(), strm.clone()));
-            if let Some(mut entry) = self.by_participant.get_mut(&(sid.clone(), participant.clone())) {
+            if let Some(mut entry) = self
+                .by_participant
+                .get_mut(&(sid.clone(), participant.clone()))
+            {
                 entry.retain(|s| s != &strm);
             }
             // GC empty participant entries to avoid stale Vec growth.

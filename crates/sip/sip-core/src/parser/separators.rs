@@ -107,7 +107,6 @@ pub fn rdquot(input: &[u8]) -> ParseResult<'_, &[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_is_separator_char() {

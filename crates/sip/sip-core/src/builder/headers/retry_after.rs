@@ -1,8 +1,8 @@
+use super::HeaderSetter;
 #[cfg(test)]
 use crate::types::headers::HeaderName;
 #[cfg(test)]
 use crate::types::headers::TypedHeader;
-use super::HeaderSetter;
 use crate::types::retry_after::RetryAfter;
 use std::time::Duration;
 
@@ -307,7 +307,7 @@ mod tests {
     use super::*;
     use crate::types::StatusCode;
     use crate::ResponseBuilder;
-    
+
     use std::time::Duration;
 
     #[test]

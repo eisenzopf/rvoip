@@ -101,10 +101,7 @@ fn write_canonical(v: &serde_json::Value, out: &mut String) {
 pub fn parse_signature_input(input: &str) -> SignatureSpec {
     let mut spec = SignatureSpec::default();
     // Strip the label prefix `name=` if present.
-    let body = input
-        .splitn(2, '=')
-        .nth(1)
-        .unwrap_or(input);
+    let body = input.splitn(2, '=').nth(1).unwrap_or(input);
     for piece in body.split(';') {
         let piece = piece.trim();
         if piece.starts_with('(') {
@@ -207,8 +204,7 @@ mod tests {
         // Codepoint sort: "Aa" < "ab" because uppercase A (0x41) <
         // lowercase a (0x61). Plain ASCII sort suffices for ASCII
         // keys.
-        let v: serde_json::Value =
-            serde_json::from_str(r#"{"ab":1,"Aa":2}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(r#"{"ab":1,"Aa":2}"#).unwrap();
         let out = String::from_utf8(canonical_envelope(&v)).unwrap();
         assert_eq!(out, r#"{"Aa":2,"ab":1}"#);
     }
@@ -223,8 +219,7 @@ mod tests {
 
     #[test]
     fn jcs_array_order_preserved() {
-        let v: serde_json::Value =
-            serde_json::from_str(r#"[3,1,2,{"y":1,"x":2}]"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(r#"[3,1,2,{"y":1,"x":2}]"#).unwrap();
         let out = String::from_utf8(canonical_envelope(&v)).unwrap();
         assert_eq!(out, r#"[3,1,2,{"x":2,"y":1}]"#);
     }
@@ -266,7 +261,10 @@ mod tests {
     #[test]
     fn jcs_bool_and_null() {
         assert_eq!(canonical_envelope(&serde_json::Value::Bool(true)), b"true");
-        assert_eq!(canonical_envelope(&serde_json::Value::Bool(false)), b"false");
+        assert_eq!(
+            canonical_envelope(&serde_json::Value::Bool(false)),
+            b"false"
+        );
         assert_eq!(canonical_envelope(&serde_json::Value::Null), b"null");
     }
 

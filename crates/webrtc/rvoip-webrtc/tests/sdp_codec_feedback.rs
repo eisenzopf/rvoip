@@ -35,14 +35,14 @@ async fn offer_sdp_advertises_h264_and_vp9() {
     peer.add_local_video_track().await.expect("video");
     let sdp = peer.create_offer_and_gather().await.expect("offer");
 
-    let codecs: Vec<_> = sdp
-        .lines()
-        .filter(|l| l.starts_with("a=rtpmap:"))
-        .collect();
+    let codecs: Vec<_> = sdp.lines().filter(|l| l.starts_with("a=rtpmap:")).collect();
     let codec_str = codecs.join("\n");
 
     assert!(codec_str.contains("VP8/"), "VP8 must be advertised");
-    assert!(codec_str.contains("VP9/"), "VP9 must be advertised (H3 codec expansion)");
+    assert!(
+        codec_str.contains("VP9/"),
+        "VP9 must be advertised (H3 codec expansion)"
+    );
     assert!(
         codec_str.contains("H264/"),
         "H.264 must be advertised — required for Safari and SIP gateways"

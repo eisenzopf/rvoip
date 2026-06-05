@@ -797,7 +797,7 @@ fn parse_path_nom(input: &str) -> nom::IResult<&str, Vec<PathSegment>> {
     use nom::bytes::complete::take_while1;
     use nom::character::complete::{char, digit1};
     use nom::combinator::{map, opt, recognize};
-    
+
     use nom::multi::separated_list1;
     use nom::sequence::{delimited, tuple};
     use nom::IResult;
@@ -877,8 +877,6 @@ fn find_field_case_insensitive<'a>(
     let cap = capitalize(field_name);
     obj.get(&cap)
 }
-
-
 
 /// Path segment representing a single access operation
 #[derive(Debug, Clone, PartialEq)]

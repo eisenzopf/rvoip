@@ -102,6 +102,3 @@ pub async fn get_security_info(
         ))
     }
 }
-
-
-

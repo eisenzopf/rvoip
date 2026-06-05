@@ -1,10 +1,10 @@
-#[cfg(test)]
-use crate::types::headers::TypedHeader;
-#[cfg(test)]
-use crate::types::headers::header_name::HeaderName;
 use super::HeaderSetter;
 use crate::error::Result;
 use crate::types::address::Address;
+#[cfg(test)]
+use crate::types::headers::header_name::HeaderName;
+#[cfg(test)]
+use crate::types::headers::TypedHeader;
 use crate::types::referred_by::ReferredBy;
 use crate::types::uri::Uri;
 

@@ -7,7 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::info;
 
 use rvoip_rtp_core::{
-    NtpTimestamp, RtcpCompoundPacket, RtcpExtendedReport, RtcpGoodbye, RtcpPacket, RtcpSenderReport, RtcpXrBlock, VoipMetricsBlock,
+    NtpTimestamp, RtcpCompoundPacket, RtcpExtendedReport, RtcpGoodbye, RtcpPacket,
+    RtcpSenderReport, RtcpXrBlock, VoipMetricsBlock,
 };
 
 fn calculate_ntp_timestamp() -> NtpTimestamp {

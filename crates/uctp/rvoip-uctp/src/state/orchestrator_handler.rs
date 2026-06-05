@@ -35,8 +35,7 @@ use super::subscription::{PublisherInfo, SubscriptionHandler, SubscriptionOutcom
 /// this set means we'd be sending the subscriber bytes it can't play.
 /// Tune via [`OrchestratorSubscriptionHandler::with_accepted_codecs`]
 /// for deployments with custom decoder pipelines.
-pub const DEFAULT_ACCEPTED_CODECS: &[&str] =
-    &["opus", "g.711-mu", "g.711-a", "g.722", "g.729"];
+pub const DEFAULT_ACCEPTED_CODECS: &[&str] = &["opus", "g.711-mu", "g.711-a", "g.722", "g.729"];
 
 /// Production handler that routes inbound subscribe/unsubscribe envelopes
 /// through `rvoip-core::Orchestrator`'s subscription registry.

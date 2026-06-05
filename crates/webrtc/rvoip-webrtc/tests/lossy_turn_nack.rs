@@ -43,22 +43,18 @@ async fn nack_round_trip_through_lossy_turn() {
     // Lossy relay handshakes take longer; budget generously.
     config.gather_timeout_secs = 20;
 
-    let (offerer, answerer) = match tokio::time::timeout(
-        Duration::from_secs(60),
-        connect_loopback(&config),
-    )
-    .await
-    {
-        Ok(Ok(pair)) => pair,
-        Ok(Err(e)) => {
-            eprintln!("skipped: lossy relay handshake failed ({e})");
-            return;
-        }
-        Err(_) => {
-            eprintln!("skipped: lossy relay handshake timed out");
-            return;
-        }
-    };
+    let (offerer, answerer) =
+        match tokio::time::timeout(Duration::from_secs(60), connect_loopback(&config)).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => {
+                eprintln!("skipped: lossy relay handshake failed ({e})");
+                return;
+            }
+            Err(_) => {
+                eprintln!("skipped: lossy relay handshake timed out");
+                return;
+            }
+        };
 
     let codec = CodecInfo {
         name: "opus".into(),
@@ -78,8 +74,10 @@ async fn nack_round_trip_through_lossy_turn() {
         None,
     );
     // Enable outbound stats on the offerer so we can observe NACK counts.
-    offerer_stream
-        .enable_webrtc_stats(Arc::clone(offerer.peer_connection()), Arc::new(Notify::new()));
+    offerer_stream.enable_webrtc_stats(
+        Arc::clone(offerer.peer_connection()),
+        Arc::new(Notify::new()),
+    );
 
     let answerer_ssrc = answerer.local_audio_ssrc().expect("answerer ssrc");
     let answerer_local = answerer.local_audio_track().expect("answerer local track");
@@ -91,16 +89,15 @@ async fn nack_round_trip_through_lossy_turn() {
         111,
         None,
     );
-    answerer_stream
-        .enable_webrtc_stats(Arc::clone(answerer.peer_connection()), Arc::new(Notify::new()));
+    answerer_stream.enable_webrtc_stats(
+        Arc::clone(answerer.peer_connection()),
+        Arc::new(Notify::new()),
+    );
 
-    let remote = RvoipPeerConnection::prime_remote_track(
-        &offerer,
-        &answerer,
-        Duration::from_secs(15),
-    )
-    .await
-    .expect("answerer receives offerer track via lossy relay");
+    let remote =
+        RvoipPeerConnection::prime_remote_track(&offerer, &answerer, Duration::from_secs(15))
+            .await
+            .expect("answerer receives offerer track via lossy relay");
     answerer_stream.attach_remote(remote);
 
     let mut inbound = answerer_stream.frames_in();
@@ -109,8 +106,7 @@ async fn nack_round_trip_through_lossy_turn() {
     let pump_offerer = offerer_stream.clone();
     let pump = tokio::spawn(async move {
         for seq in 1..=200u16 {
-            let payload =
-                silent_rtp_payload_for_ssrc(offerer_ssrc, seq, seq as u32 * 960);
+            let payload = silent_rtp_payload_for_ssrc(offerer_ssrc, seq, seq as u32 * 960);
             if pump_offerer
                 .frames_out()
                 .send(rvoip_core::stream::MediaFrame {

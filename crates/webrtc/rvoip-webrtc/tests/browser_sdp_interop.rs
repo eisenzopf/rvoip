@@ -56,16 +56,28 @@ async fn chrome_audio_offer_produces_well_formed_answer() {
     let answer = adapter.local_sdp(&conn_id).expect("local sdp present");
 
     // Required ICE+DTLS bits.
-    assert!(answer.contains("a=ice-ufrag:"), "answer must carry a fresh ICE ufrag");
-    assert!(answer.contains("a=ice-pwd:"), "answer must carry a fresh ICE pwd");
-    assert!(answer.contains("a=fingerprint:"), "answer must carry DTLS fingerprint");
+    assert!(
+        answer.contains("a=ice-ufrag:"),
+        "answer must carry a fresh ICE ufrag"
+    );
+    assert!(
+        answer.contains("a=ice-pwd:"),
+        "answer must carry a fresh ICE pwd"
+    );
+    assert!(
+        answer.contains("a=fingerprint:"),
+        "answer must carry DTLS fingerprint"
+    );
     assert!(
         answer.contains("a=setup:active") || answer.contains("a=setup:passive"),
         "answer must commit to active or passive setup (got actpass-style answer)"
     );
 
     // Audio negotiation.
-    assert!(answer.contains("m=audio "), "answer must include the audio m-section");
+    assert!(
+        answer.contains("m=audio "),
+        "answer must include the audio m-section"
+    );
     assert!(
         answer.contains("a=rtpmap:111 opus/48000/2"),
         "Opus PT 111 must be echoed"

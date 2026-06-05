@@ -3,17 +3,13 @@
 // route-param  =  name-addr *( SEMI rr-param )
 // rr-param     =  generic-param
 
-use nom::{
-    combinator::map,
-    sequence::pair,
-};
+use nom::{combinator::map, sequence::pair};
 
 // Import from base parser modules
 use crate::parser::address::name_addr; // Route uses name-addr strictly
 use crate::parser::common::comma_separated_list1; // Route requires at least one
 use crate::parser::common_params::{generic_param, semicolon_separated_params0};
 use crate::parser::ParseResult;
-
 
 // Import types (assuming)
 use crate::types::address::Address;

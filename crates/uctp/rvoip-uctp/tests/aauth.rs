@@ -96,7 +96,7 @@ fn hello() -> UctpEnvelope {
             capabilities: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -116,7 +116,7 @@ fn aauth_response(challenge_id: String, subject: &str, actor: Option<&str>) -> U
             actor_token: actor.map(|s| s.into()),
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -158,7 +158,11 @@ async fn aauth_response_yields_user_authorized_assurance() {
 
     // 2. auth.response (method=aauth) → auth.session
     in_tx
-        .send(aauth_response(challenge.id, "subject-token", Some("actor-token")))
+        .send(aauth_response(
+            challenge.id,
+            "subject-token",
+            Some("actor-token"),
+        ))
         .await
         .unwrap();
     let session = tokio::time::timeout(std::time::Duration::from_secs(2), out_rx.recv())

@@ -41,8 +41,7 @@ async fn loopback_auth_handshake_over_wss() {
 
     // --- Client (wss://, pinning the server cert) ---
     let client_tls = dev_client_config_trusting(&cert).expect("client tls cfg");
-    let url = Url::parse(&format!("wss://localhost:{}", server_addr.port()))
-        .expect("parse url");
+    let url = Url::parse(&format!("wss://localhost:{}", server_addr.port())).expect("parse url");
     let client = UctpWsClient::connect_with_tls(&url, Arc::new(client_tls))
         .await
         .expect("client connect over wss");

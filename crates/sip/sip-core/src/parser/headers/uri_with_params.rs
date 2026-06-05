@@ -10,7 +10,7 @@ use std::str;
 // Import shared parsers
 use crate::parser::common_params::generic_param;
 use crate::parser::separators::{laquot, raquot, semi};
- // Using stub absolute URI parser
+// Using stub absolute URI parser
 use crate::parser::ParseResult;
 
 // Import types

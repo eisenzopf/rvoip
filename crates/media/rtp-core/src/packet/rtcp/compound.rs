@@ -8,8 +8,8 @@
 use bytes::{Buf, Bytes, BytesMut};
 
 use super::{
-    RtcpApplicationDefined, RtcpExtendedReport, RtcpGoodbye, RtcpPacket,
-    RtcpReceiverReport, RtcpSenderReport, RtcpSourceDescription,
+    RtcpApplicationDefined, RtcpExtendedReport, RtcpGoodbye, RtcpPacket, RtcpReceiverReport,
+    RtcpSenderReport, RtcpSourceDescription,
 };
 use crate::error::Error;
 use crate::Result;
@@ -167,7 +167,6 @@ impl RtcpCompoundPacket {
 mod tests {
     use super::super::NtpTimestamp;
     use super::*;
-    
 
     #[test]
     fn test_compound_packet_validation() {

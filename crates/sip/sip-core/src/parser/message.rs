@@ -391,10 +391,8 @@ fn message_header(input: &[u8]) -> ParseResult<'_, Header> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use crate::types::{HeaderName, HeaderValue, Method};
-    
-    
 
     // RFC 3261 Section 7.3 - Headers
     // Test parsing of message headers according to the ABNF grammar:

@@ -55,9 +55,7 @@ async fn one_cycle() -> usize {
     for _ in 0..PEERS_PER_CYCLE {
         let config = WebRtcConfig::loopback();
         handles.push(tokio::spawn(async move {
-            let (offerer, answerer) = connect_loopback(&config)
-                .await
-                .expect("loopback");
+            let (offerer, answerer) = connect_loopback(&config).await.expect("loopback");
             // Hold briefly so the connection state machines fully settle.
             tokio::time::sleep(Duration::from_millis(50)).await;
             offerer.close().await.ok();

@@ -108,10 +108,7 @@ impl SessionHandle {
     /// Explicitly close the peer connection. Idempotent — subsequent calls
     /// (or `Drop`) are no-ops.
     pub async fn close(&self) -> Result<()> {
-        if self
-            .closed
-            .swap(true, std::sync::atomic::Ordering::AcqRel)
-        {
+        if self.closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
             return Ok(());
         }
         self.peer.close().await
@@ -157,7 +154,10 @@ pub struct WebRtcClient {
 
 impl WebRtcClient {
     /// Connect using WebRTC configuration and a signaling URI (used by custom signalers).
-    pub async fn connect(config: WebRtcConfig, signaler_uri: impl Into<String>) -> Result<Arc<Self>> {
+    pub async fn connect(
+        config: WebRtcConfig,
+        signaler_uri: impl Into<String>,
+    ) -> Result<Arc<Self>> {
         let peer = RvoipPeerConnection::new(&config, PeerRole::Offerer).await?;
         Ok(Arc::new(Self {
             config,

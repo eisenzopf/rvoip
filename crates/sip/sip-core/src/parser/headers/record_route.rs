@@ -11,7 +11,7 @@ use nom::{
 };
 
 // Import from base parser modules
- // For reference
+// For reference
 use crate::parser::common::comma_separated_list1;
 use crate::parser::quoted::quoted_string;
 use crate::parser::token::token;

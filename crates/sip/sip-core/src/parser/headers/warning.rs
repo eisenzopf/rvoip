@@ -27,7 +27,7 @@ use crate::parser::ParseResult;
 
 use crate::types::warning::{WarnAgent, WarningValue}; // Import types
 
- // Use delta_seconds for duration
+// Use delta_seconds for duration
 
 // WarningValue struct is now imported from types/warning.rs
 

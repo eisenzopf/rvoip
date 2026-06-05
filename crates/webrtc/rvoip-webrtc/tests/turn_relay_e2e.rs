@@ -79,22 +79,20 @@ async fn relay_only_two_peer_media_round_trip() {
     // STUN binding round trips through coturn).
     config.gather_timeout_secs = 15;
 
-    let (offerer, answerer) = match tokio::time::timeout(
-        Duration::from_secs(45),
-        connect_loopback(&config),
-    )
-    .await
-    {
-        Ok(Ok(pair)) => pair,
-        Ok(Err(e)) => {
-            eprintln!("skipped: relay handshake failed ({e}); coturn may not be reachable from this host");
-            return;
-        }
-        Err(_) => {
-            eprintln!("skipped: relay handshake timed out (coturn slow on this host)");
-            return;
-        }
-    };
+    let (offerer, answerer) =
+        match tokio::time::timeout(Duration::from_secs(45), connect_loopback(&config)).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => {
+                eprintln!(
+                "skipped: relay handshake failed ({e}); coturn may not be reachable from this host"
+            );
+                return;
+            }
+            Err(_) => {
+                eprintln!("skipped: relay handshake timed out (coturn slow on this host)");
+                return;
+            }
+        };
 
     let codec = CodecInfo {
         name: "opus".into(),
@@ -124,16 +122,15 @@ async fn relay_only_two_peer_media_round_trip() {
         /* Opus PT */ 111,
         None,
     );
-    answerer_stream
-        .enable_webrtc_stats(Arc::clone(answerer.peer_connection()), Arc::new(Notify::new()));
+    answerer_stream.enable_webrtc_stats(
+        Arc::clone(answerer.peer_connection()),
+        Arc::new(Notify::new()),
+    );
 
-    let remote = RvoipPeerConnection::prime_remote_track(
-        &offerer,
-        &answerer,
-        Duration::from_secs(15),
-    )
-    .await
-    .expect("answerer receives offerer track via the relay");
+    let remote =
+        RvoipPeerConnection::prime_remote_track(&offerer, &answerer, Duration::from_secs(15))
+            .await
+            .expect("answerer receives offerer track via the relay");
     answerer_stream.attach_remote(remote);
 
     let mut inbound = answerer_stream.frames_in();
@@ -159,7 +156,10 @@ async fn relay_only_two_peer_media_round_trip() {
         .await
         .expect("inbound timeout — relay should have delivered at least one frame")
         .expect("inbound channel closed");
-    assert!(!frame.payload.is_empty(), "first relay frame must carry payload");
+    assert!(
+        !frame.payload.is_empty(),
+        "first relay frame must carry payload"
+    );
 
     // Selected-pair assertion: the local candidate must be a relay candidate.
     // (Remote may be relay or srflx depending on coturn's reflexive

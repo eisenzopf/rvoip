@@ -46,7 +46,6 @@ pub fn parse_proxy_authorization(input: &[u8]) -> ParseResult<'_, Credentials> {
 mod tests {
     use super::*;
     use crate::types::auth::{Algorithm, DigestParam, Qop};
-    
 
     #[test]
     fn test_parse_proxy_authorization_digest() {

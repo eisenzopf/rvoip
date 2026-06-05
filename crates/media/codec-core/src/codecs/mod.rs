@@ -307,7 +307,6 @@ impl CodecCapabilities {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_codec_factory_supported_codecs() {

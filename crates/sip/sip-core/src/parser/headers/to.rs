@@ -62,11 +62,10 @@ pub fn to_header(input: &[u8]) -> ParseResult<'_, ToHeader> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use crate::types::param::{GenericValue, Param};
     use crate::types::uri::Scheme;
     use nom::combinator::all_consuming;
-    
 
     // Helper function to test with full input consumption
     fn test_parse_to(input: &[u8]) -> Result<ToHeader, nom::Err<nom::error::Error<&[u8]>>> {

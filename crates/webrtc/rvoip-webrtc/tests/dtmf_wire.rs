@@ -55,27 +55,18 @@ async fn send_dtmf_emits_rfc4733_telephone_events() {
                 let cap = Arc::clone(&cap_clone);
                 pollers.push(tokio::spawn(async move {
                     loop {
-                        let Some(event) = tokio::time::timeout(
-                            Duration::from_millis(100),
-                            track.poll(),
-                        )
-                        .await
-                        .ok()
-                        .flatten() else {
+                        let Some(event) =
+                            tokio::time::timeout(Duration::from_millis(100), track.poll())
+                                .await
+                                .ok()
+                                .flatten()
+                        else {
                             continue;
                         };
                         if let TrackRemoteEvent::OnRtpPacket(pkt) = event {
                             if pkt.header.payload_type == TELEPHONE_EVENT_PT {
-                                if let Some((ev, eoe, vol, dur)) =
-                                    decode_event(&pkt.payload)
-                                {
-                                    cap.lock().push((
-                                        ev,
-                                        eoe,
-                                        vol,
-                                        dur,
-                                        pkt.header.marker,
-                                    ));
+                                if let Some((ev, eoe, vol, dur)) = decode_event(&pkt.payload) {
+                                    cap.lock().push((ev, eoe, vol, dur, pkt.header.marker));
                                 }
                             }
                         }
@@ -111,12 +102,18 @@ async fn send_dtmf_emits_rfc4733_telephone_events() {
 
     // First packet must carry the marker bit.
     let first = events.first().expect("first event");
-    assert!(first.4, "first telephone-event packet should have marker bit set");
+    assert!(
+        first.4,
+        "first telephone-event packet should have marker bit set"
+    );
     assert!(!first.1, "first packet should not be end-of-event");
 
     // At least one packet must signal end-of-event (the retransmissions at the end).
     let any_end = events.iter().any(|(_, eoe, ..)| *eoe);
-    assert!(any_end, "expected end-of-event marker among captured packets");
+    assert!(
+        any_end,
+        "expected end-of-event marker among captured packets"
+    );
 
     // Duration must monotonically increase (cumulative samples across the tone).
     let mut last = 0u16;

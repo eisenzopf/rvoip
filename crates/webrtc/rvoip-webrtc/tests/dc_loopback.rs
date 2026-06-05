@@ -29,7 +29,10 @@ async fn loopback_data_channel_ping_pong() {
         .accept_offer_and_gather(&offer)
         .await
         .expect("answer");
-    offerer.set_remote_answer(&answer).await.expect("set answer");
+    offerer
+        .set_remote_answer(&answer)
+        .await
+        .expect("set answer");
 
     offerer
         .wait_connected(Duration::from_secs(10))

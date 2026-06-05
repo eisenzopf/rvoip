@@ -9,9 +9,7 @@ use tracing::debug;
 use crate::api::common::error::SecurityError;
 use crate::api::server::security::srtp::keys;
 use crate::api::server::security::util::conversion;
-use crate::api::server::security::{
-    ConnectionRole, ServerSecurityConfig, SocketHandle,
-};
+use crate::api::server::security::{ConnectionRole, ServerSecurityConfig, SocketHandle};
 use crate::dtls::{DtlsConfig, DtlsConnection};
 
 /// Create a new DTLS connection with server role

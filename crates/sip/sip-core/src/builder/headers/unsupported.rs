@@ -1,8 +1,8 @@
+use super::HeaderSetter;
 #[cfg(test)]
 use crate::types::headers::HeaderName;
 #[cfg(test)]
 use crate::types::headers::TypedHeader;
-use super::HeaderSetter;
 use crate::types::unsupported::Unsupported;
 
 /// Unsupported header builder
@@ -324,7 +324,6 @@ mod tests {
     use super::*;
     use crate::types::{method::Method, StatusCode};
     use crate::{RequestBuilder, ResponseBuilder};
-    
 
     #[test]
     fn test_request_unsupported_tag() {

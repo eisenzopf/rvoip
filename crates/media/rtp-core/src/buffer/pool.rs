@@ -381,7 +381,6 @@ impl SharedPools {
 mod tests {
     use super::*;
     use std::time::Duration;
-    
 
     #[tokio::test]
     async fn test_buffer_pool() {

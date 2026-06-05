@@ -2,16 +2,16 @@
 // Parser for the credentials part of Authorization headers
 
 // Use the new digest_param parser from common
+use super::common::{auth_param, auth_scheme, digest_credential};
+use crate::parser::common::comma_separated_list1;
+use crate::parser::whitespace::lws;
+use crate::parser::ParseResult;
 #[cfg(test)]
 use crate::types::auth::Algorithm;
 #[cfg(test)]
 use crate::types::auth::DigestParam;
 #[cfg(test)]
 use crate::types::auth::Qop;
-use super::common::{auth_param, auth_scheme, digest_credential};
-use crate::parser::common::comma_separated_list1;
-use crate::parser::whitespace::lws;
-use crate::parser::ParseResult;
 // Import the necessary types from types::auth
 use crate::types::auth::{AuthScheme, Credentials};
 use nom::{

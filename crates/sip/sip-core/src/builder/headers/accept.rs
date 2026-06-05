@@ -1,8 +1,8 @@
-#[cfg(test)]
-use crate::types::TypedHeader;
 use super::HeaderSetter;
 use crate::parser::headers::accept::AcceptValue;
 use crate::types::accept::Accept;
+#[cfg(test)]
+use crate::types::TypedHeader;
 use ordered_float::NotNan;
 use std::collections::HashMap;
 
@@ -335,7 +335,6 @@ mod tests {
     use super::*;
     use crate::builder::SimpleRequestBuilder;
     use crate::types::header::HeaderName;
-    
 
     #[test]
     fn test_accept_single() {

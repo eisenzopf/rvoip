@@ -131,7 +131,6 @@ impl Harness {
         self.tx.send(event).await.expect("inject transport event");
     }
 
-
     /// Poll until a sent message matches `predicate` or the deadline
     /// passes. Returns the matching `(message, destination)`.
     async fn wait_for<F>(&self, deadline_ms: u64, predicate: F) -> (Message, SocketAddr)

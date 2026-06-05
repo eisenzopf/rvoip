@@ -3,8 +3,7 @@
 use std::time::Duration;
 
 use rvoip_core::adapter::{
-    ConnectionAdapter, EndReason, OriginateRequest, RejectReason, SignatureHeaders,
-    TransferTarget,
+    ConnectionAdapter, EndReason, OriginateRequest, RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::connection::Direction;
 use rvoip_core::ids::{ParticipantId, SessionId};
@@ -78,9 +77,7 @@ async fn adapter_smoke_all_methods() {
     let dtmf = adapter.send_dtmf(conn_id.clone(), "1", 100).await;
     assert!(dtmf.is_ok(), "RFC 4733 DTMF expected to succeed: {dtmf:?}");
 
-    let _ = adapter
-        .renegotiate_media(conn_id.clone(), caps)
-        .await;
+    let _ = adapter.renegotiate_media(conn_id.clone(), caps).await;
 
     let assurance = adapter
         .verify_request_signature(
@@ -105,12 +102,10 @@ async fn adapter_smoke_all_methods() {
         "expected DtlsFingerprint assurance, got {assurance:?}"
     );
 
-    assert!(
-        adapter
-            .transfer(conn_id.clone(), TransferTarget::Uri("x".into()))
-            .await
-            .is_err()
-    );
+    assert!(adapter
+        .transfer(conn_id.clone(), TransferTarget::Uri("x".into()))
+        .await
+        .is_err());
 
     adapter
         .end(conn_id.clone(), EndReason::Normal)

@@ -71,6 +71,10 @@ First-class in this implementation:
 - users-core JWT Bearer validation.
 - users-core Basic/password verification.
 - users-core SIP Digest HA1 credential provider.
+- users-core provider-neutral token issuance for externally authenticated
+  users through `AuthenticationService::issue_tokens_for_user(...)`.
+- users-core external identity links for OIDC/SAML/SCIM providers.
+- users-core passkey credential storage for WebAuthn adapters.
 - Static JWT validation with HMAC/RSA/EC keys.
 - JWKS/OIDC-style Bearer validation.
 - OAuth2 token introspection Bearer validation for opaque tokens.
@@ -81,15 +85,44 @@ First-class in this implementation:
   revocation endpoint, and configured audience.
 - Custom external providers via traits.
 
+Implemented optional provider adapters and fixtures:
+
+- Generic OIDC discovery, JWKS, introspection, issuer/audience enforcement,
+  cache settings, and health checks through `rvoip-oidc`.
+- Keycloak/OIDC discovery, JWKS, introspection, local fixture integration,
+  role/scope mapping, and health checks through `rvoip-keycloak`.
+- OpenLDAP-backed LDAP password verifier for portable Basic-over-TLS test
+  coverage through `rvoip-ldap`.
+- Active Directory-compatible LDAP simple-bind behavior through live-skipping
+  `RVOIP_AD_*` tests; production AD deployments still require lab validation
+  against Samba AD DC or a real AD environment.
+- PostgreSQL users-core `UserStore`, `ApiKeyStore`, and auth-service security
+  storage through the `postgres` feature.
+- Redis-backed token revocation, rate limiting, and Digest nonce/replay state
+  through `rvoip-redis`.
+- JSON lines, tracing, fanout, OTLP/HTTP JSON logs, and SIEM-oriented audit
+  event export through `rvoip-audit`.
+- SCIM 2.0 Users/Groups provisioning adapter through `rvoip-scim`, backed by
+  users-core users, roles, active state, external identity links, and
+  Bearer-admin scope enforcement.
+- SAML 2.0 service-provider adapter through `rvoip-saml`, backed by a
+  required assertion verifier trait, users-core external identity links, replay
+  checks, time/audience/recipient checks, and users-core token issuance.
+- WebAuthn/passkey adapter through `rvoip-webauthn`, backed by `webauthn-rs`,
+  server-side ceremony state, users-core passkey storage, and users-core token
+  issuance after successful passkey authentication.
+- IMS AKA provider adapter through `rvoip-ims-aka`, implementing
+  `AkaClientProvider` and `AkaVectorProvider` for deterministic lab vectors,
+  optional HTTP HSS/UDM broker validation, and lab vector wiring.
+
 Future concrete adapters:
 
-- OIDC discovery builder.
-- LDAP/Active Directory password verifier.
-- PostgreSQL users-core store.
-- Redis-backed token revocation/cache/nonce storage.
-- SCIM provisioning into users-core.
-- IMS AKA HSS/UDM vector provider adapters.
-- WebAuthn/passkey login for users-core token issuance.
+- OAuth2 token introspection convenience builders for additional named IdPs.
+- OIDC discovery presets for Okta, Entra ID, Ping, and Auth0.
+- Production SAML verifier integrations around a reviewed XML signature/SAML
+  validation library or corporate SSO gateway.
+- WebAuthn browser smoke harness for local passkey registration/login demos.
+- Production HSS/UDM/UDR broker adapters beyond the generic HTTP AKA shape.
 
 Out of scope for SIP auth:
 
@@ -133,6 +166,21 @@ Implemented runtime behavior:
 - `SipAuthService` uses configured `DigestReplayStore` on async challenge and
   validation paths for provider-backed Digest and Digest-only compatibility
   services.
+- `SipTransportSecurityContext` is available as a public auth-policy input,
+  and compatibility wrappers now convert legacy boolean TLS inputs into this
+  context for UAC and UAS auth decisions.
+- Inbound transport metadata from `sip-transport` is cached by dialog
+  transaction id and propagated to `IncomingCall`, `IncomingRequest`, and
+  `IncomingRegister` auth decisions. Basic and Bearer are denied over
+  cleartext by default, with explicit opt-in APIs for controlled legacy
+  environments.
+- `SipAuthPolicy` is available on `SipAuthService` and enforces enabled
+  schemes, minimum Digest algorithm strength, Basic/Bearer cleartext opt-ins,
+  required shared Digest replay storage, and audit failure policy.
+- UAC auth retry for REGISTER, INVITE, in-dialog requests, and direct
+  out-of-dialog retry uses the dialog transport selector instead of raw
+  `sips:` string checks, so URI parameters such as `;transport=tls` and
+  `;transport=wss` participate in Basic/Bearer transport policy.
 - `SipDigestAuthService` remains sync/single-process by default and exposes
   async replay-store helpers for deployments that need shared replay state
   without using the full multi-scheme facade.
@@ -142,13 +190,120 @@ Implemented runtime behavior:
 - `rvoip-keycloak` constructs both JWKS and OAuth2 introspection validators
   from discovered OIDC metadata and reports richer health metadata.
 
-Contract-only or roadmap items:
+Provider extensions and examples:
 
 - `AuthAuditSink`, `AuthRateLimiter`, and `DigestReplayStore` are stable
-  provider contracts; production storage backends such as Redis or SIEM
-  adapters remain deployment-specific or future extension crates.
-- LDAP/AD, PostgreSQL users-core storage, SCIM provisioning, WebAuthn/passkey
-  token issuance, and IMS HSS/UDM vector adapters remain roadmap items.
+  provider contracts. `crates/extensions/rvoip-redis` now provides a
+  Redis-backed `DigestReplayStore`, `TokenRevocationChecker`, and
+  `AuthRateLimiter`.
+- `crates/extensions/rvoip-audit` provides JSON-lines, tracing, and fanout
+  `AuthAuditSink` implementations plus OTLP/HTTP JSON logs and SIEM-oriented
+  exporters for redacted auth events.
+- `crates/extensions/rvoip-oidc` provides IdP-neutral OIDC discovery, JWKS
+  Bearer validator construction, OAuth2 introspection validator construction,
+  issuer/audience enforcement, JWKS cache settings, and health metadata.
+- `crates/extensions/rvoip-ldap` provides an OpenLDAP/LDAP simple-bind
+  `PasswordVerifier` for legacy Basic-over-TLS deployments. The optional local
+  fixture lives under `~/Developer/openldap`, AD-compatible live tests use
+  `RVOIP_AD_*` variables, and tests skip unless LDAP environment variables are
+  set.
+- `rvoip-users-core` has a `postgres` feature with `PostgresUserStore`,
+  PostgreSQL migrations, `AuthSecurityStore` backing for auth-service
+  security tables, and live-skipping PostgreSQL integration tests. SQLite
+  remains the default reference store.
+- `docs/security-review/` contains the review packet: architecture diagrams,
+  data-flow diagrams, control mapping, key-management runbook, incident
+  response runbook, secure configuration checklist, and known limitations.
+- `examples/auth/` now includes local Endpoint UAC to UnifiedCoordinator UAS
+  INVITE flows for Bearer and users-core-backed Digest, plus Redis-backed
+  hooks, generic OIDC, LDAP, and custom provider examples.
+- SIP method-level UAC retry coverage now exercises REGISTER, INVITE,
+  MESSAGE, OPTIONS, SUBSCRIBE, BYE, REFER, INFO, UPDATE, and NOTIFY. The tests
+  assert first requests are unauthenticated, retries carry full auth headers,
+  method-shaped fields survive retry, and `401`/`407` map to
+  `Authorization`/`Proxy-Authorization` respectively.
+- RFC 3261 auth retry identity is now asserted for the public out-of-dialog
+  builders: MESSAGE, OPTIONS, and SUBSCRIBE retries preserve Call-ID, To, and
+  From tag, generate a fresh Via branch through the normal sender, and
+  increment CSeq on the initial auth retry and stale-nonce recovery retry.
+- Multi-challenge negotiation now handles repeated challenge headers, quoted
+  commas inside challenge parameters, case-insensitive Basic/Bearer scheme
+  tokens, malformed Digest alternatives, downgrade protection, stronger Digest
+  selection, stale/non-stale re-challenge behavior, unknown nonces, and replay
+  rejection.
+- SCIM provisioning, SAML SSO, WebAuthn/passkey token issuance, LDAP
+  389DS/FreeIPA presets, and IMS AKA provider shape now have optional
+  extension crates or adapter APIs. Remaining work is deeper live fixture
+  coverage and production-provider specialization, not core API availability.
+- Production Active Directory claims still need lab validation beyond the
+  portable LDAP/AD-compatible test shape.
+
+## Enterprise Completion Plan
+
+The current implementation is a strong auth foundation. Enterprise-grade
+completion means adding concrete production providers, enforcing policy from
+actual transport context, proving every public API surface behaves consistently,
+and publishing operational evidence that security reviewers can inspect.
+
+Required workstreams:
+
+- Transport-truth auth policy:
+  - add an explicit `SipTransportSecurityContext` carried through inbound and
+    outbound auth paths;
+  - stop relying only on `sips:` URI text for Basic/Bearer transport safety;
+  - enforce Basic and Bearer cleartext denial by default from actual TLS/WSS
+    transport state;
+  - add `SipAuthPolicy` for enabled schemes, minimum Digest algorithm,
+    cleartext exceptions, issuer/audience requirements, replay requirements,
+    and audit/rate-limit failure behavior.
+- Production provider crates and storage:
+  - add Redis-backed Digest replay, token revocation, rate-limit, and cache
+    providers;
+  - add the Redis test fixture as an optional local container under
+    `~/Developer/redis`, matching the project pattern used for PBX fixtures;
+    tests must skip cleanly when the fixture is not running;
+  - add audit sinks for JSON lines, tracing, OpenTelemetry/OTLP, and
+    SIEM-friendly redacted event export;
+  - add a generic OIDC extension crate for discovery, JWKS, introspection, and
+    provider health checks independent of Keycloak;
+  - add an LDAP password verifier for legacy Basic-over-TLS deployments, with
+    OpenLDAP as the required open-source local fixture under
+    `~/Developer/openldap`;
+  - keep Active Directory-specific behavior as a separate compatibility track
+    validated later with Samba AD DC or a real AD lab;
+  - add PostgreSQL users-core storage behind a feature flag while keeping
+    SQLite as the default reference/dev store;
+  - use the PostgreSQL service already running on this machine for PostgreSQL
+    integration tests rather than adding a PostgreSQL container fixture in this
+    pass.
+- Complete API-surface runtime coverage:
+  - test Digest, Bearer, Basic, and provider-backed AKA shape across
+    `Endpoint`, `UnifiedCoordinator`, `StreamPeer`, and `CallbackPeer`;
+  - cover UAC and UAS paths through `IncomingCall`, `IncomingRequest`, and
+    `IncomingRegister`;
+  - cover REGISTER, INVITE, MESSAGE, OPTIONS, SUBSCRIBE, BYE, REFER, INFO,
+    UPDATE, and NOTIFY where each public surface supports the method;
+  - prove `401` always uses `Authorization` and `407` always uses
+    `Proxy-Authorization`.
+- Expanded enterprise security tests:
+  - add downgrade, malformed multi-challenge, quoted-comma, repeated-header,
+    stale nonce, non-stale second challenge, unknown nonce, and replay tests;
+  - add JWT/OIDC negative tests for issuer, audience, algorithm, `kid`,
+    expiry, revocation, and unavailable provider states;
+  - add inactive user, revoked/expired API key, disabled/suspended API key,
+    deleted Digest credential, and rotated Digest credential tests;
+  - add property/fuzz tests for auth challenge parsing and redaction;
+  - add concurrency tests for shared replay and rate-limit providers.
+- Operational docs, examples, and security review packet:
+  - add deployment guides for single-node Digest, clustered SIP UAS with Redis,
+    users-core PostgreSQL, Keycloak/OIDC Bearer, OpenLDAP Basic-over-TLS, and
+    AD compatibility notes;
+  - add examples for Endpoint UAC to Unified UAS with Bearer and Digest,
+    Redis-backed enterprise hooks, generic OIDC, LDAP, and custom providers;
+  - add a `docs/security-review/` packet with architecture diagrams,
+    data-flow diagrams, threat model, control mapping, key-management runbook,
+    incident response runbook, secure configuration checklist, and known
+    limitations.
 
 ## Enterprise Security Acceptance Criteria
 
@@ -174,7 +329,8 @@ Contract-only or roadmap items:
   protection, logging/auditability, revocation, and operational rotation.
 - Add negative security tests for downgrade attempts, Basic cleartext policy,
   stale/replayed Digest, missing JWT audience/issuer, wrong `kid`, expired
-  tokens, inactive users, disabled API keys, and deleted Digest credentials.
+  tokens, inactive users, revoked/expired API keys, deleted Digest credentials,
+  rotated Digest credentials, and disabled/suspended API keys.
 
 ## Completion Tracking Checklist
 
@@ -276,8 +432,10 @@ Contract-only or roadmap items:
 - [x] Add explicit downgrade-protection tests for multi-challenge negotiation.
 - [x] Add negative tests for Basic cleartext policy, replayed Digest,
   stale/non-stale re-challenges, wrong JWT issuer, wrong JWT audience, wrong
-  `kid`, expired JWTs, inactive users, revoked/expired API keys, and deleted
-  Digest credentials.
+  `kid`, expired JWTs, inactive users, revoked/expired API keys, deleted
+  Digest credentials, rotated Digest credentials, and disabled/suspended API
+  keys. Current users-core API keys support active-state suspension,
+  revocation/deletion, and expiry.
 - [x] Add logging guidance that avoids leaking passwords, HA1 values, bearer
   tokens, API keys, authorization headers, or full JWTs.
 - [x] Add compliance mapping for least privilege, cryptographic policy,
@@ -286,10 +444,175 @@ Contract-only or roadmap items:
 - [x] Add docs.rs/rustdoc examples for users-core-backed Bearer, users-core
   Basic verifier, users-core Digest HA1 provider, external JWT/JWKS, and custom
   providers.
-- [x] Add optional external-provider adapters on the roadmap: LDAP/AD password
-  verifier, PostgreSQL users-core store, Redis-backed replay/revocation state,
-  SCIM provisioning, IMS AKA HSS/UDM vector provider, and WebAuthn/passkey token
-  issuance.
+- [x] Add optional external-provider adapters on the roadmap: OpenLDAP-backed
+  LDAP password verifier, Active Directory compatibility, PostgreSQL users-core
+  store, Redis-backed replay/revocation state, SCIM provisioning, IMS AKA
+  HSS/UDM vector provider, and WebAuthn/passkey token issuance.
+
+### Remaining Enterprise-Grade Work
+
+- [x] Add public `SipTransportSecurityContext` and compatibility wrappers for
+  UAC and UAS auth decisions.
+- [x] Pass actual TLS/WSS transport state through inbound `IncomingCall`,
+  `IncomingRequest`, and `IncomingRegister` auth decisions.
+- [x] Replace UAC retry raw `sips:` checks with dialog transport-selector
+  context for REGISTER, INVITE, in-dialog, and direct OOB retry paths.
+- [x] Add outbound post-send transport telemetry so UAC retry decisions can use
+  the actual transport selected by DNS/route resolution, not only the dialog
+  selector's pre-send decision. Dialog-core records accepted outbound
+  transport context by transaction id and SIP request identity after
+  `send_request` succeeds; rvoip-sip uses that context for REGISTER, INVITE,
+  in-dialog, and OOB retry auth policy before falling back to selector hints.
+- [x] Add `SipAuthPolicy` and enforce enabled schemes, minimum Digest
+  algorithm, cleartext exceptions, shared replay requirements, and audit
+  failure behavior.
+- [x] Add explicit high-level policy helpers or docs for issuer/audience
+  requirements on Bearer validators and rate-limit failure behavior.
+- [x] Deny Basic and Bearer over cleartext by default on UAS inbound auth using
+  actual transport state when available.
+- [x] Deny Basic and Bearer over cleartext by default on UAC retry auth using
+  dialog-selected transport context rather than URI text alone.
+- [x] Promote UAC Basic/Bearer policy from selector-backed context to actual
+  outbound post-send transport telemetry once the transport layer emits it.
+  Basic/Bearer retry auth now prefers the challenged request's recorded
+  post-send transport context and only falls back to pre-send selector context
+  when older event paths cannot provide telemetry.
+- [x] Add Redis-backed `DigestReplayStore`, `TokenRevocationChecker`, and
+  `AuthRateLimiter` in `crates/extensions/rvoip-redis`.
+- [x] Define whether a separate generic auth-cache provider contract is needed.
+  Decision: do not add one now. Keep cache behavior attached to specific
+  reviewed contracts: `DigestReplayStore`, `TokenRevocationChecker`,
+  `AuthRateLimiter`, JWKS cache TTLs, and provider-specific health checks.
+- [x] Add an optional Redis test container fixture under `~/Developer/redis`;
+  tests must skip cleanly when the fixture is unavailable.
+- [x] Add production audit sinks for JSON lines, tracing, and fanout redacted
+  event export in `crates/extensions/rvoip-audit`.
+- [x] Add OpenTelemetry/OTLP and vendor/SIEM-specific audit exporters.
+  `crates/extensions/rvoip-audit` now includes `OtlpAuditSink` for
+  OTLP/HTTP JSON logs and `SiemAuditSink` presets for generic webhooks,
+  Splunk HEC, Elastic/ECS, Microsoft Sentinel, and Datadog Logs, with payload
+  tests that assert only redacted `AuthAuditEvent` fields are serialized.
+- [x] Add a generic OIDC extension crate for discovery, JWKS, introspection,
+  audience/issuer enforcement, cache settings, and health checks.
+- [x] Add OpenLDAP-backed `PasswordVerifier` support for legacy
+  Basic-over-TLS deployments.
+- [x] Add an optional OpenLDAP test container fixture under
+  `~/Developer/openldap`, seeded with deterministic users; tests must skip
+  cleanly when the fixture is unavailable.
+- [x] Add a separate Active Directory compatibility test track using Samba AD DC
+  or a real AD lab after the OpenLDAP baseline is passing. Coverage lives in
+  `rvoip-ldap` as a live-skipping AD-compatible LDAP simple-bind test using
+  `RVOIP_AD_*` environment variables; it supports UPN and `sAMAccountName`
+  filters while keeping the OpenLDAP fixture as the portable default.
+- [x] Add PostgreSQL users-core `UserStore`/`ApiKeyStore` storage behind a
+  `postgres` feature flag.
+- [x] Add a users-core auth-service database-pool abstraction so PostgreSQL can
+  also back refresh-token revocation, access-token revocation, password-change
+  updates, last-login updates, and SIP Digest HA1 credential storage.
+  `AuthenticationService` now uses the provider-based `AuthSecurityStore`
+  contract; SQLite and PostgreSQL stores implement it, and the live Postgres
+  test covers token revocation, password change, last-login, and SIP Digest
+  create/rotate/delete/lookup through the service.
+- [x] Keep SQLite as the default users-core store and use the existing local
+  PostgreSQL service on this machine for PostgreSQL integration tests. Verified
+  with `RVOIP_USERS_POSTGRES_URL='postgresql:///postgres?host=/tmp' cargo test
+  -p rvoip-users-core --features postgres --test postgres_store_tests`.
+- [x] Add users-core enterprise identity foundations: provider-neutral token
+  issuance for externally authenticated users, external identity link storage,
+  and passkey credential storage. Coverage lives in
+  `users-core/tests/enterprise_identity_tests.rs`.
+- [x] Add `crates/extensions/rvoip-scim` with SCIM Users/Groups model types,
+  service metadata, users-core user provisioning/linking, active-state updates,
+  Bearer admin scope enforcement, and tests for provisioning plus read/write
+  scope behavior.
+- [x] Add `crates/extensions/rvoip-saml` as a SAML 2.0 service-provider
+  adapter, not a SIP auth scheme. The crate requires a
+  `SamlAssertionVerifier` for signed assertion/response validation and handles
+  audience, recipient, time, replay, users-core linking, and token issuance.
+- [x] Add `crates/extensions/rvoip-webauthn` using `webauthn-rs` for passkey
+  registration/authentication ceremonies, server-side ceremony state,
+  users-core passkey credential storage, and users-core token issuance on
+  successful authentication.
+- [x] Expand `crates/extensions/rvoip-ldap` with OpenLDAP, 389 Directory
+  Server, FreeIPA, and Active Directory-compatible lookup presets plus
+  live-skipping `RVOIP_389DS_*` and `RVOIP_FREEIPA_*` tests.
+- [x] Add `crates/extensions/rvoip-ims-aka` implementing the existing SIP
+  `AkaClientProvider` and `AkaVectorProvider` traits with deterministic lab
+  vectors, optional HTTP broker validation, and lab-vector provider wiring
+  without carrier IMS certification claims.
+- [x] Add complete UAC/UAS auth parity tests across `Endpoint`,
+  `UnifiedCoordinator`, `StreamPeer`, and `CallbackPeer`. Endpoint UAC to
+  UnifiedCoordinator UAS INVITE retry is covered for Bearer,
+  users-core-backed Digest, and Digest `407` proxy auth in
+  `tests/endpoint_unified_auth.rs`; StreamPeer and CallbackPeer UAC to
+  UnifiedCoordinator UAS INVITE retry are covered for Bearer,
+  users-core-backed Digest, users-core-backed Digest `407` proxy auth, and
+  users-core-backed Basic with explicit cleartext opt-in. Endpoint,
+  StreamPeer, and CallbackPeer UAC to UnifiedCoordinator UAS INVITE retry are
+  covered for provider-backed AKA shape. Non-INVITE request builders are on
+  UnifiedCoordinator and call handles; those method-level auth retries are
+  covered by the REGISTER/OOB/in-dialog suites listed below.
+- [x] Add method coverage for REGISTER, INVITE, MESSAGE, OPTIONS, SUBSCRIBE,
+  BYE, REFER, INFO, UPDATE, and NOTIFY where each public surface supports the
+  method. Coverage lives in `register_423_retry.rs`,
+  `builder_auth_retry_preserves_headers.rs`, `generated_sip_compliance.rs`,
+  `oob_auth_retry.rs`, `bye_auth_retry.rs`, `refer_auth_retry.rs`,
+  `info_auth_retry.rs`, and `update_notify_auth_retry.rs`.
+- [x] Add tests proving `401` retries use `Authorization` and `407` retries use
+  `Proxy-Authorization` across supported methods. REGISTER, INVITE,
+  MESSAGE, OPTIONS, SUBSCRIBE, INFO, UPDATE, and NOTIFY have explicit 401/407
+  coverage; BYE and REFER have 401 coverage plus explicit 407 proxy-auth
+  coverage in `update_notify_auth_retry.rs`. Endpoint, StreamPeer, and
+  CallbackPeer INVITE Digest proxy-auth coverage is in
+  `endpoint_unified_auth.rs`.
+- [x] Add tests proving no public builder emits partial/fake auth and no
+  configured auth is silently ignored. Endpoint/Unified INVITE tests now assert
+  full Bearer and Digest retry headers; OOB MESSAGE/OPTIONS/SUBSCRIBE coverage
+  asserts first-send unauthenticated behavior, full Digest/Bearer/Basic retry
+  headers, `401`/`407` header mapping, CSeq increments, fresh Via branches,
+  and Call-ID/To/From-tag preservation.
+- [x] Add malformed challenge, repeated header, quoted comma, downgrade,
+  stale nonce, non-stale second challenge, unknown nonce, and replay tests.
+  Coverage: repeated `WWW-Authenticate` INVITE coverage lives in
+  `invite_repeated_challenge_auth.rs`; malformed/quoted-comma and
+  case-insensitive challenge selection coverage lives in `auth::tests`;
+  stale/non-stale re-challenge coverage lives in `generated_sip_compliance.rs`
+  and `oob_auth_retry.rs`; nonce/replay coverage lives in `auth::tests` and
+  `auth-core` provider-contract tests.
+- [x] Add JWT/OIDC negative tests for issuer, audience, algorithm, `kid`,
+  expiry, revocation, and unavailable provider states. Coverage lives in
+  `auth-core/tests/jwt.rs`, `auth-core/tests/jwks.rs`, and
+  `auth-core/tests/introspection.rs`; generic OIDC metadata errors are covered
+  in `crates/extensions/rvoip-oidc/src/lib.rs`.
+- [x] Add users-core negative tests for inactive users, revoked API keys,
+  deleted Digest credentials, and rotated Digest credentials in auth-core
+  bridge and SIP auth-service flows. Coverage lives in
+  `users-core/tests/auth_core_bridge_tests.rs` and
+  `rvoip-sip/tests/endpoint_unified_auth.rs`.
+- [x] Decide whether users-core API keys need an explicit disabled/suspended
+  state distinct from revocation, deletion, and expiry. Implemented as
+  `api_keys.active` with SQLite/PostgreSQL migrations; disabled keys validate
+  as absent while remaining visible in administrative list APIs.
+- [x] Add property/fuzz tests for auth challenge parsing and auth redaction.
+  Property coverage lives in `auth::tests::auth_challenge_splitter_preserves_quoted_commas`
+  and `tests/trace_redaction.rs::auth_redactor_never_leaks_generated_authorization_values`.
+- [x] Add concurrency tests for Redis/shared replay and rate-limit providers.
+  Coverage lives in `rvoip-redis/tests/redis_live.rs` and skips cleanly unless
+  `RVOIP_REDIS_URL` is configured.
+- [x] Add fixture tests for Keycloak/OIDC, optional Redis under
+  `~/Developer/redis`, local PostgreSQL, and OpenLDAP under
+  `~/Developer/openldap`. Verified with `rvoip-keycloak` live test,
+  `rvoip-oidc` metadata tests, `rvoip-redis` live test, `rvoip-ldap`, and the
+  local users-core PostgreSQL store test.
+- [x] Add deployment guides for single-node Digest, clustered SIP UAS with
+  Redis, users-core PostgreSQL, Keycloak/OIDC Bearer, OpenLDAP
+  Basic-over-TLS, and AD compatibility notes. See
+  `docs/AUTH_DEPLOYMENT_GUIDE.md`.
+- [x] Add enterprise examples for Endpoint UAC to Unified UAS with Bearer and
+  Digest, Redis-backed hooks, generic OIDC, LDAP, and custom providers.
+- [x] Add `docs/security-review/` with architecture diagrams, data-flow
+  diagrams, control mapping, key-management runbook, incident response runbook,
+  secure configuration checklist, and known limitations.
 
 ## Test Plan
 
@@ -304,8 +627,40 @@ Contract-only or roadmap items:
   - JWT issuance validated through `BearerValidator`.
   - API key validation through `ApiKeyVerifier`.
   - SIP Digest credential create/rotate/delete/lookup.
+  - Provider-neutral token issuance for externally authenticated users.
+  - External identity link create/update/list/delete.
+  - Passkey credential create/update/list/delete.
   - HS256 and RS256 validation/JWKS behavior.
   - SQLite migrations and config loading.
+
+- `rvoip-scim`:
+  - SCIM Users/Groups model serialization.
+  - Bearer-admin scope enforcement for `scim.read` and `scim.write`.
+  - users-core user provisioning, active-state updates, role/group mapping, and
+    external identity linking.
+
+- `rvoip-saml`:
+  - Signed assertion verifier trait integration.
+  - Audience, recipient, time-window, and replay rejection.
+  - users-core external identity linking and token issuance.
+
+- `rvoip-webauthn`:
+  - WebAuthn relying-party configuration validation.
+  - Server-side ceremony-state lifecycle.
+  - users-core passkey credential storage wrappers.
+  - Browser/passkey smoke flow for registration and login as a live optional
+    example track.
+
+- `rvoip-ldap`:
+  - OpenLDAP, 389DS, FreeIPA, and AD-compatible filter presets.
+  - Live-skipping fixture tests for `RVOIP_LDAP_*`, `RVOIP_389DS_*`,
+    `RVOIP_FREEIPA_*`, and `RVOIP_AD_*`.
+
+- `rvoip-ims-aka`:
+  - Deterministic AKA challenge, UAC authorization, UAS validation, and
+    rejection tests.
+  - Optional HTTP broker validation compile coverage.
+  - Lab-vector provider coverage without carrier certification claims.
 
 - `rvoip-sip`:
   - UAS Bearer auth using users-core-issued JWTs.
@@ -315,7 +670,9 @@ Contract-only or roadmap items:
   - StreamPeer, CallbackPeer, UnifiedCoordinator, and Endpoint examples compile and run.
 
 - Docs/examples:
-  - Add `examples/auth/` with users-core Bearer, Basic, Digest, external JWKS, and custom provider examples.
+  - Add `examples/auth/` with users-core Bearer, Basic, Digest, external JWKS,
+    custom provider, Keycloak/OIDC, Redis hooks, LDAP, SCIM, SAML, WebAuthn,
+    and IMS AKA provider-shape examples.
   - Update cargo docs for crate responsibilities and supported internal/external auth services.
   - Run `cargo doc`, doc tests, users-core tests, auth-core tests, and targeted SIP auth tests.
 

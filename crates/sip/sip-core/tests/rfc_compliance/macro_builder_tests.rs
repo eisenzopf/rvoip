@@ -10,10 +10,7 @@ use rvoip_sip_core::{
     option_expr, parse_message,
     prelude::{Message, Request, RequestBuilder, Response},
     sip_request, sip_response,
-    types::{
-        header::HeaderName,
-        Method, StatusCode,
-    },
+    types::{header::HeaderName, Method, StatusCode},
 };
 use std::env;
 use std::fs;
@@ -752,7 +749,6 @@ fn compare_messages(original: &Message, parsed: &Message) -> Result<(), String> 
         _ => Err("Message type mismatch (request vs response)".to_string()),
     }
 }
-
 
 /// Convert message to string for testing
 fn message_to_string(message: &Message) -> String {

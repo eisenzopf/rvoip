@@ -181,7 +181,10 @@ async fn session_ended_carries_aggregated_quality_report() {
         }
     }
     let report = report.expect("SessionEnded must carry an aggregated report when samples landed");
-    assert!((report.jitter_ms - 20.0).abs() < 0.001, "avg jitter == 20ms");
+    assert!(
+        (report.jitter_ms - 20.0).abs() < 0.001,
+        "avg jitter == 20ms"
+    );
     assert!((report.packet_loss_pct - 2.0).abs() < 0.001);
     assert_eq!(report.mos, Some(4.0));
 }

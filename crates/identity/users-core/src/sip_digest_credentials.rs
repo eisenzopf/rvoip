@@ -8,7 +8,6 @@ use crate::{AuthenticationService, Error, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256, Sha512_256};
-use sqlx_core::{query::query, row::Row};
 use uuid::Uuid;
 
 /// Hash family used for a stored SIP Digest HA1 value.
@@ -108,7 +107,7 @@ impl AuthenticationService {
         &self,
         request: CreateSipDigestCredentialRequest,
     ) -> Result<SipDigestCredential> {
-        let pool = self.pool.as_ref().ok_or_else(|| {
+        let store = self.auth_security_store().ok_or_else(|| {
             Error::Config("SIP Digest credential storage requires a database pool".to_string())
         })?;
 
@@ -136,26 +135,7 @@ impl AuthenticationService {
             updated_at: now,
         };
 
-        query(
-            "INSERT INTO sip_digest_credentials
-                (id, user_id, sip_username, realm, algorithm, ha1, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(sip_username, realm, algorithm)
-             DO UPDATE SET
-                user_id = excluded.user_id,
-                ha1 = excluded.ha1,
-                updated_at = excluded.updated_at",
-        )
-        .bind(&credential.id)
-        .bind(&credential.user_id)
-        .bind(&credential.sip_username)
-        .bind(&credential.realm)
-        .bind(credential.algorithm.as_str())
-        .bind(&credential.ha1)
-        .bind(credential.created_at)
-        .bind(credential.updated_at)
-        .execute(pool)
-        .await?;
+        store.upsert_sip_digest_credential(&credential).await?;
 
         self.lookup_sip_digest_credential(
             &credential.sip_username,
@@ -192,19 +172,12 @@ impl AuthenticationService {
         realm: &str,
         algorithm: SipDigestAlgorithmFamily,
     ) -> Result<()> {
-        let pool = self.pool.as_ref().ok_or_else(|| {
+        let store = self.auth_security_store().ok_or_else(|| {
             Error::Config("SIP Digest credential storage requires a database pool".to_string())
         })?;
-        query(
-            "DELETE FROM sip_digest_credentials
-             WHERE sip_username = ? AND realm = ? AND algorithm = ?",
-        )
-        .bind(sip_username)
-        .bind(realm)
-        .bind(algorithm.as_str())
-        .execute(pool)
-        .await?;
-        Ok(())
+        store
+            .delete_sip_digest_credential(sip_username, realm, algorithm)
+            .await
     }
 
     /// Look up SIP Digest material for validation.
@@ -214,34 +187,11 @@ impl AuthenticationService {
         realm: &str,
         algorithm: SipDigestAlgorithmFamily,
     ) -> Result<Option<SipDigestCredential>> {
-        let pool = self.pool.as_ref().ok_or_else(|| {
+        let store = self.auth_security_store().ok_or_else(|| {
             Error::Config("SIP Digest credential storage requires a database pool".to_string())
         })?;
-        let row = query(
-            "SELECT id, user_id, sip_username, realm, algorithm, ha1, created_at, updated_at
-             FROM sip_digest_credentials
-             WHERE sip_username = ? AND realm = ? AND algorithm = ?",
-        )
-        .bind(sip_username)
-        .bind(realm)
-        .bind(algorithm.as_str())
-        .fetch_optional(pool)
-        .await?;
-
-        row.map(row_to_credential).transpose()
+        store
+            .lookup_sip_digest_credential(sip_username, realm, algorithm)
+            .await
     }
-}
-
-fn row_to_credential(row: sqlx_sqlite::SqliteRow) -> Result<SipDigestCredential> {
-    let algorithm: String = row.get("algorithm");
-    Ok(SipDigestCredential {
-        id: row.get("id"),
-        user_id: row.get("user_id"),
-        sip_username: row.get("sip_username"),
-        realm: row.get("realm"),
-        algorithm: algorithm.parse()?,
-        ha1: row.get("ha1"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-    })
 }

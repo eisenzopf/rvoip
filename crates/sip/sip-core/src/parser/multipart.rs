@@ -173,7 +173,6 @@ fn parse_header_line(input: &[u8]) -> IResult<&[u8], (HeaderName, Vec<u8>)> {
     }
 }
 
-
 /// Parse a single line including its terminator
 fn parse_line(input: &[u8]) -> IResult<&[u8], &[u8]> {
     let (input, line) = take_till_crlf(input)?;
@@ -759,8 +758,6 @@ pub fn parse_multipart(content: &[u8], boundary: &str) -> Result<MultipartBody> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    
 
     #[test]
     fn test_parse_simple_multipart() {

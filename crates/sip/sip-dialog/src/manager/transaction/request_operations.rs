@@ -98,6 +98,10 @@ impl TransactionIntegration for DialogManager {
             (destination, request, event_package, subscription_state)
         };
 
+        let request_key = crate::manager::core::outbound_request_key(&request);
+        let next_hop =
+            crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request);
+        let selected_transport = self.transaction_manager.get_best_transport_for_uri(&next_hop);
         // Use transaction-core helpers to create appropriate transaction
         let transaction_id = if method == Method::Invite {
             self.transaction_manager
@@ -126,6 +130,12 @@ impl TransactionIntegration for DialogManager {
             .map_err(|e| crate::errors::DialogError::TransactionError {
                 message: format!("Failed to send request: {}", e),
             })?;
+        self.record_outbound_transport_context(
+            &transaction_id,
+            request_key,
+            selected_transport,
+            destination,
+        );
 
         debug!(
             "Successfully sent {} request for dialog {} (transaction: {}) using Phase 3 dialog functions",

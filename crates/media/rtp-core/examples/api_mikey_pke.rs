@@ -17,7 +17,8 @@ use rvoip_rtp_core::{
     security::{
         mikey::{
             crypto::{
-                extract_certificate_info, generate_ca_certificate, sign_certificate_with_ca, CertificateConfig,
+                extract_certificate_info, generate_ca_certificate, sign_certificate_with_ca,
+                CertificateConfig,
             },
             Mikey, MikeyConfig, MikeyKeyExchangeMethod, MikeyRole,
         },

@@ -7,7 +7,7 @@ use super::channel_mixer::{ChannelLayout, ChannelMixer};
 use super::resampler::Resampler;
 use crate::error::{AudioProcessingError, Result};
 use crate::types::{AudioFrame, SampleRate};
-use tracing::{debug};
+use tracing::debug;
 /// Parameters for audio format conversion
 #[derive(Debug, Clone)]
 pub struct ConversionParams {

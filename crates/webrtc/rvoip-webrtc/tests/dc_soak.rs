@@ -58,11 +58,8 @@ async fn five_second_dc_soak_no_leak() {
             .await
             .expect("send");
         sent += 1;
-        match RvoipPeerConnection::recv_data_channel_text(
-            &answerer_dc,
-            Duration::from_millis(500),
-        )
-        .await
+        match RvoipPeerConnection::recv_data_channel_text(&answerer_dc, Duration::from_millis(500))
+            .await
         {
             Ok(_) => received += 1,
             Err(e) => panic!("recv failed at iteration {sent}: {e}"),

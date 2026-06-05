@@ -9,7 +9,13 @@ use rvoip_core::config::Config;
 use rvoip_core::ids::{ConnectionId, SessionId, StreamId};
 use rvoip_core::orchestrator::Orchestrator;
 
-fn ids() -> (SessionId, ConnectionId, ConnectionId, ConnectionId, StreamId) {
+fn ids() -> (
+    SessionId,
+    ConnectionId,
+    ConnectionId,
+    ConnectionId,
+    StreamId,
+) {
     (
         SessionId::new(),
         ConnectionId::new(),
@@ -117,7 +123,8 @@ async fn drop_session_subscriptions_also_clears_publisher_registry() {
         PublisherEntry {
             connection: publisher_connid.clone(),
             participant: "alice".to_string(),
-            kind: "audio".to_string(), codec: None,
+            kind: "audio".to_string(),
+            codec: None,
         },
     );
     registry.register(
@@ -126,7 +133,8 @@ async fn drop_session_subscriptions_also_clears_publisher_registry() {
         PublisherEntry {
             connection: publisher_connid,
             participant: "alice".to_string(),
-            kind: "video".to_string(), codec: None,
+            kind: "video".to_string(),
+            codec: None,
         },
     );
     assert!(registry.entry(&sid, "strm_audio").is_some());
@@ -169,8 +177,18 @@ async fn subscriptions_are_isolated_per_session() {
     let sub_a = ConnectionId::new();
     let sub_b = ConnectionId::new();
 
-    orch.add_subscription(sid_a.clone(), sub_a.clone(), publisher.clone(), strm.clone());
-    orch.add_subscription(sid_b.clone(), sub_b.clone(), publisher.clone(), strm.clone());
+    orch.add_subscription(
+        sid_a.clone(),
+        sub_a.clone(),
+        publisher.clone(),
+        strm.clone(),
+    );
+    orch.add_subscription(
+        sid_b.clone(),
+        sub_b.clone(),
+        publisher.clone(),
+        strm.clone(),
+    );
 
     assert_eq!(
         orch.subscribers_for(&sid_a, &publisher, &strm),

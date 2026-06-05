@@ -238,7 +238,8 @@ impl CpalSpeakerSink {
         let upmix_to_stereo = hw_channels == 2;
         let resample_step = SAMPLE_RATE_HZ as f64 / hw_rate as f64;
 
-        let err_fn = |err| tracing::warn!(target: "rvoip_webrtc", error = %err, "cpal output error");
+        let err_fn =
+            |err| tracing::warn!(target: "rvoip_webrtc", error = %err, "cpal output error");
 
         let cpal_stream = device
             .build_output_stream(
@@ -261,10 +262,8 @@ impl CpalSpeakerSink {
                                     o
                                 };
                                 if upmix_to_stereo {
-                                    let stereo: Vec<f32> = hw_pcm
-                                        .iter()
-                                        .flat_map(|&s| [s, s])
-                                        .collect();
+                                    let stereo: Vec<f32> =
+                                        hw_pcm.iter().flat_map(|&s| [s, s]).collect();
                                     hw_pcm = stereo;
                                 }
                                 playback_buf.extend_from_slice(&hw_pcm);
@@ -352,20 +351,26 @@ fn pick_compatible(
             && cfg.min_sample_rate().0 <= SAMPLE_RATE_HZ
             && cfg.max_sample_rate().0 >= SAMPLE_RATE_HZ
         {
-            return Ok(cfg.clone().with_sample_rate(cpal::SampleRate(SAMPLE_RATE_HZ)));
+            return Ok(cfg
+                .clone()
+                .with_sample_rate(cpal::SampleRate(SAMPLE_RATE_HZ)));
         }
     }
     for cfg in configs {
-        if cfg.min_sample_rate().0 <= SAMPLE_RATE_HZ
-            && cfg.max_sample_rate().0 >= SAMPLE_RATE_HZ
-        {
-            return Ok(cfg.clone().with_sample_rate(cpal::SampleRate(SAMPLE_RATE_HZ)));
+        if cfg.min_sample_rate().0 <= SAMPLE_RATE_HZ && cfg.max_sample_rate().0 >= SAMPLE_RATE_HZ {
+            return Ok(cfg
+                .clone()
+                .with_sample_rate(cpal::SampleRate(SAMPLE_RATE_HZ)));
         }
     }
     let cfg = configs
         .first()
         .ok_or_else(|| WebRtcError::Adapter("device has no supported configs".into()))?;
-    let rate = cfg.max_sample_rate().0.min(48_000).max(cfg.min_sample_rate().0);
+    let rate = cfg
+        .max_sample_rate()
+        .0
+        .min(48_000)
+        .max(cfg.min_sample_rate().0);
     Ok(cfg.clone().with_sample_rate(cpal::SampleRate(rate)))
 }
 

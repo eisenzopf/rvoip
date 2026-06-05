@@ -104,7 +104,6 @@ pub fn unsupported_header(input: &[u8]) -> IResult<&[u8], Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_parse_unsupported_basic() {

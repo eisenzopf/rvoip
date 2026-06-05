@@ -43,7 +43,10 @@ async fn media_bridge_substrate_setup_loopback() {
         .expect("offerer applies answer");
 
     let timeout = Duration::from_secs(10);
-    offerer.wait_connected(timeout).await.expect("offerer connected");
+    offerer
+        .wait_connected(timeout)
+        .await
+        .expect("offerer connected");
     answerer
         .wait_connected(timeout)
         .await

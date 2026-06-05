@@ -708,7 +708,6 @@ impl TypedHeaderTrait for ErrorInfoHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_from_str_basic() {

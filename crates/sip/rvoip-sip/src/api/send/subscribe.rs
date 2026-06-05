@@ -164,6 +164,9 @@ impl SubscribeBuilder {
             from_uri: Some(from_uri.clone()),
             contact_uri: self.contact_uri.clone(),
             authorization: None,
+            cseq: None,
+            call_id: None,
+            from_tag: None,
             refresh: false,
             extra_headers,
         };
@@ -286,6 +289,9 @@ impl SubscribeRefreshBuilder {
             from_uri: Some(self.handle.from_uri.clone()),
             contact_uri: self.handle.contact_uri.clone(),
             authorization: None,
+            cseq: None,
+            call_id: None,
+            from_tag: None,
             refresh: true,
             extra_headers,
         };

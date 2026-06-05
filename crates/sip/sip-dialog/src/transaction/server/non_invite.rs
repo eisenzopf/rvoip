@@ -568,11 +568,11 @@ impl ServerTransaction for ServerNonInviteTransaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
     use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
     use rvoip_sip_core::types::status::StatusCode;
     use std::collections::VecDeque;
     use std::str::FromStr;
+    use std::time::Duration;
     use tokio::sync::Notify;
     use tokio::time::timeout as TokioTimeout;
 

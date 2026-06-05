@@ -62,8 +62,7 @@ use rvoip_core::stream::{MediaFrame, MediaStream, StreamKind};
 use rvoip_core::{Config, Orchestrator, Transport};
 
 use rvoip_quic::{
-    spawn_datagram_reader, QuicDatagramMediaStream, UctpQuicAdapter, UctpQuicClient,
-    UctpQuicConfig,
+    spawn_datagram_reader, QuicDatagramMediaStream, UctpQuicAdapter, UctpQuicClient, UctpQuicConfig,
 };
 use rvoip_sip::api::unified::{Config as SipConfig, UnifiedCoordinator};
 use rvoip_sip::SipAdapter;
@@ -95,7 +94,10 @@ fn rand_hex() -> String {
 /// (so clients can pin trust).
 fn quic_server_endpoint(
     addr: SocketAddr,
-) -> (Arc<quinn::Endpoint>, rustls::pki_types::CertificateDer<'static>) {
+) -> (
+    Arc<quinn::Endpoint>,
+    rustls::pki_types::CertificateDer<'static>,
+) {
     let (cert_der, key_der) = self_signed_for_dev(&["localhost".into()]).expect("self_signed");
     let mut tls = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -162,10 +164,9 @@ async fn dial_quic_client(
     participant: &str,
 ) -> Arc<UctpQuicClient> {
     let client_cfg = dev_client_config_trusting(cert).expect("client tls");
-    let client =
-        UctpQuicClient::connect(client_ep, server_addr, "localhost", Arc::new(client_cfg))
-            .await
-            .expect("client connect");
+    let client = UctpQuicClient::connect(client_ep, server_addr, "localhost", Arc::new(client_cfg))
+        .await
+        .expect("client connect");
 
     let mut inbound = client.take_inbound().expect("take_inbound");
 
@@ -296,12 +297,7 @@ fn opus_tone_frames(freq_hz: f32, num_frames: usize) -> Vec<Vec<u8>> {
         if chunk.len() < 1920 {
             break;
         }
-        let af = rvoip_media_core::types::AudioFrame::new(
-            chunk.to_vec(),
-            48000,
-            2,
-            0,
-        );
+        let af = rvoip_media_core::types::AudioFrame::new(chunk.to_vec(), 48000, 2, 0);
         let bytes = enc.encode(&af).expect("opus encode");
         frames.push(bytes);
     }
@@ -443,9 +439,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // SIP — proven api::UnifiedCoordinator on a loopback UDP port.
     let sip_bind: SocketAddr = "127.0.0.1:5099".parse().unwrap();
-    let sip_coordinator =
-        UnifiedCoordinator::new(SipConfig::on("rvoip-bridge-demo", sip_bind.ip(), sip_bind.port()))
-            .await?;
+    let sip_coordinator = UnifiedCoordinator::new(SipConfig::on(
+        "rvoip-bridge-demo",
+        sip_bind.ip(),
+        sip_bind.port(),
+    ))
+    .await?;
     let sip_adapter = SipAdapter::new(sip_coordinator).await?;
     println!("[1/3] SipAdapter bound on {}", sip_bind);
 
@@ -477,9 +476,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("=== Registered adapters: ===");
     for transport in [Transport::Sip, Transport::WebRtc, Transport::Quic] {
-        let adapter = orchestrator
-            .adapter(transport)
-            .expect("just registered");
+        let adapter = orchestrator.adapter(transport).expect("just registered");
         println!(
             "  transport={:?}  kind={:?}  capabilities={} audio codec(s)",
             adapter.transport(),
@@ -552,14 +549,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Touch a type from rvoip_quic so the dev-dep doesn't warn unused.
     let _ = QuicDatagramMediaStream::id;
-    let _ = (Bytes::from_static(b"x"), MediaFrame {
-        stream_id: StreamId::new(),
-        kind: StreamKind::Audio,
-        payload: Bytes::from_static(&[0]),
-        timestamp_rtp: 0,
-        captured_at: Utc::now(),
-        payload_type: Some(0),
-    });
+    let _ = (
+        Bytes::from_static(b"x"),
+        MediaFrame {
+            stream_id: StreamId::new(),
+            kind: StreamKind::Audio,
+            payload: Bytes::from_static(&[0]),
+            timestamp_rtp: 0,
+            captured_at: Utc::now(),
+            payload_type: Some(0),
+        },
+    );
 
     // -------------------------------------------------------------
     // 5. Phase 2 — exercise SIP `originate_connection`.
@@ -595,7 +595,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Open a Conversation + Session so the orchestrator has somewhere
     // to attach the new Connection.
     let cid = orch_for_bridge
-        .open_conversation(TenantId::new(), ConversationPolicy::default(), Default::default())
+        .open_conversation(
+            TenantId::new(),
+            ConversationPolicy::default(),
+            Default::default(),
+        )
         .await?;
     let sid = orch_for_bridge
         .start_session(cid.clone(), SessionMedium::Voice, vec![])
@@ -679,7 +683,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 "\n[cross-bridge] attempting Orchestrator::bridge_connections({}, {}) — SIP↔QUIC",
                 sip, quic
             );
-            match orch_for_bridge.bridge_connections(sip.clone(), quic.clone()).await {
+            match orch_for_bridge
+                .bridge_connections(sip.clone(), quic.clone())
+                .await
+            {
                 Ok(bid) => {
                     println!(
                         "[cross-bridge] SUCCESS — bridge_id={} (SIP↔QUIC frame-pump active)",
@@ -773,11 +780,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     let mut received: Vec<Vec<u8>> = Vec::new();
                     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
                     while received.len() < 60 && tokio::time::Instant::now() < deadline {
-                        match tokio::time::timeout(
-                            Duration::from_millis(200),
-                            client_c_in.recv(),
-                        )
-                        .await
+                        match tokio::time::timeout(Duration::from_millis(200), client_c_in.recv())
+                            .await
                         {
                             Ok(Some(frame)) => received.push(frame.payload.to_vec()),
                             _ => break,
@@ -785,15 +789,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     }
 
                     if received.is_empty() {
-                        frame_test_note.push_str(
-                            "  SIP→QUIC: no MediaFrames arrived at client_c\n",
-                        );
+                        frame_test_note
+                            .push_str("  SIP→QUIC: no MediaFrames arrived at client_c\n");
                     } else {
                         let pcm = decode_opus_to_mono_pcm(&received);
                         let (ok, freq, rms_val) = assert_tone(
-                            &pcm, 48000, SIP_TO_QUIC_TONE,
-                            50.0,    // freq tolerance: ±50 Hz
-                            500.0,   // min RMS: signal not silence
+                            &pcm,
+                            48000,
+                            SIP_TO_QUIC_TONE,
+                            50.0,  // freq tolerance: ±50 Hz
+                            500.0, // min RMS: signal not silence
                         );
                         println!(
                             "[frame-test] SIP→QUIC: received {} Opus frames → {} mono PCM samples; observed {:.1} Hz (expected {} Hz), rms={:.0} → {}",
@@ -813,9 +818,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 // --- Direction B: QUIC → SIP ---
                 // Push a MediaFrame from QUIC client C; expect an
                 // AudioFrame to arrive at the peer's AudioFrameSubscriber.
-                let mut peer_audio_sub = match peer_coordinator
-                    .subscribe_to_audio(&peer_sid)
-                    .await
+                let mut peer_audio_sub = match peer_coordinator.subscribe_to_audio(&peer_sid).await
                 {
                     Ok(sub) => Some(sub),
                     Err(e) => {
@@ -857,30 +860,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     );
 
                     let mut received_pcm: Vec<i16> = Vec::new();
-                    let deadline =
-                        tokio::time::Instant::now() + Duration::from_secs(3);
-                    while received_pcm.len() < 8000 * 2
-                        && tokio::time::Instant::now() < deadline
-                    {
-                        match tokio::time::timeout(Duration::from_millis(200), sub.recv())
-                            .await
-                        {
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                    while received_pcm.len() < 8000 * 2 && tokio::time::Instant::now() < deadline {
+                        match tokio::time::timeout(Duration::from_millis(200), sub.recv()).await {
                             Ok(Some(af)) => received_pcm.extend(af.samples),
                             _ => break,
                         }
                     }
 
                     if received_pcm.is_empty() {
-                        frame_test_note
-                            .push_str("  QUIC→SIP: no AudioFrames arrived at peer\n");
+                        frame_test_note.push_str("  QUIC→SIP: no AudioFrames arrived at peer\n");
                     } else {
-                        let (ok, freq, rms_val) = assert_tone(
-                            &received_pcm,
-                            8000,
-                            QUIC_TO_SIP_TONE,
-                            50.0,
-                            500.0,
-                        );
+                        let (ok, freq, rms_val) =
+                            assert_tone(&received_pcm, 8000, QUIC_TO_SIP_TONE, 50.0, 500.0);
                         println!(
                             "[frame-test] QUIC→SIP: received {} PCM samples @ 8 kHz; observed {:.1} Hz (expected {} Hz), rms={:.0} → {}",
                             received_pcm.len(), freq, QUIC_TO_SIP_TONE, rms_val,
@@ -941,7 +933,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let webrtc_conn_id: Option<ConnectionId> = if let Some(offerer) = offerer.as_ref() {
         match offerer.create_offer_and_gather().await {
             Ok(offer_sdp) => {
-                println!("\n[webrtc] offerer generated SDP offer ({} bytes)", offer_sdp.len());
+                println!(
+                    "\n[webrtc] offerer generated SDP offer ({} bytes)",
+                    offer_sdp.len()
+                );
                 // Grab the adapter's typed handle so we can call its
                 // specific `apply_remote_offer` / `local_sdp` methods.
                 // We need a handle to the WebRtcAdapter; we passed it
@@ -1036,7 +1031,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if let Some(quic_d_id) = quic_d_id {
             // Accept the WebRTC connection into the orchestrator's
             // session/connection registry before bridging.
-            match orch_for_bridge.bridge_connections(webrtc_conn_id.clone(), quic_d_id.clone()).await {
+            match orch_for_bridge
+                .bridge_connections(webrtc_conn_id.clone(), quic_d_id.clone())
+                .await
+            {
                 Ok(bid) => {
                     println!(
                         "[webrtc] bridge_connections(WebRTC, QUIC) → bridge_id={}",
@@ -1099,8 +1097,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 None,
                             );
                             let offerer_out = offerer_stream.frames_out();
-                            let mut client_d_in =
-                                MediaStream::frames_in(client_d_stream.as_ref());
+                            let mut client_d_in = MediaStream::frames_in(client_d_stream.as_ref());
 
                             // --- WebRTC → QUIC (880 Hz tone) ---
                             const WQ_TONE: f32 = 880.0;
@@ -1131,11 +1128,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             );
 
                             let mut received: Vec<Vec<u8>> = Vec::new();
-                            let deadline =
-                                tokio::time::Instant::now() + Duration::from_secs(3);
-                            while received.len() < 60
-                                && tokio::time::Instant::now() < deadline
-                            {
+                            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                            while received.len() < 60 && tokio::time::Instant::now() < deadline {
                                 match tokio::time::timeout(
                                     Duration::from_millis(200),
                                     client_d_in.recv(),
@@ -1152,9 +1146,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             }
 
                             if received.is_empty() {
-                                webrtc_test_note.push_str(
-                                    "  WebRTC→QUIC: no MediaFrames arrived\n",
-                                );
+                                webrtc_test_note
+                                    .push_str("  WebRTC→QUIC: no MediaFrames arrived\n");
                             } else {
                                 let pcm = decode_opus_to_mono_pcm(&received);
                                 let (ok, freq, rms_val) =
@@ -1191,8 +1184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             // forwards them to the adapter; the adapter
                             // writes RTP; offerer's PC sees first
                             // packet and fires on_track.
-                            let client_d_out =
-                                MediaStream::frames_out(client_d_stream.as_ref());
+                            let client_d_out = MediaStream::frames_out(client_d_stream.as_ref());
                             let warmup_frames = opus_tone_frames(QW_TONE, 20);
                             for (i, payload) in warmup_frames.iter().enumerate() {
                                 let _ = client_d_out
@@ -1212,12 +1204,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             // it fires we attach the remote track to
                             // the offerer_stream so frames_in
                             // populates with subsequent RTP.
-                            let remote_track = offerer
-                                .wait_remote_track(Duration::from_secs(3))
-                                .await;
+                            let remote_track =
+                                offerer.wait_remote_track(Duration::from_secs(3)).await;
                             if let Some(rt) = remote_track {
                                 offerer_stream.attach_remote(rt);
-                                println!("[webrtc] Phase 5b: attached remote track to offerer_stream");
+                                println!(
+                                    "[webrtc] Phase 5b: attached remote track to offerer_stream"
+                                );
 
                                 // Drain any pre-existing frames in the
                                 // channel so we only collect new tone.
@@ -1239,8 +1232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                             payload_type: Some(111),
                                         })
                                         .await;
-                                    tokio::time::sleep(Duration::from_millis(20))
-                                        .await;
+                                    tokio::time::sleep(Duration::from_millis(20)).await;
                                 }
                                 println!(
                                     "[webrtc] Phase 5b: pushed {} Opus tone frames ({} Hz) QUIC → WebRTC",
@@ -1249,8 +1241,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
                                 // Collect offerer-side frames; decode + verify.
                                 let mut qw_received: Vec<Vec<u8>> = Vec::new();
-                                let deadline = tokio::time::Instant::now()
-                                    + Duration::from_secs(3);
+                                let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
                                 while qw_received.len() < 60
                                     && tokio::time::Instant::now() < deadline
                                 {
@@ -1297,22 +1288,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             }
                         }
                         _ => {
-                            webrtc_test_note.push_str(
-                                "  WebRTC: offerer has no local_audio_track/ssrc\n",
-                            );
+                            webrtc_test_note
+                                .push_str("  WebRTC: offerer has no local_audio_track/ssrc\n");
                         }
                     }
                 }
                 Err(e) => {
-                    webrtc_test_note.push_str(&format!(
-                        "  WebRTC↔QUIC: bridge_connections failed: {e}\n"
-                    ));
+                    webrtc_test_note
+                        .push_str(&format!("  WebRTC↔QUIC: bridge_connections failed: {e}\n"));
                 }
             }
         } else {
-            webrtc_test_note.push_str(
-                "  WebRTC↔QUIC: client_d inbound never observed within 3s\n",
-            );
+            webrtc_test_note.push_str("  WebRTC↔QUIC: client_d inbound never observed within 3s\n");
         }
 
         let _ = client_d; // keep alive
@@ -1354,7 +1341,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .start_session(cid.clone(), SessionMedium::Voice, vec![])
         .await
         .ok();
-    let sip_conn_id_2 = match (sid_2.as_ref(), orch_for_bridge.adapter(Transport::Sip).is_ok()) {
+    let sip_conn_id_2 = match (
+        sid_2.as_ref(),
+        orch_for_bridge.adapter(Transport::Sip).is_ok(),
+    ) {
         (Some(sid), true) => {
             let req = OriginateRequest {
                 session_id: sid.clone(),
@@ -1382,7 +1372,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let offerer_2 = match RvoipPeerConnection::new(&webrtc_config, PeerRole::Offerer).await {
         Ok(o) => Some(o),
         Err(e) => {
-            sw_test_note.push_str(&format!("  SIP↔WebRTC: 2nd offerer construct failed: {e}\n"));
+            sw_test_note.push_str(&format!(
+                "  SIP↔WebRTC: 2nd offerer construct failed: {e}\n"
+            ));
             None
         }
     };
@@ -1439,10 +1431,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         .await;
                     }
 
-                    let mut peer_sub = match peer_coordinator
-                        .subscribe_to_audio(peer_sid)
-                        .await
-                    {
+                    let mut peer_sub = match peer_coordinator.subscribe_to_audio(peer_sid).await {
                         Ok(s) => Some(s),
                         Err(e) => {
                             sw_test_note.push_str(&format!(
@@ -1496,16 +1485,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         );
 
                         let mut received_pcm: Vec<i16> = Vec::new();
-                        let deadline =
-                            tokio::time::Instant::now() + Duration::from_secs(5);
+                        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
                         while received_pcm.len() < 8000 * 2
                             && tokio::time::Instant::now() < deadline
                         {
-                            match tokio::time::timeout(
-                                Duration::from_millis(200),
-                                sub.recv(),
-                            )
-                            .await
+                            match tokio::time::timeout(Duration::from_millis(200), sub.recv()).await
                             {
                                 Ok(Some(af)) => received_pcm.extend(af.samples),
                                 _ => break,
@@ -1513,17 +1497,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         }
 
                         if received_pcm.is_empty() {
-                            sw_test_note.push_str(
-                                "  SIP↔WebRTC: no AudioFrames at peer\n",
-                            );
+                            sw_test_note.push_str("  SIP↔WebRTC: no AudioFrames at peer\n");
                         } else {
-                            let (ok, freq, rms_val) = assert_tone(
-                                &received_pcm,
-                                8000,
-                                SW_TONE,
-                                80.0,
-                                500.0,
-                            );
+                            let (ok, freq, rms_val) =
+                                assert_tone(&received_pcm, 8000, SW_TONE, 80.0, 500.0);
                             println!(
                                 "[sip-webrtc] WebRTC→SIP: received {} PCM samples @ 8kHz; observed {:.1} Hz (expected {} Hz), rms={:.0} → {}",
                                 received_pcm.len(), freq, SW_TONE, rms_val,
@@ -1567,18 +1544,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             tokio::time::sleep(Duration::from_millis(20)).await;
                         }
 
-                        let remote_track_2 =
-                            off2.wait_remote_track(Duration::from_secs(3)).await;
+                        let remote_track_2 = off2.wait_remote_track(Duration::from_secs(3)).await;
                         if let Some(rt) = remote_track_2 {
                             offerer_stream.attach_remote(rt);
-                            println!("[sip-webrtc] Phase 6b: attached remote track to offerer_2 stream");
-                            let mut off2_in =
-                                MediaStream::frames_in(offerer_stream.as_ref());
+                            println!(
+                                "[sip-webrtc] Phase 6b: attached remote track to offerer_2 stream"
+                            );
+                            let mut off2_in = MediaStream::frames_in(offerer_stream.as_ref());
                             while off2_in.try_recv().is_ok() {}
 
                             // Push the full SIP→WebRTC tone.
-                            let tone_pcm =
-                                pcm_sine(SW_TONE_2, 8000, 160 * 100, 12000);
+                            let tone_pcm = pcm_sine(SW_TONE_2, 8000, 160 * 100, 12000);
                             for (i, chunk) in tone_pcm.chunks(160).enumerate() {
                                 if chunk.len() < 160 {
                                     break;
@@ -1589,8 +1565,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                     1,
                                     ((20 + i) as u32) * 160,
                                 );
-                                let _ =
-                                    peer_coordinator.send_audio(peer_sid, af).await;
+                                let _ = peer_coordinator.send_audio(peer_sid, af).await;
                                 tokio::time::sleep(Duration::from_millis(20)).await;
                             }
                             println!(
@@ -1600,11 +1575,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
                             // Collect on offerer_2 side; decode + verify.
                             let mut sw_received: Vec<Vec<u8>> = Vec::new();
-                            let deadline =
-                                tokio::time::Instant::now() + Duration::from_secs(3);
-                            while sw_received.len() < 60
-                                && tokio::time::Instant::now() < deadline
-                            {
+                            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                            while sw_received.len() < 60 && tokio::time::Instant::now() < deadline {
                                 match tokio::time::timeout(
                                     Duration::from_millis(200),
                                     off2_in.recv(),
@@ -1626,9 +1598,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 );
                             } else {
                                 let pcm = decode_opus_to_mono_pcm(&sw_received);
-                                let (ok, freq, rms_val) = assert_tone(
-                                    &pcm, 48000, SW_TONE_2, 80.0, 500.0,
-                                );
+                                let (ok, freq, rms_val) =
+                                    assert_tone(&pcm, 48000, SW_TONE_2, 80.0, 500.0);
                                 println!(
                                     "[sip-webrtc] SIP→WebRTC: {} Opus frames → {} mono samples; observed {:.1} Hz (expected {} Hz), rms={:.0} → {}",
                                     sw_received.len(), pcm.len(), freq, SW_TONE_2, rms_val,
@@ -1643,22 +1614,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 }
                             }
                         } else {
-                            sw_test_note.push_str(
-                                "  SIP→WebRTC: off2.wait_remote_track timed out\n",
-                            );
+                            sw_test_note
+                                .push_str("  SIP→WebRTC: off2.wait_remote_track timed out\n");
                         }
                     }
                 }
                 Err(e) => {
-                    sw_test_note.push_str(&format!(
-                        "  SIP↔WebRTC: bridge_connections failed: {e}\n"
-                    ));
+                    sw_test_note
+                        .push_str(&format!("  SIP↔WebRTC: bridge_connections failed: {e}\n"));
                 }
             }
         } else {
-            sw_test_note.push_str(
-                "  SIP↔WebRTC: missing conn ids / peer_sid — skipping\n",
-            );
+            sw_test_note.push_str("  SIP↔WebRTC: missing conn ids / peer_sid — skipping\n");
         }
     } else {
         sw_test_note.push_str(
@@ -1671,11 +1638,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // -------------------------------------------------------------
 
     println!("\n=== Demo summary ===");
-    println!("  SIP adapter registered:                              {}", orch_for_bridge.adapter(Transport::Sip).is_ok());
-    println!("  WebRTC adapter registered:                           {}", orch_for_bridge.adapter(Transport::WebRtc).is_ok());
-    println!("  QUIC adapter registered:                             {}", orch_for_bridge.adapter(Transport::Quic).is_ok());
-    println!("  QUIC↔QUIC bridge constructed (Phase 1):              {}", bridged_quic);
-    println!("  SIP originate_connection dispatched (Phase 2):       {}", sip_conn_id.is_some());
+    println!(
+        "  SIP adapter registered:                              {}",
+        orch_for_bridge.adapter(Transport::Sip).is_ok()
+    );
+    println!(
+        "  WebRTC adapter registered:                           {}",
+        orch_for_bridge.adapter(Transport::WebRtc).is_ok()
+    );
+    println!(
+        "  QUIC adapter registered:                             {}",
+        orch_for_bridge.adapter(Transport::Quic).is_ok()
+    );
+    println!(
+        "  QUIC↔QUIC bridge constructed (Phase 1):              {}",
+        bridged_quic
+    );
+    println!(
+        "  SIP originate_connection dispatched (Phase 2):       {}",
+        sip_conn_id.is_some()
+    );
     println!(
         "  SIP↔QUIC bridge constructed (Phase 3):               {}",
         cross_bridge_result.is_ok()
@@ -1683,27 +1665,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Err(e) = &cross_bridge_result {
         println!("    (returned: {e})");
     }
-    println!("  SIP↔QUIC SIP→QUIC frame arrived (Phase 4a):          {}", sip_to_quic_ok);
-    println!("  SIP↔QUIC QUIC→SIP frame arrived (Phase 4b):          {}", quic_to_sip_ok);
+    println!(
+        "  SIP↔QUIC SIP→QUIC frame arrived (Phase 4a):          {}",
+        sip_to_quic_ok
+    );
+    println!(
+        "  SIP↔QUIC QUIC→SIP frame arrived (Phase 4b):          {}",
+        quic_to_sip_ok
+    );
     println!(
         "  SIP↔QUIC BI-DIRECTIONAL PROVEN:                      {}",
         sip_quic_bidir_proven
     );
-    println!("  WebRTC↔QUIC bridge constructed (Phase 5a):           {}", webrtc_quic_bridge_ok);
-    println!("  WebRTC↔QUIC WebRTC→QUIC tone verified (Phase 5):     {}", webrtc_quic_frame_ok);
-    println!("  WebRTC↔QUIC QUIC→WebRTC tone verified (Phase 5b):    {}", quic_to_webrtc_frame_ok);
-    println!("  SIP↔WebRTC bridge constructed (Phase 6a):            {}", sip_webrtc_bridge_ok);
-    println!("  SIP↔WebRTC WebRTC→SIP tone verified (Phase 6):       {}", sip_webrtc_frame_ok);
-    println!("  SIP↔WebRTC SIP→WebRTC tone verified (Phase 6b):      {}", sip_to_webrtc_frame_ok);
+    println!(
+        "  WebRTC↔QUIC bridge constructed (Phase 5a):           {}",
+        webrtc_quic_bridge_ok
+    );
+    println!(
+        "  WebRTC↔QUIC WebRTC→QUIC tone verified (Phase 5):     {}",
+        webrtc_quic_frame_ok
+    );
+    println!(
+        "  WebRTC↔QUIC QUIC→WebRTC tone verified (Phase 5b):    {}",
+        quic_to_webrtc_frame_ok
+    );
+    println!(
+        "  SIP↔WebRTC bridge constructed (Phase 6a):            {}",
+        sip_webrtc_bridge_ok
+    );
+    println!(
+        "  SIP↔WebRTC WebRTC→SIP tone verified (Phase 6):       {}",
+        sip_webrtc_frame_ok
+    );
+    println!(
+        "  SIP↔WebRTC SIP→WebRTC tone verified (Phase 6b):      {}",
+        sip_to_webrtc_frame_ok
+    );
     let wq_bidir_proven = webrtc_quic_frame_ok && quic_to_webrtc_frame_ok;
     let sw_bidir_proven = sip_webrtc_frame_ok && sip_to_webrtc_frame_ok;
     let all_three_bidir = sip_quic_bidir_proven && wq_bidir_proven && sw_bidir_proven;
     println!();
-    println!("  SIP↔QUIC   BI-DIRECTIONAL:       {}", sip_quic_bidir_proven);
+    println!(
+        "  SIP↔QUIC   BI-DIRECTIONAL:       {}",
+        sip_quic_bidir_proven
+    );
     println!("  WebRTC↔QUIC BI-DIRECTIONAL:      {}", wq_bidir_proven);
     println!("  SIP↔WebRTC  BI-DIRECTIONAL:      {}", sw_bidir_proven);
     println!();
-    println!("  *** ALL THREE PAIRS BI-DIRECTIONAL: {} ***", all_three_bidir);
+    println!(
+        "  *** ALL THREE PAIRS BI-DIRECTIONAL: {} ***",
+        all_three_bidir
+    );
     if !frame_test_note.is_empty() {
         println!("  SIP↔QUIC test notes:");
         print!("{frame_test_note}");

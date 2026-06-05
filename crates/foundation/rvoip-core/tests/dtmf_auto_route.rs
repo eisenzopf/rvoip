@@ -23,9 +23,7 @@ use rvoip_core::adapter::{
     OriginateRequest, RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
-use rvoip_core::connection::{
-    Connection, ConnectionState, Direction, Transport, TransportHandle,
-};
+use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::events::Event;
 use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};

@@ -1,7 +1,7 @@
-#[cfg(test)]
-use crate::types::TypedHeader;
 use super::HeaderSetter;
 use crate::types::auth::{AuthenticationInfo, AuthenticationInfoParam, Qop};
+#[cfg(test)]
+use crate::types::TypedHeader;
 
 /// Extension trait for adding Authentication-Info header building capabilities
 ///

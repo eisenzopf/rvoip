@@ -129,7 +129,7 @@ transitions:
 
   # UAC receives 401/407 auth challenge on INVITE (RFC 3261 §22.2).
   # StoreAuthChallenge parses the challenge into session.auth_challenge;
-  # SendINVITEWithAuth computes the digest response via auth-core and
+  # SendINVITEWithAuth computes the configured UAC auth response and
   # re-issues the INVITE with Authorization / Proxy-Authorization through
   # DialogAdapter::resend_invite_with_auth. Self-loop keeps us in
   # Initiating until either the retry succeeds or the cap trips.
@@ -142,6 +142,30 @@ transitions:
       - type: "StoreAuthChallenge"
       - type: "SendINVITEWithAuth"
     description: "INVITE auth retry (RFC 3261 §22.2)"
+
+  # A UAS may send provisional responses (100/180/183) before the final
+  # 401/407 challenge. Retry auth from Ringing the same way as Initiating.
+  - role: "UAC"
+    state: "Ringing"
+    event:
+      type: "AuthRequired"
+    next_state: "Initiating"
+    actions:
+      - type: "StoreAuthChallenge"
+      - type: "SendINVITEWithAuth"
+    description: "INVITE auth retry after provisional response (RFC 3261 §22.2)"
+
+  # Same as Ringing: early-media provisional state can still receive a final
+  # 401/407 challenge and must retry the INVITE with auth.
+  - role: "UAC"
+    state: "EarlyMedia"
+    event:
+      type: "AuthRequired"
+    next_state: "Initiating"
+    actions:
+      - type: "StoreAuthChallenge"
+      - type: "SendINVITEWithAuth"
+    description: "INVITE auth retry after early media challenge (RFC 3261 §22.2)"
 
   # RFC 4028 §6 — UAS replied 422 Session Interval Too Small with a required
   # Min-SE header. Self-loop keeps us in Initiating while the retry action

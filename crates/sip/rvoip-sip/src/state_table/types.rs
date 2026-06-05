@@ -571,8 +571,8 @@ pub enum Action {
     /// it up. A separate action (rather than overloading `NegotiateSDPAsUAS`)
     /// because the explicit-SDP path must bypass negotiation entirely.
     PrepareEarlyMediaSDP,
-    /// RFC 3261 §22.2 — compute a digest Authorization (or Proxy-Authorization)
-    /// header from `session.auth_challenge` + `session.credentials` and resend
+    /// RFC 3261 §22.2 — compute an Authorization (or Proxy-Authorization)
+    /// header from the cached challenge plus configured UAC auth and resend
     /// the INVITE via `DialogAdapter::resend_invite_with_auth`. Bumps
     /// `session.invite_auth_retry_count`; errors if the cap is exceeded.
     SendINVITEWithAuth,
@@ -580,7 +580,7 @@ pub enum Action {
     /// methods. Reads `session.pending_auth_method` to discriminate
     /// which `pending_<method>_options` to re-issue (falls back to
     /// inspecting which stash is set when method is missing), computes
-    /// the digest via `auth-core`, and dispatches via the matching
+    /// the selected auth header, and dispatches via the matching
     /// `DialogAdapter::send_<method>_with_auth` mirror. Covers BYE,
     /// REFER, NOTIFY, INFO, UPDATE, MESSAGE, OPTIONS, SUBSCRIBE.
     SendRequestWithAuth,

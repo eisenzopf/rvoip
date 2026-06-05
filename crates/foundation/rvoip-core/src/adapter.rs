@@ -239,18 +239,10 @@ pub trait ConnectionAdapter: Send + Sync {
     /// `NotImplemented` so adapters opt in; the Orchestrator surfaces
     /// the error verbatim when a caller invokes mute against a
     /// transport that hasn't wired it.
-    async fn mute(
-        &self,
-        _conn: ConnectionId,
-        _direction: MuteDirection,
-    ) -> Result<()> {
+    async fn mute(&self, _conn: ConnectionId, _direction: MuteDirection) -> Result<()> {
         Err(RvoipError::NotImplemented("ConnectionAdapter::mute"))
     }
-    async fn unmute(
-        &self,
-        _conn: ConnectionId,
-        _direction: MuteDirection,
-    ) -> Result<()> {
+    async fn unmute(&self, _conn: ConnectionId, _direction: MuteDirection) -> Result<()> {
         Err(RvoipError::NotImplemented("ConnectionAdapter::unmute"))
     }
 

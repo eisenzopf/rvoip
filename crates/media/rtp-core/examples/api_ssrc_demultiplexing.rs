@@ -20,8 +20,8 @@ const AUDIO1_SSRC: u32 = 0x1234A001;
 const AUDIO2_SSRC: u32 = 0x1234A002;
 const VIDEO1_SSRC: u32 = 0x5678B001;
 const VIDEO2_SSRC: u32 = 0x5678B002;
- // 48kHz audio
- // 90kHz video
+// 48kHz audio
+// 90kHz video
 
 // Global timeout to ensure our example completes
 const EXAMPLE_TIMEOUT_SECS: u64 = 30;

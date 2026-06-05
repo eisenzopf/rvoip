@@ -46,10 +46,7 @@ impl WebRtcMediaBridge {
         ))
     }
 
-    pub async fn set_remote_substrate_setup(
-        &self,
-        _setup: WebRtcSubstrateSetup,
-    ) -> Result<()> {
+    pub async fn set_remote_substrate_setup(&self, _setup: WebRtcSubstrateSetup) -> Result<()> {
         Err(UctpWsError::WebRtc(
             "enable the `media-webrtc` feature on rvoip-websocket".into(),
         ))
@@ -188,10 +185,7 @@ mod bridge {
         }
 
         /// Apply peer SDP from `substrate_setup`.
-        pub async fn set_remote_substrate_setup(
-            &self,
-            setup: WebRtcSubstrateSetup,
-        ) -> Result<()> {
+        pub async fn set_remote_substrate_setup(&self, setup: WebRtcSubstrateSetup) -> Result<()> {
             if setup.kind != "websocket+webrtc" {
                 return Err(UctpWsError::WebRtc(format!(
                     "expected substrate kind websocket+webrtc, got {}",
@@ -346,7 +340,10 @@ mod tests {
         #[cfg(not(feature = "media-webrtc"))]
         {
             assert_eq!(WebRtcMediaBridge::new_offerer().role(), BridgeRole::Offerer);
-            assert_eq!(WebRtcMediaBridge::new_answerer().role(), BridgeRole::Answerer);
+            assert_eq!(
+                WebRtcMediaBridge::new_answerer().role(),
+                BridgeRole::Answerer
+            );
         }
     }
 

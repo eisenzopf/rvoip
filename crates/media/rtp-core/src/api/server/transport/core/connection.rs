@@ -42,7 +42,6 @@ pub struct ClientConnection {
     pub(crate) last_activity: Arc<Mutex<SystemTime>>,
 }
 
-
 /// Static helper function to handle a new client connection
 pub async fn handle_client_static(
     addr: SocketAddr,
@@ -185,7 +184,6 @@ pub async fn handle_client_static(
     info!("Successfully added client {}", client_id);
     Ok(client_id)
 }
-
 
 /// Disconnect a client
 pub async fn disconnect_client(

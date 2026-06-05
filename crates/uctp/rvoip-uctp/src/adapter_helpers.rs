@@ -63,9 +63,11 @@ pub async fn renegotiate_via_envelope(
 
     let reply = send_and_wait(out_tx, pending.as_ref(), env, timeout)
         .await
-        .map_err(|_| RvoipError::Adapter(
-            "renegotiate_media: timeout or substrate closed before peer replied".into(),
-        ))?;
+        .map_err(|_| {
+            RvoipError::Adapter(
+                "renegotiate_media: timeout or substrate closed before peer replied".into(),
+            )
+        })?;
 
     match reply.msg_type {
         MessageType::ConnectionUpdate => parse_update_reply(reply, capabilities),
@@ -102,11 +104,15 @@ fn parse_update_reply(
                 "renegotiate_media: malformed connection.update reply: {e}"
             ))
         })?;
-    let chosen_name = payload.codec_preferences.into_iter().next().ok_or_else(|| {
-        RvoipError::Adapter(
-            "renegotiate_media: peer replied with empty codec_preferences".into(),
-        )
-    })?;
+    let chosen_name = payload
+        .codec_preferences
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            RvoipError::Adapter(
+                "renegotiate_media: peer replied with empty codec_preferences".into(),
+            )
+        })?;
     // Look up the full CodecInfo (clock rate, channels) from our
     // capabilities — the wire reply only carries the name. If the
     // peer's chosen name doesn't appear in our request set,

@@ -1,11 +1,12 @@
 //! Authentication service
 
 use crate::config::PasswordConfig;
-use crate::jwt::RefreshTokenClaims;
-use crate::{ApiKey, ApiKeyStore, CreateUserRequest, Error, JwtIssuer, Result, User, UserStore};
+use crate::{
+    ApiKey, ApiKeyStore, AuthSecurityStore, CreateUserRequest, EnterpriseIdentityStore, Error,
+    JwtIssuer, Result, SqliteUserStore, User, UserStore,
+};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use password_hash::{rand_core::OsRng, SaltString};
-use sqlx_core::{query::query, row::Row};
 use sqlx_sqlite::SqlitePool;
 use std::sync::Arc;
 
@@ -18,7 +19,8 @@ pub struct AuthenticationService {
     #[allow(dead_code)] // reserved / not yet read
     password_config: PasswordConfig,
     argon2: Argon2<'static>,
-    pub(crate) pool: Option<SqlitePool>, // For refresh token management
+    auth_security_store: Option<Arc<dyn AuthSecurityStore>>,
+    enterprise_identity_store: Option<Arc<dyn EnterpriseIdentityStore>>,
 }
 
 /// Result of authentication
@@ -36,6 +38,36 @@ pub struct TokenPair {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_in: std::time::Duration,
+}
+
+/// Context describing why users-core issued tokens for a user.
+#[derive(Debug, Clone)]
+pub struct TokenIssueContext {
+    pub source: String,
+    pub provider_id: Option<String>,
+    pub external_subject: Option<String>,
+}
+
+impl TokenIssueContext {
+    pub fn new(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            provider_id: None,
+            external_subject: None,
+        }
+    }
+
+    pub fn external_identity(
+        source: impl Into<String>,
+        provider_id: impl Into<String>,
+        external_subject: impl Into<String>,
+    ) -> Self {
+        Self {
+            source: source.into(),
+            provider_id: Some(provider_id.into()),
+            external_subject: Some(external_subject.into()),
+        }
+    }
 }
 
 impl AuthenticationService {
@@ -63,7 +95,8 @@ impl AuthenticationService {
             api_key_store,
             password_config,
             argon2,
-            pool: None,
+            auth_security_store: None,
+            enterprise_identity_store: None,
         })
     }
 
@@ -84,7 +117,33 @@ impl AuthenticationService {
 
     /// Set the database pool for refresh token management
     pub fn set_pool(&mut self, pool: SqlitePool) {
-        self.pool = Some(pool);
+        self.auth_security_store = Some(Arc::new(SqliteUserStore::from_pool(pool)));
+    }
+
+    /// Set the auth-service security store.
+    ///
+    /// This provider backs refresh-token revocation, access-token revocation,
+    /// password hash updates, last-login updates, and SIP Digest HA1 storage.
+    pub fn set_auth_security_store(&mut self, store: Arc<dyn AuthSecurityStore>) {
+        self.auth_security_store = Some(store);
+    }
+
+    /// Get the configured auth-service security store, if any.
+    pub fn auth_security_store(&self) -> Option<&Arc<dyn AuthSecurityStore>> {
+        self.auth_security_store.as_ref()
+    }
+
+    /// Set enterprise identity extension storage.
+    ///
+    /// This provider backs external identity links and passkey credentials for
+    /// optional SCIM, SAML, OIDC-linking, and WebAuthn extension crates.
+    pub fn set_enterprise_identity_store(&mut self, store: Arc<dyn EnterpriseIdentityStore>) {
+        self.enterprise_identity_store = Some(store);
+    }
+
+    /// Get the configured enterprise identity store, if any.
+    pub fn enterprise_identity_store(&self) -> Option<&Arc<dyn EnterpriseIdentityStore>> {
+        self.enterprise_identity_store.as_ref()
     }
 
     /// Create a new user with password hashing and validation
@@ -141,18 +200,35 @@ impl AuthenticationService {
         password: &str,
     ) -> Result<AuthenticationResult> {
         let user = self.verify_password_user(username, password).await?;
+        self.issue_tokens_for_user(&user.id, TokenIssueContext::new("password"))
+            .await
+    }
 
-        // Generate tokens
-        let access_token = self.jwt_issuer.create_access_token(&user)?;
-        let refresh_token = self.jwt_issuer.create_refresh_token(&user.id)?;
+    /// Issue access and refresh tokens for an already-authenticated user.
+    ///
+    /// Extension crates use this after validating external login flows such as
+    /// SAML assertions or WebAuthn/passkey ceremonies. This method does not
+    /// authenticate the caller; it only centralizes users-core token issuance,
+    /// refresh-token storage, active-user checks, and last-login updates.
+    pub async fn issue_tokens_for_user(
+        &self,
+        user_id: &str,
+        _context: TokenIssueContext,
+    ) -> Result<AuthenticationResult> {
+        let user = self
+            .user_store
+            .get_user(user_id)
+            .await?
+            .ok_or_else(|| Error::UserNotFound(user_id.to_string()))?;
 
-        // Store refresh token JTI if pool is available
-        if let Some(pool) = &self.pool {
-            let claims = self.jwt_issuer.validate_refresh_token(&refresh_token)?;
-            self.store_refresh_token(pool, &claims).await?;
+        if !user.active {
+            return Err(Error::InvalidCredentials);
         }
 
-        // Update last login
+        let access_token = self.jwt_issuer.create_access_token(&user)?;
+        let refresh_token = self.jwt_issuer.create_refresh_token(&user.id)?;
+        self.store_refresh_token_if_configured(&refresh_token)
+            .await?;
         self.update_last_login(&user.id).await?;
 
         Ok(AuthenticationResult {
@@ -223,6 +299,20 @@ impl AuthenticationService {
         }
     }
 
+    async fn store_refresh_token_if_configured(&self, refresh_token: &str) -> Result<()> {
+        if let Some(store) = &self.auth_security_store {
+            let claims = self.jwt_issuer.validate_refresh_token(refresh_token)?;
+            let expires_at = chrono::DateTime::<chrono::Utc>::from_timestamp(claims.exp as i64, 0)
+                .ok_or_else(|| {
+                    Error::Validation("refresh token exp is outside supported range".to_string())
+                })?;
+            store
+                .store_refresh_token(&claims.jti, &claims.sub, expires_at)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Authenticate with API key
     pub async fn authenticate_api_key(&self, api_key: &str) -> Result<AuthenticationResult> {
         let (user, _) = self.verify_api_key_only(api_key).await?;
@@ -265,9 +355,9 @@ impl AuthenticationService {
         // Validate refresh token
         let claims = self.jwt_issuer.validate_refresh_token(refresh_token)?;
 
-        // Check if revoked (if pool is available)
-        if let Some(pool) = &self.pool {
-            self.check_refresh_token_revoked(pool, &claims.jti).await?;
+        // Check if revoked (if security storage is available)
+        if let Some(store) = &self.auth_security_store {
+            store.check_refresh_token_revoked(&claims.jti).await?;
         }
 
         // Get user
@@ -294,14 +384,8 @@ impl AuthenticationService {
 
     /// Revoke tokens for a user
     pub async fn revoke_tokens(&self, user_id: &str) -> Result<()> {
-        if let Some(pool) = &self.pool {
-            query(
-                "UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
-            )
-            .bind(&chrono::Utc::now())
-            .bind(user_id)
-            .execute(pool)
-            .await?;
+        if let Some(store) = &self.auth_security_store {
+            store.revoke_refresh_tokens_for_user(user_id).await?;
         }
         Ok(())
     }
@@ -328,49 +412,20 @@ impl AuthenticationService {
         user_id: Option<&str>,
         expires_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<()> {
-        if let Some(pool) = &self.pool {
-            query(
-                "INSERT INTO revoked_access_tokens (jti, user_id, expires_at, revoked_at)
-                 VALUES (?, ?, ?, ?)
-                 ON CONFLICT(jti) DO UPDATE SET
-                    user_id = excluded.user_id,
-                    expires_at = excluded.expires_at,
-                    revoked_at = excluded.revoked_at",
-            )
-            .bind(jti)
-            .bind(user_id)
-            .bind(expires_at)
-            .bind(chrono::Utc::now())
-            .execute(pool)
-            .await?;
+        if let Some(store) = &self.auth_security_store {
+            store
+                .revoke_access_token_jti(jti, user_id, expires_at)
+                .await?;
         }
         Ok(())
     }
 
     /// Check whether an access-token JWT ID is currently revoked.
     pub async fn is_access_token_revoked(&self, jti: &str) -> Result<bool> {
-        let Some(pool) = &self.pool else {
+        let Some(store) = &self.auth_security_store else {
             return Ok(false);
         };
-        let row = query("SELECT expires_at FROM revoked_access_tokens WHERE jti = ?")
-            .bind(jti)
-            .fetch_optional(pool)
-            .await?;
-
-        let Some(row) = row else {
-            return Ok(false);
-        };
-
-        let expires_at: chrono::DateTime<chrono::Utc> = row.get("expires_at");
-        if expires_at > chrono::Utc::now() {
-            return Ok(true);
-        }
-
-        query("DELETE FROM revoked_access_tokens WHERE jti = ?")
-            .bind(jti)
-            .execute(pool)
-            .await?;
-        Ok(false)
+        store.is_access_token_revoked(jti).await
     }
 
     /// Change user password
@@ -412,13 +467,8 @@ impl AuthenticationService {
             .to_string();
 
         // Update password in database
-        if let Some(pool) = &self.pool {
-            query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
-                .bind(&new_hash)
-                .bind(&chrono::Utc::now())
-                .bind(user_id)
-                .execute(pool)
-                .await?;
+        if let Some(store) = &self.auth_security_store {
+            store.update_password_hash(user_id, &new_hash).await?;
         }
 
         // Revoke all existing tokens
@@ -428,51 +478,9 @@ impl AuthenticationService {
     }
 
     async fn update_last_login(&self, user_id: &str) -> Result<()> {
-        if let Some(pool) = &self.pool {
-            query("UPDATE users SET last_login = ? WHERE id = ?")
-                .bind(&chrono::Utc::now())
-                .bind(user_id)
-                .execute(pool)
-                .await?;
+        if let Some(store) = &self.auth_security_store {
+            store.update_last_login(user_id).await?;
         }
-        Ok(())
-    }
-
-    async fn store_refresh_token(
-        &self,
-        pool: &SqlitePool,
-        claims: &RefreshTokenClaims,
-    ) -> Result<()> {
-        query(
-            "INSERT INTO refresh_tokens (jti, user_id, expires_at, created_at)
-             VALUES (?, ?, ?, ?)",
-        )
-        .bind(&claims.jti)
-        .bind(&claims.sub)
-        .bind(&chrono::DateTime::<chrono::Utc>::from_timestamp(
-            claims.exp as i64,
-            0,
-        ))
-        .bind(&chrono::Utc::now())
-        .execute(pool)
-        .await?;
-
-        Ok(())
-    }
-
-    async fn check_refresh_token_revoked(&self, pool: &SqlitePool, jti: &str) -> Result<()> {
-        let row = query("SELECT revoked_at FROM refresh_tokens WHERE jti = ?")
-            .bind(jti)
-            .fetch_optional(pool)
-            .await?;
-
-        if let Some(row) = row {
-            let revoked_at: Option<chrono::DateTime<chrono::Utc>> = row.get("revoked_at");
-            if revoked_at.is_some() {
-                return Err(Error::InvalidCredentials);
-            }
-        }
-
         Ok(())
     }
 }

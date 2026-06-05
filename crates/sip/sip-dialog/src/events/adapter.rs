@@ -5,15 +5,15 @@
 //! while maintaining backward compatibility with existing dialog event handling.
 
 use anyhow::Result;
+use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
+use rvoip_infra_common::events::cross_crate::{
+    CallState as CrossCrateCallState, CrossCrateEvent, DialogToSessionEvent, RvoipCrossCrateEvent,
+    SessionToDialogEvent,
+};
+use rvoip_infra_common::planes::LayerTaskManager;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
-use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
-use rvoip_infra_common::events::cross_crate::{
-    CallState as CrossCrateCallState, CrossCrateEvent, DialogToSessionEvent,
-    RvoipCrossCrateEvent, SessionToDialogEvent,
-};
-use rvoip_infra_common::planes::LayerTaskManager;
 
 use crate::dialog::{DialogId, DialogState};
 use crate::events::{DialogEvent, SessionCoordinationEvent};
@@ -353,6 +353,7 @@ impl DialogEventAdapter {
                         transaction_id: transaction_id.to_string(),
                         source_addr: "unknown".to_string(), // TODO: Extract from source
                         raw_request: Some(raw_bytes),
+                        transport: None,
                         // STIR/SHAKEN Phase 1: filled in by the async
                         // `publish_session_coordination_event` wrapper
                         // after running the installed verifier (if any).

@@ -15,7 +15,7 @@ pub use rtp::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use bytes::Bytes;
 
     #[test]

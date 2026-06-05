@@ -441,7 +441,7 @@ impl TypedHeaderTrait for RecordRoute {
 mod tests {
     use super::*;
     use crate::types::address::Address;
-    
+
     use crate::types::uri::Uri;
     use std::str::FromStr;
 

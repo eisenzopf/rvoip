@@ -18,7 +18,6 @@ pub use transport::DefaultMediaTransportServer;
 // Import errors
 use crate::api::common::error::MediaTransportError;
 
-
 /// Factory for creating media transport servers
 pub struct ServerFactory;
 

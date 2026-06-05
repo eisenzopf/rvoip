@@ -18,7 +18,7 @@ use super::whitespace::lws;
 use super::ParseResult;
 
 // Import necessary types
- // For unquote error
+// For unquote error
 use crate::types::address::Address; // Changed to use Address struct
 use crate::types::uri::Uri;
 
@@ -95,14 +95,12 @@ pub fn name_addr_or_addr_spec(input: &[u8]) -> ParseResult<'_, Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use crate::types::param::Param;
     use crate::types::uri::Host;
     use crate::types::uri::Scheme;
     use nom::bytes::complete::{tag, take_until};
     use nom::error::Error as NomError;
-    
-    
 
     #[test]
     fn test_display_name_simple() {

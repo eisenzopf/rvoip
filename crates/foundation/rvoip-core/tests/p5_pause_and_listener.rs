@@ -157,7 +157,12 @@ impl ConnectionAdapter for OneStreamAdapter {
     }
 }
 
-async fn setup() -> (Arc<Orchestrator>, mpsc::Sender<AdapterEvent>, Arc<TestStream>, ConnectionId) {
+async fn setup() -> (
+    Arc<Orchestrator>,
+    mpsc::Sender<AdapterEvent>,
+    Arc<TestStream>,
+    ConnectionId,
+) {
     let orch = Orchestrator::new(Config::default());
     let (adapter, tx, stream) = OneStreamAdapter::new();
     orch.register(adapter).unwrap();
@@ -228,17 +233,29 @@ async fn pause_drops_frames_resume_writes_again() {
         .await
         .unwrap();
 
-    stream.inbound_tx.send(frame(stream.id.clone(), 1)).await.unwrap();
+    stream
+        .inbound_tx
+        .send(frame(stream.id.clone(), 1))
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(40)).await;
     assert_eq!(sink.bytes().len(), 4);
 
     orch.pause_recording(rid.clone()).await.unwrap();
-    stream.inbound_tx.send(frame(stream.id.clone(), 2)).await.unwrap();
+    stream
+        .inbound_tx
+        .send(frame(stream.id.clone(), 2))
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(40)).await;
     assert_eq!(sink.bytes().len(), 4, "paused recording must drop frames");
 
     orch.resume_recording(rid.clone()).await.unwrap();
-    stream.inbound_tx.send(frame(stream.id.clone(), 3)).await.unwrap();
+    stream
+        .inbound_tx
+        .send(frame(stream.id.clone(), 3))
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(40)).await;
     assert_eq!(sink.bytes().len(), 8, "resumed recording writes again");
 
@@ -255,12 +272,12 @@ async fn detach_listener_aborts_task_and_drops_receiver() {
     use rvoip_core::commands::AttachmentRef;
     let (orch, _tx, _stream, connid) = setup().await;
     let lid = orch
-        .attach_listener(
-            ListenerTarget::Connection(connid),
-            ListenerSink::Channel,
-        )
+        .attach_listener(ListenerTarget::Connection(connid), ListenerSink::Channel)
         .unwrap();
-    assert!(orch.listener_channel(&lid).is_some(), "channel taken first time");
+    assert!(
+        orch.listener_channel(&lid).is_some(),
+        "channel taken first time"
+    );
     orch.detach(AttachmentRef::Listener(lid.clone()))
         .await
         .unwrap();
@@ -276,15 +293,16 @@ async fn detach_listener_aborts_task_and_drops_receiver() {
 async fn attach_listener_channel_forwards_frames() {
     let (orch, _tx, stream, connid) = setup().await;
     let lid = orch
-        .attach_listener(
-            ListenerTarget::Connection(connid),
-            ListenerSink::Channel,
-        )
+        .attach_listener(ListenerTarget::Connection(connid), ListenerSink::Channel)
         .unwrap();
     let mut rx = orch.listener_channel(&lid).expect("channel taken");
 
     for i in 0..3 {
-        stream.inbound_tx.send(frame(stream.id.clone(), i)).await.unwrap();
+        stream
+            .inbound_tx
+            .send(frame(stream.id.clone(), i))
+            .await
+            .unwrap();
     }
     let mut got = 0;
     for _ in 0..3 {

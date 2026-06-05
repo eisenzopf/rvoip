@@ -52,7 +52,11 @@ impl IceServerConfig {
         }
     }
 
-    pub fn turn(url: impl Into<String>, username: impl Into<String>, credential: impl Into<String>) -> Self {
+    pub fn turn(
+        url: impl Into<String>,
+        username: impl Into<String>,
+        credential: impl Into<String>,
+    ) -> Self {
         Self {
             urls: vec![url.into()],
             username: Some(username.into()),
@@ -221,7 +225,10 @@ impl OpusSettings {
             bits.push("usedtx=1".into());
         }
         if self.max_average_bitrate_bps > 0 {
-            bits.push(format!("maxaveragebitrate={}", self.max_average_bitrate_bps));
+            bits.push(format!(
+                "maxaveragebitrate={}",
+                self.max_average_bitrate_bps
+            ));
         }
         if self.stereo {
             bits.push("stereo=1".into());

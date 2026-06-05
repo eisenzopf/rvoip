@@ -362,6 +362,38 @@ pub struct SipTraceEvent {
     pub redacted: bool,
 }
 
+/// Transport metadata for SIP requests that are promoted from the transport
+/// boundary to higher-level dialog/session events.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SipTransportContext {
+    /// Transport flavor, for example `UDP`, `TCP`, `TLS`, `WS`, or `WSS`.
+    pub transport: String,
+    /// Local socket address that received or sent the SIP message.
+    pub local_addr: String,
+    /// Remote socket address for the SIP peer.
+    pub remote_addr: String,
+    /// Whether this hop used a credential-protecting transport such as TLS or
+    /// WSS.
+    pub secure: bool,
+}
+
+impl SipTransportContext {
+    /// Construct a SIP transport context from wire-boundary metadata.
+    pub fn new(
+        transport: impl Into<String>,
+        local_addr: impl Into<String>,
+        remote_addr: impl Into<String>,
+        secure: bool,
+    ) -> Self {
+        Self {
+            transport: transport.into(),
+            local_addr: local_addr.into(),
+            remote_addr: remote_addr.into(),
+            secure,
+        }
+    }
+}
+
 /// Maximum rendered SIP message bytes kept in one trace event.
 pub const SIP_TRACE_MAX_MESSAGE_BYTES: usize = 64 * 1024;
 
@@ -617,6 +649,9 @@ pub enum DialogToSessionEvent {
         /// yet.
         #[serde(skip)]
         raw_request: Option<Bytes>,
+        /// Actual transport metadata from the inbound SIP hop, when available.
+        #[serde(default)]
+        transport: Option<SipTransportContext>,
         /// STIR/SHAKEN Phase 1: outcome of `PASSporTVerifier::verify`
         /// on the inbound INVITE. `None` when no verifier is
         /// installed (the default), so existing callers see no
@@ -731,6 +766,11 @@ pub enum DialogToSessionEvent {
         /// `rvoip-sip-dialog/src/events/event_hub.rs` for the canonical
         /// 401/407 response path.
         method: String,
+        /// Post-send transport telemetry for the challenged outbound request,
+        /// when available. This is used by auth policy code to decide whether
+        /// credential-bearing schemes such as Basic or Bearer may be sent on
+        /// the retry. Older producers leave this as `None`.
+        outbound_transport: Option<SipTransportContext>,
     },
 
     /// 3xx redirect response received (RFC 3261 §8.1.3.4 / §21.3). The UAC
@@ -799,6 +839,9 @@ pub enum DialogToSessionEvent {
         /// for B2BUA carry-through to the downstream leg.
         #[serde(skip)]
         raw_request: Option<Bytes>,
+        /// Actual transport metadata from the inbound SIP hop, when available.
+        #[serde(default)]
+        transport: Option<SipTransportContext>,
     },
 
     /// Transfer requested
@@ -817,6 +860,9 @@ pub enum DialogToSessionEvent {
         /// headers via the `IncomingRequest` view.
         #[serde(skip)]
         raw_request: Option<Bytes>,
+        /// Actual transport metadata from the inbound SIP hop, when available.
+        #[serde(default)]
+        transport: Option<SipTransportContext>,
     },
 
     /// ACK received (for UAS state transitions)
@@ -866,6 +912,9 @@ pub enum DialogToSessionEvent {
         /// for `IncomingRequest`-style typed inspection.
         #[serde(skip)]
         raw_request: Option<Bytes>,
+        /// Actual transport metadata from the inbound SIP hop, when available.
+        #[serde(default)]
+        transport: Option<SipTransportContext>,
     },
 
     /// SIP_API_DESIGN_2 Phase E — in-dialog INFO (RFC 6086) received.
@@ -879,6 +928,9 @@ pub enum DialogToSessionEvent {
         /// `Arc<Request>` via `parse_message`.
         #[serde(skip)]
         raw_request: Option<Bytes>,
+        /// Actual transport metadata from the inbound SIP hop, when available.
+        #[serde(default)]
+        transport: Option<SipTransportContext>,
     },
 
     /// SIP_API_DESIGN_2 Phase E — in-dialog MESSAGE (RFC 3428)
@@ -887,6 +939,9 @@ pub enum DialogToSessionEvent {
         session_id: String,
         #[serde(skip)]
         raw_request: Option<Bytes>,
+        /// Actual transport metadata from the inbound SIP hop, when available.
+        #[serde(default)]
+        transport: Option<SipTransportContext>,
     },
 
     /// SIP_API_DESIGN_2 Phase E — OPTIONS received. May arrive
@@ -897,6 +952,9 @@ pub enum DialogToSessionEvent {
         session_id: String,
         #[serde(skip)]
         raw_request: Option<Bytes>,
+        /// Actual transport metadata from the inbound SIP hop, when available.
+        #[serde(default)]
+        transport: Option<SipTransportContext>,
     },
 
     /// MESSAGE delivered
@@ -923,6 +981,9 @@ pub enum DialogToSessionEvent {
         /// publish sites until migration.
         #[serde(skip)]
         raw_request: Option<Bytes>,
+        /// Actual transport metadata from the inbound SIP hop, when available.
+        #[serde(default)]
+        transport: Option<SipTransportContext>,
     },
 
     /// RFC 5626 outbound flow has failed — the keep-alive ping either
@@ -1330,6 +1391,7 @@ impl RvoipCrossCrateEvent {
             transaction_id: String::new(), // Must be set by caller
             source_addr: String::new(),    // Must be set by caller
             raw_request: None,
+            transport: None,
             identity_verification: None,
         })
     }

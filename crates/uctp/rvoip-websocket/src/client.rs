@@ -31,10 +31,7 @@ impl UctpWsClient {
     /// to build a config that trusts a single self-signed cert (test /
     /// dev only).
     #[cfg(feature = "wss")]
-    pub async fn connect_with_tls(
-        url: &Url,
-        tls: Arc<rustls::ClientConfig>,
-    ) -> Result<Arc<Self>> {
+    pub async fn connect_with_tls(url: &Url, tls: Arc<rustls::ClientConfig>) -> Result<Arc<Self>> {
         let connector = tokio_tungstenite::Connector::Rustls(tls);
         let (ws, _resp) = tokio_tungstenite::connect_async_tls_with_config(
             url.as_str(),
@@ -48,13 +45,8 @@ impl UctpWsClient {
     }
 
     fn spawn_pumps<S>(
-        mut sink: futures::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<S>,
-            Message,
-        >,
-        mut stream: futures::stream::SplitStream<
-            tokio_tungstenite::WebSocketStream<S>,
-        >,
+        mut sink: futures::stream::SplitSink<tokio_tungstenite::WebSocketStream<S>, Message>,
+        mut stream: futures::stream::SplitStream<tokio_tungstenite::WebSocketStream<S>>,
     ) -> Arc<Self>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -84,18 +76,16 @@ impl UctpWsClient {
         tokio::spawn(async move {
             while let Some(msg) = stream.next().await {
                 match msg {
-                    Ok(Message::Text(text)) => {
-                        match serde_json::from_str::<UctpEnvelope>(&text) {
-                            Ok(env) => {
-                                if in_tx.send(env).await.is_err() {
-                                    return;
-                                }
-                            }
-                            Err(e) => {
-                                warn!(error = %e, "rvoip-websocket-client: malformed envelope");
+                    Ok(Message::Text(text)) => match serde_json::from_str::<UctpEnvelope>(&text) {
+                        Ok(env) => {
+                            if in_tx.send(env).await.is_err() {
+                                return;
                             }
                         }
-                    }
+                        Err(e) => {
+                            warn!(error = %e, "rvoip-websocket-client: malformed envelope");
+                        }
+                    },
                     Ok(Message::Close(_)) => return,
                     Ok(_) => {}
                     Err(e) => {

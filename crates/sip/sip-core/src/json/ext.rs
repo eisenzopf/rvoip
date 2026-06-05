@@ -769,9 +769,9 @@ where
 mod tests {
     use super::*;
     use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
-    
+
     use crate::types::sip_request::Request;
-    
+
     use crate::types::status::StatusCode;
     use std::collections::HashMap;
 

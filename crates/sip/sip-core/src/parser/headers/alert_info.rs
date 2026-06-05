@@ -23,10 +23,10 @@ use std::str::FromStr;
 use crate::parser::common::comma_separated_list1;
 use crate::parser::common_params::generic_param;
 use crate::parser::separators::{hcolon, laquot, raquot, semi};
- // Using the correct function name
- // Import the actual URI parser
+// Using the correct function name
+// Import the actual URI parser
 use crate::parser::ParseResult;
- // Import all_consuming
+// Import all_consuming
 
 use crate::error::Error as CrateError;
 use crate::types::uri::Uri; // Import crate error
@@ -185,7 +185,6 @@ pub fn parse_alert_info_header(input: &[u8]) -> ParseResult<'_, Vec<AlertInfoVal
 mod tests {
     use super::*;
     use crate::types::param::{GenericValue, Param};
-    
 
     // Helper function to create an HTTP URI for testing
 

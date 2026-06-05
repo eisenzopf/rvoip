@@ -19,17 +19,10 @@ use crate::parser::ParseResult;
 
 use std::str;
 
-
-
-
-
-
-
 // Define structure for a list of tokens
- // Use String to hold tokens
+// Use String to hold tokens
 
 // Parses a comma-separated list of tokens
-
 
 // Helper to parse a token into a String
 // Based on RFC 3261 Section 25.1 token definition
@@ -40,11 +33,6 @@ pub fn token_string(input: &[u8]) -> ParseResult<'_, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-
-
-
-
 
     #[test]
     fn test_token_characters() {
@@ -61,7 +49,4 @@ mod tests {
         // assert!(token_string(b"token with spaces").is_err());
         // assert!(token_string(b"token;with;semicolons").is_err());
     }
-
-
-
 }

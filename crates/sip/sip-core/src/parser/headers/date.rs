@@ -21,9 +21,7 @@ use crate::parser::ParseResult;
 
 // Assuming chrono is available as a dependency
 // If not, we'd need manual parsing logic.
-use chrono::{
-    DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime,
-};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
 
 // wkday = "Mon" / "Tue" / "Wed" / "Thu" / "Fri" / "Sat" / "Sun"
 fn wkday(input: &[u8]) -> ParseResult<'_, &[u8]> {
@@ -246,8 +244,10 @@ pub fn sip_date(input: &[u8]) -> ParseResult<'_, DateTime<FixedOffset>> {
     };
 
     let naive_datetime = NaiveDateTime::new(naive_date, naive_time);
-    let datetime =
-        DateTime::<FixedOffset>::from_naive_utc_and_offset(naive_datetime, FixedOffset::east_opt(0).unwrap());
+    let datetime = DateTime::<FixedOffset>::from_naive_utc_and_offset(
+        naive_datetime,
+        FixedOffset::east_opt(0).unwrap(),
+    );
 
     Ok((remaining, datetime))
 }
@@ -261,7 +261,6 @@ pub fn parse_date(input: &[u8]) -> ParseResult<'_, DateTime<FixedOffset>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_sip_date() {

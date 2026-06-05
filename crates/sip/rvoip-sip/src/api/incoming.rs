@@ -85,6 +85,8 @@ pub struct IncomingCall {
     /// The parsed inbound INVITE request, when available. `None` only
     /// when the call was synthesized (tests, lean-mode feature flag).
     pub(crate) request: Option<Arc<Request>>,
+    /// Transport context for auth policy decisions.
+    pub(crate) transport: crate::auth::SipTransportSecurityContext,
     /// Internal — coordinator for performing accept/reject.
     pub(crate) coordinator: Arc<UnifiedCoordinator>,
     /// Whether this call has already been resolved (to catch double-resolve).
@@ -107,6 +109,7 @@ impl IncomingCall {
             headers: HashMap::new(),
             received_at: Instant::now(),
             request: None,
+            transport: crate::auth::SipTransportSecurityContext::unknown(),
             coordinator,
             resolved: false,
         }
@@ -141,9 +144,23 @@ impl IncomingCall {
             headers,
             received_at: Instant::now(),
             request: Some(request),
+            transport: crate::auth::SipTransportSecurityContext::unknown(),
             coordinator,
             resolved: false,
         }
+    }
+
+    pub(crate) fn with_transport_context(
+        mut self,
+        transport: crate::auth::SipTransportSecurityContext,
+    ) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    /// Transport context used by auth policy decisions.
+    pub fn transport_security_context(&self) -> &crate::auth::SipTransportSecurityContext {
+        &self.transport
     }
 
     /// Underlying parsed [`Request`]. `None` when the call was
@@ -177,13 +194,14 @@ impl IncomingCall {
         } else {
             Some(request.body())
         };
-        auth.authenticate_incoming(
+        let transport = effective_transport_security_context(Some(request), &self.transport);
+        auth.authenticate_incoming_with_transport_context(
             authorization.as_deref(),
             "INVITE",
             &request_uri,
             body,
             source,
-            request_is_tls(request),
+            &transport,
         )
         .await
     }
@@ -1008,6 +1026,8 @@ pub struct IncomingRequest {
     pub received_at: Instant,
     /// The parsed inbound request, when available.
     pub(crate) request: Option<Arc<Request>>,
+    /// Transport context for auth policy decisions.
+    pub(crate) transport: crate::auth::SipTransportSecurityContext,
     /// Coordinator for sending responses. `None` for bus-constructed
     /// instances; the surface consumer (CallbackPeer / StreamPeer)
     /// repopulates this on dispatch so response builders can resolve
@@ -1023,6 +1043,7 @@ impl std::fmt::Debug for IncomingRequest {
             .field("to", &self.to)
             .field("method", &self.method)
             .field("has_request", &self.request.is_some())
+            .field("transport", &self.transport)
             .field("has_coordinator", &self.coordinator.is_some())
             .finish()
     }
@@ -1124,13 +1145,14 @@ impl IncomingRequest {
         } else {
             Some(request.body())
         };
-        auth.authenticate_incoming(
+        let transport = effective_transport_security_context(Some(request), &self.transport);
+        auth.authenticate_incoming_with_transport_context(
             authorization.as_deref(),
             self.method.as_str(),
             &request_uri,
             body,
             source,
-            request_is_tls(request),
+            &transport,
         )
         .await
     }
@@ -1161,8 +1183,22 @@ impl IncomingRequest {
             method,
             received_at: Instant::now(),
             request: Some(request),
+            transport: crate::auth::SipTransportSecurityContext::unknown(),
             coordinator: None,
         }
+    }
+
+    pub(crate) fn with_transport_context(
+        mut self,
+        transport: crate::auth::SipTransportSecurityContext,
+    ) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    /// Transport context used by auth policy decisions.
+    pub fn transport_security_context(&self) -> &crate::auth::SipTransportSecurityContext {
+        &self.transport
     }
 
     /// Underlying parsed [`Request`]. `None` when synthesized.
@@ -1398,6 +1434,8 @@ pub struct IncomingRegister {
     pub received_at: Instant,
     /// The parsed inbound REGISTER request, when available.
     pub(crate) request: Option<Arc<Request>>,
+    /// Transport context for auth policy decisions.
+    pub(crate) transport: crate::auth::SipTransportSecurityContext,
     /// SIP_API_DESIGN_2 Phase D — optional hook back into the
     /// coordinator so `RegisterResponseBuilder.send()` can publish a
     /// `SessionToDialogEvent::SendRegisterResponse` to rvoip-sip-dialog.
@@ -1416,6 +1454,7 @@ impl std::fmt::Debug for IncomingRegister {
             .field("expires", &self.expires)
             .field("authorization_present", &self.authorization.is_some())
             .field("call_id_header", &self.call_id_header)
+            .field("transport", &self.transport)
             .field("coordinator_present", &self.coordinator.is_some())
             .finish()
     }
@@ -1482,17 +1521,15 @@ impl IncomingRegister {
                     crate::auth::SipAuthSource::Origin,
                 )
             });
-        let is_tls = self
-            .request
-            .as_ref()
-            .is_some_and(|request| request_is_tls(request));
-        auth.authenticate_incoming(
+        let transport =
+            effective_transport_security_context(self.request.as_deref(), &self.transport);
+        auth.authenticate_incoming_with_transport_context(
             authorization.as_deref(),
             "REGISTER",
             &request_uri,
             body,
             source,
-            is_tls,
+            &transport,
         )
         .await
     }
@@ -1529,6 +1566,7 @@ impl IncomingRegister {
             call_id_header,
             received_at: Instant::now(),
             request: None,
+            transport: crate::auth::SipTransportSecurityContext::unknown(),
             coordinator: None,
         }
     }
@@ -1555,6 +1593,7 @@ impl IncomingRegister {
             call_id_header,
             received_at: Instant::now(),
             request: Some(request),
+            transport: crate::auth::SipTransportSecurityContext::unknown(),
             coordinator: None,
         }
     }
@@ -1585,8 +1624,22 @@ impl IncomingRegister {
             call_id_header,
             received_at: Instant::now(),
             request: Some(request),
+            transport: crate::auth::SipTransportSecurityContext::unknown(),
             coordinator: Some(coordinator),
         }
+    }
+
+    pub(crate) fn with_transport_context(
+        mut self,
+        transport: crate::auth::SipTransportSecurityContext,
+    ) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    /// Transport context used by auth policy decisions.
+    pub fn transport_security_context(&self) -> &crate::auth::SipTransportSecurityContext {
+        &self.transport
     }
 
     /// Underlying parsed [`Request`].
@@ -1662,24 +1715,85 @@ fn selected_authorization(request: &Request) -> (Option<String>, crate::auth::Si
     (None, crate::auth::SipAuthSource::Origin)
 }
 
-fn request_is_tls(request: &Request) -> bool {
-    request
-        .uri()
-        .to_string()
-        .to_ascii_lowercase()
-        .starts_with("sips:")
+fn request_transport_security_context(
+    request: &Request,
+) -> crate::auth::SipTransportSecurityContext {
+    crate::auth::SipTransportSecurityContext::from_request_uri_hint(&request.uri().to_string())
+}
+
+fn effective_transport_security_context(
+    request: Option<&Request>,
+    transport: &crate::auth::SipTransportSecurityContext,
+) -> crate::auth::SipTransportSecurityContext {
+    if transport.secure
+        || transport.transport.is_some()
+        || transport.local_addr.is_some()
+        || transport.remote_addr.is_some()
+    {
+        transport.clone()
+    } else {
+        request
+            .map(request_transport_security_context)
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::unified::Config;
+    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 
     async fn publish_synthetic(coordinator: &UnifiedCoordinator, event: Event) {
         coordinator
             .publish_app_event_for_test(event)
             .await
             .expect("publish synthetic event");
+    }
+
+    #[tokio::test]
+    async fn incoming_request_auth_uses_transport_context_over_uri_hint() {
+        let token = BASE64_STANDARD.encode("alice:secret");
+        let raw = format!(
+            "OPTIONS sip:bob@example.test SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-test\r\n\
+             From: <sip:alice@example.test>;tag=from-tag\r\n\
+             To: <sip:bob@example.test>\r\n\
+             Call-ID: incoming-auth-context\r\n\
+             CSeq: 1 OPTIONS\r\n\
+             Authorization: Basic {token}\r\n\
+             Content-Length: 0\r\n\r\n"
+        );
+        let request = match rvoip_sip_core::parse_message(raw.as_bytes()).expect("parse request") {
+            rvoip_sip_core::Message::Request(request) => request,
+            other => panic!("expected request, got {other:?}"),
+        };
+        let incoming = IncomingRequest::from_bus_request(
+            crate::state_table::types::SessionId("incoming-auth".to_string()),
+            "sip:alice@example.test".to_string(),
+            "sip:bob@example.test".to_string(),
+            rvoip_sip_core::types::Method::Options,
+            Arc::new(request),
+        )
+        .with_transport_context(
+            crate::auth::SipTransportSecurityContext::from_transport_name("WSS"),
+        );
+
+        let mut service = crate::auth::SipAuthService::new().with_basic_realm("legacy");
+        service.add_basic_user("alice", "secret");
+
+        let decision = incoming
+            .authenticate_with(&service)
+            .await
+            .expect("incoming auth");
+
+        assert!(matches!(
+            decision,
+            crate::auth::SipAuthDecision::Authorized(crate::auth::AuthIdentity {
+                scheme: crate::auth::SipAuthScheme::Basic,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]

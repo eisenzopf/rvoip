@@ -79,7 +79,34 @@ impl TokenRevocationChecker for UsersCoreTokenRevocationChecker {
 #[async_trait]
 impl BearerValidator for UsersCoreAuthProvider {
     async fn validate(&self, token: &str) -> Result<IdentityAssurance, BearerAuthError> {
-        self.jwt_validator.validate(token).await
+        let assurance = self.jwt_validator.validate(token).await?;
+        self.ensure_assurance_user_active(&assurance).await?;
+        Ok(assurance)
+    }
+}
+
+impl UsersCoreAuthProvider {
+    async fn ensure_assurance_user_active(
+        &self,
+        assurance: &IdentityAssurance,
+    ) -> Result<(), BearerAuthError> {
+        let user_id = match assurance {
+            IdentityAssurance::UserAuthorized { user_id, .. } => user_id.as_str(),
+            IdentityAssurance::TaskScoped { identity, .. } => identity.as_str(),
+            _ => {
+                return Err(BearerAuthError::Invalid(
+                    "users-core bearer token did not identify a user".to_string(),
+                ))
+            }
+        };
+
+        match self.auth_service.user_store().get_user(user_id).await {
+            Ok(Some(user)) if user.active => Ok(()),
+            Ok(Some(_)) | Ok(None) => Err(BearerAuthError::Invalid(
+                "users-core bearer token user is inactive or missing".to_string(),
+            )),
+            Err(err) => Err(BearerAuthError::Unavailable(err.to_string())),
+        }
     }
 }
 

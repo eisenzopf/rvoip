@@ -138,7 +138,7 @@ mod tests {
             connid: None,
             in_reply_to: in_reply_to.map(String::from),
             payload: serde_json::Value::Null,
-        signature: None,
+            signature: None,
         }
     }
 
@@ -148,9 +148,8 @@ mod tests {
         let req_id = EnvelopeId::new();
         let id_for_task = req_id.clone();
         let p_in = p.clone();
-        let task = tokio::spawn(async move {
-            p_in.wait_for(id_for_task, Duration::from_secs(5)).await
-        });
+        let task =
+            tokio::spawn(async move { p_in.wait_for(id_for_task, Duration::from_secs(5)).await });
 
         // Tiny yield so the wait task registers before deliver.
         tokio::time::sleep(Duration::from_millis(10)).await;

@@ -49,6 +49,63 @@ pub struct UserFilter {
     pub offset: Option<u32>,
 }
 
+/// External identity link from an IdP or provisioning source to a users-core user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalIdentity {
+    pub provider_id: String,
+    pub external_subject: String,
+    pub user_id: String,
+    pub email: Option<String>,
+    pub username: Option<String>,
+    pub display_name: Option<String>,
+    pub groups: Vec<String>,
+    pub active: bool,
+    pub last_seen_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Request to create or update an external identity link.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpsertExternalIdentityRequest {
+    pub provider_id: String,
+    pub external_subject: String,
+    pub user_id: String,
+    pub email: Option<String>,
+    pub username: Option<String>,
+    pub display_name: Option<String>,
+    pub groups: Vec<String>,
+    pub active: bool,
+}
+
+/// Stored WebAuthn/passkey credential metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PasskeyCredential {
+    pub credential_id: String,
+    pub user_id: String,
+    pub public_key: String,
+    pub sign_count: u64,
+    pub transports: Vec<String>,
+    pub backup_eligible: bool,
+    pub backup_state: bool,
+    pub display_name: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// Request to create or replace a passkey credential.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpsertPasskeyCredentialRequest {
+    pub credential_id: String,
+    pub user_id: String,
+    pub public_key: String,
+    pub sign_count: u64,
+    pub transports: Vec<String>,
+    pub backup_eligible: bool,
+    pub backup_state: bool,
+    pub display_name: Option<String>,
+}
+
 impl User {
     /// Create a new user ID
     pub fn new_id() -> String {

@@ -39,7 +39,10 @@ impl BearerProvider {
         id: IdentityId,
         assurance: IdentityAssurance,
     ) {
-        self.table.lock().await.insert(bearer.into(), (id, assurance));
+        self.table
+            .lock()
+            .await
+            .insert(bearer.into(), (id, assurance));
     }
 }
 

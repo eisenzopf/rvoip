@@ -121,7 +121,6 @@ pub fn semicolon_params0(input: &[u8]) -> ParseResult<'_, Vec<Param>> {
     ))(input)
 }
 
-
 /// Parses zero or more semicolon-preceded parameters using a specific parameter parser function.
 /// Useful for headers where parameters might not all be generic-param.
 pub fn semicolon_separated_params0<'a, O, F>(
@@ -132,7 +131,6 @@ where
 {
     many0(preceded(semi, param_parser))
 }
-
 
 // Helper to convert a Vec<Param> (like from semicolon_params0) to a HashMap for easier lookup.
 // Note: This assumes parameter names are unique, last one wins if not.
@@ -458,5 +456,4 @@ mod tests {
         // since RFC doesn't clearly specify how to handle this edge case
         assert!(result.is_ok());
     }
-
 }

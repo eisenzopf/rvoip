@@ -13,20 +13,18 @@ use std::sync::Mutex as StdMutex;
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
+use rvoip_auth_core::BearerValidator;
 use rvoip_core::adapter::{
     AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest,
     RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
-use rvoip_core::connection::{
-    Connection, ConnectionState, Direction, Transport, TransportHandle,
-};
+use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::ConnectionId;
 use rvoip_core::message::Message;
 use rvoip_core::stream::MediaStream;
-use rvoip_auth_core::BearerValidator;
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads;
 use rvoip_uctp::types::MessageType;
@@ -66,11 +64,8 @@ pub(crate) struct Route {
     #[cfg(feature = "media-webrtc")]
     pub bridge: Arc<parking_lot::Mutex<Option<Arc<crate::media_bridge::WebRtcMediaBridge>>>>,
     #[cfg(feature = "media-webrtc")]
-    pub pending_offer: Arc<
-        parking_lot::Mutex<
-            Option<rvoip_uctp::payloads::connection::WebRtcSubstrateSetup>,
-        >,
-    >,
+    pub pending_offer:
+        Arc<parking_lot::Mutex<Option<rvoip_uctp::payloads::connection::WebRtcSubstrateSetup>>>,
 }
 
 pub struct UctpWsConfig {
@@ -111,10 +106,7 @@ impl UctpWsConfig {
 
     /// Override the per-peer Session/timeout caps (plan D1 / D2). See
     /// [`rvoip_uctp::state::UctpCoordinatorCaps`].
-    pub fn with_coordinator_caps(
-        mut self,
-        caps: rvoip_uctp::state::UctpCoordinatorCaps,
-    ) -> Self {
+    pub fn with_coordinator_caps(mut self, caps: rvoip_uctp::state::UctpCoordinatorCaps) -> Self {
         self.coordinator_caps = caps;
         self
     }
@@ -285,8 +277,11 @@ impl ConnectionAdapter for UctpWsAdapter {
             by: "part_local".into(),
             capabilities_answer: serde_json::Value::Object(Default::default()),
         };
-        let env = UctpEnvelope::new(MessageType::SessionAccept, serde_json::to_value(payload).unwrap())
-            .with_sid(route.sid);
+        let env = UctpEnvelope::new(
+            MessageType::SessionAccept,
+            serde_json::to_value(payload).unwrap(),
+        )
+        .with_sid(route.sid);
         route
             .out_tx
             .send(env)
@@ -304,8 +299,11 @@ impl ConnectionAdapter for UctpWsAdapter {
             reason_code: code,
             reason: reason_str.into(),
         };
-        let env = UctpEnvelope::new(MessageType::SessionReject, serde_json::to_value(payload).unwrap())
-            .with_sid(route.sid);
+        let env = UctpEnvelope::new(
+            MessageType::SessionReject,
+            serde_json::to_value(payload).unwrap(),
+        )
+        .with_sid(route.sid);
         route
             .out_tx
             .send(env)
@@ -323,8 +321,11 @@ impl ConnectionAdapter for UctpWsAdapter {
             reason_code: code,
             reason: reason_str.into(),
         };
-        let env = UctpEnvelope::new(MessageType::SessionEnd, serde_json::to_value(payload).unwrap())
-            .with_sid(route.sid);
+        let env = UctpEnvelope::new(
+            MessageType::SessionEnd,
+            serde_json::to_value(payload).unwrap(),
+        )
+        .with_sid(route.sid);
         route
             .out_tx
             .send(env)
@@ -388,9 +389,12 @@ impl ConnectionAdapter for UctpWsAdapter {
             attachments: Vec::new(),
             in_reply_to_msg: message.in_reply_to.map(|m| m.to_string()),
         };
-        let env = UctpEnvelope::new(MessageType::MessageSend, serde_json::to_value(payload).unwrap())
-            .with_cid(message.conversation_id.to_string())
-            .with_sid(route.sid);
+        let env = UctpEnvelope::new(
+            MessageType::MessageSend,
+            serde_json::to_value(payload).unwrap(),
+        )
+        .with_cid(message.conversation_id.to_string())
+        .with_sid(route.sid);
         route
             .out_tx
             .send(env)
@@ -417,9 +421,12 @@ impl ConnectionAdapter for UctpWsAdapter {
             duration_ms,
             method: "rfc4733".into(),
         };
-        let env = UctpEnvelope::new(MessageType::DtmfSend, serde_json::to_value(payload).unwrap())
-            .with_sid(route.sid.clone())
-            .with_connid(conn.to_string());
+        let env = UctpEnvelope::new(
+            MessageType::DtmfSend,
+            serde_json::to_value(payload).unwrap(),
+        )
+        .with_sid(route.sid.clone())
+        .with_connid(conn.to_string());
         route
             .out_tx
             .send(env)
@@ -457,7 +464,9 @@ impl ConnectionAdapter for UctpWsAdapter {
     fn subscribe_events(&self) -> mpsc::Receiver<AdapterEvent> {
         let mut guard = self.events_rx.lock().expect("poisoned");
         guard.take().unwrap_or_else(|| {
-            warn!("UctpWsAdapter::subscribe_events called more than once; returning closed channel");
+            warn!(
+                "UctpWsAdapter::subscribe_events called more than once; returning closed channel"
+            );
             let (_tx, rx) = mpsc::channel(1);
             rx
         })

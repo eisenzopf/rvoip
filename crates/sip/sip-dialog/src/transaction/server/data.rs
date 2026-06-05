@@ -1,3 +1,5 @@
+use rvoip_sip_core::prelude::*;
+use rvoip_sip_transport::Transport;
 /// # Server Transaction Data Structures
 ///
 /// This module provides data structures and traits for implementing the server transaction
@@ -18,8 +20,6 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::debug;
-use rvoip_sip_core::prelude::*;
-use rvoip_sip_transport::Transport;
 
 use crate::transaction::runner::{
     AsRefKey, AsRefState, HasCommandSender, HasLifecycle, HasTransactionEvents, HasTransport,

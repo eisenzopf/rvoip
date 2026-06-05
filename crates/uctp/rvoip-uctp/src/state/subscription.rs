@@ -124,11 +124,21 @@ pub struct PublisherInfo<'a> {
 pub struct RejectingHandler;
 
 impl SubscriptionHandler for RejectingHandler {
-    fn subscribe(&self, _: &SessionId, _: &ConnectionId, _: &StreamSubscribe) -> SubscriptionOutcome {
+    fn subscribe(
+        &self,
+        _: &SessionId,
+        _: &ConnectionId,
+        _: &StreamSubscribe,
+    ) -> SubscriptionOutcome {
         SubscriptionOutcome::reject(501, "multi-party-routing-not-implemented")
     }
 
-    fn unsubscribe(&self, _: &SessionId, _: &ConnectionId, _: &StreamUnsubscribe) -> SubscriptionOutcome {
+    fn unsubscribe(
+        &self,
+        _: &SessionId,
+        _: &ConnectionId,
+        _: &StreamUnsubscribe,
+    ) -> SubscriptionOutcome {
         SubscriptionOutcome::reject(501, "multi-party-routing-not-implemented")
     }
 }

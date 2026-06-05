@@ -705,10 +705,20 @@ impl StreamPeer {
                     // headers shape when synthesized in tests.
                     let coord = self.control.coordinator.clone();
                     let parsed = coord.session_registry.peek_pending_incoming_request().await;
+                    let transport = coord
+                        .session_registry
+                        .peek_pending_incoming_transport()
+                        .await;
                     let incoming = match parsed {
                         Some(req) => IncomingCall::with_request(call_id, from, to, sdp, coord, req),
                         None => IncomingCall::new(call_id, from, to, sdp, coord),
-                    };
+                    }
+                    .with_transport_context(
+                        transport
+                            .as_deref()
+                            .cloned()
+                            .unwrap_or_else(crate::auth::SipTransportSecurityContext::unknown),
+                    );
                     return Ok(incoming);
                 }
                 None => return Err(SessionError::Other("Event channel closed".to_string())),

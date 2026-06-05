@@ -1,12 +1,9 @@
+use super::HeaderSetter;
 #[cfg(test)]
 use crate::types::headers::HeaderName;
 #[cfg(test)]
 use crate::types::headers::TypedHeader;
-use super::HeaderSetter;
-use crate::types::{
-    allow::Allow,
-    method::Method,
-};
+use crate::types::{allow::Allow, method::Method};
 /// Allow header builder
 ///
 /// This module provides builder methods for the Allow header in SIP messages.
@@ -293,7 +290,6 @@ mod tests {
     use super::*;
     use crate::types::{method::Method, StatusCode};
     use crate::{RequestBuilder, ResponseBuilder};
-    
 
     #[test]
     fn test_request_allow_method() {

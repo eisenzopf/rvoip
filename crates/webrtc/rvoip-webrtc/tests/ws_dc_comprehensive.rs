@@ -12,7 +12,9 @@ use rvoip_core::config::Config;
 use rvoip_core::events::Event;
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId};
 use rvoip_core::orchestrator::Orchestrator;
-use rvoip_webrtc::client::comprehensive::{handle_server_connection, prepare_offer_media, run_client_checks};
+use rvoip_webrtc::client::comprehensive::{
+    handle_server_connection, prepare_offer_media, run_client_checks,
+};
 use rvoip_webrtc::client::{CallTarget, SessionMedium, WebRtcClient, WsSignaler};
 use rvoip_webrtc::peer::{PeerRole, RvoipPeerConnection};
 use rvoip_webrtc::signaling::websocket::{serve_listener, SignalingMessage};
@@ -134,7 +136,9 @@ async fn ws_offer_with_data_channel_ping_pong() {
         serve_listener(listener, ws_adapter).await.expect("ws");
     });
 
-    let offerer = RvoipPeerConnection::new(&config, PeerRole::Offerer).await.expect("offerer");
+    let offerer = RvoipPeerConnection::new(&config, PeerRole::Offerer)
+        .await
+        .expect("offerer");
     let client_dc = prepare_offer_media(&offerer, SessionMedium::Audio)
         .await
         .expect("prepare");
@@ -163,7 +167,10 @@ async fn ws_offer_with_data_channel_ping_pong() {
         .expect("ws");
     let answer: SignalingMessage =
         serde_json::from_str(answer_frame.to_text().unwrap()).expect("json");
-    offerer.set_remote_answer(&answer.sdp).await.expect("set answer");
+    offerer
+        .set_remote_answer(&answer.sdp)
+        .await
+        .expect("set answer");
 
     let conn_id = rvoip_core::ids::ConnectionId::from_string(answer.connection_id);
     let adapter_spawn = Arc::clone(&adapter);
@@ -171,7 +178,10 @@ async fn ws_offer_with_data_channel_ping_pong() {
         handle_server_connection(adapter_spawn, conn_id).await;
     });
 
-    offerer.wait_connected(Duration::from_secs(10)).await.expect("connected");
+    offerer
+        .wait_connected(Duration::from_secs(10))
+        .await
+        .expect("connected");
     RvoipPeerConnection::wait_data_channel_open(&client_dc, Duration::from_secs(10))
         .await
         .expect("dc open");

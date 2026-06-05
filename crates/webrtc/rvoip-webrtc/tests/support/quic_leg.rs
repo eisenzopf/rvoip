@@ -84,11 +84,7 @@ impl QuicLegHarness {
     }
 
     /// Auth handshake + `session.invite` → server-side inbound QUIC connection.
-    pub async fn dial_invite(
-        &self,
-        sid: &str,
-        participant: &str,
-    ) -> Arc<UctpQuicClient> {
+    pub async fn dial_invite(&self, sid: &str, participant: &str) -> Arc<UctpQuicClient> {
         let client_cfg = dev_client_config_trusting(&self.cert_der).expect("client tls");
         let client = UctpQuicClient::connect(
             &self.client_ep,
@@ -121,7 +117,7 @@ impl QuicLegHarness {
                 capabilities: serde_json::Value::Object(Default::default()),
             })
             .unwrap(),
-        signature: None,
+            signature: None,
         };
         client.send(hello).await.expect("auth.hello");
         let challenge = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
@@ -142,10 +138,10 @@ impl QuicLegHarness {
             payload: serde_json::to_value(auth::AuthResponse {
                 method: "bearer".into(),
                 credential: "test-token".into(),
-            actor_token: None,
+                actor_token: None,
             })
             .unwrap(),
-        signature: None,
+            signature: None,
         };
         client.send(response).await.expect("auth.response");
         let session_reply = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
@@ -171,7 +167,7 @@ impl QuicLegHarness {
                 capabilities_offer: serde_json::Value::Object(Default::default()),
             })
             .unwrap(),
-        signature: None,
+            signature: None,
         };
         client.send(invite).await.expect("session.invite");
         client

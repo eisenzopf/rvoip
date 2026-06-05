@@ -3,9 +3,7 @@
 // accept-value = media-range [ accept-params ]
 
 use crate::parser::common::comma_separated_list0;
-use crate::parser::common_params::{
-    generic_param, semicolon_separated_params0,
-};
+use crate::parser::common_params::{generic_param, semicolon_separated_params0};
 use crate::parser::separators::{equal, slash};
 use crate::parser::token::token; // Use the token parser instead
 use crate::parser::ParseResult;
@@ -219,9 +217,8 @@ pub fn parse_accept(input: &[u8]) -> ParseResult<'_, AcceptHeader> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use crate::types::param::Param;
-    
 
     // Helper function to test q-value parsing directly
     fn test_q_param(input: &[u8]) -> Option<NotNan<f32>> {

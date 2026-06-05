@@ -17,7 +17,9 @@
 pub mod api;
 pub mod api_keys;
 pub mod auth;
+pub mod auth_security_store;
 pub mod config;
+pub mod enterprise_identity_store;
 pub mod error;
 pub mod jwt;
 pub mod sip_digest_credentials;
@@ -26,14 +28,21 @@ pub mod user_store;
 pub mod validation;
 
 pub use api_keys::{ApiKey, ApiKeyStore};
-pub use auth::{AuthenticationResult, AuthenticationService, TokenPair};
+pub use auth::{AuthenticationResult, AuthenticationService, TokenIssueContext, TokenPair};
+pub use auth_security_store::AuthSecurityStore;
 pub use config::UsersConfig;
+pub use enterprise_identity_store::EnterpriseIdentityStore;
 pub use error::{Error, Result};
 pub use jwt::{JwtIssuer, UserClaims};
 pub use sip_digest_credentials::{
     CreateSipDigestCredentialRequest, SipDigestAlgorithmFamily, SipDigestCredential,
 };
-pub use types::{CreateUserRequest, UpdateUserRequest, User, UserFilter};
+pub use types::{
+    CreateUserRequest, ExternalIdentity, PasskeyCredential, UpdateUserRequest,
+    UpsertExternalIdentityRequest, UpsertPasskeyCredentialRequest, User, UserFilter,
+};
+#[cfg(feature = "postgres")]
+pub use user_store::PostgresUserStore;
 pub use user_store::{SqliteUserStore, UserStore};
 
 #[cfg(feature = "auth-core")]
@@ -62,8 +71,10 @@ pub async fn init(config: UsersConfig) -> Result<AuthenticationService> {
         config.password,
     )?;
 
-    // Set the pool for refresh token management
-    auth_service.set_pool(user_store.pool().clone());
+    // Set the shared auth-security store for refresh/access revocation,
+    // password/last-login updates, and SIP Digest HA1 storage.
+    auth_service.set_auth_security_store(user_store_arc.clone());
+    auth_service.set_enterprise_identity_store(user_store_arc);
 
     Ok(auth_service)
 }

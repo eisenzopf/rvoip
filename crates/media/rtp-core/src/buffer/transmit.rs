@@ -689,7 +689,6 @@ impl TransmitBuffer {
         self.stats.rto_ms = self.congestion.rto_ms;
     }
 
-
     /// Update congestion window after successful transmission
     fn update_congestion_window(&mut self, seq: Option<u16>) {
         if self.congestion.in_slow_start {

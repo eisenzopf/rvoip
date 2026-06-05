@@ -522,7 +522,6 @@ impl AdaptiveJitterBuffer {
         }
     }
 
-
     /// Check if we should adapt the buffer size based on network conditions
     fn maybe_adapt_buffer_size(&mut self, now: Instant) {
         // Only adapt at most once per second

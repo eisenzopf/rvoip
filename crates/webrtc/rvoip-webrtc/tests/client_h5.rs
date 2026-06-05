@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use rvoip_core::adapter::ConnectionAdapter;
 use rvoip_webrtc::client::{
-    Answer, AudioPacing, CountingAudioSink, FixtureAudioSource, IceCandidate, Signaler,
-    WsSignaler, WsSignalerConfig,
+    Answer, AudioPacing, CountingAudioSink, FixtureAudioSource, IceCandidate, Signaler, WsSignaler,
+    WsSignalerConfig,
 };
 use rvoip_webrtc::peer::{PeerRole, RvoipPeerConnection};
 use rvoip_webrtc::signaling::websocket::serve_listener;
@@ -147,11 +147,7 @@ async fn fixture_audio_source_emits_paced_frames() {
     let mut source = FixtureAudioSource::new(StreamId::new(), 1234);
     let mut last_ts = None;
     for _ in 0..5 {
-        let frame = source
-            .next_packet()
-            .await
-            .expect("ok")
-            .expect("some frame");
+        let frame = source.next_packet().await.expect("ok").expect("some frame");
         assert!(!frame.payload.is_empty(), "Opus payload must be non-empty");
         if let Some(prev) = last_ts {
             assert_eq!(

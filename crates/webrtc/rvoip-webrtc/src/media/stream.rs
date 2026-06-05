@@ -73,11 +73,8 @@ impl WebRtcMediaStream {
         peer: Arc<dyn webrtc::peer_connection::PeerConnection>,
         cancel: Arc<Notify>,
     ) {
-        let handle = spawn_webrtc_stats_collector(
-            Arc::clone(&self.inner.inbound_stats),
-            peer,
-            cancel,
-        );
+        let handle =
+            spawn_webrtc_stats_collector(Arc::clone(&self.inner.inbound_stats), peer, cancel);
         self.inner.pumps.lock().push(handle);
     }
 
@@ -108,7 +105,12 @@ pub fn from_tracks(
     let send_deadline_ms = DEFAULT_INBOUND_SEND_DEADLINE_MS;
 
     let mut pumps = Vec::new();
-    pumps.push(spawn_outbound_pump(local, frames_out_rx, local_ssrc, payload_type));
+    pumps.push(spawn_outbound_pump(
+        local,
+        frames_out_rx,
+        local_ssrc,
+        payload_type,
+    ));
 
     let remote_attached = AtomicBool::new(false);
     if let Some(remote_track) = remote {

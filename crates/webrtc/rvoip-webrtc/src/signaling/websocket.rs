@@ -153,8 +153,8 @@ async fn handle_tls_connection(
         let text = msg
             .to_text()
             .map_err(|e| WebRtcError::Signaling(format!("ws text: {e}")))?;
-        let parsed: SignalingMessage = serde_json::from_str(text)
-            .map_err(|e| WebRtcError::Signaling(format!("{e}")))?;
+        let parsed: SignalingMessage =
+            serde_json::from_str(text).map_err(|e| WebRtcError::Signaling(format!("{e}")))?;
         dispatch_tls(&adapter, &write, parsed, &mut forwarder_spawned).await?;
     }
     let _ = forwarder_spawned;
@@ -164,14 +164,16 @@ async fn handle_tls_connection(
 #[cfg(feature = "tls-rustls")]
 async fn dispatch_tls(
     adapter: &Arc<WebRtcAdapter>,
-    write: &Arc<AsyncMutex<
-        futures::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<
-                tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    write: &Arc<
+        AsyncMutex<
+            futures::stream::SplitSink<
+                tokio_tungstenite::WebSocketStream<
+                    tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+                >,
+                Message,
             >,
-            Message,
         >,
-    >>,
+    >,
     parsed: SignalingMessage,
     _forwarder_spawned: &mut Option<ConnectionId>,
 ) -> Result<()> {
@@ -273,9 +275,15 @@ async fn handle_connection_with_auth(
     let mut subprotocols: Vec<String> = Vec::new();
     let mut query_token: Option<String> = None;
 
-    let cb = |req: &Request, mut resp: HandshakeResponse| -> std::result::Result<HandshakeResponse, ErrorResponse> {
+    let cb = |req: &Request,
+              mut resp: HandshakeResponse|
+     -> std::result::Result<HandshakeResponse, ErrorResponse> {
         // Sec-WebSocket-Protocol (comma-separated list).
-        if let Some(v) = req.headers().get("sec-websocket-protocol").and_then(|h| h.to_str().ok()) {
+        if let Some(v) = req
+            .headers()
+            .get("sec-websocket-protocol")
+            .and_then(|h| h.to_str().ok())
+        {
             for s in v.split(',') {
                 let trimmed = s.trim();
                 if !trimmed.is_empty() {
@@ -404,8 +412,8 @@ async fn drive_ws_loop(
         let text = msg
             .to_text()
             .map_err(|e| WebRtcError::Signaling(format!("ws text: {e}")))?;
-        let parsed: SignalingMessage = serde_json::from_str(text)
-            .map_err(|e| WebRtcError::Signaling(format!("{e}")))?;
+        let parsed: SignalingMessage =
+            serde_json::from_str(text).map_err(|e| WebRtcError::Signaling(format!("{e}")))?;
 
         match parsed.msg_type.as_str() {
             "offer" => {
@@ -464,12 +472,8 @@ async fn drive_ws_loop(
                 }
                 let conn_id = ConnectionId::from_string(parsed.connection_id.clone());
                 let candidate: RTCIceCandidateInit = serde_json::from_str(&parsed.candidate)
-                    .map_err(|e| {
-                        WebRtcError::Signaling(format!("ice-candidate parse: {e}"))
-                    })?;
-                adapter
-                    .apply_trickle_candidate(&conn_id, candidate)
-                    .await?;
+                    .map_err(|e| WebRtcError::Signaling(format!("ice-candidate parse: {e}")))?;
+                adapter.apply_trickle_candidate(&conn_id, candidate).await?;
             }
             "bye" => {
                 if !parsed.connection_id.is_empty() {
@@ -510,11 +514,7 @@ async fn send_message(write: &WsSink, msg: &SignalingMessage) -> Result<()> {
 /// by `conn_id` and stream them as `{type:"ice-candidate"}` messages to the
 /// WS client. Exits when the route is gone, the WS sink errors, or the
 /// channel closes.
-fn spawn_local_ice_forwarder(
-    adapter: &Arc<WebRtcAdapter>,
-    conn_id: &ConnectionId,
-    write: &WsSink,
-) {
+fn spawn_local_ice_forwarder(adapter: &Arc<WebRtcAdapter>, conn_id: &ConnectionId, write: &WsSink) {
     let adapter = Arc::clone(adapter);
     let conn_id = conn_id.clone();
     let write = Arc::clone(write);

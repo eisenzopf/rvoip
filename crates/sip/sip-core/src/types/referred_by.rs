@@ -479,7 +479,7 @@ impl FromStr for ReferredBy {
 mod tests {
     use super::*;
     use crate::types::address::Address;
-    
+
     use crate::types::uri::{Scheme, Uri};
     use std::str::FromStr;
 

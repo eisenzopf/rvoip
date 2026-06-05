@@ -31,9 +31,7 @@ async fn whip_webrtc_bridged_to_quic_leg_via_orchestrator() {
         .expect("build server");
 
     let quic_leg = MockQuicLeg::new();
-    let (quic_conn, _quic_stream) = quic_leg
-        .provision_inbound(session_id.clone(), "opus")
-        .await;
+    let (quic_conn, _quic_stream) = quic_leg.provision_inbound(session_id.clone(), "opus").await;
 
     let orchestrator = Orchestrator::new(Config::default());
     orchestrator

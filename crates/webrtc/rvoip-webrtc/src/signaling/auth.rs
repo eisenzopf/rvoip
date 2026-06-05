@@ -190,7 +190,9 @@ impl WsAuthHook for BearerStaticTokenAuth {
 /// `None` if the header is missing, malformed, or uses a different scheme.
 pub fn extract_bearer(header: Option<&str>) -> Option<&str> {
     let header = header?;
-    let rest = header.strip_prefix("Bearer ").or_else(|| header.strip_prefix("bearer "))?;
+    let rest = header
+        .strip_prefix("Bearer ")
+        .or_else(|| header.strip_prefix("bearer "))?;
     let trimmed = rest.trim();
     if trimmed.is_empty() {
         None
@@ -242,10 +244,7 @@ mod tests {
             "127.0.0.1:1".parse().unwrap(),
         )
         .await;
-        assert!(matches!(
-            res,
-            Err(AuthRejection::Unauthorized { .. })
-        ));
+        assert!(matches!(res, Err(AuthRejection::Unauthorized { .. })));
     }
 
     #[tokio::test]

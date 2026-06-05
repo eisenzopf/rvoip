@@ -1,7 +1,7 @@
-#[cfg(test)]
-use crate::types::headers::TypedHeader;
 use super::HeaderSetter;
 use crate::types::expires::Expires;
+#[cfg(test)]
+use crate::types::headers::TypedHeader;
 use std::time::Duration;
 
 /// Expires header builder
@@ -287,7 +287,7 @@ mod tests {
     use crate::types::headers::HeaderName;
     use crate::types::{method::Method, StatusCode};
     use crate::{RequestBuilder, ResponseBuilder};
-    
+
     use std::time::Duration;
 
     #[test]

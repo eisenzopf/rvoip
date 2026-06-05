@@ -42,7 +42,10 @@ async fn idle_closer_force_closes_ephemeral_after_ttl() {
             _ => continue,
         }
     }
-    assert!(saw_close, "idle_closer must close an Ephemeral conv past TTL");
+    assert!(
+        saw_close,
+        "idle_closer must close an Ephemeral conv past TTL"
+    );
 
     let conv = orch.conversation(&cid).expect("present");
     assert_eq!(conv.read().unwrap().state, ConversationState::Closed);

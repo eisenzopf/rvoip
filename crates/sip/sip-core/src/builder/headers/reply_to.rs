@@ -1,14 +1,10 @@
+use crate::builder::headers::HeaderSetter;
+use crate::error::Result;
 #[cfg(test)]
 use crate::types::header::HeaderName;
 #[cfg(test)]
 use crate::types::headers::TypedHeader;
-use crate::builder::headers::HeaderSetter;
-use crate::error::Result;
-use crate::types::{
-    address::Address,
-    reply_to::ReplyTo,
-    uri::Uri,
-};
+use crate::types::{address::Address, reply_to::ReplyTo, uri::Uri};
 use std::str::FromStr;
 
 /// Reply-To header builder

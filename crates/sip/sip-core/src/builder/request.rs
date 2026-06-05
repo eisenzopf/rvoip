@@ -3,11 +3,8 @@ use std::str::FromStr;
 
 use crate::error::{Error, Result};
 use crate::types::{
-    content_length::ContentLength,
-    content_type::ContentType,
-    header::HeaderName,
-    sip_request::Request,
-    uri::Uri, Method, TypedHeader,
+    content_length::ContentLength, content_type::ContentType, header::HeaderName,
+    sip_request::Request, uri::Uri, Method, TypedHeader,
 };
 
 /// # SIP Request Builder

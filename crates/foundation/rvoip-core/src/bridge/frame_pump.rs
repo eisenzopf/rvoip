@@ -104,10 +104,7 @@ pub fn spawn_pump_with_swap(
         let mut need_transcode = transcoder.is_some() && from_pt != to_pt;
         debug!(
             direction,
-            from_pt,
-            to_pt,
-            need_transcode,
-            "rvoip-core::frame_pump: started"
+            from_pt, to_pt, need_transcode, "rvoip-core::frame_pump: started"
         );
 
         let mut swap_open = true;
@@ -163,77 +160,77 @@ pub fn spawn_pump_with_swap(
                 return;
             };
             {
-            // Gap plan §4.3 — PT-aware DTMF routing. If the inbound
-            // pump labelled this frame with the telephone-event PT,
-            // skip transcoding and pass through. This is a strict
-            // improvement on the 4-byte heuristic below: that one
-            // fires only when transcode *fails* on a 4-byte payload;
-            // PT==101 catches DTMF even when the input PT matches
-            // the output PT (no transcode attempted).
-            let is_telephone_event = frame.payload_type == Some(DEFAULT_TELEPHONE_EVENT_PT);
-            if is_telephone_event {
-                metrics::counter!(
-                    "rvoip_bridge_dtmf_passthrough_total",
-                    "direction" => direction,
-                )
-                .increment(1);
-                trace!(
+                // Gap plan §4.3 — PT-aware DTMF routing. If the inbound
+                // pump labelled this frame with the telephone-event PT,
+                // skip transcoding and pass through. This is a strict
+                // improvement on the 4-byte heuristic below: that one
+                // fires only when transcode *fails* on a 4-byte payload;
+                // PT==101 catches DTMF even when the input PT matches
+                // the output PT (no transcode attempted).
+                let is_telephone_event = frame.payload_type == Some(DEFAULT_TELEPHONE_EVENT_PT);
+                if is_telephone_event {
+                    metrics::counter!(
+                        "rvoip_bridge_dtmf_passthrough_total",
+                        "direction" => direction,
+                    )
+                    .increment(1);
+                    trace!(
                     direction,
                     "rvoip-core::frame_pump: PT={} (RFC 4733 telephone-event) — passing through",
                     DEFAULT_TELEPHONE_EVENT_PT
                 );
+                    if to.send(frame).await.is_err() {
+                        debug!(direction, "rvoip-core::frame_pump: peer closed; exiting");
+                        return;
+                    }
+                    continue;
+                }
+
+                if need_transcode {
+                    let t = transcoder.as_mut().expect("checked above");
+                    match t.transcode(&frame.payload, from_pt, to_pt).await {
+                        Ok(bytes) => frame.payload = bytes.into(),
+                        Err(e) => {
+                            // Pre-§4.3 fallback: a transcode failure on a
+                            // 4-byte payload is almost certainly an RFC 4733
+                            // telephone-event whose PT wasn't carried in
+                            // the MediaFrame. Pass it through verbatim.
+                            if frame.payload.len() == 4 {
+                                metrics::counter!(
+                                    "rvoip_bridge_dtmf_passthrough_total",
+                                    "direction" => direction,
+                                )
+                                .increment(1);
+                                trace!(
+                                direction,
+                                "rvoip-core::frame_pump: 4-byte transcode failure — likely RFC 4733 DTMF without PT label; passing through"
+                            );
+                                // Fall through to the `to.send(frame)` call
+                                // below with the original payload.
+                            } else {
+                                warn!(
+                                    direction,
+                                    from_pt,
+                                    to_pt,
+                                    error = %e,
+                                    bytes = frame.payload.len(),
+                                    "rvoip-core::frame_pump: transcode failed; dropping frame"
+                                );
+                                metrics::counter!(
+                                    "rvoip_bridge_transcode_errors_total",
+                                    "direction" => direction,
+                                )
+                                .increment(1);
+                                continue;
+                            }
+                        }
+                    }
+                }
+                trace!(direction, bytes = frame.payload.len(), "frame");
                 if to.send(frame).await.is_err() {
                     debug!(direction, "rvoip-core::frame_pump: peer closed; exiting");
                     return;
                 }
-                continue;
-            }
-
-            if need_transcode {
-                let t = transcoder.as_mut().expect("checked above");
-                match t.transcode(&frame.payload, from_pt, to_pt).await {
-                    Ok(bytes) => frame.payload = bytes.into(),
-                    Err(e) => {
-                        // Pre-§4.3 fallback: a transcode failure on a
-                        // 4-byte payload is almost certainly an RFC 4733
-                        // telephone-event whose PT wasn't carried in
-                        // the MediaFrame. Pass it through verbatim.
-                        if frame.payload.len() == 4 {
-                            metrics::counter!(
-                                "rvoip_bridge_dtmf_passthrough_total",
-                                "direction" => direction,
-                            )
-                            .increment(1);
-                            trace!(
-                                direction,
-                                "rvoip-core::frame_pump: 4-byte transcode failure — likely RFC 4733 DTMF without PT label; passing through"
-                            );
-                            // Fall through to the `to.send(frame)` call
-                            // below with the original payload.
-                        } else {
-                            warn!(
-                                direction,
-                                from_pt,
-                                to_pt,
-                                error = %e,
-                                bytes = frame.payload.len(),
-                                "rvoip-core::frame_pump: transcode failed; dropping frame"
-                            );
-                            metrics::counter!(
-                                "rvoip_bridge_transcode_errors_total",
-                                "direction" => direction,
-                            )
-                            .increment(1);
-                            continue;
-                        }
-                    }
-                }
-            }
-            trace!(direction, bytes = frame.payload.len(), "frame");
-            if to.send(frame).await.is_err() {
-                debug!(direction, "rvoip-core::frame_pump: peer closed; exiting");
-                return;
-            }
             } // end frame-processing block
         }
     })
@@ -373,15 +370,15 @@ mod tests {
         };
         tx_from.send(dtmf.clone()).await.unwrap();
 
-        let received = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            rx_to.recv(),
-        )
-        .await
-        .expect("dtmf must pass through")
-        .expect("channel still open");
+        let received = tokio::time::timeout(std::time::Duration::from_millis(500), rx_to.recv())
+            .await
+            .expect("dtmf must pass through")
+            .expect("channel still open");
         assert_eq!(received.payload.as_ref(), dtmf.payload.as_ref());
-        assert_eq!(received.payload_type, Some(super::DEFAULT_TELEPHONE_EVENT_PT));
+        assert_eq!(
+            received.payload_type,
+            Some(super::DEFAULT_TELEPHONE_EVENT_PT)
+        );
 
         drop(tx_from);
         pump.await.unwrap();

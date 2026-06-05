@@ -77,7 +77,9 @@ fn se_param(input: &[u8]) -> ParseResult<'_, (Option<Refresher>, Option<Param>)>
 /// refresher-param = "refresher" EQUAL ("uas" / "uac")
 ///
 /// Returns a tuple with (expires_value, refresher, params)
-pub fn parse_session_expires(input: &[u8]) -> ParseResult<'_, (u32, Option<Refresher>, Vec<Param>)> {
+pub fn parse_session_expires(
+    input: &[u8],
+) -> ParseResult<'_, (u32, Option<Refresher>, Vec<Param>)> {
     let (remaining_input, expires) = delta_seconds(input)?;
 
     // Parse any parameters

@@ -82,8 +82,7 @@ impl Resampler {
         // Deterministic output length. Use round() not ceil() so that
         // exact integer ratios (6.0×) don't pick up a phantom extra
         // sample from floating-point representation drift.
-        let output_len =
-            ((input_samples.len() as f64) * self.ratio).round() as usize;
+        let output_len = ((input_samples.len() as f64) * self.ratio).round() as usize;
         let mut output_samples = Vec::with_capacity(output_len);
 
         // Generate exactly `output_len` samples. Index the input by a

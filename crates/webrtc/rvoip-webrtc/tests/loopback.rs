@@ -59,16 +59,15 @@ async fn loopback_rtp_inbound_round_trip() {
         /* Opus PT */ 111,
         None,
     );
-    answerer_stream
-        .enable_webrtc_stats(Arc::clone(answerer.peer_connection()), Arc::new(Notify::new()));
+    answerer_stream.enable_webrtc_stats(
+        Arc::clone(answerer.peer_connection()),
+        Arc::new(Notify::new()),
+    );
 
-    let remote = RvoipPeerConnection::prime_remote_track(
-        &offerer,
-        &answerer,
-        Duration::from_secs(10),
-    )
-    .await
-    .expect("answerer receives offerer track after priming RTP");
+    let remote =
+        RvoipPeerConnection::prime_remote_track(&offerer, &answerer, Duration::from_secs(10))
+            .await
+            .expect("answerer receives offerer track after priming RTP");
     answerer_stream.attach_remote(remote);
 
     let mut inbound = answerer_stream.frames_in();

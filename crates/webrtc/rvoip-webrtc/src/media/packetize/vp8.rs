@@ -113,7 +113,11 @@ mod tests {
             payload_is_start_of_partition(&pkts[0].payload),
             "first packet must have S=1"
         );
-        assert_eq!(pkts[0].payload.len(), 101, "1 descriptor byte + 100 payload");
+        assert_eq!(
+            pkts[0].payload.len(),
+            101,
+            "1 descriptor byte + 100 payload"
+        );
     }
 
     #[test]
@@ -122,7 +126,11 @@ mod tests {
         //   1199 + 1199 + (3500 - 2398) = 1199 + 1199 + 1102
         let frame = vec![0xCD; 3500];
         let pkts = packetize_vp8(&frame, 1200);
-        assert_eq!(pkts.len(), 3, "3500 bytes should split into 3 MTU-1200 packets");
+        assert_eq!(
+            pkts.len(),
+            3,
+            "3500 bytes should split into 3 MTU-1200 packets"
+        );
         assert!(payload_is_start_of_partition(&pkts[0].payload));
         assert!(!payload_is_start_of_partition(&pkts[1].payload));
         assert!(!payload_is_start_of_partition(&pkts[2].payload));

@@ -10,20 +10,18 @@ use std::sync::Mutex as StdMutex;
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
+use rvoip_auth_core::BearerValidator;
 use rvoip_core::adapter::{
     AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest,
     RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
-use rvoip_core::connection::{
-    Connection, ConnectionState, Direction, Transport, TransportHandle,
-};
+use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::ConnectionId;
 use rvoip_core::message::Message;
 use rvoip_core::stream::MediaStream;
-use rvoip_auth_core::BearerValidator;
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads;
 use rvoip_uctp::types::MessageType;
@@ -50,9 +48,8 @@ pub(crate) struct Route {
     pub next_local_id: Arc<std::sync::atomic::AtomicU16>,
     /// Per-Connection inbound routing table — the WT datagram reader
     /// consults it to dispatch by `stream_local_id`.
-    pub streams_router: Arc<
-        parking_lot::RwLock<Vec<Arc<crate::media_stream::WebTransportDatagramMediaStream>>>,
-    >,
+    pub streams_router:
+        Arc<parking_lot::RwLock<Vec<Arc<crate::media_stream::WebTransportDatagramMediaStream>>>>,
 }
 
 pub struct UctpWtConfig {
@@ -124,10 +121,7 @@ impl UctpWtConfig {
 
     /// Override the per-peer Session/timeout caps (plan D1 / D2). See
     /// [`rvoip_uctp::state::UctpCoordinatorCaps`].
-    pub fn with_coordinator_caps(
-        mut self,
-        caps: rvoip_uctp::state::UctpCoordinatorCaps,
-    ) -> Self {
+    pub fn with_coordinator_caps(mut self, caps: rvoip_uctp::state::UctpCoordinatorCaps) -> Self {
         self.coordinator_caps = caps;
         self
     }
@@ -218,16 +212,18 @@ impl ConnectionAdapter for UctpWtAdapter {
         };
 
         // For WT, `target` is expected to be a full https:// URL.
-        let url = Url::parse(&request.target).map_err(|e| {
-            RvoipError::Adapter(format!("invalid originate target URL: {}", e))
-        })?;
+        let url = Url::parse(&request.target)
+            .map_err(|e| RvoipError::Adapter(format!("invalid originate target URL: {}", e)))?;
         let host = url
             .host_str()
             .ok_or_else(|| RvoipError::Adapter("URL has no host".into()))?;
         let port = url.port().unwrap_or(443);
-        let addr: SocketAddr = format!("{}:{}", host, port)
-            .parse()
-            .map_err(|_| RvoipError::Adapter(format!("can't resolve {}:{} to SocketAddr (use ip address for v0)", host, port)))?;
+        let addr: SocketAddr = format!("{}:{}", host, port).parse().map_err(|_| {
+            RvoipError::Adapter(format!(
+                "can't resolve {}:{} to SocketAddr (use ip address for v0)",
+                host, port
+            ))
+        })?;
 
         let client = crate::client::UctpWtClient::connect(&endpoint, addr, &url, tls)
             .await
@@ -262,8 +258,11 @@ impl ConnectionAdapter for UctpWtAdapter {
             by: "part_local".into(),
             capabilities_answer: serde_json::Value::Object(Default::default()),
         };
-        let env = UctpEnvelope::new(MessageType::SessionAccept, serde_json::to_value(payload).unwrap())
-            .with_sid(route.sid);
+        let env = UctpEnvelope::new(
+            MessageType::SessionAccept,
+            serde_json::to_value(payload).unwrap(),
+        )
+        .with_sid(route.sid);
         route
             .out_tx
             .send(env)
@@ -281,8 +280,11 @@ impl ConnectionAdapter for UctpWtAdapter {
             reason_code: code,
             reason: reason_str.into(),
         };
-        let env = UctpEnvelope::new(MessageType::SessionReject, serde_json::to_value(payload).unwrap())
-            .with_sid(route.sid);
+        let env = UctpEnvelope::new(
+            MessageType::SessionReject,
+            serde_json::to_value(payload).unwrap(),
+        )
+        .with_sid(route.sid);
         route
             .out_tx
             .send(env)
@@ -300,8 +302,11 @@ impl ConnectionAdapter for UctpWtAdapter {
             reason_code: code,
             reason: reason_str.into(),
         };
-        let env = UctpEnvelope::new(MessageType::SessionEnd, serde_json::to_value(payload).unwrap())
-            .with_sid(route.sid);
+        let env = UctpEnvelope::new(
+            MessageType::SessionEnd,
+            serde_json::to_value(payload).unwrap(),
+        )
+        .with_sid(route.sid);
         route
             .out_tx
             .send(env)
@@ -420,9 +425,12 @@ impl ConnectionAdapter for UctpWtAdapter {
             attachments: Vec::new(),
             in_reply_to_msg: message.in_reply_to.map(|m| m.to_string()),
         };
-        let env = UctpEnvelope::new(MessageType::MessageSend, serde_json::to_value(payload).unwrap())
-            .with_cid(message.conversation_id.to_string())
-            .with_sid(route.sid);
+        let env = UctpEnvelope::new(
+            MessageType::MessageSend,
+            serde_json::to_value(payload).unwrap(),
+        )
+        .with_cid(message.conversation_id.to_string())
+        .with_sid(route.sid);
         route
             .out_tx
             .send(env)
@@ -447,9 +455,12 @@ impl ConnectionAdapter for UctpWtAdapter {
             duration_ms,
             method: "rfc4733".into(),
         };
-        let env = UctpEnvelope::new(MessageType::DtmfSend, serde_json::to_value(payload).unwrap())
-            .with_sid(route.sid.clone())
-            .with_connid(conn.to_string());
+        let env = UctpEnvelope::new(
+            MessageType::DtmfSend,
+            serde_json::to_value(payload).unwrap(),
+        )
+        .with_sid(route.sid.clone())
+        .with_connid(conn.to_string());
         route
             .out_tx
             .send(env)
@@ -484,7 +495,9 @@ impl ConnectionAdapter for UctpWtAdapter {
     fn subscribe_events(&self) -> mpsc::Receiver<AdapterEvent> {
         let mut guard = self.events_rx.lock().expect("poisoned");
         guard.take().unwrap_or_else(|| {
-            warn!("UctpWtAdapter::subscribe_events called more than once; returning closed channel");
+            warn!(
+                "UctpWtAdapter::subscribe_events called more than once; returning closed channel"
+            );
             let (_tx, rx) = mpsc::channel(1);
             rx
         })

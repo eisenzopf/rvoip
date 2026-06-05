@@ -865,7 +865,6 @@ fn escape_user_info(s: &str) -> String {
     result
 }
 
-
 /// Escape URI parameters and headers
 fn escape_param(s: &str) -> String {
     let mut result = String::with_capacity(s.len() * 3);
@@ -899,6 +898,3 @@ fn escape_param(s: &str) -> String {
 
     result
 }
-
-
-

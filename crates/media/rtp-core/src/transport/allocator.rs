@@ -569,7 +569,6 @@ impl PortAllocator {
         (self.config.port_range_end - self.config.port_range_start + 1) as usize
     }
 
-
     /// Find a recently released port that can be reused
     async fn find_reusable_port(&self, ip: IpAddr) -> Option<u16> {
         let mut released = self.released_ports.lock().await;
@@ -654,7 +653,6 @@ impl PortAllocator {
             true
         }
     }
-
 
     /// Get the next port using sequential allocation
     async fn get_next_sequential_port(&self) -> u16 {

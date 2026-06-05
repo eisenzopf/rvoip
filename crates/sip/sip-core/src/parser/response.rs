@@ -13,7 +13,6 @@ use crate::parser::ParseResult;
 use crate::types::version::Version;
 use crate::types::StatusCode;
 
-
 // Status-Code = 3DIGIT
 pub fn status_code(input: &[u8]) -> ParseResult<'_, StatusCode> {
     map_res(digit1, |code_bytes: &[u8]| -> Result<StatusCode> {

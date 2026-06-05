@@ -89,7 +89,10 @@ async fn hold_resume_updates_local_sdp_when_renegotiation_enabled() {
 
     server.resume(conn_id.clone()).await.expect("resume");
     let sdp3 = server.local_sdp(&conn_id).expect("sdp3");
-    assert_ne!(sdp2, sdp3, "resume renegotiation should update the local SDP again");
+    assert_ne!(
+        sdp2, sdp3,
+        "resume renegotiation should update the local SDP again"
+    );
 
     // Tear down so the session reaper doesn't hold the test runtime.
     let _ = tokio::time::timeout(

@@ -21,9 +21,7 @@ use crate::parser::token::token;
 use crate::parser::whitespace::{lws, sws};
 use crate::parser::ParseResult;
 
-use crate::types::content_disposition::{
-    DispositionParam, DispositionType, Handling,
-};
+use crate::types::content_disposition::{DispositionParam, DispositionType, Handling};
 
 // disp-type = "render" / "session" / "icon" / "alert" / disp-extension-token
 // disp-extension-token = token

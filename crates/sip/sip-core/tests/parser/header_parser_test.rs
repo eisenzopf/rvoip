@@ -7,10 +7,10 @@ use std::str::FromStr;
 
 // Import SIP Core types with specific imports instead of wildcards
 use rvoip_sip_core::types::{
-        address::Address, allow::Allow, call_id::CallId, content_length::ContentLength,
-        content_type::ContentType, cseq::CSeq, from::From, method::Method, param::Param,
-        retry_after::RetryAfter, to::To, uri::Uri, via::Via,
-    };
+    address::Address, allow::Allow, call_id::CallId, content_length::ContentLength,
+    content_type::ContentType, cseq::CSeq, from::From, method::Method, param::Param,
+    retry_after::RetryAfter, to::To, uri::Uri, via::Via,
+};
 
 #[test]
 fn test_parse_content_type() {

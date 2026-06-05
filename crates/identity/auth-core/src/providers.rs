@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use rvoip_core_traits::identity::IdentityAssurance;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::sip_digest::DigestAlgorithm;
@@ -199,7 +200,7 @@ pub trait DigestReplayStore: Send + Sync {
 
 /// Auth scheme associated with an audit event.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthAuditScheme {
     /// SIP Digest authentication.
     Digest,
@@ -221,7 +222,7 @@ pub enum AuthAuditScheme {
 
 /// Security-relevant reason for an authentication failure.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthFailureReason {
     /// No credential was supplied.
     MissingCredential,
@@ -248,7 +249,7 @@ pub enum AuthFailureReason {
 }
 
 /// Result captured by an auth audit event.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthAuditOutcome {
     /// Authentication succeeded.
     Success,
@@ -261,7 +262,7 @@ pub enum AuthAuditOutcome {
 /// Events intentionally carry identifiers and metadata, not credential values.
 /// Do not put passwords, HA1 values, bearer tokens, API keys, full
 /// Authorization headers, or full JWTs into `metadata`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthAuditEvent {
     /// Scheme or auth subsystem involved.
     pub scheme: AuthAuditScheme,

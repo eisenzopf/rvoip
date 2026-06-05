@@ -534,9 +534,9 @@ pub use auth::{
     DigestChallengeDetails, DigestComputed, DigestNonceStatus, DigestReplayStore, DigestResponse,
     DigestSecret, DigestSecretProvider, JwksJwtValidator, JwtValidator,
     OAuth2IntrospectionValidator, PasswordVerifier, SipAuthChallenge, SipAuthContext,
-    SipAuthDecision, SipAuthScheme, SipAuthService, SipAuthSource, SipClientAuth,
-    SipDigestAuthService, SipIncomingAuthenticator, TokenRevocationChecker, TokenRevocationContext,
-    TokenRevocationStatus,
+    SipAuthDecision, SipAuthPolicy, SipAuthScheme, SipAuthService, SipAuthSource, SipClientAuth,
+    SipDigestAuthService, SipIncomingAuthenticator, SipTransportSecurityContext,
+    TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
 
 /// SIP_API_DESIGN_2 §3.6 — convenience body constructors. Each

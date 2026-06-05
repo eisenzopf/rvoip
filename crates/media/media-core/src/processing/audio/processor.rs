@@ -3,18 +3,16 @@
 //! This module contains the AudioProcessor which coordinates all audio processing
 //! operations including VAD, format conversion, and future AEC/AGC/NS components.
 
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::{debug};
 use super::agc::{AgcConfig, AgcResult, AutomaticGainControl};
 use super::vad::{VadConfig, VadResult, VoiceActivityDetector};
 use crate::error::{AudioProcessingError, Result};
 use crate::types::{AudioFrame, SampleRate};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::debug;
 
 // NEW: Performance library imports
-use crate::performance::{
-    metrics::PerformanceMetrics, pool::AudioFramePool, simd::SimdProcessor,
-};
+use crate::performance::{metrics::PerformanceMetrics, pool::AudioFramePool, simd::SimdProcessor};
 
 // NEW: Advanced v2 processor imports
 use super::aec_v2::{AdvancedAcousticEchoCanceller, AdvancedAecConfig, AdvancedAecResult};

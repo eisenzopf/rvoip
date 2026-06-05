@@ -53,9 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match event {
             Event::ConnectionInbound { connection_id, .. } => {
                 // Distinguish WebRTC (WHIP) from the pre-provisioned QUIC mock.
-                if orchestrator
-                    .adapter(Transport::WebRtc)
-                    .is_ok()
+                if orchestrator.adapter(Transport::WebRtc).is_ok()
                     && server.adapter().routes().contains_key(&connection_id)
                 {
                     tracing::info!(%connection_id, "WHIP publish — accepting WebRTC leg");
@@ -88,7 +86,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            Event::ConnectionsBridged { bridge_id, a, b, .. } => {
+            Event::ConnectionsBridged {
+                bridge_id, a, b, ..
+            } => {
                 tracing::info!(%bridge_id, %a, %b, "ConnectionsBridged");
             }
             Event::ConnectionEnded { connection_id, .. } => {

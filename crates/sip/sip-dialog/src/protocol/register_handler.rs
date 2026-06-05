@@ -100,6 +100,9 @@ impl RegisterHandler for DialogManager {
                 .transaction_manager
                 .take_inbound_bytes(&transaction_id)
                 .or_else(|| Some(bytes::Bytes::from(request.to_string().into_bytes())));
+            let transport = self
+                .transaction_manager
+                .take_inbound_transport(&transaction_id);
             let event =
                 RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::IncomingRegister {
                     transaction_id: transaction_id.to_string(),
@@ -113,6 +116,7 @@ impl RegisterHandler for DialogManager {
                         .map(|cid| cid.value().to_string())
                         .unwrap_or_else(|| "unknown".to_string()),
                     raw_request,
+                    transport,
                 });
 
             // Publish via event hub (global event bus)

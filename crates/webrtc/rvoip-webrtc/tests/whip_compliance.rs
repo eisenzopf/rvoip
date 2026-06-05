@@ -242,7 +242,10 @@ async fn session_cap_returns_503() {
     );
 
     let m = adapter.metrics();
-    assert!(m.sessions_rejected_over_cap >= 1, "metrics should track rejections");
+    assert!(
+        m.sessions_rejected_over_cap >= 1,
+        "metrics should track rejections"
+    );
 
     serve.abort();
 }

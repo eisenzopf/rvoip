@@ -25,9 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
 
-    let ws_addr = server
-        .ws_addr()
-        .expect("websocket listener address");
+    let ws_addr = server.ws_addr().expect("websocket listener address");
 
     if let Some(path) = &ready_file {
         std::fs::write(path, ws_addr.to_string())?;

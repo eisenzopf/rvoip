@@ -331,6 +331,9 @@ pub struct SubscribeRequestOptions {
     pub from_uri: Option<String>,
     pub contact_uri: Option<String>,
     pub authorization: Option<String>,
+    pub cseq: Option<u32>,
+    pub call_id: Option<String>,
+    pub from_tag: Option<String>,
     /// `false` = initial out-of-dialog SUBSCRIBE; `true` = in-dialog
     /// refresh.
     pub refresh: bool,
@@ -345,6 +348,9 @@ pub struct MessageRequestOptions {
     pub content_type: String,
     pub body: Bytes,
     pub authorization: Option<String>,
+    pub cseq: Option<u32>,
+    pub call_id: Option<String>,
+    pub from_tag: Option<String>,
     pub extra_headers: Vec<TypedHeader>,
 }
 
@@ -355,6 +361,9 @@ pub struct OptionsRequestOptions {
     pub to_uri: String,
     pub accept: Option<String>,
     pub timeout: Option<Duration>,
+    pub cseq: Option<u32>,
+    pub call_id: Option<String>,
+    pub from_tag: Option<String>,
     pub extra_headers: Vec<TypedHeader>,
 }
 
@@ -606,6 +615,22 @@ impl UnifiedDialogApi {
     /// Provides access to the underlying UnifiedDialogManager for advanced operations.
     pub fn dialog_manager(&self) -> &Arc<UnifiedDialogManager> {
         &self.manager
+    }
+
+    /// Return the accepted outbound transport context for the request matched
+    /// by a SIP response's `Call-ID` and `CSeq`, if this process sent it.
+    ///
+    /// This is post-send telemetry: it reflects the transport selected by the
+    /// transaction path that accepted the outbound request, not a URI string
+    /// guess. Higher layers use it for auth policy decisions before replying
+    /// to a 401/407 challenge with credential-bearing headers.
+    pub fn outbound_transport_context_for_response(
+        &self,
+        response: &Response,
+    ) -> Option<rvoip_infra_common::events::cross_crate::SipTransportContext> {
+        self.manager
+            .core()
+            .outbound_transport_context_for_response(response)
     }
 
     /// Get reference to the subscription manager if configured
@@ -1685,6 +1710,9 @@ impl UnifiedDialogApi {
         expires: u32,
         accept: Option<String>,
         authorization: Option<String>,
+        cseq: u32,
+        call_id: Option<String>,
+        from_tag: Option<String>,
         extra_headers: Vec<TypedHeader>,
     ) -> ApiResult<Response> {
         let dest_uri = target_uri
@@ -1704,7 +1732,9 @@ impl UnifiedDialogApi {
             expires,
             accept,
             authorization,
-            1,
+            cseq,
+            call_id,
+            from_tag,
             local_addr,
             extras_opt,
         )
@@ -1734,6 +1764,9 @@ impl UnifiedDialogApi {
         body: String,
         content_type: Option<String>,
         authorization: Option<String>,
+        cseq: u32,
+        call_id: Option<String>,
+        from_tag: Option<String>,
         extra_headers: Vec<TypedHeader>,
     ) -> ApiResult<Response> {
         let dest_uri = target_uri
@@ -1749,10 +1782,12 @@ impl UnifiedDialogApi {
             target_uri,
             from_uri,
             body,
-            1,
+            cseq,
             local_addr,
             content_type,
             authorization,
+            call_id,
+            from_tag,
             extras_opt,
         )
         .map_err(|e| ApiError::protocol(format!("Failed to build MESSAGE request: {}", e)))?;
@@ -2267,6 +2302,9 @@ impl UnifiedDialogApi {
             opts.expires,
             opts.accept,
             opts.authorization,
+            opts.cseq.unwrap_or(1),
+            opts.call_id,
+            opts.from_tag,
             opts.extra_headers,
         )
         .await
@@ -2289,6 +2327,9 @@ impl UnifiedDialogApi {
             body_string,
             content_type,
             opts.authorization,
+            opts.cseq.unwrap_or(1),
+            opts.call_id,
+            opts.from_tag,
             opts.extra_headers,
         )
         .await
@@ -2312,9 +2353,11 @@ impl UnifiedDialogApi {
         let request = crate::transaction::dialog::options_out_of_dialog_with_extras(
             &opts.to_uri,
             &opts.from_uri,
-            1,
+            opts.cseq.unwrap_or(1),
             local_addr,
             opts.accept,
+            opts.call_id,
+            opts.from_tag,
             extras_opt,
         )
         .map_err(|e| ApiError::protocol(format!("Failed to build OPTIONS request: {}", e)))?;
@@ -2641,6 +2684,15 @@ impl UnifiedDialogApi {
             destination
         );
 
+        let request_key = crate::manager::core::outbound_request_key(&request);
+        let next_hop =
+            crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request);
+        let selected_transport = self
+            .manager
+            .core()
+            .transaction_manager()
+            .get_best_transport_for_uri(&next_hop);
+
         // Create a non-dialog transaction directly with the transaction manager
         let transaction_id = match request.method() {
             Method::Invite => {
@@ -2668,6 +2720,12 @@ impl UnifiedDialogApi {
             .send_request(&transaction_id)
             .await
             .map_err(|e| ApiError::internal(format!("Failed to send request: {}", e)))?;
+        self.manager.core().record_outbound_transport_context(
+            &transaction_id,
+            request_key,
+            selected_transport,
+            destination,
+        );
 
         // Wait for final response
         let response = self

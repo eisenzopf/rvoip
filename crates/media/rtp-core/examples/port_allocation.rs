@@ -18,7 +18,8 @@ use rvoip_rtp_core::{
     transport::{
         AllocationStrategy, GlobalPortAllocator, PairingStrategy, PlatformType,
         PortAllocatorConfig, RtpTransportConfig, UdpRtpTransport,
-    }, RtpTransport,
+    },
+    RtpTransport,
 };
 
 const SESSION_COUNT: usize = 5;

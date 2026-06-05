@@ -9,9 +9,7 @@ use futures::{SinkExt, StreamExt};
 use rvoip_auth_core::BearerValidator;
 use rvoip_core::adapter::{AdapterEvent, EndReason};
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
-use rvoip_core::connection::{
-    Connection, ConnectionState, Direction, Transport, TransportHandle,
-};
+use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId};
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::state::{UctpCoordinator, UctpSessionEvent, ENVELOPE_CHANNEL_CAP};
@@ -34,8 +32,7 @@ impl UctpWsServer {
         routes: Arc<DashMap<ConnectionId, Route>>,
         _max_concurrent: usize,
         coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
-        #[cfg(feature = "wss")]
-        tls: Option<Arc<rustls::ServerConfig>>,
+        #[cfg(feature = "wss")] tls: Option<Arc<rustls::ServerConfig>>,
     ) -> Arc<Self> {
         #[cfg(feature = "wss")]
         let tls_acceptor = tls.map(tokio_rustls::TlsAcceptor::from);
@@ -197,32 +194,28 @@ async fn spawn_peer_session<S>(
     let inbound_pump = tokio::spawn(async move {
         while let Some(msg) = stream.next().await {
             match msg {
-                Ok(Message::Text(text)) => {
-                    match serde_json::from_str::<UctpEnvelope>(&text) {
-                        Ok(env) => {
-                            #[cfg(feature = "media-webrtc")]
-                            {
-                                if env.msg_type
-                                    == rvoip_uctp::types::MessageType::ConnectionOffer
-                                {
-                                    intercept_connection_offer(
-                                        &env,
-                                        &routes_for_inbound,
-                                        &by_uctp_sid_for_inbound,
-                                        &route_out_tx_for_inbound,
-                                    )
-                                    .await;
-                                }
-                            }
-                            if in_tx_for_pump.send(env).await.is_err() {
-                                return;
+                Ok(Message::Text(text)) => match serde_json::from_str::<UctpEnvelope>(&text) {
+                    Ok(env) => {
+                        #[cfg(feature = "media-webrtc")]
+                        {
+                            if env.msg_type == rvoip_uctp::types::MessageType::ConnectionOffer {
+                                intercept_connection_offer(
+                                    &env,
+                                    &routes_for_inbound,
+                                    &by_uctp_sid_for_inbound,
+                                    &route_out_tx_for_inbound,
+                                )
+                                .await;
                             }
                         }
-                        Err(e) => {
-                            warn!(error = %e, "rvoip-websocket: malformed envelope; dropping");
+                        if in_tx_for_pump.send(env).await.is_err() {
+                            return;
                         }
                     }
-                }
+                    Err(e) => {
+                        warn!(error = %e, "rvoip-websocket: malformed envelope; dropping");
+                    }
+                },
                 Ok(Message::Close(_)) => {
                     debug!("rvoip-websocket: peer sent close");
                     return;
@@ -282,11 +275,8 @@ async fn spawn_peer_session<S>(
             // Per-peer auth state; consumed by InboundInvite to emit a
             // synthetic `AdapterEvent::Authenticated` follow-up. Plan
             // §7 G1 / A3.
-            let mut latest_auth: Option<(
-                String,
-                String,
-                rvoip_core::identity::IdentityAssurance,
-            )> = None;
+            let mut latest_auth: Option<(String, String, rvoip_core::identity::IdentityAssurance)> =
+                None;
 
             while let Some(event) = coord_events_rx.recv().await {
                 let adapter_event: Option<AdapterEvent> = match event {
@@ -314,9 +304,7 @@ async fn spawn_peer_session<S>(
                         let route_streams = Arc::new(DashMap::new());
                         #[cfg(feature = "media-webrtc")]
                         let bridge_slot: Arc<
-                            parking_lot::Mutex<
-                                Option<Arc<crate::media_bridge::WebRtcMediaBridge>>,
-                            >,
+                            parking_lot::Mutex<Option<Arc<crate::media_bridge::WebRtcMediaBridge>>>,
                         > = Arc::new(parking_lot::Mutex::new(None));
                         #[cfg(feature = "media-webrtc")]
                         let pending_offer: Arc<
@@ -360,8 +348,7 @@ async fn spawn_peer_session<S>(
                         let _ = events_tx
                             .send(AdapterEvent::InboundConnection { connection })
                             .await;
-                        if let Some((identity_id, participant_id, assurance)) =
-                            latest_auth.clone()
+                        if let Some((identity_id, participant_id, assurance)) = latest_auth.clone()
                         {
                             let _ = events_tx
                                 .send(AdapterEvent::Authenticated {
@@ -376,9 +363,7 @@ async fn spawn_peer_session<S>(
                     }
                     UctpSessionEvent::SessionConnected { sid } => {
                         match by_uctp_sid.get(sid.as_str()).map(|r| r.clone()) {
-                            Some(connection_id) => {
-                                Some(AdapterEvent::Connected { connection_id })
-                            }
+                            Some(connection_id) => Some(AdapterEvent::Connected { connection_id }),
                             None => Some(AdapterEvent::Native {
                                 kind: "uctp.session_connected_orphan",
                                 detail: sid.to_string(),
@@ -547,11 +532,9 @@ async fn intercept_connection_offer(
     if payload.substrate != "websocket+webrtc" {
         return;
     }
-    let Ok(setup) =
-        serde_json::from_value::<rvoip_uctp::payloads::connection::WebRtcSubstrateSetup>(
-            payload.substrate_setup,
-        )
-    else {
+    let Ok(setup) = serde_json::from_value::<rvoip_uctp::payloads::connection::WebRtcSubstrateSetup>(
+        payload.substrate_setup,
+    ) else {
         return;
     };
 
@@ -614,11 +597,11 @@ async fn mutate_connection_answer(
 
     // Only fill substrate_setup when it's null/empty — respect any
     // value an upstream layer already provided.
-    let mut payload: rvoip_uctp::payloads::connection::ConnectionAnswer =
-        match env.decode_payload() {
-            Ok(p) => p,
-            Err(_) => return env,
-        };
+    let mut payload: rvoip_uctp::payloads::connection::ConnectionAnswer = match env.decode_payload()
+    {
+        Ok(p) => p,
+        Err(_) => return env,
+    };
     let already_set = match &payload.substrate_setup {
         serde_json::Value::Null => false,
         serde_json::Value::Object(map) => !map.is_empty(),
@@ -648,14 +631,12 @@ async fn mutate_connection_answer(
 
 #[cfg(feature = "media-webrtc")]
 fn spawn_bridge_setup(
-    bridge_slot: Arc<
-        parking_lot::Mutex<Option<Arc<crate::media_bridge::WebRtcMediaBridge>>>,
+    bridge_slot: Arc<parking_lot::Mutex<Option<Arc<crate::media_bridge::WebRtcMediaBridge>>>>,
+    route_streams: Arc<
+        DashMap<rvoip_core::ids::StreamId, Arc<dyn rvoip_core::stream::MediaStream>>,
     >,
-    route_streams: Arc<DashMap<rvoip_core::ids::StreamId, Arc<dyn rvoip_core::stream::MediaStream>>>,
     pending_offer: Arc<
-        parking_lot::Mutex<
-            Option<rvoip_uctp::payloads::connection::WebRtcSubstrateSetup>,
-        >,
+        parking_lot::Mutex<Option<rvoip_uctp::payloads::connection::WebRtcSubstrateSetup>>,
     >,
     route_out_tx: mpsc::Sender<UctpEnvelope>,
     sid: String,
@@ -767,7 +748,9 @@ pub fn spawn_trickle_ice_pump(
                     // m-line 0 in the answer SDP that
                     // `mutate_connection_answer` produces, so the EoC
                     // marker carries the same identifiers.
-                    let eoc = rvoip_uctp::payloads::connection::IceCandidateInit::end_of_candidates("0", 0);
+                    let eoc = rvoip_uctp::payloads::connection::IceCandidateInit::end_of_candidates(
+                        "0", 0,
+                    );
                     let env = UctpEnvelope::new(
                         rvoip_uctp::types::MessageType::ConnectionIceCandidate,
                         serde_json::to_value(&eoc).unwrap_or(serde_json::Value::Null),

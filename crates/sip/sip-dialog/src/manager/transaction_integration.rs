@@ -703,12 +703,11 @@ impl DialogManager {
 /// RFC 3261 §22.2 — resend an INVITE with an `Authorization` or
 /// `Proxy-Authorization` header after the UAS/proxy challenged with 401/407.
 ///
-/// The original INVITE's dialog is reused: same `Call-ID`, same `From` tag,
-/// no remote tag (the challenge was a final response that did *not* establish
-/// a dialog). CSeq is bumped via `Dialog::create_request_template` so the
-/// retry forms a new transaction under the same dialog record. The caller
-/// supplies the fully-formatted digest header value via
-/// `auth-core::DigestClient::format_authorization`.
+/// The local UAC request template is reused so the retry keeps the same
+/// `Call-ID` and `From` tag, has no remote tag, and bumps CSeq on a new client
+/// transaction. On the UAS side, the 401/407 final response terminates the
+/// early dialog, so this retry must be routed as a fresh initial INVITE rather
+/// than a re-INVITE. The caller supplies the fully-formatted auth header value.
 impl DialogManager {
     /// Find the newest outbound INVITE transaction for a dialog.
     ///
@@ -1248,6 +1247,9 @@ impl DialogManager {
                 }
             }
 
+            let sent_request = req.clone();
+            let request_key = crate::manager::core::outbound_request_key(&sent_request);
+
             let tx_result = if method == Method::Invite {
                 self.transaction_manager
                     .create_invite_client_transaction(req, target.addr)
@@ -1280,6 +1282,13 @@ impl DialogManager {
 
             match self.transaction_manager.send_request(&tx_id).await {
                 Ok(()) => {
+                    self.record_outbound_transport_context(
+                        &tx_id,
+                        request_key,
+                        target.transport,
+                        target.addr,
+                    );
+                    self.post_send_request(&sent_request, target.addr).await?;
                     if attempt > 1 {
                         debug!(
                             "RFC 3263 §4.3: candidate {}/{} ({}) succeeded after {} prior failure(s)",
@@ -1300,6 +1309,13 @@ impl DialogManager {
                         // RFC 3261 §17.1.1.3 — INVITE client transitions
                         // Calling → Terminated on automatic ACK for 2xx;
                         // treat as success and don't fail over.
+                        self.record_outbound_transport_context(
+                            &tx_id,
+                            request_key,
+                            target.transport,
+                            target.addr,
+                        );
+                        self.post_send_request(&sent_request, target.addr).await?;
                         if attempt > 1 {
                             debug!(
                                 "RFC 3263 §4.3: candidate {}/{} ({}) succeeded after {} prior failure(s) (benign terminate)",
@@ -2462,6 +2478,12 @@ impl DialogManager {
             (destination, request)
         };
 
+        let request_key = crate::manager::core::outbound_request_key(&request);
+        let next_hop =
+            crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request);
+        let selected_transport = self
+            .transaction_manager
+            .get_best_transport_for_uri(&next_hop);
         let transaction_id = self
             .transaction_manager
             .create_non_invite_client_transaction(request, destination)
@@ -2478,6 +2500,12 @@ impl DialogManager {
             .map_err(|e| crate::errors::DialogError::TransactionError {
                 message: format!("Failed to send PRACK: {}", e),
             })?;
+        self.record_outbound_transport_context(
+            &transaction_id,
+            request_key,
+            selected_transport,
+            destination,
+        );
 
         info!(
             "Sent PRACK for dialog {} (transaction {}, RSeq={})",

@@ -139,11 +139,7 @@ impl ConnectionAdapter for StepUpAdapter {
     async fn unmute(&self, _c: ConnectionId, _d: MuteDirection) -> RvResult<()> {
         Ok(())
     }
-    async fn play_audio(
-        &self,
-        _c: ConnectionId,
-        _s: AudioSource,
-    ) -> RvResult<PlaybackHandle> {
+    async fn play_audio(&self, _c: ConnectionId, _s: AudioSource) -> RvResult<PlaybackHandle> {
         Err(RvoipError::NotImplemented("play_audio"))
     }
     async fn send_step_up_request(
@@ -346,10 +342,7 @@ async fn complete_step_up_emits_assurance_changed() {
         .await
         .expect("complete_step_up");
 
-    assert!(matches!(
-        assurance,
-        IdentityAssurance::Identified { .. }
-    ));
+    assert!(matches!(assurance, IdentityAssurance::Identified { .. }));
 
     // Find IdentityAssuranceChanged.
     let mut saw = false;

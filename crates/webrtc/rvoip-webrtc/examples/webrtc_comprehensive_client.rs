@@ -15,7 +15,8 @@ async fn main() {
 
     let ws_url = env::var("WS_URL").unwrap_or_else(|_| "ws://127.0.0.1:8081".into());
     let medium = parse_medium(env::args().skip(1).next().as_deref());
-    let chat_body = env::var("CHAT_MESSAGE").unwrap_or_else(|_| "Hello from comprehensive suite!".into());
+    let chat_body =
+        env::var("CHAT_MESSAGE").unwrap_or_else(|_| "Hello from comprehensive suite!".into());
 
     let result = async {
         let client = WebRtcClient::connect(WebRtcConfig::loopback(), &ws_url).await?;

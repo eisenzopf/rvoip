@@ -17,6 +17,16 @@ async fn table_exists(pool: &SqlitePool, table: &str) -> bool {
         .is_some()
 }
 
+async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> bool {
+    let pragma = format!("PRAGMA table_info({table})");
+    query(&pragma)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .any(|row| row.get::<String, _>("name") == column)
+}
+
 async fn applied_migrations(pool: &SqlitePool) -> Vec<String> {
     query("SELECT id FROM schema_migrations ORDER BY id")
         .fetch_all(pool)
@@ -39,9 +49,11 @@ async fn fresh_database_runs_all_migrations() {
         applied_migrations(store.pool()).await,
         vec![
             "001_initial_schema".to_string(),
-            "002_auth_security_tables".to_string()
+            "002_auth_security_tables".to_string(),
+            "003_api_key_active_state".to_string(),
         ]
     );
+    assert!(column_exists(store.pool(), "api_keys", "active").await);
 }
 
 #[tokio::test]
@@ -102,9 +114,11 @@ async fn old_shape_database_receives_auth_security_tables() {
         applied_migrations(store.pool()).await,
         vec![
             "001_initial_schema".to_string(),
-            "002_auth_security_tables".to_string()
+            "002_auth_security_tables".to_string(),
+            "003_api_key_active_state".to_string(),
         ]
     );
+    assert!(column_exists(store.pool(), "api_keys", "active").await);
 }
 
 #[tokio::test]
@@ -113,14 +127,16 @@ async fn migrations_are_idempotent_on_reopen() {
     let url = db_url(&temp_dir);
     {
         let store = SqliteUserStore::new(&url).await.unwrap();
-        assert_eq!(applied_migrations(store.pool()).await.len(), 2);
+        assert_eq!(applied_migrations(store.pool()).await.len(), 3);
     }
     let store = SqliteUserStore::new(&url).await.unwrap();
     assert_eq!(
         applied_migrations(store.pool()).await,
         vec![
             "001_initial_schema".to_string(),
-            "002_auth_security_tables".to_string()
+            "002_auth_security_tables".to_string(),
+            "003_api_key_active_state".to_string(),
         ]
     );
+    assert!(column_exists(store.pool(), "api_keys", "active").await);
 }

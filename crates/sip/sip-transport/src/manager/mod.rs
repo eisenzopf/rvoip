@@ -1,12 +1,12 @@
+use crate::error::{Error, Result};
+use crate::factory::{TransportFactory, TransportFactoryConfig, TransportType};
+use crate::transport::{Transport, TransportEvent};
+use rvoip_sip_core::Message;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info};
-use crate::error::{Error, Result};
-use crate::factory::{TransportFactory, TransportFactoryConfig, TransportType};
-use crate::transport::{Transport, TransportEvent};
-use rvoip_sip_core::Message;
 
 /// Configuration for the transport manager
 #[derive(Clone, Debug)]

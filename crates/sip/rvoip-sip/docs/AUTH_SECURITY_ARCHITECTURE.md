@@ -72,6 +72,12 @@ the same traits.
 Provider failures should be treated as fail-closed for credential validation
 unless a deployment has a documented exception.
 
+Bearer validators must own token trust policy. A SIP realm is not enough to
+validate a JWT or opaque token. Production validators should enforce issuer,
+audience or resource indicators, expiry, accepted algorithms, `kid` behavior,
+revocation or introspection strategy, and application-required scopes before
+returning an authenticated identity.
+
 ## Logging And Audit
 
 Log or audit:
@@ -108,6 +114,10 @@ Use `AuthRateLimiter` or an equivalent provider for:
 Rate-limit decisions should be audited. Lockout policy should avoid user
 enumeration and should distinguish temporary lockout from credential validity
 only in internal logs.
+
+`SipAuthService` treats rate-limiter provider failures as fail-closed. Audit
+sink failures are fail-open by default and can be made fail-closed with
+`AuditFailurePolicy::FailClosed` when audit delivery is a hard control.
 
 ## Clustered Deployment Requirements
 

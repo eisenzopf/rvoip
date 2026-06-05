@@ -1,7 +1,7 @@
-#[cfg(test)]
-use crate::types::headers::HeaderName;
 use super::HeaderSetter;
 use crate::types::error_info::{ErrorInfo, ErrorInfoHeader};
+#[cfg(test)]
+use crate::types::headers::HeaderName;
 
 /// Error-Info header builder
 ///
@@ -319,11 +319,10 @@ where
 mod tests {
     use super::*;
     use crate::types::header::TypedHeaderTrait;
-    use crate::types::TypedHeader;
     use crate::types::StatusCode;
+    use crate::types::TypedHeader;
     use crate::ResponseBuilder;
     use std::convert::TryFrom;
-    
 
     #[test]
     fn test_error_info_uri() {

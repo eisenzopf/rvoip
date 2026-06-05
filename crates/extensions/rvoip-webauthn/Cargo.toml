@@ -1,0 +1,31 @@
+[package]
+name = "rvoip-webauthn"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description = "WebAuthn/passkey adapter for RVoIP users-core"
+
+[dependencies]
+chrono = { workspace = true }
+parking_lot.workspace = true
+rvoip-users-core.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+url = "2.5"
+uuid = { workspace = true, features = ["v4", "serde"] }
+webauthn-rs = "0.6.1-dev"
+
+[dev-dependencies]
+tempfile = "3.14"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

@@ -247,11 +247,9 @@ impl Default for RtpStatsManager {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn test_stats_manager() {

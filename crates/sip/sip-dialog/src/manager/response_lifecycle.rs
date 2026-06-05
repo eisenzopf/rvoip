@@ -26,6 +26,13 @@
 //!   200 OK built → pre_send_response() → Confirmed + lookup registered
 //!   ↓
 //!   200 OK sent
+//!
+//! UAS final rejection flow (Bob):
+//!   INVITE received → Early dialog
+//!   ↓
+//!   3xx-6xx built → pre_send_response() → Terminated + early lookup removed
+//!   ↓
+//!   final response sent
 //! ```
 
 use rvoip_sip_core::{Method, Request, Response};
@@ -86,8 +93,12 @@ pub trait ResponseLifecycle {
 impl ResponseLifecycle for DialogManager {
     /// Pre-send hook for UAS responses
     ///
-    /// Handles dialog state transitions when sending responses, particularly
-    /// for 200 OK responses to INVITE which confirm the dialog.
+    /// Handles dialog state transitions when sending responses. A 2xx final
+    /// response to an initial INVITE confirms the dialog. A 3xx-6xx final
+    /// response terminates any early dialog created by provisional responses;
+    /// this is especially important for RFC 3261 §22.2 auth retries because
+    /// the authenticated INVITE is a new initial INVITE transaction, not an
+    /// in-dialog re-INVITE.
     async fn pre_send_response(
         &self,
         dialog_id: &DialogId,
@@ -102,9 +113,12 @@ impl ResponseLifecycle for DialogManager {
             original_request.method()
         );
 
-        // Only process 200 OK responses to INVITE (dialog-confirming)
-        if response.status_code() == 200 && original_request.method() == Method::Invite {
-            self.confirm_uas_dialog(dialog_id, response).await?;
+        if original_request.method() == Method::Invite {
+            match response.status_code() {
+                200 => self.confirm_uas_dialog(dialog_id, response).await?,
+                300..=699 => self.terminate_uas_early_dialog_for_final_response(dialog_id)?,
+                _ => {}
+            }
         }
 
         Ok(())
@@ -229,13 +243,158 @@ impl DialogManager {
 
         Ok(())
     }
+
+    /// Terminate an early UAS dialog before sending a final non-2xx response
+    /// to the initial INVITE.
+    ///
+    /// RFC 3261 §12.3 says early dialogs terminate when a non-2xx final
+    /// response is sent for the initial INVITE. Removing the early lookup here
+    /// closes the race where an authenticated retry after 401/407 could arrive
+    /// before upper-layer session cleanup and be misclassified as a re-INVITE.
+    fn terminate_uas_early_dialog_for_final_response(
+        &self,
+        dialog_id: &DialogId,
+    ) -> DialogResult<()> {
+        let mut dialog = self.get_dialog_mut(dialog_id)?;
+        if dialog.state != DialogState::Early {
+            debug!(
+                "Dialog {} is {:?}, not terminating as rejected early dialog",
+                dialog_id, dialog.state
+            );
+            return Ok(());
+        }
+
+        if let Some(remote_tag) = dialog.remote_tag.as_ref() {
+            let early_key = DialogUtils::create_early_lookup_key(&dialog.call_id, remote_tag);
+            self.early_dialog_lookup.remove(&early_key);
+        }
+
+        dialog.state = DialogState::Terminated;
+        info!(
+            "Dialog {} transitioned Early -> Terminated (UAS sending final non-2xx INVITE response)",
+            dialog_id
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn test_response_lifecycle_trait_exists() {
-        // This test just validates the trait compiles
-        // Actual functionality tests would require a full DialogManager setup
+    use super::*;
+    use crate::manager::DialogLookup;
+    use crate::transaction::TransactionManager;
+    use async_trait::async_trait;
+    use rvoip_sip_core::builder::SimpleRequestBuilder;
+    use rvoip_sip_core::StatusCode;
+    use rvoip_sip_transport::error::Result as TransportResult;
+    use rvoip_sip_transport::{Transport, TransportEvent};
+    use std::net::SocketAddr;
+    use std::str::FromStr;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    #[derive(Debug)]
+    struct NoopTransport {
+        addr: SocketAddr,
+        closed: AtomicBool,
+    }
+
+    impl NoopTransport {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                addr: SocketAddr::from_str("127.0.0.1:5060").unwrap(),
+                closed: AtomicBool::new(false),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Transport for NoopTransport {
+        fn local_addr(&self) -> TransportResult<SocketAddr> {
+            Ok(self.addr)
+        }
+
+        async fn send_message(
+            &self,
+            _message: rvoip_sip_core::Message,
+            _destination: SocketAddr,
+        ) -> TransportResult<()> {
+            Ok(())
+        }
+
+        async fn close(&self) -> TransportResult<()> {
+            self.closed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_closed(&self) -> bool {
+            self.closed.load(Ordering::SeqCst)
+        }
+    }
+
+    async fn make_manager() -> DialogManager {
+        let transport = NoopTransport::new();
+        let (_tx, transport_rx) = mpsc::channel::<TransportEvent>(16);
+        let (transaction_manager, _events_rx) =
+            TransactionManager::new(transport, transport_rx, Some(16))
+                .await
+                .expect("build TransactionManager");
+        DialogManager::new(
+            Arc::new(transaction_manager),
+            SocketAddr::from_str("127.0.0.1:5060").unwrap(),
+        )
+        .await
+        .expect("build DialogManager")
+    }
+
+    fn initial_invite() -> Request {
+        SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-tag"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5061", None)
+            .call_id("auth-retry-dialog-test")
+            .cseq(1)
+            .via("127.0.0.1:5061", "UDP", Some("z9hG4bK-auth-retry"))
+            .max_forwards(70)
+            .build()
+    }
+
+    #[tokio::test]
+    async fn final_non_2xx_to_initial_invite_removes_early_dialog_lookup() {
+        let manager = make_manager().await;
+        let request = initial_invite();
+        let dialog_id = manager
+            .create_early_dialog_from_invite(&request)
+            .await
+            .expect("create early dialog");
+
+        assert_eq!(
+            manager.find_dialog_for_request(&request).await,
+            Some(dialog_id.clone()),
+            "initial early dialog should be discoverable before final response"
+        );
+
+        let response = Response::new(StatusCode::Unauthorized);
+        let transaction_id =
+            TransactionKey::new("z9hG4bK-auth-retry".to_string(), Method::Invite, true);
+
+        manager
+            .pre_send_response(&dialog_id, &response, &transaction_id, &request)
+            .await
+            .expect("pre-send lifecycle");
+
+        assert_eq!(
+            manager
+                .get_dialog_state(&dialog_id)
+                .expect("dialog should remain until upper-layer cleanup"),
+            DialogState::Terminated
+        );
+        assert_eq!(
+            manager.find_dialog_for_request(&request).await,
+            None,
+            "a no-To-tag authenticated retry must not resolve as a re-INVITE"
+        );
     }
 }

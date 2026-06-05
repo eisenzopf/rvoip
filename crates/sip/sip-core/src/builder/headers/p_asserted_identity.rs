@@ -153,10 +153,7 @@ where
 mod tests {
     use super::*;
     use crate::builder::SimpleRequestBuilder;
-    use crate::types::{
-        headers::TypedHeader,
-        method::Method,
-    };
+    use crate::types::{headers::TypedHeader, method::Method};
 
     #[test]
     fn pai_single_uri_lands_on_request() {

@@ -1073,6 +1073,8 @@ pub fn subscribe_out_of_dialog(
         None, // accept
         None, // authorization
         cseq,
+        None, // call_id
+        None, // from_tag
         local_address,
         None,
     )
@@ -1090,6 +1092,8 @@ pub fn subscribe_out_of_dialog_with_extras(
     accept: Option<String>,
     authorization: Option<String>,
     cseq: u32,
+    call_id: Option<String>,
+    from_tag: Option<String>,
     local_address: SocketAddr,
     extra_headers: Option<Vec<TypedHeader>>,
 ) -> Result<Request> {
@@ -1099,6 +1103,8 @@ pub fn subscribe_out_of_dialog_with_extras(
     let from_uri = from_uri.into();
     let contact_uri = contact_uri.into();
     let event_package = event_package.into();
+    let call_id = call_id.unwrap_or_else(|| format!("sub-{}", uuid::Uuid::new_v4()));
+    let from_tag = from_tag.unwrap_or_else(|| format!("tag-{}", uuid::Uuid::new_v4().simple()));
     let branch = crate::transaction::utils::dialog_utils::generate_branch();
     let via_transport = via_transport_for_uris(&target_uri, &from_uri);
 
@@ -1108,13 +1114,9 @@ pub fn subscribe_out_of_dialog_with_extras(
         expires,
     )
     .map_err(|e| Error::Other(format!("Failed to build SUBSCRIBE request: {}", e)))?
-    .from(
-        "",
-        &from_uri,
-        Some(&format!("tag-{}", uuid::Uuid::new_v4().simple())),
-    )
+    .from("", &from_uri, Some(&from_tag))
     .to("", &target_uri, None)
-    .call_id(&format!("sub-{}", uuid::Uuid::new_v4()))
+    .call_id(&call_id)
     .cseq(cseq)
     .via(&local_address.to_string(), via_transport, Some(&branch))
     .max_forwards(70)
@@ -1238,6 +1240,8 @@ pub fn message_out_of_dialog(
         local_address,
         None, // content_type
         None, // authorization
+        None, // call_id
+        None, // from_tag
         None, // extra_headers
     )
 }
@@ -1254,6 +1258,8 @@ pub fn message_out_of_dialog_with_extras(
     local_address: SocketAddr,
     content_type: Option<String>,
     authorization: Option<String>,
+    call_id: Option<String>,
+    from_tag: Option<String>,
     extra_headers: Option<Vec<TypedHeader>>,
 ) -> Result<Request> {
     use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
@@ -1262,19 +1268,17 @@ pub fn message_out_of_dialog_with_extras(
     let from_uri = from_uri.into();
     let body = body.into();
     let ct = content_type.unwrap_or_else(|| "text/plain".to_string());
+    let call_id = call_id.unwrap_or_else(|| format!("msg-{}", uuid::Uuid::new_v4()));
+    let from_tag = from_tag.unwrap_or_else(|| format!("tag-{}", uuid::Uuid::new_v4().simple()));
     let branch = crate::transaction::utils::dialog_utils::generate_branch();
     let via_transport = via_transport_for_uris(&target_uri, &from_uri);
 
     let mut request =
         rvoip_sip_core::builder::SimpleRequestBuilder::new(Method::Message, &target_uri)
             .map_err(|e| Error::Other(format!("Failed to build MESSAGE request: {}", e)))?
-            .from(
-                "",
-                &from_uri,
-                Some(&format!("tag-{}", uuid::Uuid::new_v4().simple())),
-            )
+            .from("", &from_uri, Some(&from_tag))
             .to("", &target_uri, None)
-            .call_id(&format!("msg-{}", uuid::Uuid::new_v4()))
+            .call_id(&call_id)
             .cseq(cseq)
             .via(&local_address.to_string(), via_transport, Some(&branch))
             .max_forwards(70)
@@ -1309,25 +1313,25 @@ pub fn options_out_of_dialog_with_extras(
     cseq: u32,
     local_address: SocketAddr,
     accept: Option<String>,
+    call_id: Option<String>,
+    from_tag: Option<String>,
     extra_headers: Option<Vec<TypedHeader>>,
 ) -> Result<Request> {
     use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
 
     let target_uri = target_uri.into();
     let from_uri = from_uri.into();
+    let call_id = call_id.unwrap_or_else(|| format!("opt-{}", uuid::Uuid::new_v4()));
+    let from_tag = from_tag.unwrap_or_else(|| format!("tag-{}", uuid::Uuid::new_v4().simple()));
     let branch = crate::transaction::utils::dialog_utils::generate_branch();
     let via_transport = via_transport_for_uris(&target_uri, &from_uri);
 
     let mut builder =
         rvoip_sip_core::builder::SimpleRequestBuilder::new(Method::Options, &target_uri)
             .map_err(|e| Error::Other(format!("Failed to build OPTIONS request: {}", e)))?
-            .from(
-                "",
-                &from_uri,
-                Some(&format!("tag-{}", uuid::Uuid::new_v4().simple())),
-            )
+            .from("", &from_uri, Some(&from_tag))
             .to("", &target_uri, None)
-            .call_id(&format!("opt-{}", uuid::Uuid::new_v4()))
+            .call_id(&call_id)
             .cseq(cseq)
             .via(&local_address.to_string(), via_transport, Some(&branch))
             .max_forwards(70);

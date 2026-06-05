@@ -75,7 +75,10 @@ pub mod uctp {
 #[derive(Clone, Debug)]
 pub enum Credential {
     Bearer(String),
-    OAuth2Dpop { access_token: String, dpop_proof: String },
+    OAuth2Dpop {
+        access_token: String,
+        dpop_proof: String,
+    },
 }
 
 /// Target of an outbound `Client::call`. Resolved at the underlying
@@ -136,7 +139,9 @@ pub enum InboundEvent {
         connection_id: ConnectionId,
         new_assurance: String,
     },
-    Disconnected { reason: String },
+    Disconnected {
+        reason: String,
+    },
 }
 
 /// Handle to a single Session — returned from `Client::call` and
@@ -263,11 +268,7 @@ impl Client {
     /// Outbound: place a Session against `target`. Returns a handle
     /// the consumer drives. v1 returns `NotImplemented` until the
     /// substrate-specific dial logic is wired per consumer demand.
-    pub async fn call(
-        &self,
-        _target: CallTarget,
-        _medium: SessionMedium,
-    ) -> Result<SessionHandle> {
+    pub async fn call(&self, _target: CallTarget, _medium: SessionMedium) -> Result<SessionHandle> {
         // Local in-process handle (no wire dial yet). Lets consumers
         // exercise the SessionHandle shape immediately while the
         // per-protocol dial implementations land.
@@ -281,11 +282,7 @@ impl Client {
     /// Send a Message in a Conversation. v1 returns
     /// `NotImplemented` until messaging is wired through the chosen
     /// substrate.
-    pub async fn send_message(
-        &self,
-        _cid: ConversationId,
-        _body: &str,
-    ) -> Result<MessageId> {
+    pub async fn send_message(&self, _cid: ConversationId, _body: &str) -> Result<MessageId> {
         Err(ClientError::NotImplemented("Client::send_message"))
     }
 
@@ -328,34 +325,24 @@ mod tests {
 
     #[tokio::test]
     async fn connect_unknown_scheme_errors() {
-        let result = Client::connect(
-            "ftp://example.com",
-            Credential::Bearer("test".into()),
-        )
-        .await;
+        let result = Client::connect("ftp://example.com", Credential::Bearer("test".into())).await;
         assert!(matches!(result, Err(ClientError::UnsupportedScheme(_))));
     }
 
     #[tokio::test]
     async fn incoming_can_be_taken_once() {
-        let client = Client::connect(
-            "uctp+quic://example.com",
-            Credential::Bearer("t".into()),
-        )
-        .await
-        .unwrap();
+        let client = Client::connect("uctp+quic://example.com", Credential::Bearer("t".into()))
+            .await
+            .unwrap();
         assert!(client.incoming().is_some());
         assert!(client.incoming().is_none(), "second take should be None");
     }
 
     #[tokio::test]
     async fn deliver_routes_to_incoming() {
-        let client = Client::connect(
-            "uctp+quic://example.com",
-            Credential::Bearer("t".into()),
-        )
-        .await
-        .unwrap();
+        let client = Client::connect("uctp+quic://example.com", Credential::Bearer("t".into()))
+            .await
+            .unwrap();
         let mut rx = client.incoming().unwrap();
         client
             .deliver(InboundEvent::Disconnected {

@@ -9,7 +9,9 @@ use tokio::sync::{mpsc, RwLock};
 use tokio::time::{timeout, Duration};
 
 // Import rtp-core types
-use rvoip_rtp_core::{ClientConfigBuilder, ClientFactory, MediaFrame, MediaFrameType, MediaTransportClient};
+use rvoip_rtp_core::{
+    ClientConfigBuilder, ClientFactory, MediaFrame, MediaFrameType, MediaTransportClient,
+};
 
 // Import media-core types
 use codec_core::codecs::g711::G711Variant;

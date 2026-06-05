@@ -53,11 +53,7 @@ pub trait MessageStore: Send + Sync {
     /// (consumer-defined: by side-band map, or by amending the
     /// Message itself). For the in-memory impl we keep a side-band
     /// `read_by` map keyed by message_id → Vec<participant_id>.
-    async fn mark_read(
-        &self,
-        id: &MessageId,
-        by: &ParticipantId,
-    ) -> Result<()>;
+    async fn mark_read(&self, id: &MessageId, by: &ParticipantId) -> Result<()>;
 }
 
 #[derive(Clone, Debug, Default)]
@@ -144,11 +140,7 @@ impl MessageStore for MemoryMessageStore {
         })
     }
 
-    async fn mark_read(
-        &self,
-        id: &MessageId,
-        by: &ParticipantId,
-    ) -> Result<()> {
+    async fn mark_read(&self, id: &MessageId, by: &ParticipantId) -> Result<()> {
         let mut e = self.read_by.entry(id.clone()).or_default();
         if !e.contains(by) {
             e.push(by.clone());

@@ -182,7 +182,6 @@ mod tests {
     use super::*;
     use crate::types::header::TypedHeaderTrait;
     use crate::types::param::{GenericValue, Param};
-    
 
     #[test]
     fn test_info_param() {

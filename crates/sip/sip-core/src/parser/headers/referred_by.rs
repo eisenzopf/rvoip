@@ -80,7 +80,6 @@ mod tests {
     use super::*;
     use crate::types::param::{GenericValue, Param};
     use crate::types::uri::Scheme;
-    
 
     #[test]
     fn test_parse_referred_by_simple() {

@@ -110,6 +110,7 @@ pub struct ApiKeyResponse {
     pub id: String,
     pub name: String,
     pub permissions: Vec<String>,
+    pub active: bool,
     pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub last_used: Option<DateTime<Utc>>,
@@ -563,6 +564,7 @@ async fn create_api_key(
                 id: key_info.id,
                 name: key_info.name,
                 permissions: key_info.permissions,
+                active: key_info.active,
                 expires_at: key_info.expires_at,
                 created_at: key_info.created_at,
                 last_used: key_info.last_used,
@@ -593,6 +595,7 @@ async fn list_api_keys(
             id: k.id,
             name: k.name,
             permissions: k.permissions,
+            active: k.active,
             expires_at: k.expires_at,
             created_at: k.created_at,
             last_used: k.last_used,
@@ -701,7 +704,7 @@ async fn metrics(State(state): State<ApiState>) -> Result<Json<serde_json::Value
         },
         "api_keys": {
             "total": total_api_keys,
-            "active": total_api_keys, // Simplified: all keys are considered active
+            "active": total_api_keys, // API metrics count creations/revocations; list APIs expose suspension state.
         },
         "authentication": {
             "attempts": auth_attempts,

@@ -2,11 +2,7 @@
 // Allow = "Allow" HCOLON [Method *(COMMA Method)]
 // Method = token
 
-use nom::{
-    error::Error,
-    multi::separated_list0,
-    sequence::delimited,
-};
+use nom::{error::Error, multi::separated_list0, sequence::delimited};
 
 // Import from new modules
 use crate::parser::separators::comma;

@@ -78,9 +78,7 @@ async fn whip_webrtc_bridged_to_real_quic_leg() {
     let mut events = orchestrator.subscribe_events();
 
     // Real UCTP/QUIC inbound leg (auth + session.invite).
-    let quic_client = quic
-        .dial_invite(&session_id.to_string(), "quic_peer")
-        .await;
+    let quic_client = quic.dial_invite(&session_id.to_string(), "quic_peer").await;
     let quic_conn = wait_quic_inbound(&mut events).await;
 
     // WHIP publisher (foreign WebRTC client).
@@ -176,10 +174,18 @@ async fn whip_webrtc_bridged_to_real_quic_leg() {
     spawn_datagram_reader(quic_client.connection.clone(), router, None);
     let mut client_in = client_stream.frames_in();
 
-    publisher.accept(pub_conn.clone()).await.expect("publisher accept");
+    publisher
+        .accept(pub_conn.clone())
+        .await
+        .expect("publisher accept");
 
     // webrtc-rs fires on_track only after the first inbound RTP packet.
-    let offerer_peer = publisher.routes().get(&pub_conn).expect("pub route").peer.clone();
+    let offerer_peer = publisher
+        .routes()
+        .get(&pub_conn)
+        .expect("pub route")
+        .peer
+        .clone();
     let answerer_peer = server
         .adapter()
         .routes()
@@ -187,15 +193,14 @@ async fn whip_webrtc_bridged_to_real_quic_leg() {
         .expect("server route")
         .peer
         .clone();
-    RvoipPeerConnection::prime_remote_track(
-        &offerer_peer,
-        &answerer_peer,
-        Duration::from_secs(10),
-    )
-    .await
-    .expect("remote track on WHIP answerer");
+    RvoipPeerConnection::prime_remote_track(&offerer_peer, &answerer_peer, Duration::from_secs(10))
+        .await
+        .expect("remote track on WHIP answerer");
 
-    let pub_streams = publisher.streams(pub_conn.clone()).await.expect("pub streams");
+    let pub_streams = publisher
+        .streams(pub_conn.clone())
+        .await
+        .expect("pub streams");
     let pub_stream = pub_streams.first().expect("publisher stream");
     let pub_ssrc = offerer_peer.local_audio_ssrc().expect("publisher ssrc");
 
@@ -219,7 +224,10 @@ async fn whip_webrtc_bridged_to_real_quic_leg() {
         .await
         .expect("quic client recv timeout")
         .expect("quic client stream closed");
-    assert!(!frame.payload.is_empty(), "expected bridged media on QUIC client");
+    assert!(
+        !frame.payload.is_empty(),
+        "expected bridged media on QUIC client"
+    );
 
     server.shutdown().await;
 }

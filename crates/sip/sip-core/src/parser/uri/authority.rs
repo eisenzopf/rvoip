@@ -1,7 +1,6 @@
 // Parser for URI authority component (RFC 3261/2396)
 // authority = userinfo@host:port or standalone reg-name
 
-
 // Import shared parsers
 use crate::parser::ParseResult;
 
@@ -67,7 +66,6 @@ fn is_hex_digit(c: u8) -> bool {
 // reg-name-char = unreserved / escaped / "$" / "," / ";" / ":" / "@" / "&" / "=" / "+"
 
 // userinfo_bytes = use userinfo parser but return matched bytes instead
-
 
 // Function to validate that authority strings don't have invalid percent-encoding
 

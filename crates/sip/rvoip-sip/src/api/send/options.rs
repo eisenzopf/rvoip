@@ -99,6 +99,9 @@ impl OptionsBuilder {
             to_uri: self.target,
             accept: self.accept,
             timeout: self.timeout,
+            cseq: None,
+            call_id: None,
+            from_tag: None,
             extra_headers,
         };
         let auth = self.auth.or_else(|| self.credentials.map(Into::into));

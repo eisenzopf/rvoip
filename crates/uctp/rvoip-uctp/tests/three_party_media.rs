@@ -47,7 +47,10 @@ fn install_crypto_provider() {
 
 fn server_endpoint(
     addr: std::net::SocketAddr,
-) -> (Arc<quinn::Endpoint>, rustls::pki_types::CertificateDer<'static>) {
+) -> (
+    Arc<quinn::Endpoint>,
+    rustls::pki_types::CertificateDer<'static>,
+) {
     let (cert_der, key_der) = self_signed_for_dev(&["localhost".into()]).expect("self_signed");
     let mut tls = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -103,7 +106,7 @@ fn invite(sid: &str, participant: &str) -> UctpEnvelope {
             capabilities_offer: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -136,7 +139,7 @@ async fn drive_auth_quic(
         serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "test-token".into(),
-        actor_token: None,
+            actor_token: None,
         })
         .unwrap(),
     )
@@ -182,10 +185,8 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
 
     let orchestrator = Orchestrator::new(Config::default());
     let publishers = orchestrator.publisher_registry();
-    let handler = OrchestratorSubscriptionHandler::new(
-        Arc::clone(&orchestrator),
-        Arc::clone(&publishers),
-    );
+    let handler =
+        OrchestratorSubscriptionHandler::new(Arc::clone(&orchestrator), Arc::clone(&publishers));
     let quic_adapter = UctpQuicAdapter::new(
         UctpQuicConfig::new(Arc::clone(&server_ep), quic_accept_rx, bearer_stub())
             .with_subscription_handler(handler)
@@ -204,14 +205,12 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
     let ep_s = client_endpoint();
     let cfg = dev_client_config_trusting(&cert_der).expect("client cfg");
 
-    let client_a =
-        UctpQuicClient::connect(&ep_a, server_addr, "localhost", Arc::new(cfg.clone()))
-            .await
-            .expect("client a");
-    let client_b =
-        UctpQuicClient::connect(&ep_b, server_addr, "localhost", Arc::new(cfg.clone()))
-            .await
-            .expect("client b");
+    let client_a = UctpQuicClient::connect(&ep_a, server_addr, "localhost", Arc::new(cfg.clone()))
+        .await
+        .expect("client a");
+    let client_b = UctpQuicClient::connect(&ep_b, server_addr, "localhost", Arc::new(cfg.clone()))
+        .await
+        .expect("client b");
     let client_s = UctpQuicClient::connect(&ep_s, server_addr, "localhost", Arc::new(cfg))
         .await
         .expect("client s");
@@ -283,8 +282,18 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
     // subscription must be registered against that publisher's sid.
     let sid_a = SessionId::from_string("sess_3p");
     let sid_b = SessionId::from_string("sess_3p_b");
-    orchestrator.add_subscription(sid_a.clone(), conn_s.clone(), conn_a.clone(), strm_a.clone());
-    orchestrator.add_subscription(sid_b.clone(), conn_s.clone(), conn_b.clone(), strm_b.clone());
+    orchestrator.add_subscription(
+        sid_a.clone(),
+        conn_s.clone(),
+        conn_a.clone(),
+        strm_a.clone(),
+    );
+    orchestrator.add_subscription(
+        sid_b.clone(),
+        conn_s.clone(),
+        conn_b.clone(),
+        strm_b.clone(),
+    );
 
     // --- Publisher-side client streams (both fixed local_id=1, the
     // server-side default audio stream's slot) ---
@@ -328,7 +337,7 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
             payload: prime.clone(),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
-        payload_type: None,
+            payload_type: None,
         })
         .await
         .expect("prime a");
@@ -340,7 +349,7 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
             payload: prime.clone(),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
-        payload_type: None,
+            payload_type: None,
         })
         .await
         .expect("prime b");
@@ -402,7 +411,7 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
                 payload: Bytes::from(vec![0xAA, i]),
                 timestamp_rtp: 0,
                 captured_at: Utc::now(),
-            payload_type: None,
+                payload_type: None,
             })
             .await
             .expect("inject a");
@@ -414,7 +423,7 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
                 payload: Bytes::from(vec![0xBB, i]),
                 timestamp_rtp: 0,
                 captured_at: Utc::now(),
-            payload_type: None,
+                payload_type: None,
             })
             .await
             .expect("inject b");
@@ -451,10 +460,8 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
     // ONE publisher's marker. Mixing would indicate the MP3c
     // local_id rewrite isn't working — both publishers' frames would
     // land on the same MediaStream.
-    let one_markers: std::collections::HashSet<u8> =
-        on_one.iter().copied().collect();
-    let two_markers: std::collections::HashSet<u8> =
-        on_two.iter().copied().collect();
+    let one_markers: std::collections::HashSet<u8> = on_one.iter().copied().collect();
+    let two_markers: std::collections::HashSet<u8> = on_two.iter().copied().collect();
     assert!(
         one_markers.len() <= 1,
         "MP3c: subscriber stream one received mixed publishers: {:?}",

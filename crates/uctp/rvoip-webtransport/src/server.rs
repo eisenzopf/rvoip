@@ -9,14 +9,12 @@ use std::time::Duration;
 use chrono::Utc;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
+use rvoip_auth_core::BearerValidator;
 use rvoip_core::adapter::{AdapterEvent, EndReason};
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
-use rvoip_core::connection::{
-    Connection, ConnectionState, Direction, Transport, TransportHandle,
-};
+use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
 use rvoip_core::stream::{MediaStream, MediaStreamHandle, StreamKind};
-use rvoip_auth_core::BearerValidator;
 
 use crate::adapter::Route;
 use crate::media_stream::WebTransportDatagramMediaStream;
@@ -248,11 +246,8 @@ async fn spawn_peer_session(
             // Per-peer auth state; consumed by the InboundInvite arm to
             // emit a synthetic `AdapterEvent::Authenticated` carrying
             // the just-created Connection's id. Plan §7 G1 / A3.
-            let mut latest_auth: Option<(
-                String,
-                String,
-                rvoip_core::identity::IdentityAssurance,
-            )> = None;
+            let mut latest_auth: Option<(String, String, rvoip_core::identity::IdentityAssurance)> =
+                None;
 
             while let Some(event) = coord_events_rx.recv().await {
                 let adapter_event: Option<AdapterEvent> = match event {
@@ -284,13 +279,13 @@ async fn spawn_peer_session(
                         );
                         streams_router.write().push(stream.clone());
                         if !reader_spawned.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                            let fanout = orchestrator
-                                .as_ref()
-                                .map(|orch| crate::media_stream::FanoutContext {
+                            let fanout = orchestrator.as_ref().map(|orch| {
+                                crate::media_stream::FanoutContext {
                                     orchestrator: Arc::clone(orch),
                                     sid: sid.clone(),
                                     publisher_connid: id.clone(),
-                                });
+                                }
+                            });
                             crate::media_stream::spawn_datagram_reader(
                                 session_for_translator.clone(),
                                 Arc::clone(&streams_router),
@@ -314,17 +309,14 @@ async fn spawn_peer_session(
                                 pending: Arc::clone(&pending),
                                 streams: route_streams,
                                 session: session_for_translator.clone(),
-                                next_local_id: Arc::new(
-                                    std::sync::atomic::AtomicU16::new(2),
-                                ),
+                                next_local_id: Arc::new(std::sync::atomic::AtomicU16::new(2)),
                                 streams_router: Arc::clone(&streams_router),
                             },
                         );
                         let _ = events_tx
                             .send(AdapterEvent::InboundConnection { connection })
                             .await;
-                        if let Some((identity_id, participant_id, assurance)) =
-                            latest_auth.clone()
+                        if let Some((identity_id, participant_id, assurance)) = latest_auth.clone()
                         {
                             let _ = events_tx
                                 .send(AdapterEvent::Authenticated {
@@ -339,9 +331,7 @@ async fn spawn_peer_session(
                     }
                     UctpSessionEvent::SessionConnected { sid } => {
                         match by_uctp_sid.get(sid.as_str()).map(|r| r.clone()) {
-                            Some(connection_id) => {
-                                Some(AdapterEvent::Connected { connection_id })
-                            }
+                            Some(connection_id) => Some(AdapterEvent::Connected { connection_id }),
                             None => Some(AdapterEvent::Native {
                                 kind: "uctp.session_connected_orphan",
                                 detail: sid.to_string(),
@@ -349,7 +339,9 @@ async fn spawn_peer_session(
                         }
                     }
                     UctpSessionEvent::ConnectionConnected { connid, .. } => {
-                        Some(AdapterEvent::Connected { connection_id: connid })
+                        Some(AdapterEvent::Connected {
+                            connection_id: connid,
+                        })
                     }
                     UctpSessionEvent::ConnectionEnded { connid, reason, .. } => {
                         Some(AdapterEvent::Ended {

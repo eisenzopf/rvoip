@@ -95,8 +95,6 @@ pub fn text_utf8_char(input: &[u8]) -> ParseResult<'_, &[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-
 
     #[test]
     fn test_utf8_nonascii() {

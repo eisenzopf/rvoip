@@ -69,10 +69,10 @@ pub fn parse_reply_to_public(input: &[u8]) -> ParseResult<'_, Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use crate::types::param::{GenericValue, Param};
     use crate::types::uri::{Host, Scheme};
-    
+
     use std::net::{IpAddr, Ipv6Addr};
     use std::str::FromStr;
 

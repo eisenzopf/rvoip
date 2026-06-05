@@ -9,7 +9,7 @@ use nom::{
     error::{Error as NomError, ErrorKind},
     sequence::{pair, preceded, tuple},
 };
- // Import fmt
+// Import fmt
 use std::str;
 
 // Import from new modules

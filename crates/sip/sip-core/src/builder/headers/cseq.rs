@@ -207,7 +207,6 @@ impl CSeqBuilderExt for SimpleResponseBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_request_cseq_header() {

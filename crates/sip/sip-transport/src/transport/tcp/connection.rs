@@ -1,4 +1,6 @@
+use crate::error::{Error, Result};
 use bytes::{Buf, BufMut, BytesMut};
+use rvoip_sip_core::{parse_message, Message};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,8 +9,6 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::{debug, trace, warn};
-use crate::error::{Error, Result};
-use rvoip_sip_core::{parse_message, Message};
 
 // Buffer sizes
 const INITIAL_BUFFER_SIZE: usize = 8192;

@@ -215,7 +215,6 @@ impl RtpEventAdapter {
             _ => None, // Not all transport events need to be cross-crate events
         }
     }
-
 }
 
 /// Event handler for processing cross-crate events in rtp-core
@@ -249,7 +248,6 @@ impl CrossCrateEventHandler for RtpCrossCrateEventHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[tokio::test]
     async fn test_rtp_adapter_creation() {

@@ -833,9 +833,8 @@ impl ContentTypeBuilderExt for SimpleResponseBuilder {
 mod tests {
     use super::*;
     use crate::builder::headers::cseq::CSeqBuilderExt;
-    
+
     use crate::types::Method;
-    
 
     #[test]
     fn test_request_content_type_shortcuts() {

@@ -5,9 +5,7 @@ pub mod credentials;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::auth::{
-        Algorithm, Challenge, Credentials, DigestParam, Qop,
-    };
+    use crate::types::auth::{Algorithm, Challenge, Credentials, DigestParam, Qop};
 
     #[test]
     fn test_rfc3261_digest_challenge() {

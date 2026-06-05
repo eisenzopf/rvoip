@@ -1,8 +1,9 @@
+use super::HeaderSetter;
 #[cfg(test)]
 use crate::types::TypedHeader;
-use super::HeaderSetter;
 use crate::types::{
-    auth::{Algorithm, Credentials, DigestParam, ProxyAuthorization, Qop}, Uri,
+    auth::{Algorithm, Credentials, DigestParam, ProxyAuthorization, Qop},
+    Uri,
 };
 use base64::engine::{general_purpose, Engine};
 
@@ -410,7 +411,6 @@ mod tests {
     use super::*;
     use crate::builder::SimpleRequestBuilder;
     use crate::types::header::HeaderName;
-    
 
     #[test]
     fn test_proxy_authorization_digest() {

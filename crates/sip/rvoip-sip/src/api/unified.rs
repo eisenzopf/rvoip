@@ -2737,13 +2737,13 @@ impl UnifiedCoordinator {
             return Ok(response);
         };
 
+        let mut retry_opts = opts.clone();
+        retry_opts.cseq = Some(retry.cseq);
+        retry_opts.call_id = retry.call_id.clone();
+        retry_opts.from_tag = retry.from_tag.clone();
         let retry_response = self
             .dialog_adapter
-            .send_message_oob_with_auth(
-                opts.clone(),
-                &retry.header_name,
-                retry.header_value.clone(),
-            )
+            .send_message_oob_with_auth(retry_opts, &retry.header_name, retry.header_value.clone())
             .await?;
         self.maybe_retry_oob_stale(
             Method::Message,
@@ -2752,8 +2752,11 @@ impl UnifiedCoordinator {
             || opts.to_uri.clone(),
             body,
             auth.as_ref(),
-            |header_name, header_value| {
-                let opts = opts.clone();
+            |cseq, call_id, from_tag, header_name, header_value| {
+                let mut opts = opts.clone();
+                opts.cseq = Some(cseq);
+                opts.call_id = call_id;
+                opts.from_tag = from_tag;
                 async move {
                     self.dialog_adapter
                         .send_message_oob_with_auth(opts, &header_name, header_value)
@@ -2786,13 +2789,13 @@ impl UnifiedCoordinator {
             return Ok(response);
         };
 
+        let mut retry_opts = opts.clone();
+        retry_opts.cseq = Some(retry.cseq);
+        retry_opts.call_id = retry.call_id.clone();
+        retry_opts.from_tag = retry.from_tag.clone();
         let retry_response = self
             .dialog_adapter
-            .send_options_oob_with_auth(
-                opts.clone(),
-                &retry.header_name,
-                retry.header_value.clone(),
-            )
+            .send_options_oob_with_auth(retry_opts, &retry.header_name, retry.header_value.clone())
             .await?;
         self.maybe_retry_oob_stale(
             Method::Options,
@@ -2801,8 +2804,11 @@ impl UnifiedCoordinator {
             || opts.to_uri.clone(),
             None,
             auth.as_ref(),
-            |header_name, header_value| {
-                let opts = opts.clone();
+            |cseq, call_id, from_tag, header_name, header_value| {
+                let mut opts = opts.clone();
+                opts.cseq = Some(cseq);
+                opts.call_id = call_id;
+                opts.from_tag = from_tag;
                 async move {
                     self.dialog_adapter
                         .send_options_oob_with_auth(opts, &header_name, header_value)
@@ -2836,11 +2842,15 @@ impl UnifiedCoordinator {
             return Ok(response);
         };
 
+        let mut retry_opts = opts.clone();
+        retry_opts.cseq = Some(retry.cseq);
+        retry_opts.call_id = retry.call_id.clone();
+        retry_opts.from_tag = retry.from_tag.clone();
         let retry_response = self
             .dialog_adapter
             .send_subscribe_oob_with_auth(
                 target,
-                opts.clone(),
+                retry_opts,
                 &retry.header_name,
                 retry.header_value.clone(),
             )
@@ -2852,8 +2862,11 @@ impl UnifiedCoordinator {
             || target.to_string(),
             None,
             auth.as_ref(),
-            |header_name, header_value| {
-                let opts = opts.clone();
+            |cseq, call_id, from_tag, header_name, header_value| {
+                let mut opts = opts.clone();
+                opts.cseq = Some(cseq);
+                opts.call_id = call_id;
+                opts.from_tag = from_tag;
                 async move {
                     self.dialog_adapter
                         .send_subscribe_oob_with_auth(target, opts, &header_name, header_value)
@@ -2905,22 +2918,36 @@ impl UnifiedCoordinator {
                 challenge_header_name.as_str()
             )));
         }
-        let selected = auth.authorization_for_challenge(
+        let transport = self
+            .dialog_adapter
+            .outbound_transport_context_for_response(response, request_uri);
+        let selected = auth.authorization_for_challenge_with_transport_context(
             &challenge_value,
             method.as_str(),
             request_uri,
             1,
             body,
-            request_uri.to_ascii_lowercase().starts_with("sips:"),
+            &transport,
         )?;
         let nonce = selected
             .digest_challenge
             .as_ref()
             .map(|challenge| challenge.nonce.clone())
             .unwrap_or_default();
+        let cseq = response
+            .cseq()
+            .map(|cseq| cseq.sequence().saturating_add(1))
+            .unwrap_or(2);
+        let call_id = response.call_id().map(|call_id| call_id.value());
+        let from_tag = response
+            .from()
+            .and_then(|from| from.tag().map(str::to_string));
         Ok(Some(OobAuthRetry {
             header_name: auth_header_name.to_string(),
             header_value: selected.value,
+            cseq,
+            call_id,
+            from_tag,
             nonce,
             stale: selected.stale,
         }))
@@ -2937,7 +2964,7 @@ impl UnifiedCoordinator {
         send_retry: F,
     ) -> Result<Response>
     where
-        F: FnOnce(String, String) -> Fut,
+        F: FnOnce(u32, Option<String>, Option<String>, String, String) -> Fut,
         Fut: std::future::Future<Output = Result<Response>>,
     {
         if retry_response.status_code() != 401 && retry_response.status_code() != 407 {
@@ -2962,8 +2989,14 @@ impl UnifiedCoordinator {
             return Ok(retry_response);
         }
 
-        let second_retry_response =
-            send_retry(stale_retry.header_name, stale_retry.header_value).await?;
+        let second_retry_response = send_retry(
+            stale_retry.cseq,
+            stale_retry.call_id.clone(),
+            stale_retry.from_tag.clone(),
+            stale_retry.header_name,
+            stale_retry.header_value,
+        )
+        .await?;
         ensure_retry_not_challenged(method, &second_retry_response)?;
         Ok(second_retry_response)
     }
@@ -3162,6 +3195,9 @@ impl UnifiedCoordinator {
 struct OobAuthRetry {
     header_name: String,
     header_value: String,
+    cseq: u32,
+    call_id: Option<String>,
+    from_tag: Option<String>,
     nonce: String,
     stale: bool,
 }
@@ -4685,6 +4721,65 @@ impl UnifiedCoordinator {
     /// ```
     pub async fn get_incoming_call(&self) -> Option<IncomingCallInfo> {
         self.incoming_rx.write().await.recv().await
+    }
+
+    /// Wait for the next incoming INVITE and return the controllable
+    /// [`IncomingCall`](crate::IncomingCall) wrapper.
+    ///
+    /// Open this wait before the caller sends the INVITE. Like
+    /// [`events`](Self::events), incoming-call notifications are broadcast
+    /// events and are not replayed to late subscribers.
+    ///
+    /// This is the UnifiedCoordinator equivalent of
+    /// [`StreamPeer::wait_for_incoming`](crate::StreamPeer::wait_for_incoming)
+    /// for applications that want direct coordinator control plus inbound auth
+    /// helpers such as
+    /// [`IncomingCall::authenticate_with`](crate::IncomingCall::authenticate_with).
+    pub async fn wait_for_incoming_call(
+        self: &Arc<Self>,
+    ) -> Result<crate::api::incoming::IncomingCall> {
+        let mut events = self.events().await?;
+        self.next_incoming_call(&mut events)
+            .await?
+            .ok_or_else(|| SessionError::Other("Event channel closed".to_string()))
+    }
+
+    /// Return the next incoming INVITE from an existing event receiver.
+    ///
+    /// Use this when a server may challenge a request and then receive an
+    /// immediate retry. Keeping one receiver open avoids missing the retry
+    /// event between separate subscriptions.
+    pub async fn next_incoming_call(
+        self: &Arc<Self>,
+        events: &mut crate::api::stream_peer::EventReceiver,
+    ) -> Result<Option<crate::api::incoming::IncomingCall>> {
+        let Some((call_id, from, to, sdp)) = events.next_incoming().await else {
+            return Ok(None);
+        };
+
+        let parsed = self.session_registry.peek_pending_incoming_request().await;
+        let transport = self
+            .session_registry
+            .peek_pending_incoming_transport()
+            .await;
+        let incoming = match parsed {
+            Some(req) => crate::api::incoming::IncomingCall::with_request(
+                call_id,
+                from,
+                to,
+                sdp,
+                self.clone(),
+                req,
+            ),
+            None => crate::api::incoming::IncomingCall::new(call_id, from, to, sdp, self.clone()),
+        }
+        .with_transport_context(
+            transport
+                .as_deref()
+                .cloned()
+                .unwrap_or_else(crate::auth::SipTransportSecurityContext::unknown),
+        );
+        Ok(Some(incoming))
     }
 
     // ===== Auto-Transfer Handling =====

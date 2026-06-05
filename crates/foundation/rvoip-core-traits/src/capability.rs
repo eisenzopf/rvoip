@@ -89,7 +89,10 @@ impl From<CodecInfo> for Codec {
         if let Some(fmtp) = c.fmtp {
             params.insert("fmtp".into(), serde_json::Value::String(fmtp));
         }
-        Self { name: c.name, params }
+        Self {
+            name: c.name,
+            params,
+        }
     }
 }
 

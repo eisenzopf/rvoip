@@ -10,20 +10,18 @@ use std::sync::Mutex as StdMutex;
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
+use rvoip_auth_core::BearerValidator;
 use rvoip_core::adapter::{
     AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest,
     RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
-use rvoip_core::connection::{
-    Connection, ConnectionState, Direction, Transport, TransportHandle,
-};
+use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::ConnectionId;
 use rvoip_core::message::Message;
 use rvoip_core::stream::MediaStream;
-use rvoip_auth_core::BearerValidator;
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads;
 use rvoip_uctp::types::MessageType;
@@ -137,10 +135,7 @@ impl UctpQuicConfig {
     /// coordinator instances (plan D1 / D2). Most deployments should
     /// leave the defaults alone; embedded/mobile hosts or extreme N-party
     /// rooms can tune up.
-    pub fn with_coordinator_caps(
-        mut self,
-        caps: rvoip_uctp::state::UctpCoordinatorCaps,
-    ) -> Self {
+    pub fn with_coordinator_caps(mut self, caps: rvoip_uctp::state::UctpCoordinatorCaps) -> Self {
         self.coordinator_caps = caps;
         self
     }
@@ -268,12 +263,16 @@ impl ConnectionAdapter for UctpQuicAdapter {
         // parsing for "uctp://" / "https://" + SAN-based server_name is a
         // straightforward follow-up.
         let server_addr: SocketAddr = request.target.parse().map_err(|_| {
-            RvoipError::Adapter(format!("invalid originate target (expected ip:port): {}", request.target))
+            RvoipError::Adapter(format!(
+                "invalid originate target (expected ip:port): {}",
+                request.target
+            ))
         })?;
 
-        let client = crate::client::UctpQuicClient::connect(&endpoint, server_addr, "localhost", tls)
-            .await
-            .map_err(|e| RvoipError::Adapter(format!("dial failed: {}", e)))?;
+        let client =
+            crate::client::UctpQuicClient::connect(&endpoint, server_addr, "localhost", tls)
+                .await
+                .map_err(|e| RvoipError::Adapter(format!("dial failed: {}", e)))?;
 
         let connection = Connection {
             id: ConnectionId::new(),
@@ -302,8 +301,11 @@ impl ConnectionAdapter for UctpQuicAdapter {
             by: "part_local".into(),
             capabilities_answer: serde_json::Value::Object(Default::default()),
         };
-        let env = UctpEnvelope::new(MessageType::SessionAccept, serde_json::to_value(payload).unwrap())
-            .with_sid(route.sid);
+        let env = UctpEnvelope::new(
+            MessageType::SessionAccept,
+            serde_json::to_value(payload).unwrap(),
+        )
+        .with_sid(route.sid);
         route
             .out_tx
             .send(env)
@@ -321,8 +323,11 @@ impl ConnectionAdapter for UctpQuicAdapter {
             reason_code: code,
             reason: reason_str.into(),
         };
-        let env = UctpEnvelope::new(MessageType::SessionReject, serde_json::to_value(payload).unwrap())
-            .with_sid(route.sid);
+        let env = UctpEnvelope::new(
+            MessageType::SessionReject,
+            serde_json::to_value(payload).unwrap(),
+        )
+        .with_sid(route.sid);
         route
             .out_tx
             .send(env)
@@ -340,8 +345,11 @@ impl ConnectionAdapter for UctpQuicAdapter {
             reason_code: code,
             reason: reason_str.into(),
         };
-        let env = UctpEnvelope::new(MessageType::SessionEnd, serde_json::to_value(payload).unwrap())
-            .with_sid(route.sid);
+        let env = UctpEnvelope::new(
+            MessageType::SessionEnd,
+            serde_json::to_value(payload).unwrap(),
+        )
+        .with_sid(route.sid);
         route
             .out_tx
             .send(env)
@@ -480,9 +488,12 @@ impl ConnectionAdapter for UctpQuicAdapter {
             attachments: Vec::new(),
             in_reply_to_msg: message.in_reply_to.map(|m| m.to_string()),
         };
-        let env = UctpEnvelope::new(MessageType::MessageSend, serde_json::to_value(payload).unwrap())
-            .with_cid(message.conversation_id.to_string())
-            .with_sid(route.sid);
+        let env = UctpEnvelope::new(
+            MessageType::MessageSend,
+            serde_json::to_value(payload).unwrap(),
+        )
+        .with_cid(message.conversation_id.to_string())
+        .with_sid(route.sid);
         route
             .out_tx
             .send(env)
@@ -508,9 +519,12 @@ impl ConnectionAdapter for UctpQuicAdapter {
             duration_ms,
             method: "rfc4733".into(),
         };
-        let env = UctpEnvelope::new(MessageType::DtmfSend, serde_json::to_value(payload).unwrap())
-            .with_sid(route.sid.clone())
-            .with_connid(conn.to_string());
+        let env = UctpEnvelope::new(
+            MessageType::DtmfSend,
+            serde_json::to_value(payload).unwrap(),
+        )
+        .with_sid(route.sid.clone())
+        .with_connid(conn.to_string());
         route
             .out_tx
             .send(env)
@@ -548,7 +562,9 @@ impl ConnectionAdapter for UctpQuicAdapter {
     fn subscribe_events(&self) -> mpsc::Receiver<AdapterEvent> {
         let mut guard = self.events_rx.lock().expect("poisoned");
         guard.take().unwrap_or_else(|| {
-            warn!("UctpQuicAdapter::subscribe_events called more than once; returning closed channel");
+            warn!(
+                "UctpQuicAdapter::subscribe_events called more than once; returning closed channel"
+            );
             let (_tx, rx) = mpsc::channel(1);
             rx
         })

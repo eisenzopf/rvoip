@@ -39,7 +39,7 @@ fn auth_hello_env() -> UctpEnvelope {
         connid: None,
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -47,7 +47,7 @@ fn auth_response_env(token: &str, in_reply_to: &str) -> UctpEnvelope {
     let payload = auth::AuthResponse {
         method: "bearer".into(),
         credential: token.into(),
-    actor_token: None,
+        actor_token: None,
     };
     UctpEnvelope {
         v: 1,
@@ -59,7 +59,7 @@ fn auth_response_env(token: &str, in_reply_to: &str) -> UctpEnvelope {
         connid: None,
         in_reply_to: Some(in_reply_to.into()),
         payload: serde_json::to_value(payload).unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -81,7 +81,7 @@ fn session_invite_env(sid: &str, cid: &str) -> UctpEnvelope {
         connid: None,
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -133,7 +133,10 @@ async fn auth_response_with_empty_token_yields_401_error() {
 
     in_tx.send(auth_hello_env()).await.unwrap();
     let challenge = out_rx.recv().await.unwrap();
-    in_tx.send(auth_response_env("", &challenge.id)).await.unwrap();
+    in_tx
+        .send(auth_response_env("", &challenge.id))
+        .await
+        .unwrap();
 
     let reply = out_rx.recv().await.expect("expected error");
     assert_eq!(reply.msg_type, MessageType::Error);
@@ -162,7 +165,9 @@ async fn inbound_invite_emits_event() {
 
     let event = events_rx.recv().await.expect("expected InboundInvite");
     match event {
-        UctpSessionEvent::InboundInvite { from, to, medium, .. } => {
+        UctpSessionEvent::InboundInvite {
+            from, to, medium, ..
+        } => {
             assert_eq!(from, "part_alice");
             assert_eq!(to, vec!["part_bob".to_string()]);
             assert_eq!(medium, "voice");
@@ -194,7 +199,7 @@ async fn multi_party_stream_subscribe_rejected_with_501() {
             "by_participant": "part_alice",
             "subscriptions": [{"strm_id": "strm_z"}]
         }),
-    signature: None,
+        signature: None,
     };
     in_tx.send(env).await.unwrap();
 
@@ -228,7 +233,7 @@ fn connection_offer_env(sid: &str, connid: &str, prefs: &[&str]) -> UctpEnvelope
         connid: Some(connid.into()),
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -334,11 +339,13 @@ async fn shutdown_emits_session_end_for_inflight_sessions() {
         .take(8)
         .collect();
     assert!(
-        envs.iter()
-            .any(|e| e.msg_type == MessageType::SessionEnd
-                && e.sid.as_deref() == Some("sess_alpha")),
+        envs.iter().any(
+            |e| e.msg_type == MessageType::SessionEnd && e.sid.as_deref() == Some("sess_alpha")
+        ),
         "expected synthesized session.end for sess_alpha, got {:?}",
-        envs.iter().map(|e| (&e.msg_type, &e.sid)).collect::<Vec<_>>()
+        envs.iter()
+            .map(|e| (&e.msg_type, &e.sid))
+            .collect::<Vec<_>>()
     );
 
     // And a terminal UctpSessionEvent::SessionEnded.
@@ -380,7 +387,7 @@ async fn envelope_for_unknown_connid_emits_404() {
             "streams_answered": [],
             "substrate_setup": null
         }),
-    signature: None,
+        signature: None,
     };
     let env_id = env.id.clone();
     in_tx.send(env).await.unwrap();
@@ -463,7 +470,10 @@ async fn auth_handshake_unlocks_subsequent_envelopes() {
         .await
         .unwrap();
 
-    let event = events_rx.recv().await.expect("expected InboundInvite after auth");
+    let event = events_rx
+        .recv()
+        .await
+        .expect("expected InboundInvite after auth");
     matches!(event, UctpSessionEvent::InboundInvite { .. });
 
     // No 401 should land on out_rx.
@@ -471,10 +481,7 @@ async fn auth_handshake_unlocks_subsequent_envelopes() {
     if let Ok(envelope) = out_rx.try_recv() {
         if envelope.msg_type == MessageType::Error {
             let payload: rvoip_uctp::payloads::control::Error = envelope.decode_payload().unwrap();
-            assert_ne!(
-                payload.code, 401,
-                "post-auth envelope must not produce 401"
-            );
+            assert_ne!(payload.code, 401, "post-auth envelope must not produce 401");
         }
     }
 }
@@ -497,7 +504,7 @@ async fn unknown_envelope_types_are_silently_ignored() {
         connid: None,
         in_reply_to: None,
         payload: serde_json::Value::Object(Default::default()),
-    signature: None,
+        signature: None,
     };
     in_tx.send(env).await.unwrap();
 
@@ -664,14 +671,16 @@ async fn inbound_dtmf_send_emits_session_event() {
             "duration_ms": 120,
             "method": "rfc4733"
         }),
-    signature: None,
+        signature: None,
     };
     in_tx.send(env).await.unwrap();
 
     // Drain the events channel looking for Dtmf.
     let mut saw_dtmf = false;
     for _ in 0..10 {
-        if let Ok(Some(ev)) = tokio::time::timeout(std::time::Duration::from_millis(100), events_rx.recv()).await {
+        if let Ok(Some(ev)) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), events_rx.recv()).await
+        {
             if let UctpSessionEvent::Dtmf {
                 digits,
                 duration_ms,
@@ -755,17 +764,17 @@ async fn inbound_connection_quality_emits_per_stream_events() {
                 }
             ]
         }),
-    signature: None,
+        signature: None,
     };
     in_tx.send(env).await.unwrap();
 
     let mut quality_events: Vec<(String, f32, f32)> = Vec::new();
     for _ in 0..10 {
-        if let Ok(Some(ev)) = tokio::time::timeout(std::time::Duration::from_millis(100), events_rx.recv()).await {
+        if let Ok(Some(ev)) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), events_rx.recv()).await
+        {
             if let UctpSessionEvent::Quality {
-                strm_id,
-                snapshot,
-                ..
+                strm_id, snapshot, ..
             } = ev
             {
                 quality_events.push((
@@ -938,7 +947,7 @@ async fn dtmf_send_for_unknown_connid_emits_404() {
             "duration_ms": 100,
             "method": "rfc4733"
         }),
-    signature: None,
+        signature: None,
     };
     in_tx.send(env).await.unwrap();
 

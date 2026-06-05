@@ -10,8 +10,7 @@ use tracing::debug;
 use crate::api::common::error::MediaTransportError;
 use crate::api::common::frame::MediaFrame;
 use crate::buffer::{
-    BufferPool, GlobalBufferManager, PacketPriority, TransmitBuffer,
-    TransmitBufferConfig,
+    BufferPool, GlobalBufferManager, PacketPriority, TransmitBuffer, TransmitBufferConfig,
 };
 use crate::transport::RtpTransport;
 

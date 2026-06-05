@@ -8,10 +8,7 @@ use crate::parser::whitespace::lws;
 use crate::parser::ParseResult;
 // Import the necessary types from types::auth
 use crate::types::auth::{AuthScheme, Challenge};
-use nom::{
-    bytes::complete::take_while,
-    combinator::opt,
-};
+use nom::{bytes::complete::take_while, combinator::opt};
 use std::str::FromStr;
 
 // challenge = ("Digest" LWS digest-challenge-params)

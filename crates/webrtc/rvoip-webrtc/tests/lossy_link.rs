@@ -39,11 +39,7 @@ pub async fn spawn_lossy_udp_proxy(
     loss_rate: f64,
     seed: u64,
 ) -> std::net::SocketAddr {
-    let socket = Arc::new(
-        UdpSocket::bind(listen)
-            .await
-            .expect("bind lossy proxy"),
-    );
+    let socket = Arc::new(UdpSocket::bind(listen).await.expect("bind lossy proxy"));
     let addr = socket.local_addr().expect("local addr");
     let mut rng = StdRng::seed_from_u64(seed);
     tokio::spawn(async move {

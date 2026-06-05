@@ -120,11 +120,7 @@ impl ConnectionAdapter for CtrlAdapter {
         self.counts.unmute.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn play_audio(
-        &self,
-        _c: ConnectionId,
-        _s: AudioSource,
-    ) -> RvResult<PlaybackHandle> {
+    async fn play_audio(&self, _c: ConnectionId, _s: AudioSource) -> RvResult<PlaybackHandle> {
         self.counts.play.fetch_add(1, Ordering::SeqCst);
         let (handle, _rx) = PlaybackHandle::new(PlaybackId::new());
         Ok(handle)
@@ -172,7 +168,6 @@ async fn track_inbound(
     tokio::time::sleep(Duration::from_millis(30)).await;
     let _ = orch; // just here for symmetry — not used directly
 }
-
 
 #[tokio::test]
 async fn mute_and_unmute_round_trip() {

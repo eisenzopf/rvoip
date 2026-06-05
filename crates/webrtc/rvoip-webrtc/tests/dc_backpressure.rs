@@ -170,11 +170,8 @@ async fn buffered_amount_low_event_fires_after_drain() {
     let drain = tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
         while tokio::time::Instant::now() < deadline {
-            let _ = RvoipPeerConnection::poll_data_channel(
-                &dc_b_drain,
-                Duration::from_millis(50),
-            )
-            .await;
+            let _ = RvoipPeerConnection::poll_data_channel(&dc_b_drain, Duration::from_millis(50))
+                .await;
         }
     });
 

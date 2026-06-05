@@ -71,7 +71,7 @@ fn offer_env(sid: &str, connid: &str, strm_id: &str) -> UctpEnvelope {
             substrate_setup: serde_json::Value::Null,
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -86,7 +86,7 @@ fn ready_env(sid: &str, connid: &str) -> UctpEnvelope {
         connid: Some(connid.into()),
         in_reply_to: None,
         payload: serde_json::Value::Object(Default::default()),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -109,7 +109,7 @@ fn subscribe_env(sid: &str, connid: &str, strm_id: &str) -> UctpEnvelope {
             }],
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -136,8 +136,7 @@ async fn next_envelope_of(
 async fn connection_ready_emits_stream_opened_and_registers_publisher() {
     let orch = Orchestrator::new(Config::default());
     let publishers = orch.publisher_registry();
-    let handler =
-        OrchestratorSubscriptionHandler::new(Arc::clone(&orch), Arc::clone(&publishers));
+    let handler = OrchestratorSubscriptionHandler::new(Arc::clone(&orch), Arc::clone(&publishers));
 
     let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
@@ -189,10 +188,7 @@ async fn connection_ready_emits_stream_opened_and_registers_publisher() {
     assert_eq!(payload.stream.codec["name"], "opus");
 
     // 3. PublisherRegistry should now resolve the strm_id.
-    let publisher = publishers.publisher(
-        &SessionId::from_string("sess_a"),
-        "strm_audio_1",
-    );
+    let publisher = publishers.publisher(&SessionId::from_string("sess_a"), "strm_audio_1");
     assert_eq!(
         publisher.as_ref().map(|c| c.to_string()),
         Some("conn_publisher".to_string()),

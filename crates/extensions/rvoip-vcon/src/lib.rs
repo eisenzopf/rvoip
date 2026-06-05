@@ -55,6 +55,5 @@ pub fn sign_jws(
     algorithm: jsonwebtoken::Algorithm,
 ) -> Result<String, VconError> {
     let header = jsonwebtoken::Header::new(algorithm);
-    jsonwebtoken::encode(&header, vcon, encoding_key)
-        .map_err(|e| VconError::Sign(e.to_string()))
+    jsonwebtoken::encode(&header, vcon, encoding_key).map_err(|e| VconError::Sign(e.to_string()))
 }

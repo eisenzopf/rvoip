@@ -14,7 +14,12 @@ use webrtc::data_channel::{DataChannel, DataChannelEvent};
 async fn open_pair_with_dc(
     opts: DataChannelOptions,
     label: &str,
-) -> (Arc<RvoipPeerConnection>, Arc<RvoipPeerConnection>, Arc<dyn DataChannel>, Arc<dyn DataChannel>) {
+) -> (
+    Arc<RvoipPeerConnection>,
+    Arc<RvoipPeerConnection>,
+    Arc<dyn DataChannel>,
+    Arc<dyn DataChannel>,
+) {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let config = WebRtcConfig::loopback();
     let offerer = RvoipPeerConnection::new(&config, PeerRole::Offerer)
@@ -72,7 +77,9 @@ async fn round_trip_text(
         if tokio::time::Instant::now() >= deadline {
             panic!("did not receive {msg}");
         }
-        if let Some(ev) = RvoipPeerConnection::poll_data_channel(receiver, Duration::from_millis(100)).await {
+        if let Some(ev) =
+            RvoipPeerConnection::poll_data_channel(receiver, Duration::from_millis(100)).await
+        {
             if let DataChannelEvent::OnMessage(m) = ev {
                 if m.is_string && String::from_utf8_lossy(&m.data) == msg {
                     return;
@@ -84,8 +91,7 @@ async fn round_trip_text(
 
 #[tokio::test]
 async fn dc_options_reliable_round_trips() {
-    let (_o, _a, dc_a, dc_b) =
-        open_pair_with_dc(DataChannelOptions::reliable(), "reliable").await;
+    let (_o, _a, dc_a, dc_b) = open_pair_with_dc(DataChannelOptions::reliable(), "reliable").await;
     round_trip_text(&dc_a, &dc_b, "hello-reliable").await;
 }
 
@@ -129,8 +135,7 @@ async fn dc_options_protocol_field_round_trips_to_remote() {
 
 #[tokio::test]
 async fn dc_options_binary_round_trips() {
-    let (_o, _a, dc_a, dc_b) =
-        open_pair_with_dc(DataChannelOptions::reliable(), "binary").await;
+    let (_o, _a, dc_a, dc_b) = open_pair_with_dc(DataChannelOptions::reliable(), "binary").await;
     let payload: &[u8] = b"\x00\x01\x02hello-bin\xff";
     dc_a.send(BytesMut::from(payload)).await.expect("send bin");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);

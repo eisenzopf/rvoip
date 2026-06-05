@@ -287,12 +287,52 @@ name = "auth_endpoint_register_users_core"
 path = "examples/auth/endpoint_register_users_core.rs"
 
 [[example]]
+name = "auth_endpoint_invite_bearer"
+path = "examples/auth/endpoint_invite_bearer.rs"
+
+[[example]]
+name = "auth_endpoint_invite_digest"
+path = "examples/auth/endpoint_invite_digest.rs"
+
+[[example]]
 name = "auth_enterprise_hooks"
 path = "examples/auth/enterprise_hooks.rs"
 
 [[example]]
 name = "auth_keycloak_bearer_provider"
 path = "examples/auth/keycloak_bearer_provider.rs"
+
+[[example]]
+name = "auth_redis_enterprise_hooks"
+path = "examples/auth/redis_enterprise_hooks.rs"
+
+[[example]]
+name = "auth_generic_oidc_provider"
+path = "examples/auth/generic_oidc_provider.rs"
+
+[[example]]
+name = "auth_ldap_basic_provider"
+path = "examples/auth/ldap_basic_provider.rs"
+
+[[example]]
+name = "auth_scim_users_core"
+path = "examples/auth/scim_users_core.rs"
+
+[[example]]
+name = "auth_saml_users_core"
+path = "examples/auth/saml_users_core.rs"
+
+[[example]]
+name = "auth_webauthn_passkeys"
+path = "examples/auth/webauthn_passkeys.rs"
+
+[[example]]
+name = "auth_ims_aka_provider"
+path = "examples/auth/ims_aka_provider.rs"
+
+[[example]]
+name = "auth_custom_provider"
+path = "examples/auth/custom_provider.rs"
 
 
 [dependencies]
@@ -348,12 +388,20 @@ rand = "0.8"
 strum = { version = "0.26", features = ["derive"] }
 
 [dev-dependencies]
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 rvoip-sip-transport.workspace = true
 rvoip-sip-registrar.workspace = true
 rvoip-users-core = { workspace = true, features = ["auth-core"] }
 rvoip-keycloak.workspace = true
+rvoip-redis.workspace = true
+rvoip-audit.workspace = true
+rvoip-oidc.workspace = true
+rvoip-ldap.workspace = true
+rvoip-scim.workspace = true
+rvoip-saml.workspace = true
+rvoip-webauthn.workspace = true
+rvoip-ims-aka.workspace = true
 serial_test = { workspace = true }
 tempfile = "3.14"
 url = "2.5"
@@ -369,6 +417,7 @@ crossterm = "0.27"
 ratatui = "0.26"
 criterion = { workspace = true }
 futures = { workspace = true }
+proptest = { workspace = true }
 
 # End-to-end benchmarks. See `crates/sip/rvoip-sip/docs/PROFILING.md`.
 [[bench]]

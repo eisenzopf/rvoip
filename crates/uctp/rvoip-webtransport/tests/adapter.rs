@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use rvoip_auth_core::bearer_stub;
 use rvoip_core::adapter::{AdapterEvent, AdapterKind, ConnectionAdapter};
 use rvoip_core::connection::Transport;
-use rvoip_auth_core::bearer_stub;
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads::{auth, session::SessionInvite};
 use rvoip_uctp::substrate::{dispatch_by_alpn, self_signed_for_dev};
@@ -24,7 +24,12 @@ fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-fn server_endpoint(addr: SocketAddr) -> (Arc<quinn::Endpoint>, rustls::pki_types::CertificateDer<'static>) {
+fn server_endpoint(
+    addr: SocketAddr,
+) -> (
+    Arc<quinn::Endpoint>,
+    rustls::pki_types::CertificateDer<'static>,
+) {
     let (cert_der, key_der) = self_signed_for_dev(&["localhost".into()]).expect("self_signed");
     let mut tls = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -74,19 +79,14 @@ async fn wt_adapter_emits_inbound_connection_on_session_invite() {
     let mut events = adapter.subscribe_events();
 
     let client_ep = client_endpoint();
-    let client_cfg = rvoip_uctp::substrate::dev_client_config_trusting(&cert_der)
-        .expect("client cfg");
+    let client_cfg =
+        rvoip_uctp::substrate::dev_client_config_trusting(&cert_der).expect("client cfg");
 
-    let url = Url::parse(&format!("https://localhost:{}/uctp", server_addr.port()))
-        .expect("parse url");
-    let client = UctpWtClient::connect(
-        &client_ep,
-        server_addr,
-        &url,
-        Arc::new(client_cfg),
-    )
-    .await
-    .expect("client connect");
+    let url =
+        Url::parse(&format!("https://localhost:{}/uctp", server_addr.port())).expect("parse url");
+    let client = UctpWtClient::connect(&client_ep, server_addr, &url, Arc::new(client_cfg))
+        .await
+        .expect("client connect");
 
     // A1: bearer auth handshake before session.invite.
     let mut inbound = client.take_inbound().expect("take_inbound");
@@ -110,7 +110,7 @@ async fn wt_adapter_emits_inbound_connection_on_session_invite() {
             capabilities: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     };
     client.send(hello).await.expect("send hello");
     let challenge = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
@@ -130,10 +130,10 @@ async fn wt_adapter_emits_inbound_connection_on_session_invite() {
         payload: serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "test-token".into(),
-        actor_token: None,
+            actor_token: None,
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     };
     client.send(response).await.expect("send response");
     let session_reply = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
@@ -159,7 +159,7 @@ async fn wt_adapter_emits_inbound_connection_on_session_invite() {
         connid: None,
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
-    signature: None,
+        signature: None,
     };
     client.send(env).await.expect("send invite");
 
@@ -179,10 +179,7 @@ async fn wt_adapter_emits_inbound_connection_on_session_invite() {
     match event {
         AdapterEvent::InboundConnection { connection } => {
             assert_eq!(connection.transport, Transport::WebTransport);
-            assert_eq!(
-                connection.session_id.as_str(),
-                "sess_wt_adapter_test"
-            );
+            assert_eq!(connection.session_id.as_str(), "sess_wt_adapter_test");
             assert_eq!(connection.participant_id.as_str(), "part_alice");
 
             // SP-D: default audio stream is now populated at InboundInvite.
@@ -195,9 +192,8 @@ async fn wt_adapter_emits_inbound_connection_on_session_invite() {
                 rvoip_core::stream::MediaStream::kind(connection.streams[0].stream().as_ref()),
                 rvoip_core::stream::StreamKind::Audio
             );
-            let codec = rvoip_core::stream::MediaStream::codec(
-                connection.streams[0].stream().as_ref(),
-            );
+            let codec =
+                rvoip_core::stream::MediaStream::codec(connection.streams[0].stream().as_ref());
             assert_eq!(codec.name, "opus");
 
             let via_adapter = adapter

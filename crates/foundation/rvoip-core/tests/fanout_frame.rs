@@ -208,10 +208,7 @@ fn frame(kind: StreamKind, body: &[u8]) -> MediaFrame {
 /// loop to track it. Returns once the orchestrator can resolve the
 /// ConnectionId to its adapter (i.e. `subscribers_for`-adjacent
 /// machinery works).
-async fn register_connection(
-    events_tx: &mpsc::Sender<AdapterEvent>,
-    connection: Connection,
-) {
+async fn register_connection(events_tx: &mpsc::Sender<AdapterEvent>, connection: Connection) {
     events_tx
         .send(AdapterEvent::InboundConnection { connection })
         .await
@@ -252,9 +249,24 @@ async fn fanout_frame_delivers_to_all_subscribers() {
     register_connection(&events_tx, fake_inbound(sub_c.clone())).await;
 
     // Wire all three as subscribers of (sid, publisher, strm_id).
-    orch.add_subscription(sid.clone(), sub_a, publisher_connid.clone(), strm_id.clone());
-    orch.add_subscription(sid.clone(), sub_b, publisher_connid.clone(), strm_id.clone());
-    orch.add_subscription(sid.clone(), sub_c, publisher_connid.clone(), strm_id.clone());
+    orch.add_subscription(
+        sid.clone(),
+        sub_a,
+        publisher_connid.clone(),
+        strm_id.clone(),
+    );
+    orch.add_subscription(
+        sid.clone(),
+        sub_b,
+        publisher_connid.clone(),
+        strm_id.clone(),
+    );
+    orch.add_subscription(
+        sid.clone(),
+        sub_c,
+        publisher_connid.clone(),
+        strm_id.clone(),
+    );
 
     // Fanout.
     let f = frame(StreamKind::Audio, b"hello-multi-party");
@@ -555,7 +567,8 @@ async fn ended_connection_clears_publisher_registry_rows() {
         PublisherEntry {
             connection: publisher_connid.clone(),
             participant: "alice".to_string(),
-            kind: "audio".to_string(), codec: None,
+            kind: "audio".to_string(),
+            codec: None,
         },
     );
     // A second publisher on a different Connection in the same Session
@@ -567,7 +580,8 @@ async fn ended_connection_clears_publisher_registry_rows() {
         PublisherEntry {
             connection: other_publisher.clone(),
             participant: "bob".to_string(),
-            kind: "audio".to_string(), codec: None,
+            kind: "audio".to_string(),
+            codec: None,
         },
     );
     assert!(registry.entry(&sid, "strm_audio").is_some());

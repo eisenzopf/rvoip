@@ -4,11 +4,11 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
-use tracing::{debug, trace, warn};
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 #[cfg(feature = "ws")]
 use tokio_tungstenite::{tungstenite, WebSocketStream};
+use tracing::{debug, trace, warn};
 
 #[cfg(feature = "ws")]
 use super::SipWsStream;

@@ -58,10 +58,7 @@ async fn shutdown_ends_active_routes_then_closes_listener() {
     let mut attempts = 0;
     loop {
         attempts += 1;
-        let r = http
-            .get(format!("http://{whip_addr}/healthz"))
-            .send()
-            .await;
+        let r = http.get(format!("http://{whip_addr}/healthz")).send().await;
         if r.is_err() {
             break;
         }

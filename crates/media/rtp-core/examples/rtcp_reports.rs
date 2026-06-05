@@ -4,9 +4,7 @@
 //! and processed to calculate quality metrics like jitter, packet loss, and RTT.
 
 use bytes::Bytes;
-use rvoip_rtp_core::{
-    RtpSession, RtpSessionConfig, RtpSessionEvent,
-};
+use rvoip_rtp_core::{RtpSession, RtpSessionConfig, RtpSessionEvent};
 use std::time::Duration;
 use tokio::time;
 use tracing::info;

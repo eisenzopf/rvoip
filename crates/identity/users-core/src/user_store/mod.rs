@@ -6,6 +6,12 @@ use chrono::Utc;
 use sqlx_core::{query::query, raw_sql::raw_sql, row::Row};
 use sqlx_sqlite::{SqlitePool, SqliteRow};
 
+#[cfg(feature = "postgres")]
+mod postgres;
+
+#[cfg(feature = "postgres")]
+pub use postgres::PostgresUserStore;
+
 const MIGRATIONS: &[(&str, &str)] = &[
     (
         "001_initial_schema",
@@ -14,6 +20,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "002_auth_security_tables",
         include_str!("../../migrations/002_auth_security_tables.sql"),
+    ),
+    (
+        "003_api_key_active_state",
+        include_str!("../../migrations/003_api_key_active_state.sql"),
+    ),
+    (
+        "004_enterprise_identity_tables",
+        include_str!("../../migrations/004_enterprise_identity_tables.sql"),
     ),
 ];
 
@@ -49,6 +63,11 @@ impl SqliteUserStore {
     /// Get the underlying pool
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    /// Build a store wrapper from an existing migrated SQLite pool.
+    pub fn from_pool(pool: SqlitePool) -> Self {
+        Self { pool }
     }
 }
 
@@ -325,6 +344,7 @@ impl crate::ApiKeyStore for SqliteUserStore {
             name: request.name,
             key_hash: key_hash.clone(),
             permissions: request.permissions,
+            active: true,
             expires_at: request.expires_at,
             last_used: None,
             created_at: Utc::now(),
@@ -333,14 +353,15 @@ impl crate::ApiKeyStore for SqliteUserStore {
         let permissions_json = serde_json::to_string(&api_key.permissions).unwrap();
 
         query(
-            "INSERT INTO api_keys (id, user_id, name, key_hash, permissions, expires_at, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO api_keys (id, user_id, name, key_hash, permissions, active, expires_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&api_key.id)
         .bind(&api_key.user_id)
         .bind(&api_key.name)
         .bind(&api_key.key_hash)
         .bind(&permissions_json)
+        .bind(api_key.active)
         .bind(&api_key.expires_at)
         .bind(&api_key.created_at)
         .execute(&self.pool)
@@ -358,7 +379,7 @@ impl crate::ApiKeyStore for SqliteUserStore {
         let key_hash = format!("{:x}", hasher.finalize());
 
         let row = query(
-            "SELECT id, user_id, name, key_hash, permissions, expires_at, last_used, created_at
+            "SELECT id, user_id, name, key_hash, permissions, active, expires_at, last_used, created_at
              FROM api_keys WHERE key_hash = ?",
         )
         .bind(&key_hash)
@@ -372,10 +393,15 @@ impl crate::ApiKeyStore for SqliteUserStore {
                 name: row.get("name"),
                 key_hash: row.get("key_hash"),
                 permissions: serde_json::from_str(row.get("permissions")).unwrap_or_default(),
+                active: row.get("active"),
                 expires_at: row.get("expires_at"),
                 last_used: row.get("last_used"),
                 created_at: row.get("created_at"),
             };
+
+            if !api_key.active {
+                return Ok(None);
+            }
 
             // Check if expired
             if let Some(expires_at) = api_key.expires_at {
@@ -401,6 +427,20 @@ impl crate::ApiKeyStore for SqliteUserStore {
         }
     }
 
+    async fn set_api_key_active(&self, id: &str, active: bool) -> Result<()> {
+        let result = query("UPDATE api_keys SET active = ? WHERE id = ?")
+            .bind(active)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(Error::ApiKeyNotFound);
+        }
+
+        Ok(())
+    }
+
     async fn revoke_api_key(&self, id: &str) -> Result<()> {
         let result = query("DELETE FROM api_keys WHERE id = ?")
             .bind(id)
@@ -416,7 +456,7 @@ impl crate::ApiKeyStore for SqliteUserStore {
 
     async fn list_api_keys(&self, user_id: &str) -> Result<Vec<crate::ApiKey>> {
         let rows = query(
-            "SELECT id, user_id, name, key_hash, permissions, expires_at, last_used, created_at
+            "SELECT id, user_id, name, key_hash, permissions, active, expires_at, last_used, created_at
              FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
         )
         .bind(user_id)
@@ -431,6 +471,7 @@ impl crate::ApiKeyStore for SqliteUserStore {
                 name: row.get("name"),
                 key_hash: row.get("key_hash"),
                 permissions: serde_json::from_str(row.get("permissions")).unwrap_or_default(),
+                active: row.get("active"),
                 expires_at: row.get("expires_at"),
                 last_used: row.get("last_used"),
                 created_at: row.get("created_at"),

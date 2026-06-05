@@ -1514,17 +1514,22 @@ pub(crate) async fn execute_action(
             // 7616 §3.4.3.
             let body_owned = session.local_sdp.clone();
             let body_bytes = body_owned.as_deref().map(|s| s.as_bytes());
-            let selected_auth = auth.authorization_for_challenge(
+            let transport_context = session
+                .pending_auth_transport
+                .clone()
+                .unwrap_or_else(|| dialog_adapter.outbound_transport_context_for_uri(&request_uri));
+            let selected_auth = auth.authorization_for_challenge_with_transport_context(
                 &challenge_raw,
                 "INVITE",
                 &request_uri,
                 nc_value,
                 body_bytes,
-                request_uri.to_ascii_lowercase().starts_with("sips:"),
+                &transport_context,
             )?;
             let header_value = selected_auth.value;
 
             session.pending_auth.take();
+            session.pending_auth_transport = None;
             let header_name = if status == 407 {
                 "Proxy-Authorization"
             } else {
@@ -1665,15 +1670,20 @@ pub(crate) async fn execute_action(
             };
             let body_bytes_ref = body_bytes_owned.as_deref();
 
-            let selected_auth = auth.authorization_for_challenge(
+            let transport_context = session
+                .pending_auth_transport
+                .clone()
+                .unwrap_or_else(|| dialog_adapter.outbound_transport_context_for_uri(&request_uri));
+            let selected_auth = auth.authorization_for_challenge_with_transport_context(
                 &challenge_raw,
                 &method,
                 &request_uri,
                 nc_value,
                 body_bytes_ref,
-                request_uri.to_ascii_lowercase().starts_with("sips:"),
+                &transport_context,
             )?;
             let header_value = selected_auth.value;
+            session.pending_auth_transport = None;
 
             // Dispatch per method. Each branch reads the matching
             // `pending_<method>_options` stash so the application

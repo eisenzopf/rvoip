@@ -22,7 +22,7 @@ use crate::parser::ParseResult;
 // Import types
 // use crate::types::contact::{ContactHeader, ContactValue, ContactParams}; // Old import
 use crate::types::contact::{ContactParamInfo, ContactValue}; // Corrected import
-// use crate::types::contact::ContactParamInfo; // Already included above
+                                                             // use crate::types::contact::ContactParamInfo; // Already included above
 
 // contact-param = (name-addr / addr-spec) *(SEMI contact-params)
 // contact-params = c-p-q / c-p-expires / contact-extension
@@ -60,7 +60,7 @@ pub fn parse_contact(input: &[u8]) -> ParseResult<'_, ContactValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use crate::types::param::Param;
     use crate::types::uri::Scheme;
     use ordered_float::NotNan;

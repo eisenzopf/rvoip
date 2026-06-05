@@ -101,7 +101,6 @@ fn param(input: &[u8]) -> ParseResult<'_, Param> {
     )(input)
 }
 
-
 /// Parse a comment enclosed in parentheses
 fn error_info_comment(input: &[u8]) -> ParseResult<'_, &[u8]> {
     delimited(
@@ -247,7 +246,6 @@ mod tests {
     use super::*;
     use crate::types::param::{GenericValue, Param};
     use crate::types::uri::Scheme;
-    
 
     #[test]
     fn test_parse_error_info() {

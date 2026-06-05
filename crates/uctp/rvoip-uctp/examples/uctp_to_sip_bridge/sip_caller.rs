@@ -38,7 +38,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Wait for the call to be answered. In v0 the orchestrator_bridge
     // doesn't actually answer (it just logs InboundConnection); this
     // will time out — but that's fine for demonstrating the wire-up.
-    match tokio::time::timeout(Duration::from_secs(3), caller.wait_for_answered(handle.id())).await
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        caller.wait_for_answered(handle.id()),
+    )
+    .await
     {
         Ok(Ok(_)) => println!("[sip_caller] connected — playing tone"),
         Ok(Err(e)) => {

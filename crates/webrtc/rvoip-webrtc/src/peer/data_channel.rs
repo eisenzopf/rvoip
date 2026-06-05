@@ -276,7 +276,10 @@ impl RvoipDataChannel {
     /// is running this would race; callers should use
     /// [`Self::subscribe_events`] instead.
     pub async fn poll(&self, timeout: std::time::Duration) -> Option<DataChannelEvent> {
-        tokio::time::timeout(timeout, self.state.dc.poll()).await.ok().flatten()
+        tokio::time::timeout(timeout, self.state.dc.poll())
+            .await
+            .ok()
+            .flatten()
     }
 
     /// Subscribe to the `bufferedamountlow` event stream. Each subscription

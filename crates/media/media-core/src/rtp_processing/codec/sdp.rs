@@ -3,9 +3,6 @@
 //! This module handles SDP (Session Description Protocol) media line
 //! processing for codec negotiation and media session setup.
 
-use std::collections::HashMap;
-use std::str::FromStr;
-use tracing::{warn};
 use super::{
     negotiation::{CodecCapability, CodecNegotiator, NegotiationPreferences},
     registry::get_global_registry,
@@ -14,6 +11,9 @@ use crate::api::{
     error::MediaError,
     types::{MediaCodec, MediaDirection},
 };
+use std::collections::HashMap;
+use std::str::FromStr;
+use tracing::warn;
 
 /// SDP media line representation
 #[derive(Debug, Clone, PartialEq)]

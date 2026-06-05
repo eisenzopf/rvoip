@@ -5,12 +5,12 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use std::sync::Arc;
-use tracing::{debug, info, warn};
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
 use rvoip_infra_common::events::cross_crate::{
     CrossCrateEvent, MediaToSessionEvent, RvoipCrossCrateEvent,
 };
+use std::sync::Arc;
+use tracing::{debug, info, warn};
 
 use crate::relay::controller::{MediaSessionController, MediaSessionEvent};
 use crate::types::MediaSessionId;

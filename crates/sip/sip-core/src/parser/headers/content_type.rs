@@ -38,7 +38,7 @@ use crate::parser::ParseResult;
 // Import the shared media_type parser - REMOVED
 // use super::media_type::media_type;
 // use crate::types::media_type::MediaType;
- // Specific header type
+// Specific header type
 
 // m-type, m-subtype are just tokens
 // Note: These seem to be defined in media_type.rs now, potentially remove if unused locally

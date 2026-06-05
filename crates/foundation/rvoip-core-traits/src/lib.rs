@@ -39,6 +39,6 @@ pub mod capability;
 pub mod connection;
 pub mod error;
 pub mod harness;
-pub mod ids;
 pub mod identity;
+pub mod ids;
 pub mod stream;

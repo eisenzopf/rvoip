@@ -6,16 +6,16 @@ pub use connection::{ReceivedFrame, TcpConnection};
 pub use listener::TcpListener;
 pub use pool::{ConnectionPool, PoolConfig};
 
+use crate::error::{Error, Result};
+use crate::transport::{Transport, TransportEvent, TransportType};
 use bytes::Bytes;
+use rvoip_sip_core::Message;
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace};
-use crate::error::{Error, Result};
-use crate::transport::{Transport, TransportEvent, TransportType};
-use rvoip_sip_core::Message;
 
 // Default channel capacity
 const DEFAULT_CHANNEL_CAPACITY: usize = 1000;

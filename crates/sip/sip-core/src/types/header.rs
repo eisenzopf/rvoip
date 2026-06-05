@@ -41,36 +41,36 @@
 //! // let from_header = TypedHeader::try_from(parse_header(header_str).unwrap()).unwrap();
 //! ```
 
- // Import the parser module
- // Import the types module itself
- // Import DateTime specifically
- // Import FixedOffset
+// Import the parser module
+// Import the types module itself
+// Import DateTime specifically
+// Import FixedOffset
 use std::string::FromUtf8Error; // Import FromUtf8Error
 
- // Import directly from parser
- // Keep parser type if no types::* yet
- // Import directly from parser
- // Keep parser type if no types::* yet
- // Import from parser
- // Import RouteEntry from parser
- // Use our new AcceptLanguage type
- // Add explicit import for Address
- // Import Contact
- // Import ContentDisposition
- // Rename From to avoid conflict
- // Needed for Allow parsing
- // Import Priority type
- // Import RecordRouteEntry from types module
- // Add ReferTo import
- // Import Require type
- // Import Subject type
- // Import Supported type
- // Rename To to avoid conflict
- // Import Unsupported type
- // Import Scheme
- // Import Uri
- // Import both Via and ViaHeader
- // Add WarnAgent import
+// Import directly from parser
+// Keep parser type if no types::* yet
+// Import directly from parser
+// Keep parser type if no types::* yet
+// Import from parser
+// Import RouteEntry from parser
+// Use our new AcceptLanguage type
+// Add explicit import for Address
+// Import Contact
+// Import ContentDisposition
+// Rename From to avoid conflict
+// Needed for Allow parsing
+// Import Priority type
+// Import RecordRouteEntry from types module
+// Add ReferTo import
+// Import Require type
+// Import Subject type
+// Import Supported type
+// Rename To to avoid conflict
+// Import Unsupported type
+// Import Scheme
+// Import Uri
+// Import both Via and ViaHeader
+// Add WarnAgent import
 
 // Add log for debug printing
 extern crate log;

@@ -16,18 +16,18 @@ use std::str;
 
 // Import from base parser modules
 use crate::parser::address::name_addr_or_addr_spec; // Use shared address parser
- // Added quoted_string
+                                                    // Added quoted_string
 use crate::parser::separators::{equal, semi};
 use crate::parser::token::token; // Added token
- // Added lws // Added parse_uri
-                                    // Import specific param parser and list helper
+                                 // Added lws // Added parse_uri
+                                 // Import specific param parser and list helper
 use crate::parser::common_params::generic_param; // Added generic_param
 use crate::parser::ParseResult;
 
 use crate::types::address::Address;
 use crate::types::from::From as FromHeader;
 use crate::types::param::Param;
- // Use specific type alias
+// Use specific type alias
 
 // NOTE: name_addr and addr_spec are duplicated from contact.rs for now.
 // Consider extracting to a shared address.rs module later.
@@ -94,10 +94,9 @@ pub fn parse_from(input: &[u8]) -> ParseResult<'_, FromHeader> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use crate::types::param::{GenericValue, Param};
     use crate::types::uri::{Host, Scheme};
-    
 
     #[test]
     fn test_parse_from_simple_addr_spec() {

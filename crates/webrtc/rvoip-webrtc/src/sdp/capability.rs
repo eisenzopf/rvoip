@@ -35,10 +35,7 @@ pub fn default_webrtc_capabilities() -> CapabilityDescriptor {
 
 /// Ordered codec preferences from an offerer's `CapabilityDescriptor`.
 pub fn offer_codec_preferences(caps: &CapabilityDescriptor) -> Vec<String> {
-    caps.audio_codecs
-        .iter()
-        .map(|c| c.name.clone())
-        .collect()
+    caps.audio_codecs.iter().map(|c| c.name.clone()).collect()
 }
 
 /// Pick the first codec from `preferences` that `local` supports.

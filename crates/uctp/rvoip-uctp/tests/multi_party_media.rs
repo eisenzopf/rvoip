@@ -44,7 +44,10 @@ fn install_crypto_provider() {
 
 fn server_endpoint(
     addr: std::net::SocketAddr,
-) -> (Arc<quinn::Endpoint>, rustls::pki_types::CertificateDer<'static>) {
+) -> (
+    Arc<quinn::Endpoint>,
+    rustls::pki_types::CertificateDer<'static>,
+) {
     let (cert_der, key_der) = self_signed_for_dev(&["localhost".into()]).expect("self_signed");
     let mut tls = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -115,7 +118,7 @@ async fn drive_auth_quic(
         serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "test-token".into(),
-        actor_token: None,
+            actor_token: None,
         })
         .unwrap(),
     )
@@ -132,9 +135,7 @@ async fn drive_auth_quic(
 /// arrives; return its `stream_local_id`. The MP3c fanout path
 /// (plan B1) announces the subscriber's per-publisher local_id this
 /// way so the subscriber's client can build a matching MediaStream.
-async fn wait_for_stream_opened(
-    inbound: &mut tokio::sync::mpsc::Receiver<UctpEnvelope>,
-) -> u16 {
+async fn wait_for_stream_opened(inbound: &mut tokio::sync::mpsc::Receiver<UctpEnvelope>) -> u16 {
     for _ in 0..30 {
         let env = tokio::time::timeout(Duration::from_millis(500), inbound.recv())
             .await
@@ -168,7 +169,7 @@ fn invite(sid: &str, participant: &str) -> UctpEnvelope {
             capabilities_offer: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -186,10 +187,8 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
     // --- Orchestrator + multi-party subscription handler + adapter ---
     let orchestrator = Orchestrator::new(Config::default());
     let publishers = orchestrator.publisher_registry();
-    let handler = OrchestratorSubscriptionHandler::new(
-        Arc::clone(&orchestrator),
-        Arc::clone(&publishers),
-    );
+    let handler =
+        OrchestratorSubscriptionHandler::new(Arc::clone(&orchestrator), Arc::clone(&publishers));
     let quic_adapter = UctpQuicAdapter::new(
         UctpQuicConfig::new(Arc::clone(&server_ep), quic_accept_rx, bearer_stub())
             .with_subscription_handler(handler)
@@ -208,14 +207,17 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
     let client_b_ep = client_endpoint();
     let cfg = dev_client_config_trusting(&cert_der).expect("client cfg");
 
-    let client_a =
-        UctpQuicClient::connect(&client_a_ep, server_addr, "localhost", Arc::new(cfg.clone()))
-            .await
-            .expect("client a");
-    let client_b =
-        UctpQuicClient::connect(&client_b_ep, server_addr, "localhost", Arc::new(cfg))
-            .await
-            .expect("client b");
+    let client_a = UctpQuicClient::connect(
+        &client_a_ep,
+        server_addr,
+        "localhost",
+        Arc::new(cfg.clone()),
+    )
+    .await
+    .expect("client a");
+    let client_b = UctpQuicClient::connect(&client_b_ep, server_addr, "localhost", Arc::new(cfg))
+        .await
+        .expect("client b");
 
     // A1: drive bearer auth on both clients before inviting.
     let mut in_a = client_a.take_inbound().expect("a take_inbound");
@@ -225,7 +227,10 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
 
     // Send invites sequentially so the orchestrator's ConnectionInbound
     // ordering is deterministic — client A is always the publisher.
-    client_a.send(invite("sess_a", "part_a_publisher")).await.unwrap();
+    client_a
+        .send(invite("sess_a", "part_a_publisher"))
+        .await
+        .unwrap();
     let publisher_connid = loop {
         if let Ok(Ok(Event::ConnectionInbound { connection_id, .. })) =
             tokio::time::timeout(Duration::from_secs(5), events.recv()).await
@@ -233,7 +238,10 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
             break connection_id;
         }
     };
-    client_b.send(invite("sess_b", "part_b_subscriber")).await.unwrap();
+    client_b
+        .send(invite("sess_b", "part_b_subscriber"))
+        .await
+        .unwrap();
     let subscriber_connid = loop {
         if let Ok(Ok(Event::ConnectionInbound { connection_id, .. })) =
             tokio::time::timeout(Duration::from_secs(5), events.recv()).await
@@ -304,7 +312,7 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
             payload: Bytes::from(vec![0x00, 0x00, 0x00, 0x00, 0xFF]),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
-        payload_type: None,
+            payload_type: None,
         })
         .await
         .expect("prime frame");
@@ -344,7 +352,7 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
             payload: Bytes::from(vec![0x4D, 0x50, 0x33, 0x42, i]),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
-        payload_type: None,
+            payload_type: None,
         };
         publisher_out.send(frame).await.expect("inject frame");
     }
@@ -386,10 +394,8 @@ async fn fanout_with_no_subscription_does_not_leak_frames() {
 
     let orchestrator = Orchestrator::new(Config::default());
     let publishers = orchestrator.publisher_registry();
-    let handler = OrchestratorSubscriptionHandler::new(
-        Arc::clone(&orchestrator),
-        Arc::clone(&publishers),
-    );
+    let handler =
+        OrchestratorSubscriptionHandler::new(Arc::clone(&orchestrator), Arc::clone(&publishers));
     let quic_adapter = UctpQuicAdapter::new(
         UctpQuicConfig::new(Arc::clone(&server_ep), quic_accept_rx, bearer_stub())
             .with_subscription_handler(handler)
@@ -405,14 +411,17 @@ async fn fanout_with_no_subscription_does_not_leak_frames() {
     let client_a_ep = client_endpoint();
     let client_b_ep = client_endpoint();
     let cfg = dev_client_config_trusting(&cert_der).expect("client cfg");
-    let client_a =
-        UctpQuicClient::connect(&client_a_ep, server_addr, "localhost", Arc::new(cfg.clone()))
-            .await
-            .expect("client a");
-    let client_b =
-        UctpQuicClient::connect(&client_b_ep, server_addr, "localhost", Arc::new(cfg))
-            .await
-            .expect("client b");
+    let client_a = UctpQuicClient::connect(
+        &client_a_ep,
+        server_addr,
+        "localhost",
+        Arc::new(cfg.clone()),
+    )
+    .await
+    .expect("client a");
+    let client_b = UctpQuicClient::connect(&client_b_ep, server_addr, "localhost", Arc::new(cfg))
+        .await
+        .expect("client b");
     let mut in_a = client_a.take_inbound().expect("a take_inbound");
     let mut in_b = client_b.take_inbound().expect("b take_inbound");
     drive_auth_quic(&client_a, &mut in_a).await;
@@ -472,7 +481,7 @@ async fn fanout_with_no_subscription_does_not_leak_frames() {
             payload: Bytes::from(vec![0xDE, 0xAD, 0xBE, 0xEF, i]),
             timestamp_rtp: 0,
             captured_at: Utc::now(),
-        payload_type: None,
+            payload_type: None,
         };
         publisher_out.send(frame).await.expect("inject");
     }

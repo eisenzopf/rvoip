@@ -88,10 +88,7 @@ impl ConnectionAdapter for StubAdapter {
     async fn transfer(&self, _conn: ConnectionId, _target: TransferTarget) -> RvResult<()> {
         Ok(())
     }
-    async fn streams(
-        &self,
-        _conn: ConnectionId,
-    ) -> RvResult<Vec<Arc<dyn MediaStream>>> {
+    async fn streams(&self, _conn: ConnectionId) -> RvResult<Vec<Arc<dyn MediaStream>>> {
         Ok(vec![])
     }
     async fn send_message(&self, _conn: ConnectionId, _msg: Message) -> RvResult<()> {
@@ -208,10 +205,7 @@ async fn start_session_rejects_when_conversation_is_closed() {
     orch.close_conversation(cid.clone(), false)
         .await
         .expect("close");
-    match orch
-        .start_session(cid, SessionMedium::Voice, vec![])
-        .await
-    {
+    match orch.start_session(cid, SessionMedium::Voice, vec![]).await {
         Err(RvoipError::InvalidState(_)) => {}
         other => panic!("expected InvalidState, got {other:?}"),
     }

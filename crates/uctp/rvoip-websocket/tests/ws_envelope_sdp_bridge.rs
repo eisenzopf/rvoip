@@ -36,9 +36,7 @@ use rvoip_core::{Config, Orchestrator};
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads::{
     auth,
-    connection::{
-        ConnectionAnswer, ConnectionOffer, StreamOffer, WebRtcSubstrateSetup,
-    },
+    connection::{ConnectionAnswer, ConnectionOffer, StreamOffer, WebRtcSubstrateSetup},
     session::SessionInvite,
 };
 use rvoip_uctp::types::MessageType;
@@ -71,7 +69,7 @@ fn auth_hello() -> UctpEnvelope {
             capabilities: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -88,9 +86,10 @@ fn auth_response(in_reply_to: String) -> UctpEnvelope {
         payload: serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "test-token".into(),
-            actor_token: None,        })
+            actor_token: None,
+        })
         .unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -112,7 +111,7 @@ fn invite(sid: &str, participant: &str) -> UctpEnvelope {
             capabilities_offer: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -154,7 +153,10 @@ async fn envelope_only_sdp_exchange_completes_dtls_handshake() {
 
     // --- session.invite ---
     let sid = "sess_env_test";
-    client.send(invite(sid, "part_env_client")).await.expect("invite");
+    client
+        .send(invite(sid, "part_env_client"))
+        .await
+        .expect("invite");
 
     // Wait for the server to materialize the per-connection route /
     // bridge (the WS adapter spawns the answerer-bridge construction

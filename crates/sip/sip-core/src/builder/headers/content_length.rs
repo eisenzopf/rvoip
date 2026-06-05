@@ -295,7 +295,7 @@ impl ContentLengthBuilderExt for SimpleResponseBuilder {
 mod tests {
     use super::*;
     use crate::builder::headers::cseq::CSeqBuilderExt;
-    
+
     use crate::types::Method;
 
     #[test]

@@ -4,7 +4,8 @@
 //! MIKEY messages consist of a common header followed by a sequence of payloads.
 
 use super::payloads::{
-    CertificatePayload, CommonHeader, EncryptedPayload, KeyDataPayload, PayloadType, PublicKeyPayload, SecurityPolicyPayload, SignaturePayload,
+    CertificatePayload, CommonHeader, EncryptedPayload, KeyDataPayload, PayloadType,
+    PublicKeyPayload, SecurityPolicyPayload, SignaturePayload,
 };
 use crate::Error;
 

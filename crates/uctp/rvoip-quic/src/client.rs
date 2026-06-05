@@ -36,8 +36,9 @@ impl UctpQuicClient {
         if tls.alpn_protocols.is_empty() {
             tls.alpn_protocols = vec![b"uctp/1".to_vec()];
         }
-        let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
-            .map_err(|e| rvoip_uctp::errors::SubstrateError::Tls(rustls::Error::General(e.to_string())))?;
+        let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|e| {
+            rvoip_uctp::errors::SubstrateError::Tls(rustls::Error::General(e.to_string()))
+        })?;
         let mut qc = quinn::ClientConfig::new(Arc::new(crypto));
         let mut t = quinn::TransportConfig::default();
         // Generous idle timeout so loopback tests don't flake.
@@ -46,7 +47,9 @@ impl UctpQuicClient {
 
         let connecting = endpoint
             .connect_with(qc, server, server_name)
-            .map_err(|e| rvoip_uctp::errors::SubstrateError::Tls(rustls::Error::General(e.to_string())))?;
+            .map_err(|e| {
+                rvoip_uctp::errors::SubstrateError::Tls(rustls::Error::General(e.to_string()))
+            })?;
         let conn = connecting
             .await
             .map_err(rvoip_uctp::errors::SubstrateError::Quinn)?;

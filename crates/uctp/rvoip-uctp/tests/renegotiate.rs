@@ -19,7 +19,9 @@ use chrono::Utc;
 use rvoip_auth_core::bearer_stub;
 use rvoip_uctp::{
     envelope::UctpEnvelope,
-    payloads::{connection::ConnectionOffer, connection::ConnectionUpdate, connection::StreamOffer},
+    payloads::{
+        connection::ConnectionOffer, connection::ConnectionUpdate, connection::StreamOffer,
+    },
     state::{UctpCoordinator, ENVELOPE_CHANNEL_CAP},
     types::MessageType,
 };
@@ -65,12 +67,7 @@ async fn setup_connection(
     let _ = tokio::time::timeout(std::time::Duration::from_millis(50), out_rx.recv()).await;
 }
 
-fn renegotiate_env(
-    sid: &str,
-    connid: &str,
-    id: &str,
-    new_prefs: Vec<String>,
-) -> UctpEnvelope {
+fn renegotiate_env(sid: &str, connid: &str, id: &str, new_prefs: Vec<String>) -> UctpEnvelope {
     UctpEnvelope {
         v: 1,
         msg_type: MessageType::ConnectionUpdate,
@@ -87,7 +84,7 @@ fn renegotiate_env(
             details: serde_json::Value::Null,
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 

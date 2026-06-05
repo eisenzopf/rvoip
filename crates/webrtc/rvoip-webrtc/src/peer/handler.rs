@@ -10,9 +10,9 @@ use tracing::warn;
 use webrtc::data_channel::DataChannel;
 use webrtc::media_stream::track_remote::TrackRemote;
 use webrtc::peer_connection::{
-    PeerConnectionEventHandler, RTCIceCandidate, RTCIceGatheringState,
+    PeerConnectionEventHandler, RTCIceCandidate, RTCIceConnectionState, RTCIceGatheringState,
     RTCPeerConnectionIceErrorEvent, RTCPeerConnectionIceEvent, RTCPeerConnectionState,
-    RTCIceConnectionState, RTCSignalingState,
+    RTCSignalingState,
 };
 
 /// Per-channel drop counters surfaced via [`HandlerChannels::drops`].
@@ -136,9 +136,7 @@ impl PeerConnectionEventHandler for ConnectionHandler {
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
         match state {
             RTCPeerConnectionState::Connected => {
-                self.channels
-                    .connected_flag
-                    .store(true, Ordering::Release);
+                self.channels.connected_flag.store(true, Ordering::Release);
                 let _ = self.channels.connected.try_send(());
             }
             RTCPeerConnectionState::Failed => {
@@ -160,18 +158,8 @@ impl PeerConnectionEventHandler for ConnectionHandler {
         ));
         // Best-effort forward for trickle signalers. Drop on backpressure rather
         // than block the webrtc-rs internal event task.
-        if self
-            .channels
-            .local_ice
-            .try_send(event.candidate)
-            .is_err()
-        {
-            let dropped = self
-                .channels
-                .drops
-                .state
-                .fetch_add(1, Ordering::Relaxed)
-                + 1;
+        if self.channels.local_ice.try_send(event.candidate).is_err() {
+            let dropped = self.channels.drops.state.fetch_add(1, Ordering::Relaxed) + 1;
             warn!(
                 dropped,
                 "local ICE candidate channel full; dropping (trickle signaler too slow?)"

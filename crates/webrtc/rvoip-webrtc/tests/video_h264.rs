@@ -68,7 +68,10 @@ async fn h264_encoder_round_trip_through_packetizer() {
                 if keyframe {
                     saw_keyframe = true;
                 }
-                assert!(!rtp_packets.is_empty(), "frame must emit at least one RTP packet");
+                assert!(
+                    !rtp_packets.is_empty(),
+                    "frame must emit at least one RTP packet"
+                );
                 for p in &rtp_packets {
                     let nal_type = p[0] & 0x1f;
                     assert!(

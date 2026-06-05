@@ -1,9 +1,7 @@
+use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 #[cfg(test)]
 use crate::types::headers::HeaderName;
-use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
-use crate::types::{
-    mime_version::MimeVersion as MimeVersionType, TypedHeader,
-};
+use crate::types::{mime_version::MimeVersion as MimeVersionType, TypedHeader};
 
 /// # MIME-Version Header Builder Extension
 ///

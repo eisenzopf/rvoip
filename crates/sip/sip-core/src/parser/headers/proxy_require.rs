@@ -12,11 +12,7 @@
 // Example:
 // Proxy-Require: sec-agree, precondition
 
-use nom::{
-    bytes::complete::tag,
-    combinator::map_res,
-    sequence::delimited,
-};
+use nom::{bytes::complete::tag, combinator::map_res, sequence::delimited};
 use std::str;
 
 // Import from new modules
@@ -106,7 +102,6 @@ pub fn parse_proxy_require(input: &[u8]) -> ParseResult<'_, Vec<String>> {
 mod tests {
     use super::*;
     use nom::combinator::all_consuming;
-    
 
     #[test]
     fn test_parse_proxy_require() {

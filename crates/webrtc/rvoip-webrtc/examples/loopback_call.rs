@@ -32,8 +32,7 @@ impl Signaler for LoopbackSignaler {
 #[tokio::main]
 async fn main() -> rvoip_webrtc::Result<()> {
     let config = WebRtcConfig::loopback();
-    let client =
-        WebRtcClient::connect(config.clone(), "loopback://in-process").await?;
+    let client = WebRtcClient::connect(config.clone(), "loopback://in-process").await?;
     let answerer = RvoipPeerConnection::new(&config, PeerRole::Answerer).await?;
 
     let signaler = LoopbackSignaler { answerer };
@@ -44,9 +43,7 @@ async fn main() -> rvoip_webrtc::Result<()> {
             SessionMedium::Audio,
         )
         .await?;
-    session
-        .wait_connected(Duration::from_secs(10))
-        .await?;
+    session.wait_connected(Duration::from_secs(10)).await?;
     println!(
         "loopback call established (session {})",
         session.session_id()

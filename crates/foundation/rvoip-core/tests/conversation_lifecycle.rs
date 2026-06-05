@@ -43,7 +43,9 @@ async fn open_and_close_emits_opened_and_closed() {
         .expect("open");
 
     match next_event(&mut events).await {
-        Event::ConversationOpened { conversation_id, .. } => {
+        Event::ConversationOpened {
+            conversation_id, ..
+        } => {
             assert_eq!(conversation_id, cid);
         }
         other => panic!("expected ConversationOpened, got {other:?}"),
@@ -61,7 +63,9 @@ async fn open_and_close_emits_opened_and_closed() {
         .expect("close");
 
     match next_event(&mut events).await {
-        Event::ConversationClosed { conversation_id, .. } => {
+        Event::ConversationClosed {
+            conversation_id, ..
+        } => {
             assert_eq!(conversation_id, cid);
         }
         other => panic!("expected ConversationClosed, got {other:?}"),
@@ -153,7 +157,9 @@ async fn close_with_force_ends_active_sessions_then_closes() {
                 assert_eq!(session_id, sid);
                 saw_session_ended = true;
             }
-            Event::ConversationClosed { conversation_id, .. } => {
+            Event::ConversationClosed {
+                conversation_id, ..
+            } => {
                 assert_eq!(conversation_id, cid);
                 saw_conversation_closed = true;
             }
@@ -249,7 +255,9 @@ async fn end_session_normal_after_force_close_does_not_panic() {
         .start_session(cid.clone(), SessionMedium::Voice, vec![])
         .await
         .expect("start_session");
-    orch.close_conversation(cid, true).await.expect("force close");
+    orch.close_conversation(cid, true)
+        .await
+        .expect("force close");
     // Now end_session on the already-ended session should be a no-op.
     orch.end_session(sid, EndReason::Normal)
         .await

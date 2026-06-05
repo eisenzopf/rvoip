@@ -212,7 +212,6 @@ pub fn ttl_value(input: &[u8]) -> ParseResult<'_, u8> {
 mod tests {
     use super::*;
     use crate::parser::utils::unfold_lws;
-    
 
     #[test]
     fn test_delta_seconds() {

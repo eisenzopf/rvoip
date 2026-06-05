@@ -1480,7 +1480,6 @@ mod tests {
     /// Test server transaction creation and operations
     #[tokio::test]
     async fn test_server_transaction_lifecycle() -> Result<()> {
-
         // Setup mock transport
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
         let (transport_tx, transport_rx) = mpsc::channel(10);

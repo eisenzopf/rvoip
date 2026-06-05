@@ -1,6 +1,6 @@
+use super::HeaderSetter;
 #[cfg(test)]
 use crate::types::headers::TypedHeader;
-use super::HeaderSetter;
 use crate::types::{
     address::Address,
     record_route::{RecordRoute, RecordRouteEntry},

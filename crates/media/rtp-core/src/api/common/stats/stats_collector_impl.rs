@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
 
-
 use crate::api::common::stats::{
     MediaStats, MediaStatsCollector, QualityLevel, StatsError, StreamStats,
 };
@@ -58,8 +57,6 @@ impl DefaultMediaStatsCollector {
             start_time: RwLock::new(SystemTime::now()),
         })
     }
-
-
 }
 
 #[async_trait]

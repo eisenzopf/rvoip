@@ -1,3 +1,5 @@
+use rvoip_sip_core::prelude::*;
+use rvoip_sip_transport::Transport;
 /// # Transaction Common Logic
 ///
 /// This module provides reusable utility functions for transaction event handling
@@ -24,13 +26,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, trace};
-use rvoip_sip_core::prelude::*;
-use rvoip_sip_transport::Transport;
 
 use crate::transaction::error::{Error, Result};
-use crate::transaction::{
-    TransactionEvent, TransactionKey, TransactionKind, TransactionState,
-};
+use crate::transaction::{TransactionEvent, TransactionKey, TransactionKind, TransactionState};
 
 /// Send a transaction state changed event to the Transaction User (TU).
 ///

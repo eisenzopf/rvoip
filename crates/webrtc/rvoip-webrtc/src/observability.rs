@@ -225,8 +225,14 @@ mod tests {
             "rvoip_webrtc_sessions_rejected_over_cap",
             "rvoip_webrtc_reaped_total",
         ] {
-            assert!(body.contains(&format!("# HELP {series}")), "missing HELP for {series}");
-            assert!(body.contains(&format!("# TYPE {series}")), "missing TYPE for {series}");
+            assert!(
+                body.contains(&format!("# HELP {series}")),
+                "missing HELP for {series}"
+            );
+            assert!(
+                body.contains(&format!("# TYPE {series}")),
+                "missing TYPE for {series}"
+            );
         }
         assert!(body.contains("rvoip_webrtc_inbound_total 7"));
         assert!(body.contains("rvoip_webrtc_active_sessions 2"));

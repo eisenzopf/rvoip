@@ -52,9 +52,7 @@ async fn spawn_static_server() -> (std::net::SocketAddr, Arc<Notify>) {
             async move { serve_file(&root, &file).await }
         }),
     );
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("static bind");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("static bind");
     let addr = listener.local_addr().expect("static addr");
     let shutdown = Arc::new(Notify::new());
     let shutdown_clone = Arc::clone(&shutdown);
@@ -85,10 +83,7 @@ async fn serve_file(root: &PathBuf, file: &str) -> impl IntoResponse {
             } else {
                 "application/octet-stream"
             };
-            headers.insert(
-                "content-type",
-                HeaderValue::from_static(ct),
-            );
+            headers.insert("content-type", HeaderValue::from_static(ct));
             (StatusCode::OK, headers, bytes).into_response()
         }
         Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
@@ -142,13 +137,9 @@ async fn headless_chromium_whip_publish_round_trip() {
             return;
         }
     };
-    let page_url = format!(
-        "http://{static_addr}/whip-publish.html?whip=http://{whip}/whip/browser-test"
-    );
-    let page = browser
-        .new_page(&page_url)
-        .await
-        .expect("open page");
+    let page_url =
+        format!("http://{static_addr}/whip-publish.html?whip=http://{whip}/whip/browser-test");
+    let page = browser.new_page(&page_url).await.expect("open page");
 
     // Wait for the load event.
     let mut load_events = page
@@ -194,7 +185,10 @@ async fn headless_chromium_whip_publish_round_trip() {
         m.inbound_total >= 1,
         "metrics.inbound_total should reflect the browser WHIP POST; got {m:?}"
     );
-    assert!(connected, "browser RTCPeerConnection never reached `connected` (last status: {last_status})");
+    assert!(
+        connected,
+        "browser RTCPeerConnection never reached `connected` (last status: {last_status})"
+    );
 
     // Teardown.
     let _ = page.close().await;

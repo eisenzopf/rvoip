@@ -57,9 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let event = events.recv().await?;
         match event {
             Event::ConnectionInbound { connection_id, .. } => {
-                if quic_conn.is_none()
-                    && !server.adapter().routes().contains_key(&connection_id)
-                {
+                if quic_conn.is_none() && !server.adapter().routes().contains_key(&connection_id) {
                     tracing::info!(%connection_id, "QUIC/UCTP leg ready");
                     quic_conn = Some(connection_id);
                     continue;
@@ -96,7 +94,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            Event::ConnectionsBridged { bridge_id, a, b, .. } => {
+            Event::ConnectionsBridged {
+                bridge_id, a, b, ..
+            } => {
                 tracing::info!(%bridge_id, %a, %b, "ConnectionsBridged");
             }
             Event::ConnectionEnded { connection_id, .. } => {

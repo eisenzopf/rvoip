@@ -38,6 +38,8 @@ pub struct SessionRegistry {
     /// while the call is in `Ringing` so `IncomingCall::raw_request()` can
     /// surface it.
     pending_incoming_request: Arc<ArcSwapOption<rvoip_sip_core::Request>>,
+    /// Transport context for the pending inbound INVITE.
+    pending_incoming_transport: Arc<ArcSwapOption<crate::auth::SipTransportSecurityContext>>,
 }
 
 impl SessionRegistry {
@@ -49,6 +51,7 @@ impl SessionRegistry {
             current_media: Arc::new(ArcSwapOption::empty()),
             pending_incoming_call: Arc::new(ArcSwapOption::empty()),
             pending_incoming_request: Arc::new(ArcSwapOption::empty()),
+            pending_incoming_transport: Arc::new(ArcSwapOption::empty()),
         }
     }
 
@@ -126,6 +129,7 @@ impl SessionRegistry {
         self.current_media.store(None);
         self.pending_incoming_call.store(None);
         self.pending_incoming_request.store(None);
+        self.pending_incoming_transport.store(None);
     }
 
     /// Store pending incoming call info (single session version).
@@ -155,6 +159,15 @@ impl SessionRegistry {
         self.pending_incoming_request.store(Some(request));
     }
 
+    /// Store the transport context for the pending inbound INVITE.
+    pub async fn store_pending_incoming_transport(
+        &self,
+        transport: crate::auth::SipTransportSecurityContext,
+    ) {
+        self.pending_incoming_transport
+            .store(Some(Arc::new(transport)));
+    }
+
     /// Peek at the parsed inbound INVITE without consuming it. Used
     /// when multiple surfaces (StreamPeer, CallbackPeer event stream,
     /// Endpoint) may build their own `IncomingCall` view of the same
@@ -163,11 +176,25 @@ impl SessionRegistry {
         self.pending_incoming_request.load_full()
     }
 
+    /// Peek at the transport context for the pending inbound INVITE.
+    pub async fn peek_pending_incoming_transport(
+        &self,
+    ) -> Option<Arc<crate::auth::SipTransportSecurityContext>> {
+        self.pending_incoming_transport.load_full()
+    }
+
     /// Consume the parsed inbound INVITE once an
     /// `IncomingCall::accept()` / `reject()` / `defer()` resolves the
     /// call. Idempotent — repeated calls return `None`.
     pub async fn take_pending_incoming_request(&self) -> Option<Arc<rvoip_sip_core::Request>> {
         self.pending_incoming_request.swap(None)
+    }
+
+    /// Consume the pending inbound INVITE transport context.
+    pub async fn take_pending_incoming_transport(
+        &self,
+    ) -> Option<Arc<crate::auth::SipTransportSecurityContext>> {
+        self.pending_incoming_transport.swap(None)
     }
 }
 

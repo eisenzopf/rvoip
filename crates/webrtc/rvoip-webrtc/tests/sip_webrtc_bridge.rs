@@ -90,7 +90,10 @@ async fn webrtc_advertises_audio_codecs_and_sip_is_capability_neutral() {
         "WebRTC adapter must advertise Opus by default"
     );
     assert!(
-        webrtc_caps.audio_codecs.iter().any(|c| c.name.starts_with("g.711")),
+        webrtc_caps
+            .audio_codecs
+            .iter()
+            .any(|c| c.name.starts_with("g.711")),
         "WebRTC adapter must advertise G.711 for SIP interop"
     );
 

@@ -285,7 +285,7 @@ pub struct RtpSchedulerStats {
 mod tests {
     use super::*;
     use crate::packet::{RtpHeader, RtpPacket};
-    
+
     use bytes::Bytes;
 
     #[tokio::test]

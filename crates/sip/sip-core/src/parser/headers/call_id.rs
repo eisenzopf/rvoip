@@ -45,8 +45,6 @@ pub fn parse_call_id(input: &[u8]) -> ParseResult<'_, CallId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    
 
     // Test the callid function directly (without header name)
     #[test]

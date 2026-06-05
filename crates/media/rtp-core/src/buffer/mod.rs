@@ -121,8 +121,6 @@ impl Drop for MemoryPermit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    
 
     #[tokio::test]
     async fn test_memory_limits() {

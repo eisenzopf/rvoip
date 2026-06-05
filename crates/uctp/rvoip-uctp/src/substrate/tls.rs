@@ -7,7 +7,6 @@
 //! `dangerous_no_verify` skips verification entirely; it's gated behind
 //! the `dev-dangerous` feature so production builds can't depend on it.
 
-
 use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
@@ -19,9 +18,8 @@ use crate::errors::SubstrateError;
 pub fn self_signed_for_dev(
     domains: &[String],
 ) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>), SubstrateError> {
-    let cert = generate_simple_self_signed(domains.to_vec()).map_err(|e| {
-        SubstrateError::Tls(rustls::Error::General(format!("rcgen: {}", e)))
-    })?;
+    let cert = generate_simple_self_signed(domains.to_vec())
+        .map_err(|e| SubstrateError::Tls(rustls::Error::General(format!("rcgen: {}", e))))?;
     let der = cert.cert.der().clone();
     let key = PrivateKeyDer::Pkcs8(cert.signing_key.serialize_der().into());
     Ok((der, key))
@@ -34,9 +32,9 @@ pub fn dev_client_config_trusting(
     cert: &CertificateDer<'_>,
 ) -> Result<rustls::ClientConfig, SubstrateError> {
     let mut roots = rustls::RootCertStore::empty();
-    roots.add(cert.clone().into_owned()).map_err(|e| {
-        SubstrateError::Tls(rustls::Error::General(format!("trust anchor: {}", e)))
-    })?;
+    roots
+        .add(cert.clone().into_owned())
+        .map_err(|e| SubstrateError::Tls(rustls::Error::General(format!("trust anchor: {}", e))))?;
     let cfg = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();

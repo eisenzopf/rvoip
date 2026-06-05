@@ -1,7 +1,6 @@
 // Message parser tests for SIP messages
 // This file tests full SIP message parsing functionality
 
-
 // Import common test utilities
 
 // Import SIP Core types with specific imports

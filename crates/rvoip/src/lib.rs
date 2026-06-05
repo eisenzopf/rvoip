@@ -112,14 +112,14 @@ pub mod webrtc {
 /// wire-level protocol from `rvoip-uctp`. Enable the `uctp` feature.
 #[cfg(feature = "uctp")]
 pub mod uctp {
-    /// Envelope encode/decode, capability negotiation, session state machine.
-    pub use rvoip_uctp as protocol;
     /// UCTP-over-QUIC substrate adapter.
     pub use rvoip_quic as quic;
-    /// UCTP-over-WebTransport substrate adapter.
-    pub use rvoip_webtransport as webtransport;
+    /// Envelope encode/decode, capability negotiation, session state machine.
+    pub use rvoip_uctp as protocol;
     /// UCTP-over-WebSocket substrate adapter.
     pub use rvoip_websocket as websocket;
+    /// UCTP-over-WebTransport substrate adapter.
+    pub use rvoip_webtransport as webtransport;
 }
 
 // ---------------------------------------------------------------------------

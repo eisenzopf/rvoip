@@ -120,10 +120,7 @@ fn msg(cid: rvoip_core::ids::ConversationId, body: &str) -> Message {
     }
 }
 
-async fn drive_inbound(
-    tx: &mpsc::Sender<AdapterEvent>,
-    connid: ConnectionId,
-) {
+async fn drive_inbound(tx: &mpsc::Sender<AdapterEvent>, connid: ConnectionId) {
     tx.send(AdapterEvent::InboundConnection {
         connection: Connection {
             id: connid,
@@ -220,10 +217,7 @@ async fn pagination_returns_cursor_when_page_full() {
         .unwrap();
     assert_eq!(p1.messages.len(), 2);
     let cursor = p1.next.expect("cursor present");
-    let p2 = orch
-        .list_messages(cid, filter, Some(cursor))
-        .await
-        .unwrap();
+    let p2 = orch.list_messages(cid, filter, Some(cursor)).await.unwrap();
     assert_eq!(p2.messages.len(), 2);
 }
 

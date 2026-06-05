@@ -1,7 +1,4 @@
-use nom::{
-    bytes::complete::take_while1,
-    combinator::verify,
-};
+use nom::{bytes::complete::take_while1, combinator::verify};
 use std::str;
 
 use crate::parser::ParseResult;

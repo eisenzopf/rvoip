@@ -16,9 +16,7 @@ use rvoip_core::adapter::{
     OriginateRequest, RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
-use rvoip_core::connection::{
-    Connection, ConnectionState, Direction, Transport, TransportHandle,
-};
+use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::events::Event;
 use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
@@ -328,8 +326,7 @@ async fn bridge_passes_frames_through_when_codecs_match() {
 
 #[tokio::test]
 async fn bridge_self_returns_error() {
-    let (orch, _a, _b, conn_a, _) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+    let (orch, _a, _b, conn_a, _) = setup_two_connection_orchestrator("opus", "opus").await;
     let err = orch
         .bridge_connections(conn_a.clone(), conn_a.clone())
         .await
@@ -339,8 +336,7 @@ async fn bridge_self_returns_error() {
 
 #[tokio::test]
 async fn bridge_connection_not_found_returns_error() {
-    let (orch, _a, _b, conn_a, _) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+    let (orch, _a, _b, conn_a, _) = setup_two_connection_orchestrator("opus", "opus").await;
     let unknown = ConnectionId::new();
     let err = orch
         .bridge_connections(conn_a, unknown.clone())
@@ -351,8 +347,7 @@ async fn bridge_connection_not_found_returns_error() {
 
 #[tokio::test]
 async fn bridge_already_bridged_returns_error() {
-    let (orch, _a, _b, conn_a, conn_b) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+    let (orch, _a, _b, conn_a, conn_b) = setup_two_connection_orchestrator("opus", "opus").await;
     orch.bridge_connections(conn_a.clone(), conn_b.clone())
         .await
         .expect("first bridge");
@@ -390,8 +385,7 @@ async fn unbridge_aborts_pumps_and_emits_event() {
 
     // The pump task is aborted; subsequent injects don't propagate.
     stream_a.inject(mk_frame(stream_a.id(), 99)).await;
-    let result =
-        tokio::time::timeout(Duration::from_millis(200), b_out.recv()).await;
+    let result = tokio::time::timeout(Duration::from_millis(200), b_out.recv()).await;
     assert!(
         result.is_err(),
         "no frame should arrive after unbridge (got {:?})",

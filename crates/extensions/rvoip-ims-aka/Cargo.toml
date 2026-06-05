@@ -1,0 +1,39 @@
+[package]
+name = "rvoip-ims-aka"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description = "IMS AKA provider adapters for RVoIP SIP authentication"
+
+[features]
+default = []
+http = ["dep:reqwest"]
+lab-milenage = ["dep:aes", "dep:hmac", "dep:sha2"]
+
+[dependencies]
+async-trait = { workspace = true }
+base64.workspace = true
+md-5.workspace = true
+rvoip-sip.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+aes = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+sha2 = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

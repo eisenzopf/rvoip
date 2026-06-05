@@ -49,7 +49,7 @@ fn subscribe_env(sid: &str, connid: &str, strm_ids: &[&str]) -> UctpEnvelope {
         connid: Some(connid.into()),
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -67,7 +67,7 @@ fn unsubscribe_env(sid: &str, connid: &str, strm_ids: &[&str]) -> UctpEnvelope {
         connid: Some(connid.into()),
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -85,7 +85,8 @@ async fn subscribe_with_registered_publisher_emits_ack_and_records_row() {
         PublisherEntry {
             connection: publisher_connid.clone(),
             participant: "part_publisher".into(),
-            kind: "audio".into(), codec: None,
+            kind: "audio".into(),
+            codec: None,
         },
     );
 
@@ -172,7 +173,8 @@ async fn unsubscribe_is_idempotent_and_removes_row() {
         PublisherEntry {
             connection: publisher_connid.clone(),
             participant: "part_publisher".into(),
-            kind: "audio".into(), codec: None,
+            kind: "audio".into(),
+            codec: None,
         },
     );
 
@@ -244,7 +246,8 @@ async fn setup_with_alice_streams() -> (
         PublisherEntry {
             connection: alice_conn.clone(),
             participant: "part_alice".into(),
-            kind: "audio".into(), codec: None,
+            kind: "audio".into(),
+            codec: None,
         },
     );
     publishers.register(
@@ -253,7 +256,8 @@ async fn setup_with_alice_streams() -> (
         PublisherEntry {
             connection: alice_conn.clone(),
             participant: "part_alice".into(),
-            kind: "video".into(), codec: None,
+            kind: "video".into(),
+            codec: None,
         },
     );
 
@@ -302,7 +306,7 @@ fn from_participant_env(
             }],
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     }
 }
 
@@ -311,7 +315,12 @@ async fn from_participant_subscribes_to_all_streams_when_no_kinds_filter() {
     let (orch, _publishers, in_tx, mut out_rx) = setup_with_alice_streams().await;
 
     in_tx
-        .send(from_participant_env("sess_x", "conn_bob", "part_alice", &[]))
+        .send(from_participant_env(
+            "sess_x",
+            "conn_bob",
+            "part_alice",
+            &[],
+        ))
         .await
         .unwrap();
     let ack = out_rx.recv().await.expect("expected ack");
@@ -444,7 +453,11 @@ async fn subscribe_refuses_unsupported_codec_with_488() {
     drive_auth_handshake(&in_tx, &mut out_rx).await;
 
     in_tx
-        .send(subscribe_env("sess_b2", "conn_subscriber", &["strm_exotic"]))
+        .send(subscribe_env(
+            "sess_b2",
+            "conn_subscriber",
+            &["strm_exotic"],
+        ))
         .await
         .unwrap();
     let reply = out_rx.recv().await.expect("expected 488");
@@ -462,7 +475,10 @@ async fn subscribe_refuses_unsupported_codec_with_488() {
         &publisher_connid,
         &StreamId::from_string("strm_exotic"),
     );
-    assert!(subs.is_empty(), "refused subscription must not record a row");
+    assert!(
+        subs.is_empty(),
+        "refused subscription must not record a row"
+    );
 }
 
 #[tokio::test]
@@ -514,11 +530,7 @@ async fn subscribe_accepts_when_codec_in_default_set() {
     let reply = out_rx.recv().await.expect("expected ack");
     assert_eq!(reply.msg_type, MessageType::Ack);
 
-    let subs = orch.subscribers_for(
-        &sid,
-        &publisher_connid,
-        &StreamId::from_string("strm_opus"),
-    );
+    let subs = orch.subscribers_for(&sid, &publisher_connid, &StreamId::from_string("strm_opus"));
     assert_eq!(subs.len(), 1, "opus subscription must succeed");
 }
 
@@ -565,8 +577,7 @@ async fn from_participant_skips_unsupported_codec_streams() {
             }),
         },
     );
-    let handler =
-        OrchestratorSubscriptionHandler::new(Arc::clone(&orch), Arc::clone(&publishers));
+    let handler = OrchestratorSubscriptionHandler::new(Arc::clone(&orch), Arc::clone(&publishers));
 
     let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
@@ -601,7 +612,7 @@ async fn from_participant_skips_unsupported_codec_streams() {
             }],
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     };
     in_tx.send(env).await.unwrap();
 

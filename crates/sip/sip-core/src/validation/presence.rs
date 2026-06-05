@@ -314,16 +314,12 @@ pub fn validate_conditional_request(request: &Request) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    
-    
+
     use crate::types::event::{Event, EventType};
     use crate::types::expires::Expires;
-    
-    
+
     use crate::types::subscription_state::SubscriptionState;
     use crate::types::to::To;
-    
 
     #[test]
     fn test_validate_publish_request_valid() {

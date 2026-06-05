@@ -1,8 +1,8 @@
+use crate::builder::headers::HeaderSetter;
 #[cfg(test)]
 use crate::types::header::HeaderName;
 #[cfg(test)]
 use crate::types::headers::TypedHeader;
-use crate::builder::headers::HeaderSetter;
 use crate::types::in_reply_to::InReplyTo;
 
 /// In-Reply-To header builder
@@ -191,7 +191,6 @@ mod tests {
     use super::*;
     use crate::types::{method::Method, StatusCode};
     use crate::{RequestBuilder, ResponseBuilder};
-    
 
     #[test]
     fn test_request_with_single_in_reply_to() {

@@ -65,8 +65,7 @@ fn unknown_envelope_extension_fields_are_preserved() {
         }
     });
 
-    let env: UctpEnvelope<serde_json::Value> =
-        serde_json::from_value(wire).expect("decode");
+    let env: UctpEnvelope<serde_json::Value> = serde_json::from_value(wire).expect("decode");
 
     // Payload still contains the unknown extension field.
     assert!(env.payload.get("future_extension_field").is_some());
@@ -86,8 +85,7 @@ fn unknown_message_type_decodes_to_unknown_variant() {
         "payload": {}
     });
 
-    let env: UctpEnvelope<serde_json::Value> =
-        serde_json::from_value(wire).expect("decode");
+    let env: UctpEnvelope<serde_json::Value> = serde_json::from_value(wire).expect("decode");
 
     match env.msg_type {
         MessageType::Unknown(s) => assert_eq!(s, "future.feature"),
@@ -145,8 +143,7 @@ fn auth_hello_payload_decodes() {
         }
     });
 
-    let env: UctpEnvelope<serde_json::Value> =
-        serde_json::from_value(wire).expect("decode");
+    let env: UctpEnvelope<serde_json::Value> = serde_json::from_value(wire).expect("decode");
     let payload: AuthHello = env.decode_payload().expect("typed decode");
 
     assert_eq!(payload.device.kind, "desktop");

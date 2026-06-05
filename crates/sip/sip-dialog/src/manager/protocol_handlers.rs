@@ -664,6 +664,8 @@ struct NotifyFields {
     /// so session-core can build an `IncomingRequest` view with
     /// header-level access.
     raw_request: Option<bytes::Bytes>,
+    /// Transport metadata for the inbound NOTIFY hop.
+    transport: Option<rvoip_infra_common::events::cross_crate::SipTransportContext>,
 }
 
 fn extract_notify_fields(
@@ -702,11 +704,16 @@ fn extract_notify_fields(
     // SIP_API_DESIGN_2 §7.5: prefer the transport-cached wire bytes so
     // STIR/SHAKEN consumers verify against the upstream form. Mock /
     // synthetic paths fall back to re-serialising the parsed Request.
-    let raw_request = crate::transaction::utils::transaction_key_from_message(
+    let transaction_key = crate::transaction::utils::transaction_key_from_message(
         &rvoip_sip_core::Message::Request(request.clone()),
-    )
-    .and_then(|key| transaction_manager.peek_inbound_bytes(&key))
-    .or_else(|| Some(bytes::Bytes::from(request.to_string().into_bytes())));
+    );
+    let raw_request = transaction_key
+        .as_ref()
+        .and_then(|key| transaction_manager.peek_inbound_bytes(key))
+        .or_else(|| Some(bytes::Bytes::from(request.to_string().into_bytes())));
+    let transport = transaction_key
+        .as_ref()
+        .and_then(|key| transaction_manager.peek_inbound_transport(key));
 
     NotifyFields {
         event_package,
@@ -714,6 +721,7 @@ fn extract_notify_fields(
         content_type,
         body,
         raw_request,
+        transport,
     }
 }
 
@@ -746,6 +754,7 @@ impl DialogManager {
                 content_type: fields.content_type,
                 body: fields.body,
                 raw_request: fields.raw_request,
+                transport: fields.transport,
             },
         );
 

@@ -151,9 +151,9 @@ fn setup_logging_with_otel(
         .with(filter)
         .with(otel_layer)
         .with(fmt_layer);
-    registry.try_init().map_err(|e| {
-        Error::Config(format!("tracing subscriber init failed: {}", e))
-    })?;
+    registry
+        .try_init()
+        .map_err(|e| Error::Config(format!("tracing subscriber init failed: {}", e)))?;
 
     // Hand provider ownership to a global so spans flush at shutdown
     // (the user can re-fetch via opentelemetry::global::tracer_provider).

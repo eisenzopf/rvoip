@@ -8,15 +8,9 @@ use tokio::time;
 use tracing::{info, warn};
 
 use rvoip_rtp_core::api::{
-    client::{
-        config::ClientConfigBuilder,
-        transport::MediaTransportClient,
-    },
+    client::{config::ClientConfigBuilder, transport::MediaTransportClient},
     common::{frame::MediaFrame, frame::MediaFrameType},
-    server::{
-        config::ServerConfigBuilder,
-        transport::MediaTransportServer,
-    },
+    server::{config::ServerConfigBuilder, transport::MediaTransportServer},
 };
 
 use rvoip_rtp_core::api::client::transport::DefaultMediaTransportClient;

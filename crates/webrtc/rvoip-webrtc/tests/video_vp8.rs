@@ -70,7 +70,10 @@ async fn vp8_encoder_round_trip_through_packetizer() {
                 if keyframe {
                     saw_keyframe = true;
                 }
-                assert!(!rtp_packets.is_empty(), "frame must emit at least one RTP packet");
+                assert!(
+                    !rtp_packets.is_empty(),
+                    "frame must emit at least one RTP packet"
+                );
                 // First RTP packet of the frame must have S=1 in its VP8 descriptor.
                 assert!(
                     payload_is_start_of_partition(&rtp_packets[0]),

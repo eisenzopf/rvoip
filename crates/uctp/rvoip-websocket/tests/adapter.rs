@@ -55,7 +55,7 @@ async fn ws_adapter_emits_inbound_connection_on_session_invite() {
             capabilities: serde_json::Value::Object(Default::default()),
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     };
     client.send(hello).await.expect("send hello");
     let challenge = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
@@ -75,10 +75,10 @@ async fn ws_adapter_emits_inbound_connection_on_session_invite() {
         payload: serde_json::to_value(auth::AuthResponse {
             method: "bearer".into(),
             credential: "test-token".into(),
-        actor_token: None,
+            actor_token: None,
         })
         .unwrap(),
-    signature: None,
+        signature: None,
     };
     client.send(response).await.expect("send response");
     let session_reply = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
@@ -104,7 +104,7 @@ async fn ws_adapter_emits_inbound_connection_on_session_invite() {
         connid: None,
         in_reply_to: None,
         payload: serde_json::to_value(payload).unwrap(),
-    signature: None,
+        signature: None,
     };
     client.send(env).await.expect("send invite");
 

@@ -1,9 +1,7 @@
+use super::HeaderSetter;
 #[cfg(test)]
 use crate::types::headers::HeaderName;
-use super::HeaderSetter;
-use crate::types::{
-    address::Address, refer_to::ReferTo, uri::Uri,
-};
+use crate::types::{address::Address, refer_to::ReferTo, uri::Uri};
 use std::str::FromStr;
 
 /// ReferTo header builder

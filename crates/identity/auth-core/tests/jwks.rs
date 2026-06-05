@@ -67,6 +67,8 @@ struct Claims {
     #[serde(skip_serializing_if = "Option::is_none")]
     aud: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    iss: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     realm_access: Option<RoleAccessClaims>,
@@ -96,6 +98,7 @@ fn mint_with_kid(
         sub: sub.into(),
         exp: Utc::now().timestamp() + exp_in_secs,
         aud: aud.map(|s| s.into()),
+        iss: None,
         scope: scope.map(|s| s.into()),
         realm_access: None,
         resource_access: None,
@@ -122,11 +125,32 @@ fn mint_with_keycloak_roles() -> String {
         sub: "id_keycloak".into(),
         exp: Utc::now().timestamp() + 3600,
         aud: Some("rvoip-sip".into()),
+        iss: None,
         scope: Some("profile email".into()),
         realm_access: Some(RoleAccessClaims {
             roles: vec!["admin".to_string()],
         }),
         resource_access: Some(resource_access),
+    };
+    encode(
+        &header,
+        &claims,
+        &EncodingKey::from_rsa_pem(TEST_PRIVATE_PEM.as_bytes()).expect("rsa pem"),
+    )
+    .expect("encode JWT")
+}
+
+fn mint_with_issuer(issuer: &str) -> String {
+    let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+    header.kid = Some(TEST_KID.to_string());
+    let claims = Claims {
+        sub: "id_issuer".into(),
+        exp: Utc::now().timestamp() + 3600,
+        aud: None,
+        iss: Some(issuer.into()),
+        scope: None,
+        realm_access: None,
+        resource_access: None,
     };
     encode(
         &header,
@@ -275,6 +299,22 @@ async fn audience_mismatch_rejects() {
     ));
 
     let good = mint("id_x", 3600, Some("expected.example.com"), None);
+    assert!(validator.validate(&good).await.is_ok());
+}
+
+#[tokio::test]
+async fn issuer_mismatch_rejects() {
+    let server = setup_server(jwks_body(TEST_KID)).await;
+    let validator =
+        JwksJwtValidator::new(jwks_url(&server)).with_issuer(["https://issuer.example.com"]);
+
+    let bad = mint_with_issuer("https://imposter.example.com");
+    assert!(matches!(
+        validator.validate(&bad).await,
+        Err(BearerAuthError::Invalid(_))
+    ));
+
+    let good = mint_with_issuer("https://issuer.example.com");
     assert!(validator.validate(&good).await.is_ok());
 }
 
