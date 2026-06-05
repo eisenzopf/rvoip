@@ -222,7 +222,8 @@ Operational references:
 
 - This is a beta candidate, not a broad production-readiness claim.
 - Carrier SBC readiness is partial and not certified.
-- Kamailio/OpenSIPS plus RTPengine are de-scoped from beta-candidate claims.
+- Kamailio/OpenSIPS plus RTPengine are planned validation targets, not release
+  claims for this beta candidate.
 - WebRTC/browser interop, ICE, TURN, DTLS-SRTP, and WSS outbound are outside
   the beta-candidate claim unless separately completed and tested.
 - The default full-media performance claim is bounded to the documented

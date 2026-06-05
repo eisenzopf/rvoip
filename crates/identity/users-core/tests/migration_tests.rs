@@ -8,6 +8,18 @@ fn db_url(temp_dir: &TempDir) -> String {
     format!("sqlite://{}?mode=rwc", db_path.display())
 }
 
+fn expected_migrations() -> Vec<String> {
+    [
+        "001_initial_schema",
+        "002_auth_security_tables",
+        "003_api_key_active_state",
+        "004_enterprise_identity_tables",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
 async fn table_exists(pool: &SqlitePool, table: &str) -> bool {
     query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
         .bind(table)
@@ -37,23 +49,25 @@ async fn applied_migrations(pool: &SqlitePool) -> Vec<String> {
         .collect()
 }
 
+async fn assert_migrated_schema(pool: &SqlitePool) {
+    assert!(table_exists(pool, "schema_migrations").await);
+    assert!(table_exists(pool, "revoked_access_tokens").await);
+    assert!(table_exists(pool, "sip_digest_credentials").await);
+    assert!(table_exists(pool, "external_identities").await);
+    assert!(table_exists(pool, "passkey_credentials").await);
+    assert!(column_exists(pool, "api_keys", "active").await);
+}
+
 #[tokio::test]
 async fn fresh_database_runs_all_migrations() {
     let temp_dir = TempDir::new().unwrap();
     let store = SqliteUserStore::new(&db_url(&temp_dir)).await.unwrap();
 
-    assert!(table_exists(store.pool(), "schema_migrations").await);
-    assert!(table_exists(store.pool(), "revoked_access_tokens").await);
-    assert!(table_exists(store.pool(), "sip_digest_credentials").await);
+    assert_migrated_schema(store.pool()).await;
     assert_eq!(
         applied_migrations(store.pool()).await,
-        vec![
-            "001_initial_schema".to_string(),
-            "002_auth_security_tables".to_string(),
-            "003_api_key_active_state".to_string(),
-        ]
+        expected_migrations()
     );
-    assert!(column_exists(store.pool(), "api_keys", "active").await);
 }
 
 #[tokio::test]
@@ -107,18 +121,11 @@ async fn old_shape_database_receives_auth_security_tables() {
     pool.close().await;
 
     let store = SqliteUserStore::new(&url).await.unwrap();
-    assert!(table_exists(store.pool(), "schema_migrations").await);
-    assert!(table_exists(store.pool(), "revoked_access_tokens").await);
-    assert!(table_exists(store.pool(), "sip_digest_credentials").await);
+    assert_migrated_schema(store.pool()).await;
     assert_eq!(
         applied_migrations(store.pool()).await,
-        vec![
-            "001_initial_schema".to_string(),
-            "002_auth_security_tables".to_string(),
-            "003_api_key_active_state".to_string(),
-        ]
+        expected_migrations()
     );
-    assert!(column_exists(store.pool(), "api_keys", "active").await);
 }
 
 #[tokio::test]
@@ -127,16 +134,15 @@ async fn migrations_are_idempotent_on_reopen() {
     let url = db_url(&temp_dir);
     {
         let store = SqliteUserStore::new(&url).await.unwrap();
-        assert_eq!(applied_migrations(store.pool()).await.len(), 3);
+        assert_eq!(
+            applied_migrations(store.pool()).await.len(),
+            expected_migrations().len()
+        );
     }
     let store = SqliteUserStore::new(&url).await.unwrap();
+    assert_migrated_schema(store.pool()).await;
     assert_eq!(
         applied_migrations(store.pool()).await,
-        vec![
-            "001_initial_schema".to_string(),
-            "002_auth_security_tables".to_string(),
-            "003_api_key_active_state".to_string(),
-        ]
+        expected_migrations()
     );
-    assert!(column_exists(store.pool(), "api_keys", "active").await);
 }

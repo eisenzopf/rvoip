@@ -101,7 +101,7 @@ opus = { version = "0.3", optional = true }
 # D3b/c — video encoder + camera capture (all optional).
 # `nokhwa` 0.10 with `input-native` for cross-platform camera capture.
 # `vpx-encode` 0.7 wraps libvpx for VP8/VP9 encoding.
-# `openh264` 0.6 wraps Cisco's BSD-licensed H.264 encoder.
+# `openh264` 0.9 wraps Cisco's BSD-licensed H.264 encoder.
 nokhwa = { version = "0.10", default-features = false, features = ["input-native"], optional = true }
 vpx-encode = { version = "0.6", optional = true }
 # `env-libvpx-sys` ships pre-generated bindings only for older libvpx
@@ -109,7 +109,7 @@ vpx-encode = { version = "0.6", optional = true }
 # match. Force the `generate` feature so the build runs bindgen against
 # whatever libvpx is installed locally.
 env-libvpx-sys = { version = "5", features = ["generate"], optional = true }
-openh264 = { version = "0.6", optional = true }
+openh264 = { version = "0.9.3", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

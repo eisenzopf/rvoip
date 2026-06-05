@@ -742,6 +742,18 @@ run_proxy_descope_audit() {
 run_dependency_audit() {
   local security_dir="$ARTIFACT_DIR/security"
   mkdir -p "$security_dir"
+  cat > "$security_dir/accepted-advisories.md" <<'EOF'
+# Accepted Dependency Advisories
+
+- advisory: `RUSTSEC-2023-0071`
+- package: `rsa`
+- status: accepted beta risk
+- reason: RustSec reports no fixed upgrade is available.
+- affected paths:
+  - `users-core` RS256/JWK support from configured signing keys.
+  - `webauthn-rs` transitive crypto via `crypto-glue`.
+- beta stance: keep this advisory visible in release evidence and revisit before stable release or when upstream publishes a fixed upgrade path.
+EOF
   run_gate "dependency advisory audit" env SECURITY_DIR="$security_dir" bash -c '
     set -euo pipefail
     mkdir -p "$SECURITY_DIR"
@@ -750,11 +762,16 @@ run_dependency_audit() {
       exit 127
     fi
     set +e
-    cargo audit > "$SECURITY_DIR/cargo-audit.txt" 2>&1
+    cargo audit --ignore RUSTSEC-2023-0071 > "$SECURITY_DIR/cargo-audit.txt" 2>&1
     audit_status=$?
-    cargo audit --json > "$SECURITY_DIR/cargo-audit.json" 2> "$SECURITY_DIR/cargo-audit-json.stderr"
+    cargo audit --ignore RUSTSEC-2023-0071 --json > "$SECURITY_DIR/cargo-audit.json" 2> "$SECURITY_DIR/cargo-audit-json.stderr"
     json_status=$?
     set -e
+    {
+      echo
+      echo "Accepted dependency advisory retained for beta evidence:"
+      cat "$SECURITY_DIR/accepted-advisories.md"
+    } >> "$SECURITY_DIR/cargo-audit.txt"
     cat "$SECURITY_DIR/cargo-audit.txt"
     if [ "$audit_status" -ne 0 ] || [ "$json_status" -ne 0 ]; then
       exit 1
@@ -765,9 +782,10 @@ run_dependency_audit() {
 run_fuzz_smoke_target() {
   local target="$1"
   local fuzz_dir="$ARTIFACT_DIR/security/fuzz"
+  local fuzz_crate_dir="${BETA_FUZZ_CRATE_DIR:-$CRATE_DIR/../fuzz}"
   mkdir -p "$fuzz_dir"
   run_gate "parser fuzz smoke ($target)" env \
-    CRATE_DIR="$CRATE_DIR" \
+    FUZZ_CRATE_DIR="$fuzz_crate_dir" \
     WORKSPACE_ROOT="$WORKSPACE_ROOT" \
     FUZZ_TARGET="$target" \
     FUZZ_LOG="$fuzz_dir/$target.log" \
@@ -782,10 +800,10 @@ run_fuzz_smoke_target() {
         echo "Install with: rustup toolchain install $BETA_FUZZ_TOOLCHAIN && cargo install cargo-fuzz" >&2
         exit 127
       fi
-      cd "$CRATE_DIR"
+      cd "$WORKSPACE_ROOT"
       set +e
       CARGO_TARGET_DIR="$WORKSPACE_ROOT/target/fuzz" \
-        cargo +"$BETA_FUZZ_TOOLCHAIN" fuzz run "$FUZZ_TARGET" -- \
+        cargo +"$BETA_FUZZ_TOOLCHAIN" fuzz run --fuzz-dir "$FUZZ_CRATE_DIR" "$FUZZ_TARGET" -- \
           -runs="$BETA_FUZZ_SMOKE_RUNS" \
           -max_total_time="$BETA_FUZZ_SMOKE_SECONDS" \
           > "$FUZZ_LOG" 2>&1
@@ -915,6 +933,17 @@ case "$MODE" in
     exit 2
     ;;
 esac
+
+if [ -f "$ARTIFACT_DIR/security/accepted-advisories.md" ]; then
+  cat >> "$SUMMARY" <<'EOF'
+
+## Accepted Dependency Advisories
+
+- `RUSTSEC-2023-0071` (`rsa`): accepted beta risk because RustSec reports no fixed upgrade.
+- Affected paths: `users-core` RS256/JWK support and `webauthn-rs` transitive crypto.
+- Evidence: `security/accepted-advisories.md`.
+EOF
+fi
 
 cat >> "$SUMMARY" <<EOF
 

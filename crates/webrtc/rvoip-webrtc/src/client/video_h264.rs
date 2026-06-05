@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use openh264::encoder::{Encoder as OpenH264Encoder, EncoderConfig};
+use openh264::encoder::{BitRate, Encoder as OpenH264Encoder, EncoderConfig, FrameRate};
 use openh264::formats::YUVSlices;
 use tokio::sync::mpsc;
 
@@ -71,8 +71,8 @@ impl H264VideoSource {
         let (encoded_tx, encoded_rx) = mpsc::channel::<EncodedAccessUnit>(8);
 
         let enc_cfg = EncoderConfig::new()
-            .set_bitrate_bps(cfg.bitrate_kbps * 1000)
-            .max_frame_rate(cfg.fps as f32);
+            .bitrate(BitRate::from_bps(cfg.bitrate_kbps * 1000))
+            .max_frame_rate(FrameRate::from_hz(cfg.fps as f32));
 
         thread::Builder::new()
             .name("rvoip-h264-encoder".to_string())

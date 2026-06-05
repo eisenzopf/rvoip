@@ -27,9 +27,6 @@ jsonwebtoken = "9.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# OAuth2 client library
-oauth2 = "4.4"
-
 # URL handling
 url = "2.5"
 

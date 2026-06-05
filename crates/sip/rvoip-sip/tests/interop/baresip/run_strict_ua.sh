@@ -9,7 +9,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
+WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../../../../../.." && pwd)"
 OUT_ROOT="${RVOIP_STRICT_UA_RESULTS:-$WORKSPACE_ROOT/target/strict-ua/$(date -u +%Y%m%dT%H%M%SZ)}"
 SUMMARY="$OUT_ROOT/summary.md"
 ENV_REPORT="$OUT_ROOT/environment.md"

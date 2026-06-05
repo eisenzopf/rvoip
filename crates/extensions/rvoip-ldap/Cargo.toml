@@ -14,7 +14,7 @@ description = "LDAP password verifier for RVoIP auth providers"
 
 [dependencies]
 async-trait = { workspace = true }
-ldap3 = { version = "0.11", default-features = false, features = ["tls-rustls"] }
+ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-ring"] }
 rvoip-auth-core.workspace = true
 rvoip-core-traits.workspace = true
 thiserror = { workspace = true }
