@@ -167,6 +167,7 @@ async fn main() -> Result<()> {
         invite = invite.with_sdp(sdp); // your own offer; otherwise the stack builds one
     }
     invite = invite.with_supported_100rel(true); // emits Supported: 100rel
+
     // `with_header` is policy-guarded: it returns Err for stack-managed headers
     // (Via, CSeq, From/To, Call-ID, Contact, …) so you cannot corrupt the dialog.
     for header in plan.extra_headers {

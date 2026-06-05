@@ -842,7 +842,10 @@ impl UnifiedDialogManager {
             // auth-retry path emits.
             extra_headers.insert(
                 0,
-                TypedHeader::Other(HeaderName::Authorization, HeaderValue::Raw(auth.into_bytes())),
+                TypedHeader::Other(
+                    HeaderName::Authorization,
+                    HeaderValue::Raw(auth.into_bytes()),
+                ),
             );
         }
 
@@ -943,24 +946,22 @@ impl UnifiedDialogManager {
         // `send_initial_invite_with_extra_headers` path so the headers ride
         // on the very first wire INVITE; otherwise the generic path is fine.
         let body_bytes = sdp_offer.map(|s| bytes::Bytes::from(s));
-        let send_result = if extra_headers.is_empty()
-            && from_display.is_none()
-            && contact_override.is_none()
-        {
-            self.core
-                .send_request(&dialog_id, Method::Invite, body_bytes)
-                .await
-        } else {
-            self.core
-                .send_initial_invite_with_extra_headers(
-                    &dialog_id,
-                    body_bytes,
-                    extra_headers,
-                    from_display,
-                    contact_override,
-                )
-                .await
-        };
+        let send_result =
+            if extra_headers.is_empty() && from_display.is_none() && contact_override.is_none() {
+                self.core
+                    .send_request(&dialog_id, Method::Invite, body_bytes)
+                    .await
+            } else {
+                self.core
+                    .send_initial_invite_with_extra_headers(
+                        &dialog_id,
+                        body_bytes,
+                        extra_headers,
+                        from_display,
+                        contact_override,
+                    )
+                    .await
+            };
         let _transaction_key = match send_result {
             Ok(tx_key) => tx_key,
             Err(e) => {

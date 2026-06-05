@@ -218,8 +218,7 @@ async fn structured_invite_overrides_survive_401_driven_auth_retry() {
 
 const PRECOMP_UAS_PORT: u16 = 35282;
 const PRECOMP_UAC_PORT: u16 = 35283;
-const PRECOMPUTED_AUTH: &str =
-    r#"Digest username="alice", realm="testrealm", nonce="n", uri="sip:bob@127.0.0.1", response="deadbeef""#;
+const PRECOMPUTED_AUTH: &str = r#"Digest username="alice", realm="testrealm", nonce="n", uri="sip:bob@127.0.0.1", response="deadbeef""#;
 
 /// `with_precomputed_authorization` rides the **initial** INVITE so a UAS that
 /// accepts pre-emptive auth never has to challenge (no 401 round-trip).
