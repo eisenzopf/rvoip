@@ -772,6 +772,7 @@ impl DialogManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_invite_with_auth(
         &self,
         dialog_id: &DialogId,
@@ -779,6 +780,8 @@ impl DialogManager {
         auth_header_name: &str,
         auth_header_value: String,
         extras: Vec<rvoip_sip_core::types::TypedHeader>,
+        from_display: Option<String>,
+        contact_override: Option<String>,
     ) -> DialogResult<TransactionKey> {
         use crate::transaction::client::builders::InviteBuilder;
         use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
@@ -819,7 +822,7 @@ impl DialogManager {
                 self.local_address_for_target_and_routes(&template.target_uri, &template.route_set);
             let mut invite_builder = InviteBuilder::new()
                 .from_detailed(
-                    Some("User"),
+                    from_display.as_deref().or(Some("User")),
                     template.local_uri.to_string(),
                     Some(&local_tag),
                 )
@@ -833,7 +836,23 @@ impl DialogManager {
                 invite_builder = invite_builder.add_route(route.clone());
             }
 
-            if let Some(contact) = self.local_contact_uri() {
+            // Contact precedence mirrors the initial-INVITE path so the retry
+            // wire form matches: structured override wins, else a Contact
+            // smuggled through `extras`, else the local UA binding. Partition
+            // any Contact out of `extras` so it is never appended twice
+            // (InviteBuilder emits exactly one).
+            let (caller_contact, extras): (Vec<TypedHeader>, Vec<TypedHeader>) = extras
+                .into_iter()
+                .partition(|h| matches!(h, TypedHeader::Contact(_)));
+            let override_contact_uri = contact_override.or_else(|| {
+                caller_contact.into_iter().find_map(|h| match h {
+                    TypedHeader::Contact(c) => c.address().map(|addr| addr.uri.to_string()),
+                    _ => None,
+                })
+            });
+            if let Some(uri) = override_contact_uri {
+                invite_builder = invite_builder.contact(uri);
+            } else if let Some(contact) = self.local_contact_uri() {
                 invite_builder = invite_builder.contact(contact);
             }
 
@@ -1047,6 +1066,8 @@ impl DialogManager {
         dialog_id: &DialogId,
         body: Option<bytes::Bytes>,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+        from_display: Option<String>,
+        contact_override: Option<String>,
     ) -> DialogResult<TransactionKey> {
         use crate::transaction::client::builders::InviteBuilder;
 
@@ -1084,7 +1105,7 @@ impl DialogManager {
                 self.local_address_for_target_and_routes(&template.target_uri, &template.route_set);
             let mut invite_builder = InviteBuilder::new()
                 .from_detailed(
-                    Some("User"),
+                    from_display.as_deref().or(Some("User")),
                     template.local_uri.to_string(),
                     Some(&local_tag),
                 )
@@ -1098,24 +1119,26 @@ impl DialogManager {
                 invite_builder = invite_builder.add_route(route.clone());
             }
 
-            // SIP_API_DESIGN_2 §7.2 — caller may supply a Contact override
-            // via `extra_headers` (e.g. B2BUA rewriting the upstream Contact
-            // to its own public address). InviteBuilder always emits exactly
-            // one Contact header (falling back to a socket-derived default),
-            // so we partition the override out of `extra_headers` and feed it
-            // through the typed `.contact(...)` setter instead. If the caller
-            // did not pre-stage a Contact, fall back to the local UA binding.
+            // SIP_API_DESIGN_2 §7.2 — Contact override precedence: a structured
+            // `contact_override` (Phase B `InviteRequestOptions.contact_uri`)
+            // wins; otherwise the legacy partition of a Contact smuggled
+            // through `extra_headers` (e.g. a B2BUA rewriting the upstream
+            // Contact); otherwise the local UA binding. InviteBuilder always
+            // emits exactly one Contact, so any caller-supplied Contact must be
+            // fed through the typed `.contact(...)` setter, never appended.
             let (caller_contact, extra_headers): (
                 Vec<rvoip_sip_core::types::TypedHeader>,
                 Vec<rvoip_sip_core::types::TypedHeader>,
             ) = extra_headers
                 .into_iter()
                 .partition(|h| matches!(h, rvoip_sip_core::types::TypedHeader::Contact(_)));
-            let override_contact_uri = caller_contact.into_iter().find_map(|h| match h {
-                rvoip_sip_core::types::TypedHeader::Contact(c) => {
-                    c.address().map(|addr| addr.uri.to_string())
-                }
-                _ => None,
+            let override_contact_uri = contact_override.or_else(|| {
+                caller_contact.into_iter().find_map(|h| match h {
+                    rvoip_sip_core::types::TypedHeader::Contact(c) => {
+                        c.address().map(|addr| addr.uri.to_string())
+                    }
+                    _ => None,
+                })
             });
             if let Some(uri) = override_contact_uri {
                 invite_builder = invite_builder.contact(uri);

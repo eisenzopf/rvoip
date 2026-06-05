@@ -441,6 +441,8 @@ impl UnifiedDialogManager {
             call_id,
             Some(session_id.to_string()),
             Vec::new(),
+            None,
+            None,
         )
         .await
     }
@@ -452,8 +454,17 @@ impl UnifiedDialogManager {
         sdp_offer: Option<String>,
         call_id: Option<String>,
     ) -> ApiResult<CallHandle> {
-        self.make_call_inner(from_uri, to_uri, sdp_offer, call_id, None, Vec::new())
-            .await
+        self.make_call_inner(
+            from_uri,
+            to_uri,
+            sdp_offer,
+            call_id,
+            None,
+            Vec::new(),
+            None,
+            None,
+        )
+        .await
     }
 
     /// Send a dialog-creating SUBSCRIBE and pre-register a session↔dialog mapping.
@@ -775,8 +786,17 @@ impl UnifiedDialogManager {
         sdp_offer: Option<String>,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> ApiResult<CallHandle> {
-        self.make_call_inner(from_uri, to_uri, sdp_offer, None, None, extra_headers)
-            .await
+        self.make_call_inner(
+            from_uri,
+            to_uri,
+            sdp_offer,
+            None,
+            None,
+            extra_headers,
+            None,
+            None,
+        )
+        .await
     }
 
     /// `make_call_for_session` + extra headers. Use this from session-core
@@ -798,10 +818,48 @@ impl UnifiedDialogManager {
             call_id,
             Some(session_id.to_string()),
             extra_headers,
+            None,
+            None,
         )
         .await
     }
 
+    /// SIP_API_DESIGN_2 Phase B — structured initial-INVITE send. Folds the
+    /// pre-computed `Authorization` into the appended headers and threads the
+    /// `From` display name + `Contact` override structurally into the builder.
+    pub async fn send_invite_with_options(
+        &self,
+        pre_register_session_id: Option<String>,
+        opts: crate::api::unified::InviteRequestOptions,
+    ) -> ApiResult<CallHandle> {
+        use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
+        use rvoip_sip_core::types::TypedHeader;
+
+        let mut extra_headers = opts.extra_headers;
+        if let Some(auth) = opts.precomputed_authorization {
+            // Pre-emptive auth on the initial INVITE rides as an appended
+            // Authorization header — same shape as the digest stamp the
+            // auth-retry path emits.
+            extra_headers.insert(
+                0,
+                TypedHeader::Other(HeaderName::Authorization, HeaderValue::Raw(auth.into_bytes())),
+            );
+        }
+
+        self.make_call_inner(
+            &opts.from_uri,
+            &opts.to_uri,
+            opts.sdp,
+            opts.call_id,
+            pre_register_session_id,
+            extra_headers,
+            opts.from_display,
+            opts.contact_uri,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn make_call_inner(
         &self,
         from_uri: &str,
@@ -810,6 +868,8 @@ impl UnifiedDialogManager {
         call_id: Option<String>,
         pre_register_session_id: Option<String>,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+        from_display: Option<String>,
+        contact_override: Option<String>,
     ) -> ApiResult<CallHandle> {
         // Check if outgoing calls are supported
         if !self.config.supports_outgoing_calls() {
@@ -883,13 +943,22 @@ impl UnifiedDialogManager {
         // `send_initial_invite_with_extra_headers` path so the headers ride
         // on the very first wire INVITE; otherwise the generic path is fine.
         let body_bytes = sdp_offer.map(|s| bytes::Bytes::from(s));
-        let send_result = if extra_headers.is_empty() {
+        let send_result = if extra_headers.is_empty()
+            && from_display.is_none()
+            && contact_override.is_none()
+        {
             self.core
                 .send_request(&dialog_id, Method::Invite, body_bytes)
                 .await
         } else {
             self.core
-                .send_initial_invite_with_extra_headers(&dialog_id, body_bytes, extra_headers)
+                .send_initial_invite_with_extra_headers(
+                    &dialog_id,
+                    body_bytes,
+                    extra_headers,
+                    from_display,
+                    contact_override,
+                )
                 .await
         };
         let _transaction_key = match send_result {
@@ -1494,6 +1563,7 @@ impl UnifiedDialogManager {
     /// From tag, bumps CSeq on a new client transaction, preserves SDP, and
     /// attaches the caller-supplied `Authorization` (401) or
     /// `Proxy-Authorization` (407) header value verbatim.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_invite_with_auth(
         &self,
         dialog_id: &DialogId,
@@ -1501,10 +1571,20 @@ impl UnifiedDialogManager {
         auth_header_name: &str,
         auth_header_value: String,
         extras: Vec<rvoip_sip_core::types::TypedHeader>,
+        from_display: Option<String>,
+        contact_override: Option<String>,
     ) -> ApiResult<TransactionKey> {
         let body = sdp.map(bytes::Bytes::from);
         self.core
-            .send_invite_with_auth(dialog_id, body, auth_header_name, auth_header_value, extras)
+            .send_invite_with_auth(
+                dialog_id,
+                body,
+                auth_header_name,
+                auth_header_value,
+                extras,
+                from_display,
+                contact_override,
+            )
             .await
             .map_err(ApiError::from)
     }

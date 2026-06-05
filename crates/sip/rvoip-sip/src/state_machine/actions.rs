@@ -290,6 +290,94 @@ async fn execute_register_action(
     }
 }
 
+/// Materialize the per-call INVITE override set from a staged
+/// [`OutboundCallOptionsSnapshot`](crate::api::send::outbound_call::OutboundCallOptionsSnapshot)
+/// into a dialog-core [`InviteRequestOptions`] plus whether the global
+/// outbound-proxy `Route` should be suppressed.
+///
+/// SIP_API_DESIGN_2 Phase B. Shared by the initial dispatch
+/// ([`Action::SendINVITEWithOptions`]) and the 401/407 retry
+/// ([`Action::SendINVITEWithAuth`]) so the authenticated retry's wire form
+/// matches the initial INVITE — the root cause of per-call overrides vanishing
+/// on the challenge retry. `P-Asserted-Identity` / outbound-proxy `Route` /
+/// `Subject` ride `extra_headers` (the designed appended-header channel); the
+/// `From` display name, `Contact`, and pre-computed `Authorization` are typed
+/// structural fields the dialog builder constructs directly.
+fn materialize_invite_options(
+    snapshot: &crate::api::send::outbound_call::OutboundCallOptionsSnapshot,
+    session_pai_uri: Option<&str>,
+    sdp_for_wire: Option<String>,
+) -> Result<
+    (rvoip_sip_dialog::api::unified::InviteRequestOptions, bool),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    use crate::api::send::ProxyOverride;
+    use rvoip_sip_core::types::TypedHeader;
+    use std::str::FromStr;
+
+    let mut extras = snapshot.extra_headers.clone();
+
+    // P-Asserted-Identity (RFC 3325) — from `session.pai_uri`, set by the
+    // builder's `with_pai(uri)` or the `Config.pai_uri` fallback.
+    if let Some(pai) = session_pai_uri {
+        use rvoip_sip_core::types::{p_asserted_identity::PAssertedIdentity, uri::Uri};
+        match Uri::from_str(pai) {
+            Ok(uri) => extras.insert(
+                0,
+                TypedHeader::PAssertedIdentity(PAssertedIdentity::with_uri(uri)),
+            ),
+            Err(e) => {
+                return Err(format!(
+                    "INVITE options: pai_uri ({}) is not a valid URI: {}",
+                    pai, e
+                )
+                .into())
+            }
+        }
+    }
+
+    // Per-call outbound-proxy `Route` override (`with_outbound_proxy`).
+    let route_override = match &snapshot.outbound_proxy_override {
+        ProxyOverride::Use(uri) => Some(uri.clone()),
+        ProxyOverride::Default | ProxyOverride::Suppress => None,
+    };
+    if let Some(uri_str) = route_override {
+        use rvoip_sip_core::types::{route::Route, uri::Uri};
+        match Uri::from_str(&uri_str) {
+            Ok(uri) => extras.insert(0, TypedHeader::Route(Route::with_uri(uri))),
+            Err(e) => {
+                return Err(format!(
+                    "INVITE options: outbound_proxy override ({}) is not a valid URI: {}",
+                    uri_str, e
+                )
+                .into())
+            }
+        }
+    }
+    let suppress_global_proxy = matches!(
+        &snapshot.outbound_proxy_override,
+        ProxyOverride::Suppress | ProxyOverride::Use(_)
+    );
+
+    // Subject — a first-class header appended via the application channel.
+    if let Some(subject) = snapshot.subject.as_ref() {
+        use rvoip_sip_core::types::subject::Subject;
+        extras.push(TypedHeader::Subject(Subject::new(subject.clone())));
+    }
+
+    let opts = rvoip_sip_dialog::api::unified::InviteRequestOptions {
+        from_uri: snapshot.from.clone().unwrap_or_default(),
+        to_uri: snapshot.to.clone(),
+        sdp: sdp_for_wire,
+        call_id: None,
+        from_display: snapshot.from_display.clone(),
+        contact_uri: snapshot.contact_uri.clone(),
+        precomputed_authorization: snapshot.precomputed_auth.clone(),
+        extra_headers: extras,
+    };
+    Ok((opts, suppress_global_proxy))
+}
+
 /// Execute an action from the state table
 pub(crate) async fn execute_action(
     action: &Action,
@@ -1536,19 +1624,32 @@ pub(crate) async fn execute_action(
                 "Authorization"
             };
 
-            // SIP_API_DESIGN_2 §7.3 — pull application extras from the
-            // INVITE stash so they ride the 401/407 retry. The snapshot
-            // persists across the auth-retry hop because the stash is
-            // not consumed by `Action::SendINVITEWithOptions` until the
-            // final response (200 / 4xx-after-retry / 5xx / 6xx).
-            // The OutboundCallBuilder path fills this; transfer-leg and
-            // internal helper paths leave it empty, in which case we
-            // send an empty extras vector.
-            let auth_extras: Vec<rvoip_sip_core::types::TypedHeader> = session
-                .pending_invite_options
-                .as_ref()
-                .map(|snapshot| snapshot.extra_headers.clone())
-                .unwrap_or_default();
+            // SIP_API_DESIGN_2 §7.3 / Phase B — rebuild the FULL per-call
+            // override set from the persisted INVITE stash so the authenticated
+            // retry's wire form matches the initial INVITE. The snapshot
+            // survives the auth-retry hop (the stash isn't consumed until the
+            // final response), so we re-run the same `materialize_invite_options`
+            // mapping rather than forwarding raw `extra_headers` alone — which
+            // is what used to drop with_pai / with_subject / with_from_display /
+            // with_contact_uri on the 401/407 retry that actually completes the
+            // call. Transfer-leg / internal paths leave the stash empty.
+            let (auth_extras, from_display, contact_override) =
+                match session.pending_invite_options.as_ref() {
+                    Some(opts_arc) => {
+                        let snapshot = (**opts_arc).clone();
+                        let (invite_opts, _suppress) = materialize_invite_options(
+                            &snapshot,
+                            session.pai_uri.as_deref(),
+                            session.local_sdp.clone(),
+                        )?;
+                        (
+                            invite_opts.extra_headers,
+                            invite_opts.from_display,
+                            invite_opts.contact_uri,
+                        )
+                    }
+                    None => (Vec::new(), None, None),
+                };
 
             dialog_adapter
                 .resend_invite_with_auth(
@@ -1557,6 +1658,8 @@ pub(crate) async fn execute_action(
                     header_name,
                     header_value,
                     auth_extras,
+                    from_display,
+                    contact_override,
                 )
                 .await?;
             info!(
@@ -2525,120 +2628,14 @@ pub(crate) async fn execute_action(
             // backstopped by the executor's `Terminated` sweep.
             if let Some(opts) = session.pending_invite_options.clone() {
                 let snapshot = (*opts).clone();
-                let from = snapshot.from.clone().unwrap_or_else(String::new);
-
-                // Mirror the legacy `CreateDialog` action's PAI plumbing
-                // (actions.rs:407) so the builder dispatch path stamps
-                // `P-Asserted-Identity` on the wire INVITE when
-                // `session.pai_uri` is set (either from the builder's
-                // `with_pai(uri)` or via `Config.pai_uri` fall-through
-                // resolved at builder-staging time). Without this, the
-                // builder path silently drops PAI even though the legacy
-                // path honors it.
-                let mut extras = snapshot.extra_headers.clone();
-                if let Some(pai) = session.pai_uri.as_ref() {
-                    use rvoip_sip_core::types::{
-                        p_asserted_identity::PAssertedIdentity, uri::Uri, TypedHeader,
-                    };
-                    use std::str::FromStr;
-                    match Uri::from_str(pai) {
-                        Ok(uri) => {
-                            extras.insert(
-                                0,
-                                TypedHeader::PAssertedIdentity(PAssertedIdentity::with_uri(uri)),
-                            );
-                        }
-                        Err(e) => {
-                            return Err(format!(
-                                "SendINVITEWithOptions: SessionState.pai_uri \
-                                 ({}) is not a valid URI: {}",
-                                pai, e
-                            )
-                            .into());
-                        }
-                    }
-                }
-
-                // SIP_API_DESIGN_2 §6.1 — per-call outbound proxy
-                // override. `dialog_adapter.send_invite_with_extra_headers`
-                // applies the global `Config.outbound_proxy_uri` via
-                // `prepend_outbound_proxy_route`. To honor the builder's
-                // `with_outbound_proxy(uri)` override we prepend a
-                // `Route:` ahead of any global one; `Suppress` just
-                // omits both. The global path will still try to
-                // prepend its own Route at the adapter, so on Use we
-                // route through the override below and skip the adapter's
-                // global default by passing `None` for the adapter call
-                // when applicable.
-                use crate::api::send::ProxyOverride;
-                let route_override = match &snapshot.outbound_proxy_override {
-                    ProxyOverride::Use(uri) => Some(uri.clone()),
-                    ProxyOverride::Default | ProxyOverride::Suppress => None,
-                };
-                if let Some(uri_str) = route_override {
-                    use rvoip_sip_core::types::{route::Route, uri::Uri, TypedHeader};
-                    use std::str::FromStr;
-                    match Uri::from_str(&uri_str) {
-                        Ok(uri) => {
-                            extras.insert(0, TypedHeader::Route(Route::with_uri(uri)));
-                        }
-                        Err(e) => {
-                            return Err(format!(
-                                "SendINVITEWithOptions: outbound_proxy override \
-                                 ({}) is not a valid URI: {}",
-                                uri_str, e
-                            )
-                            .into());
-                        }
-                    }
-                }
-                let suppress_global_proxy = matches!(
-                    &snapshot.outbound_proxy_override,
-                    ProxyOverride::Suppress | ProxyOverride::Use(_)
-                );
-
-                // SIP_API_DESIGN_2 §7.2 — per-call Contact override.
-                // The builder's `with_contact_uri(uri)` stages a value into
-                // `snapshot.contact_uri`; emit it as a typed `Contact` in
-                // extras so dialog-core honors it instead of stamping the
-                // default socket-derived Contact. Prepended so it sits
-                // ahead of application extras, deterministic on the wire.
-                if let Some(contact_uri) = snapshot.contact_uri.as_ref() {
-                    use rvoip_sip_core::types::address::Address;
-                    use rvoip_sip_core::types::contact::{Contact, ContactParamInfo};
-                    use rvoip_sip_core::types::{uri::Uri, TypedHeader};
-                    use std::str::FromStr;
-                    match Uri::from_str(contact_uri) {
-                        Ok(uri) => {
-                            let address = Address::new(uri);
-                            let contact = Contact::new_params(vec![ContactParamInfo { address }]);
-                            extras.insert(0, TypedHeader::Contact(contact));
-                        }
-                        Err(e) => {
-                            return Err(format!(
-                                "SendINVITEWithOptions: contact_uri override \
-                                 ({}) is not a valid URI: {}",
-                                contact_uri, e
-                            )
-                            .into());
-                        }
-                    }
-                }
-
-                // SDP precedence: builder-supplied snapshot.sdp wins;
-                // otherwise fall back to `session.local_sdp` populated by
-                // the preceding `GenerateLocalSDP` action. Mirrors the
-                // legacy `Action::SendINVITE` shape so the new builder
-                // path negotiates media identically.
+                // SDP precedence: builder-supplied `snapshot.sdp` wins;
+                // otherwise fall back to `session.local_sdp` populated by the
+                // preceding `GenerateLocalSDP` action.
                 let sdp_for_wire = snapshot.sdp.clone().or_else(|| session.local_sdp.clone());
 
-                // `with_topology_hiding(true)` is a no-op on the
-                // fresh-INVITE build path (Via stack is stamped
-                // from scratch, Contact is overridden, and
-                // `with_headers_from` already filters stack-managed
-                // headers out). The flag is plumbed so proxy-style
-                // forward paths (on top of `Transport::send_message_raw`)
-                // can honour the same opt-in.
+                // `with_topology_hiding(true)` is a no-op on the fresh-INVITE
+                // build path (Via/Contact are stamped from scratch); the flag
+                // is plumbed for proxy-style forward paths only.
                 if snapshot.topology_hiding {
                     debug!(
                         "topology_hiding requested for session {} — fresh INVITE path stamps a clean Via/Contact by construction (no-op)",
@@ -2646,27 +2643,25 @@ pub(crate) async fn execute_action(
                     );
                 }
 
-                if suppress_global_proxy {
-                    dialog_adapter
-                        .send_invite_with_extra_headers_no_global_proxy(
-                            &session.session_id,
-                            &from,
-                            &snapshot.to,
-                            sdp_for_wire,
-                            extras,
-                        )
-                        .await?;
-                } else {
-                    dialog_adapter
-                        .send_invite_with_extra_headers(
-                            &session.session_id,
-                            &from,
-                            &snapshot.to,
-                            sdp_for_wire,
-                            extras,
-                        )
-                        .await?;
-                }
+                // SIP_API_DESIGN_2 Phase B — map the staged snapshot to a
+                // structured `InviteRequestOptions`. Per-call From display /
+                // Contact / pre-computed Authorization travel as typed fields;
+                // PAI / Route / Subject ride `extra_headers`. The very same
+                // mapping feeds `SendINVITEWithAuth`, so the authenticated
+                // retry carries identical overrides.
+                let (invite_opts, suppress_global_proxy) = materialize_invite_options(
+                    &snapshot,
+                    session.pai_uri.as_deref(),
+                    sdp_for_wire,
+                )?;
+
+                dialog_adapter
+                    .send_invite_with_options(
+                        &session.session_id,
+                        invite_opts,
+                        !suppress_global_proxy,
+                    )
+                    .await?;
                 debug!(
                     "SendINVITEWithOptions dispatched for session {}: to={}",
                     session.session_id, snapshot.to

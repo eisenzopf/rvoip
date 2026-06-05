@@ -322,6 +322,33 @@ pub struct ReInviteRequestOptions {
     pub extra_headers: Vec<TypedHeader>,
 }
 
+/// Initial out-of-dialog INVITE options (SIP_API_DESIGN_2 Phase B).
+///
+/// Completes the structured-options family for the one request the flat
+/// `make_call*` API never covered. Carries the fields the `InviteBuilder`
+/// constructs *specially* — the `From` display name and the single
+/// `Contact` — as typed values instead of smuggling them through
+/// `extra_headers` (a second `From`/`Contact` would be malformed). Everything
+/// the builder simply appends (PAI, Route, Subject, Privacy, X-*) still rides
+/// `extra_headers`, the designed application-header channel.
+#[derive(Default, Debug, Clone)]
+pub struct InviteRequestOptions {
+    pub from_uri: String,
+    pub to_uri: String,
+    pub sdp: Option<String>,
+    /// Pre-set Call-ID (session-core pre-registers the session↔dialog map).
+    pub call_id: Option<String>,
+    /// `From:` display name. `None` keeps the legacy `"User"` default.
+    pub from_display: Option<String>,
+    /// `Contact:` URI override (else the socket-derived default).
+    pub contact_uri: Option<String>,
+    /// Pre-computed `Authorization:` value — rides the initial INVITE to
+    /// bypass a 401-driven digest round-trip.
+    pub precomputed_authorization: Option<String>,
+    /// Headers appended after the stack stamps Call-ID/CSeq/Via/Max-Forwards.
+    pub extra_headers: Vec<TypedHeader>,
+}
+
 /// SUBSCRIBE options (RFC 6665).
 #[derive(Default, Debug, Clone)]
 pub struct SubscribeRequestOptions {
@@ -797,6 +824,31 @@ impl UnifiedDialogApi {
             .await
     }
 
+    /// SIP_API_DESIGN_2 Phase B — structured initial-INVITE entry point.
+    ///
+    /// Unlike [`make_call_with_extra_headers`](Self::make_call_with_extra_headers),
+    /// this carries the `From` display name and `Contact` as typed fields so
+    /// the builder constructs them directly (`make_call_*` is now a thin shim
+    /// over this path with those fields left `None`).
+    pub async fn send_invite_with_options(
+        &self,
+        opts: InviteRequestOptions,
+    ) -> ApiResult<CallHandle> {
+        self.manager.send_invite_with_options(None, opts).await
+    }
+
+    /// `send_invite_with_options` with the session↔dialog mapping
+    /// pre-registered (mirrors `make_call_with_extra_headers_for_session`).
+    pub async fn send_invite_with_options_for_session(
+        &self,
+        session_id: &str,
+        opts: InviteRequestOptions,
+    ) -> ApiResult<CallHandle> {
+        self.manager
+            .send_invite_with_options(Some(session_id.to_string()), opts)
+            .await
+    }
+
     /// Create an outgoing dialog without sending INVITE (Client/Hybrid modes only)
     ///
     /// Creates a dialog in preparation for sending requests. Useful for
@@ -890,6 +942,7 @@ impl UnifiedDialogApi {
     /// RFC 3261 §22.2 — resend an INVITE with digest auth after a 401/407
     /// challenge. Session-core-v3 uses this to transparently retry call setup
     /// when the UAS or proxy challenged the original INVITE.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_invite_with_auth(
         &self,
         dialog_id: &DialogId,
@@ -897,9 +950,19 @@ impl UnifiedDialogApi {
         auth_header_name: &str,
         auth_header_value: String,
         extras: Vec<rvoip_sip_core::types::TypedHeader>,
+        from_display: Option<String>,
+        contact_override: Option<String>,
     ) -> ApiResult<TransactionKey> {
         self.manager
-            .send_invite_with_auth(dialog_id, sdp, auth_header_name, auth_header_value, extras)
+            .send_invite_with_auth(
+                dialog_id,
+                sdp,
+                auth_header_name,
+                auth_header_value,
+                extras,
+                from_display,
+                contact_override,
+            )
             .await
     }
 

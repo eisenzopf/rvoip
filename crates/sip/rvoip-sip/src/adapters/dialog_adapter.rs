@@ -895,6 +895,7 @@ impl DialogAdapter {
     /// the previous inline REGISTER-auth shortcut (`handle_401_challenge`) was
     /// retired when INVITE auth landed. See `default.yaml`'s `Initiating` /
     /// `Registering` + `AuthRequired` transitions.
+    #[allow(clippy::too_many_arguments)]
     pub async fn resend_invite_with_auth(
         &self,
         session_id: &SessionId,
@@ -902,6 +903,8 @@ impl DialogAdapter {
         auth_header_name: &str,
         auth_header_value: String,
         extras: Vec<rvoip_sip_core::types::TypedHeader>,
+        from_display: Option<String>,
+        contact_override: Option<String>,
     ) -> Result<()> {
         // Fast-RTT race: an auth challenge can arrive while the original
         // `SendINVITE` action is still awaiting dialog-core's
@@ -927,7 +930,15 @@ impl DialogAdapter {
         // outbound-proxy Route already ran when the original snapshot
         // was staged; the extras are passed through verbatim.
         self.dialog_api
-            .send_invite_with_auth(&dialog_id, sdp, auth_header_name, auth_header_value, extras)
+            .send_invite_with_auth(
+                &dialog_id,
+                sdp,
+                auth_header_name,
+                auth_header_value,
+                extras,
+                from_display,
+                contact_override,
+            )
             .await
             .map_err(|e| {
                 SessionError::DialogError(format!(
@@ -1210,6 +1221,63 @@ impl DialogAdapter {
                 .map(|_| "ok")
                 .unwrap_or("missing"),
         );
+
+        Ok(())
+    }
+
+    /// SIP_API_DESIGN_2 Phase B — structured initial-INVITE dispatch. The
+    /// rvoip-sip counterpart of dialog-core `send_invite_with_options`: carries
+    /// the `From` display name and `Contact` as typed fields instead of
+    /// smuggling them through `extra_headers`. `apply_global_proxy` follows the
+    /// same rule as [`Self::send_invite_with_extra_headers`] — skip the global
+    /// `Config.outbound_proxy_uri` Route when the builder set a per-call
+    /// override (already a `Route:` in `opts.extra_headers`).
+    pub async fn send_invite_with_options(
+        &self,
+        session_id: &SessionId,
+        mut opts: rvoip_sip_dialog::api::unified::InviteRequestOptions,
+        apply_global_proxy: bool,
+    ) -> Result<()> {
+        let call_id = format!("{}@rvoip-sip", session_id.0);
+        self.callid_to_session
+            .insert(call_id.clone(), session_id.clone());
+
+        if apply_global_proxy {
+            opts.extra_headers =
+                prepend_outbound_proxy_route(opts.extra_headers, self.outbound_proxy_uri.as_ref());
+            if self.outbound_proxy_uri.is_some() {
+                tracing::debug!(
+                    "E4 outbound proxy: prepended Route to INVITE for session {}",
+                    session_id.0
+                );
+            }
+        }
+        opts.call_id = Some(call_id.clone());
+
+        let call_handle = self
+            .dialog_api
+            .send_invite_with_options_for_session(&session_id.0, opts)
+            .await
+            .map_err(|e| {
+                SessionError::DialogError(format!("Failed to send INVITE with options: {}", e))
+            })?;
+
+        let dialog_id = call_handle.call_id().clone();
+        self.session_to_dialog
+            .insert(session_id.clone(), dialog_id.clone());
+        self.dialog_to_session
+            .insert(dialog_id.clone(), session_id.clone());
+
+        let event = SessionToDialogEvent::StoreDialogMapping {
+            session_id: session_id.0.clone(),
+            dialog_id: dialog_id.to_string(),
+        };
+        self.global_coordinator
+            .publish(Arc::new(RvoipCrossCrateEvent::SessionToDialog(event)))
+            .await
+            .map_err(|e| {
+                SessionError::InternalError(format!("Failed to publish StoreDialogMapping: {}", e))
+            })?;
 
         Ok(())
     }

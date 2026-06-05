@@ -164,6 +164,12 @@ required-features = ["dhat"]
 name = "perf_listener"
 path = "examples/perf_listener.rs"
 
+# Per-destination outbound INVITE routing — full per-call control over
+# From / auth / proxy / PAI / Subject / SDP / 100rel / app headers.
+[[example]]
+name = "outbound_routing"
+path = "examples/outbound_routing.rs"
+
 # SIP_API_DESIGN_2 §11 use-case walkthroughs — runnable end-to-end
 # demonstrations of the four target patterns (endpoint, gateway,
 # call-center agent, SBC). Each example boots multiple coordinators
