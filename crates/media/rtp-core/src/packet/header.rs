@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use tracing::debug;
+use tracing::trace;
 
 use super::extension::{ExtensionFormat, RtpHeaderExtensions};
 use crate::error::Error;
@@ -128,14 +128,14 @@ impl RtpHeader {
 
     /// Parse an RTP header from bytes
     pub fn parse(buf: &mut impl Buf) -> Result<Self> {
-        debug!(
+        trace!(
             "Starting RTP header parse with {} bytes available",
             buf.remaining()
         );
 
         // Check if we have enough data for the minimum header
         if buf.remaining() < RTP_MIN_HEADER_SIZE {
-            debug!(
+            trace!(
                 "Buffer too small: need {} but have {}",
                 RTP_MIN_HEADER_SIZE,
                 buf.remaining()
@@ -148,14 +148,14 @@ impl RtpHeader {
 
         // First byte: version (2 bits), padding (1 bit), extension (1 bit), CSRC count (4 bits)
         let first_byte = buf.get_u8();
-        debug!("First byte: 0x{:02x}", first_byte);
+        trace!("First byte: 0x{:02x}", first_byte);
 
         // Extract version (2 bits)
         let version = (first_byte >> 6) & 0x03;
-        debug!("Version: {}", version);
+        trace!("Version: {}", version);
 
         if version != RTP_VERSION {
-            debug!(
+            trace!(
                 "Invalid RTP version: {} (expected {})",
                 version, RTP_VERSION
             );
@@ -169,22 +169,22 @@ impl RtpHeader {
         let padding = ((first_byte >> 5) & 0x01) == 1;
         let extension = ((first_byte >> 4) & 0x01) == 1;
         let cc = first_byte & 0x0F;
-        debug!(
+        trace!(
             "Flags: padding={}, extension={}, cc={}",
             padding, extension, cc
         );
 
         // Second byte: marker (1 bit), payload type (7 bits)
         let second_byte = buf.get_u8();
-        debug!("Second byte: 0x{:02x}", second_byte);
+        trace!("Second byte: 0x{:02x}", second_byte);
 
         let marker = ((second_byte >> 7) & 0x01) == 1;
         let payload_type = second_byte & 0x7F;
-        debug!("Marker: {}, payload_type: {}", marker, payload_type);
+        trace!("Marker: {}, payload_type: {}", marker, payload_type);
 
         // Check if we have enough remaining bytes for sequence, timestamp, and SSRC
         if buf.remaining() < 8 {
-            debug!(
+            trace!(
                 "Buffer too small for seq/ts/ssrc: need 8 but have {}",
                 buf.remaining()
             );
@@ -196,23 +196,23 @@ impl RtpHeader {
 
         // Sequence number (16 bits)
         let sequence_number = buf.get_u16();
-        debug!("Sequence number: {}", sequence_number);
+        trace!("Sequence number: {}", sequence_number);
 
         // Timestamp (32 bits)
         let timestamp = buf.get_u32();
-        debug!("Timestamp: {}", timestamp);
+        trace!("Timestamp: {}", timestamp);
 
         // SSRC (32 bits)
         let ssrc = buf.get_u32();
-        debug!("SSRC: {}", ssrc);
+        trace!("SSRC: {}", ssrc);
 
         // Parse CSRC list if present
         let mut csrc = Vec::with_capacity(cc as usize);
-        debug!("Parsing CSRC list with {} entries", cc);
+        trace!("Parsing CSRC list with {} entries", cc);
         for i in 0..cc {
             // Make sure we have enough data for each CSRC (4 bytes)
             if buf.remaining() < 4 {
-                debug!(
+                trace!(
                     "Buffer too small for CSRC {}: need 4 but have {}",
                     i,
                     buf.remaining()
@@ -223,17 +223,17 @@ impl RtpHeader {
                 });
             }
             let csrc_value = buf.get_u32();
-            debug!("CSRC {}: 0x{:08x}", i, csrc_value);
+            trace!("CSRC {}: 0x{:08x}", i, csrc_value);
             csrc.push(csrc_value);
         }
 
         // Parse extension header if present
         let extensions = if extension {
-            debug!("Parsing extension header");
+            trace!("Parsing extension header");
 
             // Extension header requires at least 4 bytes (2 for profile ID, 2 for length)
             if buf.remaining() < 4 {
-                debug!(
+                trace!(
                     "Buffer too small for extension header: need 4 but have {}",
                     buf.remaining()
                 );
@@ -245,19 +245,19 @@ impl RtpHeader {
 
             let profile_id = buf.get_u16();
             let ext_length_words = buf.get_u16() as usize;
-            debug!(
+            trace!(
                 "Extension profile ID: 0x{:04x}, length: {} words",
                 profile_id, ext_length_words
             );
 
             // Extension length is in 32-bit words (4 bytes each)
             let ext_length_bytes = ext_length_words * 4;
-            debug!("Extension length in bytes: {}", ext_length_bytes);
+            trace!("Extension length in bytes: {}", ext_length_bytes);
 
             if ext_length_bytes > 0 {
                 // Validate we have enough data for the extension
                 if buf.remaining() < ext_length_bytes {
-                    debug!(
+                    trace!(
                         "Buffer too small for extension data: need {} but have {}",
                         ext_length_bytes,
                         buf.remaining()
@@ -274,7 +274,7 @@ impl RtpHeader {
                     let byte = buf.get_u8();
                     ext_data.put_u8(byte);
                 }
-                debug!("Read {} bytes of extension data", ext_length_bytes);
+                trace!("Read {} bytes of extension data", ext_length_bytes);
 
                 // Parse the extension data based on the profile ID
                 Some(RtpHeaderExtensions::from_extension_data(
@@ -282,15 +282,15 @@ impl RtpHeader {
                 )?)
             } else {
                 // Extension with zero length
-                debug!("Extension has zero length");
+                trace!("Extension has zero length");
                 Some(RtpHeaderExtensions::from_extension_data(profile_id, &[])?)
             }
         } else {
-            debug!("No extension header");
+            trace!("No extension header");
             None
         };
 
-        debug!("RTP header parsing completed successfully");
+        trace!("RTP header parsing completed successfully");
         Ok(Self {
             version,
             padding,
@@ -309,14 +309,14 @@ impl RtpHeader {
     /// Parse an RTP header from bytes without consuming the buffer
     /// Returns the header and the number of bytes consumed
     pub fn parse_without_consuming(data: &[u8]) -> Result<(Self, usize)> {
-        debug!(
+        trace!(
             "Starting RTP header parse_without_consuming with {} bytes",
             data.len()
         );
 
         // Check if we have enough data for the minimum header
         if data.len() < RTP_MIN_HEADER_SIZE {
-            debug!(
+            trace!(
                 "Buffer too small: need {} but have {}",
                 RTP_MIN_HEADER_SIZE,
                 data.len()
@@ -334,14 +334,14 @@ impl RtpHeader {
         // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
         // |V=2|P|X|  CC   |M|     PT      |       sequence number         |
         let first_byte = data[0];
-        debug!("First byte: 0x{:02x}", first_byte);
+        trace!("First byte: 0x{:02x}", first_byte);
 
         // Use bitshifts to extract the bits directly
         let version = (first_byte >> 6) & 0x03; // Version: bits 0-1
-        debug!("Version: {}", version);
+        trace!("Version: {}", version);
 
         if version != RTP_VERSION {
-            debug!(
+            trace!(
                 "Invalid RTP version: {} (expected {})",
                 version, RTP_VERSION
             );
@@ -355,49 +355,49 @@ impl RtpHeader {
         let padding = ((first_byte >> 5) & 0x01) == 1; // Padding: bit 2
         let extension = ((first_byte >> 4) & 0x01) == 1; // Extension: bit 3
         let cc = first_byte & 0x0F; // CSRC count: bits 4-7
-        debug!(
+        trace!(
             "Flags: padding={}, extension={}, cc={}",
             padding, extension, cc
         );
 
         // Second byte: marker (1 bit), payload type (7 bits)
         let second_byte = data[1];
-        debug!("Second byte: 0x{:02x}", second_byte);
+        trace!("Second byte: 0x{:02x}", second_byte);
 
         let marker = ((second_byte >> 7) & 0x01) == 1; // Marker: bit 0
         let payload_type = second_byte & 0x7F; // Payload type: bits 1-7
-        debug!("Marker: {}, payload_type: {}", marker, payload_type);
+        trace!("Marker: {}, payload_type: {}", marker, payload_type);
 
         // Sequence number (16 bits) - big endian
         let sequence_number = ((data[2] as u16) << 8) | (data[3] as u16);
-        debug!("Sequence number: {}", sequence_number);
+        trace!("Sequence number: {}", sequence_number);
 
         // Timestamp (32 bits) - big endian
         let timestamp = ((data[4] as u32) << 24)
             | ((data[5] as u32) << 16)
             | ((data[6] as u32) << 8)
             | (data[7] as u32);
-        debug!("Timestamp: {}", timestamp);
+        trace!("Timestamp: {}", timestamp);
 
         // SSRC (32 bits) - big endian
         let ssrc = ((data[8] as u32) << 24)
             | ((data[9] as u32) << 16)
             | ((data[10] as u32) << 8)
             | (data[11] as u32);
-        debug!("SSRC: {}", ssrc);
+        trace!("SSRC: {}", ssrc);
 
         // Calculate total size including header extension and CSRC
         let mut bytes_consumed = RTP_MIN_HEADER_SIZE;
 
         // Parse CSRC list if present
         let mut csrc = Vec::with_capacity(cc as usize);
-        debug!("Parsing CSRC list with {} entries", cc);
+        trace!("Parsing CSRC list with {} entries", cc);
         for i in 0..cc {
             let csrc_offset = RTP_MIN_HEADER_SIZE + (i as usize) * 4;
 
             // Check if we have enough data for this CSRC
             if data.len() < csrc_offset + 4 {
-                debug!(
+                trace!(
                     "Buffer too small for CSRC {}: need {} but have {}",
                     i,
                     csrc_offset + 4,
@@ -414,7 +414,7 @@ impl RtpHeader {
                 | ((data[csrc_offset + 1] as u32) << 16)
                 | ((data[csrc_offset + 2] as u32) << 8)
                 | (data[csrc_offset + 3] as u32);
-            debug!(
+            trace!(
                 "CSRC {}: 0x{:08x} from offset {}",
                 i, csrc_value, csrc_offset
             );
@@ -425,13 +425,13 @@ impl RtpHeader {
 
         // Parse extension header if present
         let extensions = if extension {
-            debug!("Parsing extension header");
+            trace!("Parsing extension header");
 
             let ext_offset = bytes_consumed;
 
             // Extension header requires at least 4 bytes (2 for profile ID, 2 for length)
             if data.len() < ext_offset + 4 {
-                debug!(
+                trace!(
                     "Buffer too small for extension header: need {} but have {}",
                     ext_offset + 4,
                     data.len()
@@ -446,21 +446,21 @@ impl RtpHeader {
             let profile_id = ((data[ext_offset] as u16) << 8) | (data[ext_offset + 1] as u16);
             let ext_length_words =
                 ((data[ext_offset + 2] as u16) << 8) | (data[ext_offset + 3] as u16);
-            debug!(
+            trace!(
                 "Extension profile ID: 0x{:04x}, length: {} words",
                 profile_id, ext_length_words
             );
 
             // Extension length is in 32-bit words (4 bytes each)
             let ext_length_bytes = ext_length_words as usize * 4;
-            debug!("Extension length in bytes: {}", ext_length_bytes);
+            trace!("Extension length in bytes: {}", ext_length_bytes);
 
             bytes_consumed += 4; // Add the 4 bytes for ext header
 
             if ext_length_bytes > 0 {
                 // Validate we have enough data for the extension
                 if data.len() < bytes_consumed + ext_length_bytes {
-                    debug!(
+                    trace!(
                         "Buffer too small for extension data: need {} but have {}",
                         bytes_consumed + ext_length_bytes,
                         data.len()
@@ -473,7 +473,7 @@ impl RtpHeader {
 
                 // Extract the extension data
                 let ext_data = &data[bytes_consumed..bytes_consumed + ext_length_bytes];
-                debug!("Read {} bytes of extension data", ext_length_bytes);
+                trace!("Read {} bytes of extension data", ext_length_bytes);
 
                 bytes_consumed += ext_length_bytes;
 
@@ -483,15 +483,15 @@ impl RtpHeader {
                 )?)
             } else {
                 // Extension with zero length
-                debug!("Extension has zero length");
+                trace!("Extension has zero length");
                 Some(RtpHeaderExtensions::from_extension_data(profile_id, &[])?)
             }
         } else {
-            debug!("No extension header");
+            trace!("No extension header");
             None
         };
 
-        debug!(
+        trace!(
             "RTP header parsing completed successfully, consumed {} bytes",
             bytes_consumed
         );
@@ -536,7 +536,7 @@ impl RtpHeader {
         }
         first_byte |= self.cc & 0x0F; // CSRC count: bits 4-7
 
-        debug!(
+        trace!(
             "Serializing first byte: 0x{:02x} (V={}, P={}, X={}, CC={})",
             first_byte, self.version, self.padding, self.extension, self.cc
         );

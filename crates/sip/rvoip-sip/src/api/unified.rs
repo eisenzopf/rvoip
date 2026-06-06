@@ -2543,6 +2543,16 @@ pub struct UnifiedCoordinator {
     /// public surfaces can fetch the parsed inbound `Arc<Request>` when
     /// constructing an `IncomingCall`.
     pub(crate) session_registry: Arc<SessionRegistry>,
+
+    /// Default UAC Digest credentials adopted from the most recent REGISTER
+    /// when the application did not configure [`Config::credentials`] /
+    /// [`Config::auth`]. This lets a registered client authenticate challenged
+    /// in-account requests (INVITE, re-INVITE, BYE, REFER) out of the box —
+    /// most PBXes (Asterisk, FreeSWITCH) challenge those as well as REGISTER.
+    /// A plain `std::sync::Mutex` because it is only ever locked briefly and
+    /// synchronously (no `.await` held); [`config_credentials`](Self::config_credentials)
+    /// reads it.
+    registered_credentials: std::sync::Mutex<Option<crate::types::Credentials>>,
 }
 
 impl UnifiedCoordinator {
@@ -2555,6 +2565,30 @@ impl UnifiedCoordinator {
         self.config.local_uri.clone()
     }
 
+    /// The `Contact` URI to advertise on REGISTER for `user`: the explicit
+    /// [`Config::contact_uri`] when set, otherwise the actual bound/advertised
+    /// transport address as `sip:{user}@{host}:{port}`.
+    ///
+    /// A `Contact`'s purpose is to be the reachable transport address the
+    /// registrar routes inbound calls to, so this deliberately uses the bound
+    /// address — never the port-less AOR ([`Config::local_uri`]), which would
+    /// misroute incoming calls to the default SIP port.
+    pub fn config_contact_uri(&self, user: &str) -> String {
+        if let Some(contact) = &self.config.contact_uri {
+            return contact.clone();
+        }
+        let host = self
+            .config
+            .sip_advertised_addr
+            .unwrap_or(self.config.bind_addr);
+        let scheme = if self.config.local_uri.starts_with("sips:") {
+            "sips"
+        } else {
+            "sip"
+        };
+        format!("{scheme}:{user}@{host}")
+    }
+
     /// SIP_API_DESIGN_2 §7.1 — read-only access to
     /// [`Config::pai_uri`] for outbound builders that need to resolve
     /// the per-call `P-Asserted-Identity` against
@@ -2563,11 +2597,21 @@ impl UnifiedCoordinator {
         self.config.pai_uri.clone()
     }
 
-    /// Read-only access to [`Config::credentials`] so outbound builders
-    /// can fall back to the peer-level default when the application
-    /// did not stage per-call credentials via `with_credentials(..)`.
+    /// Read-only access to the peer-level default Digest credentials so
+    /// outbound builders can fall back when the application did not stage
+    /// per-call credentials via `with_credentials(..)`.
+    ///
+    /// Precedence: explicit [`Config::credentials`] first, then credentials
+    /// adopted from a prior REGISTER (see `registered_credentials`). The latter
+    /// makes a registered client able to place calls without separately
+    /// populating `Config.credentials`.
     pub fn config_credentials(&self) -> Option<crate::types::Credentials> {
-        self.config.credentials.clone()
+        self.config.credentials.clone().or_else(|| {
+            self.registered_credentials
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone())
+        })
     }
 
     /// Read-only access to [`Config::auth`] so outbound builders can fall
@@ -3495,6 +3539,7 @@ impl UnifiedCoordinator {
             lifecycle: lifecycle.clone(),
             app_event_publisher: app_event_publisher.clone(),
             session_registry: registry.clone(),
+            registered_credentials: std::sync::Mutex::new(None),
         });
 
         // Start the dialog adapter
@@ -5284,6 +5329,17 @@ impl UnifiedCoordinator {
             .await?;
 
         let credentials = crate::types::Credentials::new(username, password);
+
+        // If the application didn't configure UAC auth, adopt these REGISTER
+        // credentials as the default for challenged in-account requests
+        // (INVITE/re-INVITE/BYE/REFER) so "register, then call" authenticates
+        // out of the box. Explicit Config.credentials/Config.auth always win
+        // (see `config_credentials`). Locked briefly and synchronously.
+        if self.config.credentials.is_none() && self.config.auth.is_none() {
+            if let Ok(mut slot) = self.registered_credentials.lock() {
+                *slot = Some(credentials.clone());
+            }
+        }
 
         let session_store = &self.helpers.state_machine.store;
         let mut session = session_store.get_session(&session_id).await?;

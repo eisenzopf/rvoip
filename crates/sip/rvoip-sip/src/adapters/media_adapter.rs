@@ -1392,7 +1392,7 @@ impl MediaAdapter {
             })?
             .clone();
 
-        tracing::info!(
+        tracing::trace!(
             "📤 Sending audio frame for session {} ({} samples) via RTP",
             session_id.0,
             audio_frame.samples.len()
@@ -1410,7 +1410,7 @@ impl MediaAdapter {
                 SessionError::MediaError(format!("Failed to send audio frame via RTP: {}", e))
             })?;
 
-        tracing::debug!(
+        tracing::trace!(
             "✅ Audio frame sent successfully via RTP for session {}",
             session_id.0
         );

@@ -52,6 +52,14 @@
 //! event streams, inspect registration lifecycle metadata, or build your own
 //! peer abstraction.
 //!
+//! **[`Endpoint`] transfer ceiling.** `Endpoint` does **blind transfer only**
+//! ([`EndpointCall::transfer`]) and surfaces no inbound-REFER events. For
+//! **attended transfer** or **inbound REFER** control, use [`StreamPeer`] /
+//! [`SessionHandle`] — `transfer_attended`, `accept_refer`/`reject_refer`, and
+//! the REFER/transfer events on the coordinator event stream live there. A
+//! project that starts on `Endpoint` for simplicity should switch surfaces
+//! before building attended transfer.
+//!
 //! ## Authentication
 //!
 //! SIP access authentication is negotiated in SIP headers, not in SDP. A UAS
@@ -512,6 +520,10 @@ pub use api::handlers::{
 
 // Call control
 pub use api::audio::{AudioReceiver, AudioSender, AudioStream};
+// The PCM frame type carried by `AudioStream` (`SessionHandle::audio()`).
+// Re-exported so clients can construct frames (mic -> RTP) without taking a
+// direct dependency on `rvoip-media-core`.
+pub use rvoip_media_core::types::AudioFrame;
 pub use api::handle::{
     CallId, SessionHandle, SipReason, TransferDialogMatcher, TransferLifecycleOptions,
     TransferOutcome, TransferWaitMode,
@@ -593,7 +605,7 @@ pub use rvoip_sip_core::types::{HeaderName, TypedHeader};
 /// ```
 pub mod prelude {
     pub use crate::{
-        AudioReceiver, AudioSender, AudioStream, CallAnsweredInfo, CallHandler,
+        AudioFrame, AudioReceiver, AudioSender, AudioStream, CallAnsweredInfo, CallHandler,
         CallHandlerDecision, CallId, CallLifecycleSnapshot, CallProgressInfo, CallState,
         CallTerminalInfo, CallbackPeer, CallbackPeerBuilder, CallbackPeerControl, Config,
         DialogInfo, DialogInfoDocument, DialogPackageEvent, DialogPackageState,

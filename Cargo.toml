@@ -19,6 +19,9 @@ members = [
     "crates/media/media-core",
     "crates/media/codec-core",
     "crates/media/rtp-core",
+    # Optional OS audio-device bridge — top-of-stack helper that depends UP on
+    # rvoip-sip (so it sits with the SIP product, not below it).
+    "crates/media/rvoip-audio-device",
 
     # sip/ — SIP product. The sub-crates are siblings of the rvoip-sip
     # umbrella (the umbrella no longer nests them, so no `exclude` needed).
@@ -222,6 +225,7 @@ rvoip-websocket     = { path = "crates/uctp/rvoip-websocket", version = "0.1.0" 
 rvoip-webrtc        = { path = "crates/webrtc/rvoip-webrtc", version = "0.1.0" }
 rvoip-identity      = { path = "crates/identity/rvoip-identity", version = "0.1.0" }
 rvoip-client        = { path = "crates/rvoip-client", version = "0.1.0" }
+rvoip-audio-device  = { path = "crates/media/rvoip-audio-device", version = "0.1.0" }
 rvoip-stir-shaken   = { path = "crates/extensions/rvoip-stir-shaken", version = "0.1.0" }
 rvoip-keycloak      = { path = "crates/extensions/rvoip-keycloak", version = "0.1.0" }
 rvoip-redis         = { path = "crates/extensions/rvoip-redis", version = "0.1.0" }

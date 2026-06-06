@@ -6,6 +6,18 @@
 //! tuned for mobile / web / desktop / embedded apps that act as a
 //! single Identity in a single tenant.
 //!
+//! ## Status — experimental stub
+//!
+//! The public type surface (`Client`, `SessionHandle`, `InboundEvent`) is in
+//! place, but `Client::connect` / `Client::call` are **not yet wired to a live
+//! substrate** — they return stub handles and most `SessionHandle` methods
+//! return `NotImplemented`. **This crate cannot place a real call yet.**
+//!
+//! To build a working SIP client today, use
+//! [`rvoip-sip`](https://docs.rs/rvoip-sip) directly — `StreamPeer` /
+//! `SessionHandle` for full control, or `Endpoint` for a PBX-account softphone.
+//! This SDK will point there until its per-protocol dispatch lands.
+//!
 //! ## Why a separate crate?
 //!
 //! Per §15.1, the server-side `Orchestrator` surface is multi-tenant

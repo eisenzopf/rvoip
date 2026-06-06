@@ -138,6 +138,16 @@ impl AudioBridge {
     }
 }
 
+// Audio pacing contract: emit exactly ONE 20 ms frame per interval tick — never
+// pace a real-time source with a per-frame `sleep`. `tokio::time::interval`
+// ticks on absolute deadlines and absorbs processing time; a per-frame `sleep`
+// accumulates its own latency (deadline = elapsed + 20 ms + timer slop), so the
+// effective cadence drifts to ~22 ms and starves the far end → choppy audio.
+// `MissedTickBehavior::Delay` skips missed ticks instead of bursting to catch up.
+//
+// (Production clients should prefer the supported `rvoip-audio-device` crate,
+// which also adds band-limited resampling and a click-free jitter buffer; this
+// example keeps the cpal bridge inline to show the Endpoint frame path.)
 async fn send_microphone_frames(
     mic_rx: &mut mpsc::UnboundedReceiver<Vec<f32>>,
     input_sample_rate: u32,
@@ -145,18 +155,40 @@ async fn send_microphone_frames(
 ) {
     let mut mono_buffer = Vec::<f32>::new();
     let mut timestamp = 0u32;
-    while let Some(samples) = mic_rx.recv().await {
-        let resampled = resample_linear(&samples, input_sample_rate, SAMPLE_RATE);
-        mono_buffer.extend(resampled);
-        while mono_buffer.len() >= FRAME_SAMPLES {
-            let chunk = mono_buffer.drain(..FRAME_SAMPLES).collect::<Vec<_>>();
-            let pcm = chunk.into_iter().map(float_to_i16).collect::<Vec<_>>();
-            let frame = EndpointAudioFrame::pcmu_sized_mono_8khz(pcm, timestamp);
-            timestamp = timestamp.wrapping_add(FRAME_SAMPLES as u32);
-            if sender.send(frame).await.is_err() {
-                return;
+    // Bound the accumulation buffer so latency can't grow without limit if the
+    // capture clock runs slightly faster than the 20 ms send clock.
+    let max_buffer = (SAMPLE_RATE as usize) / 2; // 0.5 s of 8 kHz audio
+
+    let mut ticker = tokio::time::interval(Duration::from_millis(FRAME_MS as u64));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            biased;
+            // Emit exactly one 20 ms frame per tick.
+            _ = ticker.tick() => {
+                let pcm: Vec<i16> = if mono_buffer.len() >= FRAME_SAMPLES {
+                    mono_buffer.drain(..FRAME_SAMPLES).map(float_to_i16).collect()
+                } else {
+                    // Underrun: send silence to hold the RTP cadence.
+                    vec![0i16; FRAME_SAMPLES]
+                };
+                let frame = EndpointAudioFrame::pcmu_sized_mono_8khz(pcm, timestamp);
+                timestamp = timestamp.wrapping_add(FRAME_SAMPLES as u32);
+                if sender.send(frame).await.is_err() {
+                    return;
+                }
             }
-            tokio::time::sleep(Duration::from_millis(FRAME_MS as u64)).await;
+            // Drain whatever the mic captured into the accumulation buffer.
+            maybe = mic_rx.recv() => {
+                let Some(samples) = maybe else { return };
+                let resampled = resample_linear(&samples, input_sample_rate, SAMPLE_RATE);
+                mono_buffer.extend(resampled);
+                if mono_buffer.len() > max_buffer {
+                    let overflow = mono_buffer.len() - max_buffer;
+                    mono_buffer.drain(..overflow);
+                }
+            }
         }
     }
 }

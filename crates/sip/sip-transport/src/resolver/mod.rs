@@ -74,6 +74,11 @@ pub enum ResolverError {
     Forbidden(&'static str),
     #[error("No candidates after NAPTR/SRV/A ladder")]
     NoCandidates,
+    /// The request URI has no routable host (e.g. `sip:600` — a bare
+    /// extension addressed without a domain). Surfaced *before* DNS so the
+    /// caller sees a routing hint instead of a cryptic NAPTR/SRV/A failure.
+    #[error("{0}")]
+    InvalidHost(String),
 }
 
 impl From<ResolverError> for crate::error::Error {
@@ -86,6 +91,7 @@ impl From<ResolverError> for crate::error::Error {
             ResolverError::NoCandidates => {
                 crate::error::Error::DnsResolutionFailed("no candidates".to_string())
             }
+            ResolverError::InvalidHost(msg) => crate::error::Error::InvalidUri(msg),
         }
     }
 }

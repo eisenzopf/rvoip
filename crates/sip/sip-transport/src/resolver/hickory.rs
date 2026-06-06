@@ -368,7 +368,27 @@ impl Resolver for HickoryResolver {
                     transport,
                 )])
             }
-            Host::Domain(domain) => self.resolve_domain(domain, uri).await,
+            Host::Domain(domain) => {
+                // A request URI whose host is empty, or a bare all-numeric
+                // label like `sip:600`, is almost always a misaddressed
+                // extension — the caller meant `sip:600@registrar`. Neither is
+                // DNS-resolvable; fail early with a routing hint instead of a
+                // cryptic NAPTR/SRV/A ladder error. (All-numeric single labels
+                // are not valid hostnames, so this won't reject real domains
+                // like `sip:pbx` or `sip:host.example`.)
+                if domain.is_empty() {
+                    return Err(ResolverError::InvalidHost(
+                        "request URI has no host".to_string(),
+                    ));
+                }
+                if domain.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(ResolverError::InvalidHost(format!(
+                        "request URI host `{domain}` is not routable; address it \
+                         to the registrar, e.g. `sip:{domain}@your-pbx`"
+                    )));
+                }
+                self.resolve_domain(domain, uri).await
+            }
         }
     }
 }
@@ -484,5 +504,17 @@ mod tests {
         let uri = Uri::from_str("sips:1.2.3.4;transport=udp").unwrap();
         let err = resolver.resolve(&uri).await.unwrap_err();
         assert!(matches!(err, ResolverError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn bare_extension_host_is_invalid() {
+        // `sip:600` parses with host `600` — a misaddressed extension, not a
+        // routable host. The all-numeric check returns InvalidHost *before* any
+        // DNS query (so this passes against the dead-port resolver), turning a
+        // cryptic NAPTR/SRV/A failure into a clear routing error.
+        let resolver = empty_resolver();
+        let uri = Uri::from_str("sip:600").unwrap();
+        let err = resolver.resolve(&uri).await.unwrap_err();
+        assert!(matches!(err, ResolverError::InvalidHost(_)));
     }
 }

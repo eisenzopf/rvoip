@@ -20,7 +20,7 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::codec::audio::common::AudioCodec;
 use crate::codec::audio::G711Codec;
@@ -1129,7 +1129,7 @@ impl MediaSessionController {
                                     || rtp_count == 101
                                     || rtp_count > 100 && rtp_count < 110
                                 {
-                                    info!(
+                                    trace!(
                                         "📦 Received RTP packet #{} for dialog {}: PT={}, seq={}, ts={}, payload_size={}",
                                         rtp_count,
                                         dialog_id,

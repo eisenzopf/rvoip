@@ -52,6 +52,7 @@ fn clone_error(e: &ResolverError) -> ResolverError {
         ResolverError::Dns(msg) => ResolverError::Dns(msg.clone()),
         ResolverError::Forbidden(reason) => ResolverError::Forbidden(reason),
         ResolverError::NoCandidates => ResolverError::NoCandidates,
+        ResolverError::InvalidHost(msg) => ResolverError::InvalidHost(msg.clone()),
     }
 }
 

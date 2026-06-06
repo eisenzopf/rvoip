@@ -112,7 +112,14 @@ impl RegisterBuilder {
             .from_uri
             .clone()
             .unwrap_or_else(|| self.coord.config_local_uri());
-        let contact_uri = self.contact_uri.clone().unwrap_or_else(|| from_uri.clone());
+        // The Contact must be the reachable transport address so the registrar
+        // routes inbound calls back to us — default to the bound/advertised
+        // address (or an explicit `Config.contact_uri`), NOT the port-less AOR
+        // that `from_uri` carries. Override with `with_contact_uri()`.
+        let contact_uri = self
+            .contact_uri
+            .clone()
+            .unwrap_or_else(|| self.coord.config_contact_uri(&self.user));
         let extra_headers = take_staged(&mut self.state);
 
         // SIP_API_DESIGN_2 §10 #19 — application-staged extras (raw

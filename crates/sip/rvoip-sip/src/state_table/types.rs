@@ -2,13 +2,47 @@ use crate::types::CallState;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-/// Session ID type
+/// Session ID type. The public [`CallId`](crate::CallId) is an alias for this.
+///
+/// Round-trip a call id through a `String` (e.g. when it crosses a UI event
+/// channel) with [`as_str`](Self::as_str) / [`from_string`](Self::from_string):
+///
+/// ```
+/// use rvoip_sip::CallId;
+/// let id = CallId::from_string("call-42");
+/// assert_eq!(id.as_str(), "call-42");
+/// let id2: CallId = id.as_str().to_string().into();
+/// assert_eq!(id, id2);
+/// ```
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionId(pub String);
 
 impl SessionId {
+    /// Generate a fresh, random session id.
     pub fn new() -> Self {
         Self(format!("session-{}", uuid::Uuid::new_v4()))
+    }
+
+    /// Wrap an existing id string (the inverse of [`as_str`](Self::as_str)).
+    pub fn from_string(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    /// Borrow the id as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for SessionId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for SessionId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
     }
 }
 

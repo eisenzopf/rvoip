@@ -1,0 +1,26 @@
+[package]
+name = "rvoip-audio-device"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+description = "Optional cpal-based OS audio-device bridge for rvoip-sip. Wires microphone capture and speaker playback to a call's frame-based AudioStream with drift-free 20 ms pacing, band-limited resampling, a click-free jitter buffer, mute-as-silence, and VU metering — so softphone authors don't re-implement real-time audio."
+
+[lints]
+workspace = true
+
+# Top-of-stack helper: depends UP on rvoip-sip for the audio stream/frame
+# types. rvoip-sip must NOT depend back on this crate.
+[dependencies]
+rvoip-sip = { workspace = true }
+tokio     = { workspace = true }
+log       = { workspace = true }
+anyhow    = { workspace = true }
+cpal      = "0.15"

@@ -35,7 +35,9 @@ use crate::api::events::{Event, MediaSecurityState, SipTrace};
 use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::IncomingCall;
 use crate::api::performance::PerformanceConfig;
-use crate::api::unified::{Config, MediaMode, UnifiedCoordinator};
+use crate::api::unified::{
+    Config, MediaMode, RegistrationHandle, RegistrationInfo, UnifiedCoordinator,
+};
 use crate::auth::SipClientAuth;
 use crate::errors::{Result, SessionError};
 
@@ -470,6 +472,25 @@ impl PeerControl {
         &self.coordinator
     }
 
+    /// Get the [`SessionHandle`] for a call by id.
+    ///
+    /// Works for inbound and outbound calls alike: pair it with the [`CallId`]
+    /// returned by [`invite().send()`](crate::api::send::OutboundCallBuilder::send)
+    /// to drive per-call control — hold/resume, mute, DTMF, transfer, audio —
+    /// without reaching into [`coordinator()`](Self::coordinator).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(control: rvoip_sip::PeerControl, call_id: rvoip_sip::CallId) -> rvoip_sip::Result<()> {
+    /// control.session(&call_id).hold().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn session(&self, call_id: &CallId) -> SessionHandle {
+        SessionHandle::new(call_id.clone(), self.coordinator.clone())
+    }
+
     /// Begin building an outbound INVITE from this peer's configured
     /// `local_uri`. Equivalent to
     /// `peer.coordinator().invite(Some(local_uri), target)`.
@@ -505,6 +526,96 @@ impl PeerControl {
             builder = builder.with_contact_uri(contact_uri.clone());
         }
         builder
+    }
+
+    /// Send a REGISTER and await the registrar's final answer.
+    ///
+    /// [`register()`](Self::register)`.send()` returns as soon as the REGISTER
+    /// is dispatched — success or failure arrives later as an
+    /// [`Event::RegistrationSuccess`]/[`Event::RegistrationFailed`]. This helper
+    /// subscribes first, sends, then resolves once the outcome lands, so a
+    /// client doesn't advance its UI to "connected" before the binding exists.
+    /// `timeout` of `None` waits indefinitely.
+    ///
+    /// Mirrors [`Endpoint::register_and_wait`](crate::api::endpoint::Endpoint::register_and_wait)
+    /// on the reactive `StreamPeer`/`PeerControl` surface.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(control: rvoip_sip::PeerControl) -> rvoip_sip::Result<()> {
+    /// let info = control
+    ///     .register_and_wait(
+    ///         "sip:pbx.example.com",
+    ///         "2001",
+    ///         "secret",
+    ///         Some(std::time::Duration::from_secs(10)),
+    ///     )
+    ///     .await?;
+    /// println!("registered; refresh in {:?}", info.next_refresh_in);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn register_and_wait(
+        &self,
+        registrar: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<RegistrationInfo> {
+        // Subscribe before sending so the success/failure event can't be
+        // emitted before the receiver exists.
+        let mut events = self.subscribe_events().await?;
+        let handle = self.register(registrar, username, password).send().await?;
+        wait_for_peer_registration(&self.coordinator, &mut events, &handle, timeout).await
+    }
+}
+
+/// Block on the REGISTER outcome for `handle`, resolving to the coordinator's
+/// [`RegistrationInfo`] on success or a descriptive error on failure / timeout /
+/// stream close. Matches the registrar reported for the handle so a peer with
+/// several registrations in flight resolves the right one.
+async fn wait_for_peer_registration(
+    coordinator: &Arc<UnifiedCoordinator>,
+    events: &mut EventReceiver,
+    handle: &RegistrationHandle,
+    timeout: Option<std::time::Duration>,
+) -> Result<RegistrationInfo> {
+    let registrar = coordinator
+        .registration_info(handle)
+        .await?
+        .registrar
+        .unwrap_or_default();
+    let matches = |ev: &str| registrar.is_empty() || ev == registrar;
+    let fut = async {
+        loop {
+            match events.next().await {
+                Some(Event::RegistrationSuccess { registrar: r, .. }) if matches(&r) => {
+                    return coordinator.registration_info(handle).await;
+                }
+                Some(Event::RegistrationFailed {
+                    registrar: r,
+                    status_code,
+                    reason,
+                }) if matches(&r) => {
+                    return Err(SessionError::Other(format!(
+                        "registration failed for {r}: {status_code} {reason}"
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    return Err(SessionError::Other(
+                        "event stream closed while waiting for registration".to_string(),
+                    ));
+                }
+            }
+        }
+    };
+    match timeout {
+        Some(duration) => tokio::time::timeout(duration, fut)
+            .await
+            .map_err(|_| SessionError::Timeout("register_and_wait timed out".to_string()))?,
+        None => fut.await,
     }
 }
 
@@ -648,6 +759,12 @@ impl StreamPeer {
         self.control.coordinator()
     }
 
+    /// Get the [`SessionHandle`] for a call by id. Delegates to
+    /// [`PeerControl::session`].
+    pub fn session(&self, call_id: &CallId) -> SessionHandle {
+        self.control.session(call_id)
+    }
+
     // ===== Sequential helpers =====
 
     /// Begin building an outbound INVITE from this peer's configured
@@ -673,6 +790,20 @@ impl StreamPeer {
     /// Begin building an outbound REGISTER from a shared SIP account.
     pub fn register_account(&self, account: &SipAccount) -> crate::api::send::RegisterBuilder {
         self.control.register_account(account)
+    }
+
+    /// Send a REGISTER and await the registrar's final answer. Delegates to
+    /// [`PeerControl::register_and_wait`].
+    pub async fn register_and_wait(
+        &self,
+        registrar: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<RegistrationInfo> {
+        self.control
+            .register_and_wait(registrar, username, password, timeout)
+            .await
     }
 
     /// Wait for the next incoming call.

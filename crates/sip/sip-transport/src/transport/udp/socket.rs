@@ -43,6 +43,11 @@ pub(crate) fn bind_std_udp_socket(
         socket.set_send_buffer_size(size)?;
     }
 
+    // Allow rebinding the same local address right after a prior socket on it
+    // closes. Without SO_REUSEADDR, a teardown-then-rebind on the same port
+    // (e.g. re-login after a failed REGISTER) can race the OS socket release
+    // and fail with EADDRINUSE.
+    socket.set_reuse_address(true)?;
     socket.bind(&addr.into())?;
     socket.set_nonblocking(true)?;
     Ok(socket.into())
@@ -61,5 +66,19 @@ mod tests {
         .expect("bind with socket options");
 
         assert!(socket.local_addr().unwrap().port() > 0);
+    }
+
+    #[test]
+    fn rebinds_same_port_after_drop() {
+        // Discover a free port, release it, then immediately rebind the same
+        // port — the SO_REUSEADDR path must not fail with EADDRINUSE.
+        let probe = bind_std_udp_socket("127.0.0.1:0".parse().unwrap(), UdpSocketOptions::default())
+            .expect("probe bind");
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+
+        let rebind =
+            bind_std_udp_socket(addr, UdpSocketOptions::default()).expect("rebind same port");
+        assert_eq!(rebind.local_addr().unwrap().port(), addr.port());
     }
 }
