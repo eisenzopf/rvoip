@@ -73,7 +73,11 @@ Environment:
   BETA_FUZZ_TOOLCHAIN            Rust toolchain used by cargo-fuzz. Defaults to nightly.
   BETA_FUZZ_SMOKE_RUNS           libFuzzer runs per parser target. Defaults to 1000.
   BETA_FUZZ_SMOKE_SECONDS        libFuzzer max_total_time per parser target. Defaults to 10.
-  RVOIP_PERF_SOAK_DURATION_SECS  Soak duration. Defaults to the perf test default.
+  RVOIP_PERF_SOAK_DURATION_SECS  Soak duration. Defaults to 3600 in the beta gate.
+  RVOIP_PERF_SOAK_ACTIVE_CALLS   Cycling active/media calls. Defaults to 500 in the beta gate.
+  RVOIP_PERF_SOAK_MIN_HOLD_SECS  Minimum cycling active-call hold. Defaults to 10.
+  RVOIP_PERF_SOAK_MAX_HOLD_SECS  Maximum cycling active-call hold. Defaults to 360.
+  RVOIP_PERF_SOAK_CPS            Optional immediate hangup churn. Defaults to 0.
   RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR
                                   Soak RSS growth threshold. Defaults to Config's 10 MB/hr.
   RVOIP_PERF_APP_EVENT_CHANNEL_CAPACITY
@@ -444,7 +448,11 @@ write_summary_gate_table_header() {
 - beta_run_sipp: \`${BETA_RUN_SIPP:-1}\`
 - beta_run_strict_ua: \`${BETA_RUN_STRICT_UA:-1}\`
 - beta_run_long_soak: \`${BETA_RUN_LONG_SOAK:-1}\`
-- rvoip_perf_soak_duration_secs: \`${RVOIP_PERF_SOAK_DURATION_SECS:-perf test default}\`
+- rvoip_perf_soak_duration_secs: \`${RVOIP_PERF_SOAK_DURATION_SECS:-3600}\`
+- rvoip_perf_soak_active_calls: \`${RVOIP_PERF_SOAK_ACTIVE_CALLS:-500}\`
+- rvoip_perf_soak_min_hold_secs: \`${RVOIP_PERF_SOAK_MIN_HOLD_SECS:-10}\`
+- rvoip_perf_soak_max_hold_secs: \`${RVOIP_PERF_SOAK_MAX_HOLD_SECS:-360}\`
+- rvoip_perf_soak_cps: \`${RVOIP_PERF_SOAK_CPS:-0}\`
 - rvoip_perf_max_rss_growth_mb_per_hr: \`${RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR:-Config default (10)}\`
 - rvoip_perf_app_event_channel_capacity: \`${RVOIP_PERF_APP_EVENT_CHANNEL_CAPACITY:-Config default}\`
 - rvoip_perf_rss_tail_window_secs: \`${RVOIP_PERF_RSS_TAIL_WINDOW_SECS:-60}\`
@@ -900,7 +908,13 @@ run_perf_gates() {
   run_gate "perf transport recovery" cargo test -p rvoip-sip --release --features perf-tests --test perf_transport_recovery -- --nocapture
   run_gate "perf session churn leak" cargo test -p rvoip-sip --release --features perf-tests --test perf_soak_30min perf_session_churn_leak -- --ignored --nocapture
   if [ "${BETA_RUN_LONG_SOAK:-1}" = "1" ]; then
-    run_gate "perf soak candidate" cargo test -p rvoip-sip --release --features perf-tests --test perf_soak_30min perf_soak_30min -- --ignored --nocapture
+    run_gate "perf soak candidate" env \
+      RVOIP_PERF_SOAK_DURATION_SECS="${RVOIP_PERF_SOAK_DURATION_SECS:-3600}" \
+      RVOIP_PERF_SOAK_ACTIVE_CALLS="${RVOIP_PERF_SOAK_ACTIVE_CALLS:-500}" \
+      RVOIP_PERF_SOAK_MIN_HOLD_SECS="${RVOIP_PERF_SOAK_MIN_HOLD_SECS:-10}" \
+      RVOIP_PERF_SOAK_MAX_HOLD_SECS="${RVOIP_PERF_SOAK_MAX_HOLD_SECS:-360}" \
+      RVOIP_PERF_SOAK_CPS="${RVOIP_PERF_SOAK_CPS:-0}" \
+      cargo test -p rvoip-sip --release --features perf-tests --test perf_soak_30min perf_soak_30min -- --ignored --nocapture
   else
     skip_gate "perf soak" "BETA_RUN_LONG_SOAK=0 disables release-candidate soak evidence."
   fi

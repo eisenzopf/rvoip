@@ -72,8 +72,9 @@ mod tests {
     fn rebinds_same_port_after_drop() {
         // Discover a free port, release it, then immediately rebind the same
         // port — the SO_REUSEADDR path must not fail with EADDRINUSE.
-        let probe = bind_std_udp_socket("127.0.0.1:0".parse().unwrap(), UdpSocketOptions::default())
-            .expect("probe bind");
+        let probe =
+            bind_std_udp_socket("127.0.0.1:0".parse().unwrap(), UdpSocketOptions::default())
+                .expect("probe bind");
         let addr = probe.local_addr().unwrap();
         drop(probe);
 

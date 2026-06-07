@@ -2662,9 +2662,11 @@ impl UnifiedCoordinator {
                 "terminating": session_stats.terminating,
                 "terminated": session_stats.terminated,
                 "failed": session_stats.failed,
+                "lifecycle": self.helpers.state_machine.store.perf_lifecycle_counts(),
             },
             "session_registry": {
                 "sessions": registry_sessions,
+                "lifecycle": self.session_registry.perf_lifecycle_counts(),
             },
             "lifecycle": self.lifecycle.perf_diagnostic_counts(),
             "state_machine_helpers": helper_counts,

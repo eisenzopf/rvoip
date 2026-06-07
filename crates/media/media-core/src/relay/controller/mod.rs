@@ -368,12 +368,60 @@ impl MediaSessionController {
     #[cfg(feature = "perf-diagnostics")]
     #[doc(hidden)]
     pub fn diagnostic_counts(&self) -> serde_json::Value {
+        let mut rtp_sender_queue_packets = 0usize;
+        let mut rtp_sender_capacity_packets = 0usize;
+        let mut rtp_receiver_queue_packets = 0usize;
+        let mut rtp_receiver_capacity_packets = 0usize;
+        let mut rtp_event_queue_events = 0usize;
+        let mut rtp_event_receiver_count = 0usize;
+        let mut rtp_sessions_locked_for_diag = 0usize;
+
+        for entry in self.rtp_sessions.iter() {
+            match entry.value().session.try_lock() {
+                Ok(session) => {
+                    let counts = session.queue_diagnostics();
+                    rtp_sender_queue_packets += counts.sender_queue_packets;
+                    rtp_sender_capacity_packets += counts.sender_capacity_packets;
+                    rtp_receiver_queue_packets += counts.receiver_queue_packets;
+                    rtp_receiver_capacity_packets += counts.receiver_capacity_packets;
+                    rtp_event_queue_events += counts.event_queue_events;
+                    rtp_event_receiver_count += counts.event_receiver_count;
+                }
+                Err(_) => {
+                    rtp_sessions_locked_for_diag += 1;
+                }
+            }
+        }
+
+        let audio_callback_queue_frames: usize = self
+            .audio_frame_callbacks
+            .iter()
+            .map(|entry| {
+                let sender = entry.value();
+                sender.max_capacity().saturating_sub(sender.capacity())
+            })
+            .sum();
+        let audio_callback_capacity_frames: usize = self
+            .audio_frame_callbacks
+            .iter()
+            .map(|entry| entry.value().max_capacity())
+            .sum();
+
         serde_json::json!({
             "sessions": self.sessions.len(),
             "rtp_sessions": self.rtp_sessions.len(),
+            "rtp_sender_queue_packets": rtp_sender_queue_packets,
+            "rtp_sender_capacity_packets": rtp_sender_capacity_packets,
+            "rtp_receiver_queue_packets": rtp_receiver_queue_packets,
+            "rtp_receiver_capacity_packets": rtp_receiver_capacity_packets,
+            "rtp_event_queue_events": rtp_event_queue_events,
+            "rtp_event_receiver_count": rtp_event_receiver_count,
+            "rtp_sessions_locked_for_diag": rtp_sessions_locked_for_diag,
             "session_to_media": self.session_to_media.len(),
             "media_to_session": self.media_to_session.len(),
             "audio_frame_callbacks": self.audio_frame_callbacks.len(),
+            "audio_callback_queue_frames": audio_callback_queue_frames,
+            "audio_callback_capacity_frames": audio_callback_capacity_frames,
             "dtmf_callbacks": self.dtmf_callbacks.len(),
             "bridge_partners": self.bridge_partners.len(),
             "cn_gate_state": self.cn_gate_state.len(),
@@ -604,7 +652,7 @@ impl MediaSessionController {
             };
 
             let session_started = Instant::now();
-            match RtpSession::new(rtp_config).await {
+            match RtpSession::new_event_driven(rtp_config).await {
                 Ok(rtp_session) => {
                     diagnostics::record_rtp_session_new(session_started.elapsed());
                     created_session = Some((local_rtp_addr, rtp_session));
@@ -1104,25 +1152,16 @@ impl MediaSessionController {
 
         tokio::spawn(async move {
             info!("🎧 Started RTP event handler for dialog: {}", dialog_id);
+            let mut rtp_count = 0u64;
+            let mut decoded_audio_frame_count = 0u64;
+            let mut logged_missing_audio_callback = false;
 
             loop {
                 match rtp_events.recv().await {
                     Ok(event) => {
                         match event {
                             rtp_core::session::RtpSessionEvent::PacketReceived(packet) => {
-                                // Count RTP packets for debugging
-                                static RTP_COUNTERS: once_cell::sync::Lazy<
-                                    std::sync::Mutex<std::collections::HashMap<String, u64>>,
-                                > = once_cell::sync::Lazy::new(|| {
-                                    std::sync::Mutex::new(std::collections::HashMap::new())
-                                });
-
-                                let rtp_count = {
-                                    let mut counters = RTP_COUNTERS.lock().unwrap();
-                                    let count = counters.entry(dialog_id.to_string()).or_insert(0);
-                                    *count += 1;
-                                    *count
-                                };
+                                rtp_count += 1;
 
                                 if rtp_count % 10 == 0
                                     || rtp_count == 100
@@ -1201,63 +1240,42 @@ impl MediaSessionController {
                                     .get(&dialog_id)
                                     .map(|r| r.value().clone());
                                 if let Some(sender) = sender {
-                                    // Count frames for debugging
-                                    static FRAME_COUNTERS: once_cell::sync::Lazy<
-                                        std::sync::Mutex<std::collections::HashMap<String, u64>>,
-                                    > = once_cell::sync::Lazy::new(|| {
-                                        std::sync::Mutex::new(std::collections::HashMap::new())
-                                    });
-
-                                    let frame_count = {
-                                        let mut counters = FRAME_COUNTERS.lock().unwrap();
-                                        let count =
-                                            counters.entry(dialog_id.to_string()).or_insert(0);
-                                        *count += 1;
-                                        *count
-                                    };
+                                    decoded_audio_frame_count += 1;
 
                                     // Use try_send to avoid blocking the RTP event handler
                                     match sender.try_send(audio_frame) {
                                         Ok(_) => {
-                                            if frame_count % 10 == 0
-                                                || frame_count == 100
-                                                || frame_count == 101
+                                            if decoded_audio_frame_count % 10 == 0
+                                                || decoded_audio_frame_count == 100
+                                                || decoded_audio_frame_count == 101
                                             {
                                                 info!(
                                                     "✅ Sent decoded audio frame #{} to callback for dialog {}",
-                                                    frame_count, dialog_id
+                                                    decoded_audio_frame_count, dialog_id
                                                 );
                                             }
                                         }
                                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                                             warn!(
                                                 "Audio frame buffer full for dialog {} at frame #{}, dropping frame",
-                                                dialog_id, frame_count
+                                                dialog_id, decoded_audio_frame_count
                                             );
                                         }
                                         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                                             error!(
                                                 "❌ Audio frame channel closed for dialog {} at frame #{} - THIS IS THE 100-FRAME BUG!",
-                                                dialog_id, frame_count
+                                                dialog_id, decoded_audio_frame_count
                                             );
                                             break;
                                         }
                                     }
                                 } else {
-                                    // Log only once per dialog to avoid spam
-                                    static LOGGED_MISSING: once_cell::sync::Lazy<
-                                        std::sync::Mutex<std::collections::HashSet<String>>,
-                                    > = once_cell::sync::Lazy::new(|| {
-                                        std::sync::Mutex::new(std::collections::HashSet::new())
-                                    });
-
-                                    let mut logged = LOGGED_MISSING.lock().unwrap();
-                                    if !logged.contains(dialog_id.as_str()) {
+                                    if !logged_missing_audio_callback {
                                         info!(
                                             "⚠️ No audio frame callback registered yet for dialog {}",
                                             dialog_id
                                         );
-                                        logged.insert(dialog_id.to_string());
+                                        logged_missing_audio_callback = true;
                                     }
                                 }
                             }

@@ -157,7 +157,8 @@ impl RtpHeader {
         if version != RTP_VERSION {
             trace!(
                 "Invalid RTP version: {} (expected {})",
-                version, RTP_VERSION
+                version,
+                RTP_VERSION
             );
             return Err(Error::InvalidPacket(format!(
                 "Invalid RTP version: {}",
@@ -171,7 +172,9 @@ impl RtpHeader {
         let cc = first_byte & 0x0F;
         trace!(
             "Flags: padding={}, extension={}, cc={}",
-            padding, extension, cc
+            padding,
+            extension,
+            cc
         );
 
         // Second byte: marker (1 bit), payload type (7 bits)
@@ -247,7 +250,8 @@ impl RtpHeader {
             let ext_length_words = buf.get_u16() as usize;
             trace!(
                 "Extension profile ID: 0x{:04x}, length: {} words",
-                profile_id, ext_length_words
+                profile_id,
+                ext_length_words
             );
 
             // Extension length is in 32-bit words (4 bytes each)
@@ -343,7 +347,8 @@ impl RtpHeader {
         if version != RTP_VERSION {
             trace!(
                 "Invalid RTP version: {} (expected {})",
-                version, RTP_VERSION
+                version,
+                RTP_VERSION
             );
             return Err(Error::InvalidPacket(format!(
                 "Invalid RTP version: {}",
@@ -357,7 +362,9 @@ impl RtpHeader {
         let cc = first_byte & 0x0F; // CSRC count: bits 4-7
         trace!(
             "Flags: padding={}, extension={}, cc={}",
-            padding, extension, cc
+            padding,
+            extension,
+            cc
         );
 
         // Second byte: marker (1 bit), payload type (7 bits)
@@ -416,7 +423,9 @@ impl RtpHeader {
                 | (data[csrc_offset + 3] as u32);
             trace!(
                 "CSRC {}: 0x{:08x} from offset {}",
-                i, csrc_value, csrc_offset
+                i,
+                csrc_value,
+                csrc_offset
             );
             csrc.push(csrc_value);
 
@@ -448,7 +457,8 @@ impl RtpHeader {
                 ((data[ext_offset + 2] as u16) << 8) | (data[ext_offset + 3] as u16);
             trace!(
                 "Extension profile ID: 0x{:04x}, length: {} words",
-                profile_id, ext_length_words
+                profile_id,
+                ext_length_words
             );
 
             // Extension length is in 32-bit words (4 bytes each)
@@ -538,7 +548,11 @@ impl RtpHeader {
 
         trace!(
             "Serializing first byte: 0x{:02x} (V={}, P={}, X={}, CC={})",
-            first_byte, self.version, self.padding, self.extension, self.cc
+            first_byte,
+            self.version,
+            self.padding,
+            self.extension,
+            self.cc
         );
 
         buf.put_u8(first_byte);

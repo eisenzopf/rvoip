@@ -1,6 +1,7 @@
 use crate::cleanup_diag::{self, CleanupStage};
 use crate::state_table::{CallId, DialogId, MediaSessionId, SessionId};
 use dashmap::DashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -26,6 +27,12 @@ pub struct SessionStore {
 
     /// Index by media session ID (lock-free with DashMap)
     pub(crate) by_media_id: Arc<DashMap<MediaSessionId, SessionId>>,
+
+    /// Diagnostic lifecycle counters for create/remove balance.
+    created_total: AtomicU64,
+    removed_total: AtomicU64,
+    remove_missing_total: AtomicU64,
+    update_missing_total: AtomicU64,
 }
 
 impl SessionStore {
@@ -36,6 +43,10 @@ impl SessionStore {
             by_dialog: Arc::new(DashMap::new()),
             by_call_id: Arc::new(DashMap::new()),
             by_media_id: Arc::new(DashMap::new()),
+            created_total: AtomicU64::new(0),
+            removed_total: AtomicU64::new(0),
+            remove_missing_total: AtomicU64::new(0),
+            update_missing_total: AtomicU64::new(0),
         }
     }
 
@@ -46,6 +57,10 @@ impl SessionStore {
             by_dialog: Arc::new(DashMap::with_capacity(capacity)),
             by_call_id: Arc::new(DashMap::with_capacity(capacity)),
             by_media_id: Arc::new(DashMap::with_capacity(capacity)),
+            created_total: AtomicU64::new(0),
+            removed_total: AtomicU64::new(0),
+            remove_missing_total: AtomicU64::new(0),
+            update_missing_total: AtomicU64::new(0),
         }
     }
 
@@ -69,6 +84,7 @@ impl SessionStore {
         }
 
         self.sessions.insert(session_id.clone(), session.clone());
+        self.created_total.fetch_add(1, Ordering::Relaxed);
         info!("Created new session {} with role {:?}", session_id, role);
 
         Ok(session)
@@ -132,6 +148,20 @@ impl SessionStore {
                     self.by_call_id.insert(new_id.clone(), session_id.clone());
                 }
             }
+        } else {
+            self.update_missing_total.fetch_add(1, Ordering::Relaxed);
+            self.created_total.fetch_add(1, Ordering::Relaxed);
+            if let Some(dialog_id) = &session.dialog_id {
+                self.by_dialog.insert(dialog_id.clone(), session_id.clone());
+            }
+            if let Some(media_id) = &session.media_session_id {
+                self.by_media_id
+                    .insert(media_id.clone(), session_id.clone());
+            }
+            if let Some(call_id) = &session.call_id {
+                self.by_call_id.insert(call_id.clone(), session_id.clone());
+            }
+            debug!("Update inserted missing session {}", session_id);
         }
 
         self.sessions.insert(session_id.clone(), session);
@@ -160,11 +190,27 @@ impl SessionStore {
             }
 
             info!("Removed session {}", session_id);
+            self.removed_total.fetch_add(1, Ordering::Relaxed);
             guard.finish_success();
             Ok(())
         } else {
+            self.remove_missing_total.fetch_add(1, Ordering::Relaxed);
             Err(format!("Session {} not found", session_id).into())
         }
+    }
+
+    /// Feature-gated lifecycle counters for perf leak investigations.
+    #[cfg(feature = "perf-tests")]
+    pub(crate) fn perf_lifecycle_counts(&self) -> serde_json::Value {
+        let created = self.created_total.load(Ordering::Relaxed);
+        let removed = self.removed_total.load(Ordering::Relaxed);
+        serde_json::json!({
+            "created_total": created,
+            "removed_total": removed,
+            "remove_missing_total": self.remove_missing_total.load(Ordering::Relaxed),
+            "update_missing_total": self.update_missing_total.load(Ordering::Relaxed),
+            "net_created_minus_removed": created.saturating_sub(removed),
+        })
     }
 
     /// Find session by dialog ID

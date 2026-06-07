@@ -1,8 +1,7 @@
 //! Scenario 8 — long-duration soak (default 30 min, `#[ignore]`).
 //!
-//! Combines scenario 1's signalling churn (steady call setup/teardown
-//! at a fixed mid-knee CPS) with scenario 5's RTP steady-state (a
-//! fixed number of long-lived calls carrying PCMU). Run for
+//! Maintains a cycling pool of active RTP calls carrying PCMU, with an
+//! optional immediate setup/teardown signalling churn stream. Run for
 //! `RVOIP_PERF_SOAK_DURATION_SECS` (default 30 min). Marked `#[ignore]`
 //! so it opts in via `-- --ignored`.
 //!
@@ -25,8 +24,11 @@
 //!
 //! Env knobs:
 //! - `RVOIP_PERF_SOAK_DURATION_SECS` (default 1800 = 30 min)
-//! - `RVOIP_PERF_SOAK_CPS`           (default 20 — well below typical knee)
-//! - `RVOIP_PERF_SOAK_MEDIA_CALLS`   (default 30 — concurrent RTP streams)
+//! - `RVOIP_PERF_SOAK_ACTIVE_CALLS`  (default 30 — cycling RTP calls)
+//! - `RVOIP_PERF_SOAK_MIN_HOLD_SECS` (default 10)
+//! - `RVOIP_PERF_SOAK_MAX_HOLD_SECS` (default 360)
+//! - `RVOIP_PERF_SOAK_CPS`           (default 0 — optional immediate hangup churn)
+//! - `RVOIP_PERF_SOAK_MEDIA_CALLS`   (legacy alias for active calls)
 //! - `RVOIP_PERF_CALL_TIMEOUT_SECS`  (default 30)
 //! - `RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR` (default from `Config`)
 //! - `RVOIP_PERF_APP_EVENT_CHANNEL_CAPACITY` (default 256)
@@ -40,12 +42,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_media_core::types::AudioFrame;
 use rvoip_sip::api::callback_peer::{
     CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle,
 };
 use rvoip_sip::api::incoming::IncomingCall;
-use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
+use rvoip_sip::api::unified::{AudioSource, Config, UnifiedCoordinator};
 use serde_json::json;
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -53,8 +54,6 @@ use tokio::task::{JoinHandle, JoinSet};
 mod support;
 use support::{LatencyHistogram, LoadProfile, ResourceSample, ResourceSampler, ScenarioReport};
 
-const FRAME_SAMPLES: usize = 160;
-const FRAME_INTERVAL_MS: u64 = 20;
 const DEFAULT_PERF_APP_EVENT_CHANNEL_CAPACITY: usize = Config::DEFAULT_APP_EVENT_CHANNEL_CAPACITY;
 const DEFAULT_RETENTION_DRAIN_WAIT_SECS: usize = 40;
 
@@ -160,14 +159,28 @@ async fn perf_soak_30min() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1800);
-    let soak_cps: f64 = std::env::var("RVOIP_PERF_SOAK_CPS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(20.0);
-    let media_calls: u64 = std::env::var("RVOIP_PERF_SOAK_MEDIA_CALLS")
+    let soak_cps: f64 = read_nonnegative_f64_env("RVOIP_PERF_SOAK_CPS").unwrap_or(0.0);
+    let active_calls: u64 = std::env::var("RVOIP_PERF_SOAK_ACTIVE_CALLS")
+        .or_else(|_| std::env::var("RVOIP_PERF_SOAK_MEDIA_CALLS"))
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(30);
+    assert!(
+        active_calls > 0,
+        "RVOIP_PERF_SOAK_ACTIVE_CALLS must be greater than 0"
+    );
+    let min_hold_secs: u64 = std::env::var("RVOIP_PERF_SOAK_MIN_HOLD_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
+    let max_hold_secs: u64 = std::env::var("RVOIP_PERF_SOAK_MAX_HOLD_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(360);
+    assert!(
+        min_hold_secs > 0 && max_hold_secs >= min_hold_secs,
+        "RVOIP_PERF_SOAK_MIN_HOLD_SECS must be > 0 and <= RVOIP_PERF_SOAK_MAX_HOLD_SECS"
+    );
     let call_timeout = Duration::from_secs(
         std::env::var("RVOIP_PERF_CALL_TIMEOUT_SECS")
             .ok()
@@ -201,54 +214,9 @@ async fn perf_soak_30min() {
     let last_minute_hist = Arc::new(LatencyHistogram::new("setup_latency_last_minute"));
     let counters = Arc::new(SoakCounters::default());
 
-    // Long-lived media calls held for the whole soak.
-    let sent_frames = Arc::new(AtomicU64::new(0));
-    let (media_drop_tx, _) = tokio::sync::broadcast::channel::<()>(1);
-    let mut media_handles: Vec<JoinHandle<()>> = Vec::with_capacity(media_calls as usize);
-    for _ in 0..media_calls {
-        let alice = Arc::clone(&alice);
-        let from = from.clone();
-        let target_uri = target_uri.clone();
-        let counters = Arc::clone(&counters);
-        let sent_frames = Arc::clone(&sent_frames);
-        let mut drop_rx = media_drop_tx.subscribe();
-        media_handles.push(tokio::spawn(async move {
-            let call_id = match alice.invite(Some(from), target_uri).send().await {
-                Ok(id) => id,
-                Err(_) => {
-                    counters.media_setup_failed.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-            };
-            let handle = alice.session(&call_id);
-            if handle.wait_for_answered(Some(call_timeout)).await.is_err() {
-                counters.media_setup_failed.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-            let audio = match handle.audio().await {
-                Ok(a) => a,
-                Err(_) => return,
-            };
-            let sender = audio.sender;
-            let mut next = tokio::time::Instant::now() + Duration::from_millis(FRAME_INTERVAL_MS);
-            loop {
-                if drop_rx.try_recv().is_ok() {
-                    break;
-                }
-                tokio::time::sleep_until(next).await;
-                next += Duration::from_millis(FRAME_INTERVAL_MS);
-                let f = AudioFrame::new(vec![0i16; FRAME_SAMPLES], 8_000, 1, 0);
-                if sender.send(f).await.is_err() {
-                    break;
-                }
-                sent_frames.fetch_add(1, Ordering::Relaxed);
-            }
-            let _ = handle.hangup_and_wait(Some(call_timeout)).await;
-        }));
-    }
-    // Give the media plane time to come up before the signalling
-    // churn starts.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    let total = Duration::from_secs(duration_secs);
+    let started = std::time::Instant::now();
+    let active_deadline = started + total;
 
     let sampler = ResourceSampler::start(Duration::from_secs(5));
     let retention_sampler = RetentionSampler::start(
@@ -256,71 +224,170 @@ async fn perf_soak_30min() {
         Arc::clone(&bob.coordinator),
         Duration::from_secs(5),
     );
-    let started = std::time::Instant::now();
-    let total = Duration::from_secs(duration_secs);
 
-    // Signalling churn: continuously dispatch INVITE-BYE cycles at
-    // `soak_cps`. Each spawned task records its setup latency into
-    // the appropriate histogram (first minute / last minute / global).
-    let tick = Duration::from_secs_f64(1.0 / soak_cps.max(1.0));
-    let mut churn_tasks = JoinSet::<()>::new();
-    loop {
-        while let Some(result) = churn_tasks.try_join_next() {
-            let _ = result;
-        }
-
-        let elapsed = started.elapsed();
-        if elapsed >= total {
-            break;
-        }
+    // Cycling active media pool. Each slot keeps one call active until its
+    // hold timer expires, tears it down, then immediately replenishes the slot
+    // until the soak window closes.
+    let mut active_tasks = JoinSet::<()>::new();
+    for slot in 0..active_calls {
         let alice = Arc::clone(&alice);
         let from = from.clone();
         let target_uri = target_uri.clone();
+        let counters = Arc::clone(&counters);
         let setup_hist = Arc::clone(&setup_hist);
         let first_minute_hist = Arc::clone(&first_minute_hist);
         let last_minute_hist = Arc::clone(&last_minute_hist);
-        let counters = Arc::clone(&counters);
-        churn_tasks.spawn(async move {
-            let dispatch_at = std::time::Instant::now();
-            let t_send = dispatch_at;
-            counters.offered.fetch_add(1, Ordering::Relaxed);
-            let call_id = match alice.invite(Some(from), target_uri).send().await {
-                Ok(id) => id,
-                Err(_) => {
+        active_tasks.spawn(async move {
+            let mut cycle = 0u64;
+            loop {
+                if std::time::Instant::now() >= active_deadline {
+                    break;
+                }
+
+                let dispatch_at = std::time::Instant::now();
+                counters.offered.fetch_add(1, Ordering::Relaxed);
+                counters.active_offered.fetch_add(1, Ordering::Relaxed);
+                let call_id = match alice
+                    .invite(Some(from.clone()), target_uri.clone())
+                    .send()
+                    .await
+                {
+                    Ok(id) => id,
+                    Err(_) => {
+                        counters.failed.fetch_add(1, Ordering::Relaxed);
+                        counters.media_setup_failed.fetch_add(1, Ordering::Relaxed);
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                };
+                let handle = alice.session(&call_id);
+                if handle.wait_for_answered(Some(call_timeout)).await.is_err() {
+                    counters.failed.fetch_add(1, Ordering::Relaxed);
+                    counters.media_setup_failed.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+
+                let ns = dispatch_at.elapsed().as_nanos() as u64;
+                setup_hist.record_nanos(ns);
+                if dispatch_at.duration_since(started_global()).as_secs() < 60 {
+                    first_minute_hist.record_nanos(ns);
+                }
+                if total
+                    .saturating_sub(dispatch_at.duration_since(started_global()))
+                    .as_secs()
+                    <= 60
+                {
+                    last_minute_hist.record_nanos(ns);
+                }
+
+                if alice
+                    .set_audio_source(
+                        &call_id,
+                        AudioSource::Tone {
+                            frequency: 440.0,
+                            amplitude: 0.25,
+                        },
+                    )
+                    .await
+                    .is_err()
+                {
+                    counters.failed.fetch_add(1, Ordering::Relaxed);
+                    counters.media_setup_failed.fetch_add(1, Ordering::Relaxed);
+                    let _ = handle.hangup_and_wait(Some(call_timeout)).await;
+                    continue;
+                }
+
+                let hold = cycling_hold_duration(slot, cycle, min_hold_secs, max_hold_secs);
+                let hold_deadline = (std::time::Instant::now() + hold).min(active_deadline);
+                let remaining = hold_deadline.saturating_duration_since(std::time::Instant::now());
+                if !remaining.is_zero() {
+                    tokio::time::sleep(remaining).await;
+                }
+
+                if handle.hangup_and_wait(Some(call_timeout)).await.is_ok() {
+                    counters.succeeded.fetch_add(1, Ordering::Relaxed);
+                    counters.active_succeeded.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    counters.failed.fetch_add(1, Ordering::Relaxed);
+                    counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                }
+                cycle += 1;
+            }
+        });
+    }
+
+    // Optional signalling churn: continuously dispatch INVITE-BYE cycles at
+    // `soak_cps`. The cycling active-call pool above is the normal soak load;
+    // this path is retained as an explicit additional stress knob.
+    let mut churn_tasks = JoinSet::<()>::new();
+    if soak_cps > 0.0 {
+        let tick = Duration::from_secs_f64(1.0 / soak_cps);
+        loop {
+            while let Some(result) = churn_tasks.try_join_next() {
+                let _ = result;
+            }
+
+            let elapsed = started.elapsed();
+            if elapsed >= total {
+                break;
+            }
+            let alice = Arc::clone(&alice);
+            let from = from.clone();
+            let target_uri = target_uri.clone();
+            let setup_hist = Arc::clone(&setup_hist);
+            let first_minute_hist = Arc::clone(&first_minute_hist);
+            let last_minute_hist = Arc::clone(&last_minute_hist);
+            let counters = Arc::clone(&counters);
+            churn_tasks.spawn(async move {
+                let dispatch_at = std::time::Instant::now();
+                let t_send = dispatch_at;
+                counters.offered.fetch_add(1, Ordering::Relaxed);
+                counters.churn_offered.fetch_add(1, Ordering::Relaxed);
+                let call_id = match alice.invite(Some(from), target_uri).send().await {
+                    Ok(id) => id,
+                    Err(_) => {
+                        counters.failed.fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
+                };
+                let handle = alice.session(&call_id);
+                if handle.wait_for_answered(Some(call_timeout)).await.is_err() {
                     counters.failed.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
-            };
-            let handle = alice.session(&call_id);
-            if handle.wait_for_answered(Some(call_timeout)).await.is_err() {
-                counters.failed.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-            let ns = t_send.elapsed().as_nanos() as u64;
-            setup_hist.record_nanos(ns);
-            // Place into first or last minute snapshot bucket.
-            let secs = dispatch_at
-                .duration_since(started_minute_anchor())
-                .as_secs_f64();
-            // We use a global anchor (set just once via OnceLock).
-            // Cheaper: classify by `dispatch_at - started` using a
-            // captured `started` clone — but we can't move it cheaply
-            // here. Fall back to anchor.
-            let _ = secs;
-            if dispatch_at.duration_since(started_global()).as_secs() < 60 {
-                first_minute_hist.record_nanos(ns);
-            }
-            if total
-                .saturating_sub(dispatch_at.duration_since(started_global()))
-                .as_secs()
-                <= 60
-            {
-                last_minute_hist.record_nanos(ns);
-            }
-            let _ = handle.hangup_and_wait(Some(call_timeout)).await;
-            counters.succeeded.fetch_add(1, Ordering::Relaxed);
-        });
-        tokio::time::sleep(tick).await;
+                let ns = t_send.elapsed().as_nanos() as u64;
+                setup_hist.record_nanos(ns);
+                // Place into first or last minute snapshot bucket.
+                let secs = dispatch_at
+                    .duration_since(started_minute_anchor())
+                    .as_secs_f64();
+                // We use a global anchor (set just once via OnceLock).
+                // Cheaper: classify by `dispatch_at - started` using a
+                // captured `started` clone — but we can't move it cheaply
+                // here. Fall back to anchor.
+                let _ = secs;
+                if dispatch_at.duration_since(started_global()).as_secs() < 60 {
+                    first_minute_hist.record_nanos(ns);
+                }
+                if total
+                    .saturating_sub(dispatch_at.duration_since(started_global()))
+                    .as_secs()
+                    <= 60
+                {
+                    last_minute_hist.record_nanos(ns);
+                }
+                if handle.hangup_and_wait(Some(call_timeout)).await.is_ok() {
+                    counters.succeeded.fetch_add(1, Ordering::Relaxed);
+                    counters.churn_succeeded.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    counters.failed.fetch_add(1, Ordering::Relaxed);
+                    counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+            tokio::time::sleep(tick).await;
+        }
+    } else {
+        tokio::time::sleep(total).await;
     }
 
     // Drain churn calls.
@@ -337,14 +404,22 @@ async fn perf_soak_30min() {
         }
     }
 
-    // Stop media calls.
-    let _ = media_drop_tx.send(());
-    let _ = tokio::time::timeout(call_timeout + Duration::from_secs(10), async {
-        for h in media_handles {
-            let _ = h.await;
+    // Stop active cycling calls. Each slot clamps its current hold to the
+    // active deadline, then hangs up the current call and exits.
+    let active_drain_result = tokio::time::timeout(call_timeout + Duration::from_secs(30), async {
+        while let Some(result) = active_tasks.join_next().await {
+            let _ = result;
         }
     })
     .await;
+    if active_drain_result.is_err() {
+        active_tasks.abort_all();
+        while let Some(result) = active_tasks.join_next().await {
+            let _ = result;
+        }
+        counters.failed.fetch_add(1, Ordering::Relaxed);
+        counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+    }
 
     tokio::time::sleep(retention_drain_wait).await;
     let retention_samples = retention_sampler.stop().await;
@@ -386,6 +461,11 @@ async fn perf_soak_30min() {
     let succeeded = counters.succeeded.load(Ordering::Relaxed);
     let failed = counters.failed.load(Ordering::Relaxed);
     let media_setup_failed = counters.media_setup_failed.load(Ordering::Relaxed);
+    let teardown_failed = counters.teardown_failed.load(Ordering::Relaxed);
+    let active_offered = counters.active_offered.load(Ordering::Relaxed);
+    let active_succeeded = counters.active_succeeded.load(Ordering::Relaxed);
+    let churn_offered = counters.churn_offered.load(Ordering::Relaxed);
+    let churn_succeeded = counters.churn_succeeded.load(Ordering::Relaxed);
     let active_audio_receivers = bob_diagnostics
         .active_audio_receivers
         .load(Ordering::Relaxed);
@@ -415,7 +495,10 @@ async fn perf_soak_30min() {
     report
         .result("duration_secs", duration_secs)
         .result("soak_cps", soak_cps)
-        .result("media_calls_held", media_calls)
+        .result("active_calls_target", active_calls)
+        .result("media_calls_held", active_calls)
+        .result("active_call_min_hold_secs", min_hold_secs)
+        .result("active_call_max_hold_secs", max_hold_secs)
         .result("global_event_channel_capacity", app_event_capacity)
         .result(
             "session_event_dispatcher_channel_capacity",
@@ -432,6 +515,10 @@ async fn perf_soak_30min() {
         )
         .result("calls_offered", offered)
         .result("calls_succeeded", succeeded)
+        .result("active_calls_offered", active_offered)
+        .result("active_calls_succeeded", active_succeeded)
+        .result("churn_calls_offered", churn_offered)
+        .result("churn_calls_succeeded", churn_succeeded)
         .result("cps_per_core", round2(cps_per_core))
         .result("asr", round4(asr))
         .result("bob_received_frames", received_frames)
@@ -502,8 +589,9 @@ async fn perf_soak_30min() {
         .result(
             "errors",
             json!({
-                "churn_failed":         failed,
+                "call_failed":          failed,
                 "media_setup_failed":   media_setup_failed,
+                "teardown_failed":      teardown_failed,
             }),
         )
         .latency(&setup_hist)
@@ -528,10 +616,13 @@ async fn perf_soak_30min() {
         gate_failures.push(format!("ASR {:.4} below 0.999", asr));
     }
     if failed != 0 {
-        gate_failures.push(format!("churn_failed={failed}"));
+        gate_failures.push(format!("call_failed={failed}"));
     }
     if media_setup_failed != 0 {
         gate_failures.push(format!("media_setup_failed={media_setup_failed}"));
+    }
+    if teardown_failed != 0 {
+        gate_failures.push(format!("teardown_failed={teardown_failed}"));
     }
     if retained_after_drain != 0 {
         gate_failures.push(format!(
@@ -753,6 +844,22 @@ fn read_positive_f64_env(name: &str) -> Option<f64> {
     assert!(
         value.is_finite() && value > 0.0,
         "{name} must be a finite number greater than 0, got {raw:?}"
+    );
+    Some(value)
+}
+
+fn read_nonnegative_f64_env(name: &str) -> Option<f64> {
+    let raw = match std::env::var(name) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return None,
+        Err(err) => panic!("{name} could not be read: {err}"),
+    };
+    let value: f64 = raw
+        .parse()
+        .unwrap_or_else(|_| panic!("{name} must be a finite number >= 0, got {raw:?}"));
+    assert!(
+        value.is_finite() && value >= 0.0,
+        "{name} must be a finite number >= 0, got {raw:?}"
     );
     Some(value)
 }
@@ -994,7 +1101,25 @@ struct SoakCounters {
     offered: AtomicU64,
     succeeded: AtomicU64,
     failed: AtomicU64,
+    active_offered: AtomicU64,
+    active_succeeded: AtomicU64,
+    churn_offered: AtomicU64,
+    churn_succeeded: AtomicU64,
     media_setup_failed: AtomicU64,
+    teardown_failed: AtomicU64,
+}
+
+fn cycling_hold_duration(slot: u64, cycle: u64, min_secs: u64, max_secs: u64) -> Duration {
+    let span = max_secs - min_secs + 1;
+    let offset = if span == 1 {
+        0
+    } else {
+        slot.wrapping_mul(1_103_515_245)
+            .wrapping_add(cycle.wrapping_mul(12_345))
+            .wrapping_add(slot.rotate_left((cycle % 63) as u32))
+            % span
+    };
+    Duration::from_secs(min_secs + offset)
 }
 
 // Global anchors so the bucketing classifier doesn't need plumbing.
@@ -1162,5 +1287,24 @@ mod tests {
             assert_eq!(gate.effective_mb_per_hr, 25.0);
             assert_eq!(gate.source, "env:RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR");
         });
+    }
+
+    #[test]
+    fn cycling_hold_duration_stays_inside_configured_range() {
+        for slot in 0..64 {
+            for cycle in 0..64 {
+                let hold = cycling_hold_duration(slot, cycle, 10, 360);
+                assert!(hold >= Duration::from_secs(10));
+                assert!(hold <= Duration::from_secs(360));
+            }
+        }
+    }
+
+    #[test]
+    fn cycling_hold_duration_allows_fixed_hold_time() {
+        assert_eq!(
+            cycling_hold_duration(42, 7, 30, 30),
+            Duration::from_secs(30)
+        );
     }
 }

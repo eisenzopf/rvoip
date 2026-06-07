@@ -139,6 +139,19 @@ fn uac_late_answer_bye_cleanup_publishes_cancelled_on_dialog_terminated() {
 }
 
 #[test]
+fn inbound_bye_while_ringing_is_terminal_cleanup() {
+    let table = load();
+
+    for role in [Role::UAC, Role::UAS] {
+        let t = transition(&table, role, CallState::Ringing, EventType::DialogBYE);
+        assert_eq!(t.next_state, Some(CallState::Terminated));
+        assert!(t.actions.contains(&Action::CleanupDialog));
+        assert!(t.actions.contains(&Action::CleanupMedia));
+        assert!(t.publish_events.contains(&EventTemplate::CallTerminated));
+    }
+}
+
+#[test]
 fn initiating_timeout_does_not_send_cancel() {
     let table = load();
     let t = transition(

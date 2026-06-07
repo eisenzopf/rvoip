@@ -24,12 +24,13 @@ use rvoip_sip_core::sdp::SdpBuilder;
 use rvoip_sip_core::types::sdp::{CryptoAttribute, CryptoSuite, ParsedAttribute, SdpSession};
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 const DIAG_OFF: u8 = 1;
 const DIAG_ON: u8 = 2;
+const AUDIO_RECEIVER_CHANNEL_FRAMES: usize = 128;
 
 static SRTP_DIAGNOSTICS: AtomicU8 = AtomicU8::new(DIAG_OFF);
 static MEDIA_SDP_DIAGNOSTICS: AtomicU8 = AtomicU8::new(DIAG_OFF);
@@ -336,6 +337,20 @@ pub struct MediaAdapter {
     /// Audio frame channels for receiving decoded audio from media-core
     audio_receivers: Arc<DashMap<SessionId, mpsc::Sender<AudioFrame>>>,
 
+    /// Perf diagnostics for media lifecycle and active audio churn.
+    session_create_attempt_total: Arc<AtomicU64>,
+    session_create_success_total: Arc<AtomicU64>,
+    session_create_failed_total: Arc<AtomicU64>,
+    cleanup_attempt_total: Arc<AtomicU64>,
+    cleanup_mapped_total: Arc<AtomicU64>,
+    cleanup_fallback_total: Arc<AtomicU64>,
+    cleanup_media_session_removed_total: Arc<AtomicU64>,
+    cleanup_audio_receiver_removed_total: Arc<AtomicU64>,
+    audio_subscriber_created_total: Arc<AtomicU64>,
+    audio_subscriber_disconnected_total: Arc<AtomicU64>,
+    audio_send_frames_total: Arc<AtomicU64>,
+    audio_send_samples_total: Arc<AtomicU64>,
+
     /// Local IP for SDP generation
     local_ip: IpAddr,
 
@@ -440,6 +455,18 @@ impl MediaAdapter {
             dialog_to_session: Arc::new(DashMap::new()),
             media_sessions: Arc::new(DashMap::new()),
             audio_receivers: Arc::new(DashMap::new()),
+            session_create_attempt_total: Arc::new(AtomicU64::new(0)),
+            session_create_success_total: Arc::new(AtomicU64::new(0)),
+            session_create_failed_total: Arc::new(AtomicU64::new(0)),
+            cleanup_attempt_total: Arc::new(AtomicU64::new(0)),
+            cleanup_mapped_total: Arc::new(AtomicU64::new(0)),
+            cleanup_fallback_total: Arc::new(AtomicU64::new(0)),
+            cleanup_media_session_removed_total: Arc::new(AtomicU64::new(0)),
+            cleanup_audio_receiver_removed_total: Arc::new(AtomicU64::new(0)),
+            audio_subscriber_created_total: Arc::new(AtomicU64::new(0)),
+            audio_subscriber_disconnected_total: Arc::new(AtomicU64::new(0)),
+            audio_send_frames_total: Arc::new(AtomicU64::new(0)),
+            audio_send_samples_total: Arc::new(AtomicU64::new(0)),
             local_ip,
             media_port_start: port_start,
             media_port_end: port_end,
@@ -501,15 +528,47 @@ impl MediaAdapter {
     /// Feature-gated retained-object counts for perf leak investigations.
     #[cfg(feature = "perf-tests")]
     pub(crate) fn perf_diagnostic_counts(&self) -> serde_json::Value {
+        let audio_receiver_queue_frames: usize = self
+            .audio_receivers
+            .iter()
+            .map(|entry| {
+                let sender = entry.value();
+                sender.max_capacity().saturating_sub(sender.capacity())
+            })
+            .sum();
+        let audio_receiver_capacity_frames: usize = self
+            .audio_receivers
+            .iter()
+            .map(|entry| entry.value().max_capacity())
+            .sum();
+
         serde_json::json!({
             "session_to_dialog": self.session_to_dialog.len(),
             "dialog_to_session": self.dialog_to_session.len(),
             "media_sessions": self.media_sessions.len(),
             "audio_receivers": self.audio_receivers.len(),
+            "audio_receiver_queue_frames": audio_receiver_queue_frames,
+            "audio_receiver_capacity_frames": audio_receiver_capacity_frames,
             "pending_srtp_offerers": self.pending_srtp_offerers.len(),
             "negotiated_srtp": self.negotiated_srtp.len(),
             "audio_mixers": self.audio_mixers.len(),
             "controller": self.controller.diagnostic_counts(),
+            "lifecycle": {
+                "session_create_attempt_total": self.session_create_attempt_total.load(Ordering::Relaxed),
+                "session_create_success_total": self.session_create_success_total.load(Ordering::Relaxed),
+                "session_create_failed_total": self.session_create_failed_total.load(Ordering::Relaxed),
+                "cleanup_attempt_total": self.cleanup_attempt_total.load(Ordering::Relaxed),
+                "cleanup_mapped_total": self.cleanup_mapped_total.load(Ordering::Relaxed),
+                "cleanup_fallback_total": self.cleanup_fallback_total.load(Ordering::Relaxed),
+                "cleanup_media_session_removed_total": self.cleanup_media_session_removed_total.load(Ordering::Relaxed),
+                "cleanup_audio_receiver_removed_total": self.cleanup_audio_receiver_removed_total.load(Ordering::Relaxed),
+                "audio_subscriber_created_total": self.audio_subscriber_created_total.load(Ordering::Relaxed),
+                "audio_subscriber_disconnected_total": self.audio_subscriber_disconnected_total.load(Ordering::Relaxed),
+            },
+            "audio_send": {
+                "frames_total": self.audio_send_frames_total.load(Ordering::Relaxed),
+                "samples_total": self.audio_send_samples_total.load(Ordering::Relaxed),
+            },
         })
     }
 
@@ -1398,10 +1457,17 @@ impl MediaAdapter {
             audio_frame.samples.len()
         );
 
-        // Convert AudioFrame to PCM samples and call encode_and_send_audio_frame
-        // This will encode the audio and send it via RTP to the remote peer
-        let pcm_samples = audio_frame.samples.clone();
-        let timestamp = audio_frame.timestamp;
+        // Move the PCM buffer into media-core instead of cloning it. At soak
+        // scale, the old clone created one extra Vec allocation per outbound
+        // frame and showed up as sustained RSS/CPU pressure.
+        let AudioFrame {
+            samples: pcm_samples,
+            timestamp,
+            ..
+        } = audio_frame;
+        self.audio_send_frames_total.fetch_add(1, Ordering::Relaxed);
+        self.audio_send_samples_total
+            .fetch_add(pcm_samples.len() as u64, Ordering::Relaxed);
 
         self.controller
             .encode_and_send_audio_frame(&dialog_id, pcm_samples, timestamp)
@@ -1422,6 +1488,8 @@ impl MediaAdapter {
         &self,
         session_id: &SessionId,
     ) -> Result<crate::types::MediaSessionId> {
+        self.session_create_attempt_total
+            .fetch_add(1, Ordering::Relaxed);
         // Create dialog ID for media-core
         let dialog_id = DialogId::new(format!("media-{}", session_id.0));
 
@@ -1442,6 +1510,8 @@ impl MediaAdapter {
                 "signaling-only media mode: skipped media-core allocation for session {}",
                 session_id.0
             );
+            self.session_create_success_total
+                .fetch_add(1, Ordering::Relaxed);
             return Ok(dialog_id);
         }
 
@@ -1458,6 +1528,8 @@ impl MediaAdapter {
             .start_media(dialog_id.clone(), media_config)
             .await
             .map_err(|e| {
+                self.session_create_failed_total
+                    .fetch_add(1, Ordering::Relaxed);
                 SessionError::MediaError(format!("Failed to start media session: {}", e))
             })?;
 
@@ -1489,9 +1561,13 @@ impl MediaAdapter {
                 "✅ Media session created successfully for dialog {}",
                 dialog_id
             );
+            self.session_create_success_total
+                .fetch_add(1, Ordering::Relaxed);
             return Ok(media_id);
         }
 
+        self.session_create_failed_total
+            .fetch_add(1, Ordering::Relaxed);
         Err(SessionError::MediaError(
             "Failed to get session info after creation".to_string(),
         ))
@@ -1744,8 +1820,10 @@ impl MediaAdapter {
             dialog_id
         );
 
-        // Create channel for audio frames
-        let (tx, rx) = mpsc::channel(1000); // Buffer up to 1000 frames (20 seconds at 50fps)
+        // Keep decoded-audio buffering bounded for real-time media. At 50 fps,
+        // 128 frames is ~2.5 seconds; the old 1000-frame buffer retained up to
+        // 20 seconds of stale audio per active call.
+        let (tx, rx) = mpsc::channel(AUDIO_RECEIVER_CHANNEL_FRAMES);
 
         // Register the callback with MediaSessionController to receive audio frames
         self.controller
@@ -1757,6 +1835,8 @@ impl MediaAdapter {
 
         // Store the sender for this session for cleanup
         self.audio_receivers.insert(session_id.clone(), tx);
+        self.audio_subscriber_created_total
+            .fetch_add(1, Ordering::Relaxed);
 
         tracing::info!(
             "🎧 Created audio frame subscriber for session {} with dialog {}",
@@ -1783,6 +1863,8 @@ impl MediaAdapter {
             if let Err(_) = tx.send(audio_frame).await {
                 // Receiver has been dropped, clean up
                 self.audio_receivers.remove(session_id);
+                self.audio_subscriber_disconnected_total
+                    .fetch_add(1, Ordering::Relaxed);
                 tracing::debug!(
                     "Audio frame subscriber disconnected for session {}",
                     session_id.0
@@ -2052,6 +2134,7 @@ impl MediaAdapter {
     /// still present.
     pub async fn cleanup_session(&self, session_id: &SessionId) -> Result<()> {
         let guard = cleanup_diag::stage_guard(CleanupStage::MediaCleanup, &session_id.0);
+        self.cleanup_attempt_total.fetch_add(1, Ordering::Relaxed);
         // Resolve dialog_id — prefer the mapping populated by create_session
         // (which is authoritative once set) but fall back to the deterministic
         // form `media-<session_id>` when the mapping has been lost (e.g. on a
@@ -2061,9 +2144,13 @@ impl MediaAdapter {
         // same dialog_id.
         let removed = self.session_to_dialog.remove(session_id);
         let dialog_id = match removed {
-            Some((_, d)) => Some(d),
+            Some((_, d)) => {
+                self.cleanup_mapped_total.fetch_add(1, Ordering::Relaxed);
+                Some(d)
+            }
             None => {
                 // Fallback to deterministic form used by create_session.
+                self.cleanup_fallback_total.fetch_add(1, Ordering::Relaxed);
                 Some(DialogId::new(format!("media-{}", session_id.0)))
             }
         };
@@ -2081,9 +2168,15 @@ impl MediaAdapter {
             self.dialog_to_session.remove(&dialog_id);
         }
 
-        self.media_sessions.remove(session_id);
+        if self.media_sessions.remove(session_id).is_some() {
+            self.cleanup_media_session_removed_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
         // Drop our own clone of the tx as well (the other lived in media-core).
-        self.audio_receivers.remove(session_id);
+        if self.audio_receivers.remove(session_id).is_some() {
+            self.cleanup_audio_receiver_removed_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
 
         // NEXT_STEPS B diag — bump a process-global counter so the
         // perf_listener example can poll cleanup throughput without
@@ -2442,6 +2535,18 @@ impl Clone for MediaAdapter {
             dialog_to_session: self.dialog_to_session.clone(),
             media_sessions: self.media_sessions.clone(),
             audio_receivers: self.audio_receivers.clone(),
+            session_create_attempt_total: self.session_create_attempt_total.clone(),
+            session_create_success_total: self.session_create_success_total.clone(),
+            session_create_failed_total: self.session_create_failed_total.clone(),
+            cleanup_attempt_total: self.cleanup_attempt_total.clone(),
+            cleanup_mapped_total: self.cleanup_mapped_total.clone(),
+            cleanup_fallback_total: self.cleanup_fallback_total.clone(),
+            cleanup_media_session_removed_total: self.cleanup_media_session_removed_total.clone(),
+            cleanup_audio_receiver_removed_total: self.cleanup_audio_receiver_removed_total.clone(),
+            audio_subscriber_created_total: self.audio_subscriber_created_total.clone(),
+            audio_subscriber_disconnected_total: self.audio_subscriber_disconnected_total.clone(),
+            audio_send_frames_total: self.audio_send_frames_total.clone(),
+            audio_send_samples_total: self.audio_send_samples_total.clone(),
             audio_mixers: self.audio_mixers.clone(),
             local_ip: self.local_ip,
             media_port_start: self.media_port_start,

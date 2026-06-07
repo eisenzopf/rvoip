@@ -26,7 +26,19 @@ use crate::packet::{RtpHeader, RtpPacket};
 use crate::transport::{RtpTransport, RtpTransportConfig, UdpRtpTransport};
 use crate::{Result, RtpSsrc, RtpTimestamp};
 
-// Define the constant locally since it's not publicly exported
+/// Bounded queue depth for per-session RTP send/event channels.
+///
+/// RTP is real-time traffic; keeping many seconds of packet backlog per call
+/// hides overload and retains packet payloads. At 20 ms packets, 256 entries is
+/// roughly 5 seconds of headroom for one stream.
+pub const RTP_SESSION_CHANNEL_CAPACITY: usize = 256;
+
+/// Small best-effort queue for the legacy polling receive API.
+///
+/// Media-core consumes RTP packets through the event broadcast path, so this
+/// queue must not become an unbounded duplicate packet buffer when nobody calls
+/// [`RtpSession::receive_packet`].
+pub const RTP_SESSION_RECEIVE_QUEUE_CAPACITY: usize = 32;
 
 /// Stats for an RTP session
 #[derive(Debug, Clone, Default)]
@@ -60,6 +72,23 @@ pub struct RtpSessionStats {
 
     /// Remote address of the most recent packet
     pub remote_addr: Option<SocketAddr>,
+}
+
+/// Snapshot of bounded queue occupancy inside an RTP session.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RtpSessionQueueDiagnostics {
+    /// Packets waiting to be sent by the RTP send task.
+    pub sender_queue_packets: usize,
+    /// Configured sender queue capacity.
+    pub sender_capacity_packets: usize,
+    /// Packets waiting in the receive queue for explicit `receive_packet` users.
+    pub receiver_queue_packets: usize,
+    /// Configured receiver queue capacity.
+    pub receiver_capacity_packets: usize,
+    /// Events retained in the broadcast ring.
+    pub event_queue_events: usize,
+    /// Current subscribers to the event broadcast ring.
+    pub event_receiver_count: usize,
 }
 
 /// RTP session configuration options
@@ -285,6 +314,10 @@ pub struct RtpSession {
     /// Channel for sending packets
     sender: mpsc::Sender<RtpPacket>,
 
+    /// Whether received RTP packets should also be mirrored into the legacy
+    /// polling receive queue.
+    receive_queue_enabled: bool,
+
     /// Event broadcaster
     event_tx: broadcast::Sender<RtpSessionEvent>,
 
@@ -319,6 +352,22 @@ pub struct RtpSession {
 impl RtpSession {
     /// Create a new RTP session
     pub async fn new(config: RtpSessionConfig) -> Result<Self> {
+        Self::new_with_receive_queue(config, true).await
+    }
+
+    /// Create a new RTP session for event-driven consumers.
+    ///
+    /// Packets are still emitted through [`RtpSessionEvent::PacketReceived`],
+    /// but they are not duplicated into the polling queue used by
+    /// [`RtpSession::receive_packet`].
+    pub async fn new_event_driven(config: RtpSessionConfig) -> Result<Self> {
+        Self::new_with_receive_queue(config, false).await
+    }
+
+    async fn new_with_receive_queue(
+        config: RtpSessionConfig,
+        receive_queue_enabled: bool,
+    ) -> Result<Self> {
         // Generate SSRC if not provided
         let ssrc = config.ssrc.unwrap_or_else(|| {
             let mut rng = rand::thread_rng();
@@ -339,11 +388,10 @@ impl RtpSession {
         // Create UDP transport
         let transport = Arc::new(UdpRtpTransport::new(transport_config).await?);
 
-        // Create channels for internal communication
-        // Increased capacity to handle longer sessions without dropping packets
-        let (sender_tx, sender_rx) = mpsc::channel(1000);
-        let (receiver_tx, receiver_rx) = mpsc::channel(1000);
-        let (event_tx, _) = broadcast::channel(1000);
+        // Create channels for internal communication.
+        let (sender_tx, sender_rx) = mpsc::channel(RTP_SESSION_CHANNEL_CAPACITY);
+        let (receiver_tx, receiver_rx) = mpsc::channel(RTP_SESSION_RECEIVE_QUEUE_CAPACITY);
+        let (event_tx, _) = broadcast::channel(RTP_SESSION_CHANNEL_CAPACITY);
 
         // Create scheduler if needed
         let scheduler = Some(RtpScheduler::new(
@@ -370,6 +418,7 @@ impl RtpSession {
             scheduler,
             receiver: receiver_rx,
             sender: sender_tx,
+            receive_queue_enabled,
             event_tx,
             recv_task: None,
             send_task: None,
@@ -410,6 +459,7 @@ impl RtpSession {
         let _jitter_buffer_enabled = self.config.enable_jitter_buffer;
         let _jitter_size = self.config.jitter_buffer_size.unwrap_or(50);
         let _max_age_ms = self.config.max_packet_age_ms.unwrap_or(200);
+        let receive_queue_enabled = self.receive_queue_enabled;
 
         let media_sync = self.media_sync.clone();
 
@@ -694,8 +744,20 @@ impl RtpSession {
 
                         // Forward the packet
                         if let Some(output) = output_packet {
-                            if let Err(e) = receiver_tx.send(output.clone()).await {
-                                error!("Failed to forward RTP packet to receiver: {}", e);
+                            if receive_queue_enabled {
+                                match receiver_tx.try_send(output.clone()) {
+                                    Ok(()) => {}
+                                    Err(mpsc::error::TrySendError::Full(_)) => {
+                                        trace!(
+                                            "RTP receive polling queue full; dropping duplicate packet"
+                                        );
+                                    }
+                                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                                        error!(
+                                            "Failed to forward RTP packet to receiver: channel closed"
+                                        );
+                                    }
+                                }
                             }
 
                             // Broadcast packet received event
@@ -922,6 +984,25 @@ impl RtpSession {
     /// Get the session statistics
     pub fn get_stats(&self) -> RtpSessionStats {
         self.stats.lock().clone()
+    }
+
+    /// Get current bounded-queue occupancy for leak/perf diagnostics.
+    pub fn queue_diagnostics(&self) -> RtpSessionQueueDiagnostics {
+        let sender_capacity_packets = self.sender.max_capacity();
+        let (receiver_queue_packets, receiver_capacity_packets) = if self.receive_queue_enabled {
+            (self.receiver.len(), self.receiver.max_capacity())
+        } else {
+            (0, 0)
+        };
+
+        RtpSessionQueueDiagnostics {
+            sender_queue_packets: sender_capacity_packets.saturating_sub(self.sender.capacity()),
+            sender_capacity_packets,
+            receiver_queue_packets,
+            receiver_capacity_packets,
+            event_queue_events: self.event_tx.len(),
+            event_receiver_count: self.event_tx.receiver_count(),
+        }
     }
 
     /// Set the remote address

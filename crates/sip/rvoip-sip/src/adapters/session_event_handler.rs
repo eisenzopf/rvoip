@@ -12,7 +12,7 @@ use crate::api::lifecycle::{LifecycleIndex, SessionEventPublisher};
 use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result as SessionResult, SessionError};
 use crate::session_registry::SessionRegistry;
-use crate::state_machine::StateMachine as StateMachineExecutor;
+use crate::state_machine::{ProcessEventResult, StateMachine as StateMachineExecutor};
 use crate::state_table::types::{EventTemplate, EventType, Role, SessionId};
 use crate::types::{CallState, DialogId};
 use anyhow::Result;
@@ -67,6 +67,10 @@ fn session_dispatch_shard(session_id: &str, shard_count: usize) -> usize {
     let mut hasher = DefaultHasher::new();
     session_id.hash(&mut hasher);
     (hasher.finish() as usize) % shard_count.max(1)
+}
+
+fn dialog_bye_requires_terminal_release(result: &ProcessEventResult) -> bool {
+    result.transition.is_none()
 }
 
 struct QueuedDialogToSessionEvent {
@@ -3489,20 +3493,17 @@ impl SessionCrossCrateEventHandler {
     }
 
     async fn handle_bye_received_parts(&self, session_id: SessionId) -> Result<()> {
-        if self
-            .state_machine
-            .store
-            .get_session(&session_id)
-            .await
-            .is_err()
-        {
-            rvoip_sip_dialog::diagnostics::record_bye_cleanup_session_missing();
-            debug!(
-                "Ignoring ByeReceived for session {} - not in our store",
-                session_id
-            );
-            return Ok(());
-        }
+        let initial_state = match self.state_machine.store.get_session(&session_id).await {
+            Ok(session) => session.call_state,
+            Err(_) => {
+                rvoip_sip_dialog::diagnostics::record_bye_cleanup_session_missing();
+                debug!(
+                    "Ignoring ByeReceived for session {} - not in our store",
+                    session_id
+                );
+                return Ok(());
+            }
+        };
 
         rvoip_sip_dialog::diagnostics::record_bye_cleanup_delivered();
         let bye_guard = cleanup_diag::stage_guard(CleanupStage::ByeReceivedHandling, &session_id.0);
@@ -3511,7 +3512,7 @@ impl SessionCrossCrateEventHandler {
             .process_event(&session_id, EventType::DialogBYE)
             .await
         {
-            Ok(_) => {
+            Ok(result) if !dialog_bye_requires_terminal_release(&result) => {
                 let api_event = crate::api::events::Event::CallEnded {
                     call_id: session_id.clone(),
                     reason: "BYE received".to_string(),
@@ -3519,10 +3520,36 @@ impl SessionCrossCrateEventHandler {
                 self.publish_and_release_session(api_event, session_id)
                     .await;
             }
+            Ok(result) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    initial_state = ?initial_state,
+                    old_state = ?result.old_state,
+                    next_state = ?result.next_state,
+                    "DialogBYE had no matching state transition; releasing session as terminal"
+                );
+                let api_event = crate::api::events::Event::CallEnded {
+                    call_id: session_id.clone(),
+                    reason: format!("BYE received after state mismatch ({initial_state:?})"),
+                };
+                self.publish_and_release_session(api_event, session_id)
+                    .await;
+            }
             Err(e) => {
-                error!("Failed to process DialogBYE for {}: {}", session_id, e);
-                bye_guard.finish_failure();
-                return Ok(());
+                error!(
+                    session_id = %session_id,
+                    initial_state = ?initial_state,
+                    error = %e,
+                    "Failed to process DialogBYE; releasing session as terminal"
+                );
+                let api_event = crate::api::events::Event::CallEnded {
+                    call_id: session_id.clone(),
+                    reason: format!(
+                        "BYE received after state-machine error ({initial_state:?}): {e}"
+                    ),
+                };
+                self.publish_and_release_session(api_event, session_id)
+                    .await;
             }
         }
         bye_guard.finish_success();
@@ -4787,8 +4814,14 @@ fn parse_sipfrag_status_line(body: &str) -> Option<(u16, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_sip_trace_session_id, parse_sipfrag_status_line, sip_trace_owner_matches};
+    use super::{
+        dialog_bye_requires_terminal_release, map_sip_trace_session_id, parse_sipfrag_status_line,
+        sip_trace_owner_matches,
+    };
+    use crate::state_machine::ProcessEventResult;
     use crate::state_table::types::SessionId;
+    use crate::state_table::{ConditionUpdates, Transition};
+    use crate::types::CallState;
     use dashmap::DashMap;
     use rvoip_infra_common::events::cross_crate::{SipTraceDirection, SipTraceEvent};
 
@@ -4844,6 +4877,38 @@ mod tests {
             map_sip_trace_session_id(&event, &callid_to_session),
             Some(SessionId("direct-session".into()))
         );
+    }
+
+    #[test]
+    fn dialog_bye_without_transition_requires_terminal_release() {
+        let result = ProcessEventResult {
+            old_state: CallState::Ringing,
+            next_state: None,
+            transition: None,
+            actions_executed: vec![],
+            events_published: vec![],
+        };
+
+        assert!(dialog_bye_requires_terminal_release(&result));
+    }
+
+    #[test]
+    fn dialog_bye_with_transition_uses_normal_state_table_cleanup() {
+        let result = ProcessEventResult {
+            old_state: CallState::Active,
+            next_state: Some(CallState::Terminated),
+            transition: Some(Transition {
+                guards: vec![],
+                actions: vec![],
+                next_state: Some(CallState::Terminated),
+                condition_updates: ConditionUpdates::none(),
+                publish_events: vec![],
+            }),
+            actions_executed: vec![],
+            events_published: vec![],
+        };
+
+        assert!(!dialog_bye_requires_terminal_release(&result));
     }
 
     fn trace_event(session_id: Option<&str>, sip_call_id: Option<&str>) -> SipTraceEvent {

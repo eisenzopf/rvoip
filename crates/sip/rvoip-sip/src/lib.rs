@@ -523,7 +523,6 @@ pub use api::audio::{AudioReceiver, AudioSender, AudioStream};
 // The PCM frame type carried by `AudioStream` (`SessionHandle::audio()`).
 // Re-exported so clients can construct frames (mic -> RTP) without taking a
 // direct dependency on `rvoip-media-core`.
-pub use rvoip_media_core::types::AudioFrame;
 pub use api::handle::{
     CallId, SessionHandle, SipReason, TransferDialogMatcher, TransferLifecycleOptions,
     TransferOutcome, TransferWaitMode,
@@ -550,6 +549,7 @@ pub use auth::{
     SipDigestAuthService, SipIncomingAuthenticator, SipTransportSecurityContext,
     TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
+pub use rvoip_media_core::types::AudioFrame;
 
 /// SIP_API_DESIGN_2 §3.6 — convenience body constructors. Each
 /// helper returns `(content_type, Bytes)` for attachment to a SIP

@@ -22,6 +22,8 @@ use crate::errors::{Result, SessionError};
 use crate::state_table::types::SessionId;
 use crate::types::{CallState, SessionInfo};
 
+const AUDIO_STREAM_CHANNEL_FRAMES: usize = 128;
+
 /// Type alias so callers can refer to a session by `CallId`.
 pub type CallId = SessionId;
 
@@ -1088,7 +1090,7 @@ impl SessionHandle {
         let mut subscriber = self.coordinator.subscribe_to_audio(&self.call_id).await?;
 
         // Create a channel for receiving frames: drain the subscriber into an mpsc channel
-        let (recv_tx, recv_rx) = mpsc::channel::<AudioFrame>(512);
+        let (recv_tx, recv_rx) = mpsc::channel::<AudioFrame>(AUDIO_STREAM_CHANNEL_FRAMES);
         tokio::spawn(async move {
             while let Some(frame) = subscriber.receiver.recv().await {
                 if recv_tx.send(frame).await.is_err() {
@@ -1100,7 +1102,7 @@ impl SessionHandle {
         // Create a channel for sending frames to the media layer
         let coordinator = self.coordinator.clone();
         let call_id = self.call_id.clone();
-        let (send_tx, mut send_rx) = mpsc::channel::<AudioFrame>(512);
+        let (send_tx, mut send_rx) = mpsc::channel::<AudioFrame>(AUDIO_STREAM_CHANNEL_FRAMES);
         tokio::spawn(async move {
             while let Some(frame) = send_rx.recv().await {
                 if let Err(e) = coordinator.send_audio(&call_id, frame).await {

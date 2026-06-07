@@ -618,6 +618,18 @@ transitions:
   # teardown events and local BYE completion.
 
   - role: "Both"
+    state: "Ringing"
+    event:
+      type: "DialogBYE"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallTerminated"
+    description: "Inbound BYE while local session still shows Ringing — cleanup and finalize"
+
+  - role: "Both"
     state: "Answering"
     event:
       type: "DialogBYE"

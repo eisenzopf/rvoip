@@ -287,7 +287,7 @@ async fn send_microphone_frames(
     // Bound the accumulation buffer so latency can't grow without limit if the
     // capture clock runs slightly faster than the 20 ms send clock.
     let max_buffer = (SAMPLE_RATE as usize) / 2; // 0.5 s of 8 kHz audio
-    // Anti-alias filter applied before downsampling the mic to 8 kHz.
+                                                 // Anti-alias filter applied before downsampling the mic to 8 kHz.
     let mut capture_lp = LowPass::new(input_sample_rate, TELEPHONE_CUTOFF_HZ);
 
     // Drift-free 20 ms send clock. `interval` ticks on absolute deadlines and

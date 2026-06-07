@@ -12,6 +12,7 @@
 //! choice is grounded in.
 
 use arc_swap::ArcSwapOption;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::types::{DialogId, IncomingCallInfo, MediaSessionId, SessionId};
@@ -40,6 +41,12 @@ pub struct SessionRegistry {
     pending_incoming_request: Arc<ArcSwapOption<rvoip_sip_core::Request>>,
     /// Transport context for the pending inbound INVITE.
     pending_incoming_transport: Arc<ArcSwapOption<crate::auth::SipTransportSecurityContext>>,
+
+    /// Diagnostic lifecycle counters for map/remove balance.
+    dialog_mapped_total: Arc<AtomicU64>,
+    media_mapped_total: Arc<AtomicU64>,
+    removed_total: Arc<AtomicU64>,
+    remove_missing_total: Arc<AtomicU64>,
 }
 
 impl SessionRegistry {
@@ -52,6 +59,10 @@ impl SessionRegistry {
             pending_incoming_call: Arc::new(ArcSwapOption::empty()),
             pending_incoming_request: Arc::new(ArcSwapOption::empty()),
             pending_incoming_transport: Arc::new(ArcSwapOption::empty()),
+            dialog_mapped_total: Arc::new(AtomicU64::new(0)),
+            media_mapped_total: Arc::new(AtomicU64::new(0)),
+            removed_total: Arc::new(AtomicU64::new(0)),
+            remove_missing_total: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -59,12 +70,14 @@ impl SessionRegistry {
     pub async fn map_dialog(&self, session_id: SessionId, dialog_id: DialogId) {
         self.current_session.store(Some(Arc::new(session_id)));
         self.current_dialog.store(Some(Arc::new(dialog_id)));
+        self.dialog_mapped_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Map a media session ID to a session ID (single session version).
     pub async fn map_media(&self, session_id: SessionId, media_id: MediaSessionId) {
         self.current_session.store(Some(Arc::new(session_id)));
         self.current_media.store(Some(Arc::new(media_id)));
+        self.media_mapped_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Get session ID by dialog ID (single session version).
@@ -109,7 +122,21 @@ impl SessionRegistry {
             self.current_session.store(None);
             self.current_dialog.store(None);
             self.current_media.store(None);
+            self.removed_total.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.remove_missing_total.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Feature-gated lifecycle counters for perf leak investigations.
+    #[cfg(feature = "perf-tests")]
+    pub(crate) fn perf_lifecycle_counts(&self) -> serde_json::Value {
+        serde_json::json!({
+            "dialog_mapped_total": self.dialog_mapped_total.load(Ordering::Relaxed),
+            "media_mapped_total": self.media_mapped_total.load(Ordering::Relaxed),
+            "removed_total": self.removed_total.load(Ordering::Relaxed),
+            "remove_missing_total": self.remove_missing_total.load(Ordering::Relaxed),
+        })
     }
 
     /// Check if a session exists in the registry (single session version).

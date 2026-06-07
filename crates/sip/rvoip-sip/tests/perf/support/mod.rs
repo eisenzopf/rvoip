@@ -28,6 +28,7 @@ pub mod pcap;
 pub mod ports;
 pub mod report;
 pub mod sampler;
+pub mod soak;
 pub mod sweep;
 
 // `env::EnvironmentBlock` is captured internally by

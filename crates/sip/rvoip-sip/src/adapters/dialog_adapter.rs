@@ -42,6 +42,7 @@ use rvoip_sip_dialog::{
     DialogId as RvoipDialogId,
 };
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -141,6 +142,13 @@ pub struct DialogAdapter {
     registration_refresh_jitter_percent: u8,
     registration_refresh_tasks: Arc<DashMap<SessionId, tokio::task::AbortHandle>>,
 
+    /// Perf diagnostics for dialog mapping cleanup balance.
+    cleanup_attempt_total: Arc<AtomicU64>,
+    cleanup_mapped_total: Arc<AtomicU64>,
+    cleanup_missing_total: Arc<AtomicU64>,
+    cleanup_call_ids_removed_total: Arc<AtomicU64>,
+    cleanup_outgoing_invite_removed_total: Arc<AtomicU64>,
+
     /// SIP_API_DESIGN_2 §12.4 — pluggable trace-output redactor. When
     /// `Some`, the trace path consults this hook before emitting each
     /// header to the trace sink so PII / carrier tokens can be
@@ -190,6 +198,11 @@ impl DialogAdapter {
             registration_auto_refresh,
             registration_refresh_jitter_percent,
             registration_refresh_tasks: Arc::new(DashMap::new()),
+            cleanup_attempt_total: Arc::new(AtomicU64::new(0)),
+            cleanup_mapped_total: Arc::new(AtomicU64::new(0)),
+            cleanup_missing_total: Arc::new(AtomicU64::new(0)),
+            cleanup_call_ids_removed_total: Arc::new(AtomicU64::new(0)),
+            cleanup_outgoing_invite_removed_total: Arc::new(AtomicU64::new(0)),
             trace_redactor,
         }
     }
@@ -267,6 +280,13 @@ impl DialogAdapter {
             "callid_to_session": self.callid_to_session.len(),
             "outgoing_invite_tx": self.outgoing_invite_tx.len(),
             "registration_refresh_tasks": self.registration_refresh_tasks.len(),
+            "lifecycle": {
+                "cleanup_attempt_total": self.cleanup_attempt_total.load(Ordering::Relaxed),
+                "cleanup_mapped_total": self.cleanup_mapped_total.load(Ordering::Relaxed),
+                "cleanup_missing_total": self.cleanup_missing_total.load(Ordering::Relaxed),
+                "cleanup_call_ids_removed_total": self.cleanup_call_ids_removed_total.load(Ordering::Relaxed),
+                "cleanup_outgoing_invite_removed_total": self.cleanup_outgoing_invite_removed_total.load(Ordering::Relaxed),
+            },
         })
     }
 
@@ -2159,13 +2179,17 @@ impl DialogAdapter {
     /// Clean up all mappings and resources for a session
     pub async fn cleanup_session(&self, session_id: &SessionId) -> Result<()> {
         let guard = cleanup_diag::stage_guard(CleanupStage::DialogCleanup, &session_id.0);
+        self.cleanup_attempt_total.fetch_add(1, Ordering::Relaxed);
         // Remove from all mappings
         if let Some(dialog_id) = self.session_to_dialog.remove(session_id) {
+            self.cleanup_mapped_total.fetch_add(1, Ordering::Relaxed);
             self.dialog_to_session.remove(&dialog_id.1);
             self.dialog_api
                 .dialog_manager()
                 .core()
                 .cleanup_dialog_storage(&dialog_id.1);
+        } else {
+            self.cleanup_missing_total.fetch_add(1, Ordering::Relaxed);
         }
 
         let call_ids_to_remove: Vec<_> = self
@@ -2176,9 +2200,14 @@ impl DialogAdapter {
             .collect();
         for call_id in call_ids_to_remove {
             self.callid_to_session.remove(&call_id);
+            self.cleanup_call_ids_removed_total
+                .fetch_add(1, Ordering::Relaxed);
         }
 
-        self.outgoing_invite_tx.remove(session_id);
+        if self.outgoing_invite_tx.remove(session_id).is_some() {
+            self.cleanup_outgoing_invite_removed_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
 
         tracing::debug!(
             "Cleaned up dialog adapter mappings for session {}",
@@ -2759,6 +2788,13 @@ impl Clone for DialogAdapter {
             registration_auto_refresh: self.registration_auto_refresh,
             registration_refresh_jitter_percent: self.registration_refresh_jitter_percent,
             registration_refresh_tasks: self.registration_refresh_tasks.clone(),
+            cleanup_attempt_total: self.cleanup_attempt_total.clone(),
+            cleanup_mapped_total: self.cleanup_mapped_total.clone(),
+            cleanup_missing_total: self.cleanup_missing_total.clone(),
+            cleanup_call_ids_removed_total: self.cleanup_call_ids_removed_total.clone(),
+            cleanup_outgoing_invite_removed_total: self
+                .cleanup_outgoing_invite_removed_total
+                .clone(),
             trace_redactor: self.trace_redactor.clone(),
         }
     }
