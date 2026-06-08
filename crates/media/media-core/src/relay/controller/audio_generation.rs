@@ -7,10 +7,19 @@ use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinHandle;
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 use rvoip_rtp_core::{RtpSendHandle, RtpSession};
+
+#[cfg(feature = "memory-diagnostics")]
+fn record_transient_allocation(kind: &'static str, bytes: usize) {
+    rvoip_infra_common::memory_diagnostics::record_transient_allocation(kind, bytes as u64);
+}
+
+#[cfg(not(feature = "memory-diagnostics"))]
+fn record_transient_allocation(_: &'static str, _: usize) {}
 
 /// Audio source types supported by the audio transmitter
 #[derive(Debug, Clone)]
@@ -227,6 +236,8 @@ pub struct AudioTransmitter {
     timestamp: Arc<Mutex<u32>>,
     /// Whether transmission is active
     is_active: Arc<RwLock<bool>>,
+    /// Background transmission task.
+    tx_task: Option<JoinHandle<()>>,
 }
 
 impl AudioTransmitter {
@@ -275,11 +286,17 @@ impl AudioTransmitter {
             config,
             timestamp: Arc::new(Mutex::new(0)),
             is_active: Arc::new(RwLock::new(false)),
+            tx_task: None,
         }
     }
 
     /// Start audio transmission
     pub async fn start(&mut self) {
+        if self.tx_task.is_some() {
+            debug!("AudioTransmitter: transmission task already running");
+            return;
+        }
+
         if matches!(self.config.source, AudioSource::PassThrough) {
             *self.is_active.write().await = false;
             debug!("AudioTransmitter: pass-through source has no background TX task");
@@ -327,60 +344,79 @@ impl AudioTransmitter {
         let mut interval_timer = interval(self.config.interval);
         let samples_per_packet = self.config.samples_per_packet;
 
-        tokio::spawn(async move {
-            while *is_active.read().await {
-                interval_timer.tick().await;
+        self.tx_task = Some(super::spawn_memory_tracked(
+            "media_core.audio_transmitter_task",
+            async move {
+                while *is_active.read().await {
+                    interval_timer.tick().await;
 
-                // Generate audio samples
-                let audio_samples = {
-                    let mut generator = audio_generator.lock().await;
-                    generator.generate_pcmu_samples(samples_per_packet)
-                };
-
-                // Send RTP packet (only if not in pass-through mode)
-                if !matches!(audio_samples.as_slice(), [0x7F, ..] if audio_samples.iter().all(|&x| x == 0x7F))
-                {
-                    let current_timestamp = {
-                        let mut ts = timestamp.lock().await;
-                        let current = *ts;
-                        *ts = ts.wrapping_add(samples_per_packet as u32);
-                        current
+                    // Generate audio samples
+                    let audio_samples = {
+                        let mut generator = audio_generator.lock().await;
+                        generator.generate_pcmu_samples(samples_per_packet)
                     };
+                    record_transient_allocation(
+                        "media_core.audio.tx.payload_vec",
+                        audio_samples.capacity(),
+                    );
 
-                    // Fast path: send through the lock-free handle —
-                    // no `session.lock().await` per frame.
-                    let send_result = if let Some(handle) = &send_handle {
-                        handle
-                            .send_packet(current_timestamp, Bytes::from(audio_samples), false)
-                            .await
-                    } else {
-                        // Fallback: session lock per frame. Only reached
-                        // if the session was missing a scheduler when
-                        // we tried to build the handle.
-                        let session = rtp_session.lock().await;
-                        session
-                            .send_packet(current_timestamp, Bytes::from(audio_samples), false)
-                            .await
-                    };
+                    // Send RTP packet (only if not in pass-through mode)
+                    if !matches!(audio_samples.as_slice(), [0x7F, ..] if audio_samples.iter().all(|&x| x == 0x7F))
+                    {
+                        let current_timestamp = {
+                            let mut ts = timestamp.lock().await;
+                            let current = *ts;
+                            *ts = ts.wrapping_add(samples_per_packet as u32);
+                            current
+                        };
 
-                    if let Err(e) = send_result {
-                        error!("Failed to send RTP audio packet: {}", e);
-                    } else {
-                        debug!(
-                            "📡 Sent RTP audio packet (timestamp: {}, {} samples)",
-                            current_timestamp, samples_per_packet
-                        );
+                        // Fast path: send through the lock-free handle —
+                        // no `session.lock().await` per frame.
+                        let send_result = if let Some(handle) = &send_handle {
+                            handle
+                                .send_packet(current_timestamp, Bytes::from(audio_samples), false)
+                                .await
+                        } else {
+                            // Fallback: session lock per frame. Only reached
+                            // if the session was missing a scheduler when
+                            // we tried to build the handle.
+                            let session = rtp_session.lock().await;
+                            session
+                                .send_packet(current_timestamp, Bytes::from(audio_samples), false)
+                                .await
+                        };
+
+                        if let Err(e) = send_result {
+                            error!("Failed to send RTP audio packet: {}", e);
+                            *is_active.write().await = false;
+                            break;
+                        } else {
+                            debug!(
+                                "📡 Sent RTP audio packet (timestamp: {}, {} samples)",
+                                current_timestamp, samples_per_packet
+                            );
+                        }
                     }
                 }
-            }
 
-            info!("🛑 Stopped audio transmission");
-        });
+                info!("🛑 Stopped audio transmission");
+            },
+        ));
     }
 
     /// Stop audio transmission
-    pub async fn stop(&self) {
+    pub async fn stop(mut self) {
         *self.is_active.write().await = false;
+        if let Some(task) = self.tx_task.take() {
+            let mut task = task;
+            tokio::select! {
+                _ = &mut task => {}
+                _ = tokio::time::sleep(self.config.interval.saturating_mul(2)) => {
+                    task.abort();
+                    let _ = task.await;
+                }
+            }
+        }
         info!("🛑 Stopping audio transmission");
     }
 
@@ -415,5 +451,13 @@ impl AudioTransmitter {
     pub async fn set_pass_through(&self) {
         let source = AudioSource::PassThrough;
         self.set_audio_source(source).await;
+    }
+}
+
+impl Drop for AudioTransmitter {
+    fn drop(&mut self) {
+        if let Some(task) = self.tx_task.take() {
+            task.abort();
+        }
     }
 }

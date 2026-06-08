@@ -84,7 +84,11 @@ default = ["pcmu", "pcma"]
 pcmu = []
 pcma = []
 g722 = []
-perf-diagnostics = []
+memory-diagnostics = [
+    "rvoip-infra-common/memory-diagnostics",
+    "rvoip-rtp-core/memory-diagnostics",
+]
+perf-diagnostics = ["memory-diagnostics"]
 # Declared so the `#[cfg(feature = "g729")]` gates in
 # src/codec/audio/g729.rs compile without `unexpected_cfgs` warnings.
 # Enabling this feature on its own won't actually build — the `g729`

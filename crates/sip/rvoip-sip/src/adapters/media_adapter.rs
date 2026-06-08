@@ -35,6 +35,24 @@ const AUDIO_RECEIVER_CHANNEL_FRAMES: usize = 128;
 static SRTP_DIAGNOSTICS: AtomicU8 = AtomicU8::new(DIAG_OFF);
 static MEDIA_SDP_DIAGNOSTICS: AtomicU8 = AtomicU8::new(DIAG_OFF);
 
+#[cfg(feature = "perf-tests")]
+fn spawn_memory_tracked<F>(kind: &'static str, future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    rvoip_infra_common::memory_diagnostics::spawn_tracked(kind, future)
+}
+
+#[cfg(not(feature = "perf-tests"))]
+fn spawn_memory_tracked<F>(_: &'static str, future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(future)
+}
+
 /// NEXT_STEPS B.1 diag — process-global cleanup counter so external
 /// observers (the `perf_listener` example, integration tests) can read
 /// how many sessions have been fully cleaned up without subscribing to
@@ -1194,11 +1212,14 @@ impl MediaAdapter {
             publisher.publish(api_event);
         } else if let Some(coordinator) = self.global_coordinator.read().await.clone() {
             let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
-            tokio::spawn(async move {
-                if let Err(e) = coordinator.publish(wrapped).await {
-                    tracing::warn!("Failed to publish MediaSecurityNegotiated event: {}", e);
-                }
-            });
+            spawn_memory_tracked(
+                "sip.media_adapter.media_security_publish_task",
+                async move {
+                    if let Err(e) = coordinator.publish(wrapped).await {
+                        tracing::warn!("Failed to publish MediaSecurityNegotiated event: {}", e);
+                    }
+                },
+            );
         } else {
             tracing::debug!(
                 "MediaSecurityNegotiated publish skipped for session {}: no event publisher yet",
@@ -1767,7 +1788,7 @@ impl MediaAdapter {
         // sender end of the channel is dropped (media session stopped).
         let sid = session_id.clone();
         let did = dialog_id.clone();
-        tokio::spawn(async move {
+        spawn_memory_tracked("sip.media_adapter.dtmf_bridge_task", async move {
             while let Some(notification) = rx.recv().await {
                 let api_event = crate::api::events::Event::DtmfReceived {
                     call_id: sid.clone(),

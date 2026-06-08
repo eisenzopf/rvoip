@@ -60,6 +60,14 @@ impl EnvironmentBlock {
         let rustc = rustc_version();
         let git_rev = git_rev();
 
+        let (global_allocator, mimalloc_enabled) = if cfg!(feature = "dhat") {
+            ("dhat", false)
+        } else if cfg!(feature = "perf-system-allocator") {
+            ("system", false)
+        } else {
+            ("mimalloc", true)
+        };
+
         Self {
             rustc,
             os,
@@ -68,11 +76,8 @@ impl EnvironmentBlock {
             cpu_count_logical,
             total_ram_gb,
             build_profile: "release",
-            // mimalloc is wired via rvoip-infra-common unless the
-            // `no-global-allocator` feature is set, which only the dhat
-            // examples do.
-            global_allocator: "mimalloc",
-            mimalloc_enabled: true,
+            global_allocator,
+            mimalloc_enabled,
             // Hard-coded to match the workspace pin in the root
             // Cargo.toml. Bump this when the workspace tokio dep moves.
             tokio_version: "1.40",

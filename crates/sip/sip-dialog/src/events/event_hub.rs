@@ -502,21 +502,16 @@ impl DialogEventHub {
                         }
                         487 => {
                             // RFC 3261 §15.1.2 — 487 Request Terminated follows a
-                            // CANCEL. `handle_transaction_failure_response`
-                            // emits `SessionCoordinationEvent::CallCancelled`
-                            // explicitly for this status (see the dedicated
-                            // 487 arm there), which the `CallCancelled`
-                            // branch above maps to
-                            // `DialogToSessionEvent::CallCancelled`. Returning
-                            // `None` here avoids publishing the cross-crate
-                            // event twice — the duplicate caused
-                            // `handle_call_cancelled_session` to fire a
-                            // second time after the first invocation had
-                            // already removed the session, logging a
-                            // spurious "Failed to process CallCancelled:
-                            // Session not found" line on every ring_cancel
-                            // run.
-                            None
+                            // CANCEL. Publish from the response path as well
+                            // as the explicit CallCancelled coordination path
+                            // so client-side cancellation release is not lost
+                            // if the final transaction event has already
+                            // dropped its dialog lookup. Session-core treats a
+                            // second cancellation as idempotent once the
+                            // session has been released.
+                            Some(RvoipCrossCrateEvent::DialogToSession(
+                                DialogToSessionEvent::CallCancelled { session_id },
+                            ))
                         }
                         491 if is_reinvite_or_update_response => {
                             // RFC 3261 §14.1 — 491 Request Pending on a re-INVITE

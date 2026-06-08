@@ -24,6 +24,8 @@
 use bytes::Bytes;
 use crossbeam_queue::ArrayQueue;
 use std::mem::ManuallyDrop;
+#[cfg(feature = "memory-diagnostics")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Lock-free pool of recv buffers used by [`UdpRtpTransport`](super::UdpRtpTransport).
@@ -31,6 +33,23 @@ use std::sync::Arc;
 pub struct RecvBufPool {
     pool: ArrayQueue<Vec<u8>>,
     buf_size: usize,
+    #[cfg_attr(not(feature = "memory-diagnostics"), allow(dead_code))]
+    max_in_flight: usize,
+    #[cfg(feature = "memory-diagnostics")]
+    allocated_total: AtomicU64,
+    #[cfg(feature = "memory-diagnostics")]
+    dropped_total: AtomicU64,
+}
+
+#[cfg(feature = "memory-diagnostics")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RecvBufPoolDiagnosticCounts {
+    pub idle_buffers: usize,
+    pub idle_bytes: usize,
+    pub buffer_size: usize,
+    pub max_in_flight: usize,
+    pub allocated_total: u64,
+    pub dropped_total: u64,
 }
 
 impl RecvBufPool {
@@ -43,6 +62,11 @@ impl RecvBufPool {
         Arc::new(Self {
             pool: ArrayQueue::new(max_in_flight.max(1)),
             buf_size,
+            max_in_flight: max_in_flight.max(1),
+            #[cfg(feature = "memory-diagnostics")]
+            allocated_total: AtomicU64::new(0),
+            #[cfg(feature = "memory-diagnostics")]
+            dropped_total: AtomicU64::new(0),
         })
     }
 
@@ -57,8 +81,23 @@ impl RecvBufPool {
                 buf.resize(self.buf_size, 0);
                 buf
             }
-            None => vec![0u8; self.buf_size],
+            None => {
+                #[cfg(feature = "memory-diagnostics")]
+                {
+                    self.allocated_total.fetch_add(1, Ordering::Relaxed);
+                    rvoip_infra_common::memory_diagnostics::record_created(
+                        "rtp_core.recv_pool.buffer",
+                        self.buf_size,
+                    );
+                }
+                vec![0u8; self.buf_size]
+            }
         };
+        #[cfg(feature = "memory-diagnostics")]
+        rvoip_infra_common::memory_diagnostics::record_checkout(
+            "rtp_core.recv_pool.checkout",
+            self.buf_size,
+        );
         PooledRecvBuf {
             buf: Some(buf),
             pool: self.clone(),
@@ -71,11 +110,55 @@ impl RecvBufPool {
         self.pool.len()
     }
 
+    #[cfg(feature = "memory-diagnostics")]
+    pub fn diagnostic_counts(&self) -> RecvBufPoolDiagnosticCounts {
+        let idle = self.pool.len();
+        RecvBufPoolDiagnosticCounts {
+            idle_buffers: idle,
+            idle_bytes: idle * self.buf_size,
+            buffer_size: self.buf_size,
+            max_in_flight: self.max_in_flight,
+            allocated_total: self.allocated_total.load(Ordering::Relaxed),
+            dropped_total: self.dropped_total.load(Ordering::Relaxed),
+        }
+    }
+
     /// Internal: actually push a buf back. Used by both the
     /// `PooledRecvBuf` and `Bytes::from_owner` drop paths.
     fn return_buf(&self, mut buf: Vec<u8>) {
         buf.resize(self.buf_size, 0);
-        let _ = self.pool.push(buf);
+        #[cfg(feature = "memory-diagnostics")]
+        rvoip_infra_common::memory_diagnostics::record_return(
+            "rtp_core.recv_pool.checkout",
+            self.buf_size,
+        );
+        if self.pool.push(buf).is_err() {
+            #[cfg(feature = "memory-diagnostics")]
+            {
+                self.dropped_total.fetch_add(1, Ordering::Relaxed);
+                rvoip_infra_common::memory_diagnostics::record_dropped_full(
+                    "rtp_core.recv_pool.buffer",
+                    self.buf_size,
+                );
+                rvoip_infra_common::memory_diagnostics::record_dropped(
+                    "rtp_core.recv_pool.buffer",
+                    self.buf_size,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "memory-diagnostics")]
+impl Drop for RecvBufPool {
+    fn drop(&mut self) {
+        while self.pool.pop().is_some() {
+            self.dropped_total.fetch_add(1, Ordering::Relaxed);
+            rvoip_infra_common::memory_diagnostics::record_dropped(
+                "rtp_core.recv_pool.buffer",
+                self.buf_size,
+            );
+        }
     }
 }
 

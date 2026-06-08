@@ -154,6 +154,12 @@ pub struct CleanupStageSnapshot {
 pub struct CleanupDiagSnapshot {
     pub enabled: bool,
     pub active_total: u64,
+    pub setup_teardown_watchdog_armed: u64,
+    pub setup_teardown_watchdog_disarmed: u64,
+    pub setup_teardown_watchdog_fired: u64,
+    pub setup_teardown_watchdog_transition_failed: u64,
+    pub setup_teardown_watchdog_release_completed: u64,
+    pub setup_teardown_watchdog_release_failed: u64,
     pub stages: Vec<CleanupStageSnapshot>,
 }
 
@@ -251,6 +257,12 @@ impl Drop for CleanupStageGuard {
 static ENABLE_OVERRIDE: AtomicU8 = AtomicU8::new(ENABLE_OFF);
 static EVENT_LOGS_OVERRIDE: AtomicU8 = AtomicU8::new(ENABLE_OFF);
 static METRICS: OnceLock<Vec<StageMetrics>> = OnceLock::new();
+static SETUP_TEARDOWN_WATCHDOG_ARMED: AtomicU64 = AtomicU64::new(0);
+static SETUP_TEARDOWN_WATCHDOG_DISARMED: AtomicU64 = AtomicU64::new(0);
+static SETUP_TEARDOWN_WATCHDOG_FIRED: AtomicU64 = AtomicU64::new(0);
+static SETUP_TEARDOWN_WATCHDOG_TRANSITION_FAILED: AtomicU64 = AtomicU64::new(0);
+static SETUP_TEARDOWN_WATCHDOG_RELEASE_COMPLETED: AtomicU64 = AtomicU64::new(0);
+static SETUP_TEARDOWN_WATCHDOG_RELEASE_FAILED: AtomicU64 = AtomicU64::new(0);
 
 /// Enable or disable cleanup diagnostics for this process.
 pub fn set_enabled(enabled: bool) {
@@ -325,6 +337,15 @@ pub fn snapshot() -> CleanupDiagSnapshot {
     CleanupDiagSnapshot {
         enabled: enabled(),
         active_total,
+        setup_teardown_watchdog_armed: SETUP_TEARDOWN_WATCHDOG_ARMED.load(Ordering::Relaxed),
+        setup_teardown_watchdog_disarmed: SETUP_TEARDOWN_WATCHDOG_DISARMED.load(Ordering::Relaxed),
+        setup_teardown_watchdog_fired: SETUP_TEARDOWN_WATCHDOG_FIRED.load(Ordering::Relaxed),
+        setup_teardown_watchdog_transition_failed: SETUP_TEARDOWN_WATCHDOG_TRANSITION_FAILED
+            .load(Ordering::Relaxed),
+        setup_teardown_watchdog_release_completed: SETUP_TEARDOWN_WATCHDOG_RELEASE_COMPLETED
+            .load(Ordering::Relaxed),
+        setup_teardown_watchdog_release_failed: SETUP_TEARDOWN_WATCHDOG_RELEASE_FAILED
+            .load(Ordering::Relaxed),
         stages,
     }
 }
@@ -332,6 +353,24 @@ pub fn snapshot() -> CleanupDiagSnapshot {
 /// Render a compact single-line summary suitable for periodic perf logs.
 pub fn format_summary(snapshot: &CleanupDiagSnapshot) -> String {
     let mut out = format!("[cleanup_diag] active_total={}", snapshot.active_total);
+    let watchdog_total = snapshot
+        .setup_teardown_watchdog_armed
+        .saturating_add(snapshot.setup_teardown_watchdog_disarmed)
+        .saturating_add(snapshot.setup_teardown_watchdog_fired)
+        .saturating_add(snapshot.setup_teardown_watchdog_transition_failed)
+        .saturating_add(snapshot.setup_teardown_watchdog_release_completed)
+        .saturating_add(snapshot.setup_teardown_watchdog_release_failed);
+    if watchdog_total > 0 {
+        out.push_str(&format!(
+            " setup_teardown_watchdog:armed={} disarmed={} fired={} transition_failed={} release_done={} release_failed={}",
+            snapshot.setup_teardown_watchdog_armed,
+            snapshot.setup_teardown_watchdog_disarmed,
+            snapshot.setup_teardown_watchdog_fired,
+            snapshot.setup_teardown_watchdog_transition_failed,
+            snapshot.setup_teardown_watchdog_release_completed,
+            snapshot.setup_teardown_watchdog_release_failed,
+        ));
+    }
     for stage in &snapshot.stages {
         if stage.started == 0 && stage.max_queue_depth == 0 {
             continue;
@@ -413,6 +452,30 @@ fn metric(stage: CleanupStage) -> &'static StageMetrics {
     &metrics()[stage.as_index()]
 }
 
+pub(crate) fn record_setup_teardown_watchdog_armed() {
+    SETUP_TEARDOWN_WATCHDOG_ARMED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_setup_teardown_watchdog_disarmed() {
+    SETUP_TEARDOWN_WATCHDOG_DISARMED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_setup_teardown_watchdog_fired() {
+    SETUP_TEARDOWN_WATCHDOG_FIRED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_setup_teardown_watchdog_transition_failed() {
+    SETUP_TEARDOWN_WATCHDOG_TRANSITION_FAILED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_setup_teardown_watchdog_release_completed() {
+    SETUP_TEARDOWN_WATCHDOG_RELEASE_COMPLETED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_setup_teardown_watchdog_release_failed() {
+    SETUP_TEARDOWN_WATCHDOG_RELEASE_FAILED.fetch_add(1, Ordering::Relaxed);
+}
+
 fn metrics() -> &'static [StageMetrics] {
     METRICS
         .get_or_init(|| {
@@ -460,6 +523,12 @@ pub(crate) fn reset_for_tests() {
     for metric in metrics() {
         metric.reset();
     }
+    SETUP_TEARDOWN_WATCHDOG_ARMED.store(0, Ordering::Relaxed);
+    SETUP_TEARDOWN_WATCHDOG_DISARMED.store(0, Ordering::Relaxed);
+    SETUP_TEARDOWN_WATCHDOG_FIRED.store(0, Ordering::Relaxed);
+    SETUP_TEARDOWN_WATCHDOG_TRANSITION_FAILED.store(0, Ordering::Relaxed);
+    SETUP_TEARDOWN_WATCHDOG_RELEASE_COMPLETED.store(0, Ordering::Relaxed);
+    SETUP_TEARDOWN_WATCHDOG_RELEASE_FAILED.store(0, Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -561,5 +630,27 @@ mod tests {
             .find(|stage| stage.stage == CleanupStage::MediaCleanup)
             .unwrap();
         assert_eq!(media.started, 0);
+    }
+
+    #[test]
+    fn setup_teardown_watchdog_counters_are_reported() {
+        let _lock = test_lock();
+        reset_for_tests();
+
+        record_setup_teardown_watchdog_armed();
+        record_setup_teardown_watchdog_disarmed();
+        record_setup_teardown_watchdog_fired();
+        record_setup_teardown_watchdog_transition_failed();
+        record_setup_teardown_watchdog_release_completed();
+        record_setup_teardown_watchdog_release_failed();
+
+        let snap = snapshot();
+        assert_eq!(snap.setup_teardown_watchdog_armed, 1);
+        assert_eq!(snap.setup_teardown_watchdog_disarmed, 1);
+        assert_eq!(snap.setup_teardown_watchdog_fired, 1);
+        assert_eq!(snap.setup_teardown_watchdog_transition_failed, 1);
+        assert_eq!(snap.setup_teardown_watchdog_release_completed, 1);
+        assert_eq!(snap.setup_teardown_watchdog_release_failed, 1);
+        assert!(format_summary(&snap).contains("setup_teardown_watchdog"));
     }
 }

@@ -182,6 +182,10 @@ impl ProtocolHandlers for DialogManager {
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send 481 response to CANCEL: {}", e),
                 })?;
+            let _ = self
+                .transaction_manager
+                .terminate_transaction(&cancel_tx_id)
+                .await;
             debug!("CANCEL processed with 481 response (no matching INVITE)");
             return Ok(());
         };
@@ -195,6 +199,10 @@ impl ProtocolHandlers for DialogManager {
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to send 200 OK to CANCEL: {}", e),
             })?;
+        let _ = self
+            .transaction_manager
+            .terminate_transaction(&cancel_tx_id)
+            .await;
 
         // 487 Request Terminated to the pending INVITE server transaction.
         // Fetch the original INVITE so `create_response` can copy its From,

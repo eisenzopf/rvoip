@@ -9,7 +9,7 @@ mod stream;
 pub use scheduling::{RtpScheduler, RtpSchedulerStats};
 pub use stream::{RtpStream, RtpStreamStats};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use rand::Rng;
 use std::net::SocketAddr;
@@ -26,12 +26,30 @@ use crate::packet::{RtpHeader, RtpPacket};
 use crate::transport::{RtpTransport, RtpTransportConfig, UdpRtpTransport};
 use crate::{Result, RtpSsrc, RtpTimestamp};
 
+#[cfg(feature = "memory-diagnostics")]
+fn spawn_memory_tracked<F>(kind: &'static str, future: F) -> JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    rvoip_infra_common::memory_diagnostics::spawn_tracked(kind, future)
+}
+
+#[cfg(not(feature = "memory-diagnostics"))]
+fn spawn_memory_tracked<F>(_: &'static str, future: F) -> JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(future)
+}
+
 /// Bounded queue depth for per-session RTP send/event channels.
 ///
 /// RTP is real-time traffic; keeping many seconds of packet backlog per call
-/// hides overload and retains packet payloads. At 20 ms packets, 256 entries is
-/// roughly 5 seconds of headroom for one stream.
-pub const RTP_SESSION_CHANNEL_CAPACITY: usize = 256;
+/// hides overload and retains packet payloads. At 20 ms packets, 64 entries is
+/// roughly 1.3 seconds of headroom for one stream.
+pub const RTP_SESSION_CHANNEL_CAPACITY: usize = 64;
 
 /// Small best-effort queue for the legacy polling receive API.
 ///
@@ -89,6 +107,21 @@ pub struct RtpSessionQueueDiagnostics {
     pub event_queue_events: usize,
     /// Current subscribers to the event broadcast ring.
     pub event_receiver_count: usize,
+    #[cfg(feature = "memory-diagnostics")]
+    /// Current SSRC stream entries retained by this session.
+    pub stream_count: usize,
+    #[cfg(feature = "memory-diagnostics")]
+    /// UDP receive-pool idle buffers when this session uses UDP transport.
+    pub udp_recv_pool_idle_buffers: usize,
+    #[cfg(feature = "memory-diagnostics")]
+    /// UDP receive-pool idle bytes when this session uses UDP transport.
+    pub udp_recv_pool_idle_bytes: usize,
+    #[cfg(feature = "memory-diagnostics")]
+    /// UDP receive-pool buffers allocated since transport creation.
+    pub udp_recv_pool_allocated_total: u64,
+    #[cfg(feature = "memory-diagnostics")]
+    /// UDP receive-pool buffers dropped because the pool was full.
+    pub udp_recv_pool_dropped_total: u64,
 }
 
 /// RTP session configuration options
@@ -347,6 +380,15 @@ pub struct RtpSession {
 
     /// Session bandwidth (bits per second)
     bandwidth_bps: u32,
+
+    #[cfg(feature = "memory-diagnostics")]
+    _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
+    #[cfg(feature = "memory-diagnostics")]
+    _sender_channel_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
+    #[cfg(feature = "memory-diagnostics")]
+    _receiver_channel_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
+    #[cfg(feature = "memory-diagnostics")]
+    _event_channel_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
 }
 
 impl RtpSession {
@@ -428,6 +470,26 @@ impl RtpSession {
             rtcp_generator: Some(rtcp_generator),
             rtcp_task: None,
             bandwidth_bps: 64000, // Default bandwidth: 64 kbps
+            #[cfg(feature = "memory-diagnostics")]
+            _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
+                "rtp_core.rtp_session",
+                std::mem::size_of::<Self>(),
+            ),
+            #[cfg(feature = "memory-diagnostics")]
+            _sender_channel_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
+                "rtp_core.rtp_session.sender_channel_capacity",
+                RTP_SESSION_CHANNEL_CAPACITY * std::mem::size_of::<RtpPacket>(),
+            ),
+            #[cfg(feature = "memory-diagnostics")]
+            _receiver_channel_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
+                "rtp_core.rtp_session.receiver_channel_capacity",
+                RTP_SESSION_RECEIVE_QUEUE_CAPACITY * std::mem::size_of::<RtpPacket>(),
+            ),
+            #[cfg(feature = "memory-diagnostics")]
+            _event_channel_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
+                "rtp_core.rtp_session.event_broadcast_capacity",
+                RTP_SESSION_CHANNEL_CAPACITY * std::mem::size_of::<RtpSessionEvent>(),
+            ),
         };
 
         // Start the session
@@ -488,8 +550,14 @@ impl RtpSession {
 
         // Start sending task
         let send_transport = transport.clone();
-        let send_task = tokio::spawn(async move {
+        let send_task = spawn_memory_tracked("rtp_core.rtp_session.send_task", async move {
             let mut last_remote_addr = remote_addr;
+            let mut send_buf = BytesMut::with_capacity(1500);
+            #[cfg(feature = "memory-diagnostics")]
+            let _send_buf_guard = rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
+                "rtp_core.rtp_session.send_wire_buffer",
+                send_buf.capacity(),
+            );
 
             while let Some(packet) = sender_rx.recv().await {
                 // Always try to get the current remote address from transport first
@@ -530,7 +598,25 @@ impl RtpSession {
                     dest, packet.header.sequence_number, packet.header.timestamp
                 );
 
-                if let Err(e) = send_transport.send_rtp(&packet, dest).await {
+                let send_result =
+                    if let Some(udp) = send_transport.as_any().downcast_ref::<UdpRtpTransport>() {
+                        if udp.srtp_enabled().await {
+                            send_transport.send_rtp(&packet, dest).await
+                        } else {
+                            send_buf.clear();
+                            match packet.header.serialize(&mut send_buf) {
+                                Ok(()) => {
+                                    send_buf.extend_from_slice(&packet.payload);
+                                    udp.send_rtp_bytes(&send_buf, dest).await
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                    } else {
+                        send_transport.send_rtp(&packet, dest).await
+                    };
+
+                if let Err(e) = send_result {
                     error!("Failed to send RTP packet: {}", e);
 
                     // Broadcast error event
@@ -555,7 +641,7 @@ impl RtpSession {
         // Subscribe to transport events to handle RTCP packets
         let mut transport_events = recv_transport.subscribe();
 
-        let recv_task = tokio::spawn(async move {
+        let recv_task = spawn_memory_tracked("rtp_core.rtp_session.recv_task", async move {
             // IMPORTANT: Only handle events from transport, no direct packet reception
             // to avoid race conditions where two tasks read from the same socket
             loop {
@@ -813,7 +899,7 @@ impl RtpSession {
             rtcp_generator.set_bandwidth(bandwidth);
 
             // Start the RTCP task
-            let rtcp_task = tokio::spawn(async move {
+            let rtcp_task = spawn_memory_tracked("rtp_core.rtp_session.rtcp_task", async move {
                 debug!("RTCP scheduling task started");
 
                 // Initial interval calculation
@@ -994,6 +1080,12 @@ impl RtpSession {
         } else {
             (0, 0)
         };
+        #[cfg(feature = "memory-diagnostics")]
+        let udp_recv_pool = self
+            .transport
+            .as_any()
+            .downcast_ref::<UdpRtpTransport>()
+            .map(|transport| transport.recv_pool_diagnostics());
 
         RtpSessionQueueDiagnostics {
             sender_queue_packets: sender_capacity_packets.saturating_sub(self.sender.capacity()),
@@ -1002,6 +1094,24 @@ impl RtpSession {
             receiver_capacity_packets,
             event_queue_events: self.event_tx.len(),
             event_receiver_count: self.event_tx.receiver_count(),
+            #[cfg(feature = "memory-diagnostics")]
+            stream_count: self.streams.len(),
+            #[cfg(feature = "memory-diagnostics")]
+            udp_recv_pool_idle_buffers: udp_recv_pool
+                .map(|counts| counts.idle_buffers)
+                .unwrap_or_default(),
+            #[cfg(feature = "memory-diagnostics")]
+            udp_recv_pool_idle_bytes: udp_recv_pool
+                .map(|counts| counts.idle_bytes)
+                .unwrap_or_default(),
+            #[cfg(feature = "memory-diagnostics")]
+            udp_recv_pool_allocated_total: udp_recv_pool
+                .map(|counts| counts.allocated_total)
+                .unwrap_or_default(),
+            #[cfg(feature = "memory-diagnostics")]
+            udp_recv_pool_dropped_total: udp_recv_pool
+                .map(|counts| counts.dropped_total)
+                .unwrap_or_default(),
         }
     }
 

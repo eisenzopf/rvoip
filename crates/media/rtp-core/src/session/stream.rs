@@ -67,6 +67,9 @@ pub struct RtpStream {
 
     /// Time when the last SR was received
     last_sr_time: Option<Instant>,
+
+    #[cfg(feature = "memory-diagnostics")]
+    _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
 }
 
 impl RtpStream {
@@ -93,6 +96,11 @@ impl RtpStream {
             seq_cycles: 0,
             last_sr_timestamp: None,
             last_sr_time: None,
+            #[cfg(feature = "memory-diagnostics")]
+            _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
+                "rtp_core.rtp_stream",
+                std::mem::size_of::<Self>(),
+            ),
         }
     }
 

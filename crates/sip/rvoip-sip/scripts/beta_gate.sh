@@ -78,6 +78,22 @@ Environment:
   RVOIP_PERF_SOAK_MIN_HOLD_SECS  Minimum cycling active-call hold. Defaults to 10.
   RVOIP_PERF_SOAK_MAX_HOLD_SECS  Maximum cycling active-call hold. Defaults to 360.
   RVOIP_PERF_SOAK_CPS            Optional immediate hangup churn. Defaults to 0.
+  RVOIP_PERF_MEMORY_DIAGNOSTICS  Write memory diagnostic JSONL during soak. Defaults to 1.
+  RVOIP_PERF_ALLOCATOR_DIAGNOSTICS
+                                  Include mimalloc snapshots in memory diagnostics. Defaults to 1.
+  RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS
+                                  Memory diagnostic interval. Defaults to 5.
+  RVOIP_PERF_MIMALLOC_COLLECT_AT Optional diagnostic mi_collect(true): off|phase|drain|both.
+                                  Defaults to off in the beta gate.
+  RVOIP_PERF_SYSTEM_ALLOCATOR=1  Build perf soak with the system allocator instead of mimalloc.
+  RVOIP_PERF_DHAT=1              Build split soak with DHAT heap profiling allocator.
+  RVOIP_PERF_HEAP_SNAPSHOTS=1    Capture per-process vmmap snapshots during split soak.
+  RVOIP_PERF_HEAP_SNAPSHOT_SECS  Optional comma list of label:seconds or seconds snapshot offsets.
+  RVOIP_PERF_MALLOC_STACK_LOGGING=1
+                                  Enable macOS MallocStackLogging for child soak processes.
+  RVOIP_PERF_LEAKS_SNAPSHOTS=1   Also run macOS leaks at heap snapshot offsets.
+  RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY=1
+                                  Decode RTP media but skip app-facing AudioFrame delivery.
   RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR
                                   Soak RSS growth threshold. Defaults to Config's 10 MB/hr.
   RVOIP_PERF_APP_EVENT_CHANNEL_CAPACITY
@@ -453,6 +469,17 @@ write_summary_gate_table_header() {
 - rvoip_perf_soak_min_hold_secs: \`${RVOIP_PERF_SOAK_MIN_HOLD_SECS:-10}\`
 - rvoip_perf_soak_max_hold_secs: \`${RVOIP_PERF_SOAK_MAX_HOLD_SECS:-360}\`
 - rvoip_perf_soak_cps: \`${RVOIP_PERF_SOAK_CPS:-0}\`
+- rvoip_perf_memory_diagnostics: \`${RVOIP_PERF_MEMORY_DIAGNOSTICS:-1}\`
+- rvoip_perf_allocator_diagnostics: \`${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:-1}\`
+- rvoip_perf_memory_diag_interval_secs: \`${RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS:-5}\`
+- rvoip_perf_mimalloc_collect_at: \`${RVOIP_PERF_MIMALLOC_COLLECT_AT:-off}\`
+- rvoip_perf_system_allocator: \`${RVOIP_PERF_SYSTEM_ALLOCATOR:-0}\`
+- rvoip_perf_dhat: \`${RVOIP_PERF_DHAT:-0}\`
+- rvoip_perf_heap_snapshots: \`${RVOIP_PERF_HEAP_SNAPSHOTS:-0}\`
+- rvoip_perf_heap_snapshot_secs: \`${RVOIP_PERF_HEAP_SNAPSHOT_SECS:-auto}\`
+- rvoip_perf_malloc_stack_logging: \`${RVOIP_PERF_MALLOC_STACK_LOGGING:-0}\`
+- rvoip_perf_leaks_snapshots: \`${RVOIP_PERF_LEAKS_SNAPSHOTS:-0}\`
+- rvoip_perf_skip_audio_frame_delivery: \`${RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY:-0}\`
 - rvoip_perf_max_rss_growth_mb_per_hr: \`${RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR:-Config default (10)}\`
 - rvoip_perf_app_event_channel_capacity: \`${RVOIP_PERF_APP_EVENT_CHANNEL_CAPACITY:-Config default}\`
 - rvoip_perf_rss_tail_window_secs: \`${RVOIP_PERF_RSS_TAIL_WINDOW_SECS:-60}\`
@@ -914,7 +941,19 @@ run_perf_gates() {
       RVOIP_PERF_SOAK_MIN_HOLD_SECS="${RVOIP_PERF_SOAK_MIN_HOLD_SECS:-10}" \
       RVOIP_PERF_SOAK_MAX_HOLD_SECS="${RVOIP_PERF_SOAK_MAX_HOLD_SECS:-360}" \
       RVOIP_PERF_SOAK_CPS="${RVOIP_PERF_SOAK_CPS:-0}" \
-      cargo test -p rvoip-sip --release --features perf-tests --test perf_soak_30min perf_soak_30min -- --ignored --nocapture
+      RVOIP_PERF_MEMORY_DIAGNOSTICS="${RVOIP_PERF_MEMORY_DIAGNOSTICS:-1}" \
+      RVOIP_PERF_ALLOCATOR_DIAGNOSTICS="${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:-1}" \
+      RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS="${RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS:-5}" \
+      RVOIP_PERF_MIMALLOC_COLLECT_AT="${RVOIP_PERF_MIMALLOC_COLLECT_AT:-off}" \
+      RVOIP_PERF_SYSTEM_ALLOCATOR="${RVOIP_PERF_SYSTEM_ALLOCATOR:-0}" \
+      RVOIP_PERF_DHAT="${RVOIP_PERF_DHAT:-0}" \
+      RVOIP_PERF_HEAP_SNAPSHOTS="${RVOIP_PERF_HEAP_SNAPSHOTS:-0}" \
+      RVOIP_PERF_HEAP_SNAPSHOT_SECS="${RVOIP_PERF_HEAP_SNAPSHOT_SECS:-}" \
+      RVOIP_PERF_MALLOC_STACK_LOGGING="${RVOIP_PERF_MALLOC_STACK_LOGGING:-0}" \
+      RVOIP_PERF_LEAKS_SNAPSHOTS="${RVOIP_PERF_LEAKS_SNAPSHOTS:-0}" \
+      RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY="${RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY:-0}" \
+      RVOIP_PERF_EXTERNAL_RESOURCE_SAMPLER="${RVOIP_PERF_EXTERNAL_RESOURCE_SAMPLER:-1}" \
+      "$SCRIPT_DIR/perf_soak_split.sh"
   else
     skip_gate "perf soak" "BETA_RUN_LONG_SOAK=0 disables release-candidate soak evidence."
   fi

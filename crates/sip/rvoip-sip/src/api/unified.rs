@@ -173,6 +173,12 @@ pub enum MediaMode {
     },
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SetupTeardownTimeoutTerminal {
+    Cancelled,
+    Failed,
+}
+
 /// Runtime configuration for [`UnifiedCoordinator`].
 ///
 /// `Config` controls SIP and media binding, advertised addresses, TLS,
@@ -263,6 +269,15 @@ pub struct Config {
     /// high-CPS benchmarks where the app callback must not sit on the first
     /// final response path.
     pub fast_auto_accept_incoming_calls: bool,
+
+    /// Maximum seconds a locally-initiated setup teardown state may wait for
+    /// its matching dialog event before rvoip-sip synthesizes the existing
+    /// `DialogTimeout` transition and releases local resources.
+    ///
+    /// This bounds UAC pre-answer cancellation (`CancelPending`/`Cancelling`)
+    /// and UAS accepted-but-unacked calls (`Answering`/
+    /// `AnsweringHangupPending`). `0` disables the watchdog. Default: `120`.
+    pub setup_teardown_timeout_secs: u64,
 
     /// RFC 4028 `Session-Expires` value in seconds to advertise on outgoing
     /// INVITEs. `None` disables session timers entirely. Common carrier
@@ -933,6 +948,10 @@ impl Config {
     pub const DEFAULT_SIP_TRANSACTION_COMMAND_CHANNEL_CAPACITY: usize =
         rvoip_sip_dialog::transaction::DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY;
 
+    /// Default watchdog timeout for setup/teardown states that are waiting on
+    /// dialog-core terminal events.
+    pub const DEFAULT_SETUP_TEARDOWN_TIMEOUT_SECS: u64 = 120;
+
     /// Create a config for local development/testing on 127.0.0.1.
     ///
     /// # Examples
@@ -958,6 +977,7 @@ impl Config {
             auto_180_ringing: true,
             auto_100_trying: true,
             fast_auto_accept_incoming_calls: false,
+            setup_teardown_timeout_secs: Self::DEFAULT_SETUP_TEARDOWN_TIMEOUT_SECS,
             session_timer_secs: None,
             session_timer_min_se: 90,
             credentials: None,
@@ -1059,6 +1079,7 @@ impl Config {
             auto_180_ringing: true,
             auto_100_trying: true,
             fast_auto_accept_incoming_calls: false,
+            setup_teardown_timeout_secs: Self::DEFAULT_SETUP_TEARDOWN_TIMEOUT_SECS,
             session_timer_secs: None,
             session_timer_min_se: 90,
             credentials: None,
@@ -1578,6 +1599,17 @@ impl Config {
     /// this option sends the final answer before app callbacks run.
     pub fn with_fast_auto_accept_incoming_calls(mut self, enabled: bool) -> Self {
         self.fast_auto_accept_incoming_calls = enabled;
+        self
+    }
+
+    /// Set the watchdog timeout for setup teardown states.
+    ///
+    /// The watchdog only fires if a session is still in the same setup state
+    /// after the timeout. It then drives the existing state-table
+    /// `DialogTimeout` transition so cleanup and terminal event publication
+    /// use the normal path. Use `0` to disable the watchdog.
+    pub fn with_setup_teardown_timeout_secs(mut self, seconds: u64) -> Self {
+        self.setup_teardown_timeout_secs = seconds;
         self
     }
 
@@ -2637,7 +2669,9 @@ impl UnifiedCoordinator {
         let cleanup = crate::cleanup_diag::snapshot();
         let dialog_diag = rvoip_sip_dialog::diagnostics::snapshot();
         let dialog_core = self.dialog_adapter.dialog_api.dialog_manager().core();
-        let transaction_counts = dialog_core.transaction_manager().retention_counts();
+        let transaction_manager = dialog_core.transaction_manager();
+        let transaction_counts = transaction_manager.retention_counts();
+        let transaction_breakdown = transaction_manager.retention_breakdown();
         let dialog_counts = dialog_core.retention_counts();
 
         serde_json::json!({
@@ -2685,6 +2719,7 @@ impl UnifiedCoordinator {
                 "transaction_to_subscribers": transaction_counts.transaction_to_subscribers,
                 "pending_inbound_bytes": transaction_counts.pending_inbound_bytes,
                 "pending_inbound_timing": transaction_counts.pending_inbound_timing,
+                "breakdown": transaction_breakdown,
             },
             "dialog_manager": {
                 "dialogs": dialog_counts.dialogs,
@@ -2707,6 +2742,8 @@ impl UnifiedCoordinator {
             },
             "dialog_adapter": self.dialog_adapter.perf_diagnostic_counts(),
             "media_adapter": self.media_adapter.perf_diagnostic_counts(),
+            "memory_diagnostics": rvoip_infra_common::memory_diagnostics::snapshot(),
+            "allocator_diagnostics": rvoip_infra_common::memory_diagnostics::allocator_snapshot(),
             "sip_dialog_diagnostics": {
                 "transaction_runner": {
                     "started": dialog_diag.transaction_runner_started,
@@ -2743,6 +2780,14 @@ impl UnifiedCoordinator {
             "cleanup": {
                 "enabled": cleanup.enabled,
                 "active_total": cleanup.active_total,
+                "setup_teardown_watchdog": {
+                    "armed": cleanup.setup_teardown_watchdog_armed,
+                    "disarmed": cleanup.setup_teardown_watchdog_disarmed,
+                    "fired": cleanup.setup_teardown_watchdog_fired,
+                    "transition_failed": cleanup.setup_teardown_watchdog_transition_failed,
+                    "release_completed": cleanup.setup_teardown_watchdog_release_completed,
+                    "release_failed": cleanup.setup_teardown_watchdog_release_failed,
+                },
             },
         })
     }
@@ -3986,7 +4031,16 @@ impl UnifiedCoordinator {
     /// # }
     /// ```
     pub async fn accept_call(&self, session_id: &SessionId) -> Result<()> {
-        self.helpers.accept_call(session_id).await
+        let result = self.helpers.accept_call(session_id).await;
+        self.schedule_setup_teardown_timeout_if_current(
+            session_id,
+            &[CallState::Answering, CallState::AnsweringHangupPending],
+            EventType::DialogTimeout,
+            "UAS accepted call did not receive ACK",
+            SetupTeardownTimeoutTerminal::Failed,
+        )
+        .await;
+        result
     }
 
     /// Accept an incoming call with a caller-supplied SDP answer. Bypasses
@@ -4003,7 +4057,16 @@ impl UnifiedCoordinator {
     /// # }
     /// ```
     pub async fn accept_call_with_sdp(&self, session_id: &SessionId, sdp: String) -> Result<()> {
-        self.helpers.accept_call_with_sdp(session_id, sdp).await
+        let result = self.helpers.accept_call_with_sdp(session_id, sdp).await;
+        self.schedule_setup_teardown_timeout_if_current(
+            session_id,
+            &[CallState::Answering, CallState::AnsweringHangupPending],
+            EventType::DialogTimeout,
+            "UAS accepted call with SDP did not receive ACK",
+            SetupTeardownTimeoutTerminal::Failed,
+        )
+        .await;
+        result
     }
 
     /// Hang up or cancel a call.
@@ -4037,10 +4100,217 @@ impl UnifiedCoordinator {
             .ok()
             .map(|session| session.call_state);
         self.helpers.hangup(session_id).await?;
+        if self.lifecycle_snapshot(session_id).await.terminal.is_some() {
+            self.release_after_observed_terminal(session_id).await;
+            return Ok(());
+        }
+        self.schedule_setup_teardown_timeout_if_current(
+            session_id,
+            &[CallState::CancelPending, CallState::Cancelling],
+            EventType::DialogTimeout,
+            "UAC cancellation did not receive terminal INVITE outcome",
+            SetupTeardownTimeoutTerminal::Cancelled,
+        )
+        .await;
         if matches!(initial_state, Some(CallState::Active)) {
             self.finalize_local_bye(session_id, "Local hangup").await?;
         }
         Ok(())
+    }
+
+    async fn release_after_observed_terminal(&self, session_id: &SessionId) {
+        let release_guard = crate::cleanup_diag::stage_guard(
+            crate::cleanup_diag::CleanupStage::TerminalRelease,
+            &session_id.0,
+        );
+        if let Err(err) = self.dialog_adapter.cleanup_session(session_id).await {
+            tracing::debug!(
+                "dialog cleanup after observed terminal event for {}: {}",
+                session_id,
+                err
+            );
+        }
+        if let Err(err) = self.media_adapter.cleanup_session(session_id).await {
+            tracing::debug!(
+                "media cleanup after observed terminal event for {}: {}",
+                session_id,
+                err
+            );
+        }
+        self.helpers.cleanup_session(session_id).await;
+        if let Err(err) = self
+            .helpers
+            .state_machine
+            .store
+            .remove_session(session_id)
+            .await
+        {
+            tracing::debug!(
+                "session store removal after observed terminal event for {}: {}",
+                session_id,
+                err
+            );
+        }
+        self.session_registry.remove_session(session_id).await;
+        release_guard.finish_success();
+    }
+
+    pub(crate) async fn schedule_outbound_setup_timeout(&self, session_id: &SessionId) {
+        self.schedule_setup_teardown_timeout_if_current(
+            session_id,
+            &[CallState::Initiating],
+            EventType::DialogTimeout,
+            "UAC INVITE did not receive a final setup outcome",
+            SetupTeardownTimeoutTerminal::Failed,
+        )
+        .await;
+    }
+
+    pub(crate) async fn schedule_inbound_setup_timeout(&self, session_id: &SessionId) {
+        self.schedule_setup_teardown_timeout_if_current(
+            session_id,
+            &[
+                CallState::Ringing,
+                CallState::Answering,
+                CallState::AnsweringHangupPending,
+            ],
+            EventType::DialogTimeout,
+            "UAS INVITE did not receive a final setup outcome",
+            SetupTeardownTimeoutTerminal::Failed,
+        )
+        .await;
+    }
+
+    async fn schedule_setup_teardown_timeout_if_current(
+        &self,
+        session_id: &SessionId,
+        watched_states: &'static [CallState],
+        timeout_event: EventType,
+        reason: &'static str,
+        terminal: SetupTeardownTimeoutTerminal,
+    ) {
+        let timeout = Duration::from_secs(self.config.setup_teardown_timeout_secs);
+        if timeout.is_zero() {
+            return;
+        }
+
+        let Ok(session) = self
+            .helpers
+            .state_machine
+            .store
+            .get_session(session_id)
+            .await
+        else {
+            return;
+        };
+        if !watched_states.contains(&session.call_state) {
+            return;
+        }
+
+        crate::cleanup_diag::record_setup_teardown_watchdog_armed();
+        let session_id = session_id.clone();
+        let entered_state_at = session.entered_state_at;
+        let state_machine = Arc::clone(&self.helpers.state_machine);
+        let helpers = Arc::clone(&self.helpers);
+        let dialog_adapter = Arc::clone(&self.dialog_adapter);
+        let media_adapter = Arc::clone(&self.media_adapter);
+        let registry = Arc::clone(&self.session_registry);
+        let publisher = self.app_event_publisher.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+            let Ok(current) = state_machine.store.get_session(&session_id).await else {
+                crate::cleanup_diag::record_setup_teardown_watchdog_disarmed();
+                return;
+            };
+            if !watched_states.contains(&current.call_state)
+                || current.entered_state_at != entered_state_at
+            {
+                crate::cleanup_diag::record_setup_teardown_watchdog_disarmed();
+                return;
+            }
+
+            crate::cleanup_diag::record_setup_teardown_watchdog_fired();
+            tracing::warn!(
+                "setup teardown watchdog firing for session {} in state {:?}: {}",
+                session_id,
+                current.call_state,
+                reason
+            );
+            if let Err(err) = state_machine
+                .process_event(&session_id, timeout_event)
+                .await
+            {
+                tracing::warn!(
+                    "setup teardown watchdog failed for session {} in state {:?}: {}",
+                    session_id,
+                    current.call_state,
+                    err
+                );
+                crate::cleanup_diag::record_setup_teardown_watchdog_transition_failed();
+                return;
+            }
+
+            let Ok(after) = state_machine.store.get_session(&session_id).await else {
+                crate::cleanup_diag::record_setup_teardown_watchdog_transition_failed();
+                return;
+            };
+            if !after.call_state.is_final() {
+                crate::cleanup_diag::record_setup_teardown_watchdog_transition_failed();
+                return;
+            }
+
+            let release_guard = crate::cleanup_diag::stage_guard(
+                crate::cleanup_diag::CleanupStage::TerminalRelease,
+                &session_id.0,
+            );
+            let api_event = match terminal {
+                SetupTeardownTimeoutTerminal::Cancelled => {
+                    crate::api::events::Event::CallCancelled {
+                        call_id: session_id.clone(),
+                    }
+                }
+                SetupTeardownTimeoutTerminal::Failed => crate::api::events::Event::CallFailed {
+                    call_id: session_id.clone(),
+                    status_code: 408,
+                    reason: reason.to_string(),
+                },
+            };
+            if let Err(err) = publisher.publish_now(api_event).await {
+                tracing::warn!(
+                    "setup teardown watchdog failed to publish terminal event for {}: {}",
+                    session_id,
+                    err
+                );
+                release_guard.finish_failure();
+                crate::cleanup_diag::record_setup_teardown_watchdog_release_failed();
+                return;
+            }
+            if let Err(err) = dialog_adapter.cleanup_session(&session_id).await {
+                tracing::debug!(
+                    "dialog cleanup during setup teardown watchdog release for {}: {}",
+                    session_id,
+                    err
+                );
+            }
+            if let Err(err) = media_adapter.cleanup_session(&session_id).await {
+                tracing::debug!(
+                    "media cleanup during setup teardown watchdog release for {}: {}",
+                    session_id,
+                    err
+                );
+            }
+            helpers.cleanup_session(&session_id).await;
+            if let Err(err) = state_machine.store.remove_session(&session_id).await {
+                tracing::debug!(
+                    "session store removal during setup teardown watchdog release for {}: {}",
+                    session_id,
+                    err
+                );
+            }
+            registry.remove_session(&session_id).await;
+            release_guard.finish_success();
+            crate::cleanup_diag::record_setup_teardown_watchdog_release_completed();
+        });
     }
 
     /// Complete local BYE teardown when rvoip-sip-dialog accepts the outbound BYE.

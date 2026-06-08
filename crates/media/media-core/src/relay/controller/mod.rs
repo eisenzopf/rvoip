@@ -17,12 +17,11 @@
 //! Use `set_audio_muted()` and `is_audio_muted()` for muting functionality.
 
 use dashmap::DashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::codec::audio::common::AudioCodec;
 use crate::codec::audio::G711Codec;
 use crate::codec::mapping::CodecMapper;
 use crate::diagnostics;
@@ -88,6 +87,45 @@ pub use types::{
 };
 
 use types::RtpSessionWrapper;
+
+#[cfg(feature = "memory-diagnostics")]
+fn spawn_memory_tracked<F>(kind: &'static str, future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    rvoip_infra_common::memory_diagnostics::spawn_tracked(kind, future)
+}
+
+#[cfg(not(feature = "memory-diagnostics"))]
+fn spawn_memory_tracked<F>(_: &'static str, future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(future)
+}
+
+#[cfg(feature = "memory-diagnostics")]
+fn record_transient_allocation(kind: &'static str, bytes: usize) {
+    rvoip_infra_common::memory_diagnostics::record_transient_allocation(kind, bytes as u64);
+}
+
+#[cfg(not(feature = "memory-diagnostics"))]
+fn record_transient_allocation(_: &'static str, _: usize) {}
+
+fn perf_skip_audio_frame_delivery() -> bool {
+    static SKIP: OnceLock<bool> = OnceLock::new();
+    *SKIP.get_or_init(|| {
+        if !cfg!(feature = "memory-diagnostics") {
+            return false;
+        }
+        matches!(
+            std::env::var("RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES") | Ok("on") | Ok("ON")
+        )
+    })
+}
 
 /// RFC 4733 DTMF event delivered from media-core to session-core.
 #[derive(Debug, Clone, Copy)]
@@ -375,6 +413,16 @@ impl MediaSessionController {
         let mut rtp_event_queue_events = 0usize;
         let mut rtp_event_receiver_count = 0usize;
         let mut rtp_sessions_locked_for_diag = 0usize;
+        #[cfg(feature = "memory-diagnostics")]
+        let mut rtp_streams = 0usize;
+        #[cfg(feature = "memory-diagnostics")]
+        let mut rtp_udp_recv_pool_idle_buffers = 0usize;
+        #[cfg(feature = "memory-diagnostics")]
+        let mut rtp_udp_recv_pool_idle_bytes = 0usize;
+        #[cfg(feature = "memory-diagnostics")]
+        let mut rtp_udp_recv_pool_allocated_total = 0usize;
+        #[cfg(feature = "memory-diagnostics")]
+        let mut rtp_udp_recv_pool_dropped_total = 0usize;
 
         for entry in self.rtp_sessions.iter() {
             match entry.value().session.try_lock() {
@@ -386,6 +434,16 @@ impl MediaSessionController {
                     rtp_receiver_capacity_packets += counts.receiver_capacity_packets;
                     rtp_event_queue_events += counts.event_queue_events;
                     rtp_event_receiver_count += counts.event_receiver_count;
+                    #[cfg(feature = "memory-diagnostics")]
+                    {
+                        rtp_udp_recv_pool_idle_buffers += counts.udp_recv_pool_idle_buffers;
+                        rtp_udp_recv_pool_idle_bytes += counts.udp_recv_pool_idle_bytes;
+                        rtp_udp_recv_pool_allocated_total +=
+                            counts.udp_recv_pool_allocated_total as usize;
+                        rtp_udp_recv_pool_dropped_total +=
+                            counts.udp_recv_pool_dropped_total as usize;
+                        rtp_streams += counts.stream_count;
+                    }
                 }
                 Err(_) => {
                     rtp_sessions_locked_for_diag += 1;
@@ -407,7 +465,7 @@ impl MediaSessionController {
             .map(|entry| entry.value().max_capacity())
             .sum();
 
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "sessions": self.sessions.len(),
             "rtp_sessions": self.rtp_sessions.len(),
             "rtp_sender_queue_packets": rtp_sender_queue_packets,
@@ -427,7 +485,33 @@ impl MediaSessionController {
             "cn_gate_state": self.cn_gate_state.len(),
             "advanced_processors": self.advanced_processors.len(),
             "media_directions": self.media_directions.len(),
-        })
+        });
+        #[cfg(feature = "memory-diagnostics")]
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("rtp_streams".into(), serde_json::json!(rtp_streams));
+            obj.insert(
+                "rtp_udp_recv_pool_idle_buffers".into(),
+                serde_json::json!(rtp_udp_recv_pool_idle_buffers),
+            );
+            obj.insert(
+                "rtp_udp_recv_pool_idle_bytes".into(),
+                serde_json::json!(rtp_udp_recv_pool_idle_bytes),
+            );
+            obj.insert(
+                "rtp_udp_recv_pool_allocated_total".into(),
+                serde_json::json!(rtp_udp_recv_pool_allocated_total),
+            );
+            obj.insert(
+                "rtp_udp_recv_pool_dropped_total".into(),
+                serde_json::json!(rtp_udp_recv_pool_dropped_total),
+            );
+            obj.insert("frame_pool".into(), self.frame_pool.diagnostic_counts());
+            obj.insert(
+                "rtp_buffer_pool".into(),
+                self.rtp_buffer_pool.diagnostic_counts(),
+            );
+        }
+        value
     }
 
     /// Emit a media event through both channel and event hub. Held
@@ -709,6 +793,11 @@ impl MediaSessionController {
             audio_transmitter: None,
             transmission_enabled: true, // Enable transmission by default
             is_muted: false,
+            #[cfg(feature = "memory-diagnostics")]
+            memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
+                "media_core.rtp_session_wrapper",
+                std::mem::size_of::<RtpSessionWrapper>(),
+            ),
         };
         self.media_directions
             .insert(dialog_id.clone(), MediaDirection::SendRecv);
@@ -726,6 +815,11 @@ impl MediaSessionController {
 
         // Store session and RTP session (DashMap inserts are sharded
         // and don't take any outer guard).
+        #[cfg(feature = "memory-diagnostics")]
+        rvoip_infra_common::memory_diagnostics::record_created(
+            "media_core.media_session_info",
+            std::mem::size_of::<MediaSessionInfo>(),
+        );
         self.sessions.insert(dialog_id.clone(), session_info);
         self.rtp_sessions.insert(dialog_id.clone(), rtp_wrapper);
 
@@ -842,7 +936,14 @@ impl MediaSessionController {
         // Remove session and get info for cleanup. DashMap removes
         // are sharded; no outer guard.
         let session_info = match self.sessions.remove(dialog_id) {
-            Some((_, info)) => info,
+            Some((_, info)) => {
+                #[cfg(feature = "memory-diagnostics")]
+                rvoip_infra_common::memory_diagnostics::record_dropped(
+                    "media_core.media_session_info",
+                    std::mem::size_of::<MediaSessionInfo>(),
+                );
+                info
+            }
             None => {
                 self.cleanup_per_dialog_side_state(dialog_id);
                 diagnostics::record_stop_media(stop_started.elapsed());
@@ -1149,8 +1250,16 @@ impl MediaSessionController {
         // Create G.711 codecs outside the loop for efficiency
         let mut g711_ulaw = G711Codec::mu_law(8000, 1).expect("Failed to create μ-law codec");
         let mut g711_alaw = G711Codec::a_law(8000, 1).expect("Failed to create A-law codec");
+        let mut decode_buffer = vec![0i16; 160];
+        let skip_audio_frame_delivery = perf_skip_audio_frame_delivery();
 
-        tokio::spawn(async move {
+        #[cfg(feature = "memory-diagnostics")]
+        let _decode_buffer_guard = rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
+            "media_core.audio.rx.decode_reusable_buffer",
+            decode_buffer.capacity() * std::mem::size_of::<i16>(),
+        );
+
+        spawn_memory_tracked("media_core.rtp_event_handler_task", async move {
             info!("🎧 Started RTP event handler for dialog: {}", dialog_id);
             let mut rtp_count = 0u64;
             let mut decoded_audio_frame_count = 0u64;
@@ -1179,12 +1288,28 @@ impl MediaSessionController {
                                     );
                                 }
 
-                                // Decode based on payload type
-                                let audio_frame = match packet.header.payload_type {
+                                if decode_buffer.len() < packet.payload.len() {
+                                    let old_capacity = decode_buffer.capacity();
+                                    decode_buffer.resize(packet.payload.len(), 0);
+                                    let new_capacity = decode_buffer.capacity();
+                                    if new_capacity > old_capacity {
+                                        record_transient_allocation(
+                                            "media_core.audio.rx.decode_reusable_buffer_grow",
+                                            (new_capacity - old_capacity)
+                                                * std::mem::size_of::<i16>(),
+                                        );
+                                    }
+                                }
+
+                                // Decode based on payload type into a reusable per-handler buffer.
+                                let decoded_len = match packet.header.payload_type {
                                     0 => {
                                         // PCMU (μ-law)
-                                        match g711_ulaw.decode(&packet.payload) {
-                                            Ok(frame) => frame,
+                                        match g711_ulaw.decode_to_buffer(
+                                            &packet.payload,
+                                            &mut decode_buffer[..packet.payload.len()],
+                                        ) {
+                                            Ok(samples) => samples,
                                             Err(e) => {
                                                 warn!(
                                                     "Failed to decode PCMU for dialog {}: {}",
@@ -1196,8 +1321,11 @@ impl MediaSessionController {
                                     }
                                     8 => {
                                         // PCMA (A-law)
-                                        match g711_alaw.decode(&packet.payload) {
-                                            Ok(frame) => frame,
+                                        match g711_alaw.decode_to_buffer(
+                                            &packet.payload,
+                                            &mut decode_buffer[..packet.payload.len()],
+                                        ) {
+                                            Ok(samples) => samples,
                                             Err(e) => {
                                                 warn!(
                                                     "Failed to decode PCMA for dialog {}: {}",
@@ -1233,6 +1361,15 @@ impl MediaSessionController {
                                     continue;
                                 }
 
+                                if skip_audio_frame_delivery {
+                                    decoded_audio_frame_count += 1;
+                                    record_transient_allocation(
+                                        "media_core.audio.rx.decoded_without_frame_delivery",
+                                        decoded_len * std::mem::size_of::<i16>(),
+                                    );
+                                    continue;
+                                }
+
                                 // Check for callback each time (it might be registered later).
                                 // DashMap shard guard is held only across the synchronous
                                 // try_send; we never await with a guard alive.
@@ -1241,6 +1378,15 @@ impl MediaSessionController {
                                     .map(|r| r.value().clone());
                                 if let Some(sender) = sender {
                                     decoded_audio_frame_count += 1;
+                                    let samples = decode_buffer[..decoded_len].to_vec();
+                                    record_transient_allocation(
+                                        "media_core.audio.rx.audio_frame.samples_vec",
+                                        samples.capacity() * std::mem::size_of::<i16>(),
+                                    );
+                                    let audio_frame = AudioFrame::new(
+                                        samples, 8000, 1,
+                                        0, // timestamp behaviour preserved from codec decode path
+                                    );
 
                                     // Use try_send to avoid blocking the RTP event handler
                                     match sender.try_send(audio_frame) {

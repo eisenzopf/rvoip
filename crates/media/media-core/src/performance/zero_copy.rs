@@ -57,6 +57,13 @@ impl SharedAudioBuffer {
         &self.data[self.offset..self.offset + self.length]
     }
 
+    /// Get samples as a mutable slice, cloning the shared backing storage first
+    /// when other views still reference it.
+    pub fn samples_mut(&mut self) -> &mut [i16] {
+        let data = Arc::make_mut(&mut self.data);
+        &mut data[self.offset..self.offset + self.length]
+    }
+
     /// Get the length of this buffer view
     pub fn len(&self) -> usize {
         self.length
@@ -131,6 +138,14 @@ impl ZeroCopyAudioFrame {
     /// Get samples as a slice (zero-copy access)
     pub fn samples(&self) -> &[i16] {
         self.buffer.samples()
+    }
+
+    /// Get samples as a mutable slice.
+    ///
+    /// If this frame shares its backing buffer with another frame or slice,
+    /// the buffer is cloned first so mutation stays isolated.
+    pub fn samples_mut(&mut self) -> &mut [i16] {
+        self.buffer.samples_mut()
     }
 
     /// Get the number of samples per channel
@@ -253,6 +268,34 @@ mod tests {
         // Should share the same underlying buffer
         assert_eq!(frame.ref_count(), 2);
         assert_eq!(slice.ref_count(), 2);
+    }
+
+    #[test]
+    fn test_mutating_shared_frame_clones_backing_buffer() {
+        let mut frame = ZeroCopyAudioFrame::new(vec![1, 2, 3, 4], 8000, 1, 0);
+        let clone = frame.clone();
+
+        assert_eq!(frame.ref_count(), 2);
+        frame.samples_mut()[0] = 99;
+
+        assert_eq!(frame.samples(), &[99, 2, 3, 4]);
+        assert_eq!(clone.samples(), &[1, 2, 3, 4]);
+        assert_eq!(frame.ref_count(), 1);
+        assert_eq!(clone.ref_count(), 1);
+    }
+
+    #[test]
+    fn test_mutating_slice_updates_only_slice_view_after_clone() {
+        let frame = ZeroCopyAudioFrame::new(vec![1, 2, 3, 4, 5, 6], 8000, 1, 0);
+        let mut slice = frame.slice(2, 3).unwrap();
+
+        assert_eq!(frame.ref_count(), 2);
+        slice.samples_mut()[1] = 99;
+
+        assert_eq!(frame.samples(), &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(slice.samples(), &[3, 99, 5]);
+        assert_eq!(frame.ref_count(), 1);
+        assert_eq!(slice.ref_count(), 1);
     }
 
     #[test]

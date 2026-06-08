@@ -167,7 +167,7 @@ pub use handlers::*;
 pub use types::*;
 pub use utils::*;
 
-use std::collections::{BinaryHeap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BinaryHeap, HashSet, VecDeque};
 use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::SocketAddr;
@@ -1015,6 +1015,61 @@ impl TransactionManager {
             pending_inbound_transport: self.pending_inbound_transport.len(),
             pending_inbound_timing: self.pending_inbound_timing.len(),
         }
+    }
+
+    /// Return retained transaction breakdowns for perf diagnostics.
+    ///
+    /// This is diagnostic-only data used to attribute retained transactions by
+    /// method, RFC state, transaction kind, and lifecycle after soak drains.
+    pub fn retention_breakdown(&self) -> serde_json::Value {
+        self.maintenance_prune_retained_state();
+
+        fn increment(counts: &mut BTreeMap<String, usize>, key: impl Into<String>) {
+            *counts.entry(key.into()).or_default() += 1;
+        }
+
+        let mut client_by_method = BTreeMap::new();
+        let mut client_by_state = BTreeMap::new();
+        let mut client_by_kind = BTreeMap::new();
+        let mut client_by_lifecycle = BTreeMap::new();
+        for entry in self.client_transactions.iter() {
+            let key = entry.key();
+            let tx = entry.value();
+            increment(&mut client_by_method, key.method().to_string());
+            increment(&mut client_by_state, format!("{:?}", tx.state()));
+            increment(&mut client_by_kind, tx.kind().to_string());
+            increment(
+                &mut client_by_lifecycle,
+                format!("{:?}", tx.data().get_lifecycle()),
+            );
+        }
+
+        let mut server_by_method = BTreeMap::new();
+        let mut server_by_state = BTreeMap::new();
+        let mut server_by_kind = BTreeMap::new();
+        let mut server_by_lifecycle = BTreeMap::new();
+        for entry in self.server_transactions.iter() {
+            let key = entry.key();
+            let tx = entry.value();
+            increment(&mut server_by_method, key.method().to_string());
+            increment(&mut server_by_state, format!("{:?}", tx.state()));
+            increment(&mut server_by_kind, tx.kind().to_string());
+            increment(
+                &mut server_by_lifecycle,
+                format!("{:?}", tx.data().get_lifecycle()),
+            );
+        }
+
+        serde_json::json!({
+            "client_by_method": client_by_method,
+            "client_by_state": client_by_state,
+            "client_by_kind": client_by_kind,
+            "client_by_lifecycle": client_by_lifecycle,
+            "server_by_method": server_by_method,
+            "server_by_state": server_by_state,
+            "server_by_kind": server_by_kind,
+            "server_by_lifecycle": server_by_lifecycle,
+        })
     }
 
     /// Returns the timer settings in effect for this manager. Session-timer
@@ -2829,6 +2884,7 @@ impl TransactionManager {
         debug!(%transaction_id, "Removing terminated transaction after grace period");
 
         let mut terminated = false;
+        self.request_transaction_runner_stop(transaction_id);
 
         if self.client_transactions.remove(transaction_id).is_some() {
             debug!(%transaction_id, "Removed terminated client transaction");
@@ -3455,6 +3511,7 @@ impl TransactionManager {
 
         // Create the transaction key directly with is_server: true
         let key = TransactionKey::new(branch, request.method().clone(), true);
+        let mut cancel_target_invite_tx_id = None;
 
         // Check if this is a retransmission of an existing transaction.
         // Extract the Arc out of the shard before awaiting `process_request`.
@@ -3495,7 +3552,7 @@ impl TransactionManager {
                 // key with method rewritten to INVITE. Keep this indexed
                 // instead of scanning all active transactions.
                 let invite_tx_id = key.with_method(Method::Invite);
-                let target_invite_tx_id = if self.client_transactions.contains_key(&invite_tx_id)
+                cancel_target_invite_tx_id = if self.client_transactions.contains_key(&invite_tx_id)
                     || self.server_transactions.contains_key(&invite_tx_id)
                 {
                     debug!(method=%request.method(), "Found matching INVITE transaction for CANCEL");
@@ -3519,19 +3576,6 @@ impl TransactionManager {
                 );
 
                 info!(id=%tx.id(), method=%request.method(), "Created new ServerNonInviteTransaction for CANCEL");
-
-                // If we found a matching INVITE transaction, notify the TU
-                if let Some(invite_tx_id) = target_invite_tx_id {
-                    self.events_tx
-                        .send(TransactionEvent::CancelRequest {
-                            transaction_id: tx.id().clone(),
-                            target_transaction_id: invite_tx_id,
-                            request: request.clone(),
-                            source: remote_addr,
-                        })
-                        .await
-                        .ok();
-                }
 
                 tx
             }
@@ -3592,6 +3636,28 @@ impl TransactionManager {
         {
             error!(id=%transaction.id(), error=%e, "Failed to initialize new server transaction");
             return Err(e);
+        }
+
+        if request.method() == Method::Cancel {
+            let transaction_id = transaction.id().clone();
+            let event = match cancel_target_invite_tx_id {
+                Some(invite_tx_id) => TransactionEvent::CancelRequest {
+                    transaction_id: transaction_id.clone(),
+                    target_transaction_id: invite_tx_id,
+                    request: request.clone(),
+                    source: remote_addr,
+                },
+                None => TransactionEvent::NonInviteRequest {
+                    transaction_id: transaction_id.clone(),
+                    request: request.clone(),
+                    source: remote_addr,
+                },
+            };
+
+            if let Err(e) = self.events_tx.send(event).await {
+                warn!(id=%transaction_id, error=%e, "Failed to publish CANCEL transaction event");
+                let _ = self.terminate_transaction(&transaction_id).await;
+            }
         }
 
         Ok(transaction)

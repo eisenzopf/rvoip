@@ -472,12 +472,63 @@ tokio-console = ["dep:console-subscriber"]
 # tests/perf/. Pulls in hdrhistogram for latency percentiles and sysinfo
 # for environment-block capture. Off by default so `cargo build` /
 # `cargo test` are untouched. See `crates/sip/rvoip-sip/docs/BENCHMARKING.md`.
-perf-tests = ["dep:hdrhistogram", "dep:sysinfo", "rvoip-media-core/perf-diagnostics"]
+perf-tests = [
+    "dep:hdrhistogram",
+    "dep:sysinfo",
+    "rvoip-infra-common/memory-diagnostics",
+    "rvoip-media-core/perf-diagnostics",
+    "rvoip-rtp-core/memory-diagnostics",
+]
+# Perf-only allocator A/B switch. Used by `scripts/perf_soak_split.sh`
+# with `RVOIP_PERF_SYSTEM_ALLOCATOR=1` to disable the mimalloc global
+# allocator while leaving diagnostics and the soak harness unchanged.
+perf-system-allocator = ["rvoip-infra-common/no-global-allocator"]
 
 [[test]]
 name = "generated_sip_compliance"
 path = "tests/generated_sip_compliance.rs"
 required-features = ["generated-validation"]
+
+[[test]]
+name = "resiliency_invariants"
+path = "tests/resiliency_invariants.rs"
+required-features = ["perf-tests"]
+
+[[test]]
+name = "resilience_dialog_error_recovery"
+path = "tests/resilience/dialog_error_recovery.rs"
+
+[[test]]
+name = "resilience_pbx_proxy_interop_recovery"
+path = "tests/resilience/pbx_proxy_interop_recovery.rs"
+
+[[test]]
+name = "resilience_rfc3261_transaction_recovery"
+path = "tests/resilience/rfc3261_transaction_recovery.rs"
+
+[[test]]
+name = "resilience_rfc3262_reliable_provisional_recovery"
+path = "tests/resilience/rfc3262_reliable_provisional_recovery.rs"
+
+[[test]]
+name = "resilience_rfc3263_dns_failover_recovery"
+path = "tests/resilience/rfc3263_dns_failover_recovery.rs"
+
+[[test]]
+name = "resilience_rfc3311_update_reinvite_recovery"
+path = "tests/resilience/rfc3311_update_reinvite_recovery.rs"
+
+[[test]]
+name = "resilience_rfc3581_rport_nat_recovery"
+path = "tests/resilience/rfc3581_rport_nat_recovery.rs"
+
+[[test]]
+name = "resilience_rfc4028_session_timer_recovery"
+path = "tests/resilience/rfc4028_session_timer_recovery.rs"
+
+[[test]]
+name = "resilience_rfc5626_outbound_flow_recovery"
+path = "tests/resilience/rfc5626_outbound_flow_recovery.rs"
 
 # Publically-reportable concurrency benchmark suite. Each scenario is a
 # real integration test that writes a JSON result file to
@@ -506,6 +557,11 @@ required-features = ["perf-tests"]
 [[test]]
 name = "perf_rtp_steady_state"
 path = "tests/perf/perf_rtp_steady_state.rs"
+required-features = ["perf-tests"]
+
+[[test]]
+name = "perf_media_churn"
+path = "tests/perf/perf_media_churn.rs"
 required-features = ["perf-tests"]
 
 [[test]]

@@ -1679,6 +1679,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_server_cancel_publishes_event_after_transaction_is_visible() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, mut event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+
+        let source: SocketAddr = "192.0.2.100:5060".parse().unwrap();
+        let branch = "z9hG4bK.cancel-visible";
+        let invite_request = create_dispatch_request(Method::Invite, branch, 101)
+            .map_err(|e| Error::Other(e.to_string()))?;
+        let invite_tx = manager
+            .create_server_transaction(invite_request.clone(), source)
+            .await?;
+
+        let cancel_request = create_dispatch_request(Method::Cancel, branch, 101)
+            .map_err(|e| Error::Other(e.to_string()))?;
+        let cancel_tx = manager
+            .create_server_transaction(cancel_request.clone(), source)
+            .await?;
+        let cancel_tx_id = cancel_tx.id().clone();
+
+        let event = tokio::time::timeout(Duration::from_millis(250), event_rx.recv())
+            .await
+            .expect("CANCEL event should be published")
+            .expect("event channel should remain open");
+
+        match event {
+            TransactionEvent::CancelRequest {
+                transaction_id,
+                target_transaction_id,
+                request,
+                source: event_source,
+            } => {
+                assert_eq!(transaction_id, cancel_tx_id);
+                assert_eq!(target_transaction_id, invite_tx.id().clone());
+                assert_eq!(request.method(), Method::Cancel);
+                assert_eq!(event_source, source);
+            }
+            other => panic!("expected CancelRequest event, got {other:?}"),
+        }
+
+        assert!(
+            manager.server_transactions.contains_key(&cancel_tx_id),
+            "CANCEL transaction must be visible before its event is processed"
+        );
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unmatched_server_cancel_publishes_non_invite_event_for_481_cleanup() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, mut event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+
+        let source: SocketAddr = "192.0.2.100:5060".parse().unwrap();
+        let cancel_request =
+            create_dispatch_request(Method::Cancel, "z9hG4bK.cancel-unmatched", 101)
+                .map_err(|e| Error::Other(e.to_string()))?;
+        let cancel_tx = manager
+            .create_server_transaction(cancel_request.clone(), source)
+            .await?;
+        let cancel_tx_id = cancel_tx.id().clone();
+
+        let event = tokio::time::timeout(Duration::from_millis(250), event_rx.recv())
+            .await
+            .expect("unmatched CANCEL should still be published")
+            .expect("event channel should remain open");
+
+        match event {
+            TransactionEvent::NonInviteRequest {
+                transaction_id,
+                request,
+                source: event_source,
+            } => {
+                assert_eq!(transaction_id, cancel_tx_id);
+                assert_eq!(request.method(), Method::Cancel);
+                assert_eq!(event_source, source);
+            }
+            other => panic!("expected NonInviteRequest event, got {other:?}"),
+        }
+
+        assert!(
+            manager.server_transactions.contains_key(&cancel_tx_id),
+            "unmatched CANCEL transaction must be available for 481 response cleanup"
+        );
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn invite_2xx_is_retransmitted_until_ack() -> Result<()> {
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
         let (_transport_tx, transport_rx) = mpsc::channel(16);
@@ -2166,6 +2260,36 @@ mod tests {
         let counts = manager.retention_counts();
         assert_eq!(counts.pending_inbound_bytes, 0);
         assert!(manager.pending_inbound_inserted_at.get(&tx_id).is_none());
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unmatched_response_raw_bytes_are_not_cached() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(10)).await?;
+
+        let request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let response = create_test_response(&request, StatusCode::Ok, Some("OK"));
+        let raw_bytes = bytes::Bytes::from(Message::Response(response.clone()).to_bytes());
+
+        manager
+            .handle_transport_event(TransportEvent::MessageReceived {
+                message: Message::Response(response),
+                source: "192.0.2.100:5060".parse().unwrap(),
+                destination: transport.local_addr().unwrap(),
+                transport_type: TransportType::Udp,
+                raw_bytes: Some(raw_bytes),
+                timing: None,
+            })
+            .await?;
+
+        let counts = manager.retention_counts();
+        assert_eq!(counts.pending_inbound_bytes, 0);
+        assert_eq!(counts.pending_inbound_transport, 0);
 
         manager.shutdown().await;
         Ok(())

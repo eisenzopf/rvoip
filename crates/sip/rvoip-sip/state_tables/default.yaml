@@ -1289,6 +1289,18 @@ transitions:
       - "CallFailed"
     description: "INVITE timed out before a provisional response; do not send CANCEL"
 
+  - role: "UAS"
+    state: "Ringing"
+    event:
+      type: "DialogTimeout"
+    next_state: "Failed"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallFailed"
+    description: "Incoming call was not answered or rejected before setup timeout"
+
   # Cancel outgoing call. RFC 3261 9.1 allows CANCEL only after a
   # provisional response. Before that, record intent and let either
   # a provisional response trigger CANCEL or a final response/timeout resolve

@@ -4,7 +4,7 @@
 //! It serves as the central coordinator for SIP dialog management.
 
 use dashmap::DashMap;
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1879,6 +1879,40 @@ impl DialogManager {
                         .handle_bye_with_transaction(transaction_id.clone(), request)
                         .await;
                 }
+                if request.method() == Method::Cancel {
+                    let invite_tx_id = self
+                        .transaction_manager
+                        .find_invite_server_transaction_for_cancel(&request)
+                        .await
+                        .map_err(|e| DialogError::TransactionError {
+                            message: format!(
+                                "Failed to find INVITE server transaction for CANCEL: {}",
+                                e
+                            ),
+                        })?;
+
+                    if let Some(invite_tx_id) = invite_tx_id {
+                        return self
+                            .handle_cancel_request_event(transaction_id, &invite_tx_id, request)
+                            .await;
+                    }
+
+                    let response = crate::transaction::utils::response_builders::create_response(
+                        &request,
+                        rvoip_sip_core::StatusCode::CallOrTransactionDoesNotExist,
+                    );
+                    self.transaction_manager
+                        .send_response(transaction_id, response)
+                        .await
+                        .map_err(|e| DialogError::TransactionError {
+                            message: format!("Failed to send 481 response to CANCEL: {}", e),
+                        })?;
+                    let _ = self
+                        .transaction_manager
+                        .terminate_transaction(transaction_id)
+                        .await;
+                    return Ok(());
+                }
 
                 // For REFER requests, check if they belong to an existing dialog
                 if request.method() == Method::Refer {
@@ -1944,6 +1978,10 @@ impl DialogManager {
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to send 200 OK to CANCEL: {}", e),
             })?;
+        let _ = self
+            .transaction_manager
+            .terminate_transaction(cancel_tx_id)
+            .await;
 
         let original_invite = self
             .transaction_manager
@@ -2453,6 +2491,48 @@ impl DialogManager {
     /// idempotent: if dialog-core already removed the storage on an inbound
     /// BYE cleanup path, the method returns `false`.
     pub fn cleanup_dialog_storage(&self, dialog_id: &DialogId) -> bool {
+        self.remove_dialog_storage(dialog_id).is_some()
+    }
+
+    /// Remove a dialog and force-release server transactions indexed to it.
+    ///
+    /// Session-level terminal cleanup can run after dialog-core has stopped
+    /// making progress on a setup or teardown transaction. Snapshot the
+    /// transaction indexes before removing dialog storage so those transactions
+    /// can be woken and removed instead of becoming unowned transaction-runner
+    /// tasks.
+    pub async fn cleanup_dialog_storage_and_transactions(&self, dialog_id: &DialogId) -> bool {
+        let mut transaction_ids = Vec::new();
+
+        if let Some(transaction_id) = self.pending_response_transaction_for_dialog(dialog_id) {
+            transaction_ids.push(transaction_id);
+        }
+        if let Some(entry) = self.dialog_server_transactions.get(dialog_id) {
+            transaction_ids.extend(entry.value().iter().cloned());
+        }
+        if let Some(entry) = self.dialog_invite_transactions.get(dialog_id) {
+            transaction_ids.extend(entry.value().iter().cloned());
+        }
+
+        let mut seen = HashSet::new();
+        transaction_ids.retain(|transaction_id| seen.insert(transaction_id.clone()));
+
+        for transaction_id in transaction_ids {
+            if let Err(err) = self
+                .transaction_manager
+                .terminate_transaction(&transaction_id)
+                .await
+            {
+                debug!(
+                    "cleanup_dialog_storage_and_transactions: transaction {} was already gone: {}",
+                    transaction_id, err
+                );
+            }
+            self.cleanup_transaction_receiver(&transaction_id);
+            self.transaction_manager
+                .remove_invite_2xx_response_cache(&transaction_id);
+        }
+
         self.remove_dialog_storage(dialog_id).is_some()
     }
 
@@ -3642,6 +3722,75 @@ mod outbound_flow_handler_tests {
             42
         );
         assert!(!manager.dialogs.contains_key(&dialog_id));
+    }
+
+    #[tokio::test]
+    async fn cleanup_dialog_storage_and_transactions_terminates_indexed_server_transactions() {
+        use crate::transaction::runner::HasLifecycle;
+        use crate::transaction::state::TransactionLifecycle;
+
+        let (manager, _rx) = make_manager().await;
+        let source = dest_addr(5070);
+        let mut dialog = Dialog::new(
+            "cleanup-dialog-transaction-test".to_string(),
+            "sip:alice@example.com".parse().unwrap(),
+            "sip:bob@example.com".parse().unwrap(),
+            Some("alice-tag".to_string()),
+            Some("bob-tag".to_string()),
+            false,
+        );
+        dialog.state = DialogState::Early;
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
+
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-tag"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5070", None)
+            .call_id("cleanup-dialog-transaction-test")
+            .cseq(1)
+            .via("127.0.0.1:5070", "UDP", Some("z9hG4bK-cleanup-dialog-tx"))
+            .max_forwards(70)
+            .build();
+        let transaction = manager
+            .transaction_manager()
+            .create_server_transaction(request, source)
+            .await
+            .expect("server transaction");
+        let transaction_id = transaction.id().clone();
+        manager.link_transaction_to_dialog_indexed(&transaction_id, &dialog_id);
+        manager
+            .pending_response_transaction_by_dialog
+            .insert(dialog_id.clone(), transaction_id.clone());
+
+        assert_eq!(manager.transaction_manager().transaction_count().await, 1);
+        assert!(
+            manager
+                .cleanup_dialog_storage_and_transactions(&dialog_id)
+                .await
+        );
+
+        for _ in 0..20 {
+            if transaction.data().get_lifecycle() == TransactionLifecycle::Destroyed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(manager.transaction_manager().transaction_count().await, 0);
+        assert_eq!(
+            transaction.data().get_lifecycle(),
+            TransactionLifecycle::Destroyed
+        );
+        assert!(!manager.dialogs.contains_key(&dialog_id));
+        assert!(!manager.transaction_to_dialog.contains_key(&transaction_id));
+        assert!(manager
+            .server_transactions_for_dialog(&dialog_id)
+            .is_empty());
+        assert!(!manager
+            .pending_response_transaction_by_dialog
+            .contains_key(&dialog_id));
     }
 
     #[tokio::test]

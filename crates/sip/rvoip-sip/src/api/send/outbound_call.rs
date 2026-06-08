@@ -376,6 +376,9 @@ impl OutboundCallBuilder {
                 crate::state_table::EventType::SendOutboundInvite,
             )
             .await?;
+        self.coord
+            .schedule_outbound_setup_timeout(&session_id)
+            .await;
         Ok(session_id)
     }
 }

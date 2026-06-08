@@ -19,6 +19,9 @@
 
 #![allow(dead_code)]
 
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -43,29 +46,65 @@ pub struct ResourceSummary {
     pub rss_tail_growth_mb_per_min: f64,
     pub rss_tail_window_secs: f64,
     pub avg_cpu_pct: f64,
+    pub sample_count: usize,
+    pub samples_path: Option<PathBuf>,
     pub samples: Vec<ResourceSample>,
+}
+
+impl ResourceSummary {
+    pub fn empty() -> Self {
+        Self {
+            baseline_rss_mb: 0.0,
+            peak_rss_mb: 0.0,
+            rss_growth_mb_per_min: 0.0,
+            rss_tail_growth_mb_per_min: 0.0,
+            rss_tail_window_secs: rss_tail_window_secs(),
+            avg_cpu_pct: 0.0,
+            sample_count: 0,
+            samples_path: None,
+            samples: Vec::new(),
+        }
+    }
 }
 
 pub struct ResourceSampler {
     samples: Arc<Mutex<Vec<ResourceSample>>>,
     stop: Arc<AtomicBool>,
     task: Option<JoinHandle<()>>,
-    started: Instant,
+    samples_path: Option<PathBuf>,
 }
 
 impl ResourceSampler {
     /// Start sampling. The first sample is taken immediately so
     /// `baseline_rss_mb` reflects the state before the load began.
     pub fn start(interval: Duration) -> Self {
+        Self::start_inner(interval, None)
+    }
+
+    /// Start sampling and append each sample to `path` as JSONL while the
+    /// test is running. The in-memory series remains available for summary
+    /// math, but callers can clear it before writing the final report.
+    pub fn start_with_output(interval: Duration, path: PathBuf) -> Self {
+        Self::start_inner(interval, Some(path))
+    }
+
+    fn start_inner(interval: Duration, samples_path: Option<PathBuf>) -> Self {
         let samples: Arc<Mutex<Vec<ResourceSample>>> = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let samples_task = Arc::clone(&samples);
         let stop_task = Arc::clone(&stop);
         let started = Instant::now();
         let pid = Pid::from_u32(std::process::id());
+        let task_samples_path = samples_path.clone();
 
         let task = tokio::spawn(async move {
             let mut sys = System::new();
+            let mut writer = task_samples_path.map(|path| {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).expect("create resource sample dir");
+                }
+                BufWriter::new(File::create(path).expect("create resource sample JSONL"))
+            });
             loop {
                 // Refresh CPU + memory for our PID. sysinfo's cpu_usage
                 // is "delta since last refresh of this process", so the
@@ -80,14 +119,23 @@ impl ResourceSampler {
                     let rss_mb = proc_.memory() as f64 / (1024.0 * 1024.0);
                     let cpu_pct = proc_.cpu_usage();
                     let t_secs = started.elapsed().as_secs_f64();
+                    let sample = ResourceSample {
+                        t_secs,
+                        rss_mb,
+                        cpu_pct,
+                    };
                     samples_task
                         .lock()
                         .expect("sampler lock")
-                        .push(ResourceSample {
-                            t_secs,
-                            rss_mb,
-                            cpu_pct,
-                        });
+                        .push(sample.clone());
+                    if let Some(writer) = writer.as_mut() {
+                        serde_json::to_writer(&mut *writer, &sample)
+                            .expect("write resource sample JSONL");
+                        writer
+                            .write_all(b"\n")
+                            .expect("write resource sample newline");
+                        writer.flush().expect("flush resource sample JSONL");
+                    }
                 }
                 if stop_task.load(Ordering::Relaxed) {
                     break;
@@ -100,7 +148,7 @@ impl ResourceSampler {
             samples,
             stop,
             task: Some(task),
-            started,
+            samples_path,
         }
     }
 
@@ -113,6 +161,7 @@ impl ResourceSampler {
             let _ = t.await;
         }
         let samples = std::mem::take(&mut *self.samples.lock().expect("sampler lock"));
+        let sample_count = samples.len();
 
         let baseline_rss_mb = samples.first().map(|s| s.rss_mb).unwrap_or(0.0);
         let peak_rss_mb = samples.iter().map(|s| s.rss_mb).fold(0.0f64, f64::max);
@@ -140,6 +189,8 @@ impl ResourceSampler {
             rss_tail_growth_mb_per_min,
             rss_tail_window_secs: tail_window_secs,
             avg_cpu_pct,
+            sample_count,
+            samples_path: self.samples_path,
             samples,
         }
     }

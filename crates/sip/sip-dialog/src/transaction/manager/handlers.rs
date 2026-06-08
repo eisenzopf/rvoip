@@ -783,7 +783,9 @@ impl TransactionManager {
                         Message::Request(request) => {
                             !matches!(request.method(), Method::Ack | Method::Bye)
                         }
-                        Message::Response(_) => true,
+                        Message::Response(_) => transaction_key
+                            .as_ref()
+                            .is_some_and(|key| self.client_transactions.contains_key(key)),
                     };
                     if cache_raw_bytes {
                         if let Some(key) = transaction_key.as_ref() {
@@ -796,19 +798,25 @@ impl TransactionManager {
                     }
                 }
                 if let Some(key) = transaction_key.as_ref() {
-                    self.pending_inbound_transport.insert(
-                        key.clone(),
-                        rvoip_infra_common::events::cross_crate::SipTransportContext::new(
-                            transport_type.to_string(),
-                            destination.to_string(),
-                            source.to_string(),
-                            matches!(
-                                transport_type,
-                                rvoip_sip_transport::transport::TransportType::Tls
-                                    | rvoip_sip_transport::transport::TransportType::Wss
+                    let cache_transport = match &message {
+                        Message::Request(_) => true,
+                        Message::Response(_) => self.client_transactions.contains_key(key),
+                    };
+                    if cache_transport {
+                        self.pending_inbound_transport.insert(
+                            key.clone(),
+                            rvoip_infra_common::events::cross_crate::SipTransportContext::new(
+                                transport_type.to_string(),
+                                destination.to_string(),
+                                source.to_string(),
+                                matches!(
+                                    transport_type,
+                                    rvoip_sip_transport::transport::TransportType::Tls
+                                        | rvoip_sip_transport::transport::TransportType::Wss
+                                ),
                             ),
-                        ),
-                    );
+                        );
+                    }
                 }
                 if let (Some(key), Some(timing)) = (transaction_key.as_ref(), timing) {
                     let cache_timing = matches!(

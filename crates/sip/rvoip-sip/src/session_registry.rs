@@ -68,14 +68,32 @@ impl SessionRegistry {
 
     /// Map a dialog ID to a session ID (single session version).
     pub async fn map_dialog(&self, session_id: SessionId, dialog_id: DialogId) {
-        self.current_session.store(Some(Arc::new(session_id)));
+        let session_id = Arc::new(session_id);
+        #[cfg(feature = "perf-tests")]
+        let previous_session = self.current_session.swap(Some(session_id.clone()));
+        #[cfg(not(feature = "perf-tests"))]
+        let _previous_session = self.current_session.swap(Some(session_id.clone()));
+        #[cfg(feature = "perf-tests")]
+        self.record_session_mapping_for_memory_diagnostics(
+            previous_session.as_deref(),
+            &session_id,
+        );
         self.current_dialog.store(Some(Arc::new(dialog_id)));
         self.dialog_mapped_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Map a media session ID to a session ID (single session version).
     pub async fn map_media(&self, session_id: SessionId, media_id: MediaSessionId) {
-        self.current_session.store(Some(Arc::new(session_id)));
+        let session_id = Arc::new(session_id);
+        #[cfg(feature = "perf-tests")]
+        let previous_session = self.current_session.swap(Some(session_id.clone()));
+        #[cfg(not(feature = "perf-tests"))]
+        let _previous_session = self.current_session.swap(Some(session_id.clone()));
+        #[cfg(feature = "perf-tests")]
+        self.record_session_mapping_for_memory_diagnostics(
+            previous_session.as_deref(),
+            &session_id,
+        );
         self.current_media.store(Some(Arc::new(media_id)));
         self.media_mapped_total.fetch_add(1, Ordering::Relaxed);
     }
@@ -118,13 +136,25 @@ impl SessionRegistry {
 
     /// Remove all mappings for a session (single session version).
     pub async fn remove_session(&self, session_id: &SessionId) {
-        if self.current_session.load().as_deref() == Some(session_id) {
-            self.current_session.store(None);
-            self.current_dialog.store(None);
-            self.current_media.store(None);
-            self.removed_total.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.remove_missing_total.fetch_add(1, Ordering::Relaxed);
+        loop {
+            let current = self.current_session.load();
+            if current.as_deref() != Some(session_id) {
+                self.remove_missing_total.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+
+            let previous = self.current_session.compare_and_swap(&*current, None);
+            if Self::option_arc_ptr_eq(&current, &previous) {
+                self.current_dialog.store(None);
+                self.current_media.store(None);
+                self.removed_total.fetch_add(1, Ordering::Relaxed);
+                #[cfg(feature = "perf-tests")]
+                rvoip_infra_common::memory_diagnostics::record_dropped(
+                    "sip.session_registry.current_session",
+                    std::mem::size_of::<SessionId>(),
+                );
+                return;
+            }
         }
     }
 
@@ -151,12 +181,54 @@ impl SessionRegistry {
 
     /// Clear all mappings (single session version).
     pub async fn clear(&self) {
-        self.current_session.store(None);
+        #[cfg(feature = "perf-tests")]
+        let previous_session = self.current_session.swap(None);
+        #[cfg(not(feature = "perf-tests"))]
+        let _previous_session = self.current_session.swap(None);
+        #[cfg(feature = "perf-tests")]
+        if previous_session.is_some() {
+            rvoip_infra_common::memory_diagnostics::record_dropped(
+                "sip.session_registry.current_session",
+                std::mem::size_of::<SessionId>(),
+            );
+        }
         self.current_dialog.store(None);
         self.current_media.store(None);
         self.pending_incoming_call.store(None);
         self.pending_incoming_request.store(None);
         self.pending_incoming_transport.store(None);
+    }
+
+    #[cfg(feature = "perf-tests")]
+    fn record_session_mapping_for_memory_diagnostics(
+        &self,
+        previous: Option<&SessionId>,
+        session_id: &SessionId,
+    ) {
+        if previous == Some(session_id) {
+            return;
+        }
+        if previous.is_some() {
+            rvoip_infra_common::memory_diagnostics::record_dropped(
+                "sip.session_registry.current_session",
+                std::mem::size_of::<SessionId>(),
+            );
+        }
+        rvoip_infra_common::memory_diagnostics::record_created(
+            "sip.session_registry.current_session",
+            std::mem::size_of::<SessionId>(),
+        );
+    }
+
+    fn option_arc_ptr_eq<T>(
+        left: &Option<Arc<T>>,
+        right: &arc_swap::Guard<Option<Arc<T>>>,
+    ) -> bool {
+        match (left.as_ref(), right.as_ref()) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        }
     }
 
     /// Store pending incoming call info (single session version).

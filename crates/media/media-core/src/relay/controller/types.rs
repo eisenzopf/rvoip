@@ -219,4 +219,7 @@ pub struct RtpSessionWrapper {
     /// replaced with silence. This maintains RTP flow for NAT traversal
     /// and prevents remote endpoint timeouts.
     pub is_muted: bool,
+
+    #[cfg(feature = "memory-diagnostics")]
+    pub memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
 }

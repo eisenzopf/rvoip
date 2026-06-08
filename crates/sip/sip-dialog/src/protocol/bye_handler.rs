@@ -178,8 +178,8 @@ impl DialogManager {
             if status_code == StatusCode::Ok {
                 diagnostics::record_200_ok_bye_tombstone();
                 self.record_bye_receive_to_200(&transaction_id);
-                self.release_bye_server_transaction(&transaction_id).await;
             }
+            self.release_bye_server_transaction(&transaction_id).await;
 
             debug!(
                 "BYE processed with {} response (no dialog found)",

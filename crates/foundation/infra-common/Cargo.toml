@@ -34,6 +34,7 @@ dashmap.workspace = true
 config = "0.13"
 once_cell = "1.18.0"
 mimalloc = { version = "0.1", default-features = false }
+libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"], optional = true }
 anyhow = "1.0"
 tokio-util = "0.7.16"
 # SIP_API_DESIGN_2 Phase A: bus payloads carry original inbound bytes
@@ -56,6 +57,7 @@ tracing-opentelemetry = { version = "0.28", default-features = false, optional =
 # their own allocator and can't coexist with mimalloc. Off by default
 # so production binaries keep mimalloc's perf win.
 no-global-allocator = []
+memory-diagnostics = ["mimalloc/extended", "dep:libmimalloc-sys"]
 
 # P12.7 — wire an OpenTelemetry OTLP exporter layer into
 # `logging::setup`. When this feature is on AND

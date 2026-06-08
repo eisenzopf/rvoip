@@ -9,6 +9,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
+#[inline]
+#[cfg(feature = "memory-diagnostics")]
+fn frame_payload_bytes(frame: &ZeroCopyAudioFrame) -> usize {
+    frame.buffer.len() * std::mem::size_of::<i16>()
+}
+
+#[inline]
+#[cfg(feature = "memory-diagnostics")]
+fn configured_frame_bytes(config: &PoolConfig) -> usize {
+    config.samples_per_frame * config.channels as usize * std::mem::size_of::<i16>()
+}
+
 /// Cache-line-aligned `AtomicUsize` wrapper used for hot-path pool
 /// counters. The previous `parking_lot::Mutex<PoolStats>` was the
 /// dominant contention point on `pipeline_concurrent/{8,16}` after
@@ -98,6 +110,11 @@ pub struct PooledAudioFrame {
 impl PooledAudioFrame {
     /// Create a new pooled frame
     fn new(frame: ZeroCopyAudioFrame, pool: Arc<AudioFramePool>) -> Self {
+        #[cfg(feature = "memory-diagnostics")]
+        rvoip_infra_common::memory_diagnostics::record_checkout(
+            "media_core.audio_frame_pool.checkout",
+            frame_payload_bytes(&frame),
+        );
         Self {
             frame,
             pool,
@@ -136,12 +153,7 @@ impl PooledAudioFrame {
 
     /// Get a mutable reference to the samples for zero-copy processing
     pub fn samples_mut(&mut self) -> &mut [i16] {
-        // For zero-copy processing, we need mutable access to the underlying samples
-        // This is safe because PooledAudioFrame has exclusive access during processing
-        unsafe {
-            let samples_ptr = self.frame.samples().as_ptr() as *mut i16;
-            std::slice::from_raw_parts_mut(samples_ptr, self.frame.samples().len())
-        }
+        self.frame.samples_mut()
     }
 
     /// Get frame metadata
@@ -261,6 +273,11 @@ impl AudioFramePool {
         for _ in 0..pool_size {
             let samples = vec![0i16; config.samples_per_frame * config.channels as usize];
             let frame = ZeroCopyAudioFrame::new(samples, config.sample_rate, config.channels, 0);
+            #[cfg(feature = "memory-diagnostics")]
+            rvoip_infra_common::memory_diagnostics::record_created(
+                "media_core.audio_frame_pool.frame",
+                frame_payload_bytes(&frame),
+            );
             // Push can only fail if the queue is full — impossible
             // here since we just sized capacity ≥ initial_size.
             let _ = queue.push(frame);
@@ -295,6 +312,11 @@ impl AudioFramePool {
             let samples = vec![0i16; self.config.samples_per_frame * self.config.channels as usize];
             let frame =
                 ZeroCopyAudioFrame::new(samples, self.config.sample_rate, self.config.channels, 0);
+            #[cfg(feature = "memory-diagnostics")]
+            rvoip_infra_common::memory_diagnostics::record_created(
+                "media_core.audio_frame_pool.frame",
+                frame_payload_bytes(&frame),
+            );
             self.pool_misses.inc();
             self.allocated_count.inc();
             PooledAudioFrame::new(frame, self.clone())
@@ -333,6 +355,11 @@ impl AudioFramePool {
             // Need different dimensions, allocate new
             let samples = vec![0i16; total_samples];
             let frame = ZeroCopyAudioFrame::new(samples, sample_rate, channels, 0);
+            #[cfg(feature = "memory-diagnostics")]
+            rvoip_infra_common::memory_diagnostics::record_created(
+                "media_core.audio_frame_pool.frame",
+                frame_payload_bytes(&frame),
+            );
             self.pool_misses.inc();
             self.allocated_count.inc();
             PooledAudioFrame::new(frame, self.clone())
@@ -343,16 +370,40 @@ impl AudioFramePool {
     /// returns the frame back on a full queue (matches the previous
     /// max-size guard — frame dropped, no stats updated).
     fn return_frame(&self, frame: ZeroCopyAudioFrame) {
+        #[cfg(feature = "memory-diagnostics")]
+        let frame_bytes = frame_payload_bytes(&frame);
+        #[cfg(feature = "memory-diagnostics")]
+        rvoip_infra_common::memory_diagnostics::record_return(
+            "media_core.audio_frame_pool.checkout",
+            frame_bytes,
+        );
         let matches_config = frame.sample_rate == self.config.sample_rate
             && frame.channels == self.config.channels
             && frame.buffer.len() == self.config.samples_per_frame * self.config.channels as usize;
         if !matches_config {
+            #[cfg(feature = "memory-diagnostics")]
+            rvoip_infra_common::memory_diagnostics::record_dropped(
+                "media_core.audio_frame_pool.frame",
+                frame_bytes,
+            );
             return;
         }
         if self.pool.push(frame).is_ok() {
             self.returned_count.inc();
             let depth = self.pool.len();
             self.max_pool_size.update_max(depth);
+        } else {
+            #[cfg(feature = "memory-diagnostics")]
+            {
+                rvoip_infra_common::memory_diagnostics::record_dropped_full(
+                    "media_core.audio_frame_pool.frame",
+                    frame_bytes,
+                );
+                rvoip_infra_common::memory_diagnostics::record_dropped(
+                    "media_core.audio_frame_pool.frame",
+                    frame_bytes,
+                );
+            }
         }
     }
 
@@ -377,9 +428,33 @@ impl AudioFramePool {
         }
     }
 
+    #[cfg(feature = "memory-diagnostics")]
+    pub fn diagnostic_counts(&self) -> serde_json::Value {
+        let stats = self.get_stats();
+        let frame_bytes = configured_frame_bytes(&self.config);
+        serde_json::json!({
+            "pool_size": stats.pool_size,
+            "pooled_bytes": stats.pool_size * frame_bytes,
+            "frame_bytes": frame_bytes,
+            "allocated_count": stats.allocated_count,
+            "returned_count": stats.returned_count,
+            "pool_hits": stats.pool_hits,
+            "pool_misses": stats.pool_misses,
+            "max_pool_size": stats.max_pool_size,
+        })
+    }
+
     /// Clear the pool and reset statistics
     pub fn clear(&self) {
-        while self.pool.pop().is_some() {}
+        while let Some(frame) = self.pool.pop() {
+            #[cfg(feature = "memory-diagnostics")]
+            rvoip_infra_common::memory_diagnostics::record_dropped(
+                "media_core.audio_frame_pool.frame",
+                frame_payload_bytes(&frame),
+            );
+            #[cfg(not(feature = "memory-diagnostics"))]
+            drop(frame);
+        }
         self.pool_hits.set(0);
         self.pool_misses.set(0);
         self.allocated_count.set(0);
@@ -396,8 +471,25 @@ impl AudioFramePool {
             if self.pool.push(frame).is_err() {
                 break;
             }
+            #[cfg(feature = "memory-diagnostics")]
+            rvoip_infra_common::memory_diagnostics::record_created(
+                "media_core.audio_frame_pool.frame",
+                configured_frame_bytes(&self.config),
+            );
         }
         self.max_pool_size.update_max(self.pool.len());
+    }
+}
+
+#[cfg(feature = "memory-diagnostics")]
+impl Drop for AudioFramePool {
+    fn drop(&mut self) {
+        while let Some(frame) = self.pool.pop() {
+            rvoip_infra_common::memory_diagnostics::record_dropped(
+                "media_core.audio_frame_pool.frame",
+                frame_payload_bytes(&frame),
+            );
+        }
     }
 }
 
@@ -439,6 +531,11 @@ impl RtpBufferPool {
         for _ in 0..initial_count {
             let mut buffer = Vec::with_capacity(buffer_size);
             buffer.resize(buffer_size, 0);
+            #[cfg(feature = "memory-diagnostics")]
+            rvoip_infra_common::memory_diagnostics::record_created(
+                "media_core.rtp_buffer_pool.buffer",
+                buffer.capacity(),
+            );
             // The queue has capacity ≥ initial_count, so push can't
             // fail here.
             let _ = queue.push(buffer);
@@ -484,6 +581,11 @@ impl RtpBufferPool {
             // — acceptable for a soft max-count budget.
             let mut buffer = Vec::with_capacity(self.buffer_size);
             buffer.resize(self.buffer_size, 0);
+            #[cfg(feature = "memory-diagnostics")]
+            rvoip_infra_common::memory_diagnostics::record_created(
+                "media_core.rtp_buffer_pool.buffer",
+                buffer.capacity(),
+            );
             if self.total_allocated.get() < self.max_count {
                 self.total_allocated.inc();
                 self.cache_misses.inc();
@@ -494,6 +596,12 @@ impl RtpBufferPool {
             buffer
         };
 
+        #[cfg(feature = "memory-diagnostics")]
+        rvoip_infra_common::memory_diagnostics::record_checkout(
+            "media_core.rtp_buffer_pool.checkout",
+            buffer.capacity(),
+        );
+
         PooledRtpBuffer {
             buffer: Some(buffer),
             pool: self.clone(),
@@ -503,9 +611,26 @@ impl RtpBufferPool {
 
     /// Return a buffer to the pool. Lock-free atomic stats.
     fn return_buffer(&self, buffer: Vec<u8>) {
-        if buffer.capacity() != self.buffer_size || self.buffers.len() >= self.initial_count {
+        let capacity = buffer.capacity();
+        #[cfg(feature = "memory-diagnostics")]
+        rvoip_infra_common::memory_diagnostics::record_return(
+            "media_core.rtp_buffer_pool.checkout",
+            capacity,
+        );
+        if capacity != self.buffer_size || self.buffers.len() >= self.initial_count {
             // Oversized or excess: drop and decrement bookkeeping.
             self.total_allocated.dec();
+            #[cfg(feature = "memory-diagnostics")]
+            {
+                rvoip_infra_common::memory_diagnostics::record_dropped_full(
+                    "media_core.rtp_buffer_pool.buffer",
+                    capacity,
+                );
+                rvoip_infra_common::memory_diagnostics::record_dropped(
+                    "media_core.rtp_buffer_pool.buffer",
+                    capacity,
+                );
+            }
             return;
         }
         if self.buffers.push(buffer).is_ok() {
@@ -513,6 +638,17 @@ impl RtpBufferPool {
         } else {
             // Race: queue filled between len() check and push. Drop.
             self.total_allocated.dec();
+            #[cfg(feature = "memory-diagnostics")]
+            {
+                rvoip_infra_common::memory_diagnostics::record_dropped_full(
+                    "media_core.rtp_buffer_pool.buffer",
+                    capacity,
+                );
+                rvoip_infra_common::memory_diagnostics::record_dropped(
+                    "media_core.rtp_buffer_pool.buffer",
+                    capacity,
+                );
+            }
         }
     }
 
@@ -533,6 +669,23 @@ impl RtpBufferPool {
         }
     }
 
+    #[cfg(feature = "memory-diagnostics")]
+    pub fn diagnostic_counts(&self) -> serde_json::Value {
+        let stats = self.get_stats();
+        serde_json::json!({
+            "pool_size": stats.pool_size,
+            "pooled_bytes": stats.pool_size * self.buffer_size,
+            "buffer_size": self.buffer_size,
+            "initial_count": self.initial_count,
+            "max_count": self.max_count,
+            "total_allocated": stats.total_allocated,
+            "available": stats.available,
+            "cache_hits": stats.cache_hits,
+            "cache_misses": stats.cache_misses,
+            "pool_exhausted": stats.pool_exhausted,
+        })
+    }
+
     /// Reset pool statistics
     pub fn reset_stats(&self) {
         self.total_allocated.set(0);
@@ -540,6 +693,18 @@ impl RtpBufferPool {
         self.cache_hits.set(0);
         self.cache_misses.set(0);
         self.pool_exhausted.set(0);
+    }
+}
+
+#[cfg(feature = "memory-diagnostics")]
+impl Drop for RtpBufferPool {
+    fn drop(&mut self) {
+        while let Some(buffer) = self.buffers.pop() {
+            rvoip_infra_common::memory_diagnostics::record_dropped(
+                "media_core.rtp_buffer_pool.buffer",
+                buffer.capacity(),
+            );
+        }
     }
 }
 

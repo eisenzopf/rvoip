@@ -27,12 +27,31 @@ use tracing::{debug, error, info, trace, warn};
 /// 500 ms covers the worst-case spacing between the three retransmits
 /// while keeping the seen-set bounded under sustained DTMF traffic.
 const DTMF_DEDUP_TTL: Duration = Duration::from_millis(500);
+const RTP_TRANSPORT_EVENT_CHANNEL_CAPACITY: usize = 32;
 const RTP_DROP_LOG_INITIAL: u64 = 5;
 const RTP_DROP_LOG_EVERY: u64 = 1_000;
 const RTP_MALFORMED_WARN_EVERY: u64 = 10_000;
 
 static SRTP_DIAGNOSTICS_ENABLED: AtomicBool = AtomicBool::new(false);
 static RTP_DIAGNOSTICS_ENABLED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "memory-diagnostics")]
+fn spawn_memory_tracked<F>(kind: &'static str, future: F) -> JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    rvoip_infra_common::memory_diagnostics::spawn_tracked(kind, future)
+}
+
+#[cfg(not(feature = "memory-diagnostics"))]
+fn spawn_memory_tracked<F>(_: &'static str, future: F) -> JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(future)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RtpMuxPacketClass {
@@ -300,6 +319,11 @@ pub struct UdpRtpTransport {
     /// Capacity sized to absorb a brief downstream stall without
     /// forcing a fresh `Vec` alloc.
     recv_pool: Arc<RecvBufPool>,
+
+    #[cfg(feature = "memory-diagnostics")]
+    _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
+    #[cfg(feature = "memory-diagnostics")]
+    _event_channel_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
 }
 
 impl UdpRtpTransport {
@@ -413,7 +437,7 @@ impl UdpRtpTransport {
         };
 
         // Create broadcaster
-        let (event_tx, _) = broadcast::channel(100);
+        let (event_tx, _) = broadcast::channel(RTP_TRANSPORT_EVENT_CHANNEL_CAPACITY);
 
         let transport = Self {
             rtp_socket: Arc::new(socket_rtp),
@@ -432,6 +456,16 @@ impl UdpRtpTransport {
             // while still bounding worst-case idle memory at
             // 64 × DEFAULT_MAX_PACKET_SIZE.
             recv_pool: RecvBufPool::new(64, DEFAULT_MAX_PACKET_SIZE),
+            #[cfg(feature = "memory-diagnostics")]
+            _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
+                "rtp_core.udp_transport",
+                std::mem::size_of::<Self>(),
+            ),
+            #[cfg(feature = "memory-diagnostics")]
+            _event_channel_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
+                "rtp_core.udp_transport.event_broadcast_capacity",
+                RTP_TRANSPORT_EVENT_CHANNEL_CAPACITY * std::mem::size_of::<RtpEvent>(),
+            ),
         };
 
         // Start the receiver task
@@ -464,259 +498,265 @@ impl UdpRtpTransport {
         let local_rtp_addr = rtp_socket.local_addr().ok();
         let recv_pool = self.recv_pool.clone();
 
-        let rtp_receiver = tokio::spawn(async move {
-            let mut first_inbound_rtp_logged = false;
-            let mut srtp_unprotect_failures = 0_u64;
-            let mut non_rtp_drop_count = 0_u64;
-            let mut malformed_rtp_drop_count = 0_u64;
-            debug!("UDP receive loop started on {:?}", rtp_socket.local_addr());
+        let rtp_receiver = spawn_memory_tracked(
+            "rtp_core.udp_transport.rtp_receiver_task",
+            async move {
+                let mut first_inbound_rtp_logged = false;
+                let mut srtp_unprotect_failures = 0_u64;
+                let mut non_rtp_drop_count = 0_u64;
+                let mut malformed_rtp_drop_count = 0_u64;
+                debug!("UDP receive loop started on {:?}", rtp_socket.local_addr());
 
-            loop {
-                // Check if we should continue running
-                if !active_state.load(Ordering::Acquire) {
-                    break;
-                }
+                loop {
+                    // Check if we should continue running
+                    if !active_state.load(Ordering::Acquire) {
+                        break;
+                    }
 
-                // Pull a fresh recv buffer from the pool. Pool hits
-                // reuse a previously freed buf; misses allocate fresh.
-                // The RAII handle returns the buf to the pool on
-                // Drop, unless ownership is explicitly transferred
-                // downstream via `into_bytes`.
-                let mut buffer = recv_pool.get();
+                    // Pull a fresh recv buffer from the pool. Pool hits
+                    // reuse a previously freed buf; misses allocate fresh.
+                    // The RAII handle returns the buf to the pool on
+                    // Drop, unless ownership is explicitly transferred
+                    // downstream via `into_bytes`.
+                    let mut buffer = recv_pool.get();
 
-                // Receive packet
-                match rtp_socket.recv_from(buffer.as_mut_slice()).await {
-                    Ok((size, addr)) => {
-                        info!("🔵 UDP recv_from returned {} bytes from {}", size, addr);
+                    // Receive packet
+                    match rtp_socket.recv_from(buffer.as_mut_slice()).await {
+                        Ok((size, addr)) => {
+                            info!("🔵 UDP recv_from returned {} bytes from {}", size, addr);
 
-                        let packet_class = classify_rtp_mux_packet(&buffer.as_slice()[..size]);
-                        if !packet_class.is_media() {
-                            non_rtp_drop_count = non_rtp_drop_count.saturating_add(1);
-                            log_dropped_non_rtp_packet(
-                                rtp_diagnostics,
-                                non_rtp_drop_count,
-                                local_rtp_addr,
-                                addr,
-                                size,
-                                packet_class,
-                                &buffer.as_slice()[..size],
-                            );
-                            continue;
-                        }
+                            let packet_class = classify_rtp_mux_packet(&buffer.as_slice()[..size]);
+                            if !packet_class.is_media() {
+                                non_rtp_drop_count = non_rtp_drop_count.saturating_add(1);
+                                log_dropped_non_rtp_packet(
+                                    rtp_diagnostics,
+                                    non_rtp_drop_count,
+                                    local_rtp_addr,
+                                    addr,
+                                    size,
+                                    packet_class,
+                                    &buffer.as_slice()[..size],
+                                );
+                                continue;
+                            }
 
-                        // Check if it's RTCP according to RFC 5761
-                        if packet_class == RtpMuxPacketClass::Rtcp {
-                            // This is an RTCP packet. Hand the bytes
-                            // downstream as a pooled `Bytes` view —
-                            // zero copy, refcount-only.
-                            debug!(
-                                "Received RTCP packet, type: {}",
-                                buffer.as_slice()[1] & 0x7F
-                            );
-                            let rtcp_data = buffer.into_bytes(size);
-                            let event = RtpEvent::RtcpReceived {
-                                data: rtcp_data,
-                                source: addr,
-                            };
+                            // Check if it's RTCP according to RFC 5761
+                            if packet_class == RtpMuxPacketClass::Rtcp {
+                                // This is an RTCP packet. Hand the bytes
+                                // downstream as a pooled `Bytes` view —
+                                // zero copy, refcount-only.
+                                debug!(
+                                    "Received RTCP packet, type: {}",
+                                    buffer.as_slice()[1] & 0x7F
+                                );
+                                let rtcp_data = buffer.into_bytes(size);
+                                let event = RtpEvent::RtcpReceived {
+                                    data: rtcp_data,
+                                    source: addr,
+                                };
 
-                            // Only log errors if there are receivers
-                            if event_tx.receiver_count() > 0 {
-                                if let Err(e) = event_tx.send(event) {
-                                    warn!("Failed to send RTCP event: {}", e);
+                                // Only log errors if there are receivers
+                                if event_tx.receiver_count() > 0 {
+                                    if let Err(e) = event_tx.send(event) {
+                                        warn!("Failed to send RTCP event: {}", e);
+                                    }
+                                } else {
+                                    // Still send the event but ignore errors if no one is listening
+                                    let _ = event_tx.send(event);
                                 }
                             } else {
-                                // Still send the event but ignore errors if no one is listening
-                                let _ = event_tx.send(event);
-                            }
-                        } else {
-                            // SRTP unprotect (RFC 3711 §3.4) when an
-                            // inbound SrtpContext is configured. Auth
-                            // failures MUST be silently dropped — no
-                            // event, no warn-level log — to avoid
-                            // leaking timing or distinguishing failure
-                            // modes to a network attacker.
-                            let mut srtp_guard = srtp_recv.lock();
-                            if srtp_diagnostics && !first_inbound_rtp_logged {
-                                info!(
+                                // SRTP unprotect (RFC 3711 §3.4) when an
+                                // inbound SrtpContext is configured. Auth
+                                // failures MUST be silently dropped — no
+                                // event, no warn-level log — to avoid
+                                // leaking timing or distinguishing failure
+                                // modes to a network attacker.
+                                let mut srtp_guard = srtp_recv.lock();
+                                if srtp_diagnostics && !first_inbound_rtp_logged {
+                                    info!(
                                     "SRTP_DIAG inbound_rtp_first local={:?} source={} size={} srtp_context={}",
                                     local_rtp_addr,
                                     addr,
                                     size,
                                     srtp_guard.is_some()
                                 );
-                                first_inbound_rtp_logged = true;
-                            }
-                            // SRTP path: `unprotect` allocates a fresh
-                            // `Bytes` for the decrypted payload, so we
-                            // don't need to feed it via the pool —
-                            // the pooled buf returns to the pool when
-                            // we drop the RAII handle at the end of
-                            // this iteration.
-                            // Non-SRTP path: zero-copy parse via
-                            // `parse_from_bytes` so the payload is a
-                            // refcounted slice of the pooled buf.
-                            let mut raw_for_error: Option<Bytes> = None;
-                            let parse_result: Result<RtpPacket> = if let Some(ctx) =
-                                srtp_guard.as_mut()
-                            {
-                                match ctx.unprotect(&buffer.as_slice()[0..size]) {
-                                    Ok(packet) => Ok(packet),
-                                    Err(_) => {
-                                        srtp_unprotect_failures += 1;
-                                        if srtp_diagnostics
-                                            && (srtp_unprotect_failures <= 5
-                                                || srtp_unprotect_failures % 50 == 0)
-                                        {
-                                            info!(
+                                    first_inbound_rtp_logged = true;
+                                }
+                                // SRTP path: `unprotect` allocates a fresh
+                                // `Bytes` for the decrypted payload, so we
+                                // don't need to feed it via the pool —
+                                // the pooled buf returns to the pool when
+                                // we drop the RAII handle at the end of
+                                // this iteration.
+                                // Non-SRTP path: zero-copy parse via
+                                // `parse_from_bytes` so the payload is a
+                                // refcounted slice of the pooled buf.
+                                let mut raw_for_error: Option<Bytes> = None;
+                                let parse_result: Result<RtpPacket> = if let Some(ctx) =
+                                    srtp_guard.as_mut()
+                                {
+                                    match ctx.unprotect(&buffer.as_slice()[0..size]) {
+                                        Ok(packet) => Ok(packet),
+                                        Err(_) => {
+                                            srtp_unprotect_failures += 1;
+                                            if srtp_diagnostics
+                                                && (srtp_unprotect_failures <= 5
+                                                    || srtp_unprotect_failures % 50 == 0)
+                                            {
+                                                info!(
                                                     "SRTP_DIAG unprotect_failed local={:?} source={} size={} failures={}",
                                                     local_rtp_addr,
                                                     addr,
                                                     size,
                                                     srtp_unprotect_failures
                                                 );
+                                            }
+                                            trace!("SRTP unprotect failed; dropping packet");
+                                            drop(srtp_guard);
+                                            continue;
                                         }
-                                        trace!("SRTP unprotect failed; dropping packet");
-                                        drop(srtp_guard);
-                                        continue;
                                     }
-                                }
-                            } else {
-                                // Zero-copy: hand the pooled buf to
-                                // Bytes via from_owner, then parse
-                                // from the Bytes. The payload is a
-                                // refcounted slice; no
-                                // copy_from_slice.
-                                let bytes = buffer.into_bytes(size);
-                                raw_for_error = Some(bytes.clone());
-                                RtpPacket::parse_from_bytes(bytes)
-                            };
-                            drop(srtp_guard);
-                            match parse_result {
-                                Ok(packet) => {
-                                    // Log packet reception at transport level (debug only)
-                                    debug!(
+                                } else {
+                                    // Zero-copy: hand the pooled buf to
+                                    // Bytes via from_owner, then parse
+                                    // from the Bytes. The payload is a
+                                    // refcounted slice; no
+                                    // copy_from_slice.
+                                    let bytes = buffer.into_bytes(size);
+                                    raw_for_error = Some(bytes.clone());
+                                    RtpPacket::parse_from_bytes(bytes)
+                                };
+                                drop(srtp_guard);
+                                match parse_result {
+                                    Ok(packet) => {
+                                        // Log packet reception at transport level (debug only)
+                                        debug!(
                                         "Transport received packet with SSRC={:08x}, seq={}, ts={}",
                                         packet.header.ssrc,
                                         packet.header.sequence_number,
                                         packet.header.timestamp
                                     );
 
-                                    // Debug: Log SSRC demultiplexing info
-                                    debug!("SSRC demultiplexing: Forwarding packet with SSRC={:08x}, seq={}, payload size={} bytes",
+                                        // Debug: Log SSRC demultiplexing info
+                                        debug!("SSRC demultiplexing: Forwarding packet with SSRC={:08x}, seq={}, payload size={} bytes",
                                            packet.header.ssrc, packet.header.sequence_number, packet.payload.len());
 
-                                    // RFC 4733: PT 101 (by default) is `telephone-event` —
-                                    // DTMF tones carried as RTP events rather than audio
-                                    // samples. Decode the 4-byte body inline and emit a
-                                    // typed `DtmfEvent` instead of a generic
-                                    // `MediaReceived`, so the media layer doesn't have
-                                    // to re-parse and doesn't try to feed the bytes to
-                                    // a PCMU/PCMA/Opus decoder. Oversized payloads are
-                                    // tolerated per RFC 4733's forward-compat clause
-                                    // (read only first 4 bytes).
-                                    if packet.header.payload_type == 101
-                                        && packet.payload.len() >= 4
-                                    {
-                                        let p = &packet.payload[..4];
-                                        let event = p[0];
-                                        let byte1 = p[1];
-                                        let end_of_event = (byte1 & 0b1000_0000) != 0;
-                                        let volume = byte1 & 0b0011_1111;
-                                        let duration = u16::from_be_bytes([p[2], p[3]]);
+                                        // RFC 4733: PT 101 (by default) is `telephone-event` —
+                                        // DTMF tones carried as RTP events rather than audio
+                                        // samples. Decode the 4-byte body inline and emit a
+                                        // typed `DtmfEvent` instead of a generic
+                                        // `MediaReceived`, so the media layer doesn't have
+                                        // to re-parse and doesn't try to feed the bytes to
+                                        // a PCMU/PCMA/Opus decoder. Oversized payloads are
+                                        // tolerated per RFC 4733's forward-compat clause
+                                        // (read only first 4 bytes).
+                                        if packet.header.payload_type == 101
+                                            && packet.payload.len() >= 4
+                                        {
+                                            let p = &packet.payload[..4];
+                                            let event = p[0];
+                                            let byte1 = p[1];
+                                            let end_of_event = (byte1 & 0b1000_0000) != 0;
+                                            let volume = byte1 & 0b0011_1111;
+                                            let duration = u16::from_be_bytes([p[2], p[3]]);
 
-                                        // RFC 4733 §2.5.1.3 retransmit dedup. The
-                                        // sender emits up to three identical E=1
-                                        // frames sharing `(ssrc, rtp_timestamp)`.
-                                        // Keyed by `(peer_addr, ssrc, ts)` so two
-                                        // simultaneous DTMF streams from
-                                        // different peers fire independently.
-                                        // Inline retain prunes stale entries on
-                                        // every fire — at one PT 101 frame per
-                                        // ~20 ms per active tone, this stays
-                                        // bounded.
-                                        if end_of_event {
-                                            let key =
-                                                (addr, packet.header.ssrc, packet.header.timestamp);
-                                            let now = Instant::now();
-                                            dtmf_seen.retain(|_, seen_at| {
-                                                now.duration_since(*seen_at) < DTMF_DEDUP_TTL
-                                            });
-                                            if dtmf_seen.insert(key, now).is_some() {
-                                                continue; // retransmit — suppress
+                                            // RFC 4733 §2.5.1.3 retransmit dedup. The
+                                            // sender emits up to three identical E=1
+                                            // frames sharing `(ssrc, rtp_timestamp)`.
+                                            // Keyed by `(peer_addr, ssrc, ts)` so two
+                                            // simultaneous DTMF streams from
+                                            // different peers fire independently.
+                                            // Inline retain prunes stale entries on
+                                            // every fire — at one PT 101 frame per
+                                            // ~20 ms per active tone, this stays
+                                            // bounded.
+                                            if end_of_event {
+                                                let key = (
+                                                    addr,
+                                                    packet.header.ssrc,
+                                                    packet.header.timestamp,
+                                                );
+                                                let now = Instant::now();
+                                                dtmf_seen.retain(|_, seen_at| {
+                                                    now.duration_since(*seen_at) < DTMF_DEDUP_TTL
+                                                });
+                                                if dtmf_seen.insert(key, now).is_some() {
+                                                    continue; // retransmit — suppress
+                                                }
                                             }
+
+                                            let dtmf = RtpEvent::DtmfEvent {
+                                                event,
+                                                end_of_event,
+                                                volume,
+                                                duration,
+                                                timestamp: packet.header.timestamp,
+                                                source: addr,
+                                                ssrc: packet.header.ssrc,
+                                            };
+                                            if event_tx.receiver_count() > 0 {
+                                                if let Err(e) = event_tx.send(dtmf) {
+                                                    warn!("Failed to send DTMF event: {}", e);
+                                                }
+                                            } else {
+                                                let _ = event_tx.send(dtmf);
+                                            }
+                                            continue;
                                         }
 
-                                        let dtmf = RtpEvent::DtmfEvent {
-                                            event,
-                                            end_of_event,
-                                            volume,
-                                            duration,
+                                        // Create RTP event
+                                        let event = RtpEvent::MediaReceived {
+                                            payload_type: packet.header.payload_type,
                                             timestamp: packet.header.timestamp,
+                                            marker: packet.header.marker,
+                                            payload: packet.payload.clone(), // Use the parsed payload
                                             source: addr,
-                                            ssrc: packet.header.ssrc,
+                                            ssrc: packet.header.ssrc, // Include the SSRC from the parsed packet
                                         };
+
+                                        // Only log errors if there are receivers
                                         if event_tx.receiver_count() > 0 {
-                                            if let Err(e) = event_tx.send(dtmf) {
-                                                warn!("Failed to send DTMF event: {}", e);
+                                            if let Err(e) = event_tx.send(event) {
+                                                warn!("Failed to send RTP event: {}", e);
                                             }
                                         } else {
-                                            let _ = event_tx.send(dtmf);
+                                            // Still send the event but ignore errors if no one is listening
+                                            let _ = event_tx.send(event);
                                         }
-                                        continue;
                                     }
-
-                                    // Create RTP event
-                                    let event = RtpEvent::MediaReceived {
-                                        payload_type: packet.header.payload_type,
-                                        timestamp: packet.header.timestamp,
-                                        marker: packet.header.marker,
-                                        payload: packet.payload.clone(), // Use the parsed payload
-                                        source: addr,
-                                        ssrc: packet.header.ssrc, // Include the SSRC from the parsed packet
-                                    };
-
-                                    // Only log errors if there are receivers
-                                    if event_tx.receiver_count() > 0 {
-                                        if let Err(e) = event_tx.send(event) {
-                                            warn!("Failed to send RTP event: {}", e);
-                                        }
-                                    } else {
-                                        // Still send the event but ignore errors if no one is listening
-                                        let _ = event_tx.send(event);
+                                    Err(e) => {
+                                        malformed_rtp_drop_count =
+                                            malformed_rtp_drop_count.saturating_add(1);
+                                        log_malformed_rtp_packet(
+                                            rtp_diagnostics,
+                                            malformed_rtp_drop_count,
+                                            local_rtp_addr,
+                                            addr,
+                                            size,
+                                            &e,
+                                            raw_for_error.as_deref(),
+                                        );
                                     }
-                                }
-                                Err(e) => {
-                                    malformed_rtp_drop_count =
-                                        malformed_rtp_drop_count.saturating_add(1);
-                                    log_malformed_rtp_packet(
-                                        rtp_diagnostics,
-                                        malformed_rtp_drop_count,
-                                        local_rtp_addr,
-                                        addr,
-                                        size,
-                                        &e,
-                                        raw_for_error.as_deref(),
-                                    );
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        error!("Error receiving packet: {}", e);
+                        Err(e) => {
+                            error!("Error receiving packet: {}", e);
 
-                        // Send error event
-                        let err_event =
-                            RtpEvent::Error(Error::Transport(format!("Socket error: {}", e)));
-                        if event_tx.receiver_count() > 0 {
-                            let _ = event_tx.send(err_event);
+                            // Send error event
+                            let err_event =
+                                RtpEvent::Error(Error::Transport(format!("Socket error: {}", e)));
+                            if event_tx.receiver_count() > 0 {
+                                let _ = event_tx.send(err_event);
+                            }
+
+                            // Short delay before retrying
+                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                         }
-
-                        // Short delay before retrying
-                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                     }
                 }
-            }
-        });
+            },
+        );
 
         // Store task handle
         let mut receiver_task = self.receiver_task.lock().await;
@@ -728,53 +768,54 @@ impl UdpRtpTransport {
             let event_tx = self.event_tx.clone();
             let active_state = self.active.clone();
 
-            let rtcp_receiver = tokio::spawn(async move {
-                let mut buffer = vec![0u8; DEFAULT_MAX_PACKET_SIZE];
+            let rtcp_receiver =
+                spawn_memory_tracked("rtp_core.udp_transport.rtcp_receiver_task", async move {
+                    let mut buffer = vec![0u8; DEFAULT_MAX_PACKET_SIZE];
 
-                loop {
-                    // Check if we should continue running
-                    if !active_state.load(Ordering::Acquire) {
-                        break;
-                    }
+                    loop {
+                        // Check if we should continue running
+                        if !active_state.load(Ordering::Acquire) {
+                            break;
+                        }
 
-                    // Receive packet
-                    match rtcp_socket.recv_from(&mut buffer).await {
-                        Ok((size, addr)) => {
-                            // Create RTCP event
-                            let rtcp_data = Bytes::copy_from_slice(&buffer[0..size]);
-                            let event = RtpEvent::RtcpReceived {
-                                data: rtcp_data,
-                                source: addr,
-                            };
+                        // Receive packet
+                        match rtcp_socket.recv_from(&mut buffer).await {
+                            Ok((size, addr)) => {
+                                // Create RTCP event
+                                let rtcp_data = Bytes::copy_from_slice(&buffer[0..size]);
+                                let event = RtpEvent::RtcpReceived {
+                                    data: rtcp_data,
+                                    source: addr,
+                                };
 
-                            // Only log errors if there are receivers
-                            if event_tx.receiver_count() > 0 {
-                                if let Err(e) = event_tx.send(event) {
-                                    warn!("Failed to send RTCP event: {}", e);
+                                // Only log errors if there are receivers
+                                if event_tx.receiver_count() > 0 {
+                                    if let Err(e) = event_tx.send(event) {
+                                        warn!("Failed to send RTCP event: {}", e);
+                                    }
+                                } else {
+                                    // Still send the event but ignore errors if no one is listening
+                                    let _ = event_tx.send(event);
                                 }
-                            } else {
-                                // Still send the event but ignore errors if no one is listening
-                                let _ = event_tx.send(event);
                             }
-                        }
-                        Err(e) => {
-                            error!("Error receiving RTCP packet: {}", e);
+                            Err(e) => {
+                                error!("Error receiving RTCP packet: {}", e);
 
-                            // Send error event
-                            let err_event = RtpEvent::Error(Error::Transport(format!(
-                                "RTCP socket error: {}",
-                                e
-                            )));
-                            if event_tx.receiver_count() > 0 {
-                                let _ = event_tx.send(err_event);
+                                // Send error event
+                                let err_event = RtpEvent::Error(Error::Transport(format!(
+                                    "RTCP socket error: {}",
+                                    e
+                                )));
+                                if event_tx.receiver_count() > 0 {
+                                    let _ = event_tx.send(err_event);
+                                }
+
+                                // Short delay before retrying
+                                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                             }
-
-                            // Short delay before retrying
-                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                         }
                     }
-                }
-            });
+                });
 
             // Store in the same place - we only care about tracking any active tasks
             *receiver_task = Some(rtcp_receiver);
@@ -817,6 +858,11 @@ impl UdpRtpTransport {
     /// Get the remote RTCP address
     pub async fn remote_rtcp_addr(&self) -> Option<SocketAddr> {
         self.remote_rtcp_addr.load().as_deref().copied()
+    }
+
+    #[cfg(feature = "memory-diagnostics")]
+    pub fn recv_pool_diagnostics(&self) -> super::recv_pool::RecvBufPoolDiagnosticCounts {
+        self.recv_pool.diagnostic_counts()
     }
 
     /// Subscribe to transport events

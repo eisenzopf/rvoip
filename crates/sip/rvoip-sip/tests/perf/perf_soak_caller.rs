@@ -13,18 +13,26 @@ use std::time::Duration;
 
 use serde_json::json;
 
+#[cfg(feature = "dhat")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 #[path = "support/mod.rs"]
 mod support;
 use support::soak::{
-    boot_caller, endpoint_metric, endpoint_retention_summary, perf_config, read_required_u16_env,
-    retention_drain_wait, round2, round4, rss_result_metrics, run_caller_load, RssGrowthGate,
-    SoakCounters, SoakLoadSettings, ALICE_PORT_ENV, BOB_PORT_ENV,
+    boot_caller, diagnostic_sample_path, endpoint_metric, endpoint_retention_summary,
+    in_process_resource_sampler_enabled, media_receive_diagnostics, memory_diagnostic_interval,
+    memory_diagnostic_summary, perf_config, read_required_u16_env, resource_sampling_diagnostics,
+    retention_drain_wait, round2, round4, rss_result_metrics, run_caller_load, DhatProfile,
+    MemoryDiagnosticSampler, RssGrowthGate, SoakCounters, SoakLoadSettings, ALICE_PORT_ENV,
+    BOB_PORT_ENV,
 };
-use support::{LatencyHistogram, LoadProfile, ResourceSampler, ScenarioReport};
+use support::{LatencyHistogram, LoadProfile, ResourceSampler, ResourceSummary, ScenarioReport};
 
 #[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn perf_soak_caller() {
+    let dhat_profile = DhatProfile::start("caller");
     let settings = SoakLoadSettings::from_env();
     let bob_port = read_required_u16_env(BOB_PORT_ENV);
     let alice_port = read_required_u16_env(ALICE_PORT_ENV);
@@ -47,18 +55,28 @@ async fn perf_soak_caller() {
     let first_minute_hist = Arc::new(LatencyHistogram::new("setup_latency_minute_1"));
     let last_minute_hist = Arc::new(LatencyHistogram::new("setup_latency_last_minute"));
     let counters = Arc::new(SoakCounters::default());
-    let sampler = ResourceSampler::start(Duration::from_secs(5));
+    let in_process_resource_sampling = in_process_resource_sampler_enabled();
+    let sampler = if in_process_resource_sampling {
+        Some(ResourceSampler::start_with_output(
+            Duration::from_secs(5),
+            diagnostic_sample_path("caller", "resource"),
+        ))
+    } else {
+        None
+    };
     let retention_sampler = support::soak::EndpointRetentionSampler::start(
         "caller",
         Arc::clone(&caller),
         Duration::from_secs(5),
     );
+    let memory_sampler =
+        MemoryDiagnosticSampler::start("caller", &settings, memory_diagnostic_interval());
 
     run_caller_load(
         Arc::clone(&caller),
         from,
         target_uri,
-        settings,
+        settings.clone(),
         Arc::clone(&counters),
         Arc::clone(&setup_hist),
         Arc::clone(&first_minute_hist),
@@ -67,18 +85,27 @@ async fn perf_soak_caller() {
     .await;
 
     tokio::time::sleep(retention_drain_wait).await;
-    let retention_samples = retention_sampler.stop().await;
-    let final_retention = retention_samples
-        .last()
-        .cloned()
+    let retention_series = retention_sampler.stop().await;
+    let memory_series = match memory_sampler {
+        Some(sampler) => Some(sampler.stop().await),
+        None => None,
+    };
+    let final_retention = retention_series
+        .final_sample
+        .clone()
         .unwrap_or_else(|| json!({}));
-    let retained_after_drain = final_retention["retained_total"].as_u64().unwrap_or(0);
-    let resources = sampler.stop().await;
+    let retained_after_drain = retention_series.final_retained_objects;
+    let mut resources = match sampler {
+        Some(sampler) => sampler.stop().await,
+        None => ResourceSummary::empty(),
+    };
     let rss = rss_result_metrics(
         &resources,
         settings.duration_secs as f64,
         retention_drain_wait.as_secs_f64(),
     );
+    resources.samples.clear();
+    let dhat_diagnostics = dhat_profile.finish();
 
     let fm = first_minute_hist.snapshot();
     let lm = last_minute_hist.snapshot();
@@ -117,9 +144,14 @@ async fn perf_soak_caller() {
     };
     report
         .result("process_role", "caller")
+        .result("in_process_resource_sampling", in_process_resource_sampling)
+        .result("memory_diagnostics_enabled", memory_series.is_some())
         .result("duration_secs", settings.duration_secs)
         .result("soak_cps", settings.soak_cps)
         .result("active_calls_target", settings.active_calls)
+        .result("active_calls_initial", settings.initial_active_calls())
+        .result("active_calls_final", settings.final_active_calls())
+        .result_block("active_call_phases", settings.active_phases_json())
         .result("media_calls_held", settings.active_calls)
         .result("active_call_min_hold_secs", settings.min_hold_secs)
         .result("active_call_max_hold_secs", settings.max_hold_secs)
@@ -184,15 +216,12 @@ async fn perf_soak_caller() {
             "lifecycle_terminal_entries_after_drain",
             endpoint_metric(&final_retention["caller"], "/lifecycle/terminal_entries"),
         )
-        .result_block(
-            "retention",
-            endpoint_retention_summary(&retention_samples, retained_after_drain, "caller"),
-        )
+        .result_block("retention", endpoint_retention_summary(&retention_series))
         .diagnostic_block(
             "retention_samples",
             json!({
-                "sample_count": retention_samples.len(),
-                "samples": retention_samples,
+                "sample_count": retention_series.sample_count,
+                "samples_path": retention_series.samples_path.display().to_string(),
                 "final_retained_objects": retained_after_drain,
             }),
         )
@@ -204,6 +233,16 @@ async fn perf_soak_caller() {
                 "gate_growth_mb_per_hr": round2(rss.gate_growth_mb_per_hr),
             }),
         )
+        .diagnostic_block(
+            "memory_diagnostics",
+            memory_diagnostic_summary(memory_series.as_ref()),
+        )
+        .diagnostic_block(
+            "resource_sampling",
+            resource_sampling_diagnostics("caller", in_process_resource_sampling),
+        )
+        .diagnostic_block("media_receive", media_receive_diagnostics())
+        .diagnostic_block("dhat", dhat_diagnostics)
         .result(
             "errors",
             json!({

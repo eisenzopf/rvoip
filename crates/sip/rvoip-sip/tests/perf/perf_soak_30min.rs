@@ -140,6 +140,9 @@ fn perf_config(name: &str, port: u16) -> Config {
     {
         config = config.with_sip_transaction_command_channel_capacity(capacity);
     }
+    if let Some(seconds) = read_nonnegative_u64_env("RVOIP_PERF_SETUP_TEARDOWN_TIMEOUT_SECS") {
+        config = config.with_setup_teardown_timeout_secs(seconds);
+    }
     config
 }
 
@@ -240,7 +243,15 @@ async fn perf_soak_30min() {
         active_tasks.spawn(async move {
             let mut cycle = 0u64;
             loop {
-                if std::time::Instant::now() >= active_deadline {
+                let now = std::time::Instant::now();
+                if now >= active_deadline {
+                    break;
+                }
+                let remaining_before_stop = active_deadline.saturating_duration_since(now);
+                if remaining_before_stop <= setup_teardown_budget(call_timeout) {
+                    if !remaining_before_stop.is_zero() {
+                        tokio::time::sleep(remaining_before_stop).await;
+                    }
                     break;
                 }
 
@@ -264,6 +275,9 @@ async fn perf_soak_30min() {
                 if handle.wait_for_answered(Some(call_timeout)).await.is_err() {
                     counters.failed.fetch_add(1, Ordering::Relaxed);
                     counters.media_setup_failed.fetch_add(1, Ordering::Relaxed);
+                    if handle.hangup_and_wait(Some(call_timeout)).await.is_err() {
+                        counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                    }
                     continue;
                 }
 
@@ -353,6 +367,9 @@ async fn perf_soak_30min() {
                 let handle = alice.session(&call_id);
                 if handle.wait_for_answered(Some(call_timeout)).await.is_err() {
                     counters.failed.fetch_add(1, Ordering::Relaxed);
+                    if handle.hangup_and_wait(Some(call_timeout)).await.is_err() {
+                        counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                    }
                     return;
                 }
                 let ns = t_send.elapsed().as_nanos() as u64;
@@ -391,7 +408,7 @@ async fn perf_soak_30min() {
     }
 
     // Drain churn calls.
-    let drain_result = tokio::time::timeout(call_timeout + Duration::from_secs(30), async {
+    let drain_result = tokio::time::timeout(drain_join_timeout(call_timeout), async {
         while let Some(result) = churn_tasks.join_next().await {
             let _ = result;
         }
@@ -406,13 +423,14 @@ async fn perf_soak_30min() {
 
     // Stop active cycling calls. Each slot clamps its current hold to the
     // active deadline, then hangs up the current call and exits.
-    let active_drain_result = tokio::time::timeout(call_timeout + Duration::from_secs(30), async {
+    let active_drain_result = tokio::time::timeout(drain_join_timeout(call_timeout), async {
         while let Some(result) = active_tasks.join_next().await {
             let _ = result;
         }
     })
     .await;
     if active_drain_result.is_err() {
+        force_teardown_remaining_sessions(Arc::clone(&alice), call_timeout, &counters).await;
         active_tasks.abort_all();
         while let Some(result) = active_tasks.join_next().await {
             let _ = result;
@@ -690,6 +708,7 @@ async fn perf_session_churn_leak() {
                     let _ = handle.hangup_and_wait(Some(call_timeout)).await;
                     succeeded += 1;
                 } else {
+                    let _ = handle.hangup_and_wait(Some(call_timeout)).await;
                     failed += 1;
                 }
             }
@@ -862,6 +881,18 @@ fn read_nonnegative_f64_env(name: &str) -> Option<f64> {
         "{name} must be a finite number >= 0, got {raw:?}"
     );
     Some(value)
+}
+
+fn read_nonnegative_u64_env(name: &str) -> Option<u64> {
+    let raw = match std::env::var(name) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return None,
+        Err(err) => panic!("{name} could not be read: {err}"),
+    };
+    Some(
+        raw.parse()
+            .unwrap_or_else(|_| panic!("{name} must be a non-negative integer, got {raw:?}")),
+    )
 }
 
 fn read_positive_usize_env(name: &str) -> Option<usize> {
@@ -1120,6 +1151,38 @@ fn cycling_hold_duration(slot: u64, cycle: u64, min_secs: u64, max_secs: u64) ->
             % span
     };
     Duration::from_secs(min_secs + offset)
+}
+
+fn setup_teardown_budget(call_timeout: Duration) -> Duration {
+    call_timeout + call_timeout + Duration::from_secs(5)
+}
+
+fn drain_join_timeout(call_timeout: Duration) -> Duration {
+    call_timeout + call_timeout + Duration::from_secs(60)
+}
+
+async fn force_teardown_remaining_sessions(
+    alice: Arc<UnifiedCoordinator>,
+    call_timeout: Duration,
+    counters: &Arc<SoakCounters>,
+) {
+    let mut tasks = JoinSet::new();
+    for session in alice.list_sessions().await {
+        if session.state.is_final() {
+            continue;
+        }
+        let handle = alice.session(&session.session_id);
+        tasks.spawn(async move { handle.hangup_and_wait(Some(call_timeout)).await.is_ok() });
+    }
+
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(true) => {}
+            _ => {
+                counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 // Global anchors so the bucketing classifier doesn't need plumbing.

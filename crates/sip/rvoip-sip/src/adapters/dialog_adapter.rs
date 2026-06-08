@@ -2187,7 +2187,8 @@ impl DialogAdapter {
             self.dialog_api
                 .dialog_manager()
                 .core()
-                .cleanup_dialog_storage(&dialog_id.1);
+                .cleanup_dialog_storage_and_transactions(&dialog_id.1)
+                .await;
         } else {
             self.cleanup_missing_total.fetch_add(1, Ordering::Relaxed);
         }

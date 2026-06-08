@@ -37,6 +37,8 @@ pub struct ScenarioReport {
     rss_tail_growth_mb_per_min: Option<f64>,
     rss_tail_window_secs: Option<f64>,
     avg_cpu_pct: Option<f64>,
+    rss_sample_count: usize,
+    rss_samples_path: Option<PathBuf>,
     rss_samples: Vec<ResourceSample>,
     started: std::time::Instant,
 }
@@ -58,6 +60,8 @@ impl ScenarioReport {
             rss_tail_growth_mb_per_min: None,
             rss_tail_window_secs: None,
             avg_cpu_pct: None,
+            rss_sample_count: 0,
+            rss_samples_path: None,
             rss_samples: Vec::new(),
             started: std::time::Instant::now(),
         }
@@ -73,13 +77,17 @@ impl ScenarioReport {
     /// call. Scenarios that use [`super::ResourceSampler`] hand the
     /// result of `sampler.stop().await` here.
     pub fn with_resources(&mut self, summary: ResourceSummary) -> &mut Self {
-        self.baseline_rss_mb = Some(summary.baseline_rss_mb);
-        self.peak_rss_mb = Some(summary.peak_rss_mb);
-        self.rss_growth_mb_per_min = Some(summary.rss_growth_mb_per_min);
-        self.rss_tail_growth_mb_per_min = Some(summary.rss_tail_growth_mb_per_min);
-        self.rss_tail_window_secs = Some(summary.rss_tail_window_secs);
-        self.avg_cpu_pct = Some(summary.avg_cpu_pct);
+        self.rss_sample_count = summary.sample_count;
+        self.rss_samples_path = summary.samples_path;
         self.rss_samples = summary.samples;
+        if self.rss_sample_count > 0 {
+            self.baseline_rss_mb = Some(summary.baseline_rss_mb);
+            self.peak_rss_mb = Some(summary.peak_rss_mb);
+            self.rss_growth_mb_per_min = Some(summary.rss_growth_mb_per_min);
+            self.rss_tail_growth_mb_per_min = Some(summary.rss_tail_growth_mb_per_min);
+            self.rss_tail_window_secs = Some(summary.rss_tail_window_secs);
+            self.avg_cpu_pct = Some(summary.avg_cpu_pct);
+        }
         self
     }
 
@@ -142,6 +150,11 @@ impl ScenarioReport {
         // (rss_growth_mb_per_min) + the raw time-series so a reader can
         // distinguish "120 MB peak, stable" from "120 MB peak after 60s
         // but growing 1 MB/min" — the latter is a leak.
+        let rss_samples = if embed_resource_samples() {
+            serde_json::to_value(&self.rss_samples).expect("serialize rss samples")
+        } else {
+            Value::Array(Vec::new())
+        };
         let resources = json!({
             "baseline_rss_mb": self.baseline_rss_mb,
             "peak_rss_mb": self.peak_rss_mb,
@@ -149,7 +162,10 @@ impl ScenarioReport {
             "rss_tail_growth_mb_per_min": self.rss_tail_growth_mb_per_min,
             "rss_tail_window_secs": self.rss_tail_window_secs,
             "avg_cpu_pct": self.avg_cpu_pct,
-            "rss_samples_mb": self.rss_samples,
+            "rss_sample_count": self.rss_sample_count,
+            "rss_samples_path": self.rss_samples_path.as_ref().map(|path| path.display().to_string()),
+            "rss_samples_embedded": embed_resource_samples(),
+            "rss_samples_mb": rss_samples,
         });
 
         let value = json!({
@@ -288,4 +304,11 @@ fn target_dir() -> PathBuf {
         .and_then(|p| p.parent()) // workspace root
         .map(|p| p.join("target"))
         .unwrap_or_else(|| PathBuf::from("target"))
+}
+
+fn embed_resource_samples() -> bool {
+    matches!(
+        std::env::var("RVOIP_PERF_EMBED_RESOURCE_SAMPLES").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
 }

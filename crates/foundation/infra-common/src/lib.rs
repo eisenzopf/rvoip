@@ -24,6 +24,8 @@ pub mod errors;
 pub mod events;
 pub mod lifecycle;
 pub mod logging;
+#[cfg(feature = "memory-diagnostics")]
+pub mod memory_diagnostics;
 pub mod planes;
 
 pub use config::provider::ConfigProvider;

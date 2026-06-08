@@ -8,13 +8,45 @@ use tracing::{debug, trace, warn};
 use crate::diagnostics;
 use crate::transaction::client::TransactionExt as ClientTransactionExt;
 use crate::transaction::error::{Error, Result};
+use crate::transaction::runner::HasLifecycle;
 use crate::transaction::server::ServerTransaction;
 use crate::transaction::server::TransactionExt as ServerTransactionExt;
-use crate::transaction::{TransactionEvent, TransactionKey, TransactionState};
+use crate::transaction::{
+    InternalTransactionCommand, TransactionEvent, TransactionKey, TransactionLifecycle,
+    TransactionState,
+};
 
 use super::TransactionManager;
 
 impl TransactionManager {
+    pub(super) fn request_transaction_runner_stop(&self, tx_id: &TransactionKey) {
+        if let Some(tx) = self
+            .client_transactions
+            .get(tx_id)
+            .map(|entry| entry.value().clone())
+        {
+            let data = tx.data();
+            if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
+                data.cmd_tx.try_send(InternalTransactionCommand::Terminate)
+            {
+                data.set_lifecycle(TransactionLifecycle::Destroyed);
+            }
+        }
+
+        if let Some(tx) = self
+            .server_transactions
+            .get(tx_id)
+            .map(|entry| entry.value().clone())
+        {
+            let data = tx.data();
+            if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
+                data.cmd_tx.try_send(InternalTransactionCommand::Terminate)
+            {
+                data.set_lifecycle(TransactionLifecycle::Destroyed);
+            }
+        }
+    }
+
     /// Retrieves the original request from a transaction.
     ///
     /// In SIP protocol, each transaction begins with a request. According to RFC 3261, the transaction
@@ -465,6 +497,8 @@ impl TransactionManager {
     pub async fn terminate_transaction(&self, tx_id: &TransactionKey) -> Result<()> {
         let mut terminated = false;
 
+        self.request_transaction_runner_stop(tx_id);
+
         if self.client_transactions.remove(tx_id).is_some() {
             terminated = true;
         }
@@ -682,6 +716,7 @@ impl TransactionManager {
                 .map(|entry| entry.value().state() == TransactionState::Terminated)
                 .unwrap_or(false);
             if remove_client {
+                self.request_transaction_runner_stop(&key);
                 debug!(%key, "Removing terminated client transaction");
                 self.client_transactions.remove(&key);
                 removed = true;
@@ -693,6 +728,7 @@ impl TransactionManager {
                 .map(|entry| entry.value().state() == TransactionState::Terminated)
                 .unwrap_or(false);
             if remove_server {
+                self.request_transaction_runner_stop(&key);
                 debug!(%key, "Removing terminated server transaction");
                 self.server_transactions.remove(&key);
                 self.retire_server_invite_dialog_index_for(&key);

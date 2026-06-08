@@ -1614,8 +1614,17 @@ impl DialogManager {
                     "Transaction {} terminated for dialog {}",
                     transaction_id, dialog_id
                 );
-                // Clean up transaction association
-                self.unlink_transaction_from_dialog_indexed(transaction_id);
+                // Client INVITE transactions can emit StateChanged(Terminated)
+                // before the final failure response has been routed up to the
+                // dialog manager. Keep that mapping until the explicit
+                // TransactionTerminated cleanup so 487-after-CANCEL reaches
+                // session-core as CallCancelled instead of falling through to
+                // the setup/teardown watchdog.
+                if transaction_id.method() != &rvoip_sip_core::Method::Invite
+                    || transaction_id.is_server()
+                {
+                    self.unlink_transaction_from_dialog_indexed(transaction_id);
+                }
             }
 
             _ => {
@@ -1842,13 +1851,23 @@ impl DialogManager {
         transaction_id: &TransactionKey,
         response: Response,
     ) -> DialogResult<()> {
-        warn!(
-            "Transaction {} received failure response {} {} for dialog {}",
-            transaction_id,
-            response.status_code(),
-            response.reason_phrase(),
-            dialog_id
-        );
+        if response.status_code() == 487 {
+            info!(
+                "Transaction {} received CANCEL terminal response {} {} for dialog {}",
+                transaction_id,
+                response.status_code(),
+                response.reason_phrase(),
+                dialog_id
+            );
+        } else {
+            warn!(
+                "Transaction {} received failure response {} {} for dialog {}",
+                transaction_id,
+                response.status_code(),
+                response.reason_phrase(),
+                dialog_id
+            );
+        }
 
         // Handle specific failure cases and emit appropriate events
         match response.status_code() {
@@ -2357,6 +2376,10 @@ impl DialogManager {
             invite_tx_id,
             extra_headers.len()
         );
+        let pre_cancel_dialog_id = self
+            .transaction_to_dialog
+            .get(invite_tx_id)
+            .map(|entry| entry.value().clone());
 
         // Cancel the transaction using transaction-core
         let cancel_tx_id = self
@@ -2367,8 +2390,15 @@ impl DialogManager {
                 message: format!("Failed to cancel INVITE transaction: {}", e),
             })?;
 
-        self.terminate_dialog_for_tx(invite_tx_id, "INVITE transaction cancelled")
-            .await;
+        if let Some(dialog_id) = pre_cancel_dialog_id {
+            if let Ok(mut dialog) = self.get_dialog_mut(&dialog_id) {
+                dialog.terminate();
+                debug!("Terminated dialog {} after sending CANCEL", dialog_id);
+            }
+        } else {
+            self.terminate_dialog_for_tx(invite_tx_id, "INVITE transaction cancelled")
+                .await;
+        }
 
         debug!(
             "Successfully cancelled INVITE transaction {}, created CANCEL transaction {}",

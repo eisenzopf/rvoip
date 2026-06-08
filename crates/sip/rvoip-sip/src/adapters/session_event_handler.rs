@@ -1111,6 +1111,7 @@ impl SessionCrossCrateEventHandler {
         let registry = self.registry.clone();
         let dialog_adapter = self.dialog_adapter.clone();
         let media_adapter = self.media_adapter.clone();
+        let coordinator = self.coordinator.clone();
         tokio::spawn(async move {
             let release_guard =
                 cleanup_diag::stage_guard(CleanupStage::TerminalRelease, &session_id.0);
@@ -1133,6 +1134,9 @@ impl SessionCrossCrateEventHandler {
                     session_id,
                     e
                 );
+            }
+            if let Some(coordinator) = coordinator.get().and_then(|weak| weak.upgrade()) {
+                coordinator.helpers.cleanup_session(&session_id).await;
             }
             if let Err(e) = store.remove_session(&session_id).await {
                 // Not-found is expected if another terminal path got there
@@ -1769,11 +1773,31 @@ impl SessionCrossCrateEventHandler {
             .await
         {
             error!("Failed to process incoming call event: {}", e);
+            if let Err(cleanup_err) = self.dialog_adapter.cleanup_session(&session_id).await {
+                warn!(
+                    "dialog cleanup for failed incoming call setup {}: {}",
+                    session_id, cleanup_err
+                );
+            }
+            if let Err(cleanup_err) = self.media_adapter.cleanup_session(&session_id).await {
+                warn!(
+                    "media cleanup for failed incoming call setup {}: {}",
+                    session_id, cleanup_err
+                );
+            }
+            if let Some(coordinator) = self.coordinator.get().and_then(|weak| weak.upgrade()) {
+                coordinator.helpers.cleanup_session(&session_id).await;
+            }
             let _ = self.state_machine.store.remove_session(&session_id).await;
             self.registry.remove_session(&session_id).await;
         } else {
             if self.fast_auto_accept_incoming_calls {
                 debug!("Fast auto-accepted inbound call {}", session_id);
+            }
+            if let Some(coordinator) = self.coordinator.get().and_then(|w| w.upgrade()) {
+                coordinator
+                    .schedule_inbound_setup_timeout(&session_id)
+                    .await;
             }
 
             // SIP_API_DESIGN_2 Phase A: re-parse the inbound INVITE bytes
@@ -2244,9 +2268,29 @@ impl SessionCrossCrateEventHandler {
         {
             error!("Failed to process incoming call event: {}", e);
             // Clean up on failure
+            if let Err(cleanup_err) = self.dialog_adapter.cleanup_session(&session_id).await {
+                warn!(
+                    "dialog cleanup for failed incoming call setup {}: {}",
+                    session_id, cleanup_err
+                );
+            }
+            if let Err(cleanup_err) = self.media_adapter.cleanup_session(&session_id).await {
+                warn!(
+                    "media cleanup for failed incoming call setup {}: {}",
+                    session_id, cleanup_err
+                );
+            }
+            if let Some(coordinator) = self.coordinator.get().and_then(|weak| weak.upgrade()) {
+                coordinator.helpers.cleanup_session(&session_id).await;
+            }
             let _ = self.state_machine.store.remove_session(&session_id).await;
             self.registry.remove_session(&session_id).await;
         } else {
+            if let Some(coordinator) = self.coordinator.get().and_then(|w| w.upgrade()) {
+                coordinator
+                    .schedule_inbound_setup_timeout(&session_id)
+                    .await;
+            }
             // Publish IncomingCall event to the global coordinator's "session_to_app" channel.
             // All active subscribers (StreamPeer, CallbackPeer, etc.) will receive it.
             debug!("🔍 [DEBUG] Publishing IncomingCall event to global coordinator");
