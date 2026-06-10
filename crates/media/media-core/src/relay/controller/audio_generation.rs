@@ -4,14 +4,20 @@
 //! audio transmission management for RTP sessions with support for multiple audio sources.
 
 use bytes::Bytes;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{Mutex, RwLock};
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tokio::time::interval;
+use tokio::time::{interval_at, Instant as TokioInstant, MissedTickBehavior};
 use tracing::{debug, error, info, warn};
 
+use crate::diagnostics;
 use rvoip_rtp_core::{RtpSendHandle, RtpSession};
+
+const AUDIO_TX_PHASE_MULTIPLIER: u64 = 0x9E37_79B9_7F4A_7C15;
+
+static AUDIO_TX_START_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(feature = "memory-diagnostics")]
 fn record_transient_allocation(kind: &'static str, bytes: usize) {
@@ -232,10 +238,8 @@ pub struct AudioTransmitter {
     audio_generator: Arc<Mutex<AudioGenerator>>,
     /// Transmission configuration
     config: AudioTransmitterConfig,
-    /// Current RTP timestamp
-    timestamp: Arc<Mutex<u32>>,
     /// Whether transmission is active
-    is_active: Arc<RwLock<bool>>,
+    is_active: Arc<AtomicBool>,
     /// Background transmission task.
     tx_task: Option<JoinHandle<()>>,
 }
@@ -284,8 +288,7 @@ impl AudioTransmitter {
             send_handle,
             audio_generator: Arc::new(Mutex::new(audio_generator)),
             config,
-            timestamp: Arc::new(Mutex::new(0)),
-            is_active: Arc::new(RwLock::new(false)),
+            is_active: Arc::new(AtomicBool::new(false)),
             tx_task: None,
         }
     }
@@ -298,7 +301,7 @@ impl AudioTransmitter {
         }
 
         if matches!(self.config.source, AudioSource::PassThrough) {
-            *self.is_active.write().await = false;
+            self.is_active.store(false, Ordering::Release);
             debug!("AudioTransmitter: pass-through source has no background TX task");
             return;
         }
@@ -311,7 +314,7 @@ impl AudioTransmitter {
             self.send_handle = session.send_handle();
         }
 
-        *self.is_active.write().await = true;
+        self.is_active.store(true, Ordering::Release);
 
         let source_desc = match &self.config.source {
             AudioSource::Tone {
@@ -340,15 +343,39 @@ impl AudioTransmitter {
         let send_handle = self.send_handle.clone();
         let is_active = self.is_active.clone();
         let audio_generator = self.audio_generator.clone();
-        let timestamp = self.timestamp.clone();
-        let mut interval_timer = interval(self.config.interval);
+        let initial_delay = next_audio_tx_start_delay(self.config.interval);
+        diagnostics::record_audio_tx_task_started(initial_delay);
+        let collect_diagnostics = diagnostics::enabled();
+        let mut interval_timer =
+            interval_at(TokioInstant::now() + initial_delay, self.config.interval);
+        interval_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let samples_per_packet = self.config.samples_per_packet;
 
         self.tx_task = Some(super::spawn_memory_tracked(
             "media_core.audio_transmitter_task",
             async move {
-                while *is_active.read().await {
+                let mut last_tick_at: Option<TokioInstant> = None;
+                let mut tick_gap_count = 0_u64;
+                let mut tick_gap_total = Duration::ZERO;
+                let mut tick_gap_max = Duration::ZERO;
+                let mut send_count = 0_u64;
+                let mut send_failures = 0_u64;
+                let mut send_total = Duration::ZERO;
+                let mut send_max = Duration::ZERO;
+                let mut next_timestamp = 0_u32;
+
+                while is_active.load(Ordering::Acquire) {
                     interval_timer.tick().await;
+                    if collect_diagnostics {
+                        let tick_at = TokioInstant::now();
+                        if let Some(previous) = last_tick_at {
+                            let gap = tick_at.duration_since(previous);
+                            tick_gap_count = tick_gap_count.saturating_add(1);
+                            tick_gap_total = tick_gap_total.saturating_add(gap);
+                            tick_gap_max = tick_gap_max.max(gap);
+                        }
+                        last_tick_at = Some(tick_at);
+                    }
 
                     // Generate audio samples
                     let audio_samples = {
@@ -363,15 +390,13 @@ impl AudioTransmitter {
                     // Send RTP packet (only if not in pass-through mode)
                     if !matches!(audio_samples.as_slice(), [0x7F, ..] if audio_samples.iter().all(|&x| x == 0x7F))
                     {
-                        let current_timestamp = {
-                            let mut ts = timestamp.lock().await;
-                            let current = *ts;
-                            *ts = ts.wrapping_add(samples_per_packet as u32);
-                            current
-                        };
+                        let current_timestamp = next_timestamp;
+                        next_timestamp =
+                            next_timestamp.wrapping_add(samples_per_packet as u32);
 
                         // Fast path: send through the lock-free handle —
                         // no `session.lock().await` per frame.
+                        let send_started = collect_diagnostics.then(Instant::now);
                         let send_result = if let Some(handle) = &send_handle {
                             handle
                                 .send_packet(current_timestamp, Bytes::from(audio_samples), false)
@@ -385,10 +410,19 @@ impl AudioTransmitter {
                                 .send_packet(current_timestamp, Bytes::from(audio_samples), false)
                                 .await
                         };
+                        if let Some(send_started) = send_started {
+                            let send_elapsed = send_started.elapsed();
+                            send_count = send_count.saturating_add(1);
+                            if send_result.is_err() {
+                                send_failures = send_failures.saturating_add(1);
+                            }
+                            send_total = send_total.saturating_add(send_elapsed);
+                            send_max = send_max.max(send_elapsed);
+                        }
 
                         if let Err(e) = send_result {
                             error!("Failed to send RTP audio packet: {}", e);
-                            *is_active.write().await = false;
+                            is_active.store(false, Ordering::Release);
                             break;
                         } else {
                             debug!(
@@ -399,6 +433,20 @@ impl AudioTransmitter {
                     }
                 }
 
+                if collect_diagnostics {
+                    diagnostics::record_audio_tx_tick_gap_batch(
+                        tick_gap_count,
+                        tick_gap_total,
+                        tick_gap_max,
+                    );
+                    diagnostics::record_audio_tx_send_batch(
+                        send_count,
+                        send_failures,
+                        send_total,
+                        send_max,
+                    );
+                }
+
                 info!("🛑 Stopped audio transmission");
             },
         ));
@@ -406,7 +454,7 @@ impl AudioTransmitter {
 
     /// Stop audio transmission
     pub async fn stop(mut self) {
-        *self.is_active.write().await = false;
+        self.is_active.store(false, Ordering::Release);
         if let Some(task) = self.tx_task.take() {
             let mut task = task;
             tokio::select! {
@@ -422,7 +470,7 @@ impl AudioTransmitter {
 
     /// Check if transmission is active
     pub async fn is_active(&self) -> bool {
-        *self.is_active.read().await
+        self.is_active.load(Ordering::Acquire)
     }
 
     /// Update the audio source during transmission
@@ -454,10 +502,72 @@ impl AudioTransmitter {
     }
 }
 
+fn next_audio_tx_start_delay(interval: Duration) -> Duration {
+    let interval_nanos = interval.as_nanos().min(u128::from(u64::MAX)) as u64;
+    if interval_nanos == 0 {
+        return Duration::ZERO;
+    }
+
+    let sequence = AUDIO_TX_START_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let offset = sequence.wrapping_mul(AUDIO_TX_PHASE_MULTIPLIER) % interval_nanos;
+    Duration::from_nanos(offset)
+}
+
+#[cfg(test)]
+fn audio_tx_start_delay_for_sequence(sequence: u64, interval: Duration) -> Duration {
+    let interval_nanos = interval.as_nanos().min(u128::from(u64::MAX)) as u64;
+    if interval_nanos == 0 {
+        return Duration::ZERO;
+    }
+    Duration::from_nanos(sequence.wrapping_mul(AUDIO_TX_PHASE_MULTIPLIER) % interval_nanos)
+}
+
 impl Drop for AudioTransmitter {
     fn drop(&mut self) {
         if let Some(task) = self.tx_task.take() {
             task.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{audio_tx_start_delay_for_sequence, AudioGenerator, AudioSource};
+    use std::time::Duration;
+
+    #[test]
+    fn generate_pcmu_samples_returns_requested_length() {
+        let mut generator = AudioGenerator::new(8000, 440.0, 0.5);
+        let output = generator.generate_pcmu_samples(160);
+
+        assert_eq!(output.len(), 160);
+    }
+
+    #[test]
+    fn generate_custom_samples_repeats() {
+        let mut generator = AudioGenerator::new_with_source(
+            8000,
+            AudioSource::CustomSamples {
+                samples: vec![1, 2, 3],
+                repeat: true,
+            },
+        );
+        let output = generator.generate_pcmu_samples(5);
+
+        assert_eq!(output, vec![1, 2, 3, 1, 2]);
+    }
+
+    #[test]
+    fn audio_tx_start_delay_spreads_sequential_transmitters() {
+        let interval = Duration::from_millis(20);
+        let first = audio_tx_start_delay_for_sequence(0, interval);
+        let second = audio_tx_start_delay_for_sequence(1, interval);
+        let third = audio_tx_start_delay_for_sequence(2, interval);
+
+        assert_eq!(first, Duration::ZERO);
+        assert!(second < interval);
+        assert!(third < interval);
+        assert_ne!(second, first);
+        assert_ne!(third, second);
     }
 }

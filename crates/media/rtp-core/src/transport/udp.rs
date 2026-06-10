@@ -4,13 +4,13 @@
 
 use std::fmt::Write as _;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, Mutex};
@@ -27,7 +27,6 @@ use tracing::{debug, error, info, trace, warn};
 /// 500 ms covers the worst-case spacing between the three retransmits
 /// while keeping the seen-set bounded under sustained DTMF traffic.
 const DTMF_DEDUP_TTL: Duration = Duration::from_millis(500);
-const RTP_TRANSPORT_EVENT_CHANNEL_CAPACITY: usize = 32;
 const RTP_DROP_LOG_INITIAL: u64 = 5;
 const RTP_DROP_LOG_EVERY: u64 = 1_000;
 const RTP_MALFORMED_WARN_EVERY: u64 = 10_000;
@@ -224,7 +223,6 @@ fn log_malformed_rtp_packet(
 }
 
 use super::allocator::{GlobalPortAllocator, PairingStrategy};
-use super::recv_pool::RecvBufPool;
 use super::validation::PlatformSocketStrategy;
 use super::{RtpTransport, RtpTransportConfig};
 use crate::error::Error;
@@ -232,7 +230,6 @@ use crate::packet::rtcp::RtcpPacket;
 use crate::packet::RtpPacket;
 use crate::traits::RtpEvent;
 use crate::Result;
-use crate::DEFAULT_MAX_PACKET_SIZE;
 
 /// UDP transport for RTP/RTCP
 ///
@@ -262,6 +259,11 @@ pub struct UdpRtpTransport {
     /// can update the cached symmetric-RTP target with a single atomic
     /// store instead of an awaited `Mutex` guard.
     remote_rtp_addr: Arc<ArcSwapOption<SocketAddr>>,
+
+    /// Monotonic version for remote RTP address changes. Send tasks can
+    /// cheaply detect explicit remote-target updates without reloading the
+    /// `ArcSwapOption` on every packet.
+    remote_rtp_addr_version: Arc<AtomicU64>,
 
     /// Remote RTCP address — same lock-free swap discipline as
     /// [`Self::remote_rtp_addr`].
@@ -304,22 +306,6 @@ pub struct UdpRtpTransport {
     /// peers must each fire independently.
     dtmf_seen: Arc<DashMap<(SocketAddr, u32, u32), Instant>>,
 
-    /// Phase C23c: lock-free pool of recv buffers used by the UDP
-    /// receive loop. Each iteration pulls a buffer (`RecvBufPool::get`),
-    /// fills it via `recv_from`, then either:
-    ///   * hands it to `Bytes::from_owner` (`PooledRecvBuf::into_bytes`)
-    ///     so downstream `RtpPacket::payload` is a zero-copy refcounted
-    ///     slice — when every clone of that `Bytes` drops, the buf
-    ///     returns to the pool; or
-    ///   * lets the RAII handle drop at end-of-iteration, returning the
-    ///     buf to the pool immediately (used on the SRTP path, where
-    ///     `unprotect` makes its own owned copy of the decrypted
-    ///     payload).
-    ///
-    /// Capacity sized to absorb a brief downstream stall without
-    /// forcing a fresh `Vec` alloc.
-    recv_pool: Arc<RecvBufPool>,
-
     #[cfg(feature = "memory-diagnostics")]
     _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
     #[cfg(feature = "memory-diagnostics")]
@@ -329,6 +315,8 @@ pub struct UdpRtpTransport {
 impl UdpRtpTransport {
     /// Create a new UDP transport for RTP
     pub async fn new(config: RtpTransportConfig) -> Result<Self> {
+        let buffer_config = config.buffer_config;
+
         // Use platform-specific socket strategy
         let socket_strategy = PlatformSocketStrategy::for_current_platform();
 
@@ -437,13 +425,14 @@ impl UdpRtpTransport {
         };
 
         // Create broadcaster
-        let (event_tx, _) = broadcast::channel(RTP_TRANSPORT_EVENT_CHANNEL_CAPACITY);
+        let (event_tx, _) = broadcast::channel(buffer_config.event_channel_capacity.max(1));
 
         let transport = Self {
             rtp_socket: Arc::new(socket_rtp),
             rtcp_socket: socket_rtcp.map(Arc::new),
             config,
             remote_rtp_addr: Arc::new(ArcSwapOption::from(None)),
+            remote_rtp_addr_version: Arc::new(AtomicU64::new(0)),
             remote_rtcp_addr: Arc::new(ArcSwapOption::from(None)),
             event_tx,
             receiver_task: Arc::new(Mutex::new(None)),
@@ -451,11 +440,6 @@ impl UdpRtpTransport {
             srtp_send: Arc::new(parking_lot::Mutex::new(None)),
             srtp_recv: Arc::new(parking_lot::Mutex::new(None)),
             dtmf_seen: Arc::new(DashMap::new()),
-            // 64 buffers ≈ 8 ms of headroom at 8 kHz / 20 ms ptime
-            // per stream, plenty for the typical single-call workload
-            // while still bounding worst-case idle memory at
-            // 64 × DEFAULT_MAX_PACKET_SIZE.
-            recv_pool: RecvBufPool::new(64, DEFAULT_MAX_PACKET_SIZE),
             #[cfg(feature = "memory-diagnostics")]
             _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
                 "rtp_core.udp_transport",
@@ -464,7 +448,7 @@ impl UdpRtpTransport {
             #[cfg(feature = "memory-diagnostics")]
             _event_channel_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
                 "rtp_core.udp_transport.event_broadcast_capacity",
-                RTP_TRANSPORT_EVENT_CHANNEL_CAPACITY * std::mem::size_of::<RtpEvent>(),
+                buffer_config.event_channel_capacity * std::mem::size_of::<RtpEvent>(),
             ),
         };
 
@@ -496,7 +480,7 @@ impl UdpRtpTransport {
         let srtp_diagnostics = srtp_diagnostics_enabled();
         let rtp_diagnostics = rtp_diagnostics_enabled();
         let local_rtp_addr = rtp_socket.local_addr().ok();
-        let recv_pool = self.recv_pool.clone();
+        let recv_buffer_size = self.config.buffer_config.recv_buffer_size;
 
         let rtp_receiver = spawn_memory_tracked(
             "rtp_core.udp_transport.rtp_receiver_task",
@@ -505,6 +489,7 @@ impl UdpRtpTransport {
                 let mut srtp_unprotect_failures = 0_u64;
                 let mut non_rtp_drop_count = 0_u64;
                 let mut malformed_rtp_drop_count = 0_u64;
+                let mut buffer = vec![0u8; recv_buffer_size];
                 debug!("UDP receive loop started on {:?}", rtp_socket.local_addr());
 
                 loop {
@@ -513,19 +498,12 @@ impl UdpRtpTransport {
                         break;
                     }
 
-                    // Pull a fresh recv buffer from the pool. Pool hits
-                    // reuse a previously freed buf; misses allocate fresh.
-                    // The RAII handle returns the buf to the pool on
-                    // Drop, unless ownership is explicitly transferred
-                    // downstream via `into_bytes`.
-                    let mut buffer = recv_pool.get();
-
                     // Receive packet
-                    match rtp_socket.recv_from(buffer.as_mut_slice()).await {
+                    match rtp_socket.recv_from(&mut buffer).await {
                         Ok((size, addr)) => {
                             info!("🔵 UDP recv_from returned {} bytes from {}", size, addr);
 
-                            let packet_class = classify_rtp_mux_packet(&buffer.as_slice()[..size]);
+                            let packet_class = classify_rtp_mux_packet(&buffer[..size]);
                             if !packet_class.is_media() {
                                 non_rtp_drop_count = non_rtp_drop_count.saturating_add(1);
                                 log_dropped_non_rtp_packet(
@@ -535,21 +513,15 @@ impl UdpRtpTransport {
                                     addr,
                                     size,
                                     packet_class,
-                                    &buffer.as_slice()[..size],
+                                    &buffer[..size],
                                 );
                                 continue;
                             }
 
                             // Check if it's RTCP according to RFC 5761
                             if packet_class == RtpMuxPacketClass::Rtcp {
-                                // This is an RTCP packet. Hand the bytes
-                                // downstream as a pooled `Bytes` view —
-                                // zero copy, refcount-only.
-                                debug!(
-                                    "Received RTCP packet, type: {}",
-                                    buffer.as_slice()[1] & 0x7F
-                                );
-                                let rtcp_data = buffer.into_bytes(size);
+                                debug!("Received RTCP packet, type: {}", buffer[1] & 0x7F);
+                                let rtcp_data = Bytes::copy_from_slice(&buffer[..size]);
                                 let event = RtpEvent::RtcpReceived {
                                     data: rtcp_data,
                                     source: addr,
@@ -582,20 +554,10 @@ impl UdpRtpTransport {
                                 );
                                     first_inbound_rtp_logged = true;
                                 }
-                                // SRTP path: `unprotect` allocates a fresh
-                                // `Bytes` for the decrypted payload, so we
-                                // don't need to feed it via the pool —
-                                // the pooled buf returns to the pool when
-                                // we drop the RAII handle at the end of
-                                // this iteration.
-                                // Non-SRTP path: zero-copy parse via
-                                // `parse_from_bytes` so the payload is a
-                                // refcounted slice of the pooled buf.
-                                let mut raw_for_error: Option<Bytes> = None;
                                 let parse_result: Result<RtpPacket> = if let Some(ctx) =
                                     srtp_guard.as_mut()
                                 {
-                                    match ctx.unprotect(&buffer.as_slice()[0..size]) {
+                                    match ctx.unprotect(&buffer[0..size]) {
                                         Ok(packet) => Ok(packet),
                                         Err(_) => {
                                             srtp_unprotect_failures += 1;
@@ -617,14 +579,7 @@ impl UdpRtpTransport {
                                         }
                                     }
                                 } else {
-                                    // Zero-copy: hand the pooled buf to
-                                    // Bytes via from_owner, then parse
-                                    // from the Bytes. The payload is a
-                                    // refcounted slice; no
-                                    // copy_from_slice.
-                                    let bytes = buffer.into_bytes(size);
-                                    raw_for_error = Some(bytes.clone());
-                                    RtpPacket::parse_from_bytes(bytes)
+                                    RtpPacket::parse(&buffer[..size])
                                 };
                                 drop(srtp_guard);
                                 match parse_result {
@@ -734,7 +689,7 @@ impl UdpRtpTransport {
                                             addr,
                                             size,
                                             &e,
-                                            raw_for_error.as_deref(),
+                                            Some(&buffer[..size]),
                                         );
                                     }
                                 }
@@ -767,11 +722,11 @@ impl UdpRtpTransport {
             let rtcp_socket = rtcp_socket.clone();
             let event_tx = self.event_tx.clone();
             let active_state = self.active.clone();
+            let rtcp_recv_buffer_size = self.config.buffer_config.rtcp_recv_buffer_size;
 
             let rtcp_receiver =
                 spawn_memory_tracked("rtp_core.udp_transport.rtcp_receiver_task", async move {
-                    let mut buffer = vec![0u8; DEFAULT_MAX_PACKET_SIZE];
-
+                    let mut buffer = vec![0u8; rtcp_recv_buffer_size];
                     loop {
                         // Check if we should continue running
                         if !active_state.load(Ordering::Acquire) {
@@ -782,7 +737,7 @@ impl UdpRtpTransport {
                         match rtcp_socket.recv_from(&mut buffer).await {
                             Ok((size, addr)) => {
                                 // Create RTCP event
-                                let rtcp_data = Bytes::copy_from_slice(&buffer[0..size]);
+                                let rtcp_data = Bytes::copy_from_slice(&buffer[..size]);
                                 let event = RtpEvent::RtcpReceived {
                                     data: rtcp_data,
                                     source: addr,
@@ -842,7 +797,7 @@ impl UdpRtpTransport {
 
     /// Set the remote RTP address
     pub async fn set_remote_rtp_addr(&self, addr: SocketAddr) {
-        self.remote_rtp_addr.store(Some(Arc::new(addr)));
+        self.store_remote_rtp_addr(addr);
     }
 
     /// Set the remote RTCP address
@@ -855,14 +810,29 @@ impl UdpRtpTransport {
         self.remote_rtp_addr.load().as_deref().copied()
     }
 
+    /// Current remote RTP address version.
+    pub fn remote_rtp_addr_version(&self) -> u64 {
+        self.remote_rtp_addr_version.load(Ordering::Acquire)
+    }
+
+    /// Current remote RTP address and version.
+    pub fn remote_rtp_addr_snapshot(&self) -> (Option<SocketAddr>, u64) {
+        (
+            self.remote_rtp_addr.load().as_deref().copied(),
+            self.remote_rtp_addr_version(),
+        )
+    }
+
+    fn store_remote_rtp_addr(&self, addr: SocketAddr) {
+        if self.remote_rtp_addr.load().as_deref().copied() != Some(addr) {
+            self.remote_rtp_addr.store(Some(Arc::new(addr)));
+            self.remote_rtp_addr_version.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
     /// Get the remote RTCP address
     pub async fn remote_rtcp_addr(&self) -> Option<SocketAddr> {
         self.remote_rtcp_addr.load().as_deref().copied()
-    }
-
-    #[cfg(feature = "memory-diagnostics")]
-    pub fn recv_pool_diagnostics(&self) -> super::recv_pool::RecvBufPoolDiagnosticCounts {
-        self.recv_pool.diagnostic_counts()
     }
 
     /// Subscribe to transport events
@@ -909,6 +879,36 @@ impl UdpRtpTransport {
     pub async fn srtp_enabled(&self) -> bool {
         self.srtp_send.lock().is_some() || self.srtp_recv.lock().is_some()
     }
+
+    /// Send an RTP packet using caller-provided scratch storage for
+    /// serialization. Plain RTP writes directly into the scratch buffer;
+    /// SRTP keeps crypto-owned output semantics but combines protected
+    /// packet bytes and auth tag in one reusable buffer.
+    pub async fn send_rtp_with_buffer(
+        &self,
+        packet: &RtpPacket,
+        dest: SocketAddr,
+        buffer: &mut BytesMut,
+    ) -> Result<()> {
+        let protected = {
+            let mut srtp_guard = self.srtp_send.lock();
+            if let Some(ctx) = srtp_guard.as_mut() {
+                Some(ctx.protect(packet)?)
+            } else {
+                None
+            }
+        };
+
+        if let Some(protected) = protected {
+            let data = protected.serialize_into(buffer)?;
+            self.send_rtp_bytes(&data, dest).await
+        } else {
+            buffer.clear();
+            packet.header.serialize(buffer)?;
+            buffer.extend_from_slice(&packet.payload);
+            self.send_rtp_bytes(buffer, dest).await
+        }
+    }
 }
 
 #[async_trait]
@@ -925,31 +925,15 @@ impl RtpTransport for UdpRtpTransport {
     }
 
     async fn send_rtp(&self, packet: &RtpPacket, dest: SocketAddr) -> Result<()> {
-        // SRTP protect (RFC 3711) when an outbound SrtpContext is
-        // configured; otherwise serialise plaintext as before.
-        // Avoid per-packet `to_vec` by keeping both branches in
-        // `bytes::Bytes` (which `&data` auto-derefs to `&[u8]` for
-        // `send_rtp_bytes`).
-        let data: bytes::Bytes = {
-            let mut srtp_guard = self.srtp_send.lock();
-            if let Some(ctx) = srtp_guard.as_mut() {
-                let protected = ctx.protect(packet)?;
-                protected.serialize()?
-            } else {
-                drop(srtp_guard);
-                packet.serialize()?
-            }
-        };
-
-        // Send the bytes
-        self.send_rtp_bytes(&data, dest).await
+        let mut buffer = BytesMut::with_capacity(packet.size() + 16);
+        self.send_rtp_with_buffer(packet, dest, &mut buffer).await
     }
 
     async fn send_rtp_bytes(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
         if self.config.symmetric_rtp {
             // Update remote address if using symmetric RTP (lock-free
             // atomic swap; no .await).
-            self.remote_rtp_addr.store(Some(Arc::new(dest)));
+            self.store_remote_rtp_addr(dest);
         }
 
         // Send the data
@@ -1174,6 +1158,7 @@ mod tests {
             rtcp_mux: false, // Disable RTCP-MUX for this test
             session_id: Some("test_creation".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
 
         let transport = UdpRtpTransport::new(config).await;
@@ -1206,6 +1191,7 @@ mod tests {
             rtcp_mux: true, // Enable RTCP-MUX
             session_id: Some("test_rtcp_mux".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
 
         let transport = UdpRtpTransport::new(config).await;
@@ -1284,6 +1270,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("test_send1".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
 
         let config2 = RtpTransportConfig {
@@ -1293,6 +1280,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("test_send2".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
 
         let transport1 = UdpRtpTransport::new(config1).await.unwrap();
@@ -1323,6 +1311,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("test_event1".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
 
         let config2 = RtpTransportConfig {
@@ -1332,6 +1321,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("test_event2".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
 
         let transport1 = UdpRtpTransport::new(config1).await.unwrap();
@@ -1385,6 +1375,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("drop_sender".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
 
         let config2 = RtpTransportConfig {
@@ -1394,6 +1385,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("drop_receiver".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
 
         let transport1 = UdpRtpTransport::new(config1).await.unwrap();
@@ -1457,6 +1449,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("dtmf_sender".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
         let config2 = RtpTransportConfig {
             local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
@@ -1465,6 +1458,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("dtmf_receiver".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
         let sender = UdpRtpTransport::new(config1).await.unwrap();
         let receiver = UdpRtpTransport::new(config2).await.unwrap();
@@ -1521,6 +1515,7 @@ mod tests {
             rtcp_mux: false,
             session_id: Some("test1".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
 
         let transport = UdpRtpTransport::new(config).await.unwrap();
@@ -1547,6 +1542,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn separate_rtcp_socket_receive_emits_pooled_bytes_event() {
+        let config = RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: Some("127.0.0.1:0".parse().unwrap()),
+            symmetric_rtp: true,
+            rtcp_mux: false,
+            session_id: Some("test_rtcp_receive".to_string()),
+            use_port_allocator: false,
+            buffer_config: Default::default(),
+        };
+
+        let transport = UdpRtpTransport::new(config).await.unwrap();
+        let rtcp_addr = transport
+            .rtcp_socket
+            .as_ref()
+            .expect("separate RTCP socket")
+            .local_addr()
+            .unwrap();
+        let mut events = transport.subscribe();
+        transport.start_receiver().await.unwrap();
+
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let packet = Bytes::from_static(&[0x80, 201, 0x00, 0x01, 0x11, 0x22, 0x33, 0x44]);
+        sender.send_to(&packet, rtcp_addr).await.unwrap();
+
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("rtcp event timeout")
+            .expect("rtcp event");
+
+        match event {
+            RtpEvent::RtcpReceived { data, source } => {
+                assert_eq!(data, packet);
+                assert_eq!(source, sender.local_addr().unwrap());
+            }
+            other => panic!("expected RtcpReceived, got {other:?}"),
+        }
+
+        transport.stop_receiver().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_rtcp_mux_socket_creation() {
         let config = RtpTransportConfig {
             local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
@@ -1555,6 +1592,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("test2".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
 
         let transport = UdpRtpTransport::new(config).await.unwrap();
@@ -1583,6 +1621,7 @@ mod tests {
             rtcp_mux: false,
             session_id: Some("test_conflict1".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
 
         let transport1 = UdpRtpTransport::new(config1).await.unwrap();
@@ -1601,6 +1640,7 @@ mod tests {
             rtcp_mux: false,
             session_id: Some("test_conflict2".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
 
         // This should fail because the ports are already in use
@@ -1618,6 +1658,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("test_mux_conflict1".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
 
         let transport1 = UdpRtpTransport::new(config1).await.unwrap();
@@ -1631,6 +1672,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("test_mux_conflict2".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
 
         // This should fail because the port is already in use
@@ -1688,6 +1730,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("srtp-a".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
         let cfg_b = RtpTransportConfig {
             local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
@@ -1696,6 +1739,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("srtp-b".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
         let transport_a = UdpRtpTransport::new(cfg_a).await.unwrap();
         let transport_b = UdpRtpTransport::new(cfg_b).await.unwrap();
@@ -1750,6 +1794,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("srtp-aes256-a".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
         let cfg_b = RtpTransportConfig {
             local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
@@ -1758,6 +1803,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("srtp-aes256-b".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
         let transport_a = UdpRtpTransport::new(cfg_a).await.unwrap();
         let transport_b = UdpRtpTransport::new(cfg_b).await.unwrap();
@@ -1805,6 +1851,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("srtp-drop-a".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
         let cfg_b = RtpTransportConfig {
             local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
@@ -1813,6 +1860,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("srtp-drop-b".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
         let transport_a = UdpRtpTransport::new(cfg_a).await.unwrap();
         let transport_b = UdpRtpTransport::new(cfg_b).await.unwrap();
@@ -1884,6 +1932,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("dtmf-dedup-sender".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
         let cfg2 = RtpTransportConfig {
             local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
@@ -1892,6 +1941,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("dtmf-dedup-receiver".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
         let sender = UdpRtpTransport::new(cfg1).await.unwrap();
         let receiver = UdpRtpTransport::new(cfg2).await.unwrap();
@@ -1951,6 +2001,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some(session_id.to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
         let peer_a = UdpRtpTransport::new(mk_cfg("dtmf-peer-a")).await.unwrap();
         let peer_b = UdpRtpTransport::new(mk_cfg("dtmf-peer-b")).await.unwrap();
@@ -2005,6 +2056,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("plain1".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
         let cfg2 = RtpTransportConfig {
             local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
@@ -2013,6 +2065,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("plain2".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
         let t1 = UdpRtpTransport::new(cfg1).await.unwrap();
         let t2 = UdpRtpTransport::new(cfg2).await.unwrap();

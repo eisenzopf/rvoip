@@ -9,7 +9,7 @@ mod stream;
 pub use scheduling::{RtpScheduler, RtpSchedulerStats};
 pub use stream::{RtpStream, RtpStreamStats};
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use dashmap::DashMap;
 use rand::Rng;
 use std::net::SocketAddr;
@@ -23,7 +23,9 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::error::Error;
 use crate::packet::{RtpHeader, RtpPacket};
-use crate::transport::{RtpTransport, RtpTransportConfig, UdpRtpTransport};
+use crate::transport::{
+    RtpTransport, RtpTransportBufferConfig, RtpTransportConfig, UdpRtpTransport,
+};
 use crate::{Result, RtpSsrc, RtpTimestamp};
 
 #[cfg(feature = "memory-diagnostics")]
@@ -57,6 +59,29 @@ pub const RTP_SESSION_CHANNEL_CAPACITY: usize = 64;
 /// queue must not become an unbounded duplicate packet buffer when nobody calls
 /// [`RtpSession::receive_packet`].
 pub const RTP_SESSION_RECEIVE_QUEUE_CAPACITY: usize = 32;
+
+const RTP_SEND_STATS_FLUSH_PACKETS: u64 = 64;
+
+/// RTP session queue sizing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RtpSessionBufferConfig {
+    /// Bounded sender queue capacity in RTP packets.
+    pub sender_channel_capacity: usize,
+    /// Bounded legacy polling receive queue capacity in RTP packets.
+    pub receiver_channel_capacity: usize,
+    /// Broadcast ring capacity for RTP session events.
+    pub event_channel_capacity: usize,
+}
+
+impl Default for RtpSessionBufferConfig {
+    fn default() -> Self {
+        Self {
+            sender_channel_capacity: RTP_SESSION_CHANNEL_CAPACITY,
+            receiver_channel_capacity: RTP_SESSION_RECEIVE_QUEUE_CAPACITY,
+            event_channel_capacity: RTP_SESSION_CHANNEL_CAPACITY,
+        }
+    }
+}
 
 /// Stats for an RTP session
 #[derive(Debug, Clone, Default)]
@@ -110,18 +135,6 @@ pub struct RtpSessionQueueDiagnostics {
     #[cfg(feature = "memory-diagnostics")]
     /// Current SSRC stream entries retained by this session.
     pub stream_count: usize,
-    #[cfg(feature = "memory-diagnostics")]
-    /// UDP receive-pool idle buffers when this session uses UDP transport.
-    pub udp_recv_pool_idle_buffers: usize,
-    #[cfg(feature = "memory-diagnostics")]
-    /// UDP receive-pool idle bytes when this session uses UDP transport.
-    pub udp_recv_pool_idle_bytes: usize,
-    #[cfg(feature = "memory-diagnostics")]
-    /// UDP receive-pool buffers allocated since transport creation.
-    pub udp_recv_pool_allocated_total: u64,
-    #[cfg(feature = "memory-diagnostics")]
-    /// UDP receive-pool buffers dropped because the pool was full.
-    pub udp_recv_pool_dropped_total: u64,
 }
 
 /// RTP session configuration options
@@ -150,6 +163,12 @@ pub struct RtpSessionConfig {
 
     /// Enable jitter buffer
     pub enable_jitter_buffer: bool,
+
+    /// RTP session queue and reusable send-buffer sizing.
+    pub session_buffer_config: RtpSessionBufferConfig,
+
+    /// UDP transport buffer sizing used when the session creates its transport.
+    pub transport_buffer_config: RtpTransportBufferConfig,
 }
 
 impl Default for RtpSessionConfig {
@@ -163,6 +182,8 @@ impl Default for RtpSessionConfig {
             jitter_buffer_size: Some(50),
             max_packet_age_ms: Some(200),
             enable_jitter_buffer: true,
+            session_buffer_config: RtpSessionBufferConfig::default(),
+            transport_buffer_config: RtpTransportBufferConfig::default(),
         }
     }
 }
@@ -410,6 +431,9 @@ impl RtpSession {
         config: RtpSessionConfig,
         receive_queue_enabled: bool,
     ) -> Result<Self> {
+        let session_buffer_config = config.session_buffer_config;
+        let transport_buffer_config = config.transport_buffer_config;
+
         // Generate SSRC if not provided
         let ssrc = config.ssrc.unwrap_or_else(|| {
             let mut rng = rand::thread_rng();
@@ -425,15 +449,18 @@ impl RtpSession {
             session_id: Some(format!("rtp-session-{}", ssrc)),
             // Don't allocate a new port - use the one provided in config
             use_port_allocator: false,
+            buffer_config: transport_buffer_config,
         };
 
         // Create UDP transport
         let transport = Arc::new(UdpRtpTransport::new(transport_config).await?);
 
         // Create channels for internal communication.
-        let (sender_tx, sender_rx) = mpsc::channel(RTP_SESSION_CHANNEL_CAPACITY);
-        let (receiver_tx, receiver_rx) = mpsc::channel(RTP_SESSION_RECEIVE_QUEUE_CAPACITY);
-        let (event_tx, _) = broadcast::channel(RTP_SESSION_CHANNEL_CAPACITY);
+        let (sender_tx, sender_rx) =
+            mpsc::channel(session_buffer_config.sender_channel_capacity.max(1));
+        let (receiver_tx, receiver_rx) =
+            mpsc::channel(session_buffer_config.receiver_channel_capacity.max(1));
+        let (event_tx, _) = broadcast::channel(session_buffer_config.event_channel_capacity.max(1));
 
         // Create scheduler if needed
         let scheduler = Some(RtpScheduler::new(
@@ -478,17 +505,18 @@ impl RtpSession {
             #[cfg(feature = "memory-diagnostics")]
             _sender_channel_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
                 "rtp_core.rtp_session.sender_channel_capacity",
-                RTP_SESSION_CHANNEL_CAPACITY * std::mem::size_of::<RtpPacket>(),
+                session_buffer_config.sender_channel_capacity * std::mem::size_of::<RtpPacket>(),
             ),
             #[cfg(feature = "memory-diagnostics")]
             _receiver_channel_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
                 "rtp_core.rtp_session.receiver_channel_capacity",
-                RTP_SESSION_RECEIVE_QUEUE_CAPACITY * std::mem::size_of::<RtpPacket>(),
+                session_buffer_config.receiver_channel_capacity * std::mem::size_of::<RtpPacket>(),
             ),
             #[cfg(feature = "memory-diagnostics")]
             _event_channel_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
                 "rtp_core.rtp_session.event_broadcast_capacity",
-                RTP_SESSION_CHANNEL_CAPACITY * std::mem::size_of::<RtpSessionEvent>(),
+                session_buffer_config.event_channel_capacity
+                    * std::mem::size_of::<RtpSessionEvent>(),
             ),
         };
 
@@ -552,45 +580,34 @@ impl RtpSession {
         let send_transport = transport.clone();
         let send_task = spawn_memory_tracked("rtp_core.rtp_session.send_task", async move {
             let mut last_remote_addr = remote_addr;
-            let mut send_buf = BytesMut::with_capacity(1500);
-            #[cfg(feature = "memory-diagnostics")]
-            let _send_buf_guard = rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
-                "rtp_core.rtp_session.send_wire_buffer",
-                send_buf.capacity(),
-            );
+            let udp_transport = send_transport.as_any().downcast_ref::<UdpRtpTransport>();
+            let mut last_remote_version = udp_transport
+                .map(|t| t.remote_rtp_addr_version())
+                .unwrap_or_default();
+            let mut pending_packets_sent = 0_u64;
+            let mut pending_bytes_sent = 0_u64;
 
             while let Some(packet) = sender_rx.recv().await {
-                // Always try to get the current remote address from transport first
-                let dest =
-                    if let Some(t) = send_transport.as_any().downcast_ref::<UdpRtpTransport>() {
-                        // Check transport for current remote address
-                        match t.remote_rtp_addr().await {
-                            Some(addr) => {
-                                // Update our cached value
-                                last_remote_addr = Some(addr);
-                                addr
-                            }
-                            None => {
-                                // Fall back to cached value if transport doesn't have one
-                                if let Some(addr) = last_remote_addr {
-                                    addr
-                                } else {
-                                    // No destination address, can't send
-                                    warn!("No destination address for RTP packet, dropping");
-                                    continue;
-                                }
-                            }
-                        }
+                let dest = if let Some(t) = udp_transport {
+                    let remote_version = t.remote_rtp_addr_version();
+                    if last_remote_addr.is_none() || remote_version != last_remote_version {
+                        let (remote_addr, version) = t.remote_rtp_addr_snapshot();
+                        last_remote_addr = remote_addr;
+                        last_remote_version = version;
+                    }
+
+                    if let Some(addr) = last_remote_addr {
+                        addr
                     } else {
-                        // Not a UDP transport, use cached value
-                        if let Some(addr) = last_remote_addr {
-                            addr
-                        } else {
-                            // No destination address, can't send
-                            warn!("No destination address for RTP packet, dropping");
-                            continue;
-                        }
-                    };
+                        warn!("No destination address for RTP packet, dropping");
+                        continue;
+                    }
+                } else if let Some(addr) = last_remote_addr {
+                    addr
+                } else {
+                    warn!("No destination address for RTP packet, dropping");
+                    continue;
+                };
 
                 // Send the packet
                 debug!(
@@ -598,23 +615,7 @@ impl RtpSession {
                     dest, packet.header.sequence_number, packet.header.timestamp
                 );
 
-                let send_result =
-                    if let Some(udp) = send_transport.as_any().downcast_ref::<UdpRtpTransport>() {
-                        if udp.srtp_enabled().await {
-                            send_transport.send_rtp(&packet, dest).await
-                        } else {
-                            send_buf.clear();
-                            match packet.header.serialize(&mut send_buf) {
-                                Ok(()) => {
-                                    send_buf.extend_from_slice(&packet.payload);
-                                    udp.send_rtp_bytes(&send_buf, dest).await
-                                }
-                                Err(e) => Err(e),
-                            }
-                        }
-                    } else {
-                        send_transport.send_rtp(&packet, dest).await
-                    };
+                let send_result = send_transport.send_rtp(&packet, dest).await;
 
                 if let Err(e) = send_result {
                     error!("Failed to send RTP packet: {}", e);
@@ -626,12 +627,26 @@ impl RtpSession {
 
                 debug!("Successfully sent RTP packet to {}", dest);
 
-                // Update stats
-                {
+                pending_packets_sent = pending_packets_sent.saturating_add(1);
+                pending_bytes_sent = pending_bytes_sent.saturating_add(packet.size() as u64);
+
+                if pending_packets_sent >= RTP_SEND_STATS_FLUSH_PACKETS || sender_rx.is_empty() {
                     let mut session_stats = stats_send.lock();
-                    session_stats.packets_sent += 1;
-                    session_stats.bytes_sent += packet.size() as u64;
+                    session_stats.packets_sent = session_stats
+                        .packets_sent
+                        .saturating_add(pending_packets_sent);
+                    session_stats.bytes_sent = session_stats.bytes_sent.saturating_add(pending_bytes_sent);
+                    pending_packets_sent = 0;
+                    pending_bytes_sent = 0;
                 }
+            }
+
+            if pending_packets_sent > 0 {
+                let mut session_stats = stats_send.lock();
+                session_stats.packets_sent = session_stats
+                    .packets_sent
+                    .saturating_add(pending_packets_sent);
+                session_stats.bytes_sent = session_stats.bytes_sent.saturating_add(pending_bytes_sent);
             }
         });
 
@@ -1080,13 +1095,6 @@ impl RtpSession {
         } else {
             (0, 0)
         };
-        #[cfg(feature = "memory-diagnostics")]
-        let udp_recv_pool = self
-            .transport
-            .as_any()
-            .downcast_ref::<UdpRtpTransport>()
-            .map(|transport| transport.recv_pool_diagnostics());
-
         RtpSessionQueueDiagnostics {
             sender_queue_packets: sender_capacity_packets.saturating_sub(self.sender.capacity()),
             sender_capacity_packets,
@@ -1096,22 +1104,6 @@ impl RtpSession {
             event_receiver_count: self.event_tx.receiver_count(),
             #[cfg(feature = "memory-diagnostics")]
             stream_count: self.streams.len(),
-            #[cfg(feature = "memory-diagnostics")]
-            udp_recv_pool_idle_buffers: udp_recv_pool
-                .map(|counts| counts.idle_buffers)
-                .unwrap_or_default(),
-            #[cfg(feature = "memory-diagnostics")]
-            udp_recv_pool_idle_bytes: udp_recv_pool
-                .map(|counts| counts.idle_bytes)
-                .unwrap_or_default(),
-            #[cfg(feature = "memory-diagnostics")]
-            udp_recv_pool_allocated_total: udp_recv_pool
-                .map(|counts| counts.allocated_total)
-                .unwrap_or_default(),
-            #[cfg(feature = "memory-diagnostics")]
-            udp_recv_pool_dropped_total: udp_recv_pool
-                .map(|counts| counts.dropped_total)
-                .unwrap_or_default(),
         }
     }
 
@@ -1656,5 +1648,32 @@ impl RtpSessionSender {
             .send(packet)
             .await
             .map_err(|_| Error::SessionError("Failed to send packet".to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_session_buffer_config_preserves_channel_capacities() {
+        let config = RtpSessionConfig::default();
+
+        assert_eq!(
+            config.session_buffer_config.sender_channel_capacity,
+            RTP_SESSION_CHANNEL_CAPACITY
+        );
+        assert_eq!(
+            config.session_buffer_config.receiver_channel_capacity,
+            RTP_SESSION_RECEIVE_QUEUE_CAPACITY
+        );
+        assert_eq!(
+            config.session_buffer_config.event_channel_capacity,
+            RTP_SESSION_CHANNEL_CAPACITY
+        );
+        assert_eq!(
+            config.transport_buffer_config,
+            RtpTransportBufferConfig::default()
+        );
     }
 }
