@@ -355,6 +355,10 @@ impl DialogEventHub {
                 debug!("Processing CallAnswered for dialog: {}", dialog_id);
                 match self.dialog_manager.get_session_id(&dialog_id) {
                     Some(session_id) => {
+                        crate::diagnostics::record_hub_call_answered_session(true);
+                        crate::diagnostics::record_call_timing_hub_call_answered(
+                            session_id.as_str(),
+                        );
                         debug!("Found session ID {} for dialog {}", session_id, dialog_id);
                         Some(RvoipCrossCrateEvent::DialogToSession(
                             DialogToSessionEvent::CallEstablished {
@@ -365,6 +369,7 @@ impl DialogEventHub {
                         ))
                     }
                     None => {
+                        crate::diagnostics::record_hub_call_answered_session(false);
                         warn!("❌ [event_hub] No session ID found for dialog {} in CallAnswered event", dialog_id);
                         None
                     }
@@ -463,6 +468,12 @@ impl DialogEventHub {
                         response_method,
                         Some(rvoip_sip_core::Method::Invite | rvoip_sip_core::Method::Update)
                     );
+                    if response.status_code() == 200 && is_invite_response {
+                        crate::diagnostics::record_hub_response_invite_2xx_session(true);
+                        crate::diagnostics::record_call_timing_hub_response_invite_2xx(
+                            session_id.as_str(),
+                        );
+                    }
                     // Handle specific response codes
                     match response.status_code() {
                         200 if is_invite_response => {
@@ -702,6 +713,14 @@ impl DialogEventHub {
                         _ => None, // Non-INVITE responses stay method-specific/no-op here.
                     }
                 } else {
+                    let is_invite_2xx = response.status_code() == 200
+                        && matches!(
+                            response.cseq().map(|cseq| cseq.method.clone()),
+                            Some(rvoip_sip_core::Method::Invite)
+                        );
+                    if is_invite_2xx {
+                        crate::diagnostics::record_hub_response_invite_2xx_session(false);
+                    }
                     warn!("No session ID found for dialog {:?}", dialog_id);
                     None
                 }
@@ -773,6 +792,12 @@ impl DialogEventHub {
                     "AckSent event for dialog {}, converting to cross-crate format",
                     dialog_id
                 );
+                if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
+                    crate::diagnostics::record_hub_ack_sent_session(true);
+                    crate::diagnostics::record_call_timing_hub_ack_sent(session_id.as_str());
+                } else {
+                    crate::diagnostics::record_hub_ack_sent_session(false);
+                }
                 None // For now, UAC doesn't need this event
             }
 
@@ -784,6 +809,7 @@ impl DialogEventHub {
                 // AckReceived is critical for UAS - dialog-core received ACK, now session must transition
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
                     crate::diagnostics::record_ack_matched_session();
+                    crate::diagnostics::record_call_timing_uas_ack_received(session_id.as_str());
                     debug!(
                         "Converting AckReceived to cross-crate event for session {}",
                         session_id

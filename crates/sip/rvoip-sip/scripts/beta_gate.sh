@@ -63,9 +63,15 @@ Environment:
   BETA_SIPP_TARGET_PORT          SIPp target port. Defaults to 35060 for managed target.
   BETA_SIPP_CPS                  CPS list for standalone SIPp gate.
   BETA_SIPP_PERF_PROFILE         Managed SIPp target recipe. Defaults to pbx-media-server.
+  BETA_SIPP_DIAGNOSTICS=1        Enable managed SIPp target diagnostics. Defaults to 0 for
+                                  release latency measurements.
   BETA_PERF_PROFILE_MATRIX       Perf profile:CPS matrix. Defaults to endpoint, pbx-media-server,
                                   and signaling-only-server-high-performance.
   BETA_PERFORMANCE_RECIPE_FILE   Optional YAML recipe book path.
+  BETA_RUN_BURST_SMOKE=0         Disable required short media burst smoke.
+  BETA_RUN_BURST_MATRIX=1        Run full opt-in media burst scenario matrix.
+  BETA_BURST_SCENARIO_FILE       Burst scenario YAML. Defaults to config/perf-burst-scenarios.yaml.
+  BETA_BURST_MATRIX              Burst scenario list for full matrix, or "all".
   RVOIP_PERF_MIN_SUCCESS_PCT     SIPp pass threshold. Defaults to 99.9.
   BETA_RUN_STRICT_UA=0           Disable the baresip strict-UA gate; fails with --require-external.
   BETA_RUN_LONG_SOAK=0           Disable the ignored soak test; fails with --require-external.
@@ -457,11 +463,16 @@ write_summary_gate_table_header() {
 - docker: \`$(captured_first_line "$env_dir/docker-version.txt")\`
 - beta_profile_matrix: \`${BETA_PERF_PROFILE_MATRIX:-endpoint:30 pbx-media-server:30,100,300,1000,2000 signaling-only-server-high-performance:30,100,300,1000,2000}\`
 - beta_performance_recipe_file: \`${BETA_PERFORMANCE_RECIPE_FILE:-bundled config/performance-recipes.yaml}\`
+- beta_run_burst_smoke: \`${BETA_RUN_BURST_SMOKE:-1}\`
+- beta_run_burst_matrix: \`${BETA_RUN_BURST_MATRIX:-0}\`
+- beta_burst_scenario_file: \`${BETA_BURST_SCENARIO_FILE:-bundled config/perf-burst-scenarios.yaml}\`
+- beta_burst_matrix: \`${BETA_BURST_MATRIX:-all}\`
 - beta_pbx_provider: \`${BETA_PBX_PROVIDER:-both}\`
 - beta_pbx_api: \`${BETA_PBX_API:-all}\`
 - beta_pbx_scenario: \`${BETA_PBX_SCENARIO:-all}\`
 - beta_run_local_pbx: \`${BETA_RUN_LOCAL_PBX:-0}\`
 - beta_run_sipp: \`${BETA_RUN_SIPP:-1}\`
+- beta_sipp_diagnostics: \`${BETA_SIPP_DIAGNOSTICS:-0}\`
 - beta_run_strict_ua: \`${BETA_RUN_STRICT_UA:-1}\`
 - beta_run_long_soak: \`${BETA_RUN_LONG_SOAK:-1}\`
 - rvoip_perf_soak_duration_secs: \`${RVOIP_PERF_SOAK_DURATION_SECS:-3600}\`
@@ -680,7 +691,12 @@ start_managed_sipp_target() {
   start_epoch="$(date +%s)"
   local perf_profile="${BETA_SIPP_PERF_PROFILE:-pbx-media-server}"
   local recipe_file="${BETA_PERFORMANCE_RECIPE_FILE:-}"
-  local listener_cmd=("$WORKSPACE_ROOT/target/release/examples/perf_listener" "$port" "$host" --diagnostics --perf-profile "$perf_profile")
+  local listener_cmd=("$WORKSPACE_ROOT/target/release/examples/perf_listener" "$port" "$host" --perf-profile "$perf_profile")
+  case "${BETA_SIPP_DIAGNOSTICS:-0}" in
+    1|true|TRUE|yes|YES|on|ON)
+      listener_cmd+=(--diagnostics)
+      ;;
+  esac
   if [ -n "$recipe_file" ]; then
     listener_cmd+=(--recipe-file "$recipe_file")
   fi
@@ -934,6 +950,28 @@ run_perf_gates() {
   run_gate "perf backpressure step" cargo test -p rvoip-sip --release --features perf-tests --test perf_backpressure_step -- --nocapture
   run_gate "perf transport recovery" cargo test -p rvoip-sip --release --features perf-tests --test perf_transport_recovery -- --nocapture
   run_gate "perf session churn leak" cargo test -p rvoip-sip --release --features perf-tests --test perf_soak_30min perf_session_churn_leak -- --ignored --nocapture
+  if [ "${BETA_RUN_BURST_SMOKE:-1}" = "1" ]; then
+    run_gate "perf media burst smoke" env \
+      RVOIP_PERF_BURST_SCENARIO_FILE="${BETA_BURST_SCENARIO_FILE:-$CRATE_DIR/config/perf-burst-scenarios.yaml}" \
+      RVOIP_PERF_BURST_SCENARIOS="${BETA_BURST_SMOKE_SCENARIOS:-carrier-smoke}" \
+      RVOIP_PERF_MEMORY_DIAGNOSTICS="${RVOIP_PERF_MEMORY_DIAGNOSTICS:-1}" \
+      RVOIP_PERF_ALLOCATOR_DIAGNOSTICS="${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:-0}" \
+      RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS="${RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS:-5}" \
+      RVOIP_PERF_MIMALLOC_COLLECT_AT="${RVOIP_PERF_MIMALLOC_COLLECT_AT:-off}" \
+      "$SCRIPT_DIR/perf_burst_matrix.sh"
+  else
+    skip_gate "perf media burst smoke" "BETA_RUN_BURST_SMOKE=0 disables required media burst smoke evidence."
+  fi
+  if [ "${BETA_RUN_BURST_MATRIX:-0}" = "1" ]; then
+    run_gate "perf media burst matrix" env \
+      RVOIP_PERF_BURST_SCENARIO_FILE="${BETA_BURST_SCENARIO_FILE:-$CRATE_DIR/config/perf-burst-scenarios.yaml}" \
+      RVOIP_PERF_BURST_SCENARIOS="${BETA_BURST_MATRIX:-all}" \
+      RVOIP_PERF_MEMORY_DIAGNOSTICS="${RVOIP_PERF_MEMORY_DIAGNOSTICS:-1}" \
+      RVOIP_PERF_ALLOCATOR_DIAGNOSTICS="${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:-0}" \
+      RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS="${RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS:-5}" \
+      RVOIP_PERF_MIMALLOC_COLLECT_AT="${RVOIP_PERF_MIMALLOC_COLLECT_AT:-off}" \
+      "$SCRIPT_DIR/perf_burst_matrix.sh"
+  fi
   if [ "${BETA_RUN_LONG_SOAK:-1}" = "1" ]; then
     run_gate "perf soak candidate" env \
       RVOIP_PERF_SOAK_DURATION_SECS="${RVOIP_PERF_SOAK_DURATION_SECS:-3600}" \

@@ -15,8 +15,8 @@ pub mod controller;
 // Re-export controller types for convenience
 pub use crate::types::DialogId;
 pub use controller::{
-    DtmfNotification, MediaConfig, MediaSessionController, MediaSessionEvent, MediaSessionInfo,
-    MediaSessionStatus,
+    DtmfNotification, MediaConfig, MediaSessionController, MediaSessionControllerConfig,
+    MediaSessionEvent, MediaSessionInfo, MediaSessionStatus,
 };
 
 /// Simple G.711 PCMU codec implementation

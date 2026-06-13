@@ -143,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let media_frame = MediaFrame {
         frame_type: MediaFrameType::Audio,
-        data: "🎤 Secure voice data".as_bytes().to_vec(),
+        data: "🎤 Secure voice data".as_bytes().to_vec().into(),
         timestamp: 3200, // 400ms at 8kHz
         sequence: 3,
         marker: true,

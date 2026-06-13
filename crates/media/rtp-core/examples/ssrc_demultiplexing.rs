@@ -37,6 +37,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jitter_buffer_size: Some(50),
         max_packet_age_ms: Some(200),
         enable_jitter_buffer: true,
+        session_buffer_config: Default::default(),
+        transport_buffer_config: Default::default(),
     };
 
     // Create receiver session and wrap in Arc<Mutex<>> for sharing
@@ -66,6 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jitter_buffer_size: Some(50),
         max_packet_age_ms: Some(200),
         enable_jitter_buffer: false, // Sender doesn't need a jitter buffer
+        session_buffer_config: Default::default(),
+        transport_buffer_config: Default::default(),
     };
 
     // Create sender session

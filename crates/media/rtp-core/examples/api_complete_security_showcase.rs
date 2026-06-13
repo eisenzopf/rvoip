@@ -250,7 +250,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Create media frame
         let media_frame = MediaFrame {
             frame_type: *frame_type,
-            data: content.as_bytes().to_vec(),
+            data: content.as_bytes().to_vec().into(),
             timestamp: (i as u32) * 1000,
             sequence: i as u16,
             marker: true,

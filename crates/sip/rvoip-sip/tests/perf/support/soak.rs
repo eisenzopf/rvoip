@@ -10,7 +10,7 @@ use rvoip_sip::api::callback_peer::{
 };
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::unified::{AudioSource, Config, UnifiedCoordinator};
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::task::{JoinHandle, JoinSet};
 
 use super::{LatencyHistogram, ResourceSample, ResourceSummary};
@@ -80,6 +80,567 @@ pub fn media_receive_diagnostics() -> serde_json::Value {
         "skip_audio_frame_delivery": read_bool_env(SKIP_AUDIO_FRAME_DELIVERY_ENV),
         "skip_audio_frame_delivery_env": SKIP_AUDIO_FRAME_DELIVERY_ENV,
     })
+}
+
+pub fn sip_dialog_timing_diagnostics() -> Value {
+    let snapshot = rvoip_sip_dialog::diagnostics::snapshot();
+    let mut counts = serde_json::Map::new();
+    counts.insert(
+        "ok_200_invite_first".to_string(),
+        json!(snapshot.ok_200_invite_first),
+    );
+    counts.insert(
+        "ok_200_invite_duplicate_cache".to_string(),
+        json!(snapshot.ok_200_invite_duplicate_cache),
+    );
+    counts.insert(
+        "ok_200_invite_proactive_retransmit".to_string(),
+        json!(snapshot.ok_200_invite_proactive_retransmit),
+    );
+    counts.insert(
+        "uac_invite_2xx_response".to_string(),
+        json!(snapshot.uac_invite_2xx_response),
+    );
+    counts.insert(
+        "uac_invite_2xx_ack_attempt".to_string(),
+        json!(snapshot.uac_invite_2xx_ack_attempt),
+    );
+    counts.insert(
+        "uac_invite_2xx_ack_success".to_string(),
+        json!(snapshot.uac_invite_2xx_ack_success),
+    );
+    counts.insert(
+        "uac_invite_2xx_ack_failure".to_string(),
+        json!(snapshot.uac_invite_2xx_ack_failure),
+    );
+    counts.insert(
+        "uac_invite_2xx_call_answered_emit".to_string(),
+        json!(snapshot.uac_invite_2xx_call_answered_emit),
+    );
+    counts.insert(
+        "hub_response_invite_2xx".to_string(),
+        json!(snapshot.hub_response_invite_2xx),
+    );
+    counts.insert(
+        "hub_response_invite_2xx_session_found".to_string(),
+        json!(snapshot.hub_response_invite_2xx_session_found),
+    );
+    counts.insert(
+        "hub_response_invite_2xx_session_missing".to_string(),
+        json!(snapshot.hub_response_invite_2xx_session_missing),
+    );
+    counts.insert(
+        "hub_call_answered".to_string(),
+        json!(snapshot.hub_call_answered),
+    );
+    counts.insert(
+        "hub_call_answered_session_found".to_string(),
+        json!(snapshot.hub_call_answered_session_found),
+    );
+    counts.insert(
+        "hub_call_answered_session_missing".to_string(),
+        json!(snapshot.hub_call_answered_session_missing),
+    );
+    counts.insert("hub_ack_sent".to_string(), json!(snapshot.hub_ack_sent));
+    counts.insert(
+        "hub_ack_sent_session_found".to_string(),
+        json!(snapshot.hub_ack_sent_session_found),
+    );
+    counts.insert(
+        "hub_ack_sent_session_missing".to_string(),
+        json!(snapshot.hub_ack_sent_session_missing),
+    );
+    counts.insert(
+        "global_publish_incoming_call".to_string(),
+        json!(snapshot.global_publish_incoming_call),
+    );
+    counts.insert(
+        "global_publish_handler_count_max".to_string(),
+        json!(snapshot.global_publish_handler_count_max),
+    );
+    counts.insert(
+        "transaction_dispatch_queue_depth_max".to_string(),
+        json!(snapshot.transaction_dispatch_queue_depth_max),
+    );
+    json!({
+        "enabled": rvoip_sip_dialog::diagnostics::enabled(),
+        "transaction_timing_enabled": rvoip_sip_dialog::diagnostics::transaction_timing_enabled(),
+        "dialog_timing_enabled": rvoip_sip_dialog::diagnostics::dialog_timing_enabled(),
+        "first_invite_to_200": json!({
+            "count": snapshot.first_invite_to_200_count,
+            "avg_us": snapshot.first_invite_to_200_avg_us,
+            "p50_us": snapshot.first_invite_to_200_p50_us,
+            "p95_us": snapshot.first_invite_to_200_p95_us,
+            "p99_us": snapshot.first_invite_to_200_p99_us,
+            "p999_us": snapshot.first_invite_to_200_p999_us,
+            "max_us": snapshot.first_invite_to_200_max_us,
+            "over_500ms": snapshot.first_invite_to_200_over_500ms,
+        }),
+        "dialog_to_session_queue": json!({
+            "count": snapshot.dialog_to_session_queue_count,
+            "avg_us": snapshot.dialog_to_session_queue_avg_us,
+            "p50_us": snapshot.dialog_to_session_queue_p50_us,
+            "p95_us": snapshot.dialog_to_session_queue_p95_us,
+            "p99_us": snapshot.dialog_to_session_queue_p99_us,
+            "p999_us": snapshot.dialog_to_session_queue_p999_us,
+            "max_us": snapshot.dialog_to_session_queue_max_us,
+            "over_500ms": snapshot.dialog_to_session_queue_over_500ms,
+            "incoming_call": snapshot.dialog_to_session_queue_incoming_call,
+            "ack_received": snapshot.dialog_to_session_queue_ack_received,
+            "bye_received": snapshot.dialog_to_session_queue_bye_received,
+            "terminal": snapshot.dialog_to_session_queue_terminal,
+            "other": snapshot.dialog_to_session_queue_other,
+        }),
+        "udp_receive_to_incoming_call_emit": latency_snapshot_json(&snapshot.udp_receive_to_incoming_call_emit),
+        "transaction_dispatch_queue": latency_snapshot_json(&snapshot.transaction_dispatch_queue),
+        "transaction_dispatch_queue_invite": latency_snapshot_json(&snapshot.transaction_dispatch_queue_invite),
+        "transaction_dispatch_queue_ack": latency_snapshot_json(&snapshot.transaction_dispatch_queue_ack),
+        "transaction_dispatch_queue_bye": latency_snapshot_json(&snapshot.transaction_dispatch_queue_bye),
+        "transaction_dispatch_queue_by_worker": transaction_worker_snapshots_json(
+            &snapshot.transaction_dispatch_queue_by_worker,
+        ),
+        "transaction_handler_invite": latency_snapshot_json(&snapshot.transaction_handler_invite),
+        "server_transaction_create": latency_snapshot_json(&snapshot.server_transaction_create),
+        "existing_transaction_dispatch": latency_snapshot_json(&snapshot.existing_transaction_dispatch),
+        "transaction_event_broadcast": latency_snapshot_json(&snapshot.transaction_event_broadcast),
+        "transaction_dispatch_backpressure": latency_snapshot_json(&snapshot.transaction_dispatch_backpressure),
+        "udp_receive_to_invite_200": latency_snapshot_json(&snapshot.udp_receive_to_invite_200),
+        "dialog_event_dispatch_queue": latency_snapshot_json(&snapshot.dialog_event_dispatch_queue),
+        "dialog_event_dispatch_backpressure": latency_snapshot_json(&snapshot.dialog_event_dispatch_backpressure),
+        "dialog_event_handler_invite": latency_snapshot_json(&snapshot.dialog_event_handler_invite),
+        "dialog_session_publish_incoming_call": latency_snapshot_json(
+            &snapshot.dialog_session_publish_incoming_call,
+        ),
+        "dialog_lookup": latency_snapshot_json(&snapshot.dialog_lookup),
+        "dialog_initial_invite_setup": latency_snapshot_json(&snapshot.dialog_initial_invite_setup),
+        "invite_2xx_maintenance": latency_snapshot_json(&snapshot.invite_2xx_maintenance),
+        "invite_2xx_proactive_send": latency_snapshot_json(&snapshot.invite_2xx_proactive_send),
+        "global_publish_total": latency_snapshot_json(&snapshot.global_publish_total),
+        "call_timing_trace_overflow": snapshot.call_timing_trace_overflow,
+        "call_timing_traces": dialog_call_timing_traces_json(&snapshot.call_timing_traces),
+        "counts": Value::Object(counts),
+    })
+}
+
+pub fn sip_udp_diagnostics() -> Value {
+    let snapshot = rvoip_sip_transport::diagnostics::snapshot();
+    let mut value = serde_json::Map::new();
+    value.insert(
+        "enabled".to_string(),
+        json!(rvoip_sip_transport::diagnostics::enabled()),
+    );
+    value.insert(
+        "udp_datagrams_received".to_string(),
+        json!(snapshot.udp_datagrams_received),
+    );
+    value.insert(
+        "udp_worker_queue_enqueued".to_string(),
+        json!(snapshot.udp_worker_queue_enqueued),
+    );
+    value.insert(
+        "udp_worker_queue_full".to_string(),
+        json!(snapshot.udp_worker_queue_full),
+    );
+    value.insert("udp_parse_ok".to_string(), json!(snapshot.udp_parse_ok));
+    value.insert(
+        "udp_parse_failed".to_string(),
+        json!(snapshot.udp_parse_failed),
+    );
+    value.insert("inbound_invite".to_string(), json!(snapshot.inbound_invite));
+    value.insert("inbound_ack".to_string(), json!(snapshot.inbound_ack));
+    value.insert("inbound_bye".to_string(), json!(snapshot.inbound_bye));
+    value.insert(
+        "inbound_other_request".to_string(),
+        json!(snapshot.inbound_other_request),
+    );
+    value.insert("inbound_1xx".to_string(), json!(snapshot.inbound_1xx));
+    value.insert(
+        "inbound_invite_2xx".to_string(),
+        json!(snapshot.inbound_invite_2xx),
+    );
+    value.insert(
+        "inbound_2xx_other".to_string(),
+        json!(snapshot.inbound_2xx_other),
+    );
+    value.insert(
+        "inbound_3xx_6xx".to_string(),
+        json!(snapshot.inbound_3xx_6xx),
+    );
+    value.insert(
+        "inbound_other_response".to_string(),
+        json!(snapshot.inbound_other_response),
+    );
+    value.insert(
+        "transport_channel_backpressure_events".to_string(),
+        json!(snapshot.transport_channel_backpressure_events),
+    );
+    value.insert(
+        "transport_channel_backpressure_ns".to_string(),
+        json!(snapshot.transport_channel_backpressure_ns),
+    );
+    value.insert(
+        "manager_channel_backpressure_events".to_string(),
+        json!(snapshot.manager_channel_backpressure_events),
+    );
+    value.insert(
+        "manager_channel_backpressure_ns".to_string(),
+        json!(snapshot.manager_channel_backpressure_ns),
+    );
+    value.insert("outbound_sends".to_string(), json!(snapshot.outbound_sends));
+    value.insert(
+        "outbound_send_errors".to_string(),
+        json!(snapshot.outbound_send_errors),
+    );
+    value.insert(
+        "outbound_raw_sends".to_string(),
+        json!(snapshot.outbound_raw_sends),
+    );
+    value.insert(
+        "outbound_invite".to_string(),
+        json!(snapshot.outbound_invite),
+    );
+    value.insert("outbound_ack".to_string(), json!(snapshot.outbound_ack));
+    value.insert("outbound_bye".to_string(), json!(snapshot.outbound_bye));
+    value.insert(
+        "outbound_other_request".to_string(),
+        json!(snapshot.outbound_other_request),
+    );
+    value.insert("outbound_1xx".to_string(), json!(snapshot.outbound_1xx));
+    value.insert("outbound_2xx".to_string(), json!(snapshot.outbound_2xx));
+    value.insert(
+        "outbound_3xx_6xx".to_string(),
+        json!(snapshot.outbound_3xx_6xx),
+    );
+    value.insert(
+        "outbound_other_response".to_string(),
+        json!(snapshot.outbound_other_response),
+    );
+    value.insert(
+        "send_latency_buckets".to_string(),
+        json!(snapshot.send_latency_buckets),
+    );
+    value.insert(
+        "udp_read_to_worker_queue".to_string(),
+        sip_udp_latency_snapshot_json(&snapshot.udp_read_to_worker_queue),
+    );
+    value.insert(
+        "udp_receive_poll".to_string(),
+        sip_udp_latency_snapshot_json(&snapshot.udp_receive_poll),
+    );
+    value.insert(
+        "udp_receive_loop_gap".to_string(),
+        sip_udp_latency_snapshot_json(&snapshot.udp_receive_loop_gap),
+    );
+    value.insert(
+        "udp_parse".to_string(),
+        sip_udp_latency_snapshot_json(&snapshot.udp_parse),
+    );
+    value.insert(
+        "parse_to_transport_manager".to_string(),
+        sip_udp_latency_snapshot_json(&snapshot.parse_to_transport_manager),
+    );
+    value.insert(
+        "transport_manager_to_transaction".to_string(),
+        sip_udp_latency_snapshot_json(&snapshot.transport_manager_to_transaction),
+    );
+    value.insert(
+        "inbound_by_source".to_string(),
+        json!(snapshot
+            .inbound_by_source
+            .iter()
+            .map(sip_udp_endpoint_snapshot_json)
+            .collect::<Vec<_>>()),
+    );
+    value.insert(
+        "inbound_by_local".to_string(),
+        json!(snapshot
+            .inbound_by_local
+            .iter()
+            .map(sip_udp_endpoint_snapshot_json)
+            .collect::<Vec<_>>()),
+    );
+    value.insert(
+        "receive_loop_by_local".to_string(),
+        json!(snapshot
+            .receive_loop_by_local
+            .iter()
+            .map(sip_udp_receive_loop_endpoint_snapshot_json)
+            .collect::<Vec<_>>()),
+    );
+    value.insert(
+        "call_trace_overflow".to_string(),
+        json!(snapshot.call_trace_overflow),
+    );
+    value.insert(
+        "call_traces".to_string(),
+        json!(snapshot
+            .call_traces
+            .iter()
+            .map(sip_udp_call_trace_json)
+            .collect::<Vec<_>>()),
+    );
+    Value::Object(value)
+}
+
+pub fn sip_dialog_raw_diagnostics() -> Value {
+    serde_json::to_value(rvoip_sip_dialog::diagnostics::snapshot()).unwrap_or_else(|err| {
+        json!({
+            "serialization_error": err.to_string(),
+        })
+    })
+}
+
+pub fn media_setup_timing_diagnostics() -> Value {
+    let snapshot = rvoip_media_core::diagnostics::snapshot();
+    json!({
+        "enabled": rvoip_media_core::diagnostics::enabled(),
+        "media_start": json!({
+            "total": snapshot.media_start_total,
+            "done": snapshot.media_start_done,
+            "fail": snapshot.media_start_fail,
+            "active": snapshot.media_start_active,
+            "avg_us": round2(avg_ns_to_us(
+                snapshot.media_start_ns,
+                snapshot.media_start_done + snapshot.media_start_fail,
+            )),
+            "max_us": ns_to_us(snapshot.media_start_max_ns),
+        }),
+        "rtp_port_allocate": timing_ns_json(
+            snapshot.rtp_port_allocate_count,
+            snapshot.rtp_port_allocate_ns,
+            snapshot.rtp_port_allocate_max_ns,
+        ),
+        "rtp_session_new": timing_ns_json(
+            snapshot.rtp_session_new_count,
+            snapshot.rtp_session_new_ns,
+            snapshot.rtp_session_new_max_ns,
+        ),
+        "rtp_event_subscription": timing_ns_json(
+            snapshot.rtp_event_subscription_count,
+            snapshot.rtp_event_subscription_ns,
+            snapshot.rtp_event_subscription_max_ns,
+        ),
+        "rtp_event_handler_spawn": timing_ns_json(
+            snapshot.rtp_event_handler_spawn_count,
+            snapshot.rtp_event_handler_spawn_ns,
+            snapshot.rtp_event_handler_spawn_max_ns,
+        ),
+        "stop_media": timing_ns_json(
+            snapshot.stop_media_count,
+            snapshot.stop_media_ns,
+            snapshot.stop_media_max_ns,
+        ),
+        "port_release": timing_ns_json(
+            snapshot.port_release_count,
+            snapshot.port_release_ns,
+            snapshot.port_release_max_ns,
+        ),
+        "audio_tx": json!({
+            "task_start_count": snapshot.audio_tx_task_start_count,
+            "start_phase": timing_ns_json(
+                snapshot.audio_tx_task_start_count,
+                snapshot.audio_tx_start_phase_ns,
+                snapshot.audio_tx_start_phase_max_ns,
+            ),
+            "tick_gap": timing_ns_json(
+                snapshot.audio_tx_tick_gap_count,
+                snapshot.audio_tx_tick_gap_ns,
+                snapshot.audio_tx_tick_gap_max_ns,
+            ),
+            "send": timing_ns_json(
+                snapshot.audio_tx_send_count,
+                snapshot.audio_tx_send_ns,
+                snapshot.audio_tx_send_max_ns,
+            ),
+            "send_fail": snapshot.audio_tx_send_fail,
+        }),
+    })
+}
+
+pub fn media_setup_raw_diagnostics() -> Value {
+    serde_json::to_value(rvoip_media_core::diagnostics::snapshot()).unwrap_or_else(|err| {
+        json!({
+            "serialization_error": err.to_string(),
+        })
+    })
+}
+
+pub fn admission_diagnostics() -> Value {
+    serde_json::to_value(rvoip_sip::admission_diag::snapshot()).unwrap_or_else(|err| {
+        json!({
+            "serialization_error": err.to_string(),
+        })
+    })
+}
+
+fn latency_snapshot_json(snapshot: &rvoip_sip_dialog::diagnostics::LatencySnapshot) -> Value {
+    json!({
+        "count": snapshot.count,
+        "avg_us": snapshot.avg_us,
+        "p50_us": snapshot.p50_us,
+        "p95_us": snapshot.p95_us,
+        "p99_us": snapshot.p99_us,
+        "p999_us": snapshot.p999_us,
+        "max_us": snapshot.max_us,
+        "over_500ms": snapshot.over_500ms,
+    })
+}
+
+fn sip_udp_latency_snapshot_json(
+    snapshot: &rvoip_sip_transport::diagnostics::LatencySnapshot,
+) -> Value {
+    json!({
+        "count": snapshot.count,
+        "avg_us": snapshot.avg_us,
+        "p50_us": snapshot.p50_us,
+        "p95_us": snapshot.p95_us,
+        "p99_us": snapshot.p99_us,
+        "p999_us": snapshot.p999_us,
+        "max_us": snapshot.max_us,
+        "over_500ms": snapshot.over_500ms,
+    })
+}
+
+fn sip_udp_endpoint_snapshot_json(
+    snapshot: &rvoip_sip_transport::diagnostics::EndpointMethodSnapshot,
+) -> Value {
+    json!({
+        "endpoint": &snapshot.endpoint,
+        "total": snapshot.total,
+        "invite": snapshot.invite,
+        "ack": snapshot.ack,
+        "bye": snapshot.bye,
+        "other_request": snapshot.other_request,
+        "response_1xx": snapshot.response_1xx,
+        "invite_2xx": snapshot.invite_2xx,
+        "response_2xx_other": snapshot.response_2xx_other,
+        "response_3xx_6xx": snapshot.response_3xx_6xx,
+        "response_other": snapshot.response_other,
+    })
+}
+
+fn sip_udp_receive_loop_endpoint_snapshot_json(
+    snapshot: &rvoip_sip_transport::diagnostics::ReceiveLoopEndpointSnapshot,
+) -> Value {
+    json!({
+        "endpoint": &snapshot.endpoint,
+        "datagrams": snapshot.datagrams,
+        "max_gap_us": snapshot.max_gap_us,
+        "over_500ms_gaps": snapshot.over_500ms_gaps,
+    })
+}
+
+fn sip_udp_call_trace_json(
+    snapshot: &rvoip_sip_transport::diagnostics::CallTraceSnapshot,
+) -> Value {
+    json!({
+        "call_id": &snapshot.call_id,
+        "inbound_invite": snapshot.inbound_invite,
+        "inbound_ack": snapshot.inbound_ack,
+        "inbound_bye": snapshot.inbound_bye,
+        "inbound_invite_2xx": snapshot.inbound_invite_2xx,
+        "outbound_invite": snapshot.outbound_invite,
+        "outbound_ack": snapshot.outbound_ack,
+        "outbound_bye": snapshot.outbound_bye,
+        "outbound_invite_2xx": snapshot.outbound_invite_2xx,
+        "outbound_raw_invite_2xx": snapshot.outbound_raw_invite_2xx,
+        "outbound_target_send_errors": snapshot.outbound_target_send_errors,
+        "first_inbound_invite_epoch_us": snapshot.first_inbound_invite_epoch_us,
+        "last_inbound_invite_epoch_us": snapshot.last_inbound_invite_epoch_us,
+        "first_inbound_ack_epoch_us": snapshot.first_inbound_ack_epoch_us,
+        "last_inbound_ack_epoch_us": snapshot.last_inbound_ack_epoch_us,
+        "first_inbound_bye_epoch_us": snapshot.first_inbound_bye_epoch_us,
+        "last_inbound_bye_epoch_us": snapshot.last_inbound_bye_epoch_us,
+        "first_inbound_invite_2xx_epoch_us": snapshot.first_inbound_invite_2xx_epoch_us,
+        "last_inbound_invite_2xx_epoch_us": snapshot.last_inbound_invite_2xx_epoch_us,
+        "first_outbound_invite_epoch_us": snapshot.first_outbound_invite_epoch_us,
+        "last_outbound_invite_epoch_us": snapshot.last_outbound_invite_epoch_us,
+        "first_outbound_ack_epoch_us": snapshot.first_outbound_ack_epoch_us,
+        "last_outbound_ack_epoch_us": snapshot.last_outbound_ack_epoch_us,
+        "first_outbound_bye_epoch_us": snapshot.first_outbound_bye_epoch_us,
+        "last_outbound_bye_epoch_us": snapshot.last_outbound_bye_epoch_us,
+        "first_outbound_invite_2xx_epoch_us": snapshot.first_outbound_invite_2xx_epoch_us,
+        "last_outbound_invite_2xx_epoch_us": snapshot.last_outbound_invite_2xx_epoch_us,
+        "first_outbound_raw_invite_2xx_epoch_us": snapshot.first_outbound_raw_invite_2xx_epoch_us,
+        "last_outbound_raw_invite_2xx_epoch_us": snapshot.last_outbound_raw_invite_2xx_epoch_us,
+        "first_inbound_source": &snapshot.first_inbound_source,
+        "last_inbound_source": &snapshot.last_inbound_source,
+        "first_inbound_local": &snapshot.first_inbound_local,
+        "last_inbound_local": &snapshot.last_inbound_local,
+        "first_outbound_local": &snapshot.first_outbound_local,
+        "last_outbound_local": &snapshot.last_outbound_local,
+        "first_outbound_destination": &snapshot.first_outbound_destination,
+        "last_outbound_destination": &snapshot.last_outbound_destination,
+    })
+}
+
+fn transaction_worker_snapshots_json(
+    snapshots: &[rvoip_sip_dialog::diagnostics::TransactionDispatchWorkerSnapshot],
+) -> Value {
+    json!(snapshots
+        .iter()
+        .filter(|snapshot| snapshot.queue.count > 0 || snapshot.depth_max > 0)
+        .map(|snapshot| {
+            json!({
+                "worker_id": snapshot.worker_id,
+                "queue": latency_snapshot_json(&snapshot.queue),
+                "depth_max": snapshot.depth_max,
+            })
+        })
+        .collect::<Vec<_>>())
+}
+
+fn dialog_call_timing_traces_json(
+    snapshots: &[rvoip_sip_dialog::diagnostics::CallTimingTraceSnapshot],
+) -> Value {
+    json!(snapshots
+        .iter()
+        .map(|snapshot| {
+            json!({
+                "call_id": &snapshot.call_id,
+                "first_uac_invite_2xx_response_epoch_us": snapshot.first_uac_invite_2xx_response_epoch_us,
+                "last_uac_invite_2xx_response_epoch_us": snapshot.last_uac_invite_2xx_response_epoch_us,
+                "first_uac_ack_attempt_epoch_us": snapshot.first_uac_ack_attempt_epoch_us,
+                "last_uac_ack_attempt_epoch_us": snapshot.last_uac_ack_attempt_epoch_us,
+                "first_uac_ack_success_epoch_us": snapshot.first_uac_ack_success_epoch_us,
+                "last_uac_ack_success_epoch_us": snapshot.last_uac_ack_success_epoch_us,
+                "first_uac_ack_failure_epoch_us": snapshot.first_uac_ack_failure_epoch_us,
+                "last_uac_ack_failure_epoch_us": snapshot.last_uac_ack_failure_epoch_us,
+                "first_uac_call_answered_emit_epoch_us": snapshot.first_uac_call_answered_emit_epoch_us,
+                "last_uac_call_answered_emit_epoch_us": snapshot.last_uac_call_answered_emit_epoch_us,
+                "first_hub_response_invite_2xx_epoch_us": snapshot.first_hub_response_invite_2xx_epoch_us,
+                "last_hub_response_invite_2xx_epoch_us": snapshot.last_hub_response_invite_2xx_epoch_us,
+                "first_hub_call_answered_epoch_us": snapshot.first_hub_call_answered_epoch_us,
+                "last_hub_call_answered_epoch_us": snapshot.last_hub_call_answered_epoch_us,
+                "first_hub_ack_sent_epoch_us": snapshot.first_hub_ack_sent_epoch_us,
+                "last_hub_ack_sent_epoch_us": snapshot.last_hub_ack_sent_epoch_us,
+                "first_uas_ack_received_epoch_us": snapshot.first_uas_ack_received_epoch_us,
+                "last_uas_ack_received_epoch_us": snapshot.last_uas_ack_received_epoch_us,
+                "first_lifecycle_call_answered_epoch_us": snapshot.first_lifecycle_call_answered_epoch_us,
+                "last_lifecycle_call_answered_epoch_us": snapshot.last_lifecycle_call_answered_epoch_us,
+            })
+        })
+        .collect::<Vec<_>>())
+}
+
+fn timing_ns_json(count: u64, total_ns: u64, max_ns: u64) -> Value {
+    json!({
+        "count": count,
+        "avg_us": round2(avg_ns_to_us(total_ns, count)),
+        "max_us": ns_to_us(max_ns),
+    })
+}
+
+fn avg_ns_to_us(total_ns: u64, count: u64) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        total_ns as f64 / count as f64 / 1_000.0
+    }
+}
+
+fn ns_to_us(ns: u64) -> u64 {
+    ns / 1_000
 }
 
 pub struct DhatProfile {
@@ -1328,6 +1889,7 @@ pub struct RssResultMetrics {
     pub sustained_growth_mb_per_hr: f64,
     pub post_drain_growth_mb_per_hr: f64,
     pub post_drain_sample_count: usize,
+    pub post_drain_window_secs: f64,
     pub gate_growth_mb_per_hr: f64,
     pub gate_window: &'static str,
     pub windows: Vec<serde_json::Value>,
@@ -1347,6 +1909,10 @@ pub fn rss_result_metrics(
         .cloned()
         .collect();
     let post_drain_growth_mb_per_hr = rss_growth_mb_per_min(&post_drain_samples) * 60.0;
+    let post_drain_window_secs = match (post_drain_samples.first(), post_drain_samples.last()) {
+        (Some(first), Some(last)) => (last.t_secs - first.t_secs).max(0.0),
+        _ => 0.0,
+    };
     let (gate_growth_mb_per_hr, gate_window) = if post_drain_samples.len() >= 2 {
         (post_drain_growth_mb_per_hr, "post_drain")
     } else {
@@ -1359,6 +1925,7 @@ pub fn rss_result_metrics(
         sustained_growth_mb_per_hr,
         post_drain_growth_mb_per_hr,
         post_drain_sample_count: post_drain_samples.len(),
+        post_drain_window_secs,
         gate_growth_mb_per_hr,
         gate_window,
         windows,

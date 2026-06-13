@@ -206,7 +206,7 @@ async fn main() -> Result<(), ExampleError> {
                     );
 
                     // Display decrypted data to verify SRTP worked
-                    match String::from_utf8(frame.data.clone()) {
+                    match String::from_utf8(frame.data.to_vec()) {
                         Ok(text) => info!("Decrypted message: '{}'", text),
                         Err(_) => {
                             // Display first few bytes of payload data (for verification)
@@ -251,7 +251,7 @@ async fn main() -> Result<(), ExampleError> {
         let test_data = format!("Secure test frame {}", i);
         let frame = MediaFrame {
             frame_type: MediaFrameType::Audio,
-            data: test_data.clone().into_bytes(),
+            data: test_data.clone().into_bytes().into(),
             timestamp: i * 160, // 20ms at 8kHz
             sequence: i as u16,
             marker: i == 0,

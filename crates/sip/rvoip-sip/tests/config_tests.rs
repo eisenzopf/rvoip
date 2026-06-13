@@ -2,7 +2,10 @@
 //!
 //! Tests Config constructors, defaults, and field values.
 
-use rvoip_sip::{Config, MediaMode, PerformanceConfig, SipContactMode, SipTlsMode};
+use rvoip_sip::{
+    Config, MediaMode, MediaSessionControllerConfig, PerformanceConfig, RtpSessionBufferConfig,
+    RtpTransportBufferConfig, SipContactMode, SipTlsMode,
+};
 use rvoip_sip_transport::UdpParseDispatch;
 use std::net::{IpAddr, SocketAddr};
 
@@ -85,6 +88,21 @@ fn test_config_default() {
     assert!(!c.rtp_diagnostics);
     assert!(!c.media_sdp_diagnostics);
     assert_eq!(c.media_mode, MediaMode::Enabled);
+    assert_eq!(
+        c.rtp_session_buffer_config,
+        RtpSessionBufferConfig::default()
+    );
+    assert_eq!(
+        c.rtp_transport_buffer_config,
+        RtpTransportBufferConfig::default()
+    );
+    assert_eq!(c.media_session_controller_config.capacity_hint, 0);
+    assert_eq!(c.media_session_controller_config.rtp_buffer_size, 480);
+    assert_eq!(
+        c.media_session_controller_config.rtp_buffer_initial_count,
+        32
+    );
+    assert_eq!(c.media_session_controller_config.rtp_buffer_max_count, 128);
 }
 
 #[test]
@@ -101,6 +119,21 @@ fn test_config_media_port_validation() {
 
 #[test]
 fn test_config_graduated_perf_knobs_are_configurable() {
+    let session_buffers = RtpSessionBufferConfig {
+        sender_channel_capacity: 8,
+        receiver_channel_capacity: 4,
+        event_channel_capacity: 16,
+    };
+    let transport_buffers = RtpTransportBufferConfig {
+        event_channel_capacity: 12,
+        recv_buffer_size: 2048,
+        rtcp_recv_buffer_size: 1024,
+    };
+    let mut media_controller_config = MediaSessionControllerConfig::default();
+    media_controller_config.rtp_buffer_size = 960;
+    media_controller_config.rtp_buffer_initial_count = 8;
+    media_controller_config.rtp_buffer_max_count = 32;
+
     let c = Config::local("alice", 5060)
         .with_auto_180_ringing(false)
         .with_auto_100_trying(false)
@@ -110,6 +143,9 @@ fn test_config_graduated_perf_knobs_are_configurable() {
         .with_global_event_channel_capacity(16_384)
         .with_media_session_capacity(4096)
         .with_media_port_capacity(16_384, 1024)
+        .with_media_session_controller_config(media_controller_config)
+        .with_rtp_session_buffer_config(session_buffers)
+        .with_rtp_transport_buffer_config(transport_buffers)
         .with_sip_udp_diagnostics(true)
         .with_media_setup_diagnostics(true)
         .with_cleanup_diagnostics(true)
@@ -129,6 +165,14 @@ fn test_config_graduated_perf_knobs_are_configurable() {
     assert_eq!(c.media_port_start, 16_384);
     assert_eq!(c.media_port_end, 17_407);
     assert_eq!(c.media_port_capacity, Some(1024));
+    assert_eq!(c.rtp_session_buffer_config, session_buffers);
+    assert_eq!(c.rtp_transport_buffer_config, transport_buffers);
+    assert_eq!(c.media_session_controller_config.rtp_buffer_size, 960);
+    assert_eq!(
+        c.media_session_controller_config.rtp_buffer_initial_count,
+        8
+    );
+    assert_eq!(c.media_session_controller_config.rtp_buffer_max_count, 32);
     assert!(c.sip_udp_diagnostics);
     assert!(c.media_setup_diagnostics);
     assert!(c.cleanup_diagnostics);
@@ -222,6 +266,12 @@ performanceProfiles:
       auto180Ringing: false
       auto100Trying: false
       fastAutoAcceptIncomingCalls: true
+      sipUdpDiagnostics: true
+      sipTransactionTimingDiagnostics: true
+      sipDialogTimingDiagnostics: true
+      mediaSetupDiagnostics: true
+      cleanupDiagnostics: true
+      cleanupDiagnosticEvents: false
       sipUdpParseWorkers: 2
       sipUdpParseDispatch: round-robin
       sipTransactionCommandChannelCapacity: 64
@@ -231,6 +281,24 @@ performanceProfiles:
       serverOverloadRetryAfterSecs: 2
       mediaMode: enabled
       mediaSessionCapacity: "$capacity"
+      rtpSessionBufferConfig:
+        senderChannelCapacity: 8
+        receiverChannelCapacity: 4
+        eventChannelCapacity: 12
+      rtpTransportBufferConfig:
+        eventChannelCapacity: 10
+        recvBufferSize: 2048
+        rtcpRecvBufferSize: 1024
+      mediaSessionControllerConfig:
+        audioFramePool:
+          initialSize: 8
+          maxSize: 32
+          sampleRate: 8000
+          channels: 1
+          samplesPerFrame: 160
+        rtpBufferSize: 960
+        rtpBufferInitialCount: 8
+        rtpBufferMaxCount: 32
 "#,
     )
     .unwrap();
@@ -247,6 +315,12 @@ performanceProfiles:
     assert!(!c.auto_180_ringing);
     assert!(!c.auto_100_trying);
     assert!(c.fast_auto_accept_incoming_calls);
+    assert!(c.sip_udp_diagnostics);
+    assert!(c.sip_transaction_timing_diagnostics);
+    assert!(c.sip_dialog_timing_diagnostics);
+    assert!(c.media_setup_diagnostics);
+    assert!(c.cleanup_diagnostics);
+    assert!(!c.cleanup_diagnostic_events);
     assert_eq!(c.sip_udp_parse_workers, Some(2));
     assert_eq!(c.sip_udp_parse_dispatch, Some(UdpParseDispatch::RoundRobin));
     assert_eq!(c.sip_transaction_command_channel_capacity, Some(64));
@@ -256,6 +330,18 @@ performanceProfiles:
     assert_eq!(c.server_overload_retry_after_secs, Some(2));
     assert_eq!(c.media_session_capacity, Some(321));
     assert_eq!(c.media_mode, MediaMode::Enabled);
+    assert_eq!(c.rtp_session_buffer_config.sender_channel_capacity, 8);
+    assert_eq!(c.rtp_session_buffer_config.receiver_channel_capacity, 4);
+    assert_eq!(c.rtp_session_buffer_config.event_channel_capacity, 12);
+    assert_eq!(c.rtp_transport_buffer_config.event_channel_capacity, 10);
+    assert_eq!(c.rtp_transport_buffer_config.recv_buffer_size, 2048);
+    assert_eq!(c.rtp_transport_buffer_config.rtcp_recv_buffer_size, 1024);
+    assert_eq!(c.media_session_controller_config.rtp_buffer_size, 960);
+    assert_eq!(
+        c.media_session_controller_config.rtp_buffer_initial_count,
+        8
+    );
+    assert_eq!(c.media_session_controller_config.rtp_buffer_max_count, 32);
 }
 
 // ── Different names ─────────────────────────────────────────────────────────

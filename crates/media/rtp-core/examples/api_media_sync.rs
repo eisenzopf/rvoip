@@ -112,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Create a simple audio frame
             let frame = MediaFrame {
                 frame_type: MediaFrameType::Audio,
-                data: format!("Audio frame {}", i).into_bytes(),
+                data: format!("Audio frame {}", i).into_bytes().into(),
                 timestamp: i * (AUDIO_CLOCK_RATE / 50), // 20ms intervals
                 sequence: 0,                            // Will be set by the transport
                 marker: i == 0,                         // First packet has marker bit
@@ -133,7 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Create a simple video frame with a 100ms offset
             let frame = MediaFrame {
                 frame_type: MediaFrameType::Video,
-                data: format!("Video frame {}", i).into_bytes(),
+                data: format!("Video frame {}", i).into_bytes().into(),
                 timestamp: i * (VIDEO_CLOCK_RATE / 30) + VIDEO_CLOCK_RATE / 10, // 33ms intervals with +100ms offset
                 sequence: 0,        // Will be set by the transport
                 marker: i == 0,     // First packet has marker bit

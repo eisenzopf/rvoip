@@ -10,10 +10,24 @@ RUN_STARTED_EPOCH=$(date +%s)
 RUN_SUMMARY="$OUT_ROOT/summary.md"
 RUN_MATRIX="$OUT_ROOT/matrix.tsv"
 RUN_ENV="$OUT_ROOT/environment.md"
+EXAMPLE_BIN_DIR="${PBX_EXAMPLE_BIN_DIR:-}"
 
 PBX_ARG=${PBX_PROVIDER:-asterisk}
 API_ARG=${PBX_API:-all}
 SCENARIO_ARG=${PBX_SCENARIO:-all}
+TRANSPORT_ARG=${PBX_TRANSPORT_FILTER:-all}
+REPEAT_COUNT=${PBX_REPEAT:-1}
+PBX_REUSE_TLS_CERT=${PBX_REUSE_TLS_CERT:-1}
+PBX_RUN_WITH_CARGO=${PBX_RUN_WITH_CARGO:-0}
+PBX_TLS_PREWARM=${PBX_TLS_PREWARM:-1}
+if [ "${PBX_DIAG:-0}" = "1" ]; then
+  STOP_ON_FAIL=${PBX_STOP_ON_FAIL:-0}
+else
+  STOP_ON_FAIL=${PBX_STOP_ON_FAIL:-1}
+fi
+RUN_FAILURES=0
+DIAG_PCAP_PID=""
+DIAG_SAMPLE_PID=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -29,8 +43,20 @@ while [ "$#" -gt 0 ]; do
       SCENARIO_ARG=$2
       shift 2
       ;;
+    --transport)
+      TRANSPORT_ARG=$2
+      shift 2
+      ;;
+    --repeat)
+      REPEAT_COUNT=$2
+      shift 2
+      ;;
+    --stop-on-fail)
+      STOP_ON_FAIL=$2
+      shift 2
+      ;;
     --help|-h)
-      echo "Usage: $0 [--pbx asterisk|freeswitch|both] [--api endpoint|stream_peer|callback|all] [--scenario registration|basic_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all]"
+      echo "Usage: $0 [--pbx asterisk|freeswitch|both] [--api endpoint|stream_peer|callback|all] [--scenario registration|basic_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all] [--transport UDP|TLS|all] [--repeat N] [--stop-on-fail 0|1]"
       exit 0
       ;;
     *)
@@ -40,6 +66,21 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+case "$TRANSPORT_ARG" in
+  all|udp|UDP|tls|TLS) ;;
+  *) echo "Unknown transport: $TRANSPORT_ARG" >&2; exit 2 ;;
+esac
+
+case "$REPEAT_COUNT" in
+  ''|*[!0-9]*) echo "--repeat requires a positive integer" >&2; exit 2 ;;
+  0) echo "--repeat requires a positive integer" >&2; exit 2 ;;
+esac
+
+case "$STOP_ON_FAIL" in
+  0|1) ;;
+  *) echo "--stop-on-fail requires 0 or 1" >&2; exit 2 ;;
+esac
+
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/tls_cert.sh"
 RUN_ENV="$OUT_ROOT/environment-${PBX_ARG}.md"
@@ -48,6 +89,12 @@ PBX_CHILDREN=""
 PBX_REPORT_READY=0
 
 cleanup() {
+  if [ -n "$DIAG_SAMPLE_PID" ]; then
+    kill "$DIAG_SAMPLE_PID" 2>/dev/null || true
+  fi
+  if [ -n "$DIAG_PCAP_PID" ]; then
+    kill "$DIAG_PCAP_PID" 2>/dev/null || true
+  fi
   for pid in $PBX_CHILDREN; do
     kill "$pid" 2>/dev/null || true
   done
@@ -89,6 +136,14 @@ write_run_environment() {
     echo "- pbx_arg: $PBX_ARG"
     echo "- api_arg: $API_ARG"
     echo "- scenario_arg: $SCENARIO_ARG"
+    echo "- transport_arg: $TRANSPORT_ARG"
+    echo "- repeat_count: $REPEAT_COUNT"
+    echo "- stop_on_fail: $STOP_ON_FAIL"
+    echo "- pbx_diag: ${PBX_DIAG:-0}"
+    echo "- pbx_reuse_tls_cert: $PBX_REUSE_TLS_CERT"
+    echo "- pbx_tls_prewarm: $PBX_TLS_PREWARM"
+    echo "- pbx_run_with_cargo: $PBX_RUN_WITH_CARGO"
+    echo "- example_bin_dir: $EXAMPLE_BIN_DIR"
     echo "- git_rev: $(git -C "$WORKSPACE_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
     echo "- rustc: $(rustc --version 2>/dev/null || echo unknown)"
     echo "- cargo: $(cargo --version 2>/dev/null || echo unknown)"
@@ -118,6 +173,7 @@ init_report() {
   mkdir -p "$OUT_ROOT"
   if [ "${PBX_REPORT_APPEND:-0}" != "1" ] || [ ! -f "$RUN_MATRIX" ]; then
     printf 'status\tprovider\tapi\tscenario\ttransport\trole\tduration_s\texit_code\tstarted_at_utc\tended_at_utc\tlog\tout_dir\n' >"$RUN_MATRIX"
+    printf 'provider\tapi\tscenario\ttransport\trole\tduration_s\texit_code\tstarted_at_utc\tended_at_utc\tlog\n' >"$OUT_ROOT/tls-prewarm.tsv"
   fi
   write_run_environment
   PBX_REPORT_READY=1
@@ -183,6 +239,12 @@ finish() {
   status=$?
   trap - EXIT INT TERM
   cleanup
+  if [ "$status" -eq 0 ] && [ -f "$RUN_MATRIX" ]; then
+    failures=$(awk -F '\t' 'NR > 1 && $1 == "FAIL" { n++ } END { print n + 0 }' "$RUN_MATRIX" 2>/dev/null || echo 0)
+    if [ "$failures" -gt 0 ]; then
+      status=1
+    fi
+  fi
   write_run_summary "$status"
   exit "$status"
 }
@@ -269,6 +331,263 @@ example_label() {
   esac
 }
 
+diag_enabled() {
+  [ "${PBX_DIAG:-0}" = "1" ]
+}
+
+transport_selected() {
+  transport=$1
+  case "$TRANSPORT_ARG" in
+    all) return 0 ;;
+    udp|UDP) [ "$transport" = "UDP" ] ;;
+    tls|TLS) [ "$transport" = "TLS" ] ;;
+  esac
+}
+
+truthy() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+example_binary() {
+  printf '%s/%s\n' "$EXAMPLE_BIN_DIR" "$1"
+}
+
+example_command_label() {
+  example=$1
+  if truthy "$PBX_RUN_WITH_CARGO"; then
+    printf 'cargo run -p rvoip-sip --features dev-insecure-tls --example %s --quiet\n' "$example"
+  else
+    example_binary "$example"
+  fi
+}
+
+run_example_command() {
+  example=$1
+  if truthy "$PBX_RUN_WITH_CARGO"; then
+    cargo run -p rvoip-sip --features dev-insecure-tls --example "$example" --quiet
+    return $?
+  fi
+  bin=$(example_binary "$example")
+  if [ ! -x "$bin" ]; then
+    echo "Built example binary not found or not executable: $bin" >&2
+    echo "Set PBX_RUN_WITH_CARGO=1 to use cargo run as a fallback." >&2
+    return 127
+  fi
+  "$bin"
+}
+
+resolve_example_bin_dir() {
+  if [ -n "$EXAMPLE_BIN_DIR" ]; then
+    return
+  fi
+  metadata=$(cargo metadata --format-version 1 --no-deps 2>/dev/null || true)
+  target_dir=$(printf '%s\n' "$metadata" | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' | head -1)
+  if [ -z "$target_dir" ]; then
+    target_dir="${CARGO_TARGET_DIR:-$WORKSPACE_ROOT/target}"
+  fi
+  case "$target_dir" in
+    /*) ;;
+    *) target_dir="$WORKSPACE_ROOT/$target_dir" ;;
+  esac
+  EXAMPLE_BIN_DIR="$target_dir/debug/examples"
+}
+
+iteration_out_dir() {
+  base=$1
+  if [ "$REPEAT_COUNT" -gt 1 ]; then
+    printf '%s/repeat-%03d\n' "$base" "$PBX_REPEAT_INDEX"
+  else
+    printf '%s\n' "$base"
+  fi
+}
+
+pbx_host_for_diag() {
+  provider=$1
+  transport=$2
+  case "$provider:$transport" in
+    freeswitch:TLS) printf '%s\n' "${FREESWITCH_TLS_ADDR%%:*}" ;;
+    freeswitch:UDP) printf '%s\n' "${FREESWITCH_UDP_ADDR%%:*}" ;;
+    *) printf '%s\n' "${SIP_SERVER:-127.0.0.1}" ;;
+  esac
+}
+
+pbx_port_for_diag() {
+  provider=$1
+  transport=$2
+  case "$provider:$transport" in
+    freeswitch:TLS) printf '%s\n' "${FREESWITCH_TLS_ADDR##*:}" ;;
+    freeswitch:UDP) printf '%s\n' "${FREESWITCH_UDP_ADDR##*:}" ;;
+    *:TLS) printf '%s\n' "${SIP_TLS_PORT:-5061}" ;;
+    *) printf '%s\n' "${SIP_PORT:-5060}" ;;
+  esac
+}
+
+route_interface_for_host() {
+  host=$1
+  route -n get "$host" 2>/dev/null | awk '/interface:/{print $2; exit}'
+}
+
+fs_cli_capture() {
+  output=$1
+  command=$2
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "docker not found" >"$output"
+    return
+  fi
+  {
+    echo "+ docker exec rvoip-freeswitch fs_cli -x \"$command\""
+    docker exec rvoip-freeswitch fs_cli -x "$command"
+  } >"$output" 2>&1 || true
+}
+
+diag_fs_snapshot() {
+  dfs_provider=$1
+  dfs_out_dir=$2
+  dfs_label=$3
+  if ! diag_enabled || [ "$dfs_provider" != "freeswitch" ]; then
+    return
+  fi
+  dfs_snapshot="$dfs_out_dir/fs-cli-$dfs_label.txt"
+  {
+    echo "# FreeSWITCH fs_cli snapshot: $dfs_label"
+    echo
+    for command in \
+      "status" \
+      "show calls" \
+      "show channels" \
+      "show registrations" \
+      "sofia status profile rvoip_tls_srtp"
+    do
+      echo
+      echo "## $command"
+      echo
+      docker exec rvoip-freeswitch fs_cli -x "$command" 2>&1 || true
+    done
+  } >"$dfs_snapshot" 2>&1 || true
+}
+
+diag_fs_sample_loop() {
+  dfsl_provider=$1
+  dfsl_out_dir=$2
+  if [ "$dfsl_provider" != "freeswitch" ]; then
+    return
+  fi
+  dfsl_sample_dir="$dfsl_out_dir/fs-cli-samples"
+  mkdir -p "$dfsl_sample_dir"
+  while :; do
+    dfsl_stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    diag_fs_snapshot "$dfsl_provider" "$dfsl_sample_dir" "$dfsl_stamp"
+    sleep "${PBX_DIAG_FS_SAMPLE_SECS:-2}" || break
+  done
+}
+
+diag_start_pcap() {
+  provider=$1
+  transport=$2
+  out_dir=$3
+  host=$(pbx_host_for_diag "$provider" "$transport")
+  port=$(pbx_port_for_diag "$provider" "$transport")
+  iface=$(route_interface_for_host "$host")
+  if [ -z "$iface" ]; then
+    iface=${PBX_DIAG_TCPDUMP_IFACE:-any}
+  fi
+  rtp_start=${FREESWITCH_RTP_START:-${ASTERISK_RTP_START:-16000}}
+  rtp_end=${FREESWITCH_RTP_END:-${ASTERISK_RTP_END:-18100}}
+  local_rtp_start=${PBX_DIAG_LOCAL_RTP_START:-16000}
+  local_rtp_end=${PBX_DIAG_LOCAL_RTP_END:-18100}
+  filter="host $host and (tcp port $port or udp port $port or udp portrange $rtp_start-$rtp_end or udp portrange $local_rtp_start-$local_rtp_end)"
+  {
+    echo "host=$host"
+    echo "port=$port"
+    echo "interface=$iface"
+    echo "filter=$filter"
+  } >"$out_dir/pcap-metadata.txt"
+  if ! command -v tcpdump >/dev/null 2>&1; then
+    echo "tcpdump not found" >"$out_dir/pcap.log"
+    return
+  fi
+  tcpdump -i "$iface" -s 0 -n -w "$out_dir/cell.pcap" "$filter" >"$out_dir/pcap.log" 2>&1 &
+  DIAG_PCAP_PID=$!
+  sleep 1
+}
+
+diag_stop_pcap() {
+  out_dir=$1
+  if [ -n "$DIAG_PCAP_PID" ]; then
+    kill "$DIAG_PCAP_PID" 2>/dev/null || true
+    wait "$DIAG_PCAP_PID" 2>/dev/null || true
+    DIAG_PCAP_PID=""
+  fi
+  if command -v tshark >/dev/null 2>&1 && [ -s "$out_dir/cell.pcap" ]; then
+    {
+      printf 'frame_time_epoch\tip_src\tudp_srcport\ttcp_srcport\tip_dst\tudp_dstport\ttcp_dstport\tprotocol\tinfo\n'
+      tshark -r "$out_dir/cell.pcap" -T fields \
+        -e frame.time_epoch \
+        -e ip.src \
+        -e udp.srcport \
+        -e tcp.srcport \
+        -e ip.dst \
+        -e udp.dstport \
+        -e tcp.dstport \
+        -e _ws.col.Protocol \
+        -e _ws.col.Info 2>"$out_dir/packet-timeline.stderr"
+    } >"$out_dir/packet-timeline.tsv" || true
+  else
+    echo "tshark not available or cell.pcap missing/empty" >"$out_dir/packet-timeline.tsv"
+  fi
+}
+
+diag_begin_cell() {
+  provider=$1
+  transport=$2
+  out_dir=$3
+  if ! diag_enabled; then
+    return
+  fi
+  mkdir -p "$out_dir"
+  export RUST_LOG="${RUST_LOG:-info,rvoip_sip=debug,rvoip_sip_dialog=debug,rvoip_sip_transport=debug,rvoip_sip_proxy=debug,rvoip_sip_registrar=debug}"
+  DIAG_CELL_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  {
+    echo "# PBX Diagnostic Cell"
+    echo
+    echo "- started_at_utc: $DIAG_CELL_STARTED_AT"
+    echo "- provider: $provider"
+    echo "- transport: $transport"
+    echo "- repeat_index: ${PBX_REPEAT_INDEX:-1}"
+    echo "- rust_log: $RUST_LOG"
+  } >"$out_dir/diag-metadata.md"
+  diag_fs_snapshot "$provider" "$out_dir" before
+  diag_fs_sample_loop "$provider" "$out_dir" &
+  DIAG_SAMPLE_PID=$!
+  diag_start_pcap "$provider" "$transport" "$out_dir"
+}
+
+diag_end_cell() {
+  provider=$1
+  transport=$2
+  out_dir=$3
+  if ! diag_enabled; then
+    return
+  fi
+  if [ -n "$DIAG_SAMPLE_PID" ]; then
+    kill "$DIAG_SAMPLE_PID" 2>/dev/null || true
+    wait "$DIAG_SAMPLE_PID" 2>/dev/null || true
+    DIAG_SAMPLE_PID=""
+  fi
+  diag_stop_pcap "$out_dir"
+  diag_fs_snapshot "$provider" "$out_dir" after
+  if [ "$provider" = "freeswitch" ] && command -v docker >/dev/null 2>&1; then
+    docker logs --since "${DIAG_CELL_STARTED_AT:-0}" rvoip-freeswitch >"$out_dir/freeswitch-since-cell.log" 2>&1 || true
+  fi
+  {
+    echo
+    echo "- ended_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } >>"$out_dir/diag-metadata.md"
+}
+
 run_one() {
   provider=$1
   example=$2
@@ -298,7 +617,7 @@ run_one() {
     echo "## Command"
     echo
     echo '```sh'
-    echo "PBX_PROVIDER=$provider PBX_SCENARIO=$scenario PBX_TRANSPORT=$transport SIP_TRANSPORT=$transport PBX_ROLE=$role AUDIO_OUTPUT_DIR=$out_dir cargo run -p rvoip-sip --features dev-insecure-tls --example $example --quiet"
+    echo "PBX_PROVIDER=$provider PBX_SCENARIO=$scenario PBX_TRANSPORT=$transport SIP_TRANSPORT=$transport PBX_ROLE=$role AUDIO_OUTPUT_DIR=$out_dir $(example_command_label "$example")"
     echo '```'
     echo
     echo "## Redacted Environment"
@@ -316,19 +635,19 @@ run_one() {
     echo "role: $role"
     echo "started_at_utc: $started_at"
     echo
-    echo "+ PBX_PROVIDER=$provider PBX_SCENARIO=$scenario PBX_TRANSPORT=$transport SIP_TRANSPORT=$transport PBX_ROLE=$role AUDIO_OUTPUT_DIR=$out_dir cargo run -p rvoip-sip --features dev-insecure-tls --example $example --quiet"
+    echo "+ PBX_PROVIDER=$provider PBX_SCENARIO=$scenario PBX_TRANSPORT=$transport SIP_TRANSPORT=$transport PBX_ROLE=$role AUDIO_OUTPUT_DIR=$out_dir $(example_command_label "$example")"
   } >"$log"
 
   set +e
   (
     cd "$WORKSPACE_ROOT"
-    PBX_PROVIDER="$provider" \
-    PBX_SCENARIO="$scenario" \
-    PBX_TRANSPORT="$transport" \
-    SIP_TRANSPORT="$transport" \
-    PBX_ROLE="$role" \
-    AUDIO_OUTPUT_DIR="$out_dir" \
-      cargo run -p rvoip-sip --features dev-insecure-tls --example "$example" --quiet
+    export PBX_PROVIDER="$provider"
+    export PBX_SCENARIO="$scenario"
+    export PBX_TRANSPORT="$transport"
+    export SIP_TRANSPORT="$transport"
+    export PBX_ROLE="$role"
+    export AUDIO_OUTPUT_DIR="$out_dir"
+    run_example_command "$example"
   ) >>"$log" 2>&1
   rc=$?
   set -e
@@ -418,7 +737,135 @@ prepare_tls() {
       export ASTERISK_TLS_SRTP_REQUIRED="${ASTERISK_TLS_SRTP_REQUIRED:-1}"
       ;;
   esac
-  ensure_pbx_tls_listener_cert "$out_dir/tls"
+  if truthy "$PBX_REUSE_TLS_CERT"; then
+    tls_cert_dir="${PBX_TLS_CERT_ROOT:-$OUT_ROOT/tls}/$provider"
+  else
+    tls_cert_dir="$out_dir/tls"
+  fi
+  ensure_pbx_tls_listener_cert "$tls_cert_dir"
+}
+
+wait_for_pbx_tls_ready() {
+  provider=$1
+  out_dir=$2
+  host=$(pbx_host_for_diag "$provider" TLS)
+  port=$(pbx_port_for_diag "$provider" TLS)
+  ready_log="$out_dir/tls-ready.log"
+  attempts=${PBX_TLS_READY_ATTEMPTS:-20}
+  sleep_secs=${PBX_TLS_READY_SLEEP_SECS:-1}
+  mkdir -p "$out_dir"
+  {
+    echo "# PBX TLS readiness"
+    echo
+    echo "- provider: $provider"
+    echo "- host: $host"
+    echo "- port: $port"
+    echo "- attempts: $attempts"
+    echo "- sleep_secs: $sleep_secs"
+  } >"$ready_log"
+
+  i=1
+  while [ "$i" -le "$attempts" ]; do
+    nc_rc=1
+    openssl_rc=1
+    {
+      echo
+      echo "## attempt $i"
+      if [ "$provider" = "freeswitch" ] && command -v docker >/dev/null 2>&1; then
+        docker exec rvoip-freeswitch fs_cli -x "sofia status profile rvoip_tls_srtp" 2>&1 | sed -n '1,80p'
+      fi
+      if command -v nc >/dev/null 2>&1; then
+        nc -z -w 2 "$host" "$port"
+        nc_rc=$?
+        echo "nc_rc=$nc_rc"
+      else
+        nc_rc=0
+        echo "nc not found; skipping TCP socket probe"
+      fi
+      if command -v openssl >/dev/null 2>&1; then
+        printf '' | openssl s_client -connect "$host:$port" -servername "$host" -brief 2>&1 | sed -n '1,80p'
+        openssl_rc=$?
+        echo "openssl_rc=$openssl_rc"
+      else
+        openssl_rc=0
+        echo "openssl not found; skipping TLS handshake probe"
+      fi
+    } >>"$ready_log" 2>&1
+    if [ "$nc_rc" -eq 0 ]; then
+      echo "ready_at_attempt=$i" >>"$ready_log"
+      return 0
+    fi
+    sleep "$sleep_secs"
+    i=$((i + 1))
+  done
+  echo "PBX TLS socket was not ready at $host:$port after $attempts attempts; see $ready_log" >&2
+  return 1
+}
+
+run_prewarm_one() {
+  provider=$1
+  example=$2
+  role=$3
+  out_dir=$4
+  log="$out_dir/$role.log"
+  api_label=$(example_label "$example")
+  started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  start_epoch=$(date +%s)
+  mkdir -p "$out_dir"
+  {
+    echo "provider: $provider"
+    echo "api: $api_label"
+    echo "scenario: tls_prewarm"
+    echo "transport: TLS"
+    echo "role: $role"
+    echo "started_at_utc: $started_at"
+    echo
+    echo "+ PBX_PROVIDER=$provider PBX_SCENARIO=registration PBX_TRANSPORT=TLS SIP_TRANSPORT=TLS PBX_ROLE=$role IDLE_SECS=${PBX_TLS_PREWARM_IDLE_SECS:-0} AUDIO_OUTPUT_DIR=$out_dir $(example_command_label "$example")"
+  } >"$log"
+
+  set +e
+  (
+    cd "$WORKSPACE_ROOT"
+    export PBX_PROVIDER="$provider"
+    export PBX_SCENARIO=registration
+    export PBX_TRANSPORT=TLS
+    export SIP_TRANSPORT=TLS
+    export PBX_ROLE="$role"
+    export IDLE_SECS="${PBX_TLS_PREWARM_IDLE_SECS:-0}"
+    export AUDIO_OUTPUT_DIR="$out_dir"
+    run_example_command "$example"
+  ) >>"$log" 2>&1
+  rc=$?
+  set -e
+
+  ended_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  duration=$(( $(date +%s) - start_epoch ))
+  {
+    echo
+    echo "ended_at_utc: $ended_at"
+    echo "duration_seconds: $duration"
+    echo "exit_status: $rc"
+  } >>"$log"
+  printf '%s\t%s\t%s\tTLS\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$provider" "$api_label" tls_prewarm "$role" "$duration" "$rc" "$started_at" "$ended_at" "$log" >>"$OUT_ROOT/tls-prewarm.tsv"
+  return "$rc"
+}
+
+prewarm_tls() {
+  provider=$1
+  example=$2
+  if ! transport_selected TLS || ! truthy "$PBX_TLS_PREWARM"; then
+    return 0
+  fi
+  api_label=$(example_label "$example")
+  out_dir="$OUT_ROOT/_prewarm/$provider/$api_label/TLS"
+  rm -rf "$out_dir"
+  mkdir -p "$out_dir"
+  prepare_tls "$provider" "$out_dir"
+  wait_for_pbx_tls_ready "$provider" "$out_dir"
+  for role in registration transferee target; do
+    run_prewarm_one "$provider" "$example" "$role" "$out_dir" || return $?
+  done
 }
 
 run_analyze() {
@@ -438,17 +885,17 @@ run_analyze() {
     echo "role: analyze"
     echo "started_at_utc: $started_at"
     echo
-    echo "+ PBX_PROVIDER=$provider PBX_SCENARIO=$scenario PBX_TRANSPORT=$transport SIP_TRANSPORT=$transport AUDIO_OUTPUT_DIR=$out_dir cargo run -p rvoip-sip --features dev-insecure-tls --example pbx_analyze --quiet"
+    echo "+ PBX_PROVIDER=$provider PBX_SCENARIO=$scenario PBX_TRANSPORT=$transport SIP_TRANSPORT=$transport AUDIO_OUTPUT_DIR=$out_dir $(example_command_label pbx_analyze)"
   } >"$log"
   set +e
   (
     cd "$WORKSPACE_ROOT"
-    PBX_PROVIDER="$provider" \
-    PBX_SCENARIO="$scenario" \
-    PBX_TRANSPORT="$transport" \
-    SIP_TRANSPORT="$transport" \
-    AUDIO_OUTPUT_DIR="$out_dir" \
-      cargo run -p rvoip-sip --features dev-insecure-tls --example pbx_analyze --quiet
+    export PBX_PROVIDER="$provider"
+    export PBX_SCENARIO="$scenario"
+    export PBX_TRANSPORT="$transport"
+    export SIP_TRANSPORT="$transport"
+    export AUDIO_OUTPUT_DIR="$out_dir"
+    run_example_command pbx_analyze
   ) >>"$log" 2>&1
   rc=$?
   set -e
@@ -473,18 +920,30 @@ run_registration() {
   api_label=$(example_label "$example")
   old_idle=${IDLE_SECS-}
   export IDLE_SECS="${REGISTRATION_IDLE_SECS:-2}"
+  rc=0
   for transport in TLS UDP; do
+    if ! transport_selected "$transport"; then
+      continue
+    fi
     out_dir="$OUT_ROOT/$provider/$api_label/registration/$transport"
+    out_dir=$(iteration_out_dir "$out_dir")
     if [ "$transport" = "TLS" ]; then
       prepare_tls "$provider" "$out_dir"
     fi
-    run_one "$provider" "$example" registration "$transport" registration "$out_dir" "$out_dir/registration.log"
+    diag_begin_cell "$provider" "$transport" "$out_dir"
+    run_one "$provider" "$example" registration "$transport" registration "$out_dir" "$out_dir/registration.log" || {
+      rc=$?
+      diag_end_cell "$provider" "$transport" "$out_dir"
+      break
+    }
+    diag_end_cell "$provider" "$transport" "$out_dir"
   done
   if [ -n "$old_idle" ]; then
     export IDLE_SECS="$old_idle"
   else
     unset IDLE_SECS
   fi
+  return "$rc"
 }
 
 run_two_party() {
@@ -494,34 +953,51 @@ run_two_party() {
   transport=$4
   api_label=$(example_label "$example")
   out_dir="$OUT_ROOT/$provider/$api_label/$scenario/$transport"
+  out_dir=$(iteration_out_dir "$out_dir")
   rm -rf "$out_dir"
   mkdir -p "$out_dir"
   if [ "$transport" = "TLS" ]; then
     prepare_tls "$provider" "$out_dir"
   fi
+  diag_begin_cell "$provider" "$transport" "$out_dir"
 
+  rc=0
   case "$scenario" in
     basic_call|hold_resume|dtmf|reject)
       start_one "$provider" "$example" "$scenario" "$transport" callee "$out_dir" "$out_dir/callee.log"
       pid_a=$LAST_PID
-      wait_for_log "$out_dir/callee.log" "Registered." "$pid_a" "$scenario-callee"
-      run_one "$provider" "$example" "$scenario" "$transport" caller "$out_dir" "$out_dir/caller.log"
-      wait_child "$pid_a" "$scenario-callee" "$out_dir/callee.log"
+      wait_for_log "$out_dir/callee.log" "Registered." "$pid_a" "$scenario-callee" || rc=$?
+      if [ "$rc" -eq 0 ]; then
+        run_one "$provider" "$example" "$scenario" "$transport" caller "$out_dir" "$out_dir/caller.log" || rc=$?
+      fi
+      wait_child "$pid_a" "$scenario-callee" "$out_dir/callee.log" || {
+        child_rc=$?
+        if [ "$rc" -eq 0 ]; then rc=$child_rc; fi
+      }
       ;;
     ring_cancel)
       start_one "$provider" "$example" "$scenario" "$transport" target "$out_dir" "$out_dir/target.log"
       pid_a=$LAST_PID
-      wait_for_log "$out_dir/target.log" "Registered." "$pid_a" "$scenario-target"
-      run_one "$provider" "$example" "$scenario" "$transport" caller "$out_dir" "$out_dir/caller.log"
-      wait_child "$pid_a" "$scenario-target" "$out_dir/target.log"
+      wait_for_log "$out_dir/target.log" "Registered." "$pid_a" "$scenario-target" || rc=$?
+      if [ "$rc" -eq 0 ]; then
+        run_one "$provider" "$example" "$scenario" "$transport" caller "$out_dir" "$out_dir/caller.log" || rc=$?
+      fi
+      wait_child "$pid_a" "$scenario-target" "$out_dir/target.log" || {
+        child_rc=$?
+        if [ "$rc" -eq 0 ]; then rc=$child_rc; fi
+      }
       ;;
   esac
 
   case "$scenario" in
     hold_resume|dtmf)
-      run_analyze "$provider" "$scenario" "$transport" "$out_dir"
+      if [ "$rc" -eq 0 ]; then
+        run_analyze "$provider" "$scenario" "$transport" "$out_dir" || rc=$?
+      fi
       ;;
   esac
+  diag_end_cell "$provider" "$transport" "$out_dir"
+  return "$rc"
 }
 
 run_transfer() {
@@ -531,47 +1007,91 @@ run_transfer() {
   api_label=$(example_label "$example")
   scenario=blind_transfer
   out_dir="$OUT_ROOT/$provider/$api_label/$scenario/$transport"
+  out_dir=$(iteration_out_dir "$out_dir")
   rm -rf "$out_dir"
   mkdir -p "$out_dir"
   if [ "$transport" = "TLS" ]; then
     prepare_tls "$provider" "$out_dir"
   fi
+  diag_begin_cell "$provider" "$transport" "$out_dir"
 
+  rc=0
   start_one "$provider" "$example" "$scenario" "$transport" transferee "$out_dir" "$out_dir/transferee.log"
   pid_a=$LAST_PID
-  wait_for_log "$out_dir/transferee.log" "Registered." "$pid_a" transfer-transferee
-  start_one "$provider" "$example" "$scenario" "$transport" target "$out_dir" "$out_dir/target.log"
-  pid_b=$LAST_PID
-  wait_for_log "$out_dir/target.log" "Registered." "$pid_b" transfer-target
-  run_one "$provider" "$example" "$scenario" "$transport" transferor "$out_dir" "$out_dir/transferor.log"
-  wait_child "$pid_a" transfer-transferee "$out_dir/transferee.log"
-  wait_child "$pid_b" transfer-target "$out_dir/target.log"
-  run_analyze "$provider" "$scenario" "$transport" "$out_dir"
+  wait_for_log "$out_dir/transferee.log" "Registered." "$pid_a" transfer-transferee || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    start_one "$provider" "$example" "$scenario" "$transport" target "$out_dir" "$out_dir/target.log"
+    pid_b=$LAST_PID
+    wait_for_log "$out_dir/target.log" "Registered." "$pid_b" transfer-target || rc=$?
+  else
+    pid_b=""
+  fi
+  if [ "$rc" -eq 0 ]; then
+    run_one "$provider" "$example" "$scenario" "$transport" transferor "$out_dir" "$out_dir/transferor.log" || rc=$?
+  fi
+  wait_child "$pid_a" transfer-transferee "$out_dir/transferee.log" || {
+    child_rc=$?
+    if [ "$rc" -eq 0 ]; then rc=$child_rc; fi
+  }
+  if [ -n "$pid_b" ]; then
+    wait_child "$pid_b" transfer-target "$out_dir/target.log" || {
+      child_rc=$?
+      if [ "$rc" -eq 0 ]; then rc=$child_rc; fi
+    }
+  fi
+  if [ "$rc" -eq 0 ]; then
+    run_analyze "$provider" "$scenario" "$transport" "$out_dir" || rc=$?
+  fi
+  diag_end_cell "$provider" "$transport" "$out_dir"
+  return "$rc"
 }
 
 run_matrix_cell() {
   provider=$1
   example=$2
   scenario=$3
+  rc=0
   case "$scenario" in
     registration)
-      run_registration "$provider" "$example"
+      run_registration "$provider" "$example" || rc=$?
       ;;
     basic_call)
-      run_two_party "$provider" "$example" basic_call UDP
+      if transport_selected UDP; then
+        run_two_party "$provider" "$example" basic_call UDP || rc=$?
+      elif transport_selected TLS; then
+        run_two_party "$provider" "$example" basic_call TLS || rc=$?
+      fi
       ;;
     hold_resume|ring_cancel|dtmf|reject)
-      run_two_party "$provider" "$example" "$scenario" UDP
-      run_two_party "$provider" "$example" "$scenario" TLS
+      if transport_selected UDP; then
+        run_two_party "$provider" "$example" "$scenario" UDP || rc=$?
+        if [ "$rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then return "$rc"; fi
+      fi
+      if transport_selected TLS; then
+        run_two_party "$provider" "$example" "$scenario" TLS || {
+          tls_rc=$?
+          if [ "$rc" -eq 0 ]; then rc=$tls_rc; fi
+        }
+      fi
       ;;
     blind_transfer)
-      run_transfer "$provider" "$example" UDP
-      run_transfer "$provider" "$example" TLS
+      if transport_selected UDP; then
+        run_transfer "$provider" "$example" UDP || rc=$?
+        if [ "$rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then return "$rc"; fi
+      fi
+      if transport_selected TLS; then
+        run_transfer "$provider" "$example" TLS || {
+          tls_rc=$?
+          if [ "$rc" -eq 0 ]; then rc=$tls_rc; fi
+        }
+      fi
       ;;
   esac
+  return "$rc"
 }
 
 cd "$WORKSPACE_ROOT"
+resolve_example_bin_dir
 init_report
 echo "Building unified PBX examples..."
 echo "PBX output root: $OUT_ROOT"
@@ -584,12 +1104,26 @@ cargo build -p rvoip-sip --features dev-insecure-tls \
 for provider in $(pbx_list); do
   load_provider_env "$provider"
   for example in $(api_examples); do
+    prewarm_tls "$provider" "$example"
     for scenario in $(scenario_list); do
-      echo
-      echo "========================================================================"
-      echo "== $provider / $(example_label "$example") / $scenario"
-      echo "========================================================================"
-      run_matrix_cell "$provider" "$example" "$scenario"
+      for repeat in $(seq 1 "$REPEAT_COUNT"); do
+        export PBX_REPEAT_INDEX="$repeat"
+        echo
+        echo "========================================================================"
+        if [ "$REPEAT_COUNT" -gt 1 ]; then
+          echo "== $provider / $(example_label "$example") / $scenario / repeat $repeat/$REPEAT_COUNT"
+        else
+          echo "== $provider / $(example_label "$example") / $scenario"
+        fi
+        echo "========================================================================"
+        run_matrix_cell "$provider" "$example" "$scenario" || {
+          rc=$?
+          RUN_FAILURES=1
+          if [ "$STOP_ON_FAIL" = "1" ]; then
+            exit "$rc"
+          fi
+        }
+      done
     done
   done
 done

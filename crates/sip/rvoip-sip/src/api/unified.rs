@@ -62,7 +62,7 @@ use crate::errors::{Result, SessionError};
 use crate::session_registry::SessionRegistry;
 use crate::session_store::SessionStore;
 use crate::state_machine::{StateMachine, StateMachineHelpers};
-use crate::state_table::types::{Action, EventType, SessionId};
+use crate::state_table::types::{Action, EventType, Role, SessionId};
 use crate::types::CallState;
 use crate::types::{IncomingCallInfo, SessionInfo};
 // Callback system removed - using event-driven approach
@@ -79,7 +79,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 
-pub use rvoip_media_core::relay::controller::{AudioSource, BridgeError, BridgeHandle};
+pub use rvoip_media_core::relay::controller::{
+    AudioSource, BridgeError, BridgeHandle, MediaSessionControllerConfig,
+};
+pub use rvoip_rtp_core::{RtpSessionBufferConfig, RtpTransportBufferConfig};
 pub use rvoip_sip_dialog::api::RelUsage;
 
 /// SIP TLS operating mode for signalling transports.
@@ -278,6 +281,27 @@ pub struct Config {
     /// and UAS accepted-but-unacked calls (`Answering`/
     /// `AnsweringHangupPending`). `0` disables the watchdog. Default: `120`.
     pub setup_teardown_timeout_secs: u64,
+
+    /// Maximum seconds an inbound answered call may remain active without
+    /// receiving any RTP packets after answer before rvoip-sip sends local BYE
+    /// cleanup and releases the session.
+    ///
+    /// This is disabled by default because SIP permits long silent calls. It
+    /// is intended for high-density auto-answer servers and carrier burst
+    /// tests where an answered call that never produces RTP is more likely to
+    /// be an abandoned late-setup edge than a valid silent call. `0` disables
+    /// the watchdog.
+    pub active_call_no_media_timeout_secs: u64,
+
+    /// Maximum seconds an inbound answered call may remain active without RTP
+    /// packet-count progress after it has previously received media.
+    ///
+    /// This is disabled by default because SIP permits silent calls and
+    /// application-layer policy varies. It is intended for high-density
+    /// auto-answer servers and carrier burst tests where a media-bearing call
+    /// that stops receiving RTP and never receives BYE should not retain
+    /// server resources indefinitely. `0` disables the watchdog.
+    pub active_call_media_idle_timeout_secs: u64,
 
     /// RFC 4028 `Session-Expires` value in seconds to advertise on outgoing
     /// INVITEs. `None` disables session timers entirely. Common carrier
@@ -566,6 +590,15 @@ pub struct Config {
     /// high-CPS media servers may want RTP/media preallocation without
     /// inflating SIP dialog and transaction indexes.
     pub media_session_capacity: Option<usize>,
+
+    /// RTP session queue sizing for SIP media calls.
+    pub rtp_session_buffer_config: RtpSessionBufferConfig,
+
+    /// RTP transport event and receive buffer sizing for SIP media calls.
+    pub rtp_transport_buffer_config: RtpTransportBufferConfig,
+
+    /// Media-core controller pool and capacity tuning for SIP media calls.
+    pub media_session_controller_config: MediaSessionControllerConfig,
 
     /// STUN server (RFC 8489 §14) to probe for the RTP-side public
     /// mapping at coordinator boot. Format: `"host:port"` or `"host"`
@@ -978,6 +1011,8 @@ impl Config {
             auto_100_trying: true,
             fast_auto_accept_incoming_calls: false,
             setup_teardown_timeout_secs: Self::DEFAULT_SETUP_TEARDOWN_TIMEOUT_SECS,
+            active_call_no_media_timeout_secs: 0,
+            active_call_media_idle_timeout_secs: 0,
             session_timer_secs: None,
             session_timer_min_se: 90,
             credentials: None,
@@ -1010,6 +1045,9 @@ impl Config {
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
             media_session_capacity: None,
+            rtp_session_buffer_config: RtpSessionBufferConfig::default(),
+            rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
+            media_session_controller_config: MediaSessionControllerConfig::default(),
             stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
@@ -1080,6 +1118,8 @@ impl Config {
             auto_100_trying: true,
             fast_auto_accept_incoming_calls: false,
             setup_teardown_timeout_secs: Self::DEFAULT_SETUP_TEARDOWN_TIMEOUT_SECS,
+            active_call_no_media_timeout_secs: 0,
+            active_call_media_idle_timeout_secs: 0,
             session_timer_secs: None,
             session_timer_min_se: 90,
             credentials: None,
@@ -1112,6 +1152,9 @@ impl Config {
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
             media_session_capacity: None,
+            rtp_session_buffer_config: RtpSessionBufferConfig::default(),
+            rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
+            media_session_controller_config: MediaSessionControllerConfig::default(),
             stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
@@ -1613,6 +1656,28 @@ impl Config {
         self
     }
 
+    /// Set the watchdog timeout for answered inbound calls with no RTP.
+    ///
+    /// The watchdog is disabled when set to `0`. When enabled, it only arms
+    /// for UAS calls that have reached `Active` with a media session and
+    /// releases the call if the media session's RTP receive counter has not
+    /// advanced by the timeout.
+    pub fn with_active_call_no_media_timeout_secs(mut self, seconds: u64) -> Self {
+        self.active_call_no_media_timeout_secs = seconds;
+        self
+    }
+
+    /// Set the watchdog timeout for answered inbound calls whose RTP stops.
+    ///
+    /// The watchdog is disabled when set to `0`. When enabled, it only arms
+    /// for UAS calls that have reached `Active` with a media session. The
+    /// watchdog disarms while RTP packet counts advance and releases the call
+    /// if the packet count stops advancing for the configured interval.
+    pub fn with_active_call_media_idle_timeout_secs(mut self, seconds: u64) -> Self {
+        self.active_call_media_idle_timeout_secs = seconds;
+        self
+    }
+
     /// Set media allocation behavior.
     pub fn with_media_mode(mut self, mode: MediaMode) -> Self {
         self.media_mode = mode;
@@ -1622,6 +1687,29 @@ impl Config {
     /// Set the media-core session and RTP allocator capacity hint.
     pub fn with_media_session_capacity(mut self, capacity: usize) -> Self {
         self.media_session_capacity = Some(capacity);
+        self
+    }
+
+    /// Set RTP session queue sizing for SIP media calls.
+    pub fn with_rtp_session_buffer_config(mut self, config: RtpSessionBufferConfig) -> Self {
+        self.rtp_session_buffer_config = config;
+        self
+    }
+
+    /// Set RTP transport event and receive buffer sizing for SIP media calls.
+    pub fn with_rtp_transport_buffer_config(mut self, config: RtpTransportBufferConfig) -> Self {
+        self.rtp_transport_buffer_config = config;
+        self
+    }
+
+    /// Set media-core controller pool and capacity tuning for SIP media calls.
+    pub fn with_media_session_controller_config(
+        mut self,
+        config: MediaSessionControllerConfig,
+    ) -> Self {
+        self.rtp_session_buffer_config = config.rtp_session_buffer_config;
+        self.rtp_transport_buffer_config = config.rtp_transport_buffer_config;
+        self.media_session_controller_config = config;
         self
     }
 
@@ -2243,6 +2331,91 @@ impl Config {
                 "media_port_capacity must be at least 1 when set".to_string(),
             ));
         }
+        if self.rtp_session_buffer_config.sender_channel_capacity == 0 {
+            return Err(SessionError::ConfigError(
+                "rtp_session_buffer_config.sender_channel_capacity must be at least 1".to_string(),
+            ));
+        }
+        if self.rtp_session_buffer_config.receiver_channel_capacity == 0 {
+            return Err(SessionError::ConfigError(
+                "rtp_session_buffer_config.receiver_channel_capacity must be at least 1"
+                    .to_string(),
+            ));
+        }
+        if self.rtp_session_buffer_config.event_channel_capacity == 0 {
+            return Err(SessionError::ConfigError(
+                "rtp_session_buffer_config.event_channel_capacity must be at least 1".to_string(),
+            ));
+        }
+        if self.rtp_transport_buffer_config.event_channel_capacity == 0 {
+            return Err(SessionError::ConfigError(
+                "rtp_transport_buffer_config.event_channel_capacity must be at least 1".to_string(),
+            ));
+        }
+        if self.rtp_transport_buffer_config.recv_buffer_size == 0 {
+            return Err(SessionError::ConfigError(
+                "rtp_transport_buffer_config.recv_buffer_size must be at least 1".to_string(),
+            ));
+        }
+        if self.rtp_transport_buffer_config.rtcp_recv_buffer_size == 0 {
+            return Err(SessionError::ConfigError(
+                "rtp_transport_buffer_config.rtcp_recv_buffer_size must be at least 1".to_string(),
+            ));
+        }
+        if self
+            .media_session_controller_config
+            .audio_frame_pool
+            .sample_rate
+            == 0
+        {
+            return Err(SessionError::ConfigError(
+                "media_session_controller_config.audio_frame_pool.sample_rate must be at least 1"
+                    .to_string(),
+            ));
+        }
+        if self
+            .media_session_controller_config
+            .audio_frame_pool
+            .channels
+            == 0
+        {
+            return Err(SessionError::ConfigError(
+                "media_session_controller_config.audio_frame_pool.channels must be at least 1"
+                    .to_string(),
+            ));
+        }
+        if self
+            .media_session_controller_config
+            .audio_frame_pool
+            .samples_per_frame
+            == 0
+        {
+            return Err(SessionError::ConfigError(
+                "media_session_controller_config.audio_frame_pool.samples_per_frame must be at least 1"
+                    .to_string(),
+            ));
+        }
+        if self.media_session_controller_config.rtp_buffer_size == 0 {
+            return Err(SessionError::ConfigError(
+                "media_session_controller_config.rtp_buffer_size must be at least 1".to_string(),
+            ));
+        }
+        if self.media_session_controller_config.rtp_buffer_max_count == 0 {
+            return Err(SessionError::ConfigError(
+                "media_session_controller_config.rtp_buffer_max_count must be at least 1"
+                    .to_string(),
+            ));
+        }
+        if self
+            .media_session_controller_config
+            .rtp_buffer_initial_count
+            > self.media_session_controller_config.rtp_buffer_max_count
+        {
+            return Err(SessionError::ConfigError(
+                "media_session_controller_config.rtp_buffer_initial_count must be <= rtp_buffer_max_count"
+                    .to_string(),
+            ));
+        }
         #[cfg(feature = "perf-tests")]
         if let Some(limit) = self.perf_max_rss_growth_mb_per_hr {
             if !limit.is_finite() || limit <= 0.0 {
@@ -2484,6 +2657,20 @@ mod config_tests {
             Some(64)
         );
     }
+
+    #[test]
+    fn active_call_media_watchdogs_are_disabled_by_default_and_configurable() {
+        let config = Config::local("alice", 5060);
+        assert_eq!(config.active_call_no_media_timeout_secs, 0);
+        assert_eq!(config.active_call_media_idle_timeout_secs, 0);
+
+        let config = config
+            .with_active_call_no_media_timeout_secs(60)
+            .with_active_call_media_idle_timeout_secs(90);
+        assert_eq!(config.active_call_no_media_timeout_secs, 60);
+        assert_eq!(config.active_call_media_idle_timeout_secs, 90);
+        config.validate().expect("valid media watchdog timeouts");
+    }
 }
 
 #[cfg(all(test, feature = "perf-tests"))]
@@ -2667,6 +2854,7 @@ impl UnifiedCoordinator {
         let helper_counts = self.helpers.perf_diagnostic_counts().await;
         let registry_sessions = self.session_registry.session_count().await;
         let cleanup = crate::cleanup_diag::snapshot();
+        let admission = crate::admission_diag::snapshot();
         let dialog_diag = rvoip_sip_dialog::diagnostics::snapshot();
         let dialog_core = self.dialog_adapter.dialog_api.dialog_manager().core();
         let transaction_manager = dialog_core.transaction_manager();
@@ -2744,6 +2932,7 @@ impl UnifiedCoordinator {
             "media_adapter": self.media_adapter.perf_diagnostic_counts(),
             "memory_diagnostics": rvoip_infra_common::memory_diagnostics::snapshot(),
             "allocator_diagnostics": rvoip_infra_common::memory_diagnostics::allocator_snapshot(),
+            "server_call_admission": admission,
             "sip_dialog_diagnostics": {
                 "transaction_runner": {
                     "started": dialog_diag.transaction_runner_started,
@@ -3333,6 +3522,12 @@ impl UnifiedCoordinator {
         rvoip_media_core::diagnostics::set_enabled(config.media_setup_diagnostics);
         crate::cleanup_diag::set_enabled(config.cleanup_diagnostics);
         crate::cleanup_diag::set_event_logs_enabled(config.cleanup_diagnostic_events);
+        #[cfg(feature = "perf-tests")]
+        crate::admission_diag::set_enabled(
+            config.cleanup_diagnostics
+                || config.sip_transaction_timing_diagnostics
+                || config.sip_dialog_timing_diagnostics,
+        );
         crate::adapters::media_adapter::set_sdp_diagnostics(
             config.srtp_diagnostics,
             config.media_sdp_diagnostics,
@@ -4179,6 +4374,164 @@ impl UnifiedCoordinator {
             SetupTeardownTimeoutTerminal::Failed,
         )
         .await;
+    }
+
+    pub(crate) async fn schedule_active_call_media_timeout_if_current(
+        &self,
+        session_id: &SessionId,
+    ) {
+        let no_media_timeout = Duration::from_secs(self.config.active_call_no_media_timeout_secs);
+        let media_idle_timeout =
+            Duration::from_secs(self.config.active_call_media_idle_timeout_secs);
+        if no_media_timeout.is_zero() && media_idle_timeout.is_zero() {
+            return;
+        }
+
+        let Ok(session) = self
+            .helpers
+            .state_machine
+            .store
+            .get_session(session_id)
+            .await
+        else {
+            return;
+        };
+        if session.role != Role::UAS || session.call_state != CallState::Active {
+            return;
+        }
+
+        let Some(initial_packets_received) =
+            self.media_adapter.rtp_packets_received(session_id).await
+        else {
+            return;
+        };
+
+        let session_id = session_id.clone();
+        let entered_state_at = session.entered_state_at;
+        let state_machine = Arc::clone(&self.helpers.state_machine);
+        let helpers = Arc::clone(&self.helpers);
+        let dialog_adapter = Arc::clone(&self.dialog_adapter);
+        let media_adapter = Arc::clone(&self.media_adapter);
+        let registry = Arc::clone(&self.session_registry);
+        let publisher = self.app_event_publisher.clone();
+        tokio::spawn(async move {
+            let mut last_packets_received = initial_packets_received;
+            let mut saw_media = initial_packets_received > 0;
+            loop {
+                let timeout = if saw_media {
+                    media_idle_timeout
+                } else if !no_media_timeout.is_zero() {
+                    no_media_timeout
+                } else {
+                    media_idle_timeout
+                };
+                if timeout.is_zero() {
+                    return;
+                }
+
+                tokio::time::sleep(timeout).await;
+
+                let Ok(current) = state_machine.store.get_session(&session_id).await else {
+                    return;
+                };
+                if current.role != Role::UAS
+                    || current.call_state != CallState::Active
+                    || current.entered_state_at != entered_state_at
+                {
+                    return;
+                }
+
+                let Some(packets_received) = media_adapter.rtp_packets_received(&session_id).await
+                else {
+                    return;
+                };
+
+                if packets_received > last_packets_received {
+                    saw_media = true;
+                    last_packets_received = packets_received;
+                    continue;
+                }
+
+                let reason = if saw_media {
+                    format!(
+                        "Active call released after RTP was idle for {}s",
+                        timeout.as_secs()
+                    )
+                } else {
+                    format!(
+                        "Active call released after no RTP was received within {}s after answer",
+                        timeout.as_secs()
+                    )
+                };
+
+                tracing::warn!(
+                    "active call media watchdog firing for session {} after {:?}: last_packets_received={}, saw_media={}",
+                    session_id,
+                    timeout,
+                    last_packets_received,
+                    saw_media
+                );
+
+                if let Err(err) = state_machine
+                    .process_event(&session_id, EventType::HangupCall)
+                    .await
+                {
+                    tracing::warn!(
+                        "active call media watchdog failed to process HangupCall for {} in state {:?}: {}",
+                        session_id,
+                        current.call_state,
+                        err
+                    );
+                }
+
+                let release_guard = crate::cleanup_diag::stage_guard(
+                    crate::cleanup_diag::CleanupStage::TerminalRelease,
+                    &session_id.0,
+                );
+                if let Err(err) = dialog_adapter.cleanup_session(&session_id).await {
+                    tracing::debug!(
+                        "dialog cleanup during active call media watchdog release for {}: {}",
+                        session_id,
+                        err
+                    );
+                }
+                if let Err(err) = media_adapter.cleanup_session(&session_id).await {
+                    tracing::debug!(
+                        "media cleanup during active call media watchdog release for {}: {}",
+                        session_id,
+                        err
+                    );
+                }
+                helpers.cleanup_session(&session_id).await;
+                let api_event = crate::api::events::Event::CallEnded {
+                    call_id: session_id.clone(),
+                    reason,
+                };
+                if let Err(err) = publisher.publish_now(api_event).await {
+                    tracing::warn!(
+                        "active call media watchdog failed to publish terminal event for {}: {}",
+                        session_id,
+                        err
+                    );
+                    release_guard.finish_failure();
+                    return;
+                }
+                if let Err(err) = state_machine.store.remove_session(&session_id).await {
+                    tracing::debug!(
+                        "session store removal during active call media watchdog release for {}: {}",
+                        session_id,
+                        err
+                    );
+                }
+                registry.remove_session(&session_id).await;
+                release_guard.finish_success();
+                return;
+            }
+        });
+    }
+
+    pub(crate) fn setup_teardown_timeout_duration(&self) -> Duration {
+        Duration::from_secs(self.config.setup_teardown_timeout_secs)
     }
 
     async fn schedule_setup_teardown_timeout_if_current(
@@ -5432,14 +5785,19 @@ impl UnifiedCoordinator {
     ) -> Result<Arc<rvoip_media_core::relay::controller::MediaSessionController>> {
         use rvoip_media_core::relay::controller::MediaSessionController;
 
-        // Create media controller with port range
-        let controller = Arc::new(MediaSessionController::with_port_range_and_capacity(
+        let mut media_controller_config = config.media_session_controller_config.clone();
+        media_controller_config.capacity_hint = config
+            .media_session_capacity
+            .or(config.server_call_capacity)
+            .unwrap_or(media_controller_config.capacity_hint);
+        media_controller_config.rtp_session_buffer_config = config.rtp_session_buffer_config;
+        media_controller_config.rtp_transport_buffer_config = config.rtp_transport_buffer_config;
+
+        // Create media controller with port range and SIP-exposed media/RTP tuning.
+        let controller = Arc::new(MediaSessionController::with_port_range_and_config(
             config.media_port_start,
             config.media_port_end,
-            config
-                .media_session_capacity
-                .or(config.server_call_capacity)
-                .unwrap_or(0),
+            media_controller_config,
         ));
 
         // Create and set up the event hub

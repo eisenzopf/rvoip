@@ -157,8 +157,8 @@ impl DefaultMediaTransportServer {
         let header_extension_format = config.header_extension_format;
         let ssrc_demultiplexing_enabled = config.ssrc_demultiplexing_enabled.unwrap_or(false); // Read from config, default to false if not specified
 
-        // Create broadcast channel for frames with buffer size 16
-        let (sender, _) = broadcast::channel(16);
+        // Create broadcast channel for frames.
+        let (sender, _) = broadcast::channel(config.frame_channel_capacity.max(1));
 
         Ok(Self {
             id: format!("media-server-main-{}", Uuid::new_v4()),
@@ -240,6 +240,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             rtcp_mux: self.config.rtcp_mux,
             session_id: Some(format!("media-server-main-{}", Uuid::new_v4())),
             use_port_allocator: false, // Changed from true to false to use exact specified port
+            buffer_config: self.config.rtp_transport_buffer_config,
         };
 
         debug!(
@@ -343,6 +344,8 @@ impl MediaTransportServer for DefaultMediaTransportServer {
         let clients_clone = self.clients.clone();
         let sender_clone = self.frame_sender.clone();
         let ssrc_demux_enabled_clone = self.ssrc_demultiplexing_enabled.clone();
+        let session_buffer_config = self.config.rtp_session_buffer_config;
+        let transport_buffer_config = self.config.rtp_transport_buffer_config;
 
         let task = tokio::spawn(async move {
             debug!("Started transport event task");
@@ -377,7 +380,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                             // Use the RTP header information already provided in the event
                             let frame = crate::api::common::frame::MediaFrame {
                                 frame_type: crate::api::common::frame::MediaFrameType::Audio, // Default to Audio, media-core handles frame type
-                                data: payload.to_vec(),
+                                data: payload.clone(),
                                 timestamp,
                                 sequence: 0, // SecurityRtpTransport doesn't provide sequence in event
                                 marker,
@@ -396,7 +399,8 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                         } else {
                             // This looks like a raw RTP packet - parse it normally
                             debug!("Attempting to parse raw RTP packet from payload...");
-                            let packet_result = crate::packet::RtpPacket::parse(&payload);
+                            let packet_result =
+                                crate::packet::RtpPacket::parse_from_bytes(payload.clone());
 
                             match packet_result {
                                 Ok(packet) => {
@@ -405,10 +409,15 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                            packet.header.ssrc, packet.header.sequence_number,
                                            packet.header.timestamp, packet.header.payload_type);
 
+                                    // Log payload data if it's text (helps with debugging)
+                                    if let Ok(text) = std::str::from_utf8(&packet.payload) {
+                                        debug!("Raw packet payload (text): {}", text);
+                                    }
+
                                     let frame = crate::api::common::frame::MediaFrame {
                                         frame_type:
                                             crate::api::common::frame::MediaFrameType::Audio, // Default to Audio, media-core handles frame type
-                                        data: packet.payload.to_vec(),
+                                        data: packet.payload,
                                         timestamp: packet.header.timestamp,
                                         sequence: packet.header.sequence_number,
                                         marker: packet.header.marker,
@@ -416,11 +425,6 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                         ssrc: packet.header.ssrc,
                                         csrcs: packet.header.csrc.clone(),
                                     };
-
-                                    // Log payload data if it's text (helps with debugging)
-                                    if let Ok(text) = std::str::from_utf8(&packet.payload) {
-                                        debug!("Raw packet payload (text): {}", text);
-                                    }
 
                                     (frame, packet.header.ssrc)
                                 }
@@ -445,7 +449,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                     let frame = crate::api::common::frame::MediaFrame {
                                         frame_type:
                                             crate::api::common::frame::MediaFrameType::Audio, // Default to Audio, media-core handles frame type
-                                        data: payload.to_vec(),
+                                        data: payload.clone(),
                                         timestamp,
                                         sequence: sequence_number,
                                         marker,
@@ -495,6 +499,8 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                 source,
                                 &clients_clone,
                                 &sender_clone,
+                                session_buffer_config,
+                                transport_buffer_config,
                             )
                             .await;
 

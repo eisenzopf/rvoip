@@ -33,6 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rtcp_mux: true,
         session_id: Some("test-transport".to_string()),
         use_port_allocator: false,
+        buffer_config: Default::default(),
     };
 
     println!("Creating UDP transport on {}", server_addr);
@@ -68,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Create a simple frame from the data
                     let frame = MediaFrame {
                         frame_type: MediaFrameType::Audio,
-                        data: payload.to_vec(),
+                        data: payload.to_vec().into(),
                         timestamp,
                         sequence: 1, // We don't have sequence in the event
                         marker,

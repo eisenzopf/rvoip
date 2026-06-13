@@ -74,6 +74,7 @@ suite, scheduled for follow-up.
 | 6 | `perf_tls_overhead` *(stub)* | Δ CPS vs #1, Δ p99 setup vs #1 | Quantifies SIPS/TLS overhead so deployments can size the cost. |
 | 7 | `perf_srtp_overhead` *(stub)* | Δ max-concurrent vs #5 | Quantifies SRTP overhead (AES-CM-128 / HMAC-SHA1-80) on the media plane. |
 | 8 | `perf_soak_30min` *(stub, `#[ignore]`)* | Latency drift, RSS growth/hr | Catches slow leaks and steady-state degradation invisible in <1 min runs. |
+| 9 | **`perf_burst_matrix`** | Burst ASR, setup p99, recovery, RSS slope | Carrier-style media burst evidence with split caller/receiver processes and short-to-long random call holds. |
 
 Each scenario reads sizing knobs from `RVOIP_PERF_*` environment
 variables. Defaults are tuned so a 4-core CI runner completes inside
@@ -148,7 +149,63 @@ cargo test -p rvoip-sip --features perf-tests --release \
 # Scenario 8 is #[ignore] — requires --ignored to run the 30-min soak
 cargo test -p rvoip-sip --features perf-tests --release \
     --test perf_soak_30min -- --ignored --nocapture
+
+# Carrier media burst matrix — split caller/receiver processes
+RVOIP_PERF_BURST_SCENARIOS=carrier-smoke \
+  crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh
 ```
+
+The burst smoke keeps beta perf time bounded. It records RSS slope in the
+caller and receiver reports, but the RSS growth gate is enforced only when the
+post-drain window reaches the scenario's `minRssGateWindowSecs`.
+Burst reports also include the effective performance Config, SIP UDP
+diagnostics, SIP dialog/transaction timing, server admission diagnostics,
+media setup diagnostics, caller-side UAC INVITE 2xx/ACK counters, SIP UDP
+per-Call-ID first/last wire timestamps, and dialog `call_timing_traces` when
+the profile enables those diagnostics.
+
+For `access-edge-microburst`, 2026-06-09 admission pacing follow-up runs with
+server `softLimit=4500` did not produce a promotable recipe. `delay=1 ms`
+improved ASR only to `0.9862`, and `delay=2 ms` regressed to `0.9826` while
+failing the caller RSS gate. Use these artifacts as evidence for library-side
+receive/admission pacing diagnostics rather than more static Config tuning.
+
+Later 2026-06-09 isolation runs narrowed that conclusion. Bounded SIP UDP
+receive draining improved ASR only from `0.9896` to `0.9916`, so it is useful
+but not a root fix. The same burst shape with signaling-only media had setup
+p95 near `13 ms` and no answer timeouts. Full media allocation with generated
+RTP disabled via diagnostic-only `RVOIP_PERF_BURST_SKIP_AUDIO_SOURCE=1` also
+kept setup p95 under `14 ms`, delivered all INVITE/2xx/ACK legs, and drained
+receiver media sessions cleanly. Treat generated RTP traffic and control-plane
+scheduling fairness as the next library investigation before promoting any
+static access-edge Config recipe.
+
+The first RTP scheduling experiment spread generated-audio transmitter start
+phases over the 20 ms packet interval and set missed ticks to `Skip`. It
+improved the clean full-RTP run to ASR `0.9932` with `50` answer timeouts, but
+caller SIP receive-loop gaps still reached p95 `1 s`, p99/p999 `5 s`, and max
+`36.08 s`. Do not cite that as a passing profile. A later cached-tone/payload
+copy experiment regressed the same clean run to ASR `0.9886` with `84` answer
+timeouts and was rejected; receiver cleanup, receiver media receive, and host
+full-socket-buffer drops remained clean.
+
+Audio TX pacing is the first full-media library candidate to pass the
+`access-edge-microburst` gates. With `RVOIP_MEDIA_AUDIO_TX_PACING=1` and target
+active `3000`, three repeat runs completed `7400/7400` calls with ASR `1.0000`,
+zero answer timeouts, zero media setup failures, zero teardown failures, zero
+retained objects, zero receiver active audio receivers, and RSS gates below
+`10 MB/hr`. A lighter target active `4000` also passed once, but had a worse
+setup tail (p95 `3.63 s`, p99 `8.20 s`) and higher host `no socket` drops than
+target `3000`, so target `3000` remains the current candidate. A follow-up
+shared generated-audio TX scheduler probe did not supersede it: shared-only
+regressed to ASR `0.9866`, and shared plus target-`3000` pacing passed three
+guarded runs but still lacks a clear CPU or tail-latency advantage over the
+simpler pacing-only candidate.
+
+When the burst matrix runs with SIP UDP diagnostics, the scenario directory also
+captures host UDP snapshots as `host_udp_before.txt`, `host_udp_after.txt`, and
+`host_udp_delta.txt`. Use those with the caller/receiver `results.sip_udp`
+blocks before attributing answer timeouts to Rust queue sizing.
 
 ### 2.3 Sizing knobs
 
@@ -191,6 +248,17 @@ distinguishes:
 - `bye_failed`: BYE round-trip failed.
 - `timeout`: the per-call deadline elapsed; the call may still complete after
   the snapshot but it's not counted as a success.
+
+For split-process burst runs, interpret answer timeouts with both caller and
+receiver diagnostics. If the caller reports UAC INVITE 2xx responses and ACK
+sends but the receiver ACK count is much lower, first collect host UDP drop
+counters and per-method inbound socket/source counters before changing server
+queue sizes. Rust-level `sip_udp` backpressure counters at zero mean the loss or
+delay is below the current app queues, or in routing/matching that needs
+method-level evidence. A useful diagnostic join is caller failure JSONL
+Call-IDs against caller and receiver `results.sip_udp.call_traces` plus
+`results.sip_dialog_timing.call_timing_traces`, normalized for the optional
+`@host` suffix on wire Call-IDs.
 
 A REGISTER **succeeds** when `Event::RegistrationSuccess` arrives
 before the per-REGISTER timeout. The ratio is emitted as **`rsr`** —

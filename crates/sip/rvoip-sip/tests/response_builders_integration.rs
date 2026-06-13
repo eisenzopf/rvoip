@@ -54,6 +54,49 @@ async fn wait_for_inbound_response_status(
     }
 }
 
+#[cfg(feature = "perf-tests")]
+fn snapshot_u64(snapshot: &serde_json::Value, pointer: &str) -> u64 {
+    snapshot
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+}
+
+#[cfg(feature = "perf-tests")]
+async fn wait_for_rejected_invite_cleanup_at_or_below_baseline(
+    coordinator: &UnifiedCoordinator,
+    baseline: &serde_json::Value,
+    timeout: Duration,
+) -> serde_json::Value {
+    const POINTERS: &[&str] = &[
+        "/dialog_manager/dialogs",
+        "/dialog_manager/dialog_to_session",
+        "/dialog_manager/session_to_dialog",
+        "/dialog_manager/early_dialog_lookup",
+        "/dialog_manager/pending_response_transaction_by_dialog",
+        "/dialog_manager/transaction_dialog_route_hash",
+        "/session_store/total",
+    ];
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut last = coordinator.perf_diagnostic_snapshot().await;
+    loop {
+        if POINTERS
+            .iter()
+            .all(|pointer| snapshot_u64(&last, pointer) <= snapshot_u64(baseline, pointer))
+        {
+            return last;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return last;
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        last = coordinator.perf_diagnostic_snapshot().await;
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Scenario 1: reject_builder() with Retry-After + Warning
 // ─────────────────────────────────────────────────────────────────────
@@ -144,6 +187,8 @@ async fn server_call_admission_limit_rejects_with_503_retry_after_on_wire() {
         .with_server_call_admission_limit(1)
         .with_server_overload_retry_after_secs(2);
     let bob = CallbackPeer::new(AcceptAll, bob_cfg).await.expect("bob");
+    #[cfg(feature = "perf-tests")]
+    let bob_coordinator = bob.coordinator().clone();
     let bob_shutdown = bob.shutdown_handle();
     let bob_task = tokio::spawn(async move {
         let _ = bob.run().await;
@@ -168,6 +213,9 @@ async fn server_call_admission_limit_rejects_with_503_retry_after_on_wire() {
         .await
         .expect("first call should be active");
 
+    #[cfg(feature = "perf-tests")]
+    let retention_baseline = bob_coordinator.perf_diagnostic_snapshot().await;
+
     let _ = alice
         .invite(Some("sip:alice@127.0.0.1".to_string()), target)
         .send()
@@ -181,6 +229,37 @@ async fn server_call_admission_limit_rejects_with_503_retry_after_on_wire() {
         raw.contains("Retry-After: 2"),
         "expected overload Retry-After: 2 on the wire; got:\n{raw}"
     );
+
+    #[cfg(feature = "perf-tests")]
+    {
+        let after_reject = wait_for_rejected_invite_cleanup_at_or_below_baseline(
+            &bob_coordinator,
+            &retention_baseline,
+            Duration::from_secs(3),
+        )
+        .await;
+
+        for pointer in [
+            "/dialog_manager/dialogs",
+            "/dialog_manager/dialog_to_session",
+            "/dialog_manager/session_to_dialog",
+            "/dialog_manager/early_dialog_lookup",
+            "/dialog_manager/pending_response_transaction_by_dialog",
+            "/dialog_manager/transaction_dialog_route_hash",
+            "/session_store/total",
+        ] {
+            let before = snapshot_u64(&retention_baseline, pointer);
+            let after = snapshot_u64(&after_reject, pointer);
+            assert!(
+                after <= before,
+                "overload-rejected INVITE retained {}: before={} after={} snapshot={}",
+                pointer,
+                before,
+                after,
+                after_reject
+            );
+        }
+    }
 
     let _ = alice
         .session(&first)

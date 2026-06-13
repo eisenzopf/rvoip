@@ -296,7 +296,7 @@ async fn setup_client_events(
 fn create_test_frame(sequence: u16) -> MediaFrame {
     MediaFrame {
         frame_type: MediaFrameType::Audio,
-        data: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        data: vec![1, 2, 3, 4, 5, 6, 7, 8].into(),
         timestamp: 1000 + (sequence as u32 * 160), // 20ms samples at 8kHz
         sequence,
         marker: sequence == 0, // Mark first packet

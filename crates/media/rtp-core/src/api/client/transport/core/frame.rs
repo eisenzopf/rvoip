@@ -3,7 +3,6 @@
 //! This module handles the sending and receiving of media frames, including
 //! RTP packet construction, sequence number management, and frame processing.
 
-use bytes::Bytes;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -131,7 +130,7 @@ pub async fn send_frame(
     }
 
     // Create RTP packet
-    let packet = crate::packet::RtpPacket::new(header, Bytes::from(frame.data));
+    let packet = crate::packet::RtpPacket::new(header, frame.data);
 
     // Send packet
     transport
@@ -185,7 +184,7 @@ pub async fn process_packet(
             // Create a simplified MediaFrame from the RTP packet
             let frame = MediaFrame {
                 frame_type: get_frame_type_from_payload_type(rtp_packet.header.payload_type),
-                data: rtp_packet.payload.to_vec(),
+                data: rtp_packet.payload,
                 timestamp: rtp_packet.header.timestamp,
                 sequence: rtp_packet.header.sequence_number,
                 marker: rtp_packet.header.marker,

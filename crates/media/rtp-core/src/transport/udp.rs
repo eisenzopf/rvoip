@@ -4,7 +4,7 @@
 
 use std::fmt::Write as _;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -260,11 +260,6 @@ pub struct UdpRtpTransport {
     /// store instead of an awaited `Mutex` guard.
     remote_rtp_addr: Arc<ArcSwapOption<SocketAddr>>,
 
-    /// Monotonic version for remote RTP address changes. Send tasks can
-    /// cheaply detect explicit remote-target updates without reloading the
-    /// `ArcSwapOption` on every packet.
-    remote_rtp_addr_version: Arc<AtomicU64>,
-
     /// Remote RTCP address — same lock-free swap discipline as
     /// [`Self::remote_rtp_addr`].
     remote_rtcp_addr: Arc<ArcSwapOption<SocketAddr>>,
@@ -432,7 +427,6 @@ impl UdpRtpTransport {
             rtcp_socket: socket_rtcp.map(Arc::new),
             config,
             remote_rtp_addr: Arc::new(ArcSwapOption::from(None)),
-            remote_rtp_addr_version: Arc::new(AtomicU64::new(0)),
             remote_rtcp_addr: Arc::new(ArcSwapOption::from(None)),
             event_tx,
             receiver_task: Arc::new(Mutex::new(None)),
@@ -489,7 +483,6 @@ impl UdpRtpTransport {
                 let mut srtp_unprotect_failures = 0_u64;
                 let mut non_rtp_drop_count = 0_u64;
                 let mut malformed_rtp_drop_count = 0_u64;
-                let mut buffer = vec![0u8; recv_buffer_size];
                 debug!("UDP receive loop started on {:?}", rtp_socket.local_addr());
 
                 loop {
@@ -497,6 +490,8 @@ impl UdpRtpTransport {
                     if !active_state.load(Ordering::Acquire) {
                         break;
                     }
+
+                    let mut buffer = vec![0u8; recv_buffer_size];
 
                     // Receive packet
                     match rtp_socket.recv_from(&mut buffer).await {
@@ -726,12 +721,13 @@ impl UdpRtpTransport {
 
             let rtcp_receiver =
                 spawn_memory_tracked("rtp_core.udp_transport.rtcp_receiver_task", async move {
-                    let mut buffer = vec![0u8; rtcp_recv_buffer_size];
                     loop {
                         // Check if we should continue running
                         if !active_state.load(Ordering::Acquire) {
                             break;
                         }
+
+                        let mut buffer = vec![0u8; rtcp_recv_buffer_size];
 
                         // Receive packet
                         match rtcp_socket.recv_from(&mut buffer).await {
@@ -797,7 +793,7 @@ impl UdpRtpTransport {
 
     /// Set the remote RTP address
     pub async fn set_remote_rtp_addr(&self, addr: SocketAddr) {
-        self.store_remote_rtp_addr(addr);
+        self.remote_rtp_addr.store(Some(Arc::new(addr)));
     }
 
     /// Set the remote RTCP address
@@ -808,26 +804,6 @@ impl UdpRtpTransport {
     /// Get the remote RTP address
     pub async fn remote_rtp_addr(&self) -> Option<SocketAddr> {
         self.remote_rtp_addr.load().as_deref().copied()
-    }
-
-    /// Current remote RTP address version.
-    pub fn remote_rtp_addr_version(&self) -> u64 {
-        self.remote_rtp_addr_version.load(Ordering::Acquire)
-    }
-
-    /// Current remote RTP address and version.
-    pub fn remote_rtp_addr_snapshot(&self) -> (Option<SocketAddr>, u64) {
-        (
-            self.remote_rtp_addr.load().as_deref().copied(),
-            self.remote_rtp_addr_version(),
-        )
-    }
-
-    fn store_remote_rtp_addr(&self, addr: SocketAddr) {
-        if self.remote_rtp_addr.load().as_deref().copied() != Some(addr) {
-            self.remote_rtp_addr.store(Some(Arc::new(addr)));
-            self.remote_rtp_addr_version.fetch_add(1, Ordering::AcqRel);
-        }
     }
 
     /// Get the remote RTCP address
@@ -933,7 +909,7 @@ impl RtpTransport for UdpRtpTransport {
         if self.config.symmetric_rtp {
             // Update remote address if using symmetric RTP (lock-free
             // atomic swap; no .await).
-            self.store_remote_rtp_addr(dest);
+            self.remote_rtp_addr.store(Some(Arc::new(dest)));
         }
 
         // Send the data

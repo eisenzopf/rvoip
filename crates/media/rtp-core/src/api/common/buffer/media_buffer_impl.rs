@@ -118,11 +118,8 @@ impl DefaultMediaBuffer {
         );
         header.marker = frame.marker;
 
-        // Create payload
-        let payload = bytes::Bytes::copy_from_slice(&frame.data);
-
         // Create packet
-        crate::packet::rtp::RtpPacket::new(header, payload)
+        crate::packet::rtp::RtpPacket::new(header, frame.data.clone())
     }
 
     /// Convert internal packet to media frame
@@ -133,7 +130,7 @@ impl DefaultMediaBuffer {
     ) -> MediaFrame {
         MediaFrame {
             frame_type,
-            data: packet.payload.to_vec(),
+            data: packet.payload,
             timestamp: packet.header.timestamp,
             sequence: packet.header.sequence_number,
             marker: packet.header.marker,

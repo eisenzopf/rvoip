@@ -2,7 +2,6 @@
 //!
 //! This module handles frame sending, receiving, and broadcasting functionality.
 
-use bytes::Bytes;
 use dashmap::DashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -95,7 +94,7 @@ pub async fn send_frame_to(
     let data_len = frame.data.len();
 
     // Create RTP packet
-    let packet = RtpPacket::new(header, Bytes::from(frame.data));
+    let packet = RtpPacket::new(header, frame.data);
 
     // Snapshot the socket out from under main_socket's RwLock so we
     // don't hold the guard across the outbound send.
@@ -192,8 +191,8 @@ pub async fn broadcast_frame(
         }
     }
 
-    // Create RTP packet once with shared data
-    let shared_data = Arc::new(Bytes::from(frame.data));
+    // Share the same refcounted payload across every client send.
+    let shared_data = frame.data;
 
     // Get main socket
     let socket_guard = main_socket.read().await;
@@ -221,7 +220,7 @@ pub async fn broadcast_frame(
         let data = shared_data.clone();
 
         // Create RTP packet
-        let packet = crate::packet::RtpPacket::new(header, Bytes::clone(&data));
+        let packet = crate::packet::RtpPacket::new(header, data.clone());
 
         // Clone socket reference
         let socket_clone = socket.clone();

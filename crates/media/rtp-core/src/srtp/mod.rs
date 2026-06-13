@@ -158,6 +158,23 @@ impl ProtectedRtpPacket {
             Ok(packet_bytes)
         }
     }
+
+    /// Serialize the protected packet into a caller-owned scratch buffer.
+    pub fn serialize_into(
+        &self,
+        buffer: &mut bytes::BytesMut,
+    ) -> Result<bytes::Bytes, crate::Error> {
+        buffer.clear();
+        buffer.reserve(self.packet.size() + self.auth_tag.as_ref().map_or(0, Vec::len));
+
+        self.packet.header.serialize(buffer)?;
+        buffer.extend_from_slice(&self.packet.payload);
+        if let Some(tag) = &self.auth_tag {
+            buffer.extend_from_slice(tag);
+        }
+
+        Ok(buffer.split().freeze())
+    }
 }
 
 impl SrtpContext {

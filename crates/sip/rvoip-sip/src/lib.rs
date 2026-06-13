@@ -479,6 +479,9 @@ pub mod server;
 // surfaces documented at the crate root.
 #[doc(hidden)]
 pub mod adapters;
+#[cfg(feature = "perf-tests")]
+#[doc(hidden)]
+pub mod admission_diag;
 pub mod auth;
 #[doc(hidden)]
 pub mod cleanup_diag;
@@ -549,6 +552,7 @@ pub use auth::{
     SipDigestAuthService, SipIncomingAuthenticator, SipTransportSecurityContext,
     TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
+pub use rvoip_media_core::performance::pool::PoolConfig as MediaPoolConfig;
 pub use rvoip_media_core::types::AudioFrame;
 
 /// SIP_API_DESIGN_2 §3.6 — convenience body constructors. Each
@@ -568,7 +572,10 @@ pub use api::lifecycle::{
 };
 
 // Configuration & registration
-pub use api::unified::{AudioSource, BridgeError, BridgeHandle, Registration, RelUsage};
+pub use api::unified::{
+    AudioSource, BridgeError, BridgeHandle, MediaSessionControllerConfig, Registration, RelUsage,
+    RtpSessionBufferConfig, RtpTransportBufferConfig,
+};
 pub use api::{
     Config, MediaMode, RegistrationHandle, RegistrationInfo, RegistrationStatus, SipContactMode,
     SipTlsMode, SrtpSuitePolicy, UnifiedCoordinator,
@@ -615,15 +622,16 @@ pub mod prelude {
         EndpointEvent, EndpointEvents, EndpointIncomingCall, EndpointMediaConfig,
         EndpointNetworkConfig, EndpointProfile, EndpointProfileName, EndpointRegistrationInfo,
         EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode, EndpointTransport, Event,
-        EventReceiver, HeaderName, IncomingCall, IncomingCallGuard, MediaMode, MediaSecurityKeying,
-        MediaSecurityProfile, MediaSecurityState, PeerControl, PerformanceConfig,
-        PerformanceRecipeBook, Registration, RegistrationHandle, RegistrationInfo,
-        RegistrationStatus, Result, SessionError, SessionHandle, SipAccount, SipAuthDecision,
-        SipAuthScheme, SipAuthService, SipAuthSource, SipClientAuth, SipContactMode,
-        SipDigestAuthService, SipReason, SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection,
-        SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState, TransferDialogMatcher,
-        TransferKind, TransferLifecycleOptions, TransferOutcome, TransferTargetEvidence,
-        TransferWaitMode, TypedHeader,
+        EventReceiver, HeaderName, IncomingCall, IncomingCallGuard, MediaMode, MediaPoolConfig,
+        MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState,
+        MediaSessionControllerConfig, PeerControl, PerformanceConfig, PerformanceRecipeBook,
+        Registration, RegistrationHandle, RegistrationInfo, RegistrationStatus, Result,
+        RtpSessionBufferConfig, RtpTransportBufferConfig, SessionError, SessionHandle, SipAccount,
+        SipAuthDecision, SipAuthScheme, SipAuthService, SipAuthSource, SipClientAuth,
+        SipContactMode, SipDigestAuthService, SipReason, SipTlsMode, SipTrace, SipTraceConfig,
+        SipTraceDirection, SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState,
+        TransferDialogMatcher, TransferKind, TransferLifecycleOptions, TransferOutcome,
+        TransferTargetEvidence, TransferWaitMode, TypedHeader,
     };
 }
 

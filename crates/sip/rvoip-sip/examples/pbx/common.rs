@@ -27,13 +27,15 @@
 
 #![allow(dead_code)]
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    Arc, Mutex, OnceLock,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rvoip_media_core::types::AudioFrame;
 use rvoip_sip::{
@@ -57,7 +59,7 @@ pub const ENDPOINT_1001_TONE_HZ: f32 = ENDPOINT_2001_TONE_HZ;
 pub const ENDPOINT_1002_TONE_HZ: f32 = ENDPOINT_2002_TONE_HZ;
 pub const ENDPOINT_1003_TONE_HZ: f32 = 660.0;
 pub const MIN_RECEIVED_SAMPLES: usize = 12_000;
-pub const TONE_ANALYSIS_WINDOW_SAMPLES: usize = (SAMPLE_RATE as usize) * 2;
+pub const TONE_ANALYSIS_WINDOW_SAMPLES: usize = FRAME_SIZE * 10;
 pub const DOMINANCE_RATIO: f32 = 5.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -617,6 +619,7 @@ struct EndpointDefaults {
     media_port_end: u16,
 }
 
+#[derive(Debug)]
 pub struct ToneAnalysis {
     pub samples: usize,
     pub expected_hz: f32,
@@ -626,11 +629,43 @@ pub struct ToneAnalysis {
     pub ratio: f32,
 }
 
+#[derive(Debug)]
+struct ToneWindowScan {
+    best: ToneAnalysis,
+    total_windows: usize,
+    passing_windows: usize,
+    longest_passing_run: usize,
+    required_passing_run: usize,
+    analysis_window_samples: usize,
+    step_samples: usize,
+}
+
 pub struct ToneRecorder {
     running: Arc<AtomicBool>,
     send_task: JoinHandle<()>,
     recv_task: JoinHandle<()>,
     received_buf: Arc<Mutex<Vec<i16>>>,
+    counters: Arc<RecorderCounters>,
+    diag_output_dir: Option<PathBuf>,
+    diag_name: String,
+}
+
+pub struct RecorderCounters {
+    first_rx_elapsed_ms: AtomicU64,
+    last_rx_elapsed_ms: AtomicU64,
+    rx_frames: AtomicUsize,
+    rx_samples: AtomicUsize,
+}
+
+impl RecorderCounters {
+    fn new() -> Self {
+        Self {
+            first_rx_elapsed_ms: AtomicU64::new(0),
+            last_rx_elapsed_ms: AtomicU64::new(0),
+            rx_frames: AtomicUsize::new(0),
+            rx_samples: AtomicUsize::new(0),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -767,6 +802,92 @@ pub fn init_tracing() {
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info,rvoip_sip_dialog=warn".into()),
         )
         .try_init();
+}
+
+fn pbx_diag_enabled() -> bool {
+    matches!(
+        std::env::var("PBX_DIAG")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn diag_start() -> &'static Instant {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now)
+}
+
+fn diag_elapsed_ms() -> u64 {
+    diag_start().elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn diag_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
+}
+
+fn diag_role_name() -> String {
+    std::env::var("PBX_ROLE").unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn diag_output_dir_from_env() -> Option<PathBuf> {
+    std::env::var("AUDIO_OUTPUT_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+}
+
+fn diag_event_env(event: &str, fields: serde_json::Value) {
+    if let Some(output_dir) = diag_output_dir_from_env() {
+        diag_event(&output_dir, event, fields);
+    }
+}
+
+fn diag_event(output_dir: &Path, event: &str, fields: serde_json::Value) {
+    if !pbx_diag_enabled() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(output_dir);
+    let role = diag_role_name();
+    let mut record = serde_json::Map::new();
+    record.insert("event".to_string(), serde_json::json!(event));
+    record.insert("role".to_string(), serde_json::json!(role));
+    record.insert(
+        "elapsed_ms".to_string(),
+        serde_json::json!(diag_elapsed_ms()),
+    );
+    record.insert("epoch_ms".to_string(), serde_json::json!(diag_epoch_ms()));
+    if let serde_json::Value::Object(extra) = fields {
+        for (key, value) in extra {
+            record.insert(key, value);
+        }
+    }
+    let path = output_dir.join(format!("{}_timeline.jsonl", role));
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{}", serde_json::Value::Object(record));
+    }
+}
+
+fn diag_role_result(result: &ExampleResult<()>) {
+    match result {
+        Ok(()) => diag_event_env("role_exit", serde_json::json!({ "status": "ok" })),
+        Err(error) => diag_event_env(
+            "role_exit",
+            serde_json::json!({
+                "status": "error",
+                "error": error.to_string()
+            }),
+        ),
+    }
+}
+
+fn diag_call_id(handle: &SessionHandle) -> String {
+    format!("{:?}", handle.id())
 }
 
 pub fn context() -> ExampleResult<(PbxProvider, Scenario, TransportMode, Role)> {
@@ -1055,6 +1176,11 @@ pub async fn register_stream_peer(
     let handle = peer.register_account(&cfg.sip_account()).send().await?;
     wait_for_stream_registration(peer, &handle, &cfg.username).await?;
     println!("[{}] Registered.", cfg.username);
+    diag_event(
+        &cfg.output_dir,
+        "registration_complete",
+        serde_json::json!({ "username": cfg.username.as_str(), "surface": "stream_peer" }),
+    );
     Ok(handle)
 }
 
@@ -1072,6 +1198,11 @@ pub async fn register_endpoint_api(
             .await?
         {
             println!("[{}] Registered.", cfg.username);
+            diag_event(
+                &cfg.output_dir,
+                "registration_complete",
+                serde_json::json!({ "username": cfg.username.as_str(), "surface": "endpoint" }),
+            );
             return Ok(handle);
         }
         sleep(Duration::from_millis(200)).await;
@@ -1092,6 +1223,14 @@ pub async fn register_callback_endpoint(
         if runtime.control.is_registered(&handle).await? {
             wait_for_registration_success(&mut runtime.events, Duration::from_secs(10)).await?;
             println!("[{}] Registered.", runtime.cfg.username);
+            diag_event(
+                &runtime.cfg.output_dir,
+                "registration_complete",
+                serde_json::json!({
+                    "username": runtime.cfg.username.as_str(),
+                    "surface": "callback"
+                }),
+            );
             return Ok(handle);
         }
         sleep(Duration::from_millis(200)).await;
@@ -1110,22 +1249,33 @@ pub async fn unregister_callback_endpoint(
     runtime.control.unregister(handle).await?;
     wait_for_unregistration_success(&mut runtime.events, Duration::from_secs(10)).await?;
     println!("[{}] Unregistered.", runtime.cfg.username);
+    diag_event(
+        &runtime.cfg.output_dir,
+        "unregistration_complete",
+        serde_json::json!({ "username": runtime.cfg.username.as_str() }),
+    );
     Ok(())
 }
 
 pub async fn run_stream_peer_surface() -> ExampleResult<()> {
     let (provider, scenario, transport, role) = context()?;
-    run_stream_peer(provider, scenario, transport, role).await
+    let result = run_stream_peer(provider, scenario, transport, role).await;
+    diag_role_result(&result);
+    result
 }
 
 pub async fn run_endpoint_surface() -> ExampleResult<()> {
     let (provider, scenario, transport, role) = context()?;
-    run_endpoint(provider, scenario, transport, role).await
+    let result = run_endpoint(provider, scenario, transport, role).await;
+    diag_role_result(&result);
+    result
 }
 
 pub async fn run_callback_builder_surface() -> ExampleResult<()> {
     let (provider, scenario, transport, role) = context()?;
-    run_callback(provider, scenario, transport, role).await
+    let result = run_callback(provider, scenario, transport, role).await;
+    diag_role_result(&result);
+    result
 }
 
 async fn run_stream_peer(
@@ -1851,8 +2001,21 @@ async fn run_transferor(
     handle: &SessionHandle,
     transport: TransportMode,
 ) -> ExampleResult<()> {
+    diag_event(
+        &cfg.output_dir,
+        "call_established",
+        serde_json::json!({
+            "call_id": diag_call_id(handle),
+            "role_detail": "transferor"
+        }),
+    );
     if transport.is_tls() {
         assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
+        diag_event(
+            &cfg.output_dir,
+            "srtp_asserted",
+            serde_json::json!({ "call_id": diag_call_id(handle) }),
+        );
     }
     let recorder = if transport.is_tls() {
         Some(start_tone_recorder(handle, ENDPOINT_1001_TONE_HZ).await?)
@@ -1860,6 +2023,14 @@ async fn run_transferor(
         None
     };
     sleep(transfer_settle_duration(provider, transport)).await;
+    diag_event(
+        &cfg.output_dir,
+        "refer_start",
+        serde_json::json!({
+            "call_id": diag_call_id(handle),
+            "refer_to": cfg.remote_call_uri()
+        }),
+    );
     let transfer_outcome = handle
         .transfer_blind_and_wait_for_outcome(
             &cfg.remote_call_uri(),
@@ -1874,15 +2045,52 @@ async fn run_transferor(
             ..
         } => {
             println!("[transfer] REFER completed: {} {}", status_code, reason);
+            diag_event(
+                &cfg.output_dir,
+                "refer_outcome",
+                serde_json::json!({
+                    "call_id": diag_call_id(handle),
+                    "outcome": "completed",
+                    "status_code": status_code,
+                    "reason": reason.as_str()
+                }),
+            );
         }
         TransferOutcome::Failed {
             status_code,
             reason,
             ..
         } => {
+            diag_event(
+                &cfg.output_dir,
+                "refer_outcome",
+                serde_json::json!({
+                    "call_id": diag_call_id(handle),
+                    "outcome": "failed",
+                    "status_code": status_code,
+                    "reason": reason.as_str()
+                }),
+            );
             return Err(format!("REFER failed: {} {}", status_code, reason).into());
         }
         other => return Err(format!("unexpected transfer outcome: {:?}", other).into()),
+    }
+    let post_refer_settle = env_duration_secs("PBX_TRANSFER_POST_REFER_SETTLE_SECS", 0);
+    if !post_refer_settle.is_zero() {
+        diag_event(
+            &cfg.output_dir,
+            "post_refer_settle_start",
+            serde_json::json!({
+                "call_id": diag_call_id(handle),
+                "duration_ms": post_refer_settle.as_millis().min(u128::from(u64::MAX)) as u64
+            }),
+        );
+        sleep(post_refer_settle).await;
+        diag_event(
+            &cfg.output_dir,
+            "post_refer_settle_end",
+            serde_json::json!({ "call_id": diag_call_id(handle) }),
+        );
     }
     if let Some(recorder) = recorder {
         recorder
@@ -1893,10 +2101,20 @@ async fn run_transferor(
     // the Transferor terminates its leg of the original call with BYE. Without
     // this the dialog stays open on the PBX, which eventually retransmits a
     // BYE that may land on whichever process binds the original Contact next.
+    diag_event(
+        &cfg.output_dir,
+        "hangup_start",
+        serde_json::json!({ "call_id": diag_call_id(handle) }),
+    );
     handle
         .hangup_and_wait(Some(Duration::from_secs(8)))
         .await
         .ok();
+    diag_event(
+        &cfg.output_dir,
+        "hangup_end",
+        serde_json::json!({ "call_id": diag_call_id(handle) }),
+    );
     Ok(())
 }
 
@@ -1906,8 +2124,21 @@ async fn run_transfer_answering_role(
     transport: TransportMode,
     transferee: bool,
 ) -> ExampleResult<()> {
+    diag_event(
+        &cfg.output_dir,
+        "call_established",
+        serde_json::json!({
+            "call_id": diag_call_id(handle),
+            "role_detail": if transferee { "transferee" } else { "target" }
+        }),
+    );
     if transport.is_tls() {
         assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
+        diag_event(
+            &cfg.output_dir,
+            "srtp_asserted",
+            serde_json::json!({ "call_id": diag_call_id(handle) }),
+        );
     }
     let recorder = if transport.is_tls() {
         let tone = if transferee {
@@ -1919,16 +2150,39 @@ async fn run_transfer_answering_role(
     } else {
         None
     };
-    sleep(if transferee {
-        Duration::from_secs(12)
+    let hold_duration = if transferee {
+        env_duration_secs("PBX_TRANSFER_TRANSFEREE_DURATION_SECS", 12)
     } else {
-        Duration::from_secs(4)
-    })
-    .await;
+        env_duration_secs("PBX_TRANSFER_TARGET_DURATION_SECS", 4)
+    };
+    diag_event(
+        &cfg.output_dir,
+        "transfer_role_hold_start",
+        serde_json::json!({
+            "call_id": diag_call_id(handle),
+            "duration_ms": hold_duration.as_millis().min(u128::from(u64::MAX)) as u64
+        }),
+    );
+    sleep(hold_duration).await;
+    diag_event(
+        &cfg.output_dir,
+        "transfer_role_hold_end",
+        serde_json::json!({ "call_id": diag_call_id(handle) }),
+    );
+    diag_event(
+        &cfg.output_dir,
+        "hangup_start",
+        serde_json::json!({ "call_id": diag_call_id(handle) }),
+    );
     handle
         .hangup_and_wait(Some(Duration::from_secs(8)))
         .await
         .ok();
+    diag_event(
+        &cfg.output_dir,
+        "hangup_end",
+        serde_json::json!({ "call_id": diag_call_id(handle) }),
+    );
     if let Some(recorder) = recorder {
         let name = if transferee {
             transferee_wav(transport)
@@ -1962,6 +2216,7 @@ pub async fn run_analyze() -> ExampleResult<()> {
 }
 
 fn analyze_hold(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult<()> {
+    write_audio_diagnostics(cfg, Scenario::HoldResume, transport);
     let caller_wav = cfg.output_dir.join(hold_resume_caller_wav(transport));
     let callee_wav = cfg.output_dir.join(hold_resume_callee_wav(transport));
     let caller = assert_audio_path(
@@ -1997,6 +2252,7 @@ fn analyze_hold(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult
 }
 
 fn analyze_dtmf(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult<()> {
+    write_audio_diagnostics(cfg, Scenario::Dtmf, transport);
     let caller_wav = cfg.output_dir.join(dtmf_caller_wav(transport));
     let callee_wav = cfg.output_dir.join(dtmf_callee_wav(transport));
     let caller = assert_audio_path(&caller_wav, ENDPOINT_1002_TONE_HZ, ENDPOINT_1001_TONE_HZ)?;
@@ -2010,6 +2266,7 @@ fn analyze_transfer(cfg: &EndpointConfig, transport: TransportMode) -> ExampleRe
     const WINDOW_SAMPLES: usize = SAMPLE_RATE as usize;
     const MIN_TRANSFEREE_SAMPLES: usize = WINDOW_SAMPLES * 2;
 
+    write_audio_diagnostics(cfg, Scenario::BlindTransfer, transport);
     let transferor_wav = cfg.output_dir.join(transferor_wav(transport));
     let transferee_wav = cfg.output_dir.join(transferee_wav(transport));
     let target_wav = cfg.output_dir.join(transfer_target_wav(transport));
@@ -2068,6 +2325,379 @@ fn analyze_transfer(cfg: &EndpointConfig, transport: TransportMode) -> ExampleRe
     Ok(())
 }
 
+fn write_audio_diagnostics(cfg: &EndpointConfig, scenario: Scenario, transport: TransportMode) {
+    if !pbx_diag_enabled() {
+        return;
+    }
+    if let Err(error) = write_audio_diagnostics_inner(cfg, scenario, transport) {
+        let _ = std::fs::write(
+            cfg.output_dir.join("audio-analysis-error.txt"),
+            format!("{}\n", error),
+        );
+    }
+}
+
+fn write_audio_diagnostics_inner(
+    cfg: &EndpointConfig,
+    scenario: Scenario,
+    transport: TransportMode,
+) -> ExampleResult<()> {
+    let mut files = Vec::new();
+    let mut markdown = String::new();
+    markdown.push_str("# PBX Audio Diagnostics\n\n");
+    markdown.push_str(&format!("- scenario: {:?}\n", scenario));
+    markdown.push_str(&format!("- transport: {:?}\n\n", transport));
+
+    match scenario {
+        Scenario::HoldResume => {
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                "hold caller",
+                &cfg.output_dir.join(hold_resume_caller_wav(transport)),
+                &[(
+                    "caller received callee reference tone",
+                    WindowSelector::Stable,
+                    tone_for_callee(transport),
+                    ENDPOINT_1001_TONE_HZ,
+                )],
+            );
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                "hold callee",
+                &cfg.output_dir.join(hold_resume_callee_wav(transport)),
+                &[
+                    (
+                        "callee pre-hold caller tone",
+                        WindowSelector::LeadingThird,
+                        ENDPOINT_1001_TONE_HZ,
+                        ENDPOINT_1003_TONE_HZ,
+                    ),
+                    (
+                        "callee post-resume caller tone",
+                        WindowSelector::TrailingThird,
+                        ENDPOINT_1003_TONE_HZ,
+                        ENDPOINT_1002_TONE_HZ,
+                    ),
+                ],
+            );
+        }
+        Scenario::Dtmf => {
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                "dtmf caller",
+                &cfg.output_dir.join(dtmf_caller_wav(transport)),
+                &[(
+                    "1001 received 1002 reference tone",
+                    WindowSelector::Stable,
+                    ENDPOINT_1002_TONE_HZ,
+                    ENDPOINT_1001_TONE_HZ,
+                )],
+            );
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                "dtmf callee",
+                &cfg.output_dir.join(dtmf_callee_wav(transport)),
+                &[(
+                    "1002 received 1001 reference tone",
+                    WindowSelector::Stable,
+                    ENDPOINT_1001_TONE_HZ,
+                    ENDPOINT_1002_TONE_HZ,
+                )],
+            );
+        }
+        Scenario::BlindTransfer => {
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                "transferor",
+                &cfg.output_dir.join(transferor_wav(transport)),
+                &[(
+                    "1001 received 1002 initial-leg tone",
+                    WindowSelector::Stable,
+                    ENDPOINT_1002_TONE_HZ,
+                    ENDPOINT_1001_TONE_HZ,
+                )],
+            );
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                "transferee",
+                &cfg.output_dir.join(transferee_wav(transport)),
+                &[
+                    (
+                        "1002 initial leg received 1001 tone",
+                        WindowSelector::LeadingThird,
+                        ENDPOINT_1001_TONE_HZ,
+                        ENDPOINT_1003_TONE_HZ,
+                    ),
+                    (
+                        "1002 transferred leg received 1003 tone",
+                        WindowSelector::TrailingThird,
+                        ENDPOINT_1003_TONE_HZ,
+                        ENDPOINT_1001_TONE_HZ,
+                    ),
+                ],
+            );
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                "target",
+                &cfg.output_dir.join(transfer_target_wav(transport)),
+                &[(
+                    "1003 received 1002 transferred-leg tone",
+                    WindowSelector::Stable,
+                    ENDPOINT_1002_TONE_HZ,
+                    ENDPOINT_1003_TONE_HZ,
+                )],
+            );
+        }
+        _ => {}
+    }
+
+    let report = serde_json::json!({
+        "scenario": format!("{:?}", scenario),
+        "transport": format!("{:?}", transport),
+        "sample_rate": SAMPLE_RATE,
+        "frame_size": FRAME_SIZE,
+        "files": files,
+    });
+    std::fs::write(
+        cfg.output_dir.join("audio-analysis.json"),
+        serde_json::to_string_pretty(&report)?,
+    )?;
+    std::fs::write(cfg.output_dir.join("audio-analysis.md"), markdown)?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum WindowSelector {
+    Stable,
+    LeadingThird,
+    TrailingThird,
+}
+
+fn add_audio_file_diagnostics(
+    files: &mut Vec<serde_json::Value>,
+    markdown: &mut String,
+    label: &str,
+    path: &Path,
+    windows: &[(&str, WindowSelector, f32, f32)],
+) {
+    markdown.push_str(&format!("## {}\n\n", label));
+    match read_wav(path) {
+        Ok(samples) => {
+            let bounds = non_silence_bounds(&samples, 256);
+            markdown.push_str(&format!("- path: `{}`\n", path.display()));
+            markdown.push_str(&format!("- samples: {}\n", samples.len()));
+            markdown.push_str(&format!(
+                "- duration_secs: {:.3}\n",
+                samples.len() as f64 / SAMPLE_RATE as f64
+            ));
+            if let Some((first, last)) = bounds {
+                markdown.push_str(&format!("- first_non_silence_sample: {}\n", first));
+                markdown.push_str(&format!("- last_non_silence_sample: {}\n", last));
+            } else {
+                markdown.push_str("- first_non_silence_sample: null\n");
+                markdown.push_str("- last_non_silence_sample: null\n");
+            }
+            let mut window_values = Vec::new();
+            for (window_label, selector, expected_hz, rejected_hz) in windows {
+                let selected = match selector {
+                    WindowSelector::Stable => {
+                        analysis_slice_for_window(&samples, SAMPLE_RATE as usize)
+                    }
+                    WindowSelector::LeadingThird => {
+                        if samples.len() >= 3 {
+                            leading_third(&samples)
+                        } else {
+                            &samples
+                        }
+                    }
+                    WindowSelector::TrailingThird => {
+                        if samples.len() >= 3 {
+                            trailing_third(&samples)
+                        } else {
+                            &samples
+                        }
+                    }
+                };
+                let window_value = match best_window_tone_for_diag(
+                    selected,
+                    SAMPLE_RATE as usize,
+                    FRAME_SIZE,
+                    *expected_hz,
+                    *rejected_hz,
+                ) {
+                    Ok(scan) => {
+                        let analysis = &scan.best;
+                        markdown.push_str(&format!(
+                            "- {}: samples={} analysis_window_samples={} passing_windows={}/{} longest_passing_run={} required_passing_run={} expected_hz={:.0} rejected_hz={:.0} ratio={:.2}\n",
+                            window_label,
+                            analysis.samples,
+                            scan.analysis_window_samples,
+                            scan.passing_windows,
+                            scan.total_windows,
+                            scan.longest_passing_run,
+                            scan.required_passing_run,
+                            analysis.expected_hz,
+                            analysis.rejected_hz,
+                            analysis.ratio
+                        ));
+                        serde_json::json!({
+                            "label": window_label,
+                            "status": "ok",
+                            "samples": analysis.samples,
+                            "analysis_window_samples": scan.analysis_window_samples,
+                            "step_samples": scan.step_samples,
+                            "passing_windows": scan.passing_windows,
+                            "total_windows": scan.total_windows,
+                            "longest_passing_run": scan.longest_passing_run,
+                            "required_passing_run": scan.required_passing_run,
+                            "expected_hz": analysis.expected_hz,
+                            "rejected_hz": analysis.rejected_hz,
+                            "expected_magnitude": analysis.expected_magnitude,
+                            "rejected_magnitude": analysis.rejected_magnitude,
+                            "ratio": analysis.ratio
+                        })
+                    }
+                    Err(error) => {
+                        markdown.push_str(&format!("- {}: error: {}\n", window_label, error));
+                        serde_json::json!({
+                            "label": window_label,
+                            "status": "error",
+                            "error": error
+                        })
+                    }
+                };
+                window_values.push(window_value);
+            }
+            markdown.push('\n');
+            files.push(serde_json::json!({
+                "label": label,
+                "path": path.display().to_string(),
+                "status": "ok",
+                "samples": samples.len(),
+                "duration_secs": samples.len() as f64 / SAMPLE_RATE as f64,
+                "first_non_silence_sample": bounds.map(|(first, _)| first),
+                "last_non_silence_sample": bounds.map(|(_, last)| last),
+                "windows": window_values
+            }));
+        }
+        Err(error) => {
+            markdown.push_str(&format!("- path: `{}`\n", path.display()));
+            markdown.push_str(&format!("- error: {}\n\n", error));
+            files.push(serde_json::json!({
+                "label": label,
+                "path": path.display().to_string(),
+                "status": "error",
+                "error": error.to_string()
+            }));
+        }
+    }
+}
+
+fn non_silence_bounds(samples: &[i16], threshold: i16) -> Option<(usize, usize)> {
+    let first = samples
+        .iter()
+        .position(|sample| sample.saturating_abs() >= threshold)?;
+    let last = samples
+        .iter()
+        .rposition(|sample| sample.saturating_abs() >= threshold)?;
+    Some((first, last))
+}
+
+fn scan_tone_windows(
+    samples: &[i16],
+    window_samples: usize,
+    step_samples: usize,
+    expected_hz: f32,
+    rejected_hz: f32,
+) -> Result<ToneWindowScan, String> {
+    if samples.len() < window_samples {
+        return Err(format!(
+            "{} samples available (expected at least {})",
+            samples.len(),
+            window_samples
+        ));
+    }
+
+    let analysis_window = samples
+        .len()
+        .min(TONE_ANALYSIS_WINDOW_SAMPLES.min(window_samples).max(1));
+    let step = step_samples.max(1);
+    let last_start = samples.len() - analysis_window;
+    let mut start = 0usize;
+    let mut best: Option<ToneAnalysis> = None;
+    let mut passing_windows = 0usize;
+    let mut total_windows = 0usize;
+    let mut current_passing_run = 0usize;
+    let mut longest_passing_run = 0usize;
+    loop {
+        let analysis = analyze_samples(
+            &samples[start..start + analysis_window],
+            expected_hz,
+            rejected_hz,
+        )
+        .map_err(|error| error.to_string())?;
+        let passes = analysis.ratio >= DOMINANCE_RATIO;
+        let is_best = best
+            .as_ref()
+            .map(|current| analysis.ratio > current.ratio)
+            .unwrap_or(true);
+        if is_best {
+            best = Some(analysis);
+        }
+        total_windows += 1;
+        if passes {
+            passing_windows += 1;
+            current_passing_run += 1;
+            longest_passing_run = longest_passing_run.max(current_passing_run);
+        } else {
+            current_passing_run = 0;
+        }
+        if start == last_start {
+            break;
+        }
+        start = (start + step).min(last_start);
+    }
+    let remaining = window_samples.saturating_sub(analysis_window);
+    let additional_windows = if remaining == 0 {
+        0
+    } else {
+        (remaining + step - 1) / step
+    };
+    let required_passing_run = (additional_windows + 1).min(total_windows).max(1);
+    Ok(ToneWindowScan {
+        best: best.ok_or_else(|| "no analysis window available".to_string())?,
+        total_windows,
+        passing_windows,
+        longest_passing_run,
+        required_passing_run,
+        analysis_window_samples: analysis_window,
+        step_samples: step,
+    })
+}
+
+fn best_window_tone_for_diag(
+    samples: &[i16],
+    window_samples: usize,
+    step_samples: usize,
+    expected_hz: f32,
+    rejected_hz: f32,
+) -> Result<ToneWindowScan, String> {
+    scan_tone_windows(
+        samples,
+        window_samples,
+        step_samples,
+        expected_hz,
+        rejected_hz,
+    )
+}
+
 pub fn generate_tone(freq: f32, frame_num: usize) -> Vec<i16> {
     (0..FRAME_SIZE)
         .map(|j| {
@@ -2105,10 +2735,61 @@ pub async fn start_tone_recorder(
     let (sender, mut receiver) = audio.split();
     let received_buf = Arc::new(Mutex::new(Vec::<i16>::new()));
     let recv_buf = received_buf.clone();
+    let counters = Arc::new(RecorderCounters::new());
+    let recv_counters = counters.clone();
+    let recorder_started = Instant::now();
+    let diag_output_dir = diag_output_dir_from_env();
+    let recv_diag_output_dir = diag_output_dir.clone();
+    let diag_name = format!("tone_{:.0}hz", tone_hz);
+    let recv_diag_name = diag_name.clone();
+    if let Some(output_dir) = diag_output_dir.as_deref() {
+        diag_event(
+            output_dir,
+            "recorder_start",
+            serde_json::json!({
+                "call_id": diag_call_id(handle),
+                "recorder": diag_name,
+                "tone_hz": tone_hz
+            }),
+        );
+    }
     let recv_task = tokio::spawn(async move {
         while let Some(frame) = receiver.recv().await {
+            let elapsed_ms = recorder_started
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64;
+            let elapsed_ms = elapsed_ms.saturating_add(1);
+            let previous_frames = recv_counters.rx_frames.fetch_add(1, Ordering::Relaxed);
+            recv_counters
+                .rx_samples
+                .fetch_add(frame.samples.len(), Ordering::Relaxed);
+            recv_counters
+                .last_rx_elapsed_ms
+                .store(elapsed_ms, Ordering::Relaxed);
+            let _ = recv_counters.first_rx_elapsed_ms.compare_exchange(
+                0,
+                elapsed_ms,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
             if let Ok(mut buf) = recv_buf.lock() {
                 buf.extend_from_slice(&frame.samples);
+            }
+            let frame_count = previous_frames + 1;
+            if frame_count % 50 == 0 {
+                if let Some(output_dir) = recv_diag_output_dir.as_deref() {
+                    diag_event(
+                        output_dir,
+                        "recorder_rx_periodic",
+                        serde_json::json!({
+                            "recorder": recv_diag_name,
+                            "rx_frames": frame_count,
+                            "rx_samples": recv_counters.rx_samples.load(Ordering::Relaxed),
+                            "last_rx_elapsed_ms": elapsed_ms
+                        }),
+                    );
+                }
             }
         }
     });
@@ -2135,6 +2816,9 @@ pub async fn start_tone_recorder(
         send_task,
         recv_task,
         received_buf,
+        counters,
+        diag_output_dir,
+        diag_name,
     })
 }
 
@@ -2149,12 +2833,31 @@ impl ToneRecorder {
             send_task,
             recv_task,
             received_buf,
+            counters,
+            diag_output_dir,
+            diag_name,
         } = self;
         running.store(false, Ordering::Relaxed);
         let _ = timeout(Duration::from_secs(2), send_task).await;
         stop_recv_task(recv_task).await;
         let received = received_buf.lock().map(|g| g.clone()).unwrap_or_default();
-        save_wav(output_dir, output_name, &received)
+        let path = save_wav(output_dir, output_name, &received)?;
+        if let Some(diag_dir) = diag_output_dir.as_deref() {
+            diag_event(
+                diag_dir,
+                "recorder_stop",
+                serde_json::json!({
+                    "recorder": diag_name,
+                    "output_name": output_name,
+                    "output_path": path.display().to_string(),
+                    "rx_frames": counters.rx_frames.load(Ordering::Relaxed),
+                    "rx_samples": counters.rx_samples.load(Ordering::Relaxed),
+                    "first_rx_elapsed_ms": counters.first_rx_elapsed_ms.load(Ordering::Relaxed),
+                    "last_rx_elapsed_ms": counters.last_rx_elapsed_ms.load(Ordering::Relaxed)
+                }),
+            );
+        }
+        Ok(path)
     }
 }
 
@@ -2876,62 +3579,30 @@ pub fn assert_best_window_tone(
     expected_hz: f32,
     rejected_hz: f32,
 ) -> ExampleResult<ToneAnalysis> {
-    if samples.len() < window_samples {
+    let scan = scan_tone_windows(
+        samples,
+        window_samples,
+        step_samples,
+        expected_hz,
+        rejected_hz,
+    )
+    .map_err(|error| format!("{}: {}", label, error))?;
+    let analysis = scan.best;
+    if scan.longest_passing_run < scan.required_passing_run {
         return Err(format!(
-            "{}: {} samples available (expected at least {})",
+            "{}: {}/{} sampled windows matched, longest passing run {}/{}; best {:.0}Hz magnitude {:.1} vs {:.0}Hz magnitude {:.1}, ratio {:.2} (analysis window {} samples, step {} samples, ratio threshold {:.2})",
             label,
-            samples.len(),
-            window_samples
-        )
-        .into());
-    }
-
-    let analysis_window = samples
-        .len()
-        .min(window_samples.max(TONE_ANALYSIS_WINDOW_SAMPLES));
-    let mut best: Option<ToneAnalysis> = None;
-    let mut passing_windows = 0usize;
-    let mut total_windows = 0usize;
-    let step = step_samples.max(1);
-    let last_start = samples.len() - analysis_window;
-    let mut start = 0;
-    loop {
-        let analysis = analyze_samples(
-            &samples[start..start + analysis_window],
-            expected_hz,
-            rejected_hz,
-        )?;
-        total_windows += 1;
-        if analysis.ratio >= DOMINANCE_RATIO {
-            passing_windows += 1;
-        }
-        if best
-            .as_ref()
-            .map(|current| analysis.ratio > current.ratio)
-            .unwrap_or(true)
-        {
-            best = Some(analysis);
-        }
-        if start == last_start {
-            break;
-        }
-        start = (start + step).min(last_start);
-    }
-
-    let analysis = best.expect("at least one tone-analysis window");
-    let required_windows = total_windows.min(3);
-    if passing_windows < required_windows {
-        return Err(format!(
-            "{}: {}/{} sampled windows matched; best {:.0}Hz magnitude {:.1} vs {:.0}Hz magnitude {:.1}, ratio {:.2} (expected {} windows at ratio at least {:.2})",
-            label,
-            passing_windows,
-            total_windows,
+            scan.passing_windows,
+            scan.total_windows,
+            scan.longest_passing_run,
+            scan.required_passing_run,
             analysis.expected_hz,
             analysis.expected_magnitude,
             analysis.rejected_hz,
             analysis.rejected_magnitude,
             analysis.ratio,
-            required_windows,
+            scan.analysis_window_samples,
+            scan.step_samples,
             DOMINANCE_RATIO
         )
         .into());

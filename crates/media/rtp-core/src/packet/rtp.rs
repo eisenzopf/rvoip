@@ -42,11 +42,7 @@ impl RtpPacket {
 
     /// Parse an RTP packet from bytes.
     ///
-    /// Allocates a fresh `Bytes` for the payload (one
-    /// `copy_from_slice`). For the UDP recv hot path prefer
-    /// [`Self::parse_from_bytes`] with a pooled recv buffer — that
-    /// path is zero-copy and reuses the underlying allocation
-    /// across packets.
+    /// Allocates a fresh `Bytes` for the payload (one `copy_from_slice`).
     pub fn parse(data: &[u8]) -> Result<Self> {
         debug!("Parsing RTP packet from {} bytes", data.len());
 
@@ -65,13 +61,8 @@ impl RtpPacket {
         Ok(Self { header, payload })
     }
 
-    /// Parse an RTP packet from an owned `Bytes`, slicing the
-    /// payload as a refcounted view without copying.
-    ///
-    /// The recv hot path uses this with
-    /// [`crate::transport::recv_pool::RecvBufPool`] so the entire
-    /// recv → parse → deliver chain becomes alloc-free in steady
-    /// state.
+    /// Parse an RTP packet from an owned `Bytes`, slicing the payload as a
+    /// refcounted view without copying.
     pub fn parse_from_bytes(data: Bytes) -> Result<Self> {
         debug!("Parsing RTP packet from {} bytes (zero-copy)", data.len());
 
@@ -198,6 +189,18 @@ mod tests {
         assert_eq!(parsed.header.timestamp, original.header.timestamp);
         assert_eq!(parsed.header.ssrc, original.header.ssrc);
         assert_eq!(parsed.payload, original.payload);
+    }
+
+    #[test]
+    fn test_serialize_into_writes_one_payload() {
+        let payload = Bytes::from_static(b"abc123");
+        let packet = RtpPacket::new_with_payload(96, 1000, 12345, 0xabcdef01, payload.clone());
+        let mut reusable = BytesMut::with_capacity(1500);
+
+        let serialized = packet.serialize_into(&mut reusable).unwrap();
+
+        assert_eq!(serialized.len(), RTP_MIN_HEADER_SIZE + payload.len());
+        assert_eq!(&serialized[RTP_MIN_HEADER_SIZE..], payload.as_ref());
     }
 
     #[test]

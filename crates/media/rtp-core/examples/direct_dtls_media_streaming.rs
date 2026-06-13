@@ -316,7 +316,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             // Create test audio frame
             let frame = MediaFrame {
                 frame_type: MediaFrameType::Audio,
-                data: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                data: vec![1, 2, 3, 4, 5, 6, 7, 8].into(),
                 sequence,
                 timestamp,
                 payload_type: 8,

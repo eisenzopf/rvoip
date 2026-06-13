@@ -23,7 +23,7 @@ async fn main() {
     // Create a test frame
     let frame = MediaFrame {
         frame_type: MediaFrameType::Audio,
-        data: vec![1, 2, 3, 4, 5],
+        data: vec![1, 2, 3, 4, 5].into(),
         timestamp: 1000,
         sequence: 1,
         marker: false,

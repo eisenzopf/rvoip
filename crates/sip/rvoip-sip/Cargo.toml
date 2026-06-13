@@ -589,6 +589,16 @@ name = "perf_soak_caller"
 path = "tests/perf/perf_soak_caller.rs"
 required-features = ["perf-tests"]
 
+[[test]]
+name = "perf_burst_receiver"
+path = "tests/perf/perf_burst_receiver.rs"
+required-features = ["perf-tests"]
+
+[[test]]
+name = "perf_burst_caller"
+path = "tests/perf/perf_burst_caller.rs"
+required-features = ["perf-tests"]
+
 # Phase 3 — industry-recognised scenarios beyond Tier 1.
 [[test]]
 name = "perf_pdd_with_180_first"

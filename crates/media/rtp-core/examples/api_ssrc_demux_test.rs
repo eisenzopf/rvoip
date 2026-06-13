@@ -232,7 +232,9 @@ async fn run_test() -> Result<(), Box<dyn std::error::Error>> {
     info!("Sending AUDIO test frame with SSRC={:08x}", AUDIO_SSRC);
     let audio_frame = MediaFrame {
         frame_type: MediaFrameType::Audio,
-        data: format!("AUDIO test frame with SSRC={:08x}", AUDIO_SSRC).into_bytes(),
+        data: format!("AUDIO test frame with SSRC={:08x}", AUDIO_SSRC)
+            .into_bytes()
+            .into(),
         timestamp: 1000,
         sequence: client.get_sequence_number(AUDIO_SSRC).await.unwrap_or(100),
         marker: true,
@@ -250,7 +252,9 @@ async fn run_test() -> Result<(), Box<dyn std::error::Error>> {
     info!("Sending VIDEO test frame with SSRC={:08x}", VIDEO_SSRC);
     let video_frame = MediaFrame {
         frame_type: MediaFrameType::Video,
-        data: format!("VIDEO test frame with SSRC={:08x}", VIDEO_SSRC).into_bytes(),
+        data: format!("VIDEO test frame with SSRC={:08x}", VIDEO_SSRC)
+            .into_bytes()
+            .into(),
         timestamp: 2000,
         sequence: client.get_sequence_number(VIDEO_SSRC).await.unwrap_or(200),
         marker: true,

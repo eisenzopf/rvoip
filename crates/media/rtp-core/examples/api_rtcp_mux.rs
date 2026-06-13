@@ -235,7 +235,7 @@ async fn create_client(
 fn create_test_frame() -> MediaFrame {
     MediaFrame {
         frame_type: MediaFrameType::Audio,
-        data: vec![1, 2, 3, 4, 5],
+        data: vec![1, 2, 3, 4, 5].into(),
         timestamp: 1000,
         sequence: 1,
         marker: false,

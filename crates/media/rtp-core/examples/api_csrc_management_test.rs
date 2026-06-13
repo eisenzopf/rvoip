@@ -92,7 +92,7 @@ impl ConferenceMixer {
         // Create frame with mixer SSRC
         let frame = MediaFrame {
             frame_type: MediaFrameType::Audio,
-            data,
+            data: data.into(),
             timestamp: self.timestamp,
             sequence: self.sequence,
             marker: false,
@@ -173,7 +173,7 @@ async fn run_test() -> Result<(), Box<dyn std::error::Error>> {
 
     let dummy_frame = MediaFrame {
         frame_type: MediaFrameType::Audio,
-        data: dummy_data,
+        data: dummy_data.into(),
         timestamp: rng.gen(),
         sequence: rng.gen(),
         marker: false,

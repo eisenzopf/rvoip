@@ -1,0 +1,162 @@
+version: 1
+
+scenarios:
+  - name: carrier-smoke
+    description: "Short media burst smoke for beta gate evidence."
+    serverProfile: carrier-burst-balanced
+    clientProfile: endpoint
+    capacity: 100
+    aliceShards: 1
+    seed: 2026060801
+    phases:
+      - { label: warmup, cps: 2, durationSecs: 3 }
+      - { label: burst, cps: 5, durationSecs: 6 }
+      - { label: recovery, cps: 1, durationSecs: 3 }
+    holdDistribution:
+      - { label: short, weight: 100, minSecs: 2, maxSecs: 5 }
+    answerDelay:
+      minMillis: 0
+      maxMillis: 20
+    acceptance:
+      minAsr: 0.999
+      maxMediaSetupFailed: 0
+      maxTeardownFailed: 0
+      maxRetainedAfterDrain: 0
+      maxActiveAudioReceiversAfterDrain: 0
+      maxRssGrowthMbPerHr: 10
+      minRssGateWindowSecs: 120
+
+  - name: access-edge-microburst
+    description: "Repeated access-edge microbursts over baseline media traffic."
+    serverProfile: carrier-burst-high-density
+    clientProfile: endpoint
+    capacity: 6000
+    aliceShards: 16
+    seed: 2026060802
+    phases:
+      - { label: warmup, cps: 20, durationSecs: 30 }
+      - { label: burst-1, cps: 120, durationSecs: 20 }
+      - { label: recovery-1, cps: 20, durationSecs: 30 }
+      - { label: burst-2, cps: 160, durationSecs: 20 }
+      - { label: recovery-2, cps: 20, durationSecs: 30 }
+    acceptance:
+      minAsr: 0.999
+      maxMediaSetupFailed: 0
+      maxTeardownFailed: 0
+      maxRetainedAfterDrain: 0
+      maxActiveAudioReceiversAfterDrain: 0
+      maxRssGrowthMbPerHr: 10
+      maxRecoverySecs: 60
+
+  - name: contact-center-flash
+    description: "High-arrival flash event with mostly short media calls."
+    serverProfile: carrier-burst-high-density
+    clientProfile: endpoint
+    capacity: 8500
+    aliceShards: 8
+    seed: 2026060803
+    phases:
+      - { label: warmup, cps: 25, durationSecs: 30 }
+      - { label: flash, cps: 220, durationSecs: 45 }
+      - { label: recovery, cps: 30, durationSecs: 60 }
+    holdDistribution:
+      - { label: short, weight: 75, minSecs: 10, maxSecs: 45 }
+      - { label: medium, weight: 20, minSecs: 46, maxSecs: 180 }
+      - { label: long, weight: 5, minSecs: 181, maxSecs: 360 }
+    acceptance:
+      minAsr: 0.999
+      maxMediaSetupFailed: 0
+      maxTeardownFailed: 0
+      maxRetainedAfterDrain: 0
+      maxActiveAudioReceiversAfterDrain: 0
+      maxRssGrowthMbPerHr: 10
+      maxRecoverySecs: 90
+
+  - name: shift-change-long-hold
+    description: "Moderate burst with a long-tail hold distribution."
+    serverProfile: carrier-burst-balanced
+    clientProfile: endpoint
+    capacity: 8500
+    aliceShards: 8
+    seed: 2026060804
+    phases:
+      - { label: warmup, cps: 15, durationSecs: 30 }
+      - { label: shift-change, cps: 90, durationSecs: 90 }
+      - { label: recovery, cps: 15, durationSecs: 90 }
+    holdDistribution:
+      - { label: short, weight: 25, minSecs: 10, maxSecs: 60 }
+      - { label: medium, weight: 35, minSecs: 61, maxSecs: 240 }
+      - { label: long, weight: 40, minSecs: 241, maxSecs: 600 }
+    acceptance:
+      minAsr: 0.999
+      maxMediaSetupFailed: 0
+      maxTeardownFailed: 0
+      maxRetainedAfterDrain: 0
+      maxActiveAudioReceiversAfterDrain: 0
+      maxRssGrowthMbPerHr: 10
+      maxRecoverySecs: 120
+
+  - name: overload-recovery
+    description: "Intentional overload burst that should reject cleanly and recover."
+    serverProfile: carrier-burst-memory-tight
+    clientProfile: endpoint
+    capacity: 250
+    aliceShards: 2
+    seed: 2026060805
+    phases:
+      - { label: warmup, cps: 20, durationSecs: 20 }
+      - { label: overload, cps: 300, durationSecs: 30 }
+      - { label: recovery, cps: 20, durationSecs: 60 }
+    acceptance:
+      # This scenario intentionally exceeds the admission cap; ASR is not
+      # the pass criterion. Cleanup, media setup, teardown, and recovery are.
+      minAsr: 0.0
+      allowOverloadRejections: true
+      maxMediaSetupFailed: 0
+      maxTeardownFailed: 0
+      maxRetainedAfterDrain: 0
+      maxActiveAudioReceiversAfterDrain: 0
+      maxRssGrowthMbPerHr: 10
+      maxRecoverySecs: 90
+
+  - name: high-density-media-burst
+    description: "Dense media burst to stress RTP/media queues and pools."
+    serverProfile: carrier-burst-high-density
+    clientProfile: endpoint
+    capacity: 12500
+    aliceShards: 16
+    seed: 2026060806
+    phases:
+      - { label: warmup, cps: 30, durationSecs: 30 }
+      - { label: media-burst, cps: 180, durationSecs: 90 }
+      - { label: recovery, cps: 30, durationSecs: 90 }
+    acceptance:
+      minAsr: 0.999
+      maxMediaSetupFailed: 0
+      maxTeardownFailed: 0
+      maxRetainedAfterDrain: 0
+      maxActiveAudioReceiversAfterDrain: 0
+      maxRssGrowthMbPerHr: 10
+      maxRecoverySecs: 120
+
+  - name: buffer-ab-legacy
+    description: "Controlled A/B burst using legacy RTP send/receive buffer behavior."
+    serverProfile: carrier-burst-balanced
+    clientProfile: endpoint
+    capacity: 800
+    aliceShards: 4
+    seed: 2026060807
+    phases:
+      - { label: warmup, cps: 10, durationSecs: 20 }
+      - { label: burst, cps: 25, durationSecs: 40 }
+      - { label: recovery, cps: 10, durationSecs: 20 }
+    holdDistribution:
+      - { label: short, weight: 100, minSecs: 5, maxSecs: 15 }
+    acceptance:
+      minAsr: 0.999
+      maxMediaSetupFailed: 0
+      maxTeardownFailed: 0
+      maxRetainedAfterDrain: 0
+      maxActiveAudioReceiversAfterDrain: 0
+      maxRssGrowthMbPerHr: 10
+      maxRecoverySecs: 60

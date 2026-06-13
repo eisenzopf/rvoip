@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
-use rvoip_sip_core::types::headers::{HeaderAccess, HeaderValue};
+use rvoip_sip_core::types::headers::HeaderValue;
 use rvoip_sip_core::types::rack::RAck;
 use rvoip_sip_core::types::{ContentLength, HeaderName, Method, StatusCode, TypedHeader};
 use rvoip_sip_core::validation::{validate_generated_request, validate_generated_response};

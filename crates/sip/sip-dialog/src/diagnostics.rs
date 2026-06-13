@@ -1,8 +1,11 @@
 //! SIP transaction/dialog diagnostics for duplicate recovery under UDP load.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::sync::{LazyLock, Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde::Serialize;
 
 macro_rules! latency_buckets {
     () => {
@@ -34,10 +37,14 @@ const LATENCY_BUCKET_UPPER_US: [u64; 18] = [
     500_000, 1_000_000, 2_500_000, 5_000_000,
 ];
 const MAX_TRANSACTION_DISPATCH_DIAG_WORKERS: usize = 64;
+const MAX_CALL_TIMING_TRACE_ENTRIES: usize = 20_000;
 
 static ENABLED_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 static TRANSACTION_TIMING_ENABLED: AtomicU8 = AtomicU8::new(0);
 static DIALOG_TIMING_ENABLED: AtomicU8 = AtomicU8::new(0);
+static CALL_TIMING_TRACE_OVERFLOW: AtomicU64 = AtomicU64::new(0);
+static CALL_TIMING_TRACES: LazyLock<Mutex<HashMap<String, CallTimingTraceCounts>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 static DUP_INVITE_EXISTING_TX: AtomicU64 = AtomicU64::new(0);
 static DUP_INVITE_CACHE_HIT: AtomicU64 = AtomicU64::new(0);
@@ -67,6 +74,21 @@ static OK_200_BYE_FRESH: AtomicU64 = AtomicU64::new(0);
 static OK_200_BYE_TOMBSTONE: AtomicU64 = AtomicU64::new(0);
 static OK_200_BYE_DUPLICATE_TERMINATED: AtomicU64 = AtomicU64::new(0);
 static OK_200_OTHER: AtomicU64 = AtomicU64::new(0);
+
+static UAC_INVITE_2XX_RESPONSE: AtomicU64 = AtomicU64::new(0);
+static UAC_INVITE_2XX_ACK_ATTEMPT: AtomicU64 = AtomicU64::new(0);
+static UAC_INVITE_2XX_ACK_SUCCESS: AtomicU64 = AtomicU64::new(0);
+static UAC_INVITE_2XX_ACK_FAILURE: AtomicU64 = AtomicU64::new(0);
+static UAC_INVITE_2XX_CALL_ANSWERED_EMIT: AtomicU64 = AtomicU64::new(0);
+static HUB_RESPONSE_INVITE_2XX: AtomicU64 = AtomicU64::new(0);
+static HUB_RESPONSE_INVITE_2XX_SESSION_FOUND: AtomicU64 = AtomicU64::new(0);
+static HUB_RESPONSE_INVITE_2XX_SESSION_MISSING: AtomicU64 = AtomicU64::new(0);
+static HUB_CALL_ANSWERED: AtomicU64 = AtomicU64::new(0);
+static HUB_CALL_ANSWERED_SESSION_FOUND: AtomicU64 = AtomicU64::new(0);
+static HUB_CALL_ANSWERED_SESSION_MISSING: AtomicU64 = AtomicU64::new(0);
+static HUB_ACK_SENT: AtomicU64 = AtomicU64::new(0);
+static HUB_ACK_SENT_SESSION_FOUND: AtomicU64 = AtomicU64::new(0);
+static HUB_ACK_SENT_SESSION_MISSING: AtomicU64 = AtomicU64::new(0);
 
 static DIALOG_ROUTE_REQUEST: AtomicU64 = AtomicU64::new(0);
 static DIALOG_ROUTE_STORED: AtomicU64 = AtomicU64::new(0);
@@ -355,7 +377,7 @@ static INVITE_2XX_MAINTENANCE: LatencyMetric = LatencyMetric::new();
 static INVITE_2XX_PROACTIVE_SEND: LatencyMetric = LatencyMetric::new();
 static GLOBAL_PUBLISH_TOTAL: LatencyMetric = LatencyMetric::new();
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct LatencySnapshot {
     pub count: u64,
     pub avg_us: u64,
@@ -367,14 +389,39 @@ pub struct LatencySnapshot {
     pub over_500ms: u64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TransactionDispatchWorkerSnapshot {
     pub worker_id: usize,
     pub queue: LatencySnapshot,
     pub depth_max: u64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct CallTimingTraceSnapshot {
+    pub call_id: String,
+    pub first_uac_invite_2xx_response_epoch_us: Option<u64>,
+    pub last_uac_invite_2xx_response_epoch_us: Option<u64>,
+    pub first_uac_ack_attempt_epoch_us: Option<u64>,
+    pub last_uac_ack_attempt_epoch_us: Option<u64>,
+    pub first_uac_ack_success_epoch_us: Option<u64>,
+    pub last_uac_ack_success_epoch_us: Option<u64>,
+    pub first_uac_ack_failure_epoch_us: Option<u64>,
+    pub last_uac_ack_failure_epoch_us: Option<u64>,
+    pub first_uac_call_answered_emit_epoch_us: Option<u64>,
+    pub last_uac_call_answered_emit_epoch_us: Option<u64>,
+    pub first_hub_response_invite_2xx_epoch_us: Option<u64>,
+    pub last_hub_response_invite_2xx_epoch_us: Option<u64>,
+    pub first_hub_call_answered_epoch_us: Option<u64>,
+    pub last_hub_call_answered_epoch_us: Option<u64>,
+    pub first_hub_ack_sent_epoch_us: Option<u64>,
+    pub last_hub_ack_sent_epoch_us: Option<u64>,
+    pub first_uas_ack_received_epoch_us: Option<u64>,
+    pub last_uas_ack_received_epoch_us: Option<u64>,
+    pub first_lifecycle_call_answered_epoch_us: Option<u64>,
+    pub last_lifecycle_call_answered_epoch_us: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Snapshot {
     pub duplicate_invite_existing_transaction: u64,
     pub duplicate_invite_cache_hit: u64,
@@ -402,6 +449,22 @@ pub struct Snapshot {
     pub ok_200_bye_tombstone: u64,
     pub ok_200_bye_duplicate_terminated: u64,
     pub ok_200_other: u64,
+    pub uac_invite_2xx_response: u64,
+    pub uac_invite_2xx_ack_attempt: u64,
+    pub uac_invite_2xx_ack_success: u64,
+    pub uac_invite_2xx_ack_failure: u64,
+    pub uac_invite_2xx_call_answered_emit: u64,
+    pub hub_response_invite_2xx: u64,
+    pub hub_response_invite_2xx_session_found: u64,
+    pub hub_response_invite_2xx_session_missing: u64,
+    pub hub_call_answered: u64,
+    pub hub_call_answered_session_found: u64,
+    pub hub_call_answered_session_missing: u64,
+    pub hub_ack_sent: u64,
+    pub hub_ack_sent_session_found: u64,
+    pub hub_ack_sent_session_missing: u64,
+    pub call_timing_trace_overflow: u64,
+    pub call_timing_traces: Vec<CallTimingTraceSnapshot>,
     pub dialog_route_request: u64,
     pub dialog_route_stored: u64,
     pub dialog_route_transaction_key: u64,
@@ -524,6 +587,138 @@ pub struct Snapshot {
     pub global_publish_total: LatencySnapshot,
 }
 
+#[derive(Debug, Clone, Default)]
+struct CallTimingTraceCounts {
+    first_uac_invite_2xx_response_epoch_us: Option<u64>,
+    last_uac_invite_2xx_response_epoch_us: Option<u64>,
+    first_uac_ack_attempt_epoch_us: Option<u64>,
+    last_uac_ack_attempt_epoch_us: Option<u64>,
+    first_uac_ack_success_epoch_us: Option<u64>,
+    last_uac_ack_success_epoch_us: Option<u64>,
+    first_uac_ack_failure_epoch_us: Option<u64>,
+    last_uac_ack_failure_epoch_us: Option<u64>,
+    first_uac_call_answered_emit_epoch_us: Option<u64>,
+    last_uac_call_answered_emit_epoch_us: Option<u64>,
+    first_hub_response_invite_2xx_epoch_us: Option<u64>,
+    last_hub_response_invite_2xx_epoch_us: Option<u64>,
+    first_hub_call_answered_epoch_us: Option<u64>,
+    last_hub_call_answered_epoch_us: Option<u64>,
+    first_hub_ack_sent_epoch_us: Option<u64>,
+    last_hub_ack_sent_epoch_us: Option<u64>,
+    first_uas_ack_received_epoch_us: Option<u64>,
+    last_uas_ack_received_epoch_us: Option<u64>,
+    first_lifecycle_call_answered_epoch_us: Option<u64>,
+    last_lifecycle_call_answered_epoch_us: Option<u64>,
+}
+
+impl CallTimingTraceCounts {
+    fn record_uac_invite_2xx_response(&mut self, now_us: u64) {
+        set_first_last_u64(
+            &mut self.first_uac_invite_2xx_response_epoch_us,
+            &mut self.last_uac_invite_2xx_response_epoch_us,
+            now_us,
+        );
+    }
+
+    fn record_uac_ack_attempt(&mut self, now_us: u64) {
+        set_first_last_u64(
+            &mut self.first_uac_ack_attempt_epoch_us,
+            &mut self.last_uac_ack_attempt_epoch_us,
+            now_us,
+        );
+    }
+
+    fn record_uac_ack_success(&mut self, now_us: u64) {
+        set_first_last_u64(
+            &mut self.first_uac_ack_success_epoch_us,
+            &mut self.last_uac_ack_success_epoch_us,
+            now_us,
+        );
+    }
+
+    fn record_uac_ack_failure(&mut self, now_us: u64) {
+        set_first_last_u64(
+            &mut self.first_uac_ack_failure_epoch_us,
+            &mut self.last_uac_ack_failure_epoch_us,
+            now_us,
+        );
+    }
+
+    fn record_uac_call_answered_emit(&mut self, now_us: u64) {
+        set_first_last_u64(
+            &mut self.first_uac_call_answered_emit_epoch_us,
+            &mut self.last_uac_call_answered_emit_epoch_us,
+            now_us,
+        );
+    }
+
+    fn record_hub_response_invite_2xx(&mut self, now_us: u64) {
+        set_first_last_u64(
+            &mut self.first_hub_response_invite_2xx_epoch_us,
+            &mut self.last_hub_response_invite_2xx_epoch_us,
+            now_us,
+        );
+    }
+
+    fn record_hub_call_answered(&mut self, now_us: u64) {
+        set_first_last_u64(
+            &mut self.first_hub_call_answered_epoch_us,
+            &mut self.last_hub_call_answered_epoch_us,
+            now_us,
+        );
+    }
+
+    fn record_hub_ack_sent(&mut self, now_us: u64) {
+        set_first_last_u64(
+            &mut self.first_hub_ack_sent_epoch_us,
+            &mut self.last_hub_ack_sent_epoch_us,
+            now_us,
+        );
+    }
+
+    fn record_uas_ack_received(&mut self, now_us: u64) {
+        set_first_last_u64(
+            &mut self.first_uas_ack_received_epoch_us,
+            &mut self.last_uas_ack_received_epoch_us,
+            now_us,
+        );
+    }
+
+    fn record_lifecycle_call_answered(&mut self, now_us: u64) {
+        set_first_last_u64(
+            &mut self.first_lifecycle_call_answered_epoch_us,
+            &mut self.last_lifecycle_call_answered_epoch_us,
+            now_us,
+        );
+    }
+
+    fn snapshot(&self, call_id: String) -> CallTimingTraceSnapshot {
+        CallTimingTraceSnapshot {
+            call_id,
+            first_uac_invite_2xx_response_epoch_us: self.first_uac_invite_2xx_response_epoch_us,
+            last_uac_invite_2xx_response_epoch_us: self.last_uac_invite_2xx_response_epoch_us,
+            first_uac_ack_attempt_epoch_us: self.first_uac_ack_attempt_epoch_us,
+            last_uac_ack_attempt_epoch_us: self.last_uac_ack_attempt_epoch_us,
+            first_uac_ack_success_epoch_us: self.first_uac_ack_success_epoch_us,
+            last_uac_ack_success_epoch_us: self.last_uac_ack_success_epoch_us,
+            first_uac_ack_failure_epoch_us: self.first_uac_ack_failure_epoch_us,
+            last_uac_ack_failure_epoch_us: self.last_uac_ack_failure_epoch_us,
+            first_uac_call_answered_emit_epoch_us: self.first_uac_call_answered_emit_epoch_us,
+            last_uac_call_answered_emit_epoch_us: self.last_uac_call_answered_emit_epoch_us,
+            first_hub_response_invite_2xx_epoch_us: self.first_hub_response_invite_2xx_epoch_us,
+            last_hub_response_invite_2xx_epoch_us: self.last_hub_response_invite_2xx_epoch_us,
+            first_hub_call_answered_epoch_us: self.first_hub_call_answered_epoch_us,
+            last_hub_call_answered_epoch_us: self.last_hub_call_answered_epoch_us,
+            first_hub_ack_sent_epoch_us: self.first_hub_ack_sent_epoch_us,
+            last_hub_ack_sent_epoch_us: self.last_hub_ack_sent_epoch_us,
+            first_uas_ack_received_epoch_us: self.first_uas_ack_received_epoch_us,
+            last_uas_ack_received_epoch_us: self.last_uas_ack_received_epoch_us,
+            first_lifecycle_call_answered_epoch_us: self.first_lifecycle_call_answered_epoch_us,
+            last_lifecycle_call_answered_epoch_us: self.last_lifecycle_call_answered_epoch_us,
+        }
+    }
+}
+
 pub fn enabled() -> bool {
     match ENABLED_OVERRIDE.load(Ordering::Relaxed) {
         2 => true,
@@ -599,6 +794,9 @@ pub fn reset() {
     for metric in dialog_latency_metrics() {
         metric.reset();
     }
+    if let Ok(mut traces) = CALL_TIMING_TRACES.lock() {
+        traces.clear();
+    }
 }
 
 pub fn snapshot() -> Snapshot {
@@ -634,6 +832,26 @@ pub fn snapshot() -> Snapshot {
         ok_200_bye_tombstone: OK_200_BYE_TOMBSTONE.load(Ordering::Relaxed),
         ok_200_bye_duplicate_terminated: OK_200_BYE_DUPLICATE_TERMINATED.load(Ordering::Relaxed),
         ok_200_other: OK_200_OTHER.load(Ordering::Relaxed),
+        uac_invite_2xx_response: UAC_INVITE_2XX_RESPONSE.load(Ordering::Relaxed),
+        uac_invite_2xx_ack_attempt: UAC_INVITE_2XX_ACK_ATTEMPT.load(Ordering::Relaxed),
+        uac_invite_2xx_ack_success: UAC_INVITE_2XX_ACK_SUCCESS.load(Ordering::Relaxed),
+        uac_invite_2xx_ack_failure: UAC_INVITE_2XX_ACK_FAILURE.load(Ordering::Relaxed),
+        uac_invite_2xx_call_answered_emit: UAC_INVITE_2XX_CALL_ANSWERED_EMIT
+            .load(Ordering::Relaxed),
+        hub_response_invite_2xx: HUB_RESPONSE_INVITE_2XX.load(Ordering::Relaxed),
+        hub_response_invite_2xx_session_found: HUB_RESPONSE_INVITE_2XX_SESSION_FOUND
+            .load(Ordering::Relaxed),
+        hub_response_invite_2xx_session_missing: HUB_RESPONSE_INVITE_2XX_SESSION_MISSING
+            .load(Ordering::Relaxed),
+        hub_call_answered: HUB_CALL_ANSWERED.load(Ordering::Relaxed),
+        hub_call_answered_session_found: HUB_CALL_ANSWERED_SESSION_FOUND.load(Ordering::Relaxed),
+        hub_call_answered_session_missing: HUB_CALL_ANSWERED_SESSION_MISSING
+            .load(Ordering::Relaxed),
+        hub_ack_sent: HUB_ACK_SENT.load(Ordering::Relaxed),
+        hub_ack_sent_session_found: HUB_ACK_SENT_SESSION_FOUND.load(Ordering::Relaxed),
+        hub_ack_sent_session_missing: HUB_ACK_SENT_SESSION_MISSING.load(Ordering::Relaxed),
+        call_timing_trace_overflow: CALL_TIMING_TRACE_OVERFLOW.load(Ordering::Relaxed),
+        call_timing_traces: call_timing_trace_snapshots(),
         dialog_route_request: DIALOG_ROUTE_REQUEST.load(Ordering::Relaxed),
         dialog_route_stored: DIALOG_ROUTE_STORED.load(Ordering::Relaxed),
         dialog_route_transaction_key: DIALOG_ROUTE_TRANSACTION_KEY.load(Ordering::Relaxed),
@@ -1110,6 +1328,113 @@ pub(crate) fn record_200_ok_other() {
     increment(&OK_200_OTHER);
 }
 
+pub(crate) fn record_uac_invite_2xx_response() {
+    increment(&UAC_INVITE_2XX_RESPONSE);
+}
+
+pub(crate) fn record_uac_invite_2xx_ack_attempt() {
+    increment(&UAC_INVITE_2XX_ACK_ATTEMPT);
+}
+
+pub(crate) fn record_uac_invite_2xx_ack_success() {
+    increment(&UAC_INVITE_2XX_ACK_SUCCESS);
+}
+
+pub(crate) fn record_uac_invite_2xx_ack_failure() {
+    increment(&UAC_INVITE_2XX_ACK_FAILURE);
+}
+
+pub(crate) fn record_uac_invite_2xx_call_answered_emit() {
+    increment(&UAC_INVITE_2XX_CALL_ANSWERED_EMIT);
+}
+
+pub(crate) fn record_hub_response_invite_2xx_session(found: bool) {
+    increment(&HUB_RESPONSE_INVITE_2XX);
+    if found {
+        increment(&HUB_RESPONSE_INVITE_2XX_SESSION_FOUND);
+    } else {
+        increment(&HUB_RESPONSE_INVITE_2XX_SESSION_MISSING);
+    }
+}
+
+pub(crate) fn record_hub_call_answered_session(found: bool) {
+    increment(&HUB_CALL_ANSWERED);
+    if found {
+        increment(&HUB_CALL_ANSWERED_SESSION_FOUND);
+    } else {
+        increment(&HUB_CALL_ANSWERED_SESSION_MISSING);
+    }
+}
+
+pub(crate) fn record_hub_ack_sent_session(found: bool) {
+    increment(&HUB_ACK_SENT);
+    if found {
+        increment(&HUB_ACK_SENT_SESSION_FOUND);
+    } else {
+        increment(&HUB_ACK_SENT_SESSION_MISSING);
+    }
+}
+
+pub fn record_call_timing_uac_invite_2xx_response(call_id: &str) {
+    record_call_timing_trace(call_id, |trace, now_us| {
+        trace.record_uac_invite_2xx_response(now_us);
+    });
+}
+
+pub fn record_call_timing_uac_ack_attempt(call_id: &str) {
+    record_call_timing_trace(call_id, |trace, now_us| {
+        trace.record_uac_ack_attempt(now_us);
+    });
+}
+
+pub fn record_call_timing_uac_ack_success(call_id: &str) {
+    record_call_timing_trace(call_id, |trace, now_us| {
+        trace.record_uac_ack_success(now_us);
+    });
+}
+
+pub fn record_call_timing_uac_ack_failure(call_id: &str) {
+    record_call_timing_trace(call_id, |trace, now_us| {
+        trace.record_uac_ack_failure(now_us);
+    });
+}
+
+pub fn record_call_timing_uac_call_answered_emit(call_id: &str) {
+    record_call_timing_trace(call_id, |trace, now_us| {
+        trace.record_uac_call_answered_emit(now_us);
+    });
+}
+
+pub fn record_call_timing_hub_response_invite_2xx(call_id: &str) {
+    record_call_timing_trace(call_id, |trace, now_us| {
+        trace.record_hub_response_invite_2xx(now_us);
+    });
+}
+
+pub fn record_call_timing_hub_call_answered(call_id: &str) {
+    record_call_timing_trace(call_id, |trace, now_us| {
+        trace.record_hub_call_answered(now_us);
+    });
+}
+
+pub fn record_call_timing_hub_ack_sent(call_id: &str) {
+    record_call_timing_trace(call_id, |trace, now_us| {
+        trace.record_hub_ack_sent(now_us);
+    });
+}
+
+pub fn record_call_timing_uas_ack_received(call_id: &str) {
+    record_call_timing_trace(call_id, |trace, now_us| {
+        trace.record_uas_ack_received(now_us);
+    });
+}
+
+pub fn record_call_timing_lifecycle_call_answered(call_id: &str) {
+    record_call_timing_trace(call_id, |trace, now_us| {
+        trace.record_lifecycle_call_answered(now_us);
+    });
+}
+
 pub(crate) fn record_bye_cleanup_event_emitted() {
     increment(&BYE_CLEANUP_EVENT_EMITTED);
 }
@@ -1567,6 +1892,44 @@ pub(crate) fn record_dialog_initial_invite_setup(elapsed: Duration) {
     }
 }
 
+fn record_call_timing_trace(call_id: &str, update: impl FnOnce(&mut CallTimingTraceCounts, u64)) {
+    if !enabled() || call_id.is_empty() {
+        return;
+    }
+
+    let Ok(mut traces) = CALL_TIMING_TRACES.lock() else {
+        return;
+    };
+    if !traces.contains_key(call_id) && traces.len() >= MAX_CALL_TIMING_TRACE_ENTRIES {
+        CALL_TIMING_TRACE_OVERFLOW.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    let now_us = epoch_us();
+    let trace = traces.entry(call_id.to_string()).or_default();
+    update(trace, now_us);
+}
+
+fn call_timing_trace_snapshots() -> Vec<CallTimingTraceSnapshot> {
+    let Ok(traces) = CALL_TIMING_TRACES.lock() else {
+        return Vec::new();
+    };
+
+    let mut rows = traces
+        .iter()
+        .map(|(call_id, trace)| trace.snapshot(call_id.clone()))
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.call_id.cmp(&right.call_id));
+    rows
+}
+
+fn set_first_last_u64(first: &mut Option<u64>, last: &mut Option<u64>, value: u64) {
+    if first.is_none() {
+        *first = Some(value);
+    }
+    *last = Some(value);
+}
+
 fn increment(counter: &AtomicU64) {
     if enabled() {
         counter.fetch_add(1, Ordering::Relaxed);
@@ -1706,6 +2069,14 @@ fn ns(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
+fn epoch_us() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros()
+        .min(u128::from(u64::MAX)) as u64
+}
+
 fn percentile_us(buckets: &[AtomicU64], observed: u64, percentile: u64) -> u64 {
     percentile_per_mille_us(buckets, observed, percentile * 10)
 }
@@ -1753,6 +2124,21 @@ fn all_counters() -> Vec<&'static AtomicU64> {
         &OK_200_BYE_TOMBSTONE,
         &OK_200_BYE_DUPLICATE_TERMINATED,
         &OK_200_OTHER,
+        &UAC_INVITE_2XX_RESPONSE,
+        &UAC_INVITE_2XX_ACK_ATTEMPT,
+        &UAC_INVITE_2XX_ACK_SUCCESS,
+        &UAC_INVITE_2XX_ACK_FAILURE,
+        &UAC_INVITE_2XX_CALL_ANSWERED_EMIT,
+        &HUB_RESPONSE_INVITE_2XX,
+        &HUB_RESPONSE_INVITE_2XX_SESSION_FOUND,
+        &HUB_RESPONSE_INVITE_2XX_SESSION_MISSING,
+        &HUB_CALL_ANSWERED,
+        &HUB_CALL_ANSWERED_SESSION_FOUND,
+        &HUB_CALL_ANSWERED_SESSION_MISSING,
+        &HUB_ACK_SENT,
+        &HUB_ACK_SENT_SESSION_FOUND,
+        &HUB_ACK_SENT_SESSION_MISSING,
+        &CALL_TIMING_TRACE_OVERFLOW,
         &FIRST_INVITE_TO_200_COUNT,
         &FIRST_INVITE_TO_200_SUM_US,
         &FIRST_INVITE_TO_200_MAX_US,
@@ -1896,6 +2282,44 @@ mod tests {
 
         assert_eq!(p999, 5_000_000);
         assert_ne!(p999, u64::MAX);
+    }
+
+    #[test]
+    fn call_timing_traces_record_and_reset() {
+        set_enabled_for_tests(true);
+        reset();
+
+        record_call_timing_uac_invite_2xx_response("call-a");
+        record_call_timing_uac_ack_attempt("call-a");
+        record_call_timing_uac_ack_success("call-a");
+        record_call_timing_uac_call_answered_emit("call-a");
+        record_call_timing_hub_response_invite_2xx("call-a");
+        record_call_timing_hub_call_answered("call-a");
+        record_call_timing_hub_ack_sent("call-a");
+        record_call_timing_uas_ack_received("call-a");
+        record_call_timing_lifecycle_call_answered("call-a");
+
+        let first_snapshot = snapshot();
+        assert_eq!(first_snapshot.call_timing_trace_overflow, 0);
+        assert_eq!(first_snapshot.call_timing_traces.len(), 1);
+        let trace = &first_snapshot.call_timing_traces[0];
+        assert_eq!(trace.call_id, "call-a");
+        assert!(trace.first_uac_invite_2xx_response_epoch_us.is_some());
+        assert!(
+            trace.last_uac_invite_2xx_response_epoch_us
+                >= trace.first_uac_invite_2xx_response_epoch_us
+        );
+        assert!(trace.first_uac_ack_attempt_epoch_us.is_some());
+        assert!(trace.first_uac_ack_success_epoch_us.is_some());
+        assert!(trace.first_uac_call_answered_emit_epoch_us.is_some());
+        assert!(trace.first_hub_response_invite_2xx_epoch_us.is_some());
+        assert!(trace.first_hub_call_answered_epoch_us.is_some());
+        assert!(trace.first_hub_ack_sent_epoch_us.is_some());
+        assert!(trace.first_uas_ack_received_epoch_us.is_some());
+        assert!(trace.first_lifecycle_call_answered_epoch_us.is_some());
+
+        reset();
+        assert!(snapshot().call_timing_traces.is_empty());
     }
 
     #[test]

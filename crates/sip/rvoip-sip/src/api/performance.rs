@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::api::unified::{Config, MediaMode};
+use crate::api::unified::{
+    Config, MediaMode, MediaSessionControllerConfig, RtpSessionBufferConfig,
+    RtpTransportBufferConfig,
+};
 use crate::errors::{Result, SessionError};
 
 const DEFAULT_RECIPE_BOOK: &str = include_str!("../../config/performance-recipes.yaml");
@@ -196,6 +199,22 @@ pub struct PerformanceRecipeConfig {
     pub auto_100_trying: Option<bool>,
     /// Whether inbound INVITEs are accepted before app callbacks.
     pub fast_auto_accept_incoming_calls: Option<bool>,
+    /// Enable SIP UDP transport and duplicate-recovery diagnostics.
+    pub sip_udp_diagnostics: Option<bool>,
+    /// Enable high-cardinality transaction timing diagnostics.
+    pub sip_transaction_timing_diagnostics: Option<bool>,
+    /// Enable high-cardinality dialog timing diagnostics.
+    pub sip_dialog_timing_diagnostics: Option<bool>,
+    /// Enable media setup/teardown timing diagnostics.
+    pub media_setup_diagnostics: Option<bool>,
+    /// Enable cleanup-stage timing diagnostics.
+    pub cleanup_diagnostics: Option<bool>,
+    /// Enable per-operation cleanup diagnostic log lines.
+    pub cleanup_diagnostic_events: Option<bool>,
+    /// Active inbound no-RTP watchdog timeout in seconds.
+    pub active_call_no_media_timeout_secs: Option<u64>,
+    /// Active inbound RTP idle watchdog timeout in seconds.
+    pub active_call_media_idle_timeout_secs: Option<u64>,
     /// SIP UDP receive socket buffer size in bytes.
     pub sip_udp_recv_buffer_size: Option<usize>,
     /// SIP UDP send socket buffer size in bytes.
@@ -206,10 +225,18 @@ pub struct PerformanceRecipeConfig {
     pub sip_udp_parse_queue_capacity: Option<RecipeUsize>,
     /// UDP parse dispatch strategy.
     pub sip_udp_parse_dispatch: Option<RecipeUdpParseDispatch>,
+    /// Transport-manager event dispatch worker count.
+    pub sip_transport_dispatch_workers: Option<usize>,
+    /// Transport-manager event dispatch queue capacity.
+    pub sip_transport_dispatch_queue_capacity: Option<RecipeUsize>,
     /// Transaction-manager ingress dispatch worker count.
     pub sip_transaction_dispatch_workers: Option<usize>,
     /// Transaction-manager ingress dispatch queue capacity.
     pub sip_transaction_dispatch_queue_capacity: Option<RecipeUsize>,
+    /// Transaction-manager ACK/BYE priority burst limit.
+    pub sip_transaction_dispatch_priority_burst_max: Option<usize>,
+    /// INVITE 2xx retransmit due-item budget per maintenance tick.
+    pub sip_invite_2xx_retransmit_max_due_per_tick: Option<usize>,
     /// Per-transaction command channel capacity.
     pub sip_transaction_command_channel_capacity: Option<usize>,
     /// Dialog-core transaction-event dispatch worker count.
@@ -228,6 +255,12 @@ pub struct PerformanceRecipeConfig {
     pub media_port_capacity: Option<RecipeMediaPortCapacity>,
     /// Media-core session and RTP allocator capacity hint.
     pub media_session_capacity: Option<RecipeUsize>,
+    /// RTP session queue sizing.
+    pub rtp_session_buffer_config: Option<RecipeRtpSessionBufferConfig>,
+    /// RTP transport event and receive buffer sizing.
+    pub rtp_transport_buffer_config: Option<RecipeRtpTransportBufferConfig>,
+    /// Media-core controller pool and capacity tuning.
+    pub media_session_controller_config: Option<RecipeMediaSessionControllerConfig>,
     /// Server-side active call capacity hint.
     pub server_call_capacity: Option<RecipeUsize>,
     /// Server-side inbound call admission limit.
@@ -256,6 +289,30 @@ impl PerformanceRecipeConfig {
         if let Some(enabled) = self.fast_auto_accept_incoming_calls {
             config.fast_auto_accept_incoming_calls = enabled;
         }
+        if let Some(enabled) = self.sip_udp_diagnostics {
+            config.sip_udp_diagnostics = enabled;
+        }
+        if let Some(enabled) = self.sip_transaction_timing_diagnostics {
+            config.sip_transaction_timing_diagnostics = enabled;
+        }
+        if let Some(enabled) = self.sip_dialog_timing_diagnostics {
+            config.sip_dialog_timing_diagnostics = enabled;
+        }
+        if let Some(enabled) = self.media_setup_diagnostics {
+            config.media_setup_diagnostics = enabled;
+        }
+        if let Some(enabled) = self.cleanup_diagnostics {
+            config.cleanup_diagnostics = enabled;
+        }
+        if let Some(enabled) = self.cleanup_diagnostic_events {
+            config.cleanup_diagnostic_events = enabled;
+        }
+        if let Some(seconds) = self.active_call_no_media_timeout_secs {
+            config.active_call_no_media_timeout_secs = seconds;
+        }
+        if let Some(seconds) = self.active_call_media_idle_timeout_secs {
+            config.active_call_media_idle_timeout_secs = seconds;
+        }
         if let Some(size) = self.sip_udp_recv_buffer_size {
             config.sip_udp_recv_buffer_size = Some(size);
         }
@@ -272,12 +329,25 @@ impl PerformanceRecipeConfig {
         if let Some(dispatch) = self.sip_udp_parse_dispatch {
             config.sip_udp_parse_dispatch = Some(dispatch.into());
         }
+        if let Some(workers) = self.sip_transport_dispatch_workers {
+            config.sip_transport_dispatch_workers = Some(workers);
+        }
+        if let Some(capacity) = &self.sip_transport_dispatch_queue_capacity {
+            config.sip_transport_dispatch_queue_capacity =
+                Some(capacity.resolve(params, "sipTransportDispatchQueueCapacity")?);
+        }
         if let Some(workers) = self.sip_transaction_dispatch_workers {
             config.sip_transaction_dispatch_workers = Some(workers);
         }
         if let Some(capacity) = &self.sip_transaction_dispatch_queue_capacity {
             config.sip_transaction_dispatch_queue_capacity =
                 Some(capacity.resolve(params, "sipTransactionDispatchQueueCapacity")?);
+        }
+        if let Some(max_burst) = self.sip_transaction_dispatch_priority_burst_max {
+            config.sip_transaction_dispatch_priority_burst_max = Some(max_burst);
+        }
+        if let Some(max_due_per_tick) = self.sip_invite_2xx_retransmit_max_due_per_tick {
+            config.sip_invite_2xx_retransmit_max_due_per_tick = Some(max_due_per_tick);
         }
         if let Some(capacity) = self.sip_transaction_command_channel_capacity {
             config.sip_transaction_command_channel_capacity = Some(capacity);
@@ -323,6 +393,33 @@ impl PerformanceRecipeConfig {
         }
         if let Some(capacity) = &self.media_session_capacity {
             config.media_session_capacity = Some(capacity.resolve(params, "mediaSessionCapacity")?);
+        }
+        if let Some(recipe_config) = &self.media_session_controller_config {
+            let mut controller_config = config.media_session_controller_config.clone();
+            recipe_config.apply(&mut controller_config, params)?;
+            config.media_session_controller_config = controller_config;
+            config.rtp_session_buffer_config = config
+                .media_session_controller_config
+                .rtp_session_buffer_config;
+            config.rtp_transport_buffer_config = config
+                .media_session_controller_config
+                .rtp_transport_buffer_config;
+        }
+        if let Some(recipe_config) = &self.rtp_session_buffer_config {
+            let mut rtp_config = config.rtp_session_buffer_config;
+            recipe_config.apply(&mut rtp_config, params)?;
+            config.rtp_session_buffer_config = rtp_config;
+            config
+                .media_session_controller_config
+                .rtp_session_buffer_config = rtp_config;
+        }
+        if let Some(recipe_config) = &self.rtp_transport_buffer_config {
+            let mut rtp_config = config.rtp_transport_buffer_config;
+            recipe_config.apply(&mut rtp_config, params)?;
+            config.rtp_transport_buffer_config = rtp_config;
+            config
+                .media_session_controller_config
+                .rtp_transport_buffer_config = rtp_config;
         }
         if let Some(mode) = self.media_mode {
             config.media_mode = match mode {
@@ -444,4 +541,169 @@ pub struct RecipeMediaPortCapacity {
     pub start: u16,
     /// Requested number of ports.
     pub capacity: RecipeUsize,
+}
+
+/// RTP session buffer config recipe values.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipeRtpSessionBufferConfig {
+    /// Bounded sender queue capacity in RTP packets.
+    pub sender_channel_capacity: Option<RecipeUsize>,
+    /// Bounded legacy polling receive queue capacity in RTP packets.
+    pub receiver_channel_capacity: Option<RecipeUsize>,
+    /// Broadcast ring capacity for RTP session events.
+    pub event_channel_capacity: Option<RecipeUsize>,
+}
+
+impl RecipeRtpSessionBufferConfig {
+    fn apply(&self, config: &mut RtpSessionBufferConfig, params: &RecipeParams) -> Result<()> {
+        if let Some(value) = &self.sender_channel_capacity {
+            config.sender_channel_capacity =
+                value.resolve(params, "rtpSessionBufferConfig.senderChannelCapacity")?;
+        }
+        if let Some(value) = &self.receiver_channel_capacity {
+            config.receiver_channel_capacity =
+                value.resolve(params, "rtpSessionBufferConfig.receiverChannelCapacity")?;
+        }
+        if let Some(value) = &self.event_channel_capacity {
+            config.event_channel_capacity =
+                value.resolve(params, "rtpSessionBufferConfig.eventChannelCapacity")?;
+        }
+        Ok(())
+    }
+}
+
+/// RTP transport buffer config recipe values.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipeRtpTransportBufferConfig {
+    /// Broadcast ring capacity for RTP/RTCP transport events.
+    pub event_channel_capacity: Option<RecipeUsize>,
+    /// UDP RTP receive buffer size in bytes.
+    pub recv_buffer_size: Option<RecipeUsize>,
+    /// UDP RTCP receive buffer size in bytes for separate RTCP sockets.
+    pub rtcp_recv_buffer_size: Option<RecipeUsize>,
+}
+
+impl RecipeRtpTransportBufferConfig {
+    fn apply(&self, config: &mut RtpTransportBufferConfig, params: &RecipeParams) -> Result<()> {
+        if let Some(value) = &self.event_channel_capacity {
+            config.event_channel_capacity =
+                value.resolve(params, "rtpTransportBufferConfig.eventChannelCapacity")?;
+        }
+        if let Some(value) = &self.recv_buffer_size {
+            config.recv_buffer_size =
+                value.resolve(params, "rtpTransportBufferConfig.recvBufferSize")?;
+        }
+        if let Some(value) = &self.rtcp_recv_buffer_size {
+            config.rtcp_recv_buffer_size =
+                value.resolve(params, "rtpTransportBufferConfig.rtcpRecvBufferSize")?;
+        }
+        Ok(())
+    }
+}
+
+/// Media controller buffer and pool config recipe values.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipeMediaSessionControllerConfig {
+    /// Initial capacity for hot session indexes.
+    pub capacity_hint: Option<RecipeUsize>,
+    /// Shared audio frame pool configuration.
+    pub audio_frame_pool: Option<RecipeAudioFramePoolConfig>,
+    /// RTP output buffer size in bytes.
+    pub rtp_buffer_size: Option<RecipeUsize>,
+    /// Initial RTP output buffer count.
+    pub rtp_buffer_initial_count: Option<RecipeUsize>,
+    /// Maximum RTP output buffer count.
+    pub rtp_buffer_max_count: Option<RecipeUsize>,
+    /// RTP session queue and reusable send-buffer sizing.
+    pub rtp_session_buffer_config: Option<RecipeRtpSessionBufferConfig>,
+    /// RTP transport event and receive buffer sizing.
+    pub rtp_transport_buffer_config: Option<RecipeRtpTransportBufferConfig>,
+}
+
+impl RecipeMediaSessionControllerConfig {
+    fn apply(
+        &self,
+        config: &mut MediaSessionControllerConfig,
+        params: &RecipeParams,
+    ) -> Result<()> {
+        if let Some(value) = &self.capacity_hint {
+            config.capacity_hint =
+                value.resolve(params, "mediaSessionControllerConfig.capacityHint")?;
+        }
+        if let Some(pool) = &self.audio_frame_pool {
+            pool.apply(config, params)?;
+        }
+        if let Some(value) = &self.rtp_buffer_size {
+            config.rtp_buffer_size =
+                value.resolve(params, "mediaSessionControllerConfig.rtpBufferSize")?;
+        }
+        if let Some(value) = &self.rtp_buffer_initial_count {
+            config.rtp_buffer_initial_count =
+                value.resolve(params, "mediaSessionControllerConfig.rtpBufferInitialCount")?;
+        }
+        if let Some(value) = &self.rtp_buffer_max_count {
+            config.rtp_buffer_max_count =
+                value.resolve(params, "mediaSessionControllerConfig.rtpBufferMaxCount")?;
+        }
+        if let Some(rtp_config) = &self.rtp_session_buffer_config {
+            rtp_config.apply(&mut config.rtp_session_buffer_config, params)?;
+        }
+        if let Some(rtp_config) = &self.rtp_transport_buffer_config {
+            rtp_config.apply(&mut config.rtp_transport_buffer_config, params)?;
+        }
+        Ok(())
+    }
+}
+
+/// Audio frame pool config recipe values.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipeAudioFramePoolConfig {
+    /// Initial pool size.
+    pub initial_size: Option<RecipeUsize>,
+    /// Maximum pool size.
+    pub max_size: Option<RecipeUsize>,
+    /// Sample rate for pooled frames.
+    pub sample_rate: Option<u32>,
+    /// Number of channels for pooled frames.
+    pub channels: Option<u8>,
+    /// Samples per frame.
+    pub samples_per_frame: Option<RecipeUsize>,
+}
+
+impl RecipeAudioFramePoolConfig {
+    fn apply(
+        &self,
+        config: &mut MediaSessionControllerConfig,
+        params: &RecipeParams,
+    ) -> Result<()> {
+        if let Some(value) = &self.initial_size {
+            config.audio_frame_pool.initial_size = value.resolve(
+                params,
+                "mediaSessionControllerConfig.audioFramePool.initialSize",
+            )?;
+        }
+        if let Some(value) = &self.max_size {
+            config.audio_frame_pool.max_size = value.resolve(
+                params,
+                "mediaSessionControllerConfig.audioFramePool.maxSize",
+            )?;
+        }
+        if let Some(value) = self.sample_rate {
+            config.audio_frame_pool.sample_rate = value;
+        }
+        if let Some(value) = self.channels {
+            config.audio_frame_pool.channels = value;
+        }
+        if let Some(value) = &self.samples_per_frame {
+            config.audio_frame_pool.samples_per_frame = value.resolve(
+                params,
+                "mediaSessionControllerConfig.audioFramePool.samplesPerFrame",
+            )?;
+        }
+        Ok(())
+    }
 }

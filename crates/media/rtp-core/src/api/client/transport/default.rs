@@ -107,7 +107,7 @@ impl DefaultMediaTransportClient {
     /// Create a new DefaultMediaTransportClient
     pub async fn new(config: ClientConfig) -> Result<Self, MediaTransportError> {
         // Create channel for frames
-        let (frame_sender, frame_receiver) = mpsc::channel(100);
+        let (frame_sender, frame_receiver) = mpsc::channel(config.frame_channel_capacity.max(1));
 
         // Create session config from client config
         let session_config = RtpSessionConfig {
@@ -122,6 +122,8 @@ impl DefaultMediaTransportClient {
             jitter_buffer_size: Some(config.jitter_buffer_size as usize),
             max_packet_age_ms: Some(config.jitter_max_packet_age_ms as u32),
             enable_jitter_buffer: config.enable_jitter_buffer,
+            session_buffer_config: config.rtp_session_buffer_config,
+            transport_buffer_config: config.rtp_transport_buffer_config,
         };
 
         // Create RTP session
@@ -300,6 +302,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
                 MediaTransportError::ConfigError("Remote address not set".to_string())
             })?,
             self.config.rtcp_mux,
+            self.config.rtp_transport_buffer_config,
             &self.security,
             connection::requires_dtls(self.config.security_config.security_mode),
             60, // Default 60 seconds timeout

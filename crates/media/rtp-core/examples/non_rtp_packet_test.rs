@@ -26,6 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rtcp_mux: true,
         session_id: Some("test-transport".to_string()),
         use_port_allocator: false,
+        buffer_config: Default::default(),
     };
 
     println!("Creating UDP transport on {}", server_addr);

@@ -168,7 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Create a frame
         let frame = MediaFrame {
             frame_type: MediaFrameType::Audio,
-            data: format!("Frame {}", i).into_bytes(),
+            data: format!("Frame {}", i).into_bytes().into(),
             timestamp: i as u32 * 160, // 20ms at 8kHz
             sequence: i as u16,
             marker: i == 0,   // Mark the first packet

@@ -11,6 +11,30 @@ use crate::packet::RtpPacket;
 use crate::traits::RtpEvent;
 use crate::Result;
 
+/// Default transport event broadcast capacity.
+pub const RTP_TRANSPORT_EVENT_CHANNEL_CAPACITY: usize = 32;
+
+/// RTP transport buffer and queue sizing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RtpTransportBufferConfig {
+    /// Broadcast ring capacity for RTP/RTCP transport events.
+    pub event_channel_capacity: usize,
+    /// UDP RTP receive buffer size in bytes.
+    pub recv_buffer_size: usize,
+    /// UDP RTCP receive buffer size in bytes when RTCP uses a separate socket.
+    pub rtcp_recv_buffer_size: usize,
+}
+
+impl Default for RtpTransportBufferConfig {
+    fn default() -> Self {
+        Self {
+            event_channel_capacity: RTP_TRANSPORT_EVENT_CHANNEL_CAPACITY,
+            recv_buffer_size: crate::DEFAULT_MAX_PACKET_SIZE,
+            rtcp_recv_buffer_size: crate::DEFAULT_MAX_PACKET_SIZE,
+        }
+    }
+}
+
 /// Trait for RTP transport implementations
 #[async_trait]
 pub trait RtpTransport: Send + Sync {
@@ -72,6 +96,9 @@ pub struct RtpTransportConfig {
 
     /// Use the global port allocator
     pub use_port_allocator: bool,
+
+    /// Transport buffer and event queue sizing.
+    pub buffer_config: RtpTransportBufferConfig,
 }
 
 impl Default for RtpTransportConfig {
@@ -84,6 +111,7 @@ impl Default for RtpTransportConfig {
             session_id: None,
             // Don't use port allocator by default - let the caller decide
             use_port_allocator: false,
+            buffer_config: RtpTransportBufferConfig::default(),
         }
     }
 }
@@ -99,7 +127,6 @@ pub enum PortPairingStrategy {
 
 // Re-export submodules
 mod allocator;
-pub mod recv_pool;
 pub mod security_transport;
 mod tcp;
 mod udp;
@@ -114,3 +141,26 @@ pub use security_transport::SecurityRtpTransport;
 pub use tcp::TcpRtpTransport;
 pub use udp::{set_diagnostics as set_udp_diagnostics, UdpRtpTransport};
 pub use validation::{PlatformSocketStrategy, PlatformType, RtpSocketValidator};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_transport_buffer_config_preserves_buffer_sizes() {
+        let config = RtpTransportConfig::default();
+
+        assert_eq!(
+            config.buffer_config.event_channel_capacity,
+            RTP_TRANSPORT_EVENT_CHANNEL_CAPACITY
+        );
+        assert_eq!(
+            config.buffer_config.recv_buffer_size,
+            crate::DEFAULT_MAX_PACKET_SIZE
+        );
+        assert_eq!(
+            config.buffer_config.rtcp_recv_buffer_size,
+            crate::DEFAULT_MAX_PACKET_SIZE
+        );
+    }
+}

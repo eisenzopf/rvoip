@@ -5,6 +5,8 @@
 use crate::api::client::security::ClientSecurityConfig;
 use crate::api::common::extension::ExtensionFormat;
 use crate::buffer::{BufferLimits, TransmitBufferConfig};
+use crate::session::RtpSessionBufferConfig;
+use crate::transport::RtpTransportBufferConfig;
 use std::net::SocketAddr;
 
 /// Client configuration
@@ -46,6 +48,12 @@ pub struct ClientConfig {
     pub buffer_limits: BufferLimits,
     /// Enable high-performance buffers
     pub high_performance_buffers_enabled: bool,
+    /// RTP session queue sizing.
+    pub rtp_session_buffer_config: RtpSessionBufferConfig,
+    /// RTP transport event and receive buffer sizing.
+    pub rtp_transport_buffer_config: RtpTransportBufferConfig,
+    /// Received frame channel capacity.
+    pub frame_channel_capacity: usize,
 }
 
 /// Builder for ClientConfig
@@ -196,6 +204,24 @@ impl ClientConfigBuilder {
         self
     }
 
+    /// Set RTP session queue sizing.
+    pub fn rtp_session_buffer_config(mut self, config: RtpSessionBufferConfig) -> Self {
+        self.config.rtp_session_buffer_config = config;
+        self
+    }
+
+    /// Set RTP transport event and receive buffer sizing.
+    pub fn rtp_transport_buffer_config(mut self, config: RtpTransportBufferConfig) -> Self {
+        self.config.rtp_transport_buffer_config = config;
+        self
+    }
+
+    /// Set received frame channel capacity.
+    pub fn frame_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config.frame_channel_capacity = capacity;
+        self
+    }
+
     /// Build the client configuration
     pub fn build(self) -> ClientConfig {
         self.config
@@ -227,6 +253,53 @@ impl Default for ClientConfig {
                 max_memory: 10 * 1024 * 1024, // 10 MB default
             },
             high_performance_buffers_enabled: false,
+            rtp_session_buffer_config: RtpSessionBufferConfig::default(),
+            rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
+            frame_channel_capacity: 100,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_buffer_tuning_preserves_existing_client_values() {
+        let config = ClientConfig::default();
+
+        assert_eq!(config.frame_channel_capacity, 100);
+        assert_eq!(
+            config.rtp_session_buffer_config,
+            RtpSessionBufferConfig::default()
+        );
+        assert_eq!(
+            config.rtp_transport_buffer_config,
+            RtpTransportBufferConfig::default()
+        );
+    }
+
+    #[test]
+    fn builder_sets_buffer_tuning() {
+        let session_buffers = RtpSessionBufferConfig {
+            sender_channel_capacity: 8,
+            receiver_channel_capacity: 4,
+            event_channel_capacity: 16,
+        };
+        let transport_buffers = RtpTransportBufferConfig {
+            event_channel_capacity: 12,
+            recv_buffer_size: 2048,
+            rtcp_recv_buffer_size: 1024,
+        };
+
+        let config = ClientConfigBuilder::new()
+            .rtp_session_buffer_config(session_buffers)
+            .rtp_transport_buffer_config(transport_buffers)
+            .frame_channel_capacity(7)
+            .build();
+
+        assert_eq!(config.rtp_session_buffer_config, session_buffers);
+        assert_eq!(config.rtp_transport_buffer_config, transport_buffers);
+        assert_eq!(config.frame_channel_capacity, 7);
     }
 }

@@ -4,7 +4,6 @@ use rvoip_sip_core::builder::SimpleRequestBuilder;
 use rvoip_sip_core::types::headers::HeaderAccess;
 use rvoip_sip_core::types::{
     outbound::{mark_uri_as_outbound, set_outbound_contact_params, OutboundContactParams},
-    route::Route,
     Address, Contact, ContactParamInfo, HeaderName, Method, StatusCode, TypedHeader, Uri,
 };
 use rvoip_sip_core::validation::{validate_generated_request, validate_generated_response};

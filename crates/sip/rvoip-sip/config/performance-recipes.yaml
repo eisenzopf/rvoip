@@ -57,3 +57,150 @@ performanceProfiles:
       serverOverloadRetryAfterSecs: 1
       mediaMode: signaling-only
       signalingOnlyRtpPort: "$signalingOnlyRtpPort"
+
+  # Initial carrier burst tuning profiles. Promote/update these after
+  # three-pass burst-matrix validation with artifact path + git rev recorded in
+  # docs/TUNING.md.
+  carrier-burst-balanced:
+    description: "Carrier burst media profile balancing burst tolerance and memory footprint."
+    requiresCapacity: true
+    config:
+      channelCapacity: "$capacity"
+      auto180Ringing: false
+      auto100Trying: false
+      fastAutoAcceptIncomingCalls: true
+      activeCallNoMediaTimeoutSecs: 60
+      activeCallMediaIdleTimeoutSecs: 60
+      sipUdpRecvBufferSize: 8388608
+      sipUdpSendBufferSize: 8388608
+      sipUdpParseWorkers: 4
+      sipUdpParseQueueCapacity: "$capacity"
+      sipUdpParseDispatch: round-robin
+      sipTransactionDispatchWorkers: 2
+      sipDialogDispatchWorkers: 4
+      sessionEventDispatcherWorkers: 4
+      sipTransactionCommandChannelCapacity: 256
+      serverCallCapacity: "$capacity"
+      serverCallAdmissionLimit: "$capacity"
+      serverCallAdmissionSoftLimit: "$capacity90Percent"
+      serverCallAdmissionPacingDelayMs: 1
+      serverOverloadRetryAfterSecs: 1
+      mediaMode: enabled
+      mediaPortCapacity:
+        start: 16384
+        capacity: 49152
+      mediaSessionCapacity: "$capacity"
+      rtpSessionBufferConfig:
+        senderChannelCapacity: 64
+        receiverChannelCapacity: 32
+        eventChannelCapacity: 64
+      rtpTransportBufferConfig:
+        eventChannelCapacity: 32
+        recvBufferSize: 1500
+        rtcpRecvBufferSize: 1500
+      mediaSessionControllerConfig:
+        audioFramePool:
+          initialSize: 32
+          maxSize: 128
+          sampleRate: 8000
+          channels: 1
+          samplesPerFrame: 160
+        rtpBufferSize: 480
+        rtpBufferInitialCount: 32
+        rtpBufferMaxCount: 128
+
+  carrier-burst-high-density:
+    description: "Carrier burst media profile with larger queues and media pools for dense bursts."
+    requiresCapacity: true
+    config:
+      channelCapacity: "$capacity"
+      auto180Ringing: false
+      auto100Trying: false
+      fastAutoAcceptIncomingCalls: true
+      activeCallNoMediaTimeoutSecs: 60
+      activeCallMediaIdleTimeoutSecs: 60
+      sipUdpRecvBufferSize: 8388608
+      sipUdpSendBufferSize: 8388608
+      sipUdpParseWorkers: 8
+      sipUdpParseQueueCapacity: "$capacity"
+      sipUdpParseDispatch: round-robin
+      sipTransactionDispatchWorkers: 4
+      sipDialogDispatchWorkers: 4
+      sessionEventDispatcherWorkers: 4
+      sipTransactionCommandChannelCapacity: 512
+      serverCallCapacity: "$capacity"
+      serverCallAdmissionLimit: "$capacity"
+      serverCallAdmissionSoftLimit: "$capacity90Percent"
+      serverCallAdmissionPacingDelayMs: 1
+      serverOverloadRetryAfterSecs: 1
+      mediaMode: enabled
+      mediaPortCapacity:
+        start: 16384
+        capacity: 49152
+      mediaSessionCapacity: "$capacity"
+      rtpSessionBufferConfig:
+        senderChannelCapacity: 64
+        receiverChannelCapacity: 32
+        eventChannelCapacity: 64
+      rtpTransportBufferConfig:
+        eventChannelCapacity: 32
+        recvBufferSize: 1500
+        rtcpRecvBufferSize: 1500
+      mediaSessionControllerConfig:
+        audioFramePool:
+          initialSize: 64
+          maxSize: 256
+          sampleRate: 8000
+          channels: 1
+          samplesPerFrame: 160
+        rtpBufferSize: 480
+        rtpBufferInitialCount: 64
+        rtpBufferMaxCount: 256
+
+  carrier-burst-memory-tight:
+    description: "Carrier burst media profile with smaller RTP/media queues and media pools for memory-sensitive overload tests."
+    requiresCapacity: true
+    config:
+      channelCapacity: "$capacity"
+      auto180Ringing: false
+      auto100Trying: false
+      fastAutoAcceptIncomingCalls: true
+      activeCallNoMediaTimeoutSecs: 60
+      activeCallMediaIdleTimeoutSecs: 60
+      sipUdpRecvBufferSize: 8388608
+      sipUdpSendBufferSize: 8388608
+      sipUdpParseWorkers: 2
+      sipUdpParseQueueCapacity: "$capacity"
+      sipUdpParseDispatch: round-robin
+      sipTransactionDispatchWorkers: 2
+      sipDialogDispatchWorkers: 2
+      sessionEventDispatcherWorkers: 2
+      sipTransactionCommandChannelCapacity: 128
+      serverCallCapacity: "$capacity"
+      serverCallAdmissionLimit: "$capacity"
+      serverCallAdmissionSoftLimit: "$capacity90Percent"
+      serverCallAdmissionPacingDelayMs: 1
+      serverOverloadRetryAfterSecs: 1
+      mediaMode: enabled
+      mediaPortCapacity:
+        start: 16384
+        capacity: 49152
+      mediaSessionCapacity: "$capacity"
+      rtpSessionBufferConfig:
+        senderChannelCapacity: 32
+        receiverChannelCapacity: 16
+        eventChannelCapacity: 32
+      rtpTransportBufferConfig:
+        eventChannelCapacity: 16
+        recvBufferSize: 1500
+        rtcpRecvBufferSize: 1500
+      mediaSessionControllerConfig:
+        audioFramePool:
+          initialSize: 16
+          maxSize: 64
+          sampleRate: 8000
+          channels: 1
+          samplesPerFrame: 160
+        rtpBufferSize: 480
+        rtpBufferInitialCount: 16
+        rtpBufferMaxCount: 64

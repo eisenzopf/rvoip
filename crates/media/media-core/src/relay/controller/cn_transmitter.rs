@@ -111,6 +111,7 @@ mod tests {
             rtcp_mux: false,
             session_id: None,
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
         let receiver_transport = UdpRtpTransport::new(receiver_cfg).await.unwrap();
         let receiver_addr = receiver_transport.local_rtp_addr().unwrap();
@@ -125,6 +126,8 @@ mod tests {
             jitter_buffer_size: None,
             max_packet_age_ms: None,
             enable_jitter_buffer: false,
+            session_buffer_config: Default::default(),
+            transport_buffer_config: Default::default(),
         };
         let sender = RtpSession::new(sender_cfg).await.unwrap();
         (Arc::new(Mutex::new(sender)), receiver_events)

@@ -31,6 +31,9 @@ mod tests {
             media_sync_enabled: Some(false),
             ssrc_demultiplexing_enabled: Some(false),
             transmit_buffer_config: Default::default(),
+            rtp_session_buffer_config: Default::default(),
+            rtp_transport_buffer_config: Default::default(),
+            frame_channel_capacity: 16,
         };
 
         // Create a new server

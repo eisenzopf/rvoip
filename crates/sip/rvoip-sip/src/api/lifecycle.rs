@@ -299,6 +299,9 @@ impl LifecycleIndex {
         }
 
         if let Some(answered) = CallAnsweredInfo::from_event(event) {
+            rvoip_sip_dialog::diagnostics::record_call_timing_lifecycle_call_answered(
+                call_id.as_str(),
+            );
             entry.answered = Some(answered);
         }
 

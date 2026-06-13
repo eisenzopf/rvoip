@@ -253,7 +253,7 @@ async fn main() -> Result<(), ExampleError> {
     info!("Testing connection with a simple frame...");
     let test_frame = MediaFrame {
         frame_type: MediaFrameType::Audio, // Using Audio type since Control is not available
-        data: "PING".as_bytes().to_vec(),
+        data: "PING".as_bytes().to_vec().into(),
         timestamp: 0,
         sequence: 0,
         marker: true,
@@ -298,7 +298,7 @@ async fn main() -> Result<(), ExampleError> {
     for i in 0..5 {
         let frame = MediaFrame {
             frame_type: MediaFrameType::Audio,
-            data: format!("Test frame {}", i).into_bytes(),
+            data: format!("Test frame {}", i).into_bytes().into(),
             timestamp: i * 160, // 20ms at 8kHz
             sequence: i as u16,
             marker: i == 0,

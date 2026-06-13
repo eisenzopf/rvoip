@@ -60,8 +60,6 @@ pub const RTP_SESSION_CHANNEL_CAPACITY: usize = 64;
 /// [`RtpSession::receive_packet`].
 pub const RTP_SESSION_RECEIVE_QUEUE_CAPACITY: usize = 32;
 
-const RTP_SEND_STATS_FLUSH_PACKETS: u64 = 64;
-
 /// RTP session queue sizing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RtpSessionBufferConfig {
@@ -580,34 +578,39 @@ impl RtpSession {
         let send_transport = transport.clone();
         let send_task = spawn_memory_tracked("rtp_core.rtp_session.send_task", async move {
             let mut last_remote_addr = remote_addr;
-            let udp_transport = send_transport.as_any().downcast_ref::<UdpRtpTransport>();
-            let mut last_remote_version = udp_transport
-                .map(|t| t.remote_rtp_addr_version())
-                .unwrap_or_default();
-            let mut pending_packets_sent = 0_u64;
-            let mut pending_bytes_sent = 0_u64;
 
             while let Some(packet) = sender_rx.recv().await {
-                let dest = if let Some(t) = udp_transport {
-                    let remote_version = t.remote_rtp_addr_version();
-                    if last_remote_addr.is_none() || remote_version != last_remote_version {
-                        let (remote_addr, version) = t.remote_rtp_addr_snapshot();
-                        last_remote_addr = remote_addr;
-                        last_remote_version = version;
-                    }
-
-                    if let Some(addr) = last_remote_addr {
-                        addr
+                // Always try to get the current remote address from transport first
+                let dest =
+                    if let Some(t) = send_transport.as_any().downcast_ref::<UdpRtpTransport>() {
+                        // Check transport for current remote address
+                        match t.remote_rtp_addr().await {
+                            Some(addr) => {
+                                // Update our cached value
+                                last_remote_addr = Some(addr);
+                                addr
+                            }
+                            None => {
+                                // Fall back to cached value if transport doesn't have one
+                                if let Some(addr) = last_remote_addr {
+                                    addr
+                                } else {
+                                    // No destination address, can't send
+                                    warn!("No destination address for RTP packet, dropping");
+                                    continue;
+                                }
+                            }
+                        }
                     } else {
-                        warn!("No destination address for RTP packet, dropping");
-                        continue;
-                    }
-                } else if let Some(addr) = last_remote_addr {
-                    addr
-                } else {
-                    warn!("No destination address for RTP packet, dropping");
-                    continue;
-                };
+                        // Not a UDP transport, use cached value
+                        if let Some(addr) = last_remote_addr {
+                            addr
+                        } else {
+                            // No destination address, can't send
+                            warn!("No destination address for RTP packet, dropping");
+                            continue;
+                        }
+                    };
 
                 // Send the packet
                 debug!(
@@ -627,26 +630,12 @@ impl RtpSession {
 
                 debug!("Successfully sent RTP packet to {}", dest);
 
-                pending_packets_sent = pending_packets_sent.saturating_add(1);
-                pending_bytes_sent = pending_bytes_sent.saturating_add(packet.size() as u64);
-
-                if pending_packets_sent >= RTP_SEND_STATS_FLUSH_PACKETS || sender_rx.is_empty() {
+                // Update stats
+                {
                     let mut session_stats = stats_send.lock();
-                    session_stats.packets_sent = session_stats
-                        .packets_sent
-                        .saturating_add(pending_packets_sent);
-                    session_stats.bytes_sent = session_stats.bytes_sent.saturating_add(pending_bytes_sent);
-                    pending_packets_sent = 0;
-                    pending_bytes_sent = 0;
+                    session_stats.packets_sent += 1;
+                    session_stats.bytes_sent += packet.size() as u64;
                 }
-            }
-
-            if pending_packets_sent > 0 {
-                let mut session_stats = stats_send.lock();
-                session_stats.packets_sent = session_stats
-                    .packets_sent
-                    .saturating_add(pending_packets_sent);
-                session_stats.bytes_sent = session_stats.bytes_sent.saturating_add(pending_bytes_sent);
             }
         });
 

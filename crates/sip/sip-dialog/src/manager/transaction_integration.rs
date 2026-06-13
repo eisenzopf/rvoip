@@ -1748,22 +1748,35 @@ impl DialogManager {
         .await;
 
         // Handle specific successful response types
+        let session_id_for_diag = self.get_session_id(dialog_id);
         match response.status_code() {
             200 => {
                 // Check if this is a 200 OK to INVITE - need to send ACK
                 if transaction_id.method() == &rvoip_sip_core::Method::Invite {
+                    crate::diagnostics::record_uac_invite_2xx_response();
+                    if let Some(session_id) = session_id_for_diag.as_deref() {
+                        crate::diagnostics::record_call_timing_uac_invite_2xx_response(session_id);
+                    }
                     info!(
                         "✅ Received 200 OK to INVITE, sending automatic ACK for dialog {}",
                         dialog_id
                     );
 
                     // Send ACK using transaction-core's send_ack_for_2xx method
+                    crate::diagnostics::record_uac_invite_2xx_ack_attempt();
+                    if let Some(session_id) = session_id_for_diag.as_deref() {
+                        crate::diagnostics::record_call_timing_uac_ack_attempt(session_id);
+                    }
                     match self
                         .transaction_manager
                         .send_ack_for_2xx(transaction_id, &response)
                         .await
                     {
                         Ok(_) => {
+                            crate::diagnostics::record_uac_invite_2xx_ack_success();
+                            if let Some(session_id) = session_id_for_diag.as_deref() {
+                                crate::diagnostics::record_call_timing_uac_ack_success(session_id);
+                            }
                             info!("Successfully sent automatic ACK for 200 OK to INVITE");
 
                             // Notify session-core that ACK was sent (for state machine transition)
@@ -1783,6 +1796,10 @@ impl DialogManager {
                             .await;
                         }
                         Err(e) => {
+                            crate::diagnostics::record_uac_invite_2xx_ack_failure();
+                            if let Some(session_id) = session_id_for_diag.as_deref() {
+                                crate::diagnostics::record_call_timing_uac_ack_failure(session_id);
+                            }
                             warn!("Failed to send automatic ACK for 200 OK to INVITE: {}", e);
                         }
                     }
@@ -1807,6 +1824,14 @@ impl DialogManager {
 
                 // Successful completion - could be call answered, request completed, etc.
                 if !response.body().is_empty() {
+                    if transaction_id.method() == &rvoip_sip_core::Method::Invite {
+                        crate::diagnostics::record_uac_invite_2xx_call_answered_emit();
+                        if let Some(session_id) = session_id_for_diag.as_deref() {
+                            crate::diagnostics::record_call_timing_uac_call_answered_emit(
+                                session_id,
+                            );
+                        }
+                    }
                     let sdp = String::from_utf8_lossy(response.body()).to_string();
                     self.emit_session_coordination_event(SessionCoordinationEvent::CallAnswered {
                         dialog_id: dialog_id.clone(),

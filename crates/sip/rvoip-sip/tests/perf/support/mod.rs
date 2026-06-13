@@ -21,6 +21,7 @@
 // happens not to touch. Silence those at the module boundary.
 #![allow(dead_code, unused_imports)]
 
+pub mod burst;
 pub mod env;
 pub mod histogram;
 pub mod load;

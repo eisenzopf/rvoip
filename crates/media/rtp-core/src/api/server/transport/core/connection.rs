@@ -16,7 +16,8 @@ use crate::api::common::frame::MediaFrame;
 use crate::api::server::config::ServerConfig;
 use crate::api::server::security::ClientSecurityContext;
 use crate::api::server::transport::ClientInfo;
-use crate::session::{RtpSession, RtpSessionConfig, RtpSessionEvent};
+use crate::session::{RtpSession, RtpSessionBufferConfig, RtpSessionConfig, RtpSessionEvent};
+use crate::transport::RtpTransportBufferConfig;
 // payload registry moved to media-core
 
 /// Client connection in the server
@@ -47,6 +48,8 @@ pub async fn handle_client_static(
     addr: SocketAddr,
     clients: &Arc<DashMap<String, ClientConnection>>,
     frame_sender: &broadcast::Sender<(String, MediaFrame)>,
+    session_buffer_config: RtpSessionBufferConfig,
+    transport_buffer_config: RtpTransportBufferConfig,
 ) -> Result<String, crate::api::common::error::MediaTransportError> {
     info!("Handling new client from {}", addr);
 
@@ -63,6 +66,8 @@ pub async fn handle_client_static(
         jitter_buffer_size: Some(50 as usize), // Default buffer size
         max_packet_age_ms: Some(200),          // Default max packet age
         enable_jitter_buffer: true,
+        session_buffer_config,
+        transport_buffer_config,
     };
 
     // Create RTP session
@@ -132,7 +137,7 @@ pub async fn handle_client_static(
                     // Convert to MediaFrame
                     let frame = MediaFrame {
                         frame_type,
-                        data: packet.payload.to_vec(),
+                        data: packet.payload,
                         timestamp: packet.header.timestamp,
                         sequence: packet.header.sequence_number,
                         marker: packet.header.marker,

@@ -559,9 +559,13 @@ fn print_point_line(
             .map(|v| format!("{v:.1}"))
             .unwrap_or_else(|| "n/a".to_string()),
         rl = ratio_label.to_ascii_lowercase(),
-        r = ratio.map(|v| format!("{v:.4}")).unwrap_or_else(|| "n/a".to_string()),
+        r = ratio
+            .map(|v| format!("{v:.4}"))
+            .unwrap_or_else(|| "n/a".to_string()),
         p99 = setup_p99.map(fmt_ns).unwrap_or_else(|| "n/a".to_string()),
-        err = errors_total.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
+        err = errors_total
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
     );
 }
 

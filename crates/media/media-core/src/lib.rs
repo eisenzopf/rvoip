@@ -101,7 +101,7 @@ pub use integration::{
 pub use codec::{Codec, CodecRegistry};
 pub use relay::{
     DtmfNotification, G711PcmaCodec, G711PcmuCodec, MediaConfig, MediaSessionController,
-    MediaSessionInfo, MediaSessionStatus,
+    MediaSessionControllerConfig, MediaSessionInfo, MediaSessionStatus,
 };
 
 // NEW: Enhanced configuration re-exports
@@ -225,7 +225,10 @@ pub mod prelude {
     };
 
     // Re-export from RTP core
-    pub use rvoip_rtp_core::{RtpHeader, RtpPacket, RtpSession, RtpSessionConfig};
+    pub use rvoip_rtp_core::{
+        RtpHeader, RtpPacket, RtpSession, RtpSessionBufferConfig, RtpSessionConfig,
+        RtpTransportBufferConfig,
+    };
 
     // Re-export from error module
     pub use crate::error::{Error, Result};

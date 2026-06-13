@@ -132,6 +132,205 @@ If validation shows command-channel pressure at 2,000 CPS, retest with
 `sipTransactionCommandChannelCapacity: 256` in a custom YAML recipe file and
 record the result before changing the bundled recipe default.
 
+### Beta Release SIPp Target
+
+The beta gate's managed SIPp target should use the bundled `pbx-media-server`
+recipe with diagnostics disabled for release latency measurements:
+
+```bash
+BETA_SIPP_PERF_PROFILE=pbx-media-server
+BETA_SIPP_DIAGNOSTICS=0
+```
+
+Leave `BETA_SIPP_DIAGNOSTICS` unset, or set it explicitly to `0`, for
+promotion runs. Enable `BETA_SIPP_DIAGNOSTICS=1` only for focused RCA after a
+clean non-diagnostic control exists. The diagnostic path enables additional
+SIP UDP, media setup, and cleanup counters on the managed `perf_listener`;
+those counters are useful for attribution, but they can perturb tail latency and
+must not be used as the acceptance latency baseline.
+
+The 2026-06-12 SIPp RCA used this rule at 2,000 CPS. A beta-style run with
+`BETA_SIPP_DIAGNOSTICS=0` completed `30,000/30,000` calls with p99 and p99.9
+both under `10 ms`, while diagnostic controls widened the tail into the
+`<50 ms` bucket in repeat runs. Treat that as evidence to keep diagnostics as
+RCA tooling, not a release-performance setting.
+
+## RTP and Media Buffer Tuning
+
+The SIP API exposes the RTP/media memory knobs used by the full-media path.
+Leave these defaults alone for normal deployments; tune them when a soak or
+production profile shows a specific queue, receive buffer, or media-core pool is
+oversized or undersized for the workload.
+
+```rust
+use rvoip_sip::{
+    Config, MediaPoolConfig, MediaSessionControllerConfig,
+    RtpSessionBufferConfig, RtpTransportBufferConfig,
+};
+
+let mut media = MediaSessionControllerConfig::default();
+media.audio_frame_pool = MediaPoolConfig {
+    initial_size: 16,
+    max_size: 64,
+    sample_rate: 8000,
+    channels: 1,
+    samples_per_frame: 160,
+};
+media.rtp_buffer_size = 480;
+media.rtp_buffer_initial_count = 16;
+media.rtp_buffer_max_count = 64;
+
+let config = Config::local("answerer", 5060)
+    .with_media_session_controller_config(media)
+    .with_rtp_session_buffer_config(RtpSessionBufferConfig {
+        sender_channel_capacity: 64,
+        receiver_channel_capacity: 32,
+        event_channel_capacity: 64,
+    })
+    .with_rtp_transport_buffer_config(RtpTransportBufferConfig {
+        event_channel_capacity: 32,
+        recv_buffer_size: 1500,
+        rtcp_recv_buffer_size: 1500,
+    });
+```
+
+Default buffer values:
+
+| Config object | Field | Default | Notes |
+| --- | --- | ---: | --- |
+| `RtpSessionBufferConfig` | `sender_channel_capacity` | `64` | Bounded RTP packet send queue per session. |
+| `RtpSessionBufferConfig` | `receiver_channel_capacity` | `32` | Legacy polling receive queue per session. |
+| `RtpSessionBufferConfig` | `event_channel_capacity` | `64` | RTP session event broadcast ring. |
+| `RtpTransportBufferConfig` | `event_channel_capacity` | `32` | RTP/RTCP transport event broadcast ring. |
+| `RtpTransportBufferConfig` | `recv_buffer_size` | `1500` | UDP RTP receive buffer size. |
+| `RtpTransportBufferConfig` | `rtcp_recv_buffer_size` | `1500` | UDP RTCP receive buffer size for separate RTCP sockets. |
+| `MediaSessionControllerConfig` | `audio_frame_pool.initial_size` | `32` | Shared reusable decoded audio frame pool. |
+| `MediaSessionControllerConfig` | `audio_frame_pool.max_size` | `128` | `0` means unlimited for the media-core pool, but bounded values are recommended. |
+| `MediaSessionControllerConfig` | `audio_frame_pool.sample_rate` | `8000` | Must match the deployed audio profile. |
+| `MediaSessionControllerConfig` | `audio_frame_pool.channels` | `1` | Mono for the current G.711 beta media profile. |
+| `MediaSessionControllerConfig` | `audio_frame_pool.samples_per_frame` | `160` | 20 ms at 8 kHz. |
+| `MediaSessionControllerConfig` | `rtp_buffer_size` | `480` | Reusable encoded RTP payload buffer size. |
+| `MediaSessionControllerConfig` | `rtp_buffer_initial_count` | `32` | Initial reusable RTP payload buffer count. |
+| `MediaSessionControllerConfig` | `rtp_buffer_max_count` | `128` | Maximum reusable RTP payload buffer count. |
+
+Available API surfaces:
+
+| Surface | RTP session method | RTP transport method | Media controller method |
+| --- | --- | --- | --- |
+| `Config` / `UnifiedCoordinator` | `with_rtp_session_buffer_config(...)` | `with_rtp_transport_buffer_config(...)` | `with_media_session_controller_config(...)` |
+| `SessionBuilder` | `with_rtp_session_buffer_config(...)` | `with_rtp_transport_buffer_config(...)` | `with_media_session_controller_config(...)` |
+| `StreamPeerBuilder` | `rtp_session_buffer_config(...)` | `rtp_transport_buffer_config(...)` | `media_session_controller_config(...)` |
+| `CallbackPeerBuilder` | `rtp_session_buffer_config(...)` | `rtp_transport_buffer_config(...)` | `media_session_controller_config(...)` |
+
+`with_media_session_controller_config(...)` copies the controller config's
+nested RTP session/transport settings into the SIP-level RTP config fields.
+Calling `with_rtp_session_buffer_config(...)` or
+`with_rtp_transport_buffer_config(...)` afterwards overrides those copied
+values.
+
+## Recipe: Carrier Media Burst
+
+Carrier burst evidence uses the split-process media burst harness:
+
+```bash
+RVOIP_PERF_BURST_SCENARIOS=carrier-smoke \
+crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh
+```
+
+The bundled scenario book is `config/perf-burst-scenarios.yaml`. It defines a
+short beta-gate smoke plus broader opt-in profiles such as
+`access-edge-microburst`, `contact-center-flash`, `overload-recovery`, and
+`high-density-media-burst`. Each scenario records caller and receiver JSON plus
+a `_burst.md` carrier summary under `target/perf-results/perf_burst_matrix/`.
+The short smoke records RSS slope but only enforces the RSS growth gate when
+the post-drain window reaches the scenario's `minRssGateWindowSecs`; use a
+longer `RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS` for citable RSS-gate evidence.
+
+The bundled burst recipes are starting points:
+
+| Recipe | Intended use |
+| --- | --- |
+| `carrier-burst-balanced` | Default carrier media burst profile. |
+| `carrier-burst-high-density` | Larger SIP/media queues and media pools for dense bursts. |
+| `carrier-burst-memory-tight` | Smaller RTP/media queues and media pools for memory-sensitive overload tests. |
+
+Carrier burst recipes enable `activeCallNoMediaTimeoutSecs: 60` and
+`activeCallMediaIdleTimeoutSecs: 60`. These are auto-answer server resiliency
+guards: after an inbound call reaches `Active`, the server releases it if
+media-core has not observed RTP within the no-media window, or if RTP later
+stops advancing for the media-idle window. Keep them disabled for ordinary
+endpoints or valid silent-call workloads.
+
+Promote a burst recipe only after repeat runs show ASR, setup p99, RSS slope,
+retention, and media receiver cleanup are stable. Record the artifact path and
+git revision next to any promoted operating envelope.
+
+Current `access-edge-microburst` evidence does not justify promoting a carrier
+burst recipe. On 2026-06-09, the best dialog `8/24000` candidate still missed
+ASR with answer timeouts. Receiver media setup and cleanup were clean, SIP UDP
+queues did not report Rust-level backpressure, and changing
+`sipInvite2xxRetransmitMaxDuePerTick` to `512`, increasing `aliceShards` to
+`32`, or applying static admission pacing did not pass. Treat similar failures
+as a transport/protocol investigation before growing more server queues.
+
+The timestamped diagnostic run
+`burst_20260609_090007_78489/ae-dialog-8q24000-client-diagnostics/` added
+epoch-microsecond SIP UDP `call_traces` timestamps and dialog
+`call_timing_traces`. It failed ASR (`0.9836`, `121` answer timeouts), while
+media setup, retained objects, receiver active audio receivers, Rust UDP queue
+full/parse/send errors, and host full-socket-buffer drops all stayed at `0`.
+The failed Call-IDs split into late caller 2xx delivery with no UAC ACK attempt
+(`65`), receiver-missing INVITEs (`20`), caller ACKs not seen by the receiver
+(`20`), and receiver-saw-ACK/post-timeout lifecycle races (`16`). Do not promote
+a Config recipe from this.
+
+Admission pacing follow-up runs then lowered the server soft limit to `4500`.
+With `delay=1 ms`, admission pacing triggered (`729` pacing decisions) and
+improved ASR only modestly to `0.9862` (`102` answer timeouts). With
+`delay=2 ms`, pacing triggered `777` times but regressed to ASR `0.9826`
+(`129` answer timeouts) and failed the caller RSS gate (`17.22 MB/hr`). In both
+runs receiver media setup, cleanup, Rust UDP queue/parse/send counters, and
+host full-socket-buffer drops stayed clean. Do not promote static admission
+pacing from this sweep.
+
+Follow-up library isolation runs narrowed the failure further. Adding bounded
+UDP receive draining improved ASR only from `0.9896` to `0.9916` and left
+caller receive-loop p95 at `1 s`, so receive draining is not the root fix.
+When the same burst shape ran with signaling-only media, caller setup p95 was
+`13.1 ms` and there were no answer timeouts. When full media allocation stayed
+enabled but the perf caller skipped installing the RTP tone source
+(`RVOIP_PERF_BURST_SKIP_AUDIO_SOURCE=1`), caller setup p95 was `13.7 ms`, all
+`7400` INVITEs/2xx/ACKs were observed by the peer, and receiver media sessions
+allocated and drained cleanly. Treat generated RTP traffic, not SIP queue
+sizing or media allocation alone, as the current access-edge bottleneck.
+
+The first RTP library experiment spread generated-audio transmitter start
+phases across the 20 ms packet interval and skipped missed ticks. That helped
+but did not pass: a clean full-RTP run improved to ASR `0.9932` with `50`
+answer timeouts, while caller SIP receive-loop gaps still had p95 `1 s` and
+p99/p999 bucket `5 s`. A follow-up cached-tone/payload-copy experiment was
+rejected after ASR regressed to `0.9886` with `84` answer timeouts. In that
+rejected run, receiver SIP processing stayed fast (INVITE-to-200 p95 `1 ms`),
+receiver media cleanup stayed clean (`0` active audio receivers and `0`
+retained objects after drain), and host full-socket-buffer drops again stayed
+at delta `0`.
+
+Audio TX pacing with target active `3000` is the current leading full-media
+library candidate. Three repeat runs passed the acceptance gates with ASR
+`1.0000`, `7400/7400` calls, `0` answer timeouts, `0` media setup failures,
+`0` teardown failures, `0` caller/receiver retained objects after drain, `0`
+receiver active audio receivers after drain, and RSS gates below `10 MB/hr`.
+The pacing path skipped about `8.3M` generated-audio TX ticks per run and kept
+the caller setup tail much lower than the no-pacing library runs. A lighter
+target active `4000` passed once but had worse setup p95/p99 and more host
+`no socket` drops, so it is only a probe. Keep this as opt-in library evidence
+until it has a production-facing Config/API decision. A follow-up shared
+generated-audio TX scheduler probe did not beat this result: shared scheduling
+without pacing regressed to ASR `0.9866`, and shared scheduling with target
+`3000` pacing passed three guarded runs but added scheduler complexity without
+a clear CPU win and had less stable setup p99 (`7.67 s` on the third guarded
+run). Treat pacing-only target `3000` as the simpler leading candidate.
+
 ## Recipe: Signaling-Only High-Performance Server
 
 Use this profile to isolate SIP signaling throughput from media allocation:
@@ -333,6 +532,8 @@ bus drops messages for receivers that lag past its capacity, so size
 | `Config::with_server_call_admission_soft_limit(N)` | YAML recipe / app Config | YAML recipe / app Config | `None` | Start pacing inbound admission before the hard overload limit. |
 | `Config::with_server_call_admission_pacing_delay_ms(N)` | YAML recipe / app Config | YAML recipe / app Config | `None` | Delay applied to each inbound INVITE while above the soft threshold and below hard overload. |
 | `Config::with_server_overload_retry_after_secs(N)` | YAML recipe / app Config | YAML recipe / app Config | `Some(1)` | Set the `Retry-After` value on Config-owned overload rejections. |
+| `Config::with_active_call_no_media_timeout_secs(N)` | YAML recipe `activeCallNoMediaTimeoutSecs` | None | `0` disabled | Auto-answer server guard that releases inbound `Active` calls when no RTP packets arrive after answer. |
+| `Config::with_active_call_media_idle_timeout_secs(N)` | YAML recipe `activeCallMediaIdleTimeoutSecs` | None | `0` disabled | Auto-answer server guard that releases inbound `Active` calls when RTP stops advancing and remote BYE never arrives. |
 | `Config::with_sip_udp_parse_workers(N)` | `--udp-parse-workers N` | `RVOIP_SHARDING_UDP_WORKERS` | Transport default | Add UDP parse parallelism when parse/dispatch work backs up. |
 | `Config::with_sip_udp_parse_queue_capacity(N)` | `--udp-parse-queue-capacity N` | `RVOIP_SHARDING_UDP_QUEUE_CAPACITY` | SIP transport channel capacity | Bound per-worker UDP parse queue for bursty tests. |
 | `Config::with_sip_udp_parse_dispatch(UdpParseDispatch::RoundRobin)` | `--udp-parse-round-robin` | Always enabled by sharding runner | Source-hash | SIPp sidecar tests where all calls share one source socket. |
@@ -350,14 +551,14 @@ bus drops messages for receivers that lag past its capacity, so size
 | `Config::with_sip_dialog_dispatch_queue_capacity(N)` | `--sip-dialog-dispatch-queue-capacity N` | `RVOIP_SHARDING_DIALOG_DISPATCH_QUEUE_CAPACITY` | Dialog capacity hint | Dialog dispatch queue pressure. |
 | `Config::with_session_event_dispatcher_workers(N)` | `--session-event-dispatcher-workers N` | `RVOIP_SHARDING_SESSION_EVENT_WORKERS` | Logical CPU count capped at `16` | App-session event publication backlog. |
 | `Config::with_session_event_dispatcher_channel_capacity(N)` | `--session-event-dispatcher-queue-capacity N` | `RVOIP_SHARDING_SESSION_EVENT_QUEUE_CAPACITY` | `256` | Per-worker app-session event publication queue pressure. |
-| `Config::with_sip_udp_diagnostics(true)` | `--diagnostics` | Always enabled by sharding runner | `false` | UDP + duplicate-recovery summary counters. (`--diagnostics` also flips the two toggles below; in `Config` they are independent.) |
-| `Config::with_media_setup_diagnostics(true)` | `--diagnostics` (shared) | Always enabled by sharding runner | `false` | Media-setup summary counters; independently settable in `Config`. |
-| `Config::with_cleanup_diagnostics(true)` | `--diagnostics` (shared) | Always enabled by sharding runner | `false` | Session-cleanup summary counters. Distinct from `with_cleanup_diagnostic_events`, which emits per-event logs. |
+| `Config::with_sip_udp_diagnostics(true)` | `--diagnostics` | Always enabled by sharding runner; beta managed SIPp target only with `BETA_SIPP_DIAGNOSTICS=1` | `false` | UDP + duplicate-recovery summary counters. (`--diagnostics` also flips the two toggles below; in `Config` they are independent.) |
+| `Config::with_media_setup_diagnostics(true)` | `--diagnostics` (shared) | Always enabled by sharding runner; beta managed SIPp target only with `BETA_SIPP_DIAGNOSTICS=1` | `false` | Media-setup summary counters; independently settable in `Config`. |
+| `Config::with_cleanup_diagnostics(true)` | `--diagnostics` (shared) | Always enabled by sharding runner; beta managed SIPp target only with `BETA_SIPP_DIAGNOSTICS=1` | `false` | Session-cleanup summary counters. Distinct from `with_cleanup_diagnostic_events`, which emits per-event logs. |
 | `Config::with_perf_max_rss_growth_mb_per_hr(N)` | None | None | `None` (feature `perf-tests`) | RSS-growth ceiling for perf soak tests; aborts if exceeded. |
 | `Config::with_cleanup_diagnostic_events(true)` | `--diagnostic-events` | Use `RVOIP_SHARDING_EXTRA_LISTENER_ARGS` | `false` | Noisy cleanup event logs for focused investigations. |
 | `Config::with_srtp_diagnostics(true)`, `with_rtp_diagnostics(true)`, `with_media_sdp_diagnostics(true)` | `--wire-diagnostics` | Use `RVOIP_SHARDING_EXTRA_LISTENER_ARGS` | `false` | Noisy wire/media logs, not for high-CPS controls. |
 | `Config::with_sip_transaction_timing_diagnostics(true)` | `--transaction-timing-diagnostics` | `RVOIP_SHARDING_TRANSACTION_TIMING` | `false` | Transaction queue, dispatch, retransmit, and duplicate timing histograms. |
-| `Config::with_sip_dialog_timing_diagnostics(true)` | `--dialog-timing-diagnostics` | `RVOIP_SHARDING_DIALOG_TIMING` | `false` | Dialog ingress, BYE path, cleanup, and publish timing histograms. |
+| `Config::with_sip_dialog_timing_diagnostics(true)` | `--dialog-timing-diagnostics` | `RVOIP_SHARDING_DIALOG_TIMING` | `false` | Dialog ingress, BYE path, cleanup, publish timing histograms, and per-Call-ID answer/ACK timing traces when dialog diagnostics are enabled. |
 
 `Config::with_pbx_media_server_performance(N)` and
 `Config::with_signaling_only_server_high_performance(N)` are Config-level equivalents of the
@@ -398,7 +599,10 @@ knobs in a promoted candidate.
 | Dialog dispatch queue delay dominates | Sweep dialog dispatch workers and queue capacity. |
 | BYE `tx_received_to_handler` dominates `receive_to_200` | Transaction dispatch ordering/backlog is still the likely bottleneck. |
 | BYE `send_response` dominates | Investigate response serialization/send path rather than cleanup. |
-| INVITE 2xx duplicate/proactive counters dominate | Sweep `sip_invite_2xx_retransmit_max_due_per_tick` with same-shape controls. |
+| INVITE 2xx duplicate/proactive counters dominate | Sweep `sip_invite_2xx_retransmit_max_due_per_tick` with same-shape controls; confirm `maintenance_capped_ticks` changes before interpreting the result as a cap effect. |
+| Caller reports ACK sends but receiver ACK count stays low | Capture host UDP drops and add per-method inbound socket/source counters before changing more server worker or queue knobs. |
+| Receiver retains `Active` media calls with zero RTP after burst | Enable or lower `activeCallNoMediaTimeoutSecs` for auto-answer profiles, then confirm real RTP-bearing long calls are not released. |
+| Receiver retains `Active` media calls after RTP stops and no BYE arrives | Enable or lower `activeCallMediaIdleTimeoutSecs` for auto-answer profiles, then confirm valid silent-call workloads keep it disabled or use a larger value. |
 | Cleanup drains late but response tails are clean | Isolate cleanup publication/removal from the response path. |
 
 ## Related Docs

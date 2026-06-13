@@ -218,6 +218,8 @@ mod tests {
             jitter_buffer_size: None,
             max_packet_age_ms: None,
             enable_jitter_buffer: false,
+            session_buffer_config: Default::default(),
+            transport_buffer_config: Default::default(),
         };
         let session = RtpSession::new(cfg).await.unwrap();
         CnGate::new(Arc::new(Mutex::new(session))).unwrap()

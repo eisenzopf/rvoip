@@ -488,10 +488,15 @@ impl SessionHandle {
             Err(e) => return Err(e),
         }
 
-        wait_for_lifecycle(self, rx, timeout, "hangup_and_wait timed out", |snapshot| {
-            Ok(terminal_reason(snapshot))
-        })
-        .await
+        let result =
+            wait_for_lifecycle(self, rx, timeout, "hangup_and_wait timed out", |snapshot| {
+                Ok(terminal_reason(snapshot))
+            })
+            .await;
+        if matches!(result, Err(SessionError::Timeout(_))) {
+            self.spawn_late_answer_teardown_observer();
+        }
+        result
     }
 
     /// Hang up the call with an RFC 3326 `Reason` header and wait for the
@@ -1382,6 +1387,57 @@ impl SessionHandle {
             Ok(terminal_reason(snapshot))
         })
         .await
+    }
+
+    fn spawn_late_answer_teardown_observer(&self) {
+        let timeout = self.coordinator.setup_teardown_timeout_duration();
+        if timeout.is_zero() {
+            return;
+        }
+
+        let handle = self.clone();
+        tokio::spawn(async move {
+            let mut rx = handle.coordinator.lifecycle_watcher(&handle.call_id);
+            let watch = async {
+                loop {
+                    let snapshot = match handle.lifecycle().await {
+                        Ok(snapshot) => snapshot,
+                        Err(err) => {
+                            tracing::debug!(
+                                "late answer teardown observer failed to read lifecycle for {}: {}",
+                                handle.call_id,
+                                err
+                            );
+                            return;
+                        }
+                    };
+
+                    if snapshot.terminal.is_some()
+                        || snapshot.state.is_some_and(|state| state.is_final())
+                    {
+                        return;
+                    }
+
+                    if snapshot.answered.is_some() || snapshot.state.is_some_and(is_answered_state)
+                    {
+                        if let Err(err) = handle.coordinator.hangup(&handle.call_id).await {
+                            tracing::debug!(
+                                "late answer teardown observer failed to hang up {}: {}",
+                                handle.call_id,
+                                err
+                            );
+                        }
+                        return;
+                    }
+
+                    if rx.changed().await.is_err() {
+                        return;
+                    }
+                }
+            };
+
+            let _ = tokio::time::timeout(timeout, watch).await;
+        });
     }
 }
 

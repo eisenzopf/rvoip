@@ -167,6 +167,7 @@ async fn test_multiple_sessions() -> Result<(), Box<dyn std::error::Error>> {
             rtcp_mux: true,
             session_id: Some(session_id.clone()),
             use_port_allocator: true,
+            buffer_config: Default::default(),
         };
 
         // Create transport

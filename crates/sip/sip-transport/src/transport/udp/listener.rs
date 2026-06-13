@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
@@ -89,6 +90,25 @@ impl UdpListener {
         Ok((packet, src, self.local_addr))
     }
 
+    /// Attempts to receive one packet without waiting.
+    ///
+    /// Returns `Ok(None)` when the socket has no datagram ready. This is used
+    /// by the UDP transport receive loop to drain short bursts after one
+    /// awaited receive has already established readiness.
+    pub fn try_receive(&self) -> Result<Option<(Bytes, SocketAddr, SocketAddr)>> {
+        let mut buf = [0u8; UDP_BUFFER_SIZE];
+
+        match self.socket.try_recv_from(&mut buf) {
+            Ok((len, src)) => {
+                let packet = Bytes::copy_from_slice(&buf[..len]);
+                trace!("Received {} bytes from {}", len, src);
+                Ok(Some((packet, src, self.local_addr)))
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(Error::ReceiveFailed(error)),
+        }
+    }
+
     /// Creates a default dummy listener (used for testing)
     #[cfg(test)]
     pub fn default() -> Self {
@@ -162,5 +182,31 @@ mod tests {
         assert_eq!(&packet[..], test_data);
         assert_eq!(dest, addr);
         assert_eq!(src.ip(), sender_socket.local_addr().unwrap().ip());
+    }
+
+    #[tokio::test]
+    async fn test_udp_listener_try_receive() {
+        let listener = UdpListener::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sender_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        sender_socket.send_to(b"TRY RECEIVE", addr).await.unwrap();
+
+        let mut received = None;
+        for _ in 0..10 {
+            if let Some(packet) = listener.try_receive().unwrap() {
+                received = Some(packet);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let (packet, src, dest) = received.expect("try_receive should receive sent datagram");
+        assert_eq!(&packet[..], b"TRY RECEIVE");
+        assert_eq!(dest, addr);
+        assert_eq!(src.ip(), sender_socket.local_addr().unwrap().ip());
+        assert!(listener.try_receive().unwrap().is_none());
     }
 }

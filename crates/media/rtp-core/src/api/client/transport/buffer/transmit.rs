@@ -88,7 +88,7 @@ pub async fn send_frame_with_priority(
             }
 
             // Create RTP packet
-            let packet = crate::packet::RtpPacket::new(header, bytes::Bytes::from(frame.data));
+            let packet = crate::packet::RtpPacket::new(header, frame.data);
 
             debug!(
                 "Queuing packet with priority {:?}: PT={}, SEQ={}, TS={}",

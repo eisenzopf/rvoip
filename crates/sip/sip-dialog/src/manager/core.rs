@@ -1537,8 +1537,16 @@ impl DialogManager {
             return;
         }
 
-        let clear_route_after_processing =
-            matches!(&event, TransactionEvent::TransactionTerminated { .. });
+        let clear_route_after_processing = matches!(
+            &event,
+            TransactionEvent::TransactionTerminated { .. }
+                | TransactionEvent::StateChanged {
+                    new_state: TransactionState::Terminated,
+                    ..
+                }
+                | TransactionEvent::AckReceived { .. }
+                | TransactionEvent::AckRequest { .. }
+        );
 
         // Extract transaction ID from the event
         let transaction_id = self.extract_transaction_id(&event);
@@ -3646,6 +3654,60 @@ mod outbound_flow_handler_tests {
             first
         );
         assert_eq!(fallback.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn state_changed_terminated_clears_stored_dialog_route_hash() {
+        let (manager, _rx) = make_manager().await;
+        let fallback = AtomicUsize::new(0);
+        let source = dest_addr(5070);
+        let invite_tx =
+            TransactionKey::new("z9hG4bK-route-cleanup".to_string(), Method::Invite, true);
+
+        let invite = TransactionEvent::InviteRequest {
+            transaction_id: invite_tx.clone(),
+            request: dispatch_request(Method::Invite, "z9hG4bK-route-cleanup", 1),
+            source,
+        };
+        manager.dialog_event_dispatch_worker_index(&invite, 8, &fallback);
+        assert!(manager
+            .transaction_dialog_route_hash
+            .contains_key(&invite_tx));
+
+        manager
+            .process_global_transaction_event(TransactionEvent::StateChanged {
+                transaction_id: invite_tx.clone(),
+                previous_state: TransactionState::Proceeding,
+                new_state: TransactionState::Terminated,
+            })
+            .await;
+
+        assert!(!manager
+            .transaction_dialog_route_hash
+            .contains_key(&invite_tx));
+    }
+
+    #[tokio::test]
+    async fn ack_received_clears_stored_dialog_route_hash_after_processing() {
+        let (manager, _rx) = make_manager().await;
+        let fallback = AtomicUsize::new(0);
+        let invite_tx =
+            TransactionKey::new("z9hG4bK-ack-cleanup".to_string(), Method::Invite, true);
+
+        let ack = TransactionEvent::AckReceived {
+            transaction_id: invite_tx.clone(),
+            request: dispatch_request(Method::Ack, "z9hG4bK-ack-cleanup", 1),
+        };
+        manager.dialog_event_dispatch_worker_index(&ack, 8, &fallback);
+        assert!(manager
+            .transaction_dialog_route_hash
+            .contains_key(&invite_tx));
+
+        manager.process_global_transaction_event(ack).await;
+
+        assert!(!manager
+            .transaction_dialog_route_hash
+            .contains_key(&invite_tx));
     }
 
     #[tokio::test]

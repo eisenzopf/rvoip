@@ -17,7 +17,10 @@ use crate::api::common::error::MediaTransportError;
 use crate::api::server::security::SocketHandle;
 use crate::srtp::crypto::SrtpCryptoKey;
 use crate::srtp::{SrtpContext, SRTP_AES128_CM_SHA1_80};
-use crate::transport::{RtpTransport, RtpTransportConfig, SecurityRtpTransport, UdpRtpTransport};
+use crate::transport::{
+    RtpTransport, RtpTransportBufferConfig, RtpTransportConfig, SecurityRtpTransport,
+    UdpRtpTransport,
+};
 
 /// Check if the security mode requires DTLS
 pub fn requires_dtls(mode: SecurityMode) -> bool {
@@ -32,6 +35,7 @@ pub fn requires_dtls(mode: SecurityMode) -> bool {
 pub async fn connect(
     config_remote_address: SocketAddr,
     config_rtcp_mux: bool,
+    transport_buffer_config: RtpTransportBufferConfig,
     security: &Option<Arc<dyn ClientSecurityContext>>,
     security_requires_dtls: bool,
     security_handshake_timeout_secs: u64,
@@ -61,6 +65,7 @@ pub async fn connect(
         rtcp_mux: config_rtcp_mux,
         session_id: Some(format!("client-{}", uuid::Uuid::new_v4())),
         use_port_allocator: true,
+        buffer_config: transport_buffer_config,
     };
 
     // Create base UDP transport

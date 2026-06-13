@@ -43,9 +43,50 @@ use rvoip_rtp_core as rtp_core;
 use rvoip_rtp_core::transport::{
     AllocationStrategy, GlobalPortAllocator, PortAllocator, PortAllocatorConfig,
 };
-use rvoip_rtp_core::{RtpSession, RtpSessionConfig};
+use rvoip_rtp_core::{
+    RtpSession, RtpSessionBufferConfig, RtpSessionConfig, RtpTransportBufferConfig,
+};
 
 const RTP_SESSION_BIND_RETRIES: usize = 8;
+
+/// Controller-level capacity and pool tuning.
+#[derive(Debug, Clone)]
+pub struct MediaSessionControllerConfig {
+    /// Initial capacity for hot session indexes.
+    pub capacity_hint: usize,
+    /// Shared audio frame pool configuration.
+    pub audio_frame_pool: PoolConfig,
+    /// RTP output buffer size in bytes.
+    pub rtp_buffer_size: usize,
+    /// Initial RTP output buffer count.
+    pub rtp_buffer_initial_count: usize,
+    /// Maximum RTP output buffer count.
+    pub rtp_buffer_max_count: usize,
+    /// RTP session queue sizing.
+    pub rtp_session_buffer_config: RtpSessionBufferConfig,
+    /// RTP transport event and receive buffer sizing.
+    pub rtp_transport_buffer_config: RtpTransportBufferConfig,
+}
+
+impl Default for MediaSessionControllerConfig {
+    fn default() -> Self {
+        Self {
+            capacity_hint: 0,
+            audio_frame_pool: PoolConfig {
+                initial_size: 32,
+                max_size: 128,
+                sample_rate: 8000,
+                channels: 1,
+                samples_per_frame: 160,
+            },
+            rtp_buffer_size: 480,
+            rtp_buffer_initial_count: 32,
+            rtp_buffer_max_count: 128,
+            rtp_session_buffer_config: RtpSessionBufferConfig::default(),
+            rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
+        }
+    }
+}
 
 fn configured_port_range_len(base_port: u16, max_port: u16) -> usize {
     if max_port < base_port {
@@ -251,6 +292,12 @@ pub struct MediaSessionController {
     /// Per-dialog RTP/audio direction. This is the media-core enforcement
     /// point for SIP hold/resume and remote direction changes.
     pub(super) media_directions: Arc<DashMap<DialogId, MediaDirection>>,
+
+    /// RTP session queue sizing for new sessions.
+    rtp_session_buffer_config: RtpSessionBufferConfig,
+
+    /// RTP transport event and receive buffer sizing for new sessions.
+    rtp_transport_buffer_config: RtpTransportBufferConfig,
 }
 
 impl MediaSessionController {
@@ -264,7 +311,22 @@ impl MediaSessionController {
         Self::new_with_capacity_hint(capacity)
     }
 
+    /// Create a media session controller with explicit capacity and pool tuning.
+    pub fn with_config(config: MediaSessionControllerConfig) -> Self {
+        Self::new_with_config(config)
+    }
+
     fn new_with_capacity_hint(capacity_hint: usize) -> Self {
+        Self::new_with_config(MediaSessionControllerConfig {
+            capacity_hint,
+            ..Default::default()
+        })
+    }
+
+    fn new_with_config(config: MediaSessionControllerConfig) -> Self {
+        let capacity_hint = config.capacity_hint;
+        let rtp_session_buffer_config = config.rtp_session_buffer_config;
+        let rtp_transport_buffer_config = config.rtp_transport_buffer_config;
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
         let (conference_event_tx, conference_event_rx) = mpsc::unbounded_channel();
 
@@ -272,20 +334,13 @@ impl MediaSessionController {
         let performance_metrics = Arc::new(ConcurrentPerformanceMetrics::new());
 
         // Create global frame pool (shared across sessions)
-        let pool_config = PoolConfig {
-            initial_size: 32,
-            max_size: 128,
-            sample_rate: 8000,
-            channels: 1,
-            samples_per_frame: 160, // 20ms at 8kHz
-        };
-        let frame_pool: Arc<AudioFramePool> = AudioFramePool::new(pool_config);
+        let frame_pool: Arc<AudioFramePool> = AudioFramePool::new(config.audio_frame_pool.clone());
 
         // Create RTP buffer pool
         let rtp_buffer_pool = RtpBufferPool::new(
-            480, // Buffer size: max G.711 frame size (60ms at 8kHz)
-            32,  // Initial buffer count (more for conference)
-            128, // Max buffer count (more for conference)
+            config.rtp_buffer_size,
+            config.rtp_buffer_initial_count,
+            config.rtp_buffer_max_count,
         );
 
         // Default advanced processor configuration
@@ -347,6 +402,8 @@ impl MediaSessionController {
             cn_gate_state: Arc::new(DashMap::with_capacity(capacity_hint)),
             comfort_noise_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             media_directions: Arc::new(DashMap::with_capacity(capacity_hint)),
+            rtp_session_buffer_config,
+            rtp_transport_buffer_config,
         }
     }
 
@@ -415,14 +472,6 @@ impl MediaSessionController {
         let mut rtp_sessions_locked_for_diag = 0usize;
         #[cfg(feature = "memory-diagnostics")]
         let mut rtp_streams = 0usize;
-        #[cfg(feature = "memory-diagnostics")]
-        let mut rtp_udp_recv_pool_idle_buffers = 0usize;
-        #[cfg(feature = "memory-diagnostics")]
-        let mut rtp_udp_recv_pool_idle_bytes = 0usize;
-        #[cfg(feature = "memory-diagnostics")]
-        let mut rtp_udp_recv_pool_allocated_total = 0usize;
-        #[cfg(feature = "memory-diagnostics")]
-        let mut rtp_udp_recv_pool_dropped_total = 0usize;
 
         for entry in self.rtp_sessions.iter() {
             match entry.value().session.try_lock() {
@@ -436,12 +485,6 @@ impl MediaSessionController {
                     rtp_event_receiver_count += counts.event_receiver_count;
                     #[cfg(feature = "memory-diagnostics")]
                     {
-                        rtp_udp_recv_pool_idle_buffers += counts.udp_recv_pool_idle_buffers;
-                        rtp_udp_recv_pool_idle_bytes += counts.udp_recv_pool_idle_bytes;
-                        rtp_udp_recv_pool_allocated_total +=
-                            counts.udp_recv_pool_allocated_total as usize;
-                        rtp_udp_recv_pool_dropped_total +=
-                            counts.udp_recv_pool_dropped_total as usize;
                         rtp_streams += counts.stream_count;
                     }
                 }
@@ -489,22 +532,6 @@ impl MediaSessionController {
         #[cfg(feature = "memory-diagnostics")]
         if let Some(obj) = value.as_object_mut() {
             obj.insert("rtp_streams".into(), serde_json::json!(rtp_streams));
-            obj.insert(
-                "rtp_udp_recv_pool_idle_buffers".into(),
-                serde_json::json!(rtp_udp_recv_pool_idle_buffers),
-            );
-            obj.insert(
-                "rtp_udp_recv_pool_idle_bytes".into(),
-                serde_json::json!(rtp_udp_recv_pool_idle_bytes),
-            );
-            obj.insert(
-                "rtp_udp_recv_pool_allocated_total".into(),
-                serde_json::json!(rtp_udp_recv_pool_allocated_total),
-            );
-            obj.insert(
-                "rtp_udp_recv_pool_dropped_total".into(),
-                serde_json::json!(rtp_udp_recv_pool_dropped_total),
-            );
             obj.insert("frame_pool".into(), self.frame_pool.diagnostic_counts());
             obj.insert(
                 "rtp_buffer_pool".into(),
@@ -541,7 +568,24 @@ impl MediaSessionController {
         max_port: u16,
         capacity_hint: usize,
     ) -> Self {
-        let mut controller = Self::new_with_capacity_hint(capacity_hint);
+        Self::with_port_range_and_config(
+            base_port,
+            max_port,
+            MediaSessionControllerConfig {
+                capacity_hint,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Create a media session controller with custom port range and explicit tuning.
+    pub fn with_port_range_and_config(
+        base_port: u16,
+        max_port: u16,
+        config: MediaSessionControllerConfig,
+    ) -> Self {
+        let capacity_hint = config.capacity_hint;
+        let mut controller = Self::new_with_config(config);
 
         // Create a custom port allocator with the specified range
         let mut config = PortAllocatorConfig::default();
@@ -673,6 +717,8 @@ impl MediaSessionController {
             cn_gate_state: Arc::new(DashMap::new()),
             comfort_noise_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             media_directions: Arc::new(DashMap::new()),
+            rtp_session_buffer_config: RtpSessionBufferConfig::default(),
+            rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
         })
     }
 
@@ -733,6 +779,8 @@ impl MediaSessionController {
                 jitter_buffer_size: Some(500), // Increased from 50 to handle burst traffic
                 max_packet_age_ms: Some(1000), // Increased from 200ms to 1s for localhost testing
                 enable_jitter_buffer: false,   // Disabled to reduce processing overhead
+                session_buffer_config: self.rtp_session_buffer_config,
+                transport_buffer_config: self.rtp_transport_buffer_config,
             };
 
             let session_started = Instant::now();

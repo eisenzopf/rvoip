@@ -175,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         let default_frame = MediaFrame {
             frame_type: MediaFrameType::Audio,
-            data: b"Test frame with default SSRC".to_vec(),
+            data: b"Test frame with default SSRC".to_vec().into(),
             timestamp: 12345,
             sequence: 0,
             marker: true,
@@ -199,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Sending frame with AUDIO1_SSRC (0x{:08x})", AUDIO1_SSRC);
         let audio1_frame = MediaFrame {
             frame_type: MediaFrameType::Audio,
-            data: b"Audio1 test frame".to_vec(),
+            data: b"Audio1 test frame".to_vec().into(),
             timestamp: 10000,
             sequence: 0,
             marker: true,
@@ -217,7 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Sending frame with VIDEO1_SSRC (0x{:08x})", VIDEO1_SSRC);
         let video1_frame = MediaFrame {
             frame_type: MediaFrameType::Video,
-            data: b"Video1 test frame".to_vec(),
+            data: b"Video1 test frame".to_vec().into(),
             timestamp: 20000,
             sequence: 0,
             marker: true,

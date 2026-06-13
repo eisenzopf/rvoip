@@ -208,6 +208,7 @@ mod tests {
             rtcp_mux: true,
             session_id: Some("dtmf-tx-test-rx".to_string()),
             use_port_allocator: false,
+            buffer_config: Default::default(),
         };
         let receiver = UdpRtpTransport::new(receiver_cfg).await.unwrap();
         let receiver_addr = receiver.local_rtp_addr().unwrap();

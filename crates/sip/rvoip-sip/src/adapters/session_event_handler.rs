@@ -1468,26 +1468,40 @@ impl SessionCrossCrateEventHandler {
     }
 
     async fn acquire_server_call_admission(&self) -> ServerCallAdmissionDecision {
+        #[cfg(feature = "perf-tests")]
+        crate::admission_diag::record_attempt();
+
         let Some(hard_limit) = self.server_call_admission_limit else {
+            #[cfg(feature = "perf-tests")]
+            crate::admission_diag::record_no_limit_admit();
             return ServerCallAdmissionDecision::Admit(None);
         };
         let soft_limit = self
             .server_call_admission_soft_limit
             .unwrap_or(hard_limit)
             .min(hard_limit);
+        #[cfg(feature = "perf-tests")]
+        crate::admission_diag::record_limits(hard_limit, soft_limit);
         let pacing_delay = self
             .server_call_admission_pacing_delay_ms
             .map(Duration::from_millis);
         let mut paced_once = false;
 
         loop {
+            #[cfg(feature = "perf-tests")]
+            let admission_lock_wait_started = Instant::now();
             let _lock = self.server_call_admission_lock.lock().await;
+            #[cfg(feature = "perf-tests")]
+            crate::admission_diag::record_lock_wait(admission_lock_wait_started.elapsed());
+            let pending = self.server_call_admission_pending.load(Ordering::Relaxed);
             let observed_sessions = self
                 .state_machine
                 .store
                 .sessions
                 .len()
-                .saturating_add(self.server_call_admission_pending.load(Ordering::Relaxed));
+                .saturating_add(pending);
+            #[cfg(feature = "perf-tests")]
+            crate::admission_diag::record_observed(observed_sessions, pending);
 
             if self
                 .server_call_admission_overloaded
@@ -1496,7 +1510,11 @@ impl SessionCrossCrateEventHandler {
                 if observed_sessions < soft_limit {
                     self.server_call_admission_overloaded
                         .store(false, Ordering::Relaxed);
+                    #[cfg(feature = "perf-tests")]
+                    crate::admission_diag::record_overload_cleared();
                 } else {
+                    #[cfg(feature = "perf-tests")]
+                    crate::admission_diag::record_reject_overloaded(observed_sessions);
                     return ServerCallAdmissionDecision::Reject {
                         observed_sessions,
                         hard_limit,
@@ -1507,6 +1525,11 @@ impl SessionCrossCrateEventHandler {
             if observed_sessions >= hard_limit {
                 self.server_call_admission_overloaded
                     .store(true, Ordering::Relaxed);
+                #[cfg(feature = "perf-tests")]
+                {
+                    crate::admission_diag::record_overload_entered();
+                    crate::admission_diag::record_reject_hard_limit(observed_sessions);
+                }
                 return ServerCallAdmissionDecision::Reject {
                     observed_sessions,
                     hard_limit,
@@ -1518,14 +1541,31 @@ impl SessionCrossCrateEventHandler {
                     (pacing_delay, self.server_call_admission_soft_limit)
                 {
                     if observed_sessions >= configured_soft_limit {
+                        #[cfg(feature = "perf-tests")]
+                        crate::admission_diag::record_pacing_decision();
                         drop(_lock);
+                        #[cfg(feature = "perf-tests")]
+                        let admission_pacing_started = Instant::now();
                         tokio::time::sleep(delay).await;
+                        #[cfg(feature = "perf-tests")]
+                        crate::admission_diag::record_pacing_sleep(
+                            admission_pacing_started.elapsed(),
+                        );
                         paced_once = true;
                         continue;
                     }
                 }
             }
 
+            #[cfg(feature = "perf-tests")]
+            {
+                let pending_after = self
+                    .server_call_admission_pending
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1;
+                crate::admission_diag::record_admit(observed_sessions, pending_after);
+            }
+            #[cfg(not(feature = "perf-tests"))]
             self.server_call_admission_pending
                 .fetch_add(1, Ordering::Relaxed);
             return ServerCallAdmissionDecision::Admit(Some(ServerCallAdmissionGuard {
@@ -1616,13 +1656,14 @@ impl SessionCrossCrateEventHandler {
             .unwrap_or_else(|| "unknown".to_string());
         let p_asserted_identity = headers.get("P-Asserted-Identity").cloned();
 
-        if let Ok(dialog_uuid) = uuid::Uuid::parse_str(&dialog_id_str) {
-            let rvoip_dialog_id = rvoip_sip_dialog::DialogId(dialog_uuid);
-
+        let incoming_dialog_id = uuid::Uuid::parse_str(&dialog_id_str)
+            .ok()
+            .map(rvoip_sip_dialog::DialogId);
+        if let Some(rvoip_dialog_id) = incoming_dialog_id.as_ref() {
             if self
                 .dialog_adapter
                 .dialog_to_session
-                .contains_key(&rvoip_dialog_id)
+                .contains_key(rvoip_dialog_id)
             {
                 debug!(
                     "Ignoring IncomingCall for dialog {} - already handled by another peer",
@@ -1636,7 +1677,7 @@ impl SessionCrossCrateEventHandler {
                 .dialog_api
                 .dialog_manager()
                 .core()
-                .has_dialog(&rvoip_dialog_id)
+                .has_dialog(rvoip_dialog_id)
             {
                 debug!(
                     "Ignoring IncomingCall for dialog {} - not in our dialog-core",
@@ -1655,12 +1696,49 @@ impl SessionCrossCrateEventHandler {
                 observed_sessions,
                 hard_limit,
             } => {
-                self.reject_incoming_call_for_overload(
-                    transaction_id,
-                    observed_sessions,
-                    hard_limit,
-                )
-                .await?;
+                let reject_result = self
+                    .reject_incoming_call_for_overload(
+                        transaction_id,
+                        observed_sessions,
+                        hard_limit,
+                    )
+                    .await;
+                if let Some(dialog_id) = incoming_dialog_id.as_ref() {
+                    let removed = self
+                        .dialog_adapter
+                        .dialog_api
+                        .dialog_manager()
+                        .core()
+                        .cleanup_dialog_storage_and_transactions(dialog_id)
+                        .await;
+                    debug!(
+                        dialog_id = %dialog_id,
+                        removed,
+                        "Cleaned up rejected inbound INVITE dialog after admission overload response"
+                    );
+                } else {
+                    warn!(
+                        dialog_id = %dialog_id_str,
+                        "Rejected inbound INVITE for overload without a parseable dialog id; dialog-core cleanup skipped"
+                    );
+                }
+                match transaction_id.parse::<rvoip_sip_dialog::transaction::TransactionKey>() {
+                    Ok(transaction_id) => {
+                        self.dialog_adapter
+                            .dialog_api
+                            .dialog_manager()
+                            .core()
+                            .cleanup_transaction_receiver(&transaction_id);
+                    }
+                    Err(err) => {
+                        warn!(
+                            transaction_id,
+                            error = %err,
+                            "Rejected inbound INVITE for overload without a parseable transaction id; route cleanup skipped"
+                        );
+                    }
+                }
+                reject_result?;
                 setup_guard.finish_success();
                 return Ok(());
             }
@@ -4119,7 +4197,7 @@ impl SessionCrossCrateEventHandler {
         // This allows UAS to transition from "Answering" -> "Active"
         match self
             .state_machine
-            .process_event(&SessionId(session_id_str.clone()), EventType::DialogACK)
+            .process_event(&session_id, EventType::DialogACK)
             .await
         {
             Ok(_) => {
@@ -4127,6 +4205,11 @@ impl SessionCrossCrateEventHandler {
                     "✅ DialogACK processed successfully for session {}",
                     session_id_str
                 );
+                if let Some(coordinator) = self.coordinator.get().and_then(|w| w.upgrade()) {
+                    coordinator
+                        .schedule_active_call_media_timeout_if_current(&session_id)
+                        .await;
+                }
             }
             Err(e) => {
                 error!(
@@ -4159,6 +4242,10 @@ impl SessionCrossCrateEventHandler {
             .await
         {
             error!("Failed to process DialogACK event after AckReceived: {}", e);
+        } else if let Some(coordinator) = self.coordinator.get().and_then(|w| w.upgrade()) {
+            coordinator
+                .schedule_active_call_media_timeout_if_current(&session_id)
+                .await;
         }
         Ok(())
     }

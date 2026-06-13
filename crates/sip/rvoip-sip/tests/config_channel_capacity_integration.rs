@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use rvoip_sip::{cleanup_diag, Config, UnifiedCoordinator};
+use rvoip_sip::{
+    cleanup_diag, Config, MediaSessionControllerConfig, RtpSessionBufferConfig,
+    RtpTransportBufferConfig, UnifiedCoordinator,
+};
 use serial_test::serial;
 
 #[test]
@@ -20,6 +23,32 @@ fn incoming_call_channel_capacity_defaults_to_1000() {
     assert_eq!(Config::default().sip_udp_parse_dispatch, None);
     assert_eq!(Config::default().media_port_capacity, None);
     assert_eq!(Config::default().media_session_capacity, None);
+    assert_eq!(
+        Config::default().rtp_session_buffer_config,
+        RtpSessionBufferConfig::default()
+    );
+    assert_eq!(
+        Config::default().rtp_transport_buffer_config,
+        RtpTransportBufferConfig::default()
+    );
+    assert_eq!(
+        Config::default()
+            .media_session_controller_config
+            .rtp_buffer_size,
+        480
+    );
+    assert_eq!(
+        Config::default()
+            .media_session_controller_config
+            .rtp_buffer_initial_count,
+        32
+    );
+    assert_eq!(
+        Config::default()
+            .media_session_controller_config
+            .rtp_buffer_max_count,
+        128
+    );
     assert_eq!(Config::default().transaction_event_channel_capacity, 10_000);
     assert_eq!(Config::default().sip_transaction_dispatch_workers, None);
     assert_eq!(
@@ -219,6 +248,60 @@ fn media_session_capacity_is_independent_from_server_capacity() {
 }
 
 #[test]
+fn rtp_media_buffer_tuning_is_configurable() {
+    let session_buffers = RtpSessionBufferConfig {
+        sender_channel_capacity: 8,
+        receiver_channel_capacity: 4,
+        event_channel_capacity: 16,
+    };
+    let transport_buffers = RtpTransportBufferConfig {
+        event_channel_capacity: 12,
+        recv_buffer_size: 2048,
+        rtcp_recv_buffer_size: 1024,
+    };
+    let mut media_config = MediaSessionControllerConfig::default();
+    media_config.audio_frame_pool.initial_size = 8;
+    media_config.audio_frame_pool.max_size = 32;
+    media_config.rtp_buffer_size = 960;
+    media_config.rtp_buffer_initial_count = 8;
+    media_config.rtp_buffer_max_count = 32;
+
+    let config = Config::local("capacity-test", 5060)
+        .with_media_session_controller_config(media_config)
+        .with_rtp_session_buffer_config(session_buffers)
+        .with_rtp_transport_buffer_config(transport_buffers);
+
+    assert_eq!(config.rtp_session_buffer_config, session_buffers);
+    assert_eq!(config.rtp_transport_buffer_config, transport_buffers);
+    assert_eq!(
+        config
+            .media_session_controller_config
+            .audio_frame_pool
+            .initial_size,
+        8
+    );
+    assert_eq!(
+        config
+            .media_session_controller_config
+            .audio_frame_pool
+            .max_size,
+        32
+    );
+    assert_eq!(config.media_session_controller_config.rtp_buffer_size, 960);
+    assert_eq!(
+        config
+            .media_session_controller_config
+            .rtp_buffer_initial_count,
+        8
+    );
+    assert_eq!(
+        config.media_session_controller_config.rtp_buffer_max_count,
+        32
+    );
+    config.validate().expect("valid RTP/media buffer tuning");
+}
+
+#[test]
 fn media_port_capacity_sets_requested_range() {
     let config = Config::local("capacity-test", 5060).with_media_port_capacity(16_384, 49_152);
 
@@ -277,6 +360,81 @@ fn zero_media_port_capacity_is_rejected_when_set() {
     assert!(
         err.to_string()
             .contains("media_port_capacity must be at least 1"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
+fn invalid_rtp_session_buffer_config_is_rejected() {
+    let mut config = Config::local("capacity-test", 5060);
+    config.rtp_session_buffer_config.sender_channel_capacity = 0;
+
+    let err = config
+        .validate()
+        .expect_err("zero RTP sender capacity must fail");
+    assert!(
+        err.to_string()
+            .contains("rtp_session_buffer_config.sender_channel_capacity"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
+fn invalid_rtp_transport_buffer_config_is_rejected() {
+    let mut config = Config::local("capacity-test", 5060);
+    config.rtp_transport_buffer_config.rtcp_recv_buffer_size = 0;
+
+    let err = config
+        .validate()
+        .expect_err("zero RTCP receive buffer must fail");
+    assert!(
+        err.to_string()
+            .contains("rtp_transport_buffer_config.rtcp_recv_buffer_size"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
+fn invalid_media_session_controller_buffer_config_is_rejected() {
+    let mut config = Config::local("capacity-test", 5060);
+    config.media_session_controller_config.rtp_buffer_size = 0;
+
+    let err = config
+        .validate()
+        .expect_err("zero media RTP buffer size must fail");
+    assert!(
+        err.to_string()
+            .contains("media_session_controller_config.rtp_buffer_size"),
+        "unexpected validation error: {err}"
+    );
+
+    let mut config = Config::local("capacity-test", 5060);
+    config
+        .media_session_controller_config
+        .audio_frame_pool
+        .samples_per_frame = 0;
+
+    let err = config
+        .validate()
+        .expect_err("zero audio frame size must fail");
+    assert!(
+        err.to_string()
+            .contains("media_session_controller_config.audio_frame_pool.samples_per_frame"),
+        "unexpected validation error: {err}"
+    );
+
+    let mut config = Config::local("capacity-test", 5060);
+    config
+        .media_session_controller_config
+        .rtp_buffer_initial_count = 9;
+    config.media_session_controller_config.rtp_buffer_max_count = 8;
+
+    let err = config
+        .validate()
+        .expect_err("initial media RTP pool count above max must fail");
+    assert!(
+        err.to_string()
+            .contains("rtp_buffer_initial_count must be <= rtp_buffer_max_count"),
         "unexpected validation error: {err}"
     );
 }

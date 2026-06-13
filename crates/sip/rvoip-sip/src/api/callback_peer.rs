@@ -66,7 +66,10 @@ use crate::api::events::{
 use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::{IncomingCall, IncomingCallGuard};
 use crate::api::performance::PerformanceConfig;
-use crate::api::unified::{Config, MediaMode, RegistrationHandle, UnifiedCoordinator};
+use crate::api::unified::{
+    Config, MediaMode, MediaSessionControllerConfig, RegistrationHandle, RtpSessionBufferConfig,
+    RtpTransportBufferConfig, UnifiedCoordinator,
+};
 use crate::auth::SipClientAuth;
 use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result, SessionError};
@@ -347,6 +350,24 @@ impl CallbackPeerBuilder {
     /// Set the media-core session and RTP allocator capacity hint.
     pub fn media_session_capacity(mut self, capacity: usize) -> Self {
         self.config = self.config.with_media_session_capacity(capacity);
+        self
+    }
+
+    /// Set RTP session queue sizing for SIP media calls.
+    pub fn rtp_session_buffer_config(mut self, config: RtpSessionBufferConfig) -> Self {
+        self.config = self.config.with_rtp_session_buffer_config(config);
+        self
+    }
+
+    /// Set RTP transport event and receive buffer sizing for SIP media calls.
+    pub fn rtp_transport_buffer_config(mut self, config: RtpTransportBufferConfig) -> Self {
+        self.config = self.config.with_rtp_transport_buffer_config(config);
+        self
+    }
+
+    /// Set media-core controller pool and capacity tuning for SIP media calls.
+    pub fn media_session_controller_config(mut self, config: MediaSessionControllerConfig) -> Self {
+        self.config = self.config.with_media_session_controller_config(config);
         self
     }
 
@@ -2564,6 +2585,56 @@ mod tests {
     use rvoip_sip_core::types::sdp::CryptoSuite;
     use std::sync::Mutex;
     use tokio::task::JoinSet;
+
+    #[test]
+    fn callback_peer_builder_exposes_rtp_media_buffer_tuning() {
+        let session_buffers = RtpSessionBufferConfig {
+            sender_channel_capacity: 9,
+            receiver_channel_capacity: 6,
+            event_channel_capacity: 18,
+        };
+        let transport_buffers = RtpTransportBufferConfig {
+            event_channel_capacity: 14,
+            recv_buffer_size: 2048,
+            rtcp_recv_buffer_size: 1024,
+        };
+        let mut media_config = MediaSessionControllerConfig::default();
+        media_config.rtp_buffer_size = 960;
+        media_config.rtp_buffer_initial_count = 5;
+        media_config.rtp_buffer_max_count = 20;
+
+        let builder = CallbackPeer::builder(Config::local("callback-builder", 15444))
+            .media_session_controller_config(media_config)
+            .rtp_session_buffer_config(session_buffers)
+            .rtp_transport_buffer_config(transport_buffers);
+
+        assert_eq!(builder.config.rtp_session_buffer_config, session_buffers);
+        assert_eq!(
+            builder.config.rtp_transport_buffer_config,
+            transport_buffers
+        );
+        assert_eq!(
+            builder
+                .config
+                .media_session_controller_config
+                .rtp_buffer_size,
+            960
+        );
+        assert_eq!(
+            builder
+                .config
+                .media_session_controller_config
+                .rtp_buffer_initial_count,
+            5
+        );
+        assert_eq!(
+            builder
+                .config
+                .media_session_controller_config
+                .rtp_buffer_max_count,
+            20
+        );
+    }
 
     #[test]
     fn bounded_terminal_callback_dedupe_evicts_oldest_entries() {

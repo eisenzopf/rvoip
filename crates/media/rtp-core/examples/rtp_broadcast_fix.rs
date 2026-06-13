@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for i in 1..=5 {
             let frame = MediaFrame {
                 frame_type: MediaFrameType::Audio,
-                data: vec![i as u8; 20],
+                data: vec![i as u8; 20].into(),
                 timestamp: i * 1000,
                 sequence: i as u16,
                 marker: false,

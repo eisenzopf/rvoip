@@ -528,6 +528,16 @@ impl MediaAdapter {
         self.media_mode = mode;
     }
 
+    /// Return the current RTP receive packet count for a SIP session, when a
+    /// media-core RTP session exists for it.
+    pub(crate) async fn rtp_packets_received(&self, session_id: &SessionId) -> Option<u64> {
+        let dialog_id = self.session_to_dialog.get(session_id)?.clone();
+        self.controller
+            .get_session_info(&dialog_id)
+            .await
+            .and_then(|info| info.rtp_stats.map(|stats| stats.packets_received))
+    }
+
     /// Sprint 3.5 C2 swap — enable strict RFC 3264 §6 SDP-answer
     /// matching. Wired from `Config::strict_codec_matching` at
     /// coordinator boot.

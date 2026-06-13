@@ -152,10 +152,6 @@ async fn perf_media_churn() {
             "rtp_streams_after_drain",
             final_counts["rtp_streams"].clone(),
         )
-        .result(
-            "rtp_udp_recv_pool_idle_bytes_after_drain",
-            final_counts["rtp_udp_recv_pool_idle_bytes"].clone(),
-        )
         .diagnostic_block("controller_after_drain", final_counts)
         .diagnostic_block(
             "memory_diagnostics",

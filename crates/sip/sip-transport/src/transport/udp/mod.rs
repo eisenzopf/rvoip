@@ -26,6 +26,7 @@ use rvoip_sip_core::Message;
 const DEFAULT_CHANNEL_CAPACITY: usize = 1000;
 const DEFAULT_PARSE_WORKERS: usize = 1;
 const MAX_PARSE_WORKERS: usize = 64;
+const UDP_RECEIVE_DRAIN_BATCH: usize = 64;
 
 /// RFC 3261 §18.1.1 — outbound SIP requests larger than this MUST be
 /// shipped over a congestion-controlled transport (TCP) rather than UDP
@@ -363,7 +364,9 @@ impl UdpTransport {
         let round_robin_worker = Arc::clone(&round_robin_worker);
 
         let handle = tokio::spawn(async move {
+            let mut last_receive_completed_at: Option<Instant> = None;
             loop {
+                let receive_poll_started = diagnostics::enabled().then(Instant::now);
                 // Use select to listen for both packets and shutdown signal
                 tokio::select! {
                     // Watch for shutdown signal
@@ -379,39 +382,56 @@ impl UdpTransport {
 
                         match result {
                             Ok((packet, src, local_addr)) => {
-                                diagnostics::record_udp_datagram_received();
-                                trace!("Received UDP datagram from {}", src);
-                                let received_at = diagnostics::enabled().then(Instant::now);
-                                let worker_index = udp_worker_index(
+                                let receive_completed_at = Instant::now();
+                                if let Some(started) = receive_poll_started {
+                                    diagnostics::record_udp_receive_poll(
+                                        receive_completed_at.duration_since(started),
+                                    );
+                                }
+                                if !enqueue_udp_datagram(
+                                    packet,
                                     src,
-                                    worker_senders.len(),
+                                    local_addr,
+                                    &worker_senders,
                                     dispatch,
                                     &round_robin_worker,
-                                );
-                                let datagram = UdpDatagram {
-                                    packet,
-                                    source: src,
-                                    local_addr,
-                                    timing: received_at.map(|received_at| TransportReceiveTiming {
-                                        received_at: Some(received_at),
-                                        ..Default::default()
-                                    }),
-                                };
-                                match worker_senders[worker_index].try_send(datagram) {
-                                    Ok(()) => diagnostics::record_udp_worker_queue_enqueued(),
-                                    Err(TrySendError::Full(_)) => {
-                                        diagnostics::record_udp_worker_queue_full();
-                                        if diagnostics::enabled() {
-                                            warn!(
-                                                worker_index,
-                                                "UDP parse worker queue full; dropping datagram"
-                                            );
+                                    receive_completed_at,
+                                    &mut last_receive_completed_at,
+                                ) {
+                                    break;
+                                }
+
+                                let mut keep_running = true;
+                                for _ in 0..UDP_RECEIVE_DRAIN_BATCH {
+                                    match listener_clone.try_receive() {
+                                        Ok(Some((packet, src, local_addr))) => {
+                                            let receive_completed_at = Instant::now();
+                                            if !enqueue_udp_datagram(
+                                                packet,
+                                                src,
+                                                local_addr,
+                                                &worker_senders,
+                                                dispatch,
+                                                &round_robin_worker,
+                                                receive_completed_at,
+                                                &mut last_receive_completed_at,
+                                            ) {
+                                                keep_running = false;
+                                                break;
+                                            }
+                                        }
+                                        Ok(None) => break,
+                                        Err(e) => {
+                                            error!("Error receiving UDP packet: {}", e);
+                                            let _ = events_tx.try_send(TransportEvent::Error {
+                                                error: format!("Error receiving packet: {}", e),
+                                            });
+                                            break;
                                         }
                                     }
-                                    Err(TrySendError::Closed(_)) => {
-                                        debug!("UDP parse worker queue closed");
-                                        break;
-                                    }
+                                }
+                                if !keep_running {
+                                    break;
                                 }
                             },
                             Err(e) => {
@@ -434,6 +454,55 @@ impl UdpTransport {
         let mut task_guard = self.inner.receive_task.lock().await;
         *task_guard = Some(handle);
     }
+}
+
+fn enqueue_udp_datagram(
+    packet: Bytes,
+    src: SocketAddr,
+    local_addr: SocketAddr,
+    worker_senders: &[mpsc::Sender<UdpDatagram>],
+    dispatch: UdpParseDispatch,
+    round_robin_worker: &AtomicUsize,
+    receive_completed_at: Instant,
+    last_receive_completed_at: &mut Option<Instant>,
+) -> bool {
+    if let Some(previous) = *last_receive_completed_at {
+        diagnostics::record_udp_receive_loop_gap(
+            local_addr,
+            receive_completed_at.duration_since(previous),
+        );
+    }
+    *last_receive_completed_at = Some(receive_completed_at);
+    diagnostics::record_udp_datagram_received();
+    trace!("Received UDP datagram from {}", src);
+    let received_at = diagnostics::enabled().then_some(receive_completed_at);
+    let worker_index = udp_worker_index(src, worker_senders.len(), dispatch, round_robin_worker);
+    let datagram = UdpDatagram {
+        packet,
+        source: src,
+        local_addr,
+        timing: received_at.map(|received_at| TransportReceiveTiming {
+            received_at: Some(received_at),
+            ..Default::default()
+        }),
+    };
+    match worker_senders[worker_index].try_send(datagram) {
+        Ok(()) => diagnostics::record_udp_worker_queue_enqueued(),
+        Err(TrySendError::Full(_)) => {
+            diagnostics::record_udp_worker_queue_full();
+            if diagnostics::enabled() {
+                warn!(
+                    worker_index,
+                    "UDP parse worker queue full; dropping datagram"
+                );
+            }
+        }
+        Err(TrySendError::Closed(_)) => {
+            debug!("UDP parse worker queue closed");
+            return false;
+        }
+    }
+    true
 }
 
 async fn udp_parse_worker(
@@ -486,6 +555,7 @@ async fn process_udp_datagram(
     let event = match parsed {
         Ok(message) => {
             diagnostics::record_udp_parse_ok();
+            diagnostics::record_inbound_message(&message, datagram.source, datagram.local_addr);
             TransportEvent::MessageReceived {
                 message,
                 source: datagram.source,
@@ -572,7 +642,18 @@ impl Transport for UdpTransport {
         // Send the message using the sender
         let started = Instant::now();
         let result = self.inner.sender.send(&bytes, destination).await;
-        diagnostics::record_outbound_message(&message, started.elapsed(), result.is_err());
+        let local_addr = self.inner.listener.local_addr().unwrap_or_else(|_| {
+            "0.0.0.0:0"
+                .parse()
+                .expect("hardcoded socket address must parse")
+        });
+        diagnostics::record_outbound_message(
+            &message,
+            local_addr,
+            destination,
+            started.elapsed(),
+            result.is_err(),
+        );
         result
     }
 
@@ -587,7 +668,18 @@ impl Transport for UdpTransport {
         );
         let started = Instant::now();
         let result = self.inner.sender.send(&bytes, destination).await;
-        diagnostics::record_outbound_raw(started.elapsed(), result.is_err());
+        let local_addr = self.inner.listener.local_addr().unwrap_or_else(|_| {
+            "0.0.0.0:0"
+                .parse()
+                .expect("hardcoded socket address must parse")
+        });
+        diagnostics::record_outbound_raw(
+            bytes.as_ref(),
+            local_addr,
+            destination,
+            started.elapsed(),
+            result.is_err(),
+        );
         result
     }
 

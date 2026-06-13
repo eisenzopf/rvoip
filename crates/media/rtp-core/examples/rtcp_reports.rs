@@ -28,6 +28,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jitter_buffer_size: Some(5),
         max_packet_age_ms: Some(100),
         enable_jitter_buffer: true,
+        session_buffer_config: Default::default(),
+        transport_buffer_config: Default::default(),
     };
 
     let receiver_config = RtpSessionConfig {
@@ -39,6 +41,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jitter_buffer_size: Some(5),
         max_packet_age_ms: Some(100),
         enable_jitter_buffer: true,
+        session_buffer_config: Default::default(),
+        transport_buffer_config: Default::default(),
     };
 
     // Create the sessions

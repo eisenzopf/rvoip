@@ -118,12 +118,12 @@ pub use packet::rtp::RtpPacket;
 
 // Re-export session types
 pub use session::{
-    RtpSendHandle, RtpSession, RtpSessionConfig, RtpSessionEvent, RtpSessionStats, RtpStream,
-    RtpStreamStats,
+    RtpSendHandle, RtpSession, RtpSessionBufferConfig, RtpSessionConfig, RtpSessionEvent,
+    RtpSessionStats, RtpStream, RtpStreamStats,
 };
 
 // Re-export transport types
-pub use transport::{RtpTransport, RtpTransportConfig, UdpRtpTransport};
+pub use transport::{RtpTransport, RtpTransportBufferConfig, RtpTransportConfig, UdpRtpTransport};
 
 // Re-export traits for media-core integration
 pub use traits::media_transport::RtpMediaTransport;

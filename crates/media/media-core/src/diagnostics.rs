@@ -3,6 +3,8 @@
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
+
 static ENABLED_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
 static MEDIA_START_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -36,7 +38,27 @@ static PORT_RELEASE_COUNT: AtomicU64 = AtomicU64::new(0);
 static PORT_RELEASE_NS: AtomicU64 = AtomicU64::new(0);
 static PORT_RELEASE_MAX_NS: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+static AUDIO_TX_TASK_START_COUNT: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_START_PHASE_NS: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_START_PHASE_MAX_NS: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_TICK_GAP_COUNT: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_TICK_GAP_NS: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_TICK_GAP_MAX_NS: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_SEND_COUNT: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_SEND_FAIL: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_SEND_NS: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_SEND_MAX_NS: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_PACING_SKIP_COUNT: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_PACING_ACTIVE_MAX: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_PACING_DIVISOR_MAX: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_SHARED_DUE_COUNT: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_SHARED_SENT_COUNT: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_SHARED_SKIP_COUNT: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_SHARED_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_SHARED_ACTIVE_MAX: AtomicU64 = AtomicU64::new(0);
+static AUDIO_TX_SHARED_BATCH_MAX: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Snapshot {
     pub media_start_total: u64,
     pub media_start_done: u64,
@@ -62,6 +84,25 @@ pub struct Snapshot {
     pub port_release_count: u64,
     pub port_release_ns: u64,
     pub port_release_max_ns: u64,
+    pub audio_tx_task_start_count: u64,
+    pub audio_tx_start_phase_ns: u64,
+    pub audio_tx_start_phase_max_ns: u64,
+    pub audio_tx_tick_gap_count: u64,
+    pub audio_tx_tick_gap_ns: u64,
+    pub audio_tx_tick_gap_max_ns: u64,
+    pub audio_tx_send_count: u64,
+    pub audio_tx_send_fail: u64,
+    pub audio_tx_send_ns: u64,
+    pub audio_tx_send_max_ns: u64,
+    pub audio_tx_pacing_skip_count: u64,
+    pub audio_tx_pacing_active_max: u64,
+    pub audio_tx_pacing_divisor_max: u64,
+    pub audio_tx_shared_due_count: u64,
+    pub audio_tx_shared_sent_count: u64,
+    pub audio_tx_shared_skip_count: u64,
+    pub audio_tx_shared_fail_count: u64,
+    pub audio_tx_shared_active_max: u64,
+    pub audio_tx_shared_batch_max: u64,
 }
 
 pub struct MediaStartGuard {
@@ -143,6 +184,25 @@ pub fn snapshot() -> Snapshot {
         port_release_count: PORT_RELEASE_COUNT.load(Ordering::Relaxed),
         port_release_ns: PORT_RELEASE_NS.load(Ordering::Relaxed),
         port_release_max_ns: PORT_RELEASE_MAX_NS.load(Ordering::Relaxed),
+        audio_tx_task_start_count: AUDIO_TX_TASK_START_COUNT.load(Ordering::Relaxed),
+        audio_tx_start_phase_ns: AUDIO_TX_START_PHASE_NS.load(Ordering::Relaxed),
+        audio_tx_start_phase_max_ns: AUDIO_TX_START_PHASE_MAX_NS.load(Ordering::Relaxed),
+        audio_tx_tick_gap_count: AUDIO_TX_TICK_GAP_COUNT.load(Ordering::Relaxed),
+        audio_tx_tick_gap_ns: AUDIO_TX_TICK_GAP_NS.load(Ordering::Relaxed),
+        audio_tx_tick_gap_max_ns: AUDIO_TX_TICK_GAP_MAX_NS.load(Ordering::Relaxed),
+        audio_tx_send_count: AUDIO_TX_SEND_COUNT.load(Ordering::Relaxed),
+        audio_tx_send_fail: AUDIO_TX_SEND_FAIL.load(Ordering::Relaxed),
+        audio_tx_send_ns: AUDIO_TX_SEND_NS.load(Ordering::Relaxed),
+        audio_tx_send_max_ns: AUDIO_TX_SEND_MAX_NS.load(Ordering::Relaxed),
+        audio_tx_pacing_skip_count: AUDIO_TX_PACING_SKIP_COUNT.load(Ordering::Relaxed),
+        audio_tx_pacing_active_max: AUDIO_TX_PACING_ACTIVE_MAX.load(Ordering::Relaxed),
+        audio_tx_pacing_divisor_max: AUDIO_TX_PACING_DIVISOR_MAX.load(Ordering::Relaxed),
+        audio_tx_shared_due_count: AUDIO_TX_SHARED_DUE_COUNT.load(Ordering::Relaxed),
+        audio_tx_shared_sent_count: AUDIO_TX_SHARED_SENT_COUNT.load(Ordering::Relaxed),
+        audio_tx_shared_skip_count: AUDIO_TX_SHARED_SKIP_COUNT.load(Ordering::Relaxed),
+        audio_tx_shared_fail_count: AUDIO_TX_SHARED_FAIL_COUNT.load(Ordering::Relaxed),
+        audio_tx_shared_active_max: AUDIO_TX_SHARED_ACTIVE_MAX.load(Ordering::Relaxed),
+        audio_tx_shared_batch_max: AUDIO_TX_SHARED_BATCH_MAX.load(Ordering::Relaxed),
     }
 }
 
@@ -154,7 +214,12 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
          rtp_event_subscription={} rtp_event_sub_avg_us={:.1} rtp_event_sub_max_us={} \
          rtp_event_handler_spawn={} rtp_event_spawn_avg_us={:.1} rtp_event_spawn_max_us={} \
          stop_media={} stop_avg_us={:.1} stop_max_us={} port_release={} port_release_avg_us={:.1} \
-         port_release_max_us={}",
+         port_release_max_us={} audio_tx_starts={} audio_tx_start_phase_avg_us={:.1} \
+         audio_tx_start_phase_max_us={} audio_tx_tick_gap_avg_us={:.1} audio_tx_tick_gap_max_us={} \
+         audio_tx_send={} audio_tx_send_fail={} audio_tx_send_avg_us={:.1} audio_tx_send_max_us={} \
+         audio_tx_pacing_skips={} audio_tx_pacing_active_max={} audio_tx_pacing_divisor_max={} \
+         audio_tx_shared_due={} audio_tx_shared_sent={} audio_tx_shared_skip={} \
+         audio_tx_shared_fail={} audio_tx_shared_active_max={} audio_tx_shared_batch_max={}",
         snapshot.media_start_total,
         snapshot.media_start_done,
         snapshot.media_start_fail,
@@ -191,6 +256,30 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
         snapshot.port_release_count,
         avg_us(snapshot.port_release_ns, snapshot.port_release_count),
         ns_to_us(snapshot.port_release_max_ns),
+        snapshot.audio_tx_task_start_count,
+        avg_us(
+            snapshot.audio_tx_start_phase_ns,
+            snapshot.audio_tx_task_start_count
+        ),
+        ns_to_us(snapshot.audio_tx_start_phase_max_ns),
+        avg_us(
+            snapshot.audio_tx_tick_gap_ns,
+            snapshot.audio_tx_tick_gap_count
+        ),
+        ns_to_us(snapshot.audio_tx_tick_gap_max_ns),
+        snapshot.audio_tx_send_count,
+        snapshot.audio_tx_send_fail,
+        avg_us(snapshot.audio_tx_send_ns, snapshot.audio_tx_send_count),
+        ns_to_us(snapshot.audio_tx_send_max_ns),
+        snapshot.audio_tx_pacing_skip_count,
+        snapshot.audio_tx_pacing_active_max,
+        snapshot.audio_tx_pacing_divisor_max,
+        snapshot.audio_tx_shared_due_count,
+        snapshot.audio_tx_shared_sent_count,
+        snapshot.audio_tx_shared_skip_count,
+        snapshot.audio_tx_shared_fail_count,
+        snapshot.audio_tx_shared_active_max,
+        snapshot.audio_tx_shared_batch_max,
     )
 }
 
@@ -248,6 +337,81 @@ pub fn record_port_release(duration: Duration) {
     );
 }
 
+pub fn record_audio_tx_task_started(initial_delay: Duration) {
+    if enabled() {
+        AUDIO_TX_TASK_START_COUNT.fetch_add(1, Ordering::Relaxed);
+        let ns = ns(initial_delay);
+        AUDIO_TX_START_PHASE_NS.fetch_add(ns, Ordering::Relaxed);
+        update_max(&AUDIO_TX_START_PHASE_MAX_NS, ns);
+    }
+}
+
+pub fn record_audio_tx_tick_gap(duration: Duration) {
+    record_duration(
+        &AUDIO_TX_TICK_GAP_COUNT,
+        &AUDIO_TX_TICK_GAP_NS,
+        &AUDIO_TX_TICK_GAP_MAX_NS,
+        duration,
+    );
+}
+
+pub fn record_audio_tx_tick_gap_batch(count: u64, total: Duration, max: Duration) {
+    record_duration_batch(
+        &AUDIO_TX_TICK_GAP_COUNT,
+        &AUDIO_TX_TICK_GAP_NS,
+        &AUDIO_TX_TICK_GAP_MAX_NS,
+        count,
+        total,
+        max,
+    );
+}
+
+pub fn record_audio_tx_send(duration: Duration, success: bool) {
+    if enabled() {
+        AUDIO_TX_SEND_COUNT.fetch_add(1, Ordering::Relaxed);
+        if !success {
+            AUDIO_TX_SEND_FAIL.fetch_add(1, Ordering::Relaxed);
+        }
+        let ns = ns(duration);
+        AUDIO_TX_SEND_NS.fetch_add(ns, Ordering::Relaxed);
+        update_max(&AUDIO_TX_SEND_MAX_NS, ns);
+    }
+}
+
+pub fn record_audio_tx_send_batch(count: u64, failures: u64, total: Duration, max: Duration) {
+    if enabled() && count > 0 {
+        AUDIO_TX_SEND_COUNT.fetch_add(count, Ordering::Relaxed);
+        AUDIO_TX_SEND_FAIL.fetch_add(failures, Ordering::Relaxed);
+        AUDIO_TX_SEND_NS.fetch_add(ns(total), Ordering::Relaxed);
+        update_max(&AUDIO_TX_SEND_MAX_NS, ns(max));
+    }
+}
+
+pub fn record_audio_tx_pacing_batch(skips: u64, active_max: u64, divisor_max: u64) {
+    if skips > 0 {
+        AUDIO_TX_PACING_SKIP_COUNT.fetch_add(skips, Ordering::Relaxed);
+    }
+    update_max(&AUDIO_TX_PACING_ACTIVE_MAX, active_max);
+    update_max(&AUDIO_TX_PACING_DIVISOR_MAX, divisor_max);
+}
+
+pub fn record_audio_tx_shared_batch(
+    due_count: u64,
+    sent_count: u64,
+    skip_count: u64,
+    fail_count: u64,
+    active_count: u64,
+) {
+    if due_count > 0 {
+        AUDIO_TX_SHARED_DUE_COUNT.fetch_add(due_count, Ordering::Relaxed);
+        AUDIO_TX_SHARED_SENT_COUNT.fetch_add(sent_count, Ordering::Relaxed);
+        AUDIO_TX_SHARED_SKIP_COUNT.fetch_add(skip_count, Ordering::Relaxed);
+        AUDIO_TX_SHARED_FAIL_COUNT.fetch_add(fail_count, Ordering::Relaxed);
+    }
+    update_max(&AUDIO_TX_SHARED_ACTIVE_MAX, active_count);
+    update_max(&AUDIO_TX_SHARED_BATCH_MAX, due_count);
+}
+
 fn record_media_start_finish(duration: Duration, success: bool) {
     if enabled() {
         if success {
@@ -273,6 +437,21 @@ fn record_duration(
         count.fetch_add(1, Ordering::Relaxed);
         total_ns.fetch_add(ns, Ordering::Relaxed);
         update_max(max_ns, ns);
+    }
+}
+
+fn record_duration_batch(
+    count: &AtomicU64,
+    total_ns: &AtomicU64,
+    max_ns: &AtomicU64,
+    increment: u64,
+    total: Duration,
+    max: Duration,
+) {
+    if enabled() && increment > 0 {
+        count.fetch_add(increment, Ordering::Relaxed);
+        total_ns.fetch_add(ns(total), Ordering::Relaxed);
+        update_max(max_ns, ns(max));
     }
 }
 
@@ -302,7 +481,7 @@ fn ns(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
-fn all_counters() -> [&'static AtomicU64; 24] {
+fn all_counters() -> [&'static AtomicU64; 43] {
     [
         &MEDIA_START_TOTAL,
         &MEDIA_START_DONE,
@@ -328,6 +507,25 @@ fn all_counters() -> [&'static AtomicU64; 24] {
         &PORT_RELEASE_COUNT,
         &PORT_RELEASE_NS,
         &PORT_RELEASE_MAX_NS,
+        &AUDIO_TX_TASK_START_COUNT,
+        &AUDIO_TX_START_PHASE_NS,
+        &AUDIO_TX_START_PHASE_MAX_NS,
+        &AUDIO_TX_TICK_GAP_COUNT,
+        &AUDIO_TX_TICK_GAP_NS,
+        &AUDIO_TX_TICK_GAP_MAX_NS,
+        &AUDIO_TX_SEND_COUNT,
+        &AUDIO_TX_SEND_FAIL,
+        &AUDIO_TX_SEND_NS,
+        &AUDIO_TX_SEND_MAX_NS,
+        &AUDIO_TX_PACING_SKIP_COUNT,
+        &AUDIO_TX_PACING_ACTIVE_MAX,
+        &AUDIO_TX_PACING_DIVISOR_MAX,
+        &AUDIO_TX_SHARED_DUE_COUNT,
+        &AUDIO_TX_SHARED_SENT_COUNT,
+        &AUDIO_TX_SHARED_SKIP_COUNT,
+        &AUDIO_TX_SHARED_FAIL_COUNT,
+        &AUDIO_TX_SHARED_ACTIVE_MAX,
+        &AUDIO_TX_SHARED_BATCH_MAX,
     ]
 }
 
@@ -347,15 +545,30 @@ mod tests {
         record_rtp_event_handler_spawn(Duration::from_micros(2));
         record_stop_media(Duration::from_micros(30));
         record_port_release(Duration::from_micros(3));
+        record_audio_tx_task_started(Duration::from_micros(4));
+        record_audio_tx_tick_gap(Duration::from_millis(20));
+        record_audio_tx_send(Duration::from_micros(5), true);
+        record_audio_tx_pacing_batch(7, 11, 3);
+        record_audio_tx_shared_batch(13, 10, 2, 1, 17);
         guard.finish_success();
 
         let snapshot = snapshot();
         assert_eq!(snapshot.media_start_total, 1);
         assert_eq!(snapshot.media_start_done, 1);
         assert_eq!(snapshot.rtp_session_new_count, 1);
+        assert_eq!(snapshot.audio_tx_task_start_count, 1);
+        assert_eq!(snapshot.audio_tx_send_count, 1);
+        assert_eq!(snapshot.audio_tx_pacing_skip_count, 7);
+        assert_eq!(snapshot.audio_tx_pacing_active_max, 11);
+        assert_eq!(snapshot.audio_tx_shared_due_count, 13);
+        assert_eq!(snapshot.audio_tx_shared_sent_count, 10);
+        assert_eq!(snapshot.audio_tx_shared_active_max, 17);
         let summary = format_summary(&snapshot);
         assert!(summary.contains("start_total=1"));
         assert!(summary.contains("rtp_session_new=1"));
         assert!(summary.contains("port_release=1"));
+        assert!(summary.contains("audio_tx_starts=1"));
+        assert!(summary.contains("audio_tx_pacing_skips=7"));
+        assert!(summary.contains("audio_tx_shared_due=13"));
     }
 }

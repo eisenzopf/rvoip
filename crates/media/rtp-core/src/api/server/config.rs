@@ -5,6 +5,8 @@
 use crate::api::common::extension::ExtensionFormat;
 use crate::api::server::security::ServerSecurityConfig;
 use crate::buffer::{BufferLimits, TransmitBufferConfig};
+use crate::session::RtpSessionBufferConfig;
+use crate::transport::RtpTransportBufferConfig;
 use std::net::SocketAddr;
 
 /// Server configuration
@@ -44,6 +46,12 @@ pub struct ServerConfig {
     pub buffer_limits: BufferLimits,
     /// Enable high-performance buffers
     pub high_performance_buffers_enabled: bool,
+    /// RTP session queue sizing for per-client sessions.
+    pub rtp_session_buffer_config: RtpSessionBufferConfig,
+    /// RTP transport event and receive buffer sizing for the main server transport.
+    pub rtp_transport_buffer_config: RtpTransportBufferConfig,
+    /// Server frame broadcast channel capacity.
+    pub frame_channel_capacity: usize,
 }
 
 /// Builder for ServerConfig
@@ -79,6 +87,9 @@ impl ServerConfigBuilder {
                     max_memory: 100 * 1024 * 1024, // 100 MB default for server (more than client)
                 },
                 high_performance_buffers_enabled: false,
+                rtp_session_buffer_config: RtpSessionBufferConfig::default(),
+                rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
+                frame_channel_capacity: 16,
             },
         }
     }
@@ -204,6 +215,24 @@ impl ServerConfigBuilder {
         self
     }
 
+    /// Set RTP session queue sizing.
+    pub fn rtp_session_buffer_config(mut self, config: RtpSessionBufferConfig) -> Self {
+        self.config.rtp_session_buffer_config = config;
+        self
+    }
+
+    /// Set RTP transport event and receive buffer sizing.
+    pub fn rtp_transport_buffer_config(mut self, config: RtpTransportBufferConfig) -> Self {
+        self.config.rtp_transport_buffer_config = config;
+        self
+    }
+
+    /// Set server frame broadcast channel capacity.
+    pub fn frame_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config.frame_channel_capacity = capacity;
+        self
+    }
+
     /// Build the server configuration
     pub fn build(self) -> Result<ServerConfig, crate::api::common::error::MediaTransportError> {
         // Validate configuration
@@ -214,5 +243,50 @@ impl ServerConfigBuilder {
         }
 
         Ok(self.config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_buffer_tuning_preserves_existing_server_values() {
+        let config = ServerConfigBuilder::new().build().unwrap();
+
+        assert_eq!(config.frame_channel_capacity, 16);
+        assert_eq!(
+            config.rtp_session_buffer_config,
+            RtpSessionBufferConfig::default()
+        );
+        assert_eq!(
+            config.rtp_transport_buffer_config,
+            RtpTransportBufferConfig::default()
+        );
+    }
+
+    #[test]
+    fn builder_sets_buffer_tuning() {
+        let session_buffers = RtpSessionBufferConfig {
+            sender_channel_capacity: 8,
+            receiver_channel_capacity: 4,
+            event_channel_capacity: 16,
+        };
+        let transport_buffers = RtpTransportBufferConfig {
+            event_channel_capacity: 12,
+            recv_buffer_size: 2048,
+            rtcp_recv_buffer_size: 1024,
+        };
+
+        let config = ServerConfigBuilder::new()
+            .rtp_session_buffer_config(session_buffers)
+            .rtp_transport_buffer_config(transport_buffers)
+            .frame_channel_capacity(7)
+            .build()
+            .unwrap();
+
+        assert_eq!(config.rtp_session_buffer_config, session_buffers);
+        assert_eq!(config.rtp_transport_buffer_config, transport_buffers);
+        assert_eq!(config.frame_channel_capacity, 7);
     }
 }
