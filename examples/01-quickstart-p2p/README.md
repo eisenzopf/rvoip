@@ -75,8 +75,8 @@ Set `RUST_LOG=info` (or `debug`) for stack-level tracing.
 
 ## Beta scope notes
 
-- Media is **PCMU/PCMA** only — the beta full-media codecs. Opus / G.722 / G.729
-  are post-beta and intentionally not shown here.
+- Media in this demo is **PCMU/PCMA**. G.729A/G.729AB is optional and
+  intentionally not shown here; Opus and G.722 are post-beta.
 - Transport is **UDP** on loopback. TCP and TLS are also supported; see
   [08-tls-transport](../08-tls-transport/).
 

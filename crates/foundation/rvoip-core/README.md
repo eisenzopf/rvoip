@@ -17,7 +17,7 @@ crates. SIP, WebRTC, QUIC, WebTransport, and WebSocket all sit *above*
 
 ## Status
 
-**Beta candidate** — part of the `rvoip-sip` 0.2.0-beta closure. The
+**Beta candidate** — part of the `rvoip-sip` 0.2.x beta train. The
 type surface and `Orchestrator` are stable for the SIP path; optional
 features `vcon-signing` (vCon JWS signing) and `harness`
 (ASR/TTS/DialogManager dispatch) are alpha-quality and may evolve.
@@ -39,7 +39,7 @@ along transitively.
 
 ```toml
 [dependencies]
-rvoip-core = "0.2.0"
+rvoip-core = "0.2.2"
 ```
 
 ## Examples

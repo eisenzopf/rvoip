@@ -67,6 +67,7 @@ Environment:
   BETA_PBX_API                   PBX API subset: endpoint|stream_peer|callback|all. Defaults to all.
   BETA_PBX_SCENARIO              PBX scenario subset. Defaults to all.
   BETA_PBX_PROVIDER              PBX provider subset: asterisk|freeswitch|both. Defaults to both.
+  BETA_PBX_G729_PROFILES         G.729 PBX profiles. Defaults to "g729a g729ab".
   BETA_ASTERISK_DIR              Local Asterisk checkout. Defaults to ~/Developer/asterisk.
   BETA_FREESWITCH_DIR            Local FreeSWITCH checkout. Defaults to ~/Developer/freeswitch.
   BETA_PBX_LOG_TAIL              Docker log lines captured around PBX lifecycle events. Defaults to 1000.
@@ -353,14 +354,14 @@ markdown_local_pbx_config() {
   echo "- source_dir: $source_dir"
   if [ -d "$out_dir" ]; then
     echo "- captured_files:"
-    find "$out_dir" -maxdepth 1 -type f -print | sort | while IFS= read -r file; do
+    find "$out_dir" -maxdepth 3 -type f -print | sort | while IFS= read -r file; do
       echo "  - ${file#$ARTIFACT_DIR/}"
     done
   else
     echo "- captured_files: none"
   fi
   echo
-  for file in README.md docker-compose.yml rvoip-local.env freeswitch-local.env git-rev.txt git-status.txt; do
+  for file in README.md Dockerfile docker-compose.yml docker-entrypoint.sh freeswitch-modules.conf rvoip-local.env freeswitch-local.env config/pjsip.conf config/extensions.conf config/modules.conf git-rev.txt git-status.txt; do
     if [ -f "$out_dir/$file" ]; then
       markdown_file_block "$name $file" "$out_dir/$file"
     fi
@@ -409,8 +410,9 @@ copy_local_pbx_config_evidence() {
   local dir="$2"
   local out="$ARTIFACT_DIR/environment/local-pbx/$name"
   mkdir -p "$out"
-  for file in README.md docker-compose.yml rvoip-local.env freeswitch-local.env; do
+  for file in README.md Dockerfile docker-compose.yml docker-entrypoint.sh freeswitch-modules.conf rvoip-local.env freeswitch-local.env config/pjsip.conf config/extensions.conf config/modules.conf; do
     if [ -f "$dir/$file" ]; then
+      mkdir -p "$out/$(dirname "$file")"
       redact_file "$dir/$file" "$out/$file"
     fi
   done
@@ -555,6 +557,7 @@ write_summary_gate_table_header() {
 - beta_pbx_provider: \`${BETA_PBX_PROVIDER:-both}\`
 - beta_pbx_api: \`${BETA_PBX_API:-all}\`
 - beta_pbx_scenario: \`${BETA_PBX_SCENARIO:-all}\`
+- beta_pbx_g729_profiles: \`${BETA_PBX_G729_PROFILES:-g729a g729ab}\`
 - beta_run_local_pbx: \`${BETA_RUN_LOCAL_PBX:-0}\`
 - beta_run_sipp: \`${BETA_RUN_SIPP:-1}\`
 - beta_sipp_diagnostics: \`${BETA_SIPP_DIAGNOSTICS:-0}\`
@@ -700,6 +703,7 @@ run_local_pbx_gate() {
   local freeswitch_dir="${BETA_FREESWITCH_DIR:-$HOME/Developer/freeswitch}"
   local pbx_api="${BETA_PBX_API:-all}"
   local pbx_scenario="${BETA_PBX_SCENARIO:-all}"
+  local pbx_g729_profiles="${BETA_PBX_G729_PROFILES:-g729a g729ab}"
   local pbx_output_root="$ARTIFACT_DIR/pbx"
   local restore="${BETA_RESTORE_LOCAL_PBX:-1}"
   local initially_asterisk=0
@@ -746,6 +750,7 @@ run_local_pbx_gate() {
       run_gate "local Asterisk PBX matrix" \
         env PBX_OUT_ROOT="$pbx_output_root" \
         PBX_REPORT_APPEND=1 \
+        PBX_G729_PROFILES="$pbx_g729_profiles" \
         "$CRATE_DIR/examples/pbx/run.sh" \
         --pbx asterisk --api "$pbx_api" --scenario "$pbx_scenario" || true
       capture_docker_snapshot after-asterisk-matrix
@@ -761,6 +766,7 @@ run_local_pbx_gate() {
       run_gate "local FreeSWITCH PBX matrix" \
         env PBX_OUT_ROOT="$pbx_output_root" \
         PBX_REPORT_APPEND=1 \
+        PBX_G729_PROFILES="$pbx_g729_profiles" \
         "$CRATE_DIR/examples/pbx/run.sh" \
         --pbx freeswitch --api "$pbx_api" --scenario "$pbx_scenario" || true
       capture_docker_snapshot after-freeswitch-matrix
@@ -1012,7 +1018,9 @@ run_interop_gates() {
   if [ "${BETA_RUN_LOCAL_PBX:-0}" = "1" ]; then
     run_local_pbx_gate
   elif [ "${BETA_RUN_PBX:-0}" = "1" ]; then
-    run_gate "PBX interop matrix" "$CRATE_DIR/examples/pbx/run.sh" --pbx both --api all --scenario all
+    run_gate "PBX interop matrix" \
+      env PBX_G729_PROFILES="${BETA_PBX_G729_PROFILES:-g729a g729ab}" \
+      "$CRATE_DIR/examples/pbx/run.sh" --pbx both --api all --scenario all
   else
     skip_gate "PBX interop matrix" "Set BETA_RUN_LOCAL_PBX=1 for ~/Developer PBX lifecycle management, or BETA_RUN_PBX=1 after starting PBX containers yourself."
   fi

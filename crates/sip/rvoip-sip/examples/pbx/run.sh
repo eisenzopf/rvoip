@@ -25,6 +25,8 @@ TRANSPORT_ARG=${PBX_TRANSPORT_FILTER:-all}
 REPEAT_COUNT=${PBX_REPEAT:-1}
 PBX_REUSE_TLS_CERT=${PBX_REUSE_TLS_CERT:-1}
 PBX_RUN_WITH_CARGO=${PBX_RUN_WITH_CARGO:-0}
+PBX_CARGO_FEATURES=${PBX_CARGO_FEATURES:-dev-insecure-tls,g729}
+PBX_G729_PROFILES="${PBX_G729_PROFILES:-g729a g729ab}"
 PBX_TLS_PREWARM=${PBX_TLS_PREWARM:-1}
 if [ "${PBX_DIAG:-0}" = "1" ]; then
   STOP_ON_FAIL=${PBX_STOP_ON_FAIL:-0}
@@ -62,7 +64,7 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --help|-h)
-      echo "Usage: $0 [--pbx asterisk|freeswitch|both] [--api endpoint|stream_peer|callback|all] [--scenario registration|basic_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all] [--transport UDP|TLS|all] [--repeat N] [--stop-on-fail 0|1]"
+      echo "Usage: $0 [--pbx asterisk|freeswitch|both] [--api endpoint|stream_peer|callback|all] [--scenario registration|basic_call|g729_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all] [--transport UDP|TLS|all] [--repeat N] [--stop-on-fail 0|1]"
       exit 0
       ;;
     *)
@@ -149,6 +151,8 @@ write_run_environment() {
     echo "- pbx_reuse_tls_cert: $PBX_REUSE_TLS_CERT"
     echo "- pbx_tls_prewarm: $PBX_TLS_PREWARM"
     echo "- pbx_run_with_cargo: $PBX_RUN_WITH_CARGO"
+    echo "- pbx_cargo_features: $PBX_CARGO_FEATURES"
+    echo "- pbx_g729_profiles: $PBX_G729_PROFILES"
     echo "- example_bin_dir: $EXAMPLE_BIN_DIR"
     echo "- git_rev: $(git -C "$WORKSPACE_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
     echo "- rustc: $(rustc --version 2>/dev/null || echo unknown)"
@@ -280,8 +284,9 @@ api_examples() {
 
 scenario_list() {
   case "$SCENARIO_ARG" in
-    all) printf '%s\n' registration basic_call hold_resume ring_cancel dtmf reject blind_transfer ;;
+    all) printf '%s\n' registration basic_call g729_call hold_resume ring_cancel dtmf reject blind_transfer ;;
     basic|basic_call|call) printf '%s\n' basic_call ;;
+    g729|g729_call|g729ab|g729ab_call) printf '%s\n' g729_call ;;
     hold|hold_resume) printf '%s\n' hold_resume ;;
     ring|ring_cancel) printf '%s\n' ring_cancel ;;
     blind_transfer|transfer) printf '%s\n' blind_transfer ;;
@@ -350,6 +355,28 @@ transport_selected() {
   esac
 }
 
+codec_profile_for_scenario() {
+  scenario=$1
+  if [ -n "${PBX_CODEC_PROFILE:-}" ]; then
+    printf '%s\n' "$PBX_CODEC_PROFILE"
+    return
+  fi
+  case "$scenario" in
+    g729_call) printf '%s\n' g729ab ;;
+    *) printf '%s\n' default ;;
+  esac
+}
+
+g729_profile_list() {
+  if [ -n "${PBX_CODEC_PROFILE:-}" ]; then
+    printf '%s\n' "$PBX_CODEC_PROFILE"
+    return
+  fi
+  for profile in $PBX_G729_PROFILES; do
+    printf '%s\n' "$profile"
+  done
+}
+
 truthy() {
   case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
     1|true|yes|on) return 0 ;;
@@ -364,7 +391,7 @@ example_binary() {
 example_command_label() {
   example=$1
   if truthy "$PBX_RUN_WITH_CARGO"; then
-    printf 'cargo run -p rvoip-sip --features dev-insecure-tls --example %s --quiet\n' "$example"
+    printf 'cargo run -p rvoip-sip --features %s --example %s --quiet\n' "$PBX_CARGO_FEATURES" "$example"
   else
     example_binary "$example"
   fi
@@ -373,7 +400,7 @@ example_command_label() {
 run_example_command() {
   example=$1
   if truthy "$PBX_RUN_WITH_CARGO"; then
-    cargo run -p rvoip-sip --features dev-insecure-tls --example "$example" --quiet
+    cargo run -p rvoip-sip --features "$PBX_CARGO_FEATURES" --example "$example" --quiet
     return $?
   fi
   bin=$(example_binary "$example")
@@ -603,6 +630,7 @@ run_one() {
   out_dir=$6
   log=$7
   api_label=$(example_label "$example")
+  codec_profile=$(codec_profile_for_scenario "$scenario")
   started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   start_epoch=$(date +%s)
   status_label=PASS
@@ -616,6 +644,7 @@ run_one() {
     echo "- scenario: $scenario"
     echo "- transport: $transport"
     echo "- role: $role"
+    echo "- codec_profile: $codec_profile"
     echo "- started_at_utc: $started_at"
     echo "- output_dir: $out_dir"
     echo "- log: $log"
@@ -623,7 +652,7 @@ run_one() {
     echo "## Command"
     echo
     echo '```sh'
-    echo "PBX_PROVIDER=$provider PBX_SCENARIO=$scenario PBX_TRANSPORT=$transport SIP_TRANSPORT=$transport PBX_ROLE=$role AUDIO_OUTPUT_DIR=$out_dir $(example_command_label "$example")"
+    echo "PBX_PROVIDER=$provider PBX_SCENARIO=$scenario PBX_TRANSPORT=$transport SIP_TRANSPORT=$transport PBX_ROLE=$role PBX_CODEC_PROFILE=$codec_profile AUDIO_OUTPUT_DIR=$out_dir $(example_command_label "$example")"
     echo '```'
     echo
     echo "## Redacted Environment"
@@ -639,9 +668,10 @@ run_one() {
     echo "scenario: $scenario"
     echo "transport: $transport"
     echo "role: $role"
+    echo "codec_profile: $codec_profile"
     echo "started_at_utc: $started_at"
     echo
-    echo "+ PBX_PROVIDER=$provider PBX_SCENARIO=$scenario PBX_TRANSPORT=$transport SIP_TRANSPORT=$transport PBX_ROLE=$role AUDIO_OUTPUT_DIR=$out_dir $(example_command_label "$example")"
+    echo "+ PBX_PROVIDER=$provider PBX_SCENARIO=$scenario PBX_TRANSPORT=$transport SIP_TRANSPORT=$transport PBX_ROLE=$role PBX_CODEC_PROFILE=$codec_profile AUDIO_OUTPUT_DIR=$out_dir $(example_command_label "$example")"
   } >"$log"
 
   set +e
@@ -652,6 +682,7 @@ run_one() {
     export PBX_TRANSPORT="$transport"
     export SIP_TRANSPORT="$transport"
     export PBX_ROLE="$role"
+    export PBX_CODEC_PROFILE="$codec_profile"
     export AUDIO_OUTPUT_DIR="$out_dir"
     run_example_command "$example"
   ) >>"$log" 2>&1
@@ -879,6 +910,7 @@ run_analyze() {
   scenario=$2
   transport=$3
   out_dir=$4
+  codec_profile=$(codec_profile_for_scenario "$scenario")
   log="$out_dir/analyze.log"
   started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   start_epoch=$(date +%s)
@@ -889,9 +921,10 @@ run_analyze() {
     echo "scenario: $scenario"
     echo "transport: $transport"
     echo "role: analyze"
+    echo "codec_profile: $codec_profile"
     echo "started_at_utc: $started_at"
     echo
-    echo "+ PBX_PROVIDER=$provider PBX_SCENARIO=$scenario PBX_TRANSPORT=$transport SIP_TRANSPORT=$transport AUDIO_OUTPUT_DIR=$out_dir $(example_command_label pbx_analyze)"
+    echo "+ PBX_PROVIDER=$provider PBX_SCENARIO=$scenario PBX_TRANSPORT=$transport SIP_TRANSPORT=$transport PBX_CODEC_PROFILE=$codec_profile AUDIO_OUTPUT_DIR=$out_dir $(example_command_label pbx_analyze)"
   } >"$log"
   set +e
   (
@@ -900,6 +933,7 @@ run_analyze() {
     export PBX_SCENARIO="$scenario"
     export PBX_TRANSPORT="$transport"
     export SIP_TRANSPORT="$transport"
+    export PBX_CODEC_PROFILE="$codec_profile"
     export AUDIO_OUTPUT_DIR="$out_dir"
     run_example_command pbx_analyze
   ) >>"$log" 2>&1
@@ -958,7 +992,12 @@ run_two_party() {
   scenario=$3
   transport=$4
   api_label=$(example_label "$example")
-  out_dir="$OUT_ROOT/$provider/$api_label/$scenario/$transport"
+  codec_profile=$(codec_profile_for_scenario "$scenario")
+  if [ "$scenario" = "g729_call" ]; then
+    out_dir="$OUT_ROOT/$provider/$api_label/$scenario/$codec_profile/$transport"
+  else
+    out_dir="$OUT_ROOT/$provider/$api_label/$scenario/$transport"
+  fi
   out_dir=$(iteration_out_dir "$out_dir")
   rm -rf "$out_dir"
   mkdir -p "$out_dir"
@@ -969,7 +1008,7 @@ run_two_party() {
 
   rc=0
   case "$scenario" in
-    basic_call|hold_resume|dtmf|reject)
+    basic_call|g729_call|hold_resume|dtmf|reject)
       start_one "$provider" "$example" "$scenario" "$transport" callee "$out_dir" "$out_dir/callee.log"
       pid_a=$LAST_PID
       wait_for_log "$out_dir/callee.log" "Registered." "$pid_a" "$scenario-callee" || rc=$?
@@ -996,7 +1035,7 @@ run_two_party() {
   esac
 
   case "$scenario" in
-    hold_resume|dtmf)
+    basic_call|g729_call|hold_resume|dtmf)
       if [ "$rc" -eq 0 ]; then
         run_analyze "$provider" "$scenario" "$transport" "$out_dir" || rc=$?
       fi
@@ -1068,6 +1107,30 @@ run_matrix_cell() {
         run_two_party "$provider" "$example" basic_call TLS || rc=$?
       fi
       ;;
+    g729_call)
+      old_profile_set=0
+      old_profile=""
+      if [ "${PBX_CODEC_PROFILE+x}" = "x" ]; then
+        old_profile_set=1
+        old_profile=$PBX_CODEC_PROFILE
+      fi
+      for profile in $(g729_profile_list); do
+        export PBX_CODEC_PROFILE="$profile"
+        if transport_selected UDP; then
+          run_two_party "$provider" "$example" g729_call UDP || rc=$?
+        elif transport_selected TLS; then
+          run_two_party "$provider" "$example" g729_call TLS || rc=$?
+        fi
+        if [ "$rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then
+          break
+        fi
+      done
+      if [ "$old_profile_set" = "1" ]; then
+        export PBX_CODEC_PROFILE="$old_profile"
+      else
+        unset PBX_CODEC_PROFILE
+      fi
+      ;;
     hold_resume|ring_cancel|dtmf|reject)
       if transport_selected UDP; then
         run_two_party "$provider" "$example" "$scenario" UDP || rc=$?
@@ -1101,7 +1164,7 @@ resolve_example_bin_dir
 init_report
 echo "Building unified PBX examples..."
 echo "PBX output root: $OUT_ROOT"
-cargo build -p rvoip-sip --features dev-insecure-tls \
+cargo build -p rvoip-sip --features "$PBX_CARGO_FEATURES" \
   --example pbx_endpoint \
   --example pbx_stream_peer \
   --example pbx_callback_builder \

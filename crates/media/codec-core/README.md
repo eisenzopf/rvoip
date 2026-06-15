@@ -4,17 +4,17 @@
 [![Documentation](https://docs.rs/rvoip-codec-core/badge.svg)](https://docs.rs/rvoip-codec-core)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/eisenzopf/rvoip)
 
-G.711 (μ-law / A-law) audio codec implementation for
+G.711 (μ-law / A-law) and optional G.729A/G.729AB audio codec implementation for
 [rvoip](https://github.com/eisenzopf/rvoip). Pulled in transitively by
 `rvoip-media-core` to provide the baseline narrow-band codec every
 beta-tier SIP profile requires (RFC 3551).
 
 ## Status
 
-**Beta candidate** — part of the `rvoip-sip` 0.2.0-beta closure. The
-G.711 implementation is RFC-compliant and table-driven; broader codec
-support (Opus, G.722, G.729) is post-beta and lives in
-`rvoip-media-core` behind optional features.
+**Beta candidate** — part of the `rvoip-sip` 0.2.x beta train. The
+G.711 implementation is RFC-compliant and table-driven. G.729 support is
+available behind the `g729` feature as Annex A speech plus optional Annex B
+VAD/DTX/CNG; full-complexity base G.729 is not implemented.
 
 ## Install
 
@@ -25,7 +25,7 @@ isolation:
 
 ```toml
 [dependencies]
-rvoip-codec-core = "0.2.0"
+rvoip-codec-core = "0.2.2"
 ```
 
 ## License

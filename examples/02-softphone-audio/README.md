@@ -75,8 +75,9 @@ Each side uses a distinct media port range (caller `17200-17249`, callee
 
 ## Beta scope notes
 
-- Media is **PCMU (G.711 µ-law)**, the beta full-media codec; PCMA is also
-  supported. **Opus / G.722 / G.729 are post-beta** and not used here.
+- Media is **PCMU (G.711 µ-law)**, the default beta full-media codec; PCMA is
+  also supported. G.729A/G.729AB is optional and not used here; Opus and G.722
+  are post-beta.
 - This is a headless tone exchange so it runs in CI. Real device capture/playback
   lives in the in-crate `sip_client` example.
 

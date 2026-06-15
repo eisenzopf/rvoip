@@ -53,6 +53,8 @@ The beta gate writes audit evidence under `BETA_GATE_ARTIFACT_DIR` or
 - `pbx/<provider>/<api>/<scenario>/<transport>/`: raw command logs,
   per-cell metadata, WAV/media artifacts, analyzer logs, and generated TLS
   listener cert paths where used.
+- `pbx/<provider>/<api>/g729_call/<profile>/<transport>/`: G.729A/G.729AB
+  profile-specific logs, WAVs, and analyzer evidence.
 
 ## SIPp Matrix
 
@@ -79,8 +81,9 @@ Run the same functional suite through `Endpoint`, `StreamPeer`, and
 | Scenario | Required for beta |
 |----------|-------------------|
 | UDP registration/unregistration | Yes |
-| UDP outbound call | Yes |
+| UDP outbound call | Yes; G.711 PCMU/PCMA baseline with bidirectional tone audio verification |
 | UDP inbound call | Yes |
+| UDP G.729A/G.729AB call | Yes where PBX has G.729 enabled; both profiles must include bidirectional tone audio verification |
 | TLS registration/call | Yes where test cert setup is available |
 | Digest auth | Yes |
 | CANCEL | Yes |
@@ -96,6 +99,12 @@ Run the same functional suite through `Endpoint`, `StreamPeer`, and
 
 Mirror the Asterisk matrix where feasible. Any peer-specific difference must
 be recorded in `COMPATIBILITY_MATRIX.md` with packet capture or log evidence.
+The G.729 row uses the shared `g729_call` scenario. By default the PBX runner
+expands it into `PBX_CODEC_PROFILE=g729a` and `PBX_CODEC_PROFILE=g729ab`, so
+the beta gate attests G.729A (`annexb=no`) and G.729AB (`annexb=yes`) against
+both Asterisk and FreeSWITCH. The G.711 baseline remains the analyzer-enforced
+`basic_call` scenario. Override `BETA_PBX_G729_PROFILES` only for targeted
+reruns.
 
 ## Result Artifacts
 

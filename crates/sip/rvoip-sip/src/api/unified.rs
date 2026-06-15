@@ -653,15 +653,25 @@ pub struct Config {
     /// preserves the established beta media profile.
     ///
     /// Beta validation intentionally rejects audio payload types that
-    /// media-core cannot encode/decode end to end. Today that means the
-    /// advertised full-media set is limited to PCMU (`0`), PCMA (`8`),
-    /// telephone-event (`101`), and comfort noise (`13`) when
-    /// `comfort_noise_enabled = true`. Opus (`111`), G.722 (`9`), and G.729
-    /// (`18`) remain post-beta or signaling-only experiments until media-core
-    /// support is wired through and covered by interop/perf tests.
+    /// media-core cannot encode/decode end to end. The advertised full-media
+    /// set is limited to PCMU (`0`), PCMA (`8`), telephone-event (`101`),
+    /// comfort noise (`13`) when `comfort_noise_enabled = true`, and G.729
+    /// (`18`) when the `g729` feature is enabled. Opus (`111`) and G.722 (`9`)
+    /// remain post-beta or signaling-only experiments until media-core support
+    /// is wired through and covered by interop/perf tests.
     ///
     /// Default: `vec![0, 8, 101]`.
     pub offered_codecs: Vec<u8>,
+
+    /// G.729 Annex B VAD/DTX/CNG SDP preference for payload type 18.
+    ///
+    /// When PT 18 is present in [`Config::offered_codecs`] and the `g729`
+    /// feature is enabled, outgoing offers carry `a=fmtp:18 annexb=yes` when
+    /// this is `true` and `a=fmtp:18 annexb=no` when this is `false`. Answers
+    /// disable Annex B if either side advertises `annexb=no`.
+    ///
+    /// Default: `true` (G.729A speech plus Annex B).
+    pub g729_annex_b: bool,
 
     /// Capacity for the legacy incoming-call compatibility channel.
     ///
@@ -1052,6 +1062,7 @@ impl Config {
             comfort_noise_enabled: false,
             strict_codec_matching: true,
             offered_codecs: vec![0, 8, 101],
+            g729_annex_b: true,
             incoming_call_channel_capacity: 1000,
             state_event_channel_capacity: 1000,
             sip_transport_channel_capacity: 10_000,
@@ -1159,6 +1170,7 @@ impl Config {
             comfort_noise_enabled: false,
             strict_codec_matching: true,
             offered_codecs: vec![0, 8, 101],
+            g729_annex_b: true,
             incoming_call_channel_capacity: 1000,
             state_event_channel_capacity: 1000,
             sip_transport_channel_capacity: 10_000,
@@ -1406,6 +1418,16 @@ impl Config {
     /// ```
     pub fn with_srtp_suite_policy(mut self, policy: SrtpSuitePolicy) -> Self {
         self.srtp_offered_suites = policy.suites();
+        self
+    }
+
+    /// Set the G.729 Annex B SDP preference used when PT 18 is advertised.
+    ///
+    /// `true` emits `a=fmtp:18 annexb=yes` for G.729A plus Annex B
+    /// VAD/DTX/CNG. `false` emits `a=fmtp:18 annexb=no` for G.729A speech
+    /// only.
+    pub fn with_g729_annex_b(mut self, enabled: bool) -> Self {
+        self.g729_annex_b = enabled;
         self
     }
 
@@ -2573,6 +2595,11 @@ fn validate_beta_media_codecs(offered_codecs: &[u8], comfort_noise_enabled: bool
         ));
     }
 
+    let supported_payloads = if cfg!(feature = "g729") {
+        "0, 8, 18, 101, and 13 when comfort_noise_enabled=true"
+    } else {
+        "0, 8, 101, and 13 when comfort_noise_enabled=true"
+    };
     let mut has_audio = false;
     let mut seen = std::collections::BTreeSet::new();
     for &pt in offered_codecs {
@@ -2585,6 +2612,18 @@ fn validate_beta_media_codecs(offered_codecs: &[u8], comfort_noise_enabled: bool
 
         match pt {
             0 | 8 => has_audio = true,
+            18 => {
+                #[cfg(feature = "g729")]
+                {
+                    has_audio = true;
+                }
+                #[cfg(not(feature = "g729"))]
+                {
+                    return Err(SessionError::ConfigError(
+                        "payload type 18 requires the rvoip-sip `g729` feature".to_string(),
+                    ));
+                }
+            }
             101 => {}
             13 if comfort_noise_enabled => {}
             13 => {
@@ -2594,8 +2633,8 @@ fn validate_beta_media_codecs(offered_codecs: &[u8], comfort_noise_enabled: bool
             }
             unsupported => {
                 return Err(SessionError::ConfigError(format!(
-                    "payload type {} is not beta-supported for full media; supported payloads are 0, 8, 101, and 13 when comfort_noise_enabled=true",
-                    unsupported
+                    "payload type {} is not beta-supported for full media; supported payloads are {}",
+                    unsupported, supported_payloads
                 )));
             }
         }
@@ -2603,8 +2642,12 @@ fn validate_beta_media_codecs(offered_codecs: &[u8], comfort_noise_enabled: bool
 
     if !has_audio {
         return Err(SessionError::ConfigError(
-            "offered_codecs must include PCMU (0) or PCMA (8) for beta full-media support"
-                .to_string(),
+            if cfg!(feature = "g729") {
+                "offered_codecs must include PCMU (0), PCMA (8), or G.729 (18) for beta full-media support"
+            } else {
+                "offered_codecs must include PCMU (0) or PCMA (8) for beta full-media support"
+            }
+            .to_string(),
         ));
     }
 
@@ -2655,6 +2698,37 @@ mod config_tests {
         assert_eq!(
             overridden.sip_transaction_command_channel_capacity,
             Some(64)
+        );
+    }
+
+    #[test]
+    fn g729_annex_b_defaults_enabled_and_is_configurable() {
+        let config = Config::local("alice", 5060);
+        assert!(config.g729_annex_b);
+
+        let config = Config::local("alice", 5060).with_g729_annex_b(false);
+        assert!(!config.g729_annex_b);
+    }
+
+    #[cfg(feature = "g729")]
+    #[test]
+    fn g729_payload_is_valid_when_feature_enabled() {
+        let mut config = Config::local("alice", 5060);
+        config.offered_codecs = vec![18, 101];
+        config.validate().expect("g729 feature should allow PT18");
+    }
+
+    #[cfg(not(feature = "g729"))]
+    #[test]
+    fn g729_payload_requires_feature() {
+        let mut config = Config::local("alice", 5060);
+        config.offered_codecs = vec![18, 101];
+        let error = config
+            .validate()
+            .expect_err("PT18 should require the g729 feature");
+        assert!(
+            error.to_string().contains("`g729` feature"),
+            "unexpected error: {error}"
         );
     }
 
@@ -3695,6 +3769,7 @@ impl UnifiedCoordinator {
         media_adapter_inner.set_strict_codec_matching(config.strict_codec_matching);
         // NEXT_STEPS C2 — propagate the configured offered codec list.
         media_adapter_inner.set_offered_codecs(config.offered_codecs.clone());
+        media_adapter_inner.set_g729_annex_b(config.g729_annex_b);
         let media_adapter = Arc::new(media_adapter_inner);
 
         // Sprint 3 A6 — resolve the public RTP address. Static

@@ -12,7 +12,7 @@ Stateful SIP proxy primitives (RFC 3261 §16) for
 
 ## Status
 
-**Beta candidate** — part of the `rvoip-sip` 0.2.0-beta closure. The
+**Beta candidate** — part of the `rvoip-sip` 0.2.x beta train. The
 RFC 3261 §16 stateful-proxy path is covered. Forking (parallel and
 sequential) and the full failure-recovery matrix are post-beta scope.
 
@@ -25,7 +25,7 @@ you want the raw transaction-layer primitives:
 
 ```toml
 [dependencies]
-rvoip-sip-proxy = "0.2.0"
+rvoip-sip-proxy = "0.2.2"
 ```
 
 ## License

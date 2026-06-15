@@ -41,7 +41,7 @@ The RTP Core sits at the foundation of the media transport stack, providing reli
 3. **Transport Management**: UDP is the beta media transport; TCP transport is not a `rvoip-sip` beta claim
 4. **Buffer Management**: Adaptive jitter buffer and high-performance memory pooling
 5. **Statistics & Monitoring**: Comprehensive quality metrics and network analysis
-6. **Payload Formats**: Support for audio/video codecs (G.711, G.722, Opus, VP8/VP9)
+6. **Payload Formats**: RTP payload metadata and helpers for audio/video payloads, including G.711 and static G.729/PT18
 
 ### Security Architecture
 
@@ -118,7 +118,7 @@ beta, only tested SDES-SRTP/SRTP paths may be claimed.
 - ✅ Tested with 500 concurrent streams (500,000+ packets)
 
 #### **Payload Formats**
-- ✅ Audio codecs: G.711 (μ-law/A-law), G.722, Opus
+- ✅ Audio payload registry: G.711 (μ-law/A-law), static G.729/PT18, G.722, Opus
 - ✅ Video codecs: VP8, VP9 with RFC 7741/8741 compliance
 - ✅ Codec-specific timestamp handling
 - ✅ Payload type negotiation and management

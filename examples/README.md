@@ -13,8 +13,9 @@ crate in the workspace under the beta contract. Everything else in rvoip
 intentionally *not* shown here; for those, see the in-crate examples under each
 crate and the `scripts/demo-*.sh` runners at the repo root.
 
-Beta media is **PCMU/PCMA**; transports are **UDP** (interop-tested) and
-**TCP/TLS** (supported); **SDES-SRTP** (limited suites). **Opus/G.722/G.729,
+Beta media defaults to **PCMU/PCMA**; **G.729A/G.729AB** is optional and not
+exercised by these examples. Transports are **UDP** (interop-tested) and
+**TCP/TLS** (supported); **SDES-SRTP** has limited-suite support. **Opus/G.722,
 DTLS-SRTP, ICE/TURN, and WebRTC are post-beta.** The source of truth is
 [`crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md`](../crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md).
 
@@ -42,7 +43,7 @@ DTLS-SRTP, ICE/TURN, and WebRTC are post-beta.** The source of truth is
 ## Conventions
 
 - **Self-contained projects.** Each example is its own Cargo workspace and
-  depends on the local crate via `rvoip-sip = { version = "0.2.0", path =
+  depends on the local crate via `rvoip-sip = { version = "0.2.2", path =
   "../../crates/sip/rvoip-sip" }`. That builds against the live tree today and
   records the crates.io version for when you copy it into your own project
   (drop the `path`, keep the `version`).

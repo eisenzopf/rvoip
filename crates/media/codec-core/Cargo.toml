@@ -13,7 +13,7 @@ categories.workspace = true
 keywords.workspace = true
 
 # Crate-specific description
-description = "G.711 Audio Codec Implementation for RVOIP"
+description = "G.711 and optional G.729A/G.729AB audio codec implementation for RVOIP"
 
 [lib]
 name = "codec_core"
@@ -27,7 +27,6 @@ workspace = true
 # External dependencies from workspace
 thiserror.workspace = true
 tracing.workspace = true
-rvoip-g729 = { workspace = true, optional = true }
 
 # Crate-specific dependencies not in workspace
 tracing-subscriber = "0.3"   # Logging initialization
@@ -46,6 +45,6 @@ default = ["g711"]
 
 # Codec features
 g711 = []                    # G.711 μ-law/A-law codec (always available)
-g729 = ["dep:rvoip-g729"]    # G.729A/G.729AB codec
+g729 = []                    # G.729A/G.729AB codec
 opus = []                    # Opus codec (real impl in src/codecs/opus.rs)
 opus-sim = []                # Opus codec simulator variant

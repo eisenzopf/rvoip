@@ -126,6 +126,24 @@ mod tests {
         } else {
             panic!("Failed to parse G722 fmtp");
         }
+
+        // G.729 Annex B parameter. SIP negotiation code interprets this
+        // later; sip-core must preserve the parameter string exactly.
+        let g729_annex_b = "18 annexb=no";
+        if let Ok(ParsedAttribute::Fmtp(fmtp)) = parse_fmtp(g729_annex_b) {
+            assert_eq!(fmtp.format, "18");
+            assert_eq!(fmtp.parameters, "annexb=no");
+        } else {
+            panic!("Failed to parse G.729 Annex B fmtp");
+        }
+
+        let g729_annex_b_yes = "18 annexb=yes";
+        if let Ok(ParsedAttribute::Fmtp(fmtp)) = parse_fmtp(g729_annex_b_yes) {
+            assert_eq!(fmtp.format, "18");
+            assert_eq!(fmtp.parameters, "annexb=yes");
+        } else {
+            panic!("Failed to parse G.729 Annex B fmtp");
+        }
     }
 
     #[test]

@@ -22,7 +22,11 @@ use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
+#[cfg(feature = "g729")]
+use crate::codec::audio::common::AudioCodec;
 use crate::codec::audio::G711Codec;
+#[cfg(feature = "g729")]
+use crate::codec::audio::G729Codec;
 use crate::codec::mapping::CodecMapper;
 use crate::diagnostics;
 use crate::error::{Error, Result};
@@ -48,6 +52,47 @@ use rvoip_rtp_core::{
 };
 
 const RTP_SESSION_BIND_RETRIES: usize = 8;
+
+#[cfg(feature = "g729")]
+fn decode_g729_payload_to_buffer(
+    decoder: &mut G729Codec,
+    payload: &[u8],
+    output: &mut Vec<i16>,
+) -> Result<usize> {
+    const G729_SAMPLES_PER_FRAME: usize = 80;
+    const G729_SPEECH_FRAME_BYTES: usize = 10;
+    const G729_SID_FRAME_BYTES: usize = 2;
+
+    let frame_count = if payload.is_empty() || payload.len() == G729_SID_FRAME_BYTES {
+        1
+    } else if payload.len() % G729_SPEECH_FRAME_BYTES == 0 {
+        payload.len() / G729_SPEECH_FRAME_BYTES
+    } else {
+        1
+    };
+    let needed = frame_count * G729_SAMPLES_PER_FRAME;
+    if output.len() < needed {
+        output.resize(needed, 0);
+    }
+
+    if payload.is_empty()
+        || payload.len() == G729_SID_FRAME_BYTES
+        || payload.len() % G729_SPEECH_FRAME_BYTES != 0
+    {
+        let frame = decoder.decode(payload)?;
+        output[..frame.samples.len()].copy_from_slice(&frame.samples);
+        return Ok(frame.samples.len());
+    }
+
+    let mut written = 0;
+    for chunk in payload.chunks_exact(G729_SPEECH_FRAME_BYTES) {
+        let frame = decoder.decode(chunk)?;
+        let end = written + frame.samples.len();
+        output[written..end].copy_from_slice(&frame.samples);
+        written = end;
+    }
+    Ok(written)
+}
 
 /// Controller-level capacity and pool tuning.
 #[derive(Debug, Clone)]
@@ -293,6 +338,11 @@ pub struct MediaSessionController {
     /// point for SIP hold/resume and remote direction changes.
     pub(super) media_directions: Arc<DashMap<DialogId, MediaDirection>>,
 
+    /// Per-dialog G.729 encoder state. G.729 is stateful, so unlike G.711 it
+    /// cannot be safely recreated for each outbound RTP packet.
+    #[cfg(feature = "g729")]
+    pub(super) g729_tx_codecs: Arc<DashMap<DialogId, Arc<tokio::sync::Mutex<G729Codec>>>>,
+
     /// RTP session queue sizing for new sessions.
     rtp_session_buffer_config: RtpSessionBufferConfig,
 
@@ -402,6 +452,8 @@ impl MediaSessionController {
             cn_gate_state: Arc::new(DashMap::with_capacity(capacity_hint)),
             comfort_noise_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             media_directions: Arc::new(DashMap::with_capacity(capacity_hint)),
+            #[cfg(feature = "g729")]
+            g729_tx_codecs: Arc::new(DashMap::with_capacity(capacity_hint)),
             rtp_session_buffer_config,
             rtp_transport_buffer_config,
         }
@@ -717,6 +769,8 @@ impl MediaSessionController {
             cn_gate_state: Arc::new(DashMap::new()),
             comfort_noise_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             media_directions: Arc::new(DashMap::new()),
+            #[cfg(feature = "g729")]
+            g729_tx_codecs: Arc::new(DashMap::new()),
             rtp_session_buffer_config: RtpSessionBufferConfig::default(),
             rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
         })
@@ -946,6 +1000,8 @@ impl MediaSessionController {
         self.audio_frame_callbacks.remove(dialog_id);
         self.dtmf_callbacks.remove(dialog_id);
         self.cn_gate_state.remove(dialog_id);
+        #[cfg(feature = "g729")]
+        self.g729_tx_codecs.remove(dialog_id);
 
         let media_id = MediaSessionId::from_dialog(dialog_id);
         if let Some((_, session_id)) = self.media_to_session.remove(&media_id) {
@@ -1111,6 +1167,9 @@ impl MediaSessionController {
 
         // Apply codec change.
         if config.preferred_codec != old_codec {
+            #[cfg(feature = "g729")]
+            self.g729_tx_codecs.remove(&dialog_id);
+
             let new_payload_type = config
                 .preferred_codec
                 .as_ref()
@@ -1298,6 +1357,13 @@ impl MediaSessionController {
         // Create G.711 codecs outside the loop for efficiency
         let mut g711_ulaw = G711Codec::mu_law(8000, 1).expect("Failed to create μ-law codec");
         let mut g711_alaw = G711Codec::a_law(8000, 1).expect("Failed to create A-law codec");
+        #[cfg(feature = "g729")]
+        let mut g729_decoder = G729Codec::new(
+            crate::types::SampleRate::Rate8000,
+            1,
+            crate::codec::audio::G729Config::default(),
+        )
+        .expect("Failed to create G.729 decoder");
         let mut decode_buffer = vec![0i16; 160];
         let skip_audio_frame_delivery = perf_skip_audio_frame_delivery();
         let collect_audio_quality = diagnostics::audio_quality_enabled();
@@ -1436,6 +1502,23 @@ impl MediaSessionController {
                                             Err(e) => {
                                                 warn!(
                                                     "Failed to decode PCMA for dialog {}: {}",
+                                                    dialog_id, e
+                                                );
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    #[cfg(feature = "g729")]
+                                    18 => {
+                                        match decode_g729_payload_to_buffer(
+                                            &mut g729_decoder,
+                                            &packet.payload,
+                                            &mut decode_buffer,
+                                        ) {
+                                            Ok(samples) => samples,
+                                            Err(e) => {
+                                                warn!(
+                                                    "Failed to decode G.729 for dialog {}: {}",
                                                     dialog_id, e
                                                 );
                                                 continue;

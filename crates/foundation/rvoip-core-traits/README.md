@@ -17,7 +17,7 @@ crates as optional deps.
 
 ## Status
 
-**Beta candidate** — part of the `rvoip-sip` 0.2.0-beta closure. Trait
+**Beta candidate** — part of the `rvoip-sip` 0.2.x beta train. Trait
 signatures are stable; new traits may be added but existing ones
 won't change shape without a 0.3 bump.
 
@@ -29,7 +29,7 @@ implementing your own adapter and want only the trait surface:
 
 ```toml
 [dependencies]
-rvoip-core-traits = "0.2.0"
+rvoip-core-traits = "0.2.2"
 ```
 
 ## License

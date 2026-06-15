@@ -132,8 +132,13 @@ impl CodecMapper {
         // Register standard static payload types (RFC 3551)
         mapper.register_static_codec("PCMU", static_types::PCMU, 8000);
         mapper.register_static_codec("PCMA", static_types::PCMA, 8000);
-        // Note: G729 is commented out since we don't support it per user requirements
-        // mapper.register_static_codec("G729", static_types::G729, 8000);
+        #[cfg(feature = "g729")]
+        {
+            mapper.register_static_codec("G729", static_types::G729, 8000);
+            mapper.register_static_codec_alias("G729A", static_types::G729, 8000);
+            mapper.register_static_codec_alias("G729BA", static_types::G729, 8000);
+            mapper.register_static_codec_alias("G729AB", static_types::G729, 8000);
+        }
 
         // NOTE: Dynamic codecs like Opus should NOT be pre-registered with hardcoded payload types!
         // They must be registered with the actual negotiated payload type from SDP.
@@ -157,6 +162,19 @@ impl CodecMapper {
 
         debug!(
             "Registered static codec: {} -> PT:{} @ {}Hz",
+            name, payload_type, clock_rate
+        );
+    }
+
+    /// Register an alternate codec name for an already-canonical static payload type.
+    fn register_static_codec_alias(&mut self, name: &str, payload_type: u8, clock_rate: u32) {
+        let name_string = name.to_string();
+        self.name_to_payload
+            .insert(name_string.clone(), payload_type);
+        self.codec_clock_rates.insert(name_string, clock_rate);
+
+        debug!(
+            "Registered static codec alias: {} -> PT:{} @ {}Hz",
             name, payload_type, clock_rate
         );
     }
@@ -435,7 +453,12 @@ impl CodecMapper {
 
     /// Clear all dynamic codec registrations (keeps static ones)
     pub fn clear_dynamic_codecs(&mut self) {
-        let static_payload_types = [static_types::PCMU, static_types::PCMA]; // Only supported static types
+        let static_payload_types = [
+            static_types::PCMU,
+            static_types::PCMA,
+            #[cfg(feature = "g729")]
+            static_types::G729,
+        ];
 
         // Collect codecs to remove (those not using static payload types)
         let codecs_to_remove: Vec<String> = self
@@ -529,7 +552,15 @@ mod tests {
         );
         assert_eq!(mapper.get_clock_rate("PCMA"), 8000);
 
-        // Note: G729 test removed since we don't support it per user requirements
+        #[cfg(feature = "g729")]
+        {
+            assert_eq!(mapper.codec_to_payload("G729"), Some(static_types::G729));
+            assert_eq!(
+                mapper.payload_to_codec(static_types::G729),
+                Some("G729".to_string())
+            );
+            assert_eq!(mapper.get_clock_rate("G729"), 8000);
+        }
     }
 
     #[test]
@@ -775,6 +806,21 @@ mod tests {
         assert_eq!(opus_cap.clock_rate, 48000);
         assert!(!opus_cap.is_static);
         assert_eq!(opus_cap.opus_config, Some(opus_config));
+    }
+
+    #[cfg(feature = "g729")]
+    #[test]
+    fn test_g729_profile_aliases_resolve_to_static_payload_type() {
+        let mapper = CodecMapper::new();
+
+        for alias in ["G729", "G729A", "G729BA", "G729AB"] {
+            assert_eq!(mapper.codec_to_payload(alias), Some(static_types::G729));
+            assert_eq!(mapper.get_clock_rate(alias), 8000);
+        }
+        assert_eq!(
+            mapper.payload_to_codec(static_types::G729),
+            Some("G729".to_string())
+        );
     }
 
     #[test]

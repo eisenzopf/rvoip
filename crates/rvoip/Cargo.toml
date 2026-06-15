@@ -64,6 +64,9 @@ sip      = ["dep:rvoip-sip"]
 webrtc   = ["dep:rvoip-webrtc"]
 uctp     = ["dep:rvoip-uctp", "dep:rvoip-quic", "dep:rvoip-webtransport", "dep:rvoip-websocket"]
 
+# ── SIP media add-ons ──
+g729 = ["sip", "rvoip-sip/g729"]
+
 # ── SIP add-on (requires SIP): RFC 8224 caller-ID attestation ──
 sip-stir-shaken = ["sip", "dep:rvoip-stir-shaken"]
 

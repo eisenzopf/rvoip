@@ -417,7 +417,7 @@ load.
 
 **Citing a result** — pick the highest sweep point where ASR ≥ 0.99
 and setup-p99 stays inside your SLA budget, and report that as the
-sustained capacity. Example: "rvoip-sip 0.2.0 sustains 500 CPS at
+sustained capacity. Example: "rvoip-sip 0.2.2 sustains 500 CPS at
 98.7% ASR with setup p99 < 90 ms on Apple M3 Max." Always include the
 hardware spec block from §6.
 
@@ -444,7 +444,7 @@ extra keys is fine, removing a canonical one is a breaking change.
     "total_ram_gb": 64.0,
     "build_profile": "release",
     "global_allocator": "mimalloc",
-    "rvoip_sip_version": "0.2.0",
+    "rvoip_sip_version": "0.2.2",
     "git_rev": "a9a3383c"
   },
   "load": {
@@ -648,7 +648,7 @@ Pull the relevant numbers out of the JSON files and post a markdown
 table like this in release notes, blog posts, or the project README:
 
 ```markdown
-### rvoip-sip 0.2.0 — measured on Apple M3 Max (12P / 12L, 64 GB)
+### Historical baseline: rvoip-sip 0.2.0 — measured on Apple M3 Max (12P / 12L, 64 GB)
 
 | Workload | Throughput | p50 / p95 / p99 latency | Notes |
 | --- | --- | --- | --- |
@@ -664,7 +664,7 @@ For a sweep result, paste the `_sweep.md` table verbatim — it already
 includes the host block in the header. Example:
 
 ```markdown
-### rvoip-sip 0.2.0 — `perf_call_setup_cps` sweep on Apple M3 Max (16P / 16L, 128 GB)
+### Historical baseline: rvoip-sip 0.2.0 — `perf_call_setup_cps` sweep on Apple M3 Max (16P / 16L, 128 GB)
 
 | CPS target | Achieved | ASR | Latency p50 | Latency p95 | Latency p99 | Full-cycle p99 | RSS Δ MB | Errors |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |

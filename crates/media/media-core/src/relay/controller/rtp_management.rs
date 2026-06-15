@@ -30,6 +30,69 @@ use super::{
     MediaSessionController,
 };
 
+#[cfg(feature = "g729")]
+fn g729_annex_b_enabled(codec_name: Option<&str>) -> bool {
+    match codec_name {
+        Some(name)
+            if name.eq_ignore_ascii_case("G729A")
+                || name.eq_ignore_ascii_case("G.729A")
+                || name.eq_ignore_ascii_case("G729 annex A") =>
+        {
+            false
+        }
+        Some(name)
+            if name.eq_ignore_ascii_case("G729BA")
+                || name.eq_ignore_ascii_case("G729AB")
+                || name.eq_ignore_ascii_case("G.729AB")
+                || name.eq_ignore_ascii_case("G.729BA") =>
+        {
+            true
+        }
+        _ => true,
+    }
+}
+
+#[cfg(feature = "g729")]
+fn g729_config(annex_b: bool) -> crate::codec::audio::G729Config {
+    crate::codec::audio::G729Config {
+        annexes: crate::codec::audio::G729Annexes {
+            annex_a: true,
+            annex_b,
+        },
+        frame_size_ms: 10.0,
+        enable_vad: annex_b,
+        enable_cng: annex_b,
+    }
+}
+
+#[cfg(feature = "g729")]
+fn encode_g729_payload(
+    codec: &mut crate::codec::audio::G729Codec,
+    audio_frame: &crate::types::AudioFrame,
+) -> Result<Vec<u8>> {
+    const G729_SAMPLES_PER_FRAME: usize = 80;
+
+    if audio_frame.samples.len() % G729_SAMPLES_PER_FRAME != 0 {
+        return Err(crate::error::CodecError::InvalidFrameSize {
+            expected: G729_SAMPLES_PER_FRAME,
+            actual: audio_frame.samples.len(),
+        }
+        .into());
+    }
+
+    let mut encoded = Vec::with_capacity(audio_frame.samples.len() / G729_SAMPLES_PER_FRAME * 10);
+    for chunk in audio_frame.samples.chunks_exact(G729_SAMPLES_PER_FRAME) {
+        let frame = crate::types::AudioFrame::new(
+            chunk.to_vec(),
+            audio_frame.sample_rate,
+            audio_frame.channels,
+            audio_frame.timestamp,
+        );
+        encoded.extend(codec.encode(&frame)?);
+    }
+    Ok(encoded)
+}
+
 impl MediaSessionController {
     /// Apply RTP/audio direction for SIP offer/answer changes.
     pub async fn set_media_direction(
@@ -759,7 +822,7 @@ impl MediaSessionController {
         // Get session info to determine codec. DashMap shard guard
         // is held only for the synchronous codec-mapper lookup.
         info!("🔍 Looking for session for dialog: {}", dialog_id);
-        let codec_payload_type = self
+        let (codec_payload_type, preferred_codec) = self
             .sessions
             .get(dialog_id)
             .ok_or_else(|| {
@@ -768,15 +831,13 @@ impl MediaSessionController {
             })
             .map(|entry| {
                 info!("✅ Found session for dialog: {}", dialog_id);
-                let pt = entry
-                    .value()
-                    .config
-                    .preferred_codec
+                let preferred_codec = entry.value().config.preferred_codec.clone();
+                let pt = preferred_codec
                     .as_ref()
                     .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
                     .unwrap_or(0); // Default to PCMU
                 info!("📝 Using payload type {} for dialog: {}", pt, dialog_id);
-                pt
+                (pt, preferred_codec)
             })?;
 
         // Create AudioFrame for codec interface
@@ -804,6 +865,26 @@ impl MediaSessionController {
                 let mut codec = G711Codec::a_law(8000, 1)?;
                 codec.encode(&audio_frame)?
             }
+            #[cfg(feature = "g729")]
+            18 => {
+                let annex_b = g729_annex_b_enabled(preferred_codec.as_deref());
+                let codec = if let Some(existing) = self.g729_tx_codecs.get(dialog_id) {
+                    existing.value().clone()
+                } else {
+                    let codec = crate::codec::audio::G729Codec::new(
+                        crate::types::SampleRate::Rate8000,
+                        1,
+                        g729_config(annex_b),
+                    )?;
+                    let codec = Arc::new(tokio::sync::Mutex::new(codec));
+                    self.g729_tx_codecs.insert(dialog_id.clone(), codec.clone());
+                    codec
+                };
+                let mut codec = codec.lock().await;
+                encode_g729_payload(&mut codec, &audio_frame)?
+            }
+            #[cfg(not(feature = "g729"))]
+            18 => return Err(Error::unsupported_payload_type(codec_payload_type)),
             _ => {
                 // For other codecs, we would need to instantiate them here
                 // For now, return an error

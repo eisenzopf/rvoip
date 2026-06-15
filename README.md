@@ -20,7 +20,7 @@
 > [!NOTE]
 > **Release status.** Maturity is encoded in the version number (no `-alpha`/`-beta`
 > suffixes): **`0.1.x` = alpha, `0.2.x` = beta, `1.0` = stable**. The SIP product
-> (`rvoip-sip` + its spine) is a **beta candidate at `0.2.1`** for bounded SIP client,
+> (`rvoip-sip` + its spine) is a **beta candidate at `0.2.2`** for bounded SIP client,
 > server, PBX, gateway, and B2BUA scenarios. The rest of the workspace — WebRTC, QUIC,
 > WebTransport, WebSocket, UCTP, vCon, identity, AI harness — is **alpha, published at
 > `0.1.0`** (API-unstable; expect breaking changes before `1.0`).
@@ -67,7 +67,7 @@ switching stacks.
 
 ```toml
 [dependencies]
-rvoip-sip = "0.2.1"
+rvoip-sip = "0.2.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -130,7 +130,7 @@ PBX interop), see [`crates/sip/rvoip-sip/examples/`](crates/sip/rvoip-sip/exampl
 <a id="feature-support"></a>
 ## 📊 Feature support
 
-> ✅ **Beta** (`0.2.1`) = RFC-correct, tested · 🚧 **Alpha** (`0.1.0`) = published,
+> ✅ **Beta** (`0.2.2`) = RFC-correct, tested · 🚧 **Alpha** (`0.1.0`) = published,
 > API-unstable · 🔮 **Roadmap** = planned, not yet implemented
 
 ### 📞 SIP methods (RFC 3261 + extensions)
@@ -160,7 +160,8 @@ PBX interop), see [`crates/sip/rvoip-sip/examples/`](crates/sip/rvoip-sip/exampl
 | Hold / resume | ✅ Beta | Standard `a=sendonly` / `a=inactive` |
 | Blind transfer | ✅ Beta | REFER-based, B2BUA-bridged |
 | Conference mixing | 🚧 Alpha | N-way mixing primitives in `rvoip-media-core` |
-| Opus / G.722 / G.729 | 🔮 Post-beta | Codec hooks exist; full-media path is post-beta |
+| G.729A / G.729AB | ✅ Beta optional | Annex A speech path with optional Annex B VAD/DTX/CNG |
+| Opus / G.722 | 🔮 Post-beta | Codec hooks exist; full-media path is post-beta |
 | DTLS-SRTP | 🔮 Post-beta | Design in place, feature-flagged |
 | Echo cancel / AGC / VAD / NS | 🔮 Post-beta | Planned; not yet implemented |
 
@@ -226,7 +227,7 @@ documents are the authoritative source — this table is a summary.
 │  rvoip-core-traits  (✅ beta)  cycle-breaker trait surface    │
 │  rvoip-media-core   (✅ beta)  codec / mixing / MediaStream   │
 │  rvoip-rtp-core     (✅ beta)  RTP / SRTP                     │
-│  rvoip-codec-core   (✅ beta)  G.711 base codec               │
+│  rvoip-codec-core   (✅ beta)  G.711 + optional G.729A/AB      │
 │  rvoip-auth-core    (✅ beta)  OAuth2 / Bearer / SIP Digest   │
 └──────────────────────────────────────────────────────────────┘
                               ▲
@@ -250,7 +251,7 @@ without the substrates knowing about each other.
 
 ## 📦 Crate matrix
 
-### ✅ Beta — published to crates.io as `0.2.1`
+### ✅ Beta — published to crates.io as `0.2.2`
 
 | Crate | Purpose |
 | --- | --- |
@@ -266,7 +267,7 @@ without the substrates knowing about each other.
 | [rvoip-infra-common](crates/foundation/infra-common) | Event bus, executors, shared infra |
 | [rvoip-media-core](crates/media/media-core) | Codec negotiation, mixing, MediaStream trait |
 | [rvoip-rtp-core](crates/media/rtp-core) | RTP / SRTP framing and transport |
-| [rvoip-codec-core](crates/media/codec-core) | G.711 codec implementation |
+| [rvoip-codec-core](crates/media/codec-core) | G.711 plus optional G.729A/G.729AB codec implementation |
 | [rvoip-auth-core](crates/identity/auth-core) | OAuth2 + Bearer + token primitives |
 
 ### 🚧 Alpha — published to crates.io at `0.1.0`

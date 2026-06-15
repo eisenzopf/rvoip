@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-sip-proxy"
-version.workspace = true  # 0.2.1 — beta-tier; inherits from [workspace.package]
+version.workspace = true  # 0.2.2 — beta-tier; inherits from [workspace.package]
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true

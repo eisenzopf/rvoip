@@ -32,12 +32,25 @@ Options:
 
 - `--pbx asterisk|freeswitch|both`
 - `--api endpoint|stream_peer|callback|all`
-- `--scenario registration|basic_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all`
+- `--scenario registration|basic_call|g729_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all`
 
 The runner builds the PBX Cargo examples and stores logs/WAV evidence under
 `examples/pbx/output/<provider>/<api>/<scenario>/<transport>/` by default. Set
 `PBX_OUT_ROOT=/path/to/artifacts` to write the same evidence tree somewhere
 else, which is what the beta gate does.
+
+`g729_call` builds the examples with `dev-insecure-tls,g729` by default and
+runs both `PBX_CODEC_PROFILE=g729a` and `PBX_CODEC_PROFILE=g729ab` unless a
+single `PBX_CODEC_PROFILE` is provided. `g729a` advertises PT 18 with
+`a=fmtp:18 annexb=no`; `g729ab` advertises `a=fmtp:18 annexb=yes`. Set
+`PBX_G729_PROFILES="g729a g729ab"` to customize the profile list used by the
+matrix and beta gate.
+
+`g729_call` is an audio-verifying scenario. Both endpoints send distinct
+reference tones through the negotiated G.729 media path, record the received
+audio, and run the analyzer before the matrix cell passes. G.729 evidence is
+stored under `.../g729_call/<profile>/<transport>/` with `audio-analysis.*`
+diagnostics when `PBX_DIAG=1`.
 
 Each run also writes release-audit artifacts at the output root:
 
@@ -56,10 +69,10 @@ The runner orchestrates these examples by setting `PBX_PROVIDER`,
 `PBX_SCENARIO`, `PBX_TRANSPORT`, and `PBX_ROLE`.
 
 ```sh
-cargo run -p rvoip-sip --features dev-insecure-tls --example pbx_stream_peer
-cargo run -p rvoip-sip --features dev-insecure-tls --example pbx_endpoint
-cargo run -p rvoip-sip --features dev-insecure-tls --example pbx_callback_builder
-cargo run -p rvoip-sip --features dev-insecure-tls --example pbx_analyze
+cargo run -p rvoip-sip --features dev-insecure-tls,g729 --example pbx_stream_peer
+cargo run -p rvoip-sip --features dev-insecure-tls,g729 --example pbx_endpoint
+cargo run -p rvoip-sip --features dev-insecure-tls,g729 --example pbx_callback_builder
+cargo run -p rvoip-sip --features dev-insecure-tls,g729 --example pbx_analyze
 ```
 
 ## Scenario Matrix
@@ -68,7 +81,10 @@ The unified suite exercises these scenarios against both PBXs and all three API
 surfaces:
 
 - registration/unregistration for TLS `1001` and UDP `2001`
-- basic UDP call `2001 -> 2002`
+- basic UDP call `2001 -> 2002` for G.711 PCMU/PCMA interop with
+  bidirectional tone audio verification
+- G.729A and G.729AB UDP call `2001 -> 2002` with PT 18, Annex B SDP coverage,
+  and bidirectional audio verification
 - UDP and TLS/SRTP hold/resume
 - UDP and TLS/SRTP ring/cancel
 - UDP and TLS/SRTP DTMF

@@ -6,10 +6,11 @@
 
 > **Beta scope notice:** for the `rvoip-sip` beta, full-media claims are
 > limited to the paths that are wired and tested end to end through SIP:
-> PCMU/PCMA, telephone-event DTMF, optional comfort noise, RTP, and tested
-> SDES-SRTP/PBX flows. Older sections in this README describe intended or
-> lower-level capabilities and must not be read as beta release claims until
-> they are linked from `crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md`.
+> PCMU/PCMA, optional G.729A/G.729AB behind the `g729` feature,
+> telephone-event DTMF, optional comfort noise, RTP, and tested SDES-SRTP/PBX
+> flows. Older sections in this README describe intended or lower-level
+> capabilities and must not be read as beta release claims until they are
+> linked from `crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md`.
 
 ## Overview
 
@@ -47,7 +48,7 @@ The Media Core sits at the heart of the media processing stack, providing intell
 ### Key Components
 
 1. **Media Processing Engine**: Advanced audio processing with AEC, AGC, VAD, and noise suppression
-2. **Codec Management**: Multi-codec support with real-time transcoding (G.711, Opus, G.729)
+2. **Codec Management**: G.711 plus optional G.729A/G.729AB support with real-time transcoding among wired codecs
 3. **Session Coordination**: Per-dialog media session management with SIP integration
 4. **Conference Mixing**: N-way audio mixing for multi-party conferences
 5. **Quality Monitoring**: Real-time quality metrics and adaptive processing
@@ -114,12 +115,12 @@ Clean separation of concerns across the rvoip stack:
   - ✅ 8-sample parallel processing for audio operations
 
 #### **Codec Support and Transcoding**
-- ✅ **Multi-Codec Support**: Complete telephony codec suite
+- ✅ **Multi-Codec Support**: Wired beta codecs plus optional G.729A/G.729AB
   - ✅ **G.711**: μ-law/A-law (PCMU/PCMA) with ITU-T compliance
-  - ✅ **Opus**: Modern wideband/fullband codec with VBR/CBR
-  - ✅ **G.729**: Low-bitrate 8 kbps codec with Annex A/B support
+  - ✅ **G.729A/G.729AB**: optional low-bitrate 8 kbps codec with Annex B VAD/DTX/CNG under the `g729` feature
+  - 🔮 **Opus/G.722**: post-beta full-media paths
 - ✅ **Real-Time Transcoding**: Seamless format conversion
-  - ✅ PCMU ↔ PCMA ↔ Opus ↔ G.729 transcoding matrix
+  - ✅ PCMU ↔ PCMA and optional G.729A/G.729AB transcoding paths
   - ✅ Session management with performance statistics
   - ✅ Format conversion with sample rate adaptation
 
@@ -371,10 +372,10 @@ async fn main() -> Result<()> {
     // Create transcoding session
     let transcoder = Transcoder::new().await?;
 
-    // Configure transcoding between different codecs
+    // Configure transcoding between wired beta codecs
     let session_config = TranscodingSessionConfig::builder()
         .input_codec(CodecType::PCMU)
-        .output_codec(CodecType::Opus)
+        .output_codec(CodecType::PCMA)
         .enable_format_conversion(true)
         .build();
 
@@ -382,10 +383,9 @@ async fn main() -> Result<()> {
 
     // Transcode audio in real-time
     let pcmu_frame = AudioFrame::new(pcmu_samples, 8000, 1, timestamp);
-    let opus_frame = transcoder.transcode(session_id, pcmu_frame).await?;
+    let _pcma_frame = transcoder.transcode(session_id, pcmu_frame).await?;
 
-    // Supports all codec combinations:
-    // G.711 (PCMU/PCMA) ↔ Opus ↔ G.729
+    // Supports PCMU/PCMA and optional G.729A/G.729AB paths
     // with automatic format conversion
 
     // Monitor transcoding performance
@@ -473,12 +473,12 @@ The library provides cutting-edge audio processing algorithms competitive with c
 ### Supported Codecs
 
 - **G.711 (PCMU/PCMA)**: ITU-T compliant μ-law/A-law implementation
-- **Opus**: Modern wideband codec with VBR/CBR, 6-510 kbps
-- **G.729**: Low-bitrate 8 kbps with Annex A/B (VAD/CNG) support
+- **G.729A/G.729AB**: Optional low-bitrate 8 kbps codec with Annex B VAD/DTX/CNG
+- **Opus/G.722**: Post-beta full-media paths
 
 ### Transcoding Capabilities
 
-- **Real-Time Transcoding**: All codec combinations supported
+- **Real-Time Transcoding**: PCMU/PCMA and optional G.729A/G.729AB paths
 - **Format Conversion**: Automatic sample rate and channel conversion
 - **Session Management**: Performance statistics and caching
 - **Quality Preservation**: Optimal transcoding paths to minimize quality loss
@@ -532,7 +532,7 @@ async fn main() -> Result<()> {
 
 **Technical Implementation:**
 - **Silence Generation**: PCM samples replaced with zeros before codec encoding
-- **Codec Compatibility**: Works with all codecs (G.711, Opus, G.729)
+- **Codec Compatibility**: Works with wired codecs (G.711 and optional G.729A/G.729AB)
 - **State Tracking**: Per-session mute state in `RtpSessionWrapper`
 - **Processing Pipeline**: Muting occurs in `encode_and_send_audio_frame()`
 

@@ -1,17 +1,20 @@
 # rvoip-sip Beta Release Checklist
 
-Date: 2026-05-26
+Date: 2026-06-15
 
-This checklist is evidence-backed. Checked rows are covered by the final clean
-beta report or by current repository files.
+This checklist is evidence-backed. Checked rows are covered by the latest beta
+report selected by `crates/sip/rvoip-sip/beta-report/latest.txt` or by current
+repository files.
 
 Current reference report:
 
-- `crates/sip/rvoip-sip/beta-report/20260526T221457Z/summary.md`
+- `crates/sip/rvoip-sip/beta-report/20260615T105337Z/summary.md`
 - Result: `0` failures, `0` skips
-- Git revision: `865430d4`
-- Git status at run time: `clean`
-- Rust/Cargo: `1.88.0`
+- Git revision: `eb4be79f`
+- Git status at run time: `dirty`
+- Rust/Cargo: `1.95.0`
+- Current release train: `0.2.2`; the archived beta-gate artifact reports
+  runtime crate version `0.2.1` and should not be rewritten.
 
 ## Documentation
 
@@ -25,7 +28,10 @@ Current reference report:
 - [x] Security posture document is current and records completed security gates.
 - [x] Performance report is populated with current reference values.
 - [x] `scripts/beta_gate.sh --local` passed as part of the reference full gate.
-- [x] Final `scripts/beta_gate.sh --full --require-external` report comes from a clean commit.
+- [x] Latest `scripts/beta_gate.sh --full --require-external` report passed
+  with `0` failures and `0` skips.
+- [ ] Clean-tree publish attestation requires a fresh full gate from a clean
+  workspace if that evidence is needed for release signoff.
 
 ## Code and API
 
@@ -52,16 +58,16 @@ Current reference report:
 - [x] FreeSWITCH matrix passes in the reference full gate.
 - [x] baresip strict-UA matrix passes in the reference full gate.
 - [x] Kamailio/OpenSIPS proxy audit records this topology as a non-claim.
-- [x] Dependency advisory audit is archived in the final report.
-- [x] Parser fuzz smoke logs for SIP message, URI, header, and SDP parsing are archived in the final report.
+- [x] Dependency advisory audit is archived in the reference report.
+- [x] Parser fuzz smoke logs for SIP message, URI, header, and SDP parsing are archived in the reference report.
 
 ## Security Gates
 
 - [x] Trace redaction covers authorization, proxy authorization, authentication challenges, cookies, identity headers, token-like headers, and SDP keying attributes.
 - [x] `scripts/beta_gate.sh --security` runs dependency audit and parser fuzz smoke targets.
 - [x] Fuzz targets exist for SIP message parsing, URI parsing, header parsing, and SDP parsing.
-- [x] Final dependency audit report has no unaccepted advisories.
-- [x] Final fuzz smoke report has no parser crashes.
+- [x] Reference dependency audit report has no unaccepted advisories.
+- [x] Reference fuzz smoke report has no parser crashes.
 
 ## Performance Gates
 
@@ -70,11 +76,12 @@ Current reference report:
 - [x] Full-media 300 CPS reference point passes.
 - [x] Full-media 1,000 CPS reference point passes.
 - [x] Full-media 2,000 CPS reference point passes with at least 99.9% success in reference evidence.
-- [x] 30-minute soak passes with retained objects `0`, active Bob audio receivers `0`, and post-drain RSS gate pass.
+- [x] 1-hour split soak passes with retained objects `0`, active Bob audio
+  receivers `0`, transaction runners `0`, and post-drain RSS gate pass.
 - [x] Overload/recovery scenario passes in the reference full gate.
 - [x] Any result above 2,000 CPS is labeled as tuned or experimental.
 - [x] 24-hour release-candidate soak is explicitly waived for beta; the
-  30-minute soak is accepted as the beta release bar.
+  1-hour split soak is accepted as the beta release bar.
 
 ## Commands
 
@@ -93,7 +100,7 @@ crates/sip/rvoip-sip/scripts/beta_gate.sh --security
 Final external release-gate command:
 
 ```sh
-BETA_RUN_LOCAL_PBX=1 RUSTUP_TOOLCHAIN=1.88 crates/sip/rvoip-sip/scripts/beta_gate.sh --full --require-external
+BETA_RUN_LOCAL_PBX=1 RUSTUP_TOOLCHAIN=1.95 crates/sip/rvoip-sip/scripts/beta_gate.sh --full --require-external
 ```
 
 Optional external SIPp target command:
@@ -119,20 +126,25 @@ Required release evidence from each interop/perf/security run:
 
 ## Completed Release Evidence
 
-- Clean full beta gate passed with `0` failures, `0` skips, and
-  `git_status: clean`.
+- Latest full beta gate passed with `0` failures and `0` skips.
+- The latest gate recorded `git_status: dirty`; a clean-tree rerun is still
+  required for publish attestation if release policy requires that evidence.
 - Dependency audit is archived with no unaccepted advisories. Allowed warnings
   remain documented separately.
 - Parser fuzz smoke logs are archived for all four parser targets with no
   crashes.
-- Release notes cite the clean report directory.
+- Release notes should cite the reference report directory and its dirty-tree
+  caveat.
 
 ## Beta Soak Waiver
 
-The 24-hour release-candidate soak is waived for beta on 2026-05-26. The beta
-bar is the archived 30-minute soak from
-`crates/sip/rvoip-sip/beta-report/20260526T221457Z/perf-results/perf_soak_30min.json`:
-`35,109 / 35,109` calls succeeded, ASR was `1.0`, retained objects after drain
-were `0`, active Bob audio receivers after drain were `0`, and the post-drain
-RSS slope was `1.5 MB/hr` against the `10 MB/hr` threshold. A 24-hour soak
-remains recommended before a broader production-readiness claim.
+The 24-hour release-candidate soak is waived for beta on 2026-06-15. The beta
+bar is the archived 1-hour split soak from
+`crates/sip/rvoip-sip/beta-report/20260615T105337Z/perf-results/perf_soak_caller.json`
+and
+`crates/sip/rvoip-sip/beta-report/20260615T105337Z/perf-results/perf_soak_receiver.json`:
+`9,898 / 9,898` caller calls succeeded, ASR was `1.0`, `500` active media
+calls were held, retained objects after drain were `0`, active Bob audio
+receivers after drain were `0`, transaction runners after drain were `0`, and
+the post-drain RSS growth was `0.1 MB/hr` against the `10 MB/hr` threshold. A
+24-hour soak remains recommended before a broader production-readiness claim.

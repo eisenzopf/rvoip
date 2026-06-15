@@ -16,15 +16,15 @@ lets `rvoip-core` take `rvoip-vcon` as an optional dep.
 
 ## Status
 
-**Beta candidate** — part of the `rvoip-sip` 0.2.0-beta closure. API may
-adjust for incoming review feedback before 0.2.0 ships, but no
+**Beta candidate** — part of the `rvoip-sip` 0.2.x beta train. API may
+adjust for incoming review feedback before 0.2.x beta train ships, but no
 restructure is planned.
 
 ## Install
 
 ```toml
 [dependencies]
-rvoip-auth-core = "0.2.0"
+rvoip-auth-core = "0.2.2"
 ```
 
 ## Where to start

@@ -553,6 +553,7 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(feature = "g729")]
     #[tokio::test]
     async fn test_codec_negotiation_g729() {
         println!("🧪 Testing G729 codec negotiation");
@@ -663,9 +664,10 @@ mod tests {
         let controller = MediaSessionController::new();
 
         // Test all supported codecs with their expected payload types and clock rates
-        let test_cases = vec![
+        let test_cases = [
             ("PCMU", 0, 8000, "G.711 μ-law"),
             ("PCMA", 8, 8000, "G.711 A-law"),
+            #[cfg(feature = "g729")]
             ("G729", 18, 8000, "G.729"),
             ("opus", 111, 48000, "Opus"),
         ];

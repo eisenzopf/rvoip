@@ -214,6 +214,7 @@ Operational references:
 | `persistence` | Experimental persistence hooks; applications must validate their own storage behavior. |
 | `generated-validation` | Development and CI validation for generated SIP messages. |
 | `dev-insecure-tls` | Local test-only TLS convenience; never enable for deployed systems. |
+| `g729` | Optional G.729A/G.729AB media support with PT 18 SDP and Annex B `fmtp` negotiation. |
 | `perf-tests` | Opt-in performance gate and benchmark support. |
 | `dhat` | Heap profiling support for `examples/profiling/dhat_*.rs`. |
 | `tokio-console` | Tokio console support for profiling examples; requires `RUSTFLAGS="--cfg tokio_unstable"`. |

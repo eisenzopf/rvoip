@@ -235,13 +235,81 @@ pub(crate) fn rtpmap_for_pt(pt: u8) -> Option<&'static str> {
 
 /// NEXT_STEPS C2 — `a=fmtp:` value for payload types that require
 /// one. Returns `None` for codecs that work fine without an fmtp.
+#[cfg(test)]
 pub(crate) fn fmtp_for_pt(pt: u8) -> Option<&'static str> {
+    fmtp_for_pt_with_g729_annex_b(pt, true)
+}
+
+pub(crate) fn fmtp_for_pt_with_g729_annex_b(pt: u8, g729_annex_b: bool) -> Option<&'static str> {
     match pt {
+        18 if g729_annex_b => Some("annexb=yes"),
+        18 => Some("annexb=no"),
         101 => Some("0-15"),
         // Opus (PT 111) defaults are fine for VoIP without fmtp; a
         // production deployment may want `useinbandfec=1; minptime=10`.
         _ => None,
     }
+}
+
+fn parse_annex_b_param(parameters: &str) -> Option<bool> {
+    parameters.split(';').find_map(|part| {
+        let (name, value) = part.trim().split_once('=')?;
+        if !name.trim().eq_ignore_ascii_case("annexb") {
+            return None;
+        }
+        match value.trim().trim_matches('"').to_ascii_lowercase().as_str() {
+            "yes" | "true" | "1" => Some(true),
+            "no" | "false" | "0" => Some(false),
+            _ => None,
+        }
+    })
+}
+
+fn audio_fmtp_annex_b(session: &SdpSession, payload_type: u8) -> Option<bool> {
+    let format = payload_type.to_string();
+    session
+        .media_descriptions
+        .iter()
+        .find(|m| m.media == "audio")
+        .and_then(|m| m.get_fmtp(&format))
+        .and_then(|fmtp| parse_annex_b_param(&fmtp.parameters))
+}
+
+fn negotiated_g729_annex_b(session: &SdpSession, local_annex_b: bool) -> bool {
+    local_annex_b && audio_fmtp_annex_b(session, 18).unwrap_or(true)
+}
+
+fn select_primary_audio_payload(formats: &[String]) -> Option<u8> {
+    let mut parsed = formats.iter().filter_map(|fmt| fmt.parse::<u8>().ok());
+    parsed.find(|pt| !matches!(*pt, 13 | 101)).or_else(|| {
+        formats
+            .iter()
+            .filter_map(|fmt| fmt.parse::<u8>().ok())
+            .next()
+    })
+}
+
+fn select_primary_audio_payload_from_session(session: &SdpSession) -> Option<u8> {
+    session
+        .media_descriptions
+        .iter()
+        .find(|m| m.media == "audio")
+        .and_then(|m| select_primary_audio_payload(&m.formats))
+}
+
+fn codec_name_for_payload(payload_type: u8, g729_annex_b: bool) -> String {
+    match payload_type {
+        0 => "PCMU",
+        8 => "PCMA",
+        9 => "G722",
+        13 => "CN",
+        18 if g729_annex_b => "G729BA",
+        18 => "G729A",
+        101 => "telephone-event",
+        111 => "opus",
+        _ => return format!("PT{}", payload_type),
+    }
+    .to_string()
 }
 
 /// Build the SDP answer that declines an offered audio m-line per
@@ -454,6 +522,11 @@ pub struct MediaAdapter {
     /// payload types in tests, but `Config::validate` rejects codec sets that
     /// media-core cannot encode/decode for beta full-media operation.
     offered_codecs: Vec<u8>,
+
+    /// G.729 Annex B VAD/DTX/CNG SDP policy. When PT 18 is offered, we emit
+    /// `a=fmtp:18 annexb=yes` when this is true and `annexb=no` when false.
+    /// Answers disable Annex B when either side advertises `annexb=no`.
+    g729_annex_b: bool,
 }
 
 impl MediaAdapter {
@@ -504,6 +577,7 @@ impl MediaAdapter {
             comfort_noise_enabled: false,
             strict_codec_matching: true,
             offered_codecs: vec![0, 8, 101],
+            g729_annex_b: true,
         }
     }
 
@@ -551,6 +625,11 @@ impl MediaAdapter {
     /// parser/SDP coverage outside the beta full-media contract.
     pub fn set_offered_codecs(&mut self, codecs: Vec<u8>) {
         self.offered_codecs = codecs;
+    }
+
+    /// Set local G.729 Annex B preference for PT 18 SDP offer/answer.
+    pub fn set_g729_annex_b(&mut self, enabled: bool) {
+        self.g729_annex_b = enabled;
     }
 
     /// Feature-gated retained-object counts for perf leak investigations.
@@ -628,6 +707,31 @@ impl MediaAdapter {
             out.push(13);
         }
         out
+    }
+
+    async fn apply_negotiated_media_config(
+        &self,
+        dialog_id: &DialogId,
+        remote_addr: SocketAddr,
+        codec: &str,
+    ) -> Result<()> {
+        let mut config = self
+            .controller
+            .get_session_info(dialog_id)
+            .await
+            .ok_or_else(|| {
+                SessionError::MediaError(format!("No media session for dialog {}", dialog_id))
+            })?
+            .config;
+        config.remote_addr = Some(remote_addr);
+        config.preferred_codec = Some(codec.to_string());
+
+        self.controller
+            .update_media(dialog_id.clone(), config)
+            .await
+            .map_err(|e| {
+                SessionError::MediaError(format!("Failed to apply negotiated media config: {}", e))
+            })
     }
 
     /// Set the public RTP address advertised in SDP. Called at
@@ -805,6 +909,19 @@ impl MediaAdapter {
             }
         }
 
+        let parsed_answer = SdpSession::from_str(remote_sdp).ok();
+        let answer_direction = parsed_answer.as_ref().and_then(audio_direction);
+        let payload_type = parsed_answer
+            .as_ref()
+            .and_then(select_primary_audio_payload_from_session)
+            .unwrap_or(0);
+        let negotiated_annex_b = parsed_answer
+            .as_ref()
+            .filter(|_| payload_type == 18)
+            .map(|answer| negotiated_g729_annex_b(answer, self.g729_annex_b))
+            .unwrap_or(false);
+        let negotiated_codec = codec_name_for_payload(payload_type, negotiated_annex_b);
+
         // Update media session with remote address. SRTP contexts (if
         // negotiated in 2B.1) must be installed *between* updating the
         // remote address and starting the audio transmitter — the
@@ -822,12 +939,8 @@ impl MediaAdapter {
         if let Some(dialog_id) = dialog_id {
             let remote_addr = SocketAddr::new(remote_ip, remote_port);
 
-            self.controller
-                .update_rtp_remote_addr(&dialog_id, remote_addr)
-                .await
-                .map_err(|e| {
-                    SessionError::MediaError(format!("Failed to update RTP remote address: {}", e))
-                })?;
+            self.apply_negotiated_media_config(&dialog_id, remote_addr, &negotiated_codec)
+                .await?;
 
             // RFC 4568 SDES: install per-direction contexts before the
             // first wire packet flows.
@@ -874,8 +987,6 @@ impl MediaAdapter {
             }
         }
 
-        let parsed_answer = SdpSession::from_str(remote_sdp).ok();
-        let answer_direction = parsed_answer.as_ref().and_then(audio_direction);
         let local_port = match signaling_only_port {
             Some(port) => port,
             None => self.get_local_port(session_id)?,
@@ -883,8 +994,8 @@ impl MediaAdapter {
         let config = NegotiatedConfig {
             local_addr: SocketAddr::new(self.local_ip, local_port),
             remote_addr: SocketAddr::new(remote_ip, remote_port),
-            codec: "PCMU".to_string(),
-            payload_type: 0,
+            codec: negotiated_codec,
+            payload_type,
             local_direction: local_direction_from_remote_answer(&answer_direction),
             remote_direction: answer_direction
                 .map(sip_direction_to_session)
@@ -1007,6 +1118,23 @@ impl MediaAdapter {
             None => self.get_local_port(session_id)?,
         };
 
+        let formats = compute_answer_formats(
+            &parsed_offer,
+            &self.effective_offered_formats(),
+            self.strict_codec_matching,
+            self.offer_srtp,
+            self.srtp_required,
+        )?;
+        let negotiated_payload_type = select_primary_audio_payload(&formats).unwrap_or(0);
+        let negotiated_annex_b = if negotiated_payload_type == 18 {
+            negotiated_g729_annex_b(&parsed_offer, self.g729_annex_b)
+        } else {
+            false
+        };
+        let negotiated_codec = codec_name_for_payload(negotiated_payload_type, negotiated_annex_b);
+        let offered_direction = audio_direction(&parsed_offer);
+        let answer_direction = answer_direction_for_offer(&offered_direction);
+
         // Update media session with remote address. SRTP contexts must
         // be installed BEFORE establish_media_flow starts the audio
         // transmitter — see `negotiate_sdp_as_uac` for the same
@@ -1021,12 +1149,8 @@ impl MediaAdapter {
         if let Some(dialog_id) = dialog_id {
             let remote_addr = SocketAddr::new(remote_ip, remote_port);
 
-            self.controller
-                .update_rtp_remote_addr(&dialog_id, remote_addr)
-                .await
-                .map_err(|e| {
-                    SessionError::MediaError(format!("Failed to update RTP remote address: {}", e))
-                })?;
+            self.apply_negotiated_media_config(&dialog_id, remote_addr, &negotiated_codec)
+                .await?;
 
             if let Some((_, pair)) = self.negotiated_srtp.remove(session_id) {
                 let suite = pair.suite;
@@ -1101,15 +1225,6 @@ impl MediaAdapter {
             "RTP/AVP"
         };
 
-        let formats = compute_answer_formats(
-            &parsed_offer,
-            &self.effective_offered_formats(),
-            self.strict_codec_matching,
-            self.offer_srtp,
-            self.srtp_required,
-        )?;
-        let offered_direction = audio_direction(&parsed_offer);
-        let answer_direction = answer_direction_for_offer(&offered_direction);
         if sdp_diagnostics_enabled() {
             emit_sdp_diag(format!(
                 "local_sdp_answer session={} media={}:{} transport={} {} direction={}",
@@ -1148,7 +1263,7 @@ impl MediaAdapter {
             if let Some(rtpmap) = rtpmap_for_pt(pt) {
                 media_builder = media_builder.rtpmap(fmt.as_str(), rtpmap);
             }
-            if let Some(fmtp) = fmtp_for_pt(pt) {
+            if let Some(fmtp) = fmtp_for_pt_with_g729_annex_b(pt, negotiated_annex_b) {
                 media_builder = media_builder.fmtp(fmt.as_str(), fmtp);
             }
         }
@@ -1170,8 +1285,8 @@ impl MediaAdapter {
         let config = NegotiatedConfig {
             local_addr: SocketAddr::new(self.local_ip, local_port),
             remote_addr: SocketAddr::new(remote_ip, remote_port),
-            codec: "PCMU".to_string(),
-            payload_type: 0,
+            codec: negotiated_codec,
+            payload_type: negotiated_payload_type,
             local_direction: answer_direction,
             remote_direction: offered_direction
                 .map(sip_direction_to_session)
@@ -1741,7 +1856,7 @@ impl MediaAdapter {
             if let Some(rtpmap) = rtpmap_for_pt(*pt) {
                 media_builder = media_builder.rtpmap(pt_str.as_str(), rtpmap);
             }
-            if let Some(fmtp) = fmtp_for_pt(*pt) {
+            if let Some(fmtp) = fmtp_for_pt_with_g729_annex_b(*pt, self.g729_annex_b) {
                 media_builder = media_builder.fmtp(pt_str.as_str(), fmtp);
             }
         }
@@ -2289,7 +2404,7 @@ impl MediaAdapter {
             if let Some(rtpmap) = rtpmap_for_pt(*pt) {
                 media_builder = media_builder.rtpmap(pt_str.as_str(), rtpmap);
             }
-            if let Some(fmtp) = fmtp_for_pt(*pt) {
+            if let Some(fmtp) = fmtp_for_pt_with_g729_annex_b(*pt, self.g729_annex_b) {
                 media_builder = media_builder.fmtp(pt_str.as_str(), fmtp);
             }
         }
@@ -2602,6 +2717,7 @@ impl Clone for MediaAdapter {
             comfort_noise_enabled: self.comfort_noise_enabled,
             strict_codec_matching: self.strict_codec_matching,
             offered_codecs: self.offered_codecs.clone(),
+            g729_annex_b: self.g729_annex_b,
         }
     }
 }
@@ -2720,6 +2836,36 @@ mod sdp_format_tests {
             local_direction_from_remote_answer(&None),
             crate::types::MediaDirection::SendRecv
         );
+    }
+
+    #[test]
+    fn g729_fmtp_reflects_annex_b_flag() {
+        assert_eq!(fmtp_for_pt_with_g729_annex_b(18, true), Some("annexb=yes"));
+        assert_eq!(fmtp_for_pt_with_g729_annex_b(18, false), Some("annexb=no"));
+        assert_eq!(fmtp_for_pt(101), Some("0-15"));
+    }
+
+    #[test]
+    fn g729_annex_b_negotiation_honors_remote_no() {
+        let sdp = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=Session\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 17000 RTP/AVP 18 101\r\n\
+a=rtpmap:18 G729/8000\r\n\
+a=fmtp:18 annexb=no\r\n\
+a=rtpmap:101 telephone-event/8000\r\n\
+a=fmtp:101 0-15\r\n";
+        let session = SdpSession::from_str(sdp).expect("sdp parses");
+
+        assert!(!negotiated_g729_annex_b(&session, true));
+        assert!(!negotiated_g729_annex_b(&session, false));
+        assert_eq!(
+            select_primary_audio_payload_from_session(&session),
+            Some(18)
+        );
+        assert_eq!(codec_name_for_payload(18, false), "G729A");
     }
 
     #[test]
@@ -3368,6 +3514,179 @@ mod sdp_format_tests {
             "m-line format list must include PT 111:\n{}",
             sdp
         );
+    }
+
+    #[tokio::test]
+    async fn g729_offer_advertises_annex_b_yes() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("g729-annexb-yes-offer-test".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create session");
+
+        let mut adapter = MediaAdapter::new(
+            controller,
+            store.clone(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16000,
+            16100,
+        );
+        adapter.set_offered_codecs(vec![18, 101]);
+        adapter.set_g729_annex_b(true);
+        adapter
+            .start_session(&session_id)
+            .await
+            .expect("start session");
+
+        let sdp = adapter
+            .generate_local_sdp_offer(&session_id, crate::types::MediaDirection::SendRecv)
+            .await
+            .expect("offer builds");
+
+        assert!(
+            sdp.contains(" RTP/AVP 18 101\r\n"),
+            "m-line must advertise PT18:\n{}",
+            sdp
+        );
+        assert!(
+            sdp.contains("a=rtpmap:18 G729/8000"),
+            "G.729 rtpmap must appear:\n{}",
+            sdp
+        );
+        assert!(
+            sdp.contains("a=fmtp:18 annexb=yes"),
+            "Annex B enabled offer must advertise annexb=yes:\n{}",
+            sdp
+        );
+    }
+
+    #[tokio::test]
+    async fn g729_offer_advertises_annex_b_no() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("g729-annexb-no-offer-test".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create session");
+
+        let mut adapter = MediaAdapter::new(
+            controller,
+            store.clone(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16000,
+            16100,
+        );
+        adapter.set_offered_codecs(vec![18, 101]);
+        adapter.set_g729_annex_b(false);
+        adapter
+            .start_session(&session_id)
+            .await
+            .expect("start session");
+
+        let sdp = adapter
+            .generate_local_sdp_offer(&session_id, crate::types::MediaDirection::SendRecv)
+            .await
+            .expect("offer builds");
+
+        assert!(
+            sdp.contains("a=fmtp:18 annexb=no"),
+            "Annex B disabled offer must advertise annexb=no:\n{}",
+            sdp
+        );
+    }
+
+    #[cfg(feature = "g729")]
+    #[tokio::test]
+    async fn g729_uas_negotiation_updates_media_core_codec() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("g729-negotiated-media-config-test".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAS, false)
+            .await
+            .expect("create session");
+
+        let mut adapter = MediaAdapter::new(
+            controller.clone(),
+            store.clone(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16000,
+            16100,
+        );
+        adapter.set_offered_codecs(vec![18, 101]);
+        adapter.set_g729_annex_b(false);
+        adapter
+            .start_session(&session_id)
+            .await
+            .expect("start session");
+
+        let offer_sdp = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(35000, "RTP/AVP")
+            .formats(&["18", "101"])
+            .rtpmap("18", "G729/8000")
+            .fmtp("18", "annexb=no")
+            .rtpmap("101", "telephone-event/8000")
+            .fmtp("101", "0-15")
+            .attribute("sendrecv", None::<String>)
+            .done()
+            .build()
+            .expect("offer builds")
+            .to_string();
+
+        let (answer_sdp, config) = adapter
+            .negotiate_sdp_as_uas(&session_id, &offer_sdp)
+            .await
+            .expect("G.729 offer negotiates");
+
+        assert!(
+            answer_sdp.contains("a=fmtp:18 annexb=no"),
+            "G.729A answer must keep annexb=no:\n{}",
+            answer_sdp
+        );
+        assert_eq!(config.codec, "G729A");
+        assert_eq!(config.payload_type, 18);
+
+        let dialog_id = adapter
+            .session_to_dialog
+            .get(&session_id)
+            .expect("dialog mapping exists")
+            .value()
+            .clone();
+        let info = controller
+            .get_session_info(&dialog_id)
+            .await
+            .expect("media session exists");
+        assert_eq!(info.config.preferred_codec, Some("G729A".to_string()));
+        assert_eq!(
+            info.config.remote_addr,
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 35000))
+        );
+
+        adapter
+            .cleanup_session(&session_id)
+            .await
+            .expect("cleanup media session");
     }
 
     #[tokio::test]

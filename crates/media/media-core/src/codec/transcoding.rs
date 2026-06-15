@@ -4,7 +4,9 @@
 //! enabling mixed-codec calls and codec negotiation fallbacks.
 
 use crate::codec::audio::common::AudioCodec;
-use crate::codec::audio::{G729Codec, OpusApplication, OpusCodec};
+#[cfg(feature = "g729")]
+use crate::codec::audio::G729Codec;
+use crate::codec::audio::{OpusApplication, OpusCodec};
 use crate::codec::factory::CodecFactory;
 use crate::error::{CodecError, Result};
 use crate::processing::format::{ConversionParams, FormatConverter};
@@ -161,6 +163,7 @@ impl Transcoder {
                 // PCMU or PCMA - use factory
                 CodecFactory::create_codec_default(payload_type)
             }
+            #[cfg(feature = "g729")]
             18 => {
                 // G.729
                 let codec = G729Codec::new(
@@ -170,6 +173,8 @@ impl Transcoder {
                 )?;
                 Ok(Box::new(codec))
             }
+            #[cfg(not(feature = "g729"))]
+            18 => Err(CodecError::UnsupportedPayloadType { payload_type }.into()),
             111 => {
                 // Opus (dynamic)
                 let codec = OpusCodec::new(
@@ -204,7 +209,13 @@ impl Transcoder {
 
     /// Get all supported transcoding paths
     pub fn get_supported_paths(&self) -> Vec<TranscodingPath> {
-        let supported_codecs = vec![0u8, 8u8, 18u8, 111u8]; // PCMU, PCMA, G.729, Opus
+        let supported_codecs = [
+            0u8, // PCMU
+            8u8, // PCMA
+            #[cfg(feature = "g729")]
+            18u8, // G.729
+            111u8, // Opus
+        ];
         let mut paths = Vec::new();
 
         for &from in &supported_codecs {
@@ -428,6 +439,7 @@ mod tests {
         assert_eq!(transcoder.sessions.len(), 0);
     }
 
+    #[cfg(feature = "g729")]
     #[tokio::test]
     async fn test_g729_transcoding() {
         let mut transcoder = create_test_transcoder();
@@ -469,6 +481,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "g729")]
     #[test]
     fn test_g729_transcoding_paths() {
         let transcoder = create_test_transcoder();

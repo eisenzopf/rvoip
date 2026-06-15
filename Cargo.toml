@@ -18,7 +18,6 @@ members = [
     # media/ — shared media plane (consumed by foundation, uctp, and sip).
     "crates/media/media-core",
     "crates/media/codec-core",
-    "crates/media/g729",
     "crates/media/rtp-core",
     # Optional OS audio-device bridge — top-of-stack helper that depends UP on
     # rvoip-sip (so it sits with the SIP product, not below it).
@@ -96,9 +95,9 @@ default-members = [
 # ✨ WORKSPACE PACKAGE INHERITANCE - Define common metadata once!
 [workspace.package]
 # Numeric maturity tiers (no -alpha/-beta suffixes): 0.1.x = alpha,
-# 0.2.x = beta, 1.0 = stable. Beta-tier crates inherit this 0.2.1;
+# 0.2.x = beta, 1.0 = stable. Beta-tier crates inherit this 0.2.2;
 # Alpha-tier crates override in their own [package] with version = "0.1.0".
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "MIT"
 homepage = "https://github.com/eisenzopf/rvoip"
@@ -196,30 +195,29 @@ collapsible_else_if = "allow"
 #
 # Package names are unchanged on crates.io (rvoip-sip-core, etc.) — only
 # the in-repo directory changed. See the grouped [workspace] members above.
-# Beta-tier crates (publish to crates.io as 0.2.1).
-rvoip-sip-core      = { path = "crates/sip/sip-core", version = "0.2.1" }
-rvoip-sip-transport = { path = "crates/sip/sip-transport", version = "0.2.1" }
-rvoip-sip-dialog    = { path = "crates/sip/sip-dialog", version = "0.2.1" }
-rvoip-sip-proxy     = { path = "crates/sip/sip-proxy", version = "0.2.1" }
-rvoip-sip-registrar = { path = "crates/sip/sip-registrar", version = "0.2.1" }
-rvoip-rtp-core      = { path = "crates/media/rtp-core", version = "0.2.1" }
-rvoip-media-core    = { path = "crates/media/media-core", version = "0.2.1" }
-rvoip-g729          = { path = "crates/media/g729", version = "0.1.0" }
-rvoip-sip           = { path = "crates/sip/rvoip-sip", version = "0.2.1" }
-rvoip-core          = { path = "crates/foundation/rvoip-core", version = "0.2.1" }
-rvoip-codec-core    = { path = "crates/media/codec-core", version = "0.2.1" }
-rvoip-infra-common  = { path = "crates/foundation/infra-common", version = "0.2.1" }
-rvoip-auth-core     = { path = "crates/identity/auth-core", version = "0.2.1" }
-rvoip-core-traits   = { path = "crates/foundation/rvoip-core-traits", version = "0.2.1" }
+# Beta-tier crates (publish to crates.io as 0.2.2).
+rvoip-sip-core      = { path = "crates/sip/sip-core", version = "0.2.2" }
+rvoip-sip-transport = { path = "crates/sip/sip-transport", version = "0.2.2" }
+rvoip-sip-dialog    = { path = "crates/sip/sip-dialog", version = "0.2.2" }
+rvoip-sip-proxy     = { path = "crates/sip/sip-proxy", version = "0.2.2" }
+rvoip-sip-registrar = { path = "crates/sip/sip-registrar", version = "0.2.2" }
+rvoip-rtp-core      = { path = "crates/media/rtp-core", version = "0.2.2" }
+rvoip-media-core    = { path = "crates/media/media-core", version = "0.2.2" }
+rvoip-sip           = { path = "crates/sip/rvoip-sip", version = "0.2.2" }
+rvoip-core          = { path = "crates/foundation/rvoip-core", version = "0.2.2" }
+rvoip-codec-core    = { path = "crates/media/codec-core", version = "0.2.2" }
+rvoip-infra-common  = { path = "crates/foundation/infra-common", version = "0.2.2" }
+rvoip-auth-core     = { path = "crates/identity/auth-core", version = "0.2.2" }
+rvoip-core-traits   = { path = "crates/foundation/rvoip-core-traits", version = "0.2.2" }
 rvoip-users-core    = { path = "crates/identity/users-core", version = "0.1.0" }
 
-# Remaining internal crates — alpha-tier (0.1.0) except `rvoip` (the 0.2.1
+# Remaining internal crates — alpha-tier (0.1.0) except `rvoip` (the 0.2.2
 # beta facade). All publishable now. rvoip-core lists rvoip-vcon / rvoip-harness
 # as optional runtime deps, so their versions must resolve on crates.io
 # regardless of feature activation.
 rvoip-vcon          = { path = "crates/extensions/rvoip-vcon", version = "0.1.0" }
 rvoip-harness       = { path = "crates/extensions/rvoip-harness", version = "0.1.0" }
-rvoip               = { path = "crates/rvoip", version = "0.2.1" }
+rvoip               = { path = "crates/rvoip", version = "0.2.2" }
 rvoip-uctp          = { path = "crates/uctp/rvoip-uctp", version = "0.1.0" }
 rvoip-quic          = { path = "crates/uctp/rvoip-quic", version = "0.1.0" }
 rvoip-webtransport  = { path = "crates/uctp/rvoip-webtransport", version = "0.1.0" }

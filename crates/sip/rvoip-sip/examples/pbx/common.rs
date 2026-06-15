@@ -2,7 +2,7 @@
 //! `pbx_callback_builder`, and `pbx_analyze` Cargo examples in this directory.
 //!
 //! The same scenario suite — registration/unregistration, basic call,
-//! hold/resume, ring/cancel, DTMF, reject/busy, and blind transfer — is
+//! G.729, hold/resume, ring/cancel, DTMF, reject/busy, and blind transfer — is
 //! exercised against both Asterisk and FreeSWITCH and through all three
 //! public API surfaces ([`Endpoint`](rvoip_sip::Endpoint),
 //! [`StreamPeer`](rvoip_sip::StreamPeer), and
@@ -13,8 +13,9 @@
 //!
 //! - `PBX_PROVIDER` (`asterisk`|`freeswitch`) — selects PBX defaults and SRTP
 //!   policy
-//! - `PBX_SCENARIO` (e.g. `registration`, `basic_call`, `hold_resume`,
-//!   `ring_cancel`, `dtmf`, `reject`, `blind_transfer`) — chooses the scenario
+//! - `PBX_SCENARIO` (e.g. `registration`, `basic_call`, `g729_call`,
+//!   `hold_resume`, `ring_cancel`, `dtmf`, `reject`, `blind_transfer`) —
+//!   chooses the scenario
 //! - `PBX_TRANSPORT` (`udp`|`tls`) — selects the transport leg
 //! - `PBX_ROLE` — selects the participant (caller/callee/transfer-target/etc.)
 //!
@@ -52,6 +53,7 @@ pub type ExampleResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 pub const SAMPLE_RATE: u32 = 8000;
 pub const FRAME_SIZE: usize = 160;
+pub const G729_FRAME_SIZE: usize = 80;
 pub const TONE_FRAMES: usize = 150;
 pub const ENDPOINT_2001_TONE_HZ: f32 = 440.0;
 pub const ENDPOINT_2002_TONE_HZ: f32 = 880.0;
@@ -179,6 +181,7 @@ impl TransportMode {
 pub enum Scenario {
     Registration,
     BasicCall,
+    G729Call,
     HoldResume,
     RingCancel,
     Dtmf,
@@ -211,12 +214,64 @@ impl Scenario {
         match normalized.as_str() {
             "registration" | "registration_tls" | "registration_udp" => Ok(Self::Registration),
             "basic" | "basic_call" | "call" | "udp_call" => Ok(Self::BasicCall),
+            "g729" | "g729_call" | "g729ab" | "g729ab_call" => Ok(Self::G729Call),
             "hold" | "hold_resume" => Ok(Self::HoldResume),
             "ring" | "ring_cancel" | "ring_remote" => Ok(Self::RingCancel),
             "dtmf" => Ok(Self::Dtmf),
             "reject" | "busy" => Ok(Self::Reject),
             "blind_transfer" | "blind_transfer_remote" | "transfer" => Ok(Self::BlindTransfer),
             other => Err(format!("unknown PBX scenario '{}'", other).into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodecProfile {
+    Default,
+    G729A,
+    G729AB,
+}
+
+impl CodecProfile {
+    pub fn from_env_or_scenario() -> ExampleResult<Self> {
+        if let Ok(value) = std::env::var("PBX_CODEC_PROFILE") {
+            return Self::parse(&value);
+        }
+
+        match Scenario::from_env_or_args()? {
+            Scenario::G729Call => Ok(Self::G729AB),
+            _ => Ok(Self::Default),
+        }
+    }
+
+    fn parse(value: &str) -> ExampleResult<Self> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "" | "default" | "pcmu_pcma" | "g711" => Ok(Self::Default),
+            "g729a" | "g729_annex_a" | "annexb_no" => Ok(Self::G729A),
+            "g729" | "g729ab" | "g729ba" | "annexb_yes" => Ok(Self::G729AB),
+            other => Err(format!("unknown PBX codec profile '{}'", other).into()),
+        }
+    }
+
+    fn apply(self, config: &mut Config) {
+        match self {
+            Self::Default => {}
+            Self::G729A => {
+                config.offered_codecs = vec![18, 101];
+                config.g729_annex_b = false;
+            }
+            Self::G729AB => {
+                config.offered_codecs = vec![18, 101];
+                config.g729_annex_b = true;
+            }
+        }
+    }
+
+    fn env_value(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::G729A => "g729a",
+            Self::G729AB => "g729ab",
         }
     }
 }
@@ -322,6 +377,7 @@ pub struct EndpointConfig {
     pub tls_contact_mode: TlsContactMode,
     pub media_port_start: u16,
     pub media_port_end: u16,
+    pub codec_profile: CodecProfile,
     pub output_dir: PathBuf,
 }
 
@@ -396,6 +452,7 @@ impl EndpointConfig {
             &format!("{}_MEDIA_PORT_END", prefix),
             defaults.media_port_end,
         )?;
+        let codec_profile = CodecProfile::from_env_or_scenario()?;
         let output_dir = std::env::var("AUDIO_OUTPUT_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
@@ -420,6 +477,7 @@ impl EndpointConfig {
             tls_contact_mode,
             media_port_start,
             media_port_end,
+            codec_profile,
             output_dir,
         })
     }
@@ -523,6 +581,7 @@ impl EndpointConfig {
         config.media_port_start = self.media_port_start;
         config.media_port_end = self.media_port_end;
         config.media_public_addr = Some(SocketAddr::new(self.media_advertised_ip, 0));
+        self.codec_profile.apply(&mut config);
         config
     }
 
@@ -1292,6 +1351,7 @@ async fn run_stream_peer(
             sleep(idle_duration()).await;
         }
         Scenario::BasicCall
+        | Scenario::G729Call
         | Scenario::HoldResume
         | Scenario::RingCancel
         | Scenario::Dtmf
@@ -1321,6 +1381,7 @@ async fn run_endpoint(
             sleep(idle_duration()).await;
         }
         Scenario::BasicCall
+        | Scenario::G729Call
         | Scenario::HoldResume
         | Scenario::RingCancel
         | Scenario::Dtmf
@@ -1356,6 +1417,7 @@ async fn run_callback(
             sleep(idle_duration()).await;
         }
         Scenario::BasicCall
+        | Scenario::G729Call
         | Scenario::HoldResume
         | Scenario::RingCancel
         | Scenario::Dtmf
@@ -1383,23 +1445,29 @@ async fn run_stream_peer_two_party(
     match (scenario, role) {
         (Scenario::BasicCall, Role::Caller) => {
             settle_after_register(provider).await;
-            let handle = call_with_answer_retry(
-                peer,
-                &cfg.outbound_call_uri("2002"),
-                remote_test_timeout(provider)?,
-            )
-            .await?;
-            sleep(Duration::from_secs(2)).await;
-            handle.hangup_and_wait(Some(Duration::from_secs(8))).await?;
+            let target = cfg.outbound_call_uri(target_user_for(transport));
+            let handle =
+                call_with_answer_retry(peer, &target, remote_test_timeout(provider)?).await?;
+            run_basic_caller(cfg, &handle, transport).await?;
         }
         (Scenario::BasicCall, Role::Callee) => {
             let incoming =
                 timeout(remote_test_timeout(provider)?, peer.wait_for_incoming()).await??;
             let handle = incoming.accept().await?;
-            handle
-                .wait_for_end(Some(remote_test_timeout(provider)?))
-                .await
-                .ok();
+            run_basic_callee(provider, cfg, &handle, transport).await?;
+        }
+        (Scenario::G729Call, Role::Caller) => {
+            settle_after_register(provider).await;
+            let target = cfg.outbound_call_uri(target_user_for(transport));
+            let handle =
+                call_with_answer_retry(peer, &target, remote_test_timeout(provider)?).await?;
+            run_g729_caller(cfg, &handle, transport).await?;
+        }
+        (Scenario::G729Call, Role::Callee) => {
+            let incoming =
+                timeout(remote_test_timeout(provider)?, peer.wait_for_incoming()).await??;
+            let handle = incoming.accept().await?;
+            run_g729_callee(provider, cfg, &handle, transport).await?;
         }
         (Scenario::HoldResume, Role::Caller) => {
             settle_after_register(provider).await;
@@ -1494,19 +1562,34 @@ async fn run_endpoint_two_party(
         (Scenario::BasicCall, Role::Caller) => {
             settle_after_register(provider).await;
             let handle = endpoint
-                .call_and_wait("2002", Some(remote_test_timeout(provider)?))
+                .call_and_wait(
+                    target_user_for(transport),
+                    Some(remote_test_timeout(provider)?),
+                )
                 .await?;
-            sleep(Duration::from_secs(2)).await;
-            handle.hangup_and_wait(Some(Duration::from_secs(8))).await?;
+            run_basic_caller(cfg, handle.as_session_handle(), transport).await?;
         }
         (Scenario::BasicCall, Role::Callee) => {
             let incoming =
                 timeout(remote_test_timeout(provider)?, endpoint.wait_for_incoming()).await??;
             let handle = incoming.accept().await?;
-            handle
-                .wait_for_end(Some(remote_test_timeout(provider)?))
-                .await
-                .ok();
+            run_basic_callee(provider, cfg, handle.as_session_handle(), transport).await?;
+        }
+        (Scenario::G729Call, Role::Caller) => {
+            settle_after_register(provider).await;
+            let handle = endpoint
+                .call_and_wait(
+                    target_user_for(transport),
+                    Some(remote_test_timeout(provider)?),
+                )
+                .await?;
+            run_g729_caller(cfg, handle.as_session_handle(), transport).await?;
+        }
+        (Scenario::G729Call, Role::Callee) => {
+            let incoming =
+                timeout(remote_test_timeout(provider)?, endpoint.wait_for_incoming()).await??;
+            let handle = incoming.accept().await?;
+            run_g729_callee(provider, cfg, handle.as_session_handle(), transport).await?;
         }
         (Scenario::HoldResume, Role::Caller) => {
             settle_after_register(provider).await;
@@ -1617,23 +1700,31 @@ async fn run_callback_two_party(
     match (scenario, role) {
         (Scenario::BasicCall, Role::Caller) => {
             settle_after_register(provider).await;
-            let handle = callback_call_with_answer_retry(
-                runtime,
-                &runtime.cfg.outbound_call_uri("2002"),
-                remote_test_timeout(provider)?,
-            )
-            .await?;
-            sleep(Duration::from_secs(2)).await;
-            handle.hangup_and_wait(Some(Duration::from_secs(8))).await?;
+            let target = runtime.cfg.outbound_call_uri(target_user_for(transport));
+            let handle =
+                callback_call_with_answer_retry(runtime, &target, remote_test_timeout(provider)?)
+                    .await?;
+            run_basic_caller(&runtime.cfg, &handle, transport).await?;
         }
         (Scenario::BasicCall, Role::Callee) => {
             let handle =
                 wait_for_next_established(&mut runtime.events, remote_test_timeout(provider)?)
                     .await?;
-            handle
-                .wait_for_end(Some(remote_test_timeout(provider)?))
-                .await
-                .ok();
+            run_basic_callee(provider, &runtime.cfg, &handle, transport).await?;
+        }
+        (Scenario::G729Call, Role::Caller) => {
+            settle_after_register(provider).await;
+            let target = runtime.cfg.outbound_call_uri(target_user_for(transport));
+            let handle =
+                callback_call_with_answer_retry(runtime, &target, remote_test_timeout(provider)?)
+                    .await?;
+            run_g729_caller(&runtime.cfg, &handle, transport).await?;
+        }
+        (Scenario::G729Call, Role::Callee) => {
+            let handle =
+                wait_for_next_established(&mut runtime.events, remote_test_timeout(provider)?)
+                    .await?;
+            run_g729_callee(runtime.cfg.provider, &runtime.cfg, &handle, transport).await?;
         }
         (Scenario::HoldResume, Role::Caller) => {
             settle_after_register(provider).await;
@@ -1916,6 +2007,90 @@ async fn run_answering_tone_role(
         .await
         .ok();
     recorder.stop_and_save(&cfg.output_dir, wav_name).await?;
+    Ok(())
+}
+
+async fn run_basic_caller(
+    cfg: &EndpointConfig,
+    handle: &SessionHandle,
+    transport: TransportMode,
+) -> ExampleResult<()> {
+    if transport.is_tls() {
+        assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
+    }
+    let recorder = start_tone_recorder(handle, tone_for_caller(transport)).await?;
+    sleep(Duration::from_secs(4)).await;
+    handle
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await
+        .ok();
+    recorder
+        .stop_and_save(&cfg.output_dir, g711_caller_wav(transport))
+        .await?;
+    Ok(())
+}
+
+async fn run_basic_callee(
+    provider: PbxProvider,
+    cfg: &EndpointConfig,
+    handle: &SessionHandle,
+    transport: TransportMode,
+) -> ExampleResult<()> {
+    if transport.is_tls() {
+        assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
+    }
+    let recorder = start_tone_recorder(handle, tone_for_callee(transport)).await?;
+    handle
+        .wait_for_end(Some(remote_test_timeout(provider)?))
+        .await
+        .ok();
+    recorder
+        .stop_and_save(&cfg.output_dir, g711_callee_wav(transport))
+        .await?;
+    Ok(())
+}
+
+async fn run_g729_caller(
+    cfg: &EndpointConfig,
+    handle: &SessionHandle,
+    transport: TransportMode,
+) -> ExampleResult<()> {
+    if transport.is_tls() {
+        assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
+    }
+    let recorder =
+        start_tone_recorder_with_frame_size(handle, tone_for_caller(transport), G729_FRAME_SIZE)
+            .await?;
+    sleep(Duration::from_secs(4)).await;
+    handle
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await
+        .ok();
+    recorder
+        .stop_and_save(&cfg.output_dir, g729_caller_wav(transport))
+        .await?;
+    Ok(())
+}
+
+async fn run_g729_callee(
+    provider: PbxProvider,
+    cfg: &EndpointConfig,
+    handle: &SessionHandle,
+    transport: TransportMode,
+) -> ExampleResult<()> {
+    if transport.is_tls() {
+        assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
+    }
+    let recorder =
+        start_tone_recorder_with_frame_size(handle, tone_for_callee(transport), G729_FRAME_SIZE)
+            .await?;
+    handle
+        .wait_for_end(Some(remote_test_timeout(provider)?))
+        .await
+        .ok();
+    recorder
+        .stop_and_save(&cfg.output_dir, g729_callee_wav(transport))
+        .await?;
     Ok(())
 }
 
@@ -2202,6 +2377,8 @@ pub async fn run_analyze() -> ExampleResult<()> {
     let transport = TransportMode::from_env_or_args()?;
     let cfg = EndpointConfig::new(provider, username_for(transport, Role::Caller), transport)?;
     match scenario {
+        Scenario::BasicCall => analyze_basic(&cfg, transport),
+        Scenario::G729Call => analyze_g729(&cfg, transport),
         Scenario::HoldResume => analyze_hold(&cfg, transport),
         Scenario::Dtmf if transport.is_tls() => analyze_dtmf(&cfg, transport),
         Scenario::BlindTransfer if transport.is_tls() => analyze_transfer(&cfg, transport),
@@ -2213,6 +2390,44 @@ pub async fn run_analyze() -> ExampleResult<()> {
             Ok(())
         }
     }
+}
+
+fn analyze_basic(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult<()> {
+    write_audio_diagnostics(cfg, Scenario::BasicCall, transport);
+    let caller_wav = cfg.output_dir.join(g711_caller_wav(transport));
+    let callee_wav = cfg.output_dir.join(g711_callee_wav(transport));
+    let caller = assert_audio_path(
+        &caller_wav,
+        tone_for_callee(transport),
+        tone_for_caller(transport),
+    )?;
+    let callee = assert_audio_path(
+        &callee_wav,
+        tone_for_caller(transport),
+        tone_for_callee(transport),
+    )?;
+    print_analysis("caller received callee G.711 tone", &caller_wav, &caller);
+    print_analysis("callee received caller G.711 tone", &callee_wav, &callee);
+    Ok(())
+}
+
+fn analyze_g729(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult<()> {
+    write_audio_diagnostics(cfg, Scenario::G729Call, transport);
+    let caller_wav = cfg.output_dir.join(g729_caller_wav(transport));
+    let callee_wav = cfg.output_dir.join(g729_callee_wav(transport));
+    let caller = assert_audio_path(
+        &caller_wav,
+        tone_for_callee(transport),
+        tone_for_caller(transport),
+    )?;
+    let callee = assert_audio_path(
+        &callee_wav,
+        tone_for_caller(transport),
+        tone_for_callee(transport),
+    )?;
+    print_analysis("caller received callee G.729 tone", &caller_wav, &caller);
+    print_analysis("callee received caller G.729 tone", &callee_wav, &callee);
+    Ok(())
 }
 
 fn analyze_hold(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult<()> {
@@ -2349,6 +2564,58 @@ fn write_audio_diagnostics_inner(
     markdown.push_str(&format!("- transport: {:?}\n\n", transport));
 
     match scenario {
+        Scenario::BasicCall => {
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                "g711 caller",
+                &cfg.output_dir.join(g711_caller_wav(transport)),
+                &[(
+                    "caller received callee G.711 tone",
+                    WindowSelector::Stable,
+                    tone_for_callee(transport),
+                    tone_for_caller(transport),
+                )],
+            );
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                "g711 callee",
+                &cfg.output_dir.join(g711_callee_wav(transport)),
+                &[(
+                    "callee received caller G.711 tone",
+                    WindowSelector::Stable,
+                    tone_for_caller(transport),
+                    tone_for_callee(transport),
+                )],
+            );
+        }
+        Scenario::G729Call => {
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                "g729 caller",
+                &cfg.output_dir.join(g729_caller_wav(transport)),
+                &[(
+                    "caller received callee G.729 tone",
+                    WindowSelector::Stable,
+                    tone_for_callee(transport),
+                    tone_for_caller(transport),
+                )],
+            );
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                "g729 callee",
+                &cfg.output_dir.join(g729_callee_wav(transport)),
+                &[(
+                    "callee received caller G.729 tone",
+                    WindowSelector::Stable,
+                    tone_for_caller(transport),
+                    tone_for_callee(transport),
+                )],
+            );
+        }
         Scenario::HoldResume => {
             add_audio_file_diagnostics(
                 &mut files,
@@ -2699,9 +2966,13 @@ fn best_window_tone_for_diag(
 }
 
 pub fn generate_tone(freq: f32, frame_num: usize) -> Vec<i16> {
-    (0..FRAME_SIZE)
+    generate_tone_with_frame_size(freq, frame_num, FRAME_SIZE)
+}
+
+pub fn generate_tone_with_frame_size(freq: f32, frame_num: usize, frame_size: usize) -> Vec<i16> {
+    (0..frame_size)
         .map(|j| {
-            let t = (frame_num * FRAME_SIZE + j) as f32 / SAMPLE_RATE as f32;
+            let t = (frame_num * frame_size + j) as f32 / SAMPLE_RATE as f32;
             (0.3 * (2.0 * std::f32::consts::PI * freq * t).sin() * 32767.0) as i16
         })
         .collect()
@@ -2730,6 +3001,14 @@ pub async fn send_tone_segment(
 pub async fn start_tone_recorder(
     handle: &SessionHandle,
     tone_hz: f32,
+) -> ExampleResult<ToneRecorder> {
+    start_tone_recorder_with_frame_size(handle, tone_hz, FRAME_SIZE).await
+}
+
+pub async fn start_tone_recorder_with_frame_size(
+    handle: &SessionHandle,
+    tone_hz: f32,
+    frame_size: usize,
 ) -> ExampleResult<ToneRecorder> {
     let audio = handle.audio().await?;
     let (sender, mut receiver) = audio.split();
@@ -2797,18 +3076,19 @@ pub async fn start_tone_recorder(
     let send_running = running.clone();
     let send_task = tokio::spawn(async move {
         let mut frame_index = 0usize;
+        let frame_duration_ms = ((frame_size as u64) * 1000 / u64::from(SAMPLE_RATE)).max(1);
         while send_running.load(Ordering::Relaxed) && sender.is_open() {
             let frame = AudioFrame::new(
-                generate_tone(tone_hz, frame_index),
+                generate_tone_with_frame_size(tone_hz, frame_index, frame_size),
                 SAMPLE_RATE,
                 1,
-                (frame_index * FRAME_SIZE) as u32,
+                (frame_index * frame_size) as u32,
             );
             if sender.send(frame).await.is_err() {
                 break;
             }
             frame_index += 1;
-            sleep(Duration::from_millis(20)).await;
+            sleep(Duration::from_millis(frame_duration_ms)).await;
         }
     });
     Ok(ToneRecorder {
@@ -3707,6 +3987,11 @@ fn print_registration_context(cfg: &EndpointConfig) {
     println!("[{}] Contact:    {}", cfg.username, cfg.contact_uri());
     println!("[{}] Registrar:  {}", cfg.username, cfg.registrar_uri());
     println!("[{}] Media SDP:  {}", cfg.username, cfg.media_advertised_ip);
+    println!(
+        "[{}] Codec:     {}",
+        cfg.username,
+        cfg.codec_profile.env_value()
+    );
 }
 
 async fn settle_after_register(provider: PbxProvider) {
@@ -3791,11 +4076,51 @@ fn target_user_for(transport: TransportMode) -> &'static str {
     }
 }
 
+fn tone_for_caller(transport: TransportMode) -> f32 {
+    if transport.is_tls() {
+        ENDPOINT_1001_TONE_HZ
+    } else {
+        ENDPOINT_2001_TONE_HZ
+    }
+}
+
 fn tone_for_callee(transport: TransportMode) -> f32 {
     if transport.is_tls() {
         ENDPOINT_1002_TONE_HZ
     } else {
         ENDPOINT_2002_TONE_HZ
+    }
+}
+
+fn g711_caller_wav(transport: TransportMode) -> &'static str {
+    if transport.is_tls() {
+        "tls_srtp_g711_1001_received.wav"
+    } else {
+        "g711_2001_received.wav"
+    }
+}
+
+fn g711_callee_wav(transport: TransportMode) -> &'static str {
+    if transport.is_tls() {
+        "tls_srtp_g711_1002_received.wav"
+    } else {
+        "g711_2002_received.wav"
+    }
+}
+
+fn g729_caller_wav(transport: TransportMode) -> &'static str {
+    if transport.is_tls() {
+        "tls_srtp_g729_1001_received.wav"
+    } else {
+        "g729_2001_received.wav"
+    }
+}
+
+fn g729_callee_wav(transport: TransportMode) -> &'static str {
+    if transport.is_tls() {
+        "tls_srtp_g729_1002_received.wav"
+    } else {
+        "g729_2002_received.wav"
     }
 }
 

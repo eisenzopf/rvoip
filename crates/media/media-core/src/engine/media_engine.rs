@@ -826,6 +826,14 @@ impl MediaEngine {
                         channels: 1,
                         clock_rate: 8000,
                     }),
+                    #[cfg(feature = "g729")]
+                    payload_types::G729 => Some(AudioCodecCapability {
+                        payload_type: pt,
+                        name: "G729".to_string(),
+                        sample_rates: vec![SampleRate::Rate8000],
+                        channels: 1,
+                        clock_rate: 8000,
+                    }),
                     // Note: Opus is a dynamic codec and doesn't have a fixed payload type
                     // It will be handled during SDP negotiation with the actual negotiated PT
                     _ => None,

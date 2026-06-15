@@ -5,7 +5,9 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
+#[cfg(feature = "g729")]
+use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
 
 // Import rtp-core types
@@ -15,11 +17,12 @@ use rvoip_rtp_core::{
 
 // Import media-core types
 use codec_core::codecs::g711::G711Variant;
+#[cfg(feature = "g729")]
+use rvoip_media_core::processing::format::FormatConverter;
 use rvoip_media_core::{
     codec::audio::g711::G711Codec,
     codec::{mapping::CodecMapper, AudioCodec},
     integration::{events::RtpParameters, RtpBridge, RtpBridgeConfig},
-    processing::format::FormatConverter,
     relay::controller::codec_detection::CodecDetector,
     relay::controller::codec_fallback::CodecFallbackManager,
     AudioFrame, DialogId, MediaEngine, MediaEngineConfig, MediaSessionId, MediaSessionParams,
@@ -290,6 +293,7 @@ async fn test_rtp_bridge_packet_routing() {
     println!("✅ RTP bridge statistics working");
 }
 
+#[cfg(feature = "g729")]
 #[tokio::test]
 async fn test_transcoding_over_rtp() {
     // Test that transcoding works in the context of RTP transport
