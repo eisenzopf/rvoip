@@ -2861,6 +2861,22 @@ impl UnifiedCoordinator {
         let transaction_counts = transaction_manager.retention_counts();
         let transaction_breakdown = transaction_manager.retention_breakdown();
         let dialog_counts = dialog_core.retention_counts();
+        #[cfg(feature = "perf-infra-memory-diagnostics")]
+        let memory_diagnostics = rvoip_infra_common::memory_diagnostics::snapshot();
+        #[cfg(not(feature = "perf-infra-memory-diagnostics"))]
+        let memory_diagnostics = serde_json::json!({
+            "enabled": false,
+            "compiled": false,
+            "feature": "perf-infra-memory-diagnostics",
+        });
+        #[cfg(feature = "perf-infra-memory-diagnostics")]
+        let allocator_diagnostics = rvoip_infra_common::memory_diagnostics::allocator_snapshot();
+        #[cfg(not(feature = "perf-infra-memory-diagnostics"))]
+        let allocator_diagnostics = serde_json::json!({
+            "enabled": false,
+            "compiled": false,
+            "feature": "perf-infra-memory-diagnostics",
+        });
 
         serde_json::json!({
             "config": {
@@ -2930,8 +2946,8 @@ impl UnifiedCoordinator {
             },
             "dialog_adapter": self.dialog_adapter.perf_diagnostic_counts(),
             "media_adapter": self.media_adapter.perf_diagnostic_counts(),
-            "memory_diagnostics": rvoip_infra_common::memory_diagnostics::snapshot(),
-            "allocator_diagnostics": rvoip_infra_common::memory_diagnostics::allocator_snapshot(),
+            "memory_diagnostics": memory_diagnostics,
+            "allocator_diagnostics": allocator_diagnostics,
             "server_call_admission": admission,
             "sip_dialog_diagnostics": {
                 "transaction_runner": {

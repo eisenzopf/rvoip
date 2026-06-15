@@ -118,7 +118,10 @@ pub enum CodecType {
     G711Pcma,
     /// G.722 wideband
 
-    /// G.729 low-bitrate
+    /// G.729 low-bitrate RTP compatibility alias.
+    ///
+    /// The built-in implementation is Annex A speech coding with optional
+    /// Annex B; it does not implement full-complexity base G.729.
     G729,
     /// G.729A reduced complexity
     G729A,
@@ -383,6 +386,16 @@ impl CodecConfig {
         Self::new(CodecType::G729)
     }
 
+    /// Create G.729 Annex A configuration
+    pub fn g729a() -> Self {
+        Self::new(CodecType::G729A).with_g729_annex_b(false)
+    }
+
+    /// Create G.729 Annex A plus Annex B configuration
+    pub fn g729ba() -> Self {
+        Self::new(CodecType::G729BA).with_g729_annex_b(true)
+    }
+
     /// Create Opus configuration
     pub fn opus() -> Self {
         Self::new(CodecType::Opus)
@@ -439,6 +452,26 @@ impl CodecConfig {
     /// Set Opus FEC
     pub fn with_opus_fec(mut self, fec: bool) -> Self {
         self.parameters.opus.inband_fec = fec;
+        self
+    }
+
+    /// Set whether G.729 Annex A reduced-complexity mode is enabled.
+    ///
+    /// Setting this to `false` requests full-complexity base G.729, which is
+    /// not implemented by the built-in G.729 codec and will be rejected.
+    #[allow(deprecated)] // keep the legacy mirror field in sync
+    pub fn with_g729_annex_a(mut self, annex_a: bool) -> Self {
+        self.parameters.g729.annex_a = annex_a;
+        self.parameters.g729.reduced_complexity = annex_a;
+        self
+    }
+
+    /// Set whether G.729 Annex B VAD/DTX/CNG is enabled.
+    #[allow(deprecated)] // keep legacy VAD/CNG mirror fields in sync
+    pub fn with_g729_annex_b(mut self, annex_b: bool) -> Self {
+        self.parameters.g729.annex_b = annex_b;
+        self.parameters.g729.vad_enabled = annex_b;
+        self.parameters.g729.cng_enabled = annex_b;
         self
     }
 

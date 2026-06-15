@@ -4,8 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 CRATE_DIR="${WORKSPACE_ROOT}/crates/sip/rvoip-sip"
-CRATES_ROOT="${WORKSPACE_ROOT}/crates"
-PERF_DIR="${CRATES_ROOT}/target/perf-results"
+PERF_DIR="${WORKSPACE_ROOT}/target/perf-results"
 
 export CARGO_MANIFEST_DIR="${CRATE_DIR}"
 
@@ -22,17 +21,18 @@ export RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS
 mkdir -p "${PERF_DIR}"
 cd "${WORKSPACE_ROOT}"
 
-echo "Building split soak test binaries..."
+PERF_FEATURES="${RVOIP_PERF_FEATURES:-perf-tests}"
+echo "Building split soak test binaries (features: ${PERF_FEATURES})..."
 cargo test \
   -p rvoip-sip \
   --release \
-  --features perf-tests \
+  --features "${PERF_FEATURES}" \
   --test perf_soak_receiver \
   --no-run
 cargo test \
   -p rvoip-sip \
   --release \
-  --features perf-tests \
+  --features "${PERF_FEATURES}" \
   --test perf_soak_caller \
   --no-run
 

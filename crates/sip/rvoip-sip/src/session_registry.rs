@@ -69,11 +69,11 @@ impl SessionRegistry {
     /// Map a dialog ID to a session ID (single session version).
     pub async fn map_dialog(&self, session_id: SessionId, dialog_id: DialogId) {
         let session_id = Arc::new(session_id);
-        #[cfg(feature = "perf-tests")]
+        #[cfg(feature = "perf-infra-memory-diagnostics")]
         let previous_session = self.current_session.swap(Some(session_id.clone()));
-        #[cfg(not(feature = "perf-tests"))]
+        #[cfg(not(feature = "perf-infra-memory-diagnostics"))]
         let _previous_session = self.current_session.swap(Some(session_id.clone()));
-        #[cfg(feature = "perf-tests")]
+        #[cfg(feature = "perf-infra-memory-diagnostics")]
         self.record_session_mapping_for_memory_diagnostics(
             previous_session.as_deref(),
             &session_id,
@@ -85,11 +85,11 @@ impl SessionRegistry {
     /// Map a media session ID to a session ID (single session version).
     pub async fn map_media(&self, session_id: SessionId, media_id: MediaSessionId) {
         let session_id = Arc::new(session_id);
-        #[cfg(feature = "perf-tests")]
+        #[cfg(feature = "perf-infra-memory-diagnostics")]
         let previous_session = self.current_session.swap(Some(session_id.clone()));
-        #[cfg(not(feature = "perf-tests"))]
+        #[cfg(not(feature = "perf-infra-memory-diagnostics"))]
         let _previous_session = self.current_session.swap(Some(session_id.clone()));
-        #[cfg(feature = "perf-tests")]
+        #[cfg(feature = "perf-infra-memory-diagnostics")]
         self.record_session_mapping_for_memory_diagnostics(
             previous_session.as_deref(),
             &session_id,
@@ -148,7 +148,7 @@ impl SessionRegistry {
                 self.current_dialog.store(None);
                 self.current_media.store(None);
                 self.removed_total.fetch_add(1, Ordering::Relaxed);
-                #[cfg(feature = "perf-tests")]
+                #[cfg(feature = "perf-infra-memory-diagnostics")]
                 rvoip_infra_common::memory_diagnostics::record_dropped(
                     "sip.session_registry.current_session",
                     std::mem::size_of::<SessionId>(),
@@ -181,11 +181,11 @@ impl SessionRegistry {
 
     /// Clear all mappings (single session version).
     pub async fn clear(&self) {
-        #[cfg(feature = "perf-tests")]
+        #[cfg(feature = "perf-infra-memory-diagnostics")]
         let previous_session = self.current_session.swap(None);
-        #[cfg(not(feature = "perf-tests"))]
+        #[cfg(not(feature = "perf-infra-memory-diagnostics"))]
         let _previous_session = self.current_session.swap(None);
-        #[cfg(feature = "perf-tests")]
+        #[cfg(feature = "perf-infra-memory-diagnostics")]
         if previous_session.is_some() {
             rvoip_infra_common::memory_diagnostics::record_dropped(
                 "sip.session_registry.current_session",
@@ -199,7 +199,7 @@ impl SessionRegistry {
         self.pending_incoming_transport.store(None);
     }
 
-    #[cfg(feature = "perf-tests")]
+    #[cfg(feature = "perf-infra-memory-diagnostics")]
     fn record_session_mapping_for_memory_diagnostics(
         &self,
         previous: Option<&SessionId>,

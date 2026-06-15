@@ -85,7 +85,7 @@ impl SessionStore {
 
         self.sessions.insert(session_id.clone(), session.clone());
         self.created_total.fetch_add(1, Ordering::Relaxed);
-        #[cfg(feature = "perf-tests")]
+        #[cfg(feature = "perf-infra-memory-diagnostics")]
         rvoip_infra_common::memory_diagnostics::record_created(
             "sip.session_store.session",
             std::mem::size_of::<SessionState>(),
@@ -167,7 +167,7 @@ impl SessionStore {
                 self.by_call_id.insert(call_id.clone(), session_id.clone());
             }
             debug!("Update inserted missing session {}", session_id);
-            #[cfg(feature = "perf-tests")]
+            #[cfg(feature = "perf-infra-memory-diagnostics")]
             rvoip_infra_common::memory_diagnostics::record_created(
                 "sip.session_store.session",
                 std::mem::size_of::<SessionState>(),
@@ -201,7 +201,7 @@ impl SessionStore {
 
             info!("Removed session {}", session_id);
             self.removed_total.fetch_add(1, Ordering::Relaxed);
-            #[cfg(feature = "perf-tests")]
+            #[cfg(feature = "perf-infra-memory-diagnostics")]
             rvoip_infra_common::memory_diagnostics::record_dropped(
                 "sip.session_store.session",
                 std::mem::size_of::<SessionState>(),

@@ -4,8 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 CRATE_DIR="${WORKSPACE_ROOT}/crates/sip/rvoip-sip"
-CRATES_ROOT="${WORKSPACE_ROOT}/crates"
-PERF_DIR="${CRATES_ROOT}/target/perf-results"
+PERF_DIR="${WORKSPACE_ROOT}/target/perf-results"
 
 export CARGO_MANIFEST_DIR="${CRATE_DIR}"
 
@@ -36,14 +35,34 @@ export RVOIP_PERF_DHAT
 mkdir -p "${PERF_DIR}"
 cd "${WORKSPACE_ROOT}"
 
-PERF_FEATURES="perf-tests"
+append_perf_feature() {
+  local feature="$1"
+  case ",${PERF_FEATURES}," in
+    *,"${feature}",*) ;;
+    *) PERF_FEATURES="${PERF_FEATURES},${feature}" ;;
+  esac
+}
+
+PERF_FEATURES="${RVOIP_PERF_FEATURES:-perf-tests}"
+if [[ "${RVOIP_PERF_MEMORY_DIAGNOSTICS}" == "1" || "${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS}" == "1" ]]; then
+  append_perf_feature "perf-infra-memory-diagnostics"
+fi
+if [[ "${RVOIP_PERF_MEDIA_DIAGNOSTICS:-0}" == "1" ]]; then
+  append_perf_feature "perf-media-diagnostics"
+fi
+if [[ "${RVOIP_PERF_MEDIA_MEMORY_DIAGNOSTICS:-0}" == "1" ]]; then
+  append_perf_feature "perf-media-memory-diagnostics"
+fi
+if [[ "${RVOIP_PERF_RTP_MEMORY_DIAGNOSTICS:-0}" == "1" ]]; then
+  append_perf_feature "perf-rtp-memory-diagnostics"
+fi
 if [[ "${RVOIP_PERF_DHAT}" == "1" ]]; then
   if [[ "${RVOIP_PERF_SYSTEM_ALLOCATOR}" == "1" ]]; then
     echo "RVOIP_PERF_DHAT=1 uses DHAT's allocator; ignoring RVOIP_PERF_SYSTEM_ALLOCATOR=1" >&2
   fi
-  PERF_FEATURES="perf-tests,dhat"
+  append_perf_feature "dhat"
 elif [[ "${RVOIP_PERF_SYSTEM_ALLOCATOR}" == "1" ]]; then
-  PERF_FEATURES="perf-tests,perf-system-allocator"
+  append_perf_feature "perf-system-allocator"
 fi
 
 echo "Building split soak test binaries (features: ${PERF_FEATURES})..."

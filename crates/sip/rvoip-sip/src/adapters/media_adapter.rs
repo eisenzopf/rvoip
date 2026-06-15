@@ -35,7 +35,7 @@ const AUDIO_RECEIVER_CHANNEL_FRAMES: usize = 128;
 static SRTP_DIAGNOSTICS: AtomicU8 = AtomicU8::new(DIAG_OFF);
 static MEDIA_SDP_DIAGNOSTICS: AtomicU8 = AtomicU8::new(DIAG_OFF);
 
-#[cfg(feature = "perf-tests")]
+#[cfg(feature = "perf-infra-memory-diagnostics")]
 fn spawn_memory_tracked<F>(kind: &'static str, future: F) -> tokio::task::JoinHandle<F::Output>
 where
     F: std::future::Future + Send + 'static,
@@ -44,7 +44,7 @@ where
     rvoip_infra_common::memory_diagnostics::spawn_tracked(kind, future)
 }
 
-#[cfg(not(feature = "perf-tests"))]
+#[cfg(not(feature = "perf-infra-memory-diagnostics"))]
 fn spawn_memory_tracked<F>(_: &'static str, future: F) -> tokio::task::JoinHandle<F::Output>
 where
     F: std::future::Future + Send + 'static,
@@ -569,6 +569,14 @@ impl MediaAdapter {
             .iter()
             .map(|entry| entry.value().max_capacity())
             .sum();
+        #[cfg(feature = "perf-media-diagnostics")]
+        let controller_diagnostics = self.controller.diagnostic_counts();
+        #[cfg(not(feature = "perf-media-diagnostics"))]
+        let controller_diagnostics = serde_json::json!({
+            "enabled": false,
+            "compiled": false,
+            "feature": "perf-media-diagnostics",
+        });
 
         serde_json::json!({
             "session_to_dialog": self.session_to_dialog.len(),
@@ -580,7 +588,7 @@ impl MediaAdapter {
             "pending_srtp_offerers": self.pending_srtp_offerers.len(),
             "negotiated_srtp": self.negotiated_srtp.len(),
             "audio_mixers": self.audio_mixers.len(),
-            "controller": self.controller.diagnostic_counts(),
+            "controller": controller_diagnostics,
             "lifecycle": {
                 "session_create_attempt_total": self.session_create_attempt_total.load(Ordering::Relaxed),
                 "session_create_success_total": self.session_create_success_total.load(Ordering::Relaxed),

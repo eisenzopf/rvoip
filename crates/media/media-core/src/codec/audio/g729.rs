@@ -6,7 +6,16 @@
 use super::common::{AudioCodec, CodecInfo};
 use crate::error::{CodecError, Result};
 use crate::types::{AudioFrame, SampleRate};
-use tracing::{debug, warn};
+#[cfg(feature = "g729")]
+use codec_core::codecs::g729::G729Codec as CodecCoreG729;
+#[cfg(feature = "g729")]
+use codec_core::types::{
+    AudioCodec as CodecCoreAudioCodec, CodecConfig as CodecCoreConfig, CodecType as CodecCoreType,
+    SampleRate as CodecCoreSampleRate,
+};
+use tracing::debug;
+#[cfg(not(feature = "g729"))]
+use tracing::warn;
 /// G.729 codec configuration
 #[derive(Debug, Clone)]
 pub struct G729Config {
@@ -56,12 +65,9 @@ pub struct G729Codec {
     channels: u8,
     /// Frame size in samples (80 samples for 10ms at 8kHz)
     frame_size: usize,
-    /// Encoder state (when available)
+    /// Codec-core G.729 adapter.
     #[cfg(feature = "g729")]
-    encoder: Option<g729::Encoder>,
-    /// Decoder state (when available)
-    #[cfg(feature = "g729")]
-    decoder: Option<g729::Decoder>,
+    inner: CodecCoreG729,
 }
 
 impl G729Codec {
@@ -102,47 +108,21 @@ impl G729Codec {
             sample_rate_hz, channels, config.frame_size_ms, config.enable_vad, config.enable_cng
         );
 
+        #[cfg(feature = "g729")]
+        let inner = CodecCoreG729::new(codec_core_config(&config)?).map_err(|e| {
+            CodecError::InitializationFailed {
+                reason: format!("G.729 codec-core initialization failed: {e}"),
+            }
+        })?;
+
         Ok(Self {
             config,
             sample_rate: sample_rate_hz,
             channels,
             frame_size,
             #[cfg(feature = "g729")]
-            encoder: None,
-            #[cfg(feature = "g729")]
-            decoder: None,
+            inner,
         })
-    }
-
-    /// Initialize encoder
-    #[cfg(feature = "g729")]
-    fn ensure_encoder(&mut self) -> Result<()> {
-        if self.encoder.is_none() {
-            let encoder = g729::Encoder::new(self.config.enable_vad, self.config.annexes.annex_b)
-                .map_err(|e| CodecError::InitializationFailed {
-                reason: format!("G.729 encoder creation failed: {:?}", e),
-            })?;
-
-            self.encoder = Some(encoder);
-            debug!("G.729 encoder initialized");
-        }
-
-        Ok(())
-    }
-
-    /// Initialize decoder
-    #[cfg(feature = "g729")]
-    fn ensure_decoder(&mut self) -> Result<()> {
-        if self.decoder.is_none() {
-            let decoder = g729::Decoder::new().map_err(|e| CodecError::InitializationFailed {
-                reason: format!("G.729 decoder creation failed: {:?}", e),
-            })?;
-
-            self.decoder = Some(decoder);
-            debug!("G.729 decoder initialized");
-        }
-
-        Ok(())
     }
 
     /// Simulate G.729 encoding (when actual codec not available)
@@ -231,17 +211,12 @@ impl AudioCodec for G729Codec {
 
         #[cfg(feature = "g729")]
         {
-            self.ensure_encoder()?;
-
-            let encoder = self.encoder.as_mut().unwrap();
-            let encoded =
-                encoder
-                    .encode(&audio_frame.samples)
-                    .map_err(|e| CodecError::EncodingFailed {
-                        reason: format!("G.729 encoding failed: {:?}", e),
-                    })?;
-
-            Ok(encoded)
+            self.inner.encode(&audio_frame.samples).map_err(|e| {
+                CodecError::EncodingFailed {
+                    reason: format!("G.729 encoding failed: {e}"),
+                }
+                .into()
+            })
         }
 
         #[cfg(not(feature = "g729"))]
@@ -252,9 +227,9 @@ impl AudioCodec for G729Codec {
     }
 
     fn decode(&mut self, encoded_data: &[u8]) -> Result<AudioFrame> {
-        // G.729 frames are typically 10 bytes (8 kbps, 10ms frames)
-        // Special handling for comfort noise frames (shorter)
-        if encoded_data.is_empty() {
+        // G.729 frames are typically 10 bytes. Under Annex B, empty no-data
+        // payloads are valid only when the real codec-core backend is enabled.
+        if encoded_data.is_empty() && !cfg!(feature = "g729") {
             return Err(CodecError::InvalidFrameSize {
                 expected: 10,
                 actual: 0,
@@ -264,14 +239,11 @@ impl AudioCodec for G729Codec {
 
         #[cfg(feature = "g729")]
         {
-            self.ensure_decoder()?;
-
-            let decoder = self.decoder.as_mut().unwrap();
             let decoded_samples =
-                decoder
+                self.inner
                     .decode(encoded_data)
                     .map_err(|e| CodecError::DecodingFailed {
-                        reason: format!("G.729 decoding failed: {:?}", e),
+                        reason: format!("G.729 decoding failed: {e}"),
                     })?;
 
             Ok(AudioFrame::new(
@@ -301,15 +273,40 @@ impl AudioCodec for G729Codec {
     fn reset(&mut self) {
         #[cfg(feature = "g729")]
         {
-            if let Some(encoder) = &mut self.encoder {
-                let _ = encoder.reset();
-            }
-            if let Some(decoder) = &mut self.decoder {
-                let _ = decoder.reset();
-            }
+            let _ = self.inner.reset();
         }
         debug!("G.729 codec reset");
     }
+}
+
+#[cfg(feature = "g729")]
+fn codec_core_config(config: &G729Config) -> Result<CodecCoreConfig> {
+    if !config.annexes.annex_a {
+        return Err(CodecError::InvalidParameters {
+            details: "Full-complexity base G.729 is not implemented; Annex A is required"
+                .to_string(),
+        }
+        .into());
+    }
+
+    let annex_b = config.annexes.annex_b && config.enable_vad && config.enable_cng;
+    let codec_type = if annex_b {
+        CodecCoreType::G729BA
+    } else {
+        CodecCoreType::G729A
+    };
+
+    let mut core_config = CodecCoreConfig::new(codec_type)
+        .with_sample_rate(CodecCoreSampleRate::Rate8000)
+        .with_channels(1)
+        .with_frame_size_ms(config.frame_size_ms)
+        .with_g729_annex_a(true)
+        .with_g729_annex_b(annex_b);
+
+    core_config.parameters.g729.annex_a = true;
+    core_config.parameters.g729.annex_b = annex_b;
+
+    Ok(core_config)
 }
 
 #[cfg(test)]

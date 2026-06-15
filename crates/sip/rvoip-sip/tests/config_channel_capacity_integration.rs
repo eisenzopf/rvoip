@@ -850,7 +850,11 @@ async fn diagnostic_flags_are_independent_at_runtime() {
     assert!(!rvoip_sip_transport::diagnostics::enabled());
     assert!(!rvoip_sip_dialog::diagnostics::enabled());
     assert!(!rvoip_sip_dialog::diagnostics::transaction_timing_enabled());
-    assert!(rvoip_media_core::diagnostics::enabled());
+    if cfg!(feature = "perf-media-diagnostics") {
+        assert!(rvoip_media_core::diagnostics::enabled());
+    } else {
+        assert!(!rvoip_media_core::diagnostics::enabled());
+    }
     assert!(!cleanup_diag::enabled());
     media_only
         .shutdown_gracefully(Some(Duration::ZERO))

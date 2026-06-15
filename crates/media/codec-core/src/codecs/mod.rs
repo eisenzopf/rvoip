@@ -72,6 +72,9 @@ use std::collections::HashMap;
 #[cfg(feature = "g711")]
 pub mod g711;
 
+#[cfg(feature = "g729")]
+pub mod g729;
+
 #[cfg(any(feature = "opus", feature = "opus-sim"))]
 pub mod opus;
 
@@ -97,6 +100,12 @@ impl CodecFactory {
                 Ok(Box::new(codec))
             }
 
+            #[cfg(feature = "g729")]
+            CodecType::G729 | CodecType::G729A | CodecType::G729BA => {
+                let codec = g729::G729Codec::new(config)?;
+                Ok(Box::new(codec))
+            }
+
             #[cfg(any(feature = "opus", feature = "opus-sim"))]
             CodecType::Opus => {
                 let codec = opus::OpusCodec::new(config)?;
@@ -112,10 +121,12 @@ impl CodecFactory {
 
     /// Create a codec by name
     pub fn create_by_name(name: &str, config: CodecConfig) -> Result<Box<dyn AudioCodec>> {
-        let codec_type = match name.to_uppercase().as_str() {
+        let codec_type = match normalize_codec_name(name).as_str() {
             "PCMU" => CodecType::G711Pcmu,
             "PCMA" => CodecType::G711Pcma,
-
+            "G729" => CodecType::G729,
+            "G729A" => CodecType::G729A,
+            "G729AB" | "G729BA" => CodecType::G729BA,
             "OPUS" => CodecType::Opus,
             _ => return Err(CodecError::unsupported_codec(name)),
         };
@@ -136,6 +147,7 @@ impl CodecFactory {
         let codec_type = match payload_type {
             0 => CodecType::G711Pcmu,
             8 => CodecType::G711Pcma,
+            18 => CodecType::G729,
 
             _ => return Err(CodecError::unsupported_codec(format!("PT{}", payload_type))),
         };
@@ -155,6 +167,12 @@ impl CodecFactory {
             "PCMU",
             #[cfg(feature = "g711")]
             "PCMA",
+            #[cfg(feature = "g729")]
+            "G729",
+            #[cfg(feature = "g729")]
+            "G729A",
+            #[cfg(feature = "g729")]
+            "G729BA",
             #[cfg(any(feature = "opus", feature = "opus-sim"))]
             "OPUS",
         ]
@@ -162,8 +180,21 @@ impl CodecFactory {
 
     /// Check if a codec is supported
     pub fn is_supported(name: &str) -> bool {
-        Self::supported_codecs().contains(&name.to_uppercase().as_str())
+        let normalized = normalize_codec_name(name);
+        match normalized.as_str() {
+            #[cfg(feature = "g711")]
+            "PCMU" | "PCMA" => true,
+            #[cfg(feature = "g729")]
+            "G729" | "G729A" | "G729AB" | "G729BA" => true,
+            #[cfg(any(feature = "opus", feature = "opus-sim"))]
+            "OPUS" => true,
+            _ => false,
+        }
     }
+}
+
+fn normalize_codec_name(name: &str) -> String {
+    name.to_ascii_uppercase().replace('.', "")
 }
 
 /// Codec registry for managing multiple codec instances
@@ -283,6 +314,47 @@ impl CodecCapabilities {
                     bitrate: 64000,
                     frame_size: 960,
                     payload_type: None,
+                },
+            );
+        }
+
+        #[cfg(feature = "g729")]
+        {
+            codec_types.push(CodecType::G729);
+            codec_types.push(CodecType::G729A);
+            codec_types.push(CodecType::G729BA);
+
+            codec_info.insert(
+                CodecType::G729,
+                CodecInfo {
+                    name: "G729",
+                    sample_rate: 8000,
+                    channels: 1,
+                    bitrate: 8000,
+                    frame_size: 80,
+                    payload_type: Some(18),
+                },
+            );
+            codec_info.insert(
+                CodecType::G729A,
+                CodecInfo {
+                    name: "G729A",
+                    sample_rate: 8000,
+                    channels: 1,
+                    bitrate: 8000,
+                    frame_size: 80,
+                    payload_type: Some(18),
+                },
+            );
+            codec_info.insert(
+                CodecType::G729BA,
+                CodecInfo {
+                    name: "G729BA",
+                    sample_rate: 8000,
+                    channels: 1,
+                    bitrate: 8000,
+                    frame_size: 80,
+                    payload_type: Some(18),
                 },
             );
         }

@@ -4,6 +4,12 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 WORKSPACE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../.." && pwd)
+
+# Local PBX interop uses Docker through Colima on macOS. Homebrew installs the
+# CLIs outside the minimal PATH that some CI/desktop shells provide.
+PATH="/opt/homebrew/opt/docker/bin:/opt/homebrew/opt/docker-compose/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH
+
 OUT_ROOT="${PBX_OUT_ROOT:-$SCRIPT_DIR/output}"
 RUN_STARTED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 RUN_STARTED_EPOCH=$(date +%s)

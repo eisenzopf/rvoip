@@ -13,6 +13,16 @@ CRATE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # crates/sip/rvoip-sip -> repo root is three levels up (post directory reorg).
 WORKSPACE_ROOT="$(cd "$CRATE_DIR/../../.." && pwd)"
 
+# Local PBX interop runs use Docker through Colima on macOS. Homebrew installs
+# those CLIs outside the minimal PATH that some CI/desktop shells provide.
+export PATH="/opt/homebrew/opt/docker/bin:/opt/homebrew/opt/docker-compose/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+if [ "${BETA_DENY_WARNINGS:-1}" != "0" ]; then
+  export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D warnings"
+  export RUSTDOCFLAGS="${RUSTDOCFLAGS:+$RUSTDOCFLAGS }-D warnings"
+fi
+export RUST_LOG="${BETA_TEST_LOG_FILTER:-off}"
+
 MODE="${BETA_GATE_MODE:-local}"
 REQUIRE_EXTERNAL="${BETA_GATE_REQUIRE_EXTERNAL:-0}"
 BETA_FUZZ_TOOLCHAIN="${BETA_FUZZ_TOOLCHAIN:-nightly}"
@@ -48,6 +58,9 @@ Environment:
   BETA_REPORT_DIR                Crate-local report directory. Defaults to crates/sip/rvoip-sip/beta-report.
   BETA_REPORT_PACKAGE=0          Disable copying completed artifacts into BETA_REPORT_DIR.
   BETA_GATE_REQUIRE_EXTERNAL=1   Treat skipped external gates as failures.
+  BETA_DENY_WARNINGS=0           Allow Rust warnings during beta gates. Defaults to 1.
+  BETA_TEST_LOG_FILTER           Runtime tracing filter for cargo test/build gates.
+                                  Defaults to off for clean release evidence.
   BETA_RUN_PBX=1                 Run examples/pbx/run.sh when PBX configs are present.
   BETA_RUN_LOCAL_PBX=1           Manage ~/Developer/asterisk and ~/Developer/freeswitch sequentially.
   BETA_RESTORE_LOCAL_PBX=0       Do not restore the PBX container that was running before the gate.
@@ -68,6 +81,13 @@ Environment:
   BETA_PERF_PROFILE_MATRIX       Perf profile:CPS matrix. Defaults to endpoint, pbx-media-server,
                                   and signaling-only-server-high-performance.
   BETA_PERFORMANCE_RECIPE_FILE   Optional YAML recipe book path.
+  BETA_PERF_INFRA_MEMORY_DIAGNOSTICS=1
+                                  Compile SIP/infra memory diagnostics for perf gates.
+  BETA_PERF_MEDIA_DIAGNOSTICS=1  Compile media setup/audio-quality diagnostics for perf gates.
+  BETA_PERF_MEDIA_MEMORY_DIAGNOSTICS=1
+                                  Compile media-core memory diagnostics for perf gates.
+  BETA_PERF_RTP_MEMORY_DIAGNOSTICS=1
+                                  Compile RTP-core memory diagnostics for perf gates.
   BETA_RUN_BURST_SMOKE=0         Disable required short media burst smoke.
   BETA_RUN_BURST_MATRIX=1        Run full opt-in media burst scenario matrix.
   BETA_BURST_SCENARIO_FILE       Burst scenario YAML. Defaults to config/perf-burst-scenarios.yaml.
@@ -84,9 +104,9 @@ Environment:
   RVOIP_PERF_SOAK_MIN_HOLD_SECS  Minimum cycling active-call hold. Defaults to 10.
   RVOIP_PERF_SOAK_MAX_HOLD_SECS  Maximum cycling active-call hold. Defaults to 360.
   RVOIP_PERF_SOAK_CPS            Optional immediate hangup churn. Defaults to 0.
-  RVOIP_PERF_MEMORY_DIAGNOSTICS  Write memory diagnostic JSONL during soak. Defaults to 1.
+  RVOIP_PERF_MEMORY_DIAGNOSTICS  Write memory diagnostic JSONL during soak. Defaults to 0.
   RVOIP_PERF_ALLOCATOR_DIAGNOSTICS
-                                  Include mimalloc snapshots in memory diagnostics. Defaults to 1.
+                                  Include mimalloc snapshots in memory diagnostics. Defaults to 0.
   RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS
                                   Memory diagnostic interval. Defaults to 5.
   RVOIP_PERF_MIMALLOC_COLLECT_AT Optional diagnostic mi_collect(true): off|phase|drain|both.
@@ -207,6 +227,43 @@ skip_gate() {
   if [ "$REQUIRE_EXTERNAL" = "1" ]; then
     FAILURES=$((FAILURES + 1))
   fi
+}
+
+bool_env_enabled() {
+  case "${1:-0}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+append_feature() {
+  local current="$1"
+  local feature="$2"
+  case ",$current," in
+    *,"$feature",*) printf '%s' "$current" ;;
+    *) printf '%s,%s' "$current" "$feature" ;;
+  esac
+}
+
+perf_features() {
+  local features="perf-tests"
+
+  if bool_env_enabled "${BETA_PERF_INFRA_MEMORY_DIAGNOSTICS:-0}" \
+    || bool_env_enabled "${RVOIP_PERF_MEMORY_DIAGNOSTICS:-0}" \
+    || bool_env_enabled "${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:-0}"; then
+    features="$(append_feature "$features" "perf-infra-memory-diagnostics")"
+  fi
+  if bool_env_enabled "${BETA_PERF_MEDIA_DIAGNOSTICS:-0}"; then
+    features="$(append_feature "$features" "perf-media-diagnostics")"
+  fi
+  if bool_env_enabled "${BETA_PERF_MEDIA_MEMORY_DIAGNOSTICS:-0}"; then
+    features="$(append_feature "$features" "perf-media-memory-diagnostics")"
+  fi
+  if bool_env_enabled "${BETA_PERF_RTP_MEMORY_DIAGNOSTICS:-0}"; then
+    features="$(append_feature "$features" "perf-rtp-memory-diagnostics")"
+  fi
+
+  printf '%s' "$features"
 }
 
 capture_command() {
@@ -380,9 +437,18 @@ write_environment_report() {
   if command -v sysctl >/dev/null 2>&1; then
     capture_command "$env_dir/host-hardware.txt" sysctl -n machdep.cpu.brand_string hw.physicalcpu hw.logicalcpu hw.memsize
   fi
+  if command -v colima >/dev/null 2>&1; then
+    capture_command "$env_dir/colima-version.txt" colima version
+    capture_command "$env_dir/colima-status.txt" colima status
+  fi
   if command -v docker >/dev/null 2>&1; then
     capture_command "$env_dir/docker-version.txt" docker version
     capture_command "$env_dir/docker-ps-start.txt" docker ps --all
+  else
+    {
+      echo "docker not found on PATH"
+      echo "PATH=$PATH"
+    } > "$env_dir/docker-version.txt"
   fi
   if command -v docker-compose >/dev/null 2>&1; then
     capture_command "$env_dir/docker-compose-version.txt" docker-compose version
@@ -406,8 +472,16 @@ write_environment_report() {
 - git_status: \`$(captured_status_label "$env_dir/git-status.txt")\`
 - rustc: \`$(captured_first_line "$env_dir/rustc-version.txt")\`
 - cargo: \`$(captured_first_line "$env_dir/cargo-version.txt")\`
+- beta_deny_warnings: \`${BETA_DENY_WARNINGS:-1}\`
+- beta_test_log_filter: \`${BETA_TEST_LOG_FILTER:-off}\`
 - host: \`$(captured_first_line "$env_dir/host-uname.txt")\`
+- colima: \`$(captured_first_line "$env_dir/colima-status.txt")\`
 - docker: \`$(captured_first_line "$env_dir/docker-version.txt")\`
+- beta_perf_features: \`$(perf_features)\`
+- beta_perf_infra_memory_diagnostics: \`${BETA_PERF_INFRA_MEMORY_DIAGNOSTICS:-0}\`
+- beta_perf_media_diagnostics: \`${BETA_PERF_MEDIA_DIAGNOSTICS:-0}\`
+- beta_perf_media_memory_diagnostics: \`${BETA_PERF_MEDIA_MEMORY_DIAGNOSTICS:-0}\`
+- beta_perf_rtp_memory_diagnostics: \`${BETA_PERF_RTP_MEMORY_DIAGNOSTICS:-0}\`
 
 Docker snapshots captured during local PBX lifecycle events are stored under
 \`environment/docker-<phase>/\`. Secrets in copied local env/config files are
@@ -424,6 +498,9 @@ EOF
     fi
     if [ -f "$env_dir/host-hardware.txt" ]; then
       markdown_payload_block "Host Hardware" "$env_dir/host-hardware.txt"
+    fi
+    if [ -f "$env_dir/colima-status.txt" ]; then
+      markdown_payload_block "Colima Status" "$env_dir/colima-status.txt"
     fi
     if [ -f "$env_dir/docker-version.txt" ]; then
       markdown_payload_block "Docker Version" "$env_dir/docker-version.txt"
@@ -459,10 +536,18 @@ write_summary_gate_table_header() {
 - git_status: \`$(captured_status_label "$env_dir/git-status.txt")\`
 - rustc: \`$(captured_first_line "$env_dir/rustc-version.txt")\`
 - cargo: \`$(captured_first_line "$env_dir/cargo-version.txt")\`
+- beta_deny_warnings: \`${BETA_DENY_WARNINGS:-1}\`
+- beta_test_log_filter: \`${BETA_TEST_LOG_FILTER:-off}\`
 - host: \`$(captured_first_line "$env_dir/host-uname.txt")\`
+- colima: \`$(captured_first_line "$env_dir/colima-status.txt")\`
 - docker: \`$(captured_first_line "$env_dir/docker-version.txt")\`
 - beta_profile_matrix: \`${BETA_PERF_PROFILE_MATRIX:-endpoint:30 pbx-media-server:30,100,300,1000,2000 signaling-only-server-high-performance:30,100,300,1000,2000}\`
 - beta_performance_recipe_file: \`${BETA_PERFORMANCE_RECIPE_FILE:-bundled config/performance-recipes.yaml}\`
+- beta_perf_features: \`$(perf_features)\`
+- beta_perf_infra_memory_diagnostics: \`${BETA_PERF_INFRA_MEMORY_DIAGNOSTICS:-0}\`
+- beta_perf_media_diagnostics: \`${BETA_PERF_MEDIA_DIAGNOSTICS:-0}\`
+- beta_perf_media_memory_diagnostics: \`${BETA_PERF_MEDIA_MEMORY_DIAGNOSTICS:-0}\`
+- beta_perf_rtp_memory_diagnostics: \`${BETA_PERF_RTP_MEMORY_DIAGNOSTICS:-0}\`
 - beta_run_burst_smoke: \`${BETA_RUN_BURST_SMOKE:-1}\`
 - beta_run_burst_matrix: \`${BETA_RUN_BURST_MATRIX:-0}\`
 - beta_burst_scenario_file: \`${BETA_BURST_SCENARIO_FILE:-bundled config/perf-burst-scenarios.yaml}\`
@@ -480,8 +565,8 @@ write_summary_gate_table_header() {
 - rvoip_perf_soak_min_hold_secs: \`${RVOIP_PERF_SOAK_MIN_HOLD_SECS:-10}\`
 - rvoip_perf_soak_max_hold_secs: \`${RVOIP_PERF_SOAK_MAX_HOLD_SECS:-360}\`
 - rvoip_perf_soak_cps: \`${RVOIP_PERF_SOAK_CPS:-0}\`
-- rvoip_perf_memory_diagnostics: \`${RVOIP_PERF_MEMORY_DIAGNOSTICS:-1}\`
-- rvoip_perf_allocator_diagnostics: \`${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:-1}\`
+- rvoip_perf_memory_diagnostics: \`${RVOIP_PERF_MEMORY_DIAGNOSTICS:-0}\`
+- rvoip_perf_allocator_diagnostics: \`${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:-0}\`
 - rvoip_perf_memory_diag_interval_secs: \`${RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS:-5}\`
 - rvoip_perf_mimalloc_collect_at: \`${RVOIP_PERF_MIMALLOC_COLLECT_AT:-off}\`
 - rvoip_perf_system_allocator: \`${RVOIP_PERF_SYSTEM_ALLOCATOR:-0}\`
@@ -516,6 +601,7 @@ beta_report_run_dir() {
 
 write_report_manifest() {
   local report_dir="$1"
+  local perf_results_status="${2:-not packaged}"
   local manifest="$report_dir/report-manifest.md"
   cat > "$manifest" <<EOF
 # rvoip-sip Beta Report Manifest
@@ -544,11 +630,27 @@ write_report_manifest() {
 - \`perf-results/\`
 
 The report directory is a packaged copy of the beta-gate artifact tree plus
-the current raw \`target/perf-results\` files. Logs, matrices, redacted
+the current raw perf result files. Logs, matrices, redacted
 environment evidence, PBX lifecycle snapshots, scenario metadata, and perf
 JSON/markdown outputs are kept with their original relative paths where
 possible.
+
+Perf results package status: ${perf_results_status}
 EOF
+}
+
+copy_perf_results_into_report() {
+  local report_dir="$1"
+  local source="$WORKSPACE_ROOT/target/perf-results"
+
+  if [ ! -d "$source" ]; then
+    printf 'not packaged; no perf-results directory found under %s/target' "$WORKSPACE_ROOT"
+    return 0
+  fi
+
+  mkdir -p "$report_dir/perf-results"
+  (cd "$source" && tar cf - .) | (cd "$report_dir/perf-results" && tar xf -)
+  printf 'packaged from: %s' "$source"
 }
 
 package_beta_report() {
@@ -570,13 +672,10 @@ package_beta_report() {
     (cd "$ARTIFACT_DIR" && tar cf - .) | (cd "$report_dir" && tar xf -)
   fi
 
-  if [ -d "$WORKSPACE_ROOT/target/perf-results" ]; then
-    mkdir -p "$report_dir/perf-results"
-    (cd "$WORKSPACE_ROOT/target/perf-results" && tar cf - .) | \
-      (cd "$report_dir/perf-results" && tar xf -)
-  fi
+  local perf_results_status
+  perf_results_status="$(copy_perf_results_into_report "$report_dir")"
 
-  write_report_manifest "$report_dir"
+  write_report_manifest "$report_dir" "$perf_results_status"
   printf '%s\n' "$TIMESTAMP" > "$root/latest.txt"
 }
 
@@ -933,28 +1032,35 @@ run_interop_gates() {
 
 run_perf_gates() {
   local profile_spec
+  local features
+  features="$(perf_features)"
   for profile_spec in ${BETA_PERF_PROFILE_MATRIX:-endpoint:30 pbx-media-server:30,100,300,1000,2000 signaling-only-server-high-performance:30,100,300,1000,2000}; do
     local profile="${profile_spec%%:*}"
     local cps="${profile_spec#*:}"
-    local perf_env=(RVOIP_PERF_PROFILE="$profile" RVOIP_PERF_SWEEP_CPS="$cps")
+    local perf_env=(
+      RVOIP_PERF_PROFILE="$profile"
+      RVOIP_PERF_REPORT_SCENARIO="perf_call_setup_cps_${profile}"
+      RVOIP_PERF_SWEEP_CPS="$cps"
+    )
     if [ -n "${BETA_PERFORMANCE_RECIPE_FILE:-}" ]; then
       perf_env+=(RVOIP_PERF_RECIPE_FILE="$BETA_PERFORMANCE_RECIPE_FILE")
     fi
     run_gate "perf call setup CPS ($profile)" env \
       "${perf_env[@]}" \
-      cargo test -p rvoip-sip --release --features perf-tests --test perf_call_setup_cps -- --nocapture
+      cargo test -p rvoip-sip --release --features "$features" --test perf_call_setup_cps -- --nocapture
   done
-  run_gate "perf registration throughput" cargo test -p rvoip-sip --release --features perf-tests --test perf_registration_throughput -- --nocapture
-  run_gate "perf concurrent active calls" cargo test -p rvoip-sip --release --features perf-tests --test perf_concurrent_active_calls -- --nocapture
-  run_gate "perf RTP steady state" cargo test -p rvoip-sip --release --features perf-tests --test perf_rtp_steady_state -- --nocapture
-  run_gate "perf backpressure step" cargo test -p rvoip-sip --release --features perf-tests --test perf_backpressure_step -- --nocapture
-  run_gate "perf transport recovery" cargo test -p rvoip-sip --release --features perf-tests --test perf_transport_recovery -- --nocapture
-  run_gate "perf session churn leak" cargo test -p rvoip-sip --release --features perf-tests --test perf_soak_30min perf_session_churn_leak -- --ignored --nocapture
+  run_gate "perf registration throughput" cargo test -p rvoip-sip --release --features "$features" --test perf_registration_throughput -- --nocapture
+  run_gate "perf concurrent active calls" cargo test -p rvoip-sip --release --features "$features" --test perf_concurrent_active_calls -- --nocapture
+  run_gate "perf RTP steady state" cargo test -p rvoip-sip --release --features "$features" --test perf_rtp_steady_state -- --nocapture
+  run_gate "perf backpressure step" cargo test -p rvoip-sip --release --features "$features" --test perf_backpressure_step -- --nocapture
+  run_gate "perf transport recovery" cargo test -p rvoip-sip --release --features "$features" --test perf_transport_recovery -- --nocapture
+  run_gate "perf session churn leak" cargo test -p rvoip-sip --release --features "$features" --test perf_soak_30min perf_session_churn_leak -- --ignored --nocapture
   if [ "${BETA_RUN_BURST_SMOKE:-1}" = "1" ]; then
     run_gate "perf media burst smoke" env \
+      RVOIP_PERF_FEATURES="$features" \
       RVOIP_PERF_BURST_SCENARIO_FILE="${BETA_BURST_SCENARIO_FILE:-$CRATE_DIR/config/perf-burst-scenarios.yaml}" \
       RVOIP_PERF_BURST_SCENARIOS="${BETA_BURST_SMOKE_SCENARIOS:-carrier-smoke}" \
-      RVOIP_PERF_MEMORY_DIAGNOSTICS="${RVOIP_PERF_MEMORY_DIAGNOSTICS:-1}" \
+      RVOIP_PERF_MEMORY_DIAGNOSTICS="${RVOIP_PERF_MEMORY_DIAGNOSTICS:-0}" \
       RVOIP_PERF_ALLOCATOR_DIAGNOSTICS="${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:-0}" \
       RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS="${RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS:-5}" \
       RVOIP_PERF_MIMALLOC_COLLECT_AT="${RVOIP_PERF_MIMALLOC_COLLECT_AT:-off}" \
@@ -964,9 +1070,10 @@ run_perf_gates() {
   fi
   if [ "${BETA_RUN_BURST_MATRIX:-0}" = "1" ]; then
     run_gate "perf media burst matrix" env \
+      RVOIP_PERF_FEATURES="$features" \
       RVOIP_PERF_BURST_SCENARIO_FILE="${BETA_BURST_SCENARIO_FILE:-$CRATE_DIR/config/perf-burst-scenarios.yaml}" \
       RVOIP_PERF_BURST_SCENARIOS="${BETA_BURST_MATRIX:-all}" \
-      RVOIP_PERF_MEMORY_DIAGNOSTICS="${RVOIP_PERF_MEMORY_DIAGNOSTICS:-1}" \
+      RVOIP_PERF_MEMORY_DIAGNOSTICS="${RVOIP_PERF_MEMORY_DIAGNOSTICS:-0}" \
       RVOIP_PERF_ALLOCATOR_DIAGNOSTICS="${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:-0}" \
       RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS="${RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS:-5}" \
       RVOIP_PERF_MIMALLOC_COLLECT_AT="${RVOIP_PERF_MIMALLOC_COLLECT_AT:-off}" \
@@ -974,13 +1081,14 @@ run_perf_gates() {
   fi
   if [ "${BETA_RUN_LONG_SOAK:-1}" = "1" ]; then
     run_gate "perf soak candidate" env \
+      RVOIP_PERF_FEATURES="$features" \
       RVOIP_PERF_SOAK_DURATION_SECS="${RVOIP_PERF_SOAK_DURATION_SECS:-3600}" \
       RVOIP_PERF_SOAK_ACTIVE_CALLS="${RVOIP_PERF_SOAK_ACTIVE_CALLS:-500}" \
       RVOIP_PERF_SOAK_MIN_HOLD_SECS="${RVOIP_PERF_SOAK_MIN_HOLD_SECS:-10}" \
       RVOIP_PERF_SOAK_MAX_HOLD_SECS="${RVOIP_PERF_SOAK_MAX_HOLD_SECS:-360}" \
       RVOIP_PERF_SOAK_CPS="${RVOIP_PERF_SOAK_CPS:-0}" \
-      RVOIP_PERF_MEMORY_DIAGNOSTICS="${RVOIP_PERF_MEMORY_DIAGNOSTICS:-1}" \
-      RVOIP_PERF_ALLOCATOR_DIAGNOSTICS="${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:-1}" \
+      RVOIP_PERF_MEMORY_DIAGNOSTICS="${RVOIP_PERF_MEMORY_DIAGNOSTICS:-0}" \
+      RVOIP_PERF_ALLOCATOR_DIAGNOSTICS="${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:-0}" \
       RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS="${RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS:-5}" \
       RVOIP_PERF_MIMALLOC_COLLECT_AT="${RVOIP_PERF_MIMALLOC_COLLECT_AT:-off}" \
       RVOIP_PERF_SYSTEM_ALLOCATOR="${RVOIP_PERF_SYSTEM_ALLOCATOR:-0}" \

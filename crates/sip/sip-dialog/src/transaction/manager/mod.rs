@@ -1926,116 +1926,204 @@ impl TransactionManager {
                 ));
             }
 
-            // Now wait for a short time to catch any asynchronous errors
-            // We'll use a timeout to avoid hanging if no events are received
-            let timeout_duration = tokio::time::Duration::from_millis(100);
+            if tx_kind != TransactionKind::InviteClient {
+                let timeout_duration = tokio::time::Duration::from_millis(100);
 
-            match tokio::time::timeout(timeout_duration, async {
-                // Wait for events until timeout
-                while let Some(event) = event_rx.recv().await {
-                    match event {
-                        TransactionEvent::TransportError { transaction_id: tx_id, .. } if tx_id == *transaction_id => {
-                            debug!(%transaction_id, "Received TransportError event");
-                            return Err(Error::transport_error(
-                                rvoip_sip_transport::Error::ProtocolError("Transport error during request send".into()),
-                                "Failed to send request - transport error"
-                            ));
-                        },
-                        TransactionEvent::StateChanged { transaction_id: tx_id, previous_state, new_state }
-                            if tx_id == *transaction_id => {
-                            debug!(%transaction_id, previous=?previous_state, new=?new_state, "Transaction state changed");
+                return match tokio::time::timeout(timeout_duration, async {
+                    while let Some(event) = event_rx.recv().await {
+                        match event {
+                            TransactionEvent::TransportError {
+                                transaction_id: tx_id,
+                                ..
+                            } if tx_id == *transaction_id => {
+                                debug!(%transaction_id, "Received TransportError event");
+                                return Err(Error::transport_error(
+                                    rvoip_sip_transport::Error::ProtocolError(
+                                        "Transport error during request send".into(),
+                                    ),
+                                    "Failed to send request - transport error",
+                                ));
+                            }
+                            TransactionEvent::StateChanged {
+                                transaction_id: tx_id,
+                                previous_state,
+                                new_state,
+                            } if tx_id == *transaction_id => {
+                                debug!(%transaction_id, previous=?previous_state, new=?new_state, "Transaction state changed");
 
-                            // If transaction moved directly to Terminated state.
-                            // For an INVITE client, Calling → Terminated is the
-                            // RFC 3261 §17.1.1.2 path for a 2xx final response —
-                            // that's success, not a transport error. For
-                            // non-INVITE, Trying/Calling → Terminated within
-                            // the 100 ms window is unusual; the normal path is
-                            // Trying → Completed → Terminated (after Timer K).
-                            if new_state == TransactionState::Terminated {
-                                let is_invite_2xx_path = tx_kind == TransactionKind::InviteClient
-                                    && previous_state == TransactionState::Calling;
-                                if is_invite_2xx_path {
-                                    debug!(%transaction_id, "INVITE client Calling → Terminated (RFC 3261 §17.1.1.2 2xx) - treating as success");
-                                    return Ok(());
-                                }
-                                if previous_state == TransactionState::Initial
-                                    || previous_state == TransactionState::Calling
-                                    || previous_state == TransactionState::Trying
+                                if new_state == TransactionState::Terminated
+                                    && (previous_state == TransactionState::Initial
+                                        || previous_state == TransactionState::Calling
+                                        || previous_state == TransactionState::Trying)
                                 {
                                     debug!(%transaction_id, kind=?tx_kind, ?previous_state, "Transaction moved to Terminated state - likely transport error");
                                     return Err(Error::transport_error(
-                                        rvoip_sip_transport::Error::ProtocolError("Transaction terminated unexpectedly".into()),
-                                        "Failed to send request - transaction terminated"
+                                        rvoip_sip_transport::Error::ProtocolError(
+                                            "Transaction terminated unexpectedly".into(),
+                                        ),
+                                        "Failed to send request - transaction terminated",
                                     ));
                                 }
                             }
-                        },
-                        _ => {} // Ignore other events
-                    }
-                }
-
-                // Check final transaction state via the DashMap.
-                if let Some(entry) = self.client_transactions.get(transaction_id) {
-                    let final_state = entry.value().state();
-                    if final_state == TransactionState::Terminated {
-                        debug!(%transaction_id, "Transaction is terminated after events processed");
-                        return Err(Error::transport_error(
-                            rvoip_sip_transport::Error::ProtocolError("Transaction terminated after processing".into()),
-                            "Failed to send request - transaction terminated"
-                        ));
-                    }
-                } else {
-                    debug!(%transaction_id, "Transaction was removed - likely due to termination");
-                    return Err(Error::transport_error(
-                        rvoip_sip_transport::Error::ProtocolError("Transaction was removed".into()),
-                        "Failed to send request - transaction removed"
-                    ));
-                }
-
-                Ok(())
-            }).await {
-                // Timeout occurred — recv loop drained or 100 ms elapsed.
-                Err(_) => {
-                    if let Some(entry) = self.client_transactions.get(transaction_id) {
-                        let final_state = entry.value().state();
-                        if final_state == TransactionState::Terminated {
-                            // For INVITE, Calling → Terminated is the 2xx path
-                            // (RFC 3261 §17.1.1.2). For non-INVITE, normal flow
-                            // is Trying → Completed → Terminated only after
-                            // Timer K (5 s for UDP), so Terminated this fast
-                            // is suspicious.
-                            if tx_kind == TransactionKind::InviteClient {
-                                debug!(%transaction_id, "INVITE client terminated within 100 ms safety wait - treating as success (fast 2xx)");
-                                return Ok(());
-                            }
-                            debug!(%transaction_id, "Non-INVITE terminated within 100 ms safety wait - likely transport error");
-                            return Err(Error::transport_error(
-                                rvoip_sip_transport::Error::ProtocolError("Transaction terminated after timeout".into()),
-                                "Failed to send request - transaction terminated"
-                            ));
+                            _ => {}
                         }
+                    }
 
-                        debug!(%transaction_id, state=?final_state, "Transaction still exists and is not terminated after timeout");
-                        Ok(())
-                    } else {
-                        // Transaction was removed. For INVITE, a fast 2xx
-                        // legitimately removes the transaction quickly. For
-                        // non-INVITE, this would be abnormal in 100 ms.
-                        if tx_kind == TransactionKind::InviteClient {
-                            debug!(%transaction_id, "INVITE client transaction removed within 100 ms safety wait - treating as success (fast 2xx)");
-                            Ok(())
-                        } else {
-                            debug!(%transaction_id, "Non-INVITE transaction was removed after timeout");
+                    match self
+                        .client_transactions
+                        .get(transaction_id)
+                        .map(|entry| entry.value().state())
+                    {
+                        Some(TransactionState::Terminated) => {
+                            debug!(%transaction_id, "Non-INVITE transaction terminated during send wait - likely transport error");
                             Err(Error::transport_error(
-                                rvoip_sip_transport::Error::ProtocolError("Transaction was removed after timeout".into()),
-                                "Failed to send request - transaction removed"
+                                rvoip_sip_transport::Error::ProtocolError(
+                                    "Transaction terminated after processing".into(),
+                                ),
+                                "Failed to send request - transaction terminated",
+                            ))
+                        }
+                        Some(final_state) => {
+                            debug!(%transaction_id, state=?final_state, "Non-INVITE transaction send initiated");
+                            Ok(())
+                        }
+                        None => {
+                            debug!(%transaction_id, "Non-INVITE transaction was removed during send wait");
+                            Err(Error::transport_error(
+                                rvoip_sip_transport::Error::ProtocolError(
+                                    "Transaction was removed".into(),
+                                ),
+                                "Failed to send request - transaction removed",
                             ))
                         }
                     }
-                },
-                // Got a result from the event processing
-                Ok(result) => result,
+                })
+                .await
+                {
+                    Err(_) => match self
+                        .client_transactions
+                        .get(transaction_id)
+                        .map(|entry| entry.value().state())
+                    {
+                        Some(TransactionState::Terminated) => {
+                            debug!(%transaction_id, "Non-INVITE terminated within 100 ms safety wait - likely transport error");
+                            Err(Error::transport_error(
+                                rvoip_sip_transport::Error::ProtocolError(
+                                    "Transaction terminated after timeout".into(),
+                                ),
+                                "Failed to send request - transaction terminated",
+                            ))
+                        }
+                        Some(final_state) => {
+                            debug!(%transaction_id, state=?final_state, "Non-INVITE transaction still exists after safety wait");
+                            Ok(())
+                        }
+                        None => {
+                            debug!(%transaction_id, "Non-INVITE transaction was removed after safety wait");
+                            Err(Error::transport_error(
+                                rvoip_sip_transport::Error::ProtocolError(
+                                    "Transaction was removed after timeout".into(),
+                                ),
+                                "Failed to send request - transaction removed",
+                            ))
+                        }
+                    },
+                    Ok(result) => result,
+                };
+            }
+
+            // Drain events already observed during `initiate()`. This preserves
+            // immediate transport-error propagation without imposing a fixed
+            // post-send wait on successful INVITE call setup.
+            while let Ok(event) = event_rx.try_recv() {
+                match event {
+                    TransactionEvent::TransportError {
+                        transaction_id: tx_id,
+                        ..
+                    } if tx_id == *transaction_id => {
+                        debug!(%transaction_id, "Received TransportError event");
+                        return Err(Error::transport_error(
+                            rvoip_sip_transport::Error::ProtocolError(
+                                "Transport error during request send".into(),
+                            ),
+                            "Failed to send request - transport error",
+                        ));
+                    }
+                    TransactionEvent::StateChanged {
+                        transaction_id: tx_id,
+                        previous_state,
+                        new_state,
+                    } if tx_id == *transaction_id => {
+                        debug!(%transaction_id, previous=?previous_state, new=?new_state, "Transaction state changed");
+
+                        if new_state == TransactionState::Terminated {
+                            let invite_2xx_path = tx_kind == TransactionKind::InviteClient
+                                && previous_state == TransactionState::Calling
+                                && tx
+                                    .last_response()
+                                    .await
+                                    .is_some_and(|response| response.status().is_success());
+                            if invite_2xx_path {
+                                debug!(%transaction_id, "INVITE client Calling → Terminated (RFC 3261 §17.1.1.2 2xx) - treating as success");
+                                return Ok(());
+                            }
+                            if previous_state == TransactionState::Initial
+                                || previous_state == TransactionState::Calling
+                                || previous_state == TransactionState::Trying
+                            {
+                                debug!(%transaction_id, kind=?tx_kind, ?previous_state, "Transaction moved to Terminated state - likely transport error");
+                                return Err(Error::transport_error(
+                                    rvoip_sip_transport::Error::ProtocolError(
+                                        "Transaction terminated unexpectedly".into(),
+                                    ),
+                                    "Failed to send request - transaction terminated",
+                                ));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            match self
+                .client_transactions
+                .get(transaction_id)
+                .map(|entry| entry.value().state())
+            {
+                Some(TransactionState::Terminated) => {
+                    if tx_kind == TransactionKind::InviteClient
+                        && tx
+                            .last_response()
+                            .await
+                            .is_some_and(|response| response.status().is_success())
+                    {
+                        debug!(%transaction_id, "INVITE client terminated during immediate event drain - treating as success (fast 2xx)");
+                        Ok(())
+                    } else {
+                        debug!(%transaction_id, "Transaction is terminated after immediate event drain");
+                        Err(Error::transport_error(
+                            rvoip_sip_transport::Error::ProtocolError(
+                                "Transaction terminated after processing".into(),
+                            ),
+                            "Failed to send request - transaction terminated",
+                        ))
+                    }
+                }
+                Some(final_state) => {
+                    debug!(%transaction_id, state=?final_state, "Transaction send initiated");
+                    Ok(())
+                }
+                None if tx_kind == TransactionKind::InviteClient => {
+                    debug!(%transaction_id, "INVITE client transaction removed during immediate event drain - treating as success (fast 2xx)");
+                    Ok(())
+                }
+                None => {
+                    debug!(%transaction_id, "Transaction was removed during immediate event drain");
+                    Err(Error::transport_error(
+                        rvoip_sip_transport::Error::ProtocolError("Transaction was removed".into()),
+                        "Failed to send request - transaction removed",
+                    ))
+                }
             }
         } else {
             debug!(%transaction_id, "TransactionManager::send_request - failed to downcast to client transaction");

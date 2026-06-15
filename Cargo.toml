@@ -18,6 +18,7 @@ members = [
     # media/ — shared media plane (consumed by foundation, uctp, and sip).
     "crates/media/media-core",
     "crates/media/codec-core",
+    "crates/media/g729",
     "crates/media/rtp-core",
     # Optional OS audio-device bridge — top-of-stack helper that depends UP on
     # rvoip-sip (so it sits with the SIP product, not below it).
@@ -203,6 +204,7 @@ rvoip-sip-proxy     = { path = "crates/sip/sip-proxy", version = "0.2.1" }
 rvoip-sip-registrar = { path = "crates/sip/sip-registrar", version = "0.2.1" }
 rvoip-rtp-core      = { path = "crates/media/rtp-core", version = "0.2.1" }
 rvoip-media-core    = { path = "crates/media/media-core", version = "0.2.1" }
+rvoip-g729          = { path = "crates/media/g729", version = "0.1.0" }
 rvoip-sip           = { path = "crates/sip/rvoip-sip", version = "0.2.1" }
 rvoip-core          = { path = "crates/foundation/rvoip-core", version = "0.2.1" }
 rvoip-codec-core    = { path = "crates/media/codec-core", version = "0.2.1" }

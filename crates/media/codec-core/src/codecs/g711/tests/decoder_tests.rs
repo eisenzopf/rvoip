@@ -8,7 +8,7 @@
 //! - Round-trip consistency
 
 use crate::codecs::g711::*;
-use crate::types::{AudioCodec, CodecConfig, CodecType, SampleRate};
+use crate::types::{AudioCodec, AudioCodecExt, CodecConfig, CodecType, SampleRate};
 
 #[cfg(test)]
 mod tests {
@@ -100,6 +100,46 @@ mod tests {
 
         // μ-law and A-law should produce different decoded data
         assert_ne!(decoded_mu, decoded_a);
+    }
+
+    #[test]
+    fn test_codec_decode_to_buffer_is_bit_exact_for_all_values() {
+        let config_mu = CodecConfig::new(CodecType::G711Pcmu)
+            .with_sample_rate(SampleRate::Rate8000)
+            .with_channels(1);
+        let mut codec_mu = G711Codec::new_pcmu(config_mu).unwrap();
+
+        let config_a = CodecConfig::new(CodecType::G711Pcma)
+            .with_sample_rate(SampleRate::Rate8000)
+            .with_channels(1);
+        let mut codec_a = G711Codec::new_pcma(config_a).unwrap();
+
+        let encoded = (0u8..=255u8).collect::<Vec<_>>();
+        let mut decoded = vec![0i16; encoded.len()];
+
+        let decoded_len = codec_mu
+            .decode_to_buffer(&encoded, &mut decoded)
+            .expect("decode μ-law");
+        assert_eq!(decoded_len, encoded.len());
+        for (&encoded, &decoded) in encoded.iter().zip(decoded.iter()) {
+            assert_eq!(
+                decoded,
+                ulaw_expand(encoded),
+                "μ-law mismatch for {encoded}"
+            );
+        }
+
+        let decoded_len = codec_a
+            .decode_to_buffer(&encoded, &mut decoded)
+            .expect("decode A-law");
+        assert_eq!(decoded_len, encoded.len());
+        for (&encoded, &decoded) in encoded.iter().zip(decoded.iter()) {
+            assert_eq!(
+                decoded,
+                alaw_expand(encoded),
+                "A-law mismatch for {encoded}"
+            );
+        }
     }
 
     #[test]

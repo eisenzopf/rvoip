@@ -1018,7 +1018,7 @@ mod tests {
         let (_, transport_rx) = mpsc::channel(10);
 
         // Create the transaction manager
-        let (manager, _) =
+        let (manager, _event_rx) =
             TransactionManager::new(transport.clone(), transport_rx, Some(10)).await?;
 
         // Create an INVITE request
@@ -2383,7 +2383,7 @@ mod tests {
         let (transport_tx, transport_rx) = mpsc::channel(10);
 
         // Create the transaction manager
-        let (manager, _) =
+        let (manager, _event_rx) =
             TransactionManager::new(transport.clone(), transport_rx, Some(10)).await?;
 
         // Create two transactions
@@ -2710,6 +2710,36 @@ mod tests {
         // Clean up
         manager.shutdown().await;
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_send_request_does_not_wait_for_async_error_window() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(10)).await?;
+
+        let invite_request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let destination = SocketAddr::from_str("192.168.1.100:5060").unwrap();
+        let tx_id = manager
+            .create_client_transaction(invite_request, destination)
+            .await?;
+
+        let started = Instant::now();
+        manager.send_request(&tx_id).await?;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(80),
+            "send_request should not wait for the old 100 ms async error window, elapsed: {:?}",
+            elapsed
+        );
+
+        let sent_messages = transport.get_sent_messages().await;
+        assert_eq!(sent_messages.len(), 1, "Expected INVITE to be sent");
+
+        manager.shutdown().await;
         Ok(())
     }
 }

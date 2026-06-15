@@ -20,6 +20,13 @@ file without changing library source. Do not treat high-CPS signaling-only
 recipes as universal defaults; they are reproducible starting points for a
 specific SIPp signaling-only workload.
 
+Performance measurement and diagnostics are separate choices. Use
+`perf-tests` alone for clean benchmark/beta numbers. Add only the specific
+diagnostic feature needed for an investigation, such as
+`perf-media-diagnostics`, `perf-infra-memory-diagnostics`,
+`perf-media-memory-diagnostics`, or `perf-rtp-memory-diagnostics`. Diagnostic
+features and config diagnostic flags are not production defaults.
+
 ## Profile Starting Points
 
 | Workload | Starting point | Notes |
@@ -265,6 +272,40 @@ Promote a burst recipe only after repeat runs show ASR, setup p99, RSS slope,
 retention, and media receiver cleanup are stable. Record the artifact path and
 git revision next to any promoted operating envelope.
 
+## Stress Tuning Decision Guide
+
+Default production tuning should start by keeping admitted sessions below the
+measured pressure point. Set `serverCallCapacity` and
+`serverCallAdmissionLimit` to a conservative operating envelope, then use
+diagnostics to pick one next knob. Do not grow queues or enable RTP/audio
+pacing blindly. For media-bearing profiles, ASR alone is not enough: require
+clean teardown, retained-object, RSS, and RTP/audio continuity evidence before
+promoting a setting.
+
+The stress data collectors and env-only RTP/audio pacing or shared-scheduler
+hooks are perf/test gated. Normal library builds compile the media stress
+collectors to no-ops, and the env-only RTP/audio pacing and shared scheduler
+switches stay disabled unless the SIP-facing `perf-media-diagnostics` feature
+is enabled through the perf-test harness.
+
+The `access-edge-microburst` ledger in
+[`CARRIER_BURST_TUNING.md`](CARRIER_BURST_TUNING.md) is the evidence source for
+these current reads:
+
+| Knob or technique | Try when | Current stress-test read | Tradeoff |
+| --- | --- | --- | --- |
+| `serverCallCapacity` and `serverCallAdmissionLimit` | You need production stability under a known server limit. | Recommended first production control. Keep admitted sessions below the pressure point instead of relying on emergency pacing. | Lowers the advertised maximum, but preserves media quality and cleanup behavior. |
+| `serverCallAdmissionSoftLimit` and `serverCallAdmissionPacingDelayMs` | You want to smooth inbound INVITE admission before hard overload. | Available and wired, but the tested `4500`/`5000` soft limits with `1-2 ms` delay did not pass `access-edge-microburst`. | Adds setup latency and can regress ASR/RSS if the pressure is not admission-bound. |
+| SIP UDP recv/send socket buffers | Host UDP full-socket drops increase or ingress bursts overflow the OS socket queue. | Real and wired. Current access-edge evidence showed host full-socket drops stayed at `0`, so buffers are not the observed bottleneck. | Uses more kernel memory and can hide the real pressure point if enabled without drop evidence. |
+| SIP UDP parse workers, queue capacity, and dispatch mode | UDP parse/dispatch diagnostics show backlog, or one-source SIPp load needs `RoundRobin` distribution. | Useful tuning surface, but increasing UDP parse capacity/parallelism did not produce an accepted access-edge recipe. | More workers and queue depth can add scheduling and cache overhead. |
+| Transaction and dialog dispatch workers/queues | Timing diagnostics show transaction or dialog dispatch queue delay dominates. | Dialog `8/24000` was the best Config-only candidate, but it still missed ASR `0.999`; do not keep growing queues without diagnostics. | Higher memory use and more executor scheduling. Large queues can also defer overload visibility. |
+| RTP/media buffers and media controller pools | RTP/media queue counters or allocation diagnostics show actual media queue pressure or pool churn. | The current burst failure was not fixed by larger media buffers/pools, and generated RTP traffic looked like the pressure source. | More memory per active call; may not help CPU or network saturation. |
+| Generated-audio TX phase spreading | Many generated RTP senders start on the same timer phase. | Worth keeping as a partial library improvement. It improved ASR but did not pass the full burst gate alone. | Reduces timer clustering, but does not remove RTP send/receive load. |
+| RTP/audio TX pacing target active `3000` | Other knobs fail and the server is under RTP/media pressure that starves signaling. | Opt-in pressure-relief candidate only. It passed signaling/retention/RSS gates, but failed production audio-quality expectations due RTP continuity gaps. | Drops/skips generated media sends under pressure; can degrade perceived audio. Not a default. |
+| Shared RTP/audio TX scheduler | You are explicitly testing timer consolidation for generated RTP senders. | Shared-only regressed and should not be promoted. Shared plus target-`3000` pacing is the best pressure-relief candidate so far, but remains tied to the pacing caveat. | Adds scheduler complexity and has no standalone performance win. |
+| Audio-quality diagnostics | Any pacing, shared scheduler, or media-plane stress recommendation is being evaluated. | Required for promotion decisions because ASR-only gates missed RTP packet-cadence risk. | Adds measurement overhead; use for focused validation, not every acceptance run. |
+| Targeted call-setup diagnostics | A beta/perf run shows a recurring 100 ms setup tail with RTP send timings in microseconds. | Use only for RCA. It found the 2026-06-15 tail in the INVITE client send path, not in RTP or Bob accept. | Must stay opt-in; not part of headline beta builds. |
+
 Current `access-edge-microburst` evidence does not justify promoting a carrier
 burst recipe. On 2026-06-09, the best dialog `8/24000` candidate still missed
 ASR with answer timeouts. Receiver media setup and cleanup were clean, SIP UDP
@@ -303,6 +344,15 @@ enabled but the perf caller skipped installing the RTP tone source
 `7400` INVITEs/2xx/ACKs were observed by the peer, and receiver media sessions
 allocated and drained cleanly. Treat generated RTP traffic, not SIP queue
 sizing or media allocation alone, as the current access-edge bottleneck.
+
+Separately from the access-edge burst recipe work, the 2026-06-15 beta RCA
+found a generic call-setup hot-path issue: successful INVITE client sends were
+paying a fixed `100 ms` post-initiation wait that existed to catch asynchronous
+transport errors. The beta fix removes that fixed wait for `InviteClient`
+transactions and keeps the old wait only for non-INVITE sends while their
+auth-retry pending-options lifecycle is cleaned up. This is a library fix, not
+a Config knob; it should reduce intermittent setup tails without changing
+production defaults.
 
 The first RTP library experiment spread generated-audio transmitter start
 phases across the 20 ms packet interval and skipped missed ticks. That helped

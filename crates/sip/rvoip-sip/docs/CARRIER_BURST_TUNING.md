@@ -12,14 +12,82 @@ The canonical data table is
 has one row per run and includes artifact path, scenario/profile files,
 effective tuning knobs, result counters, RSS gates, host UDP deltas, and the
 decision. The Markdown tables below are human-readable summaries of that CSV.
+For the operator-facing map from stress symptoms to knobs, see
+[`TUNING.md#stress-tuning-decision-guide`](TUNING.md#stress-tuning-decision-guide).
 
 The current conclusion is: no `access-edge-microburst` Config recipe is ready
-to promote, but media-plane pacing is now the first full-media library
-candidate to pass the gates in three repeat runs. Config tuning improved
-observability and found partial improvements, but every Config-only full-media
-candidate missed ASR `0.999`. The remaining failure mode appears to be
-generated RTP/media scheduling pressure starving SIP control-plane polling,
-especially on the caller.
+to promote. Media-plane pacing and shared+pacing are the first full-media
+library candidates to pass signaling/retention/RSS gates, but audio-quality
+diagnostics still show RTP continuity risk under overload. Treat them as
+opt-in overload/synthetic-load tools, not production media guidance, until the
+packet-cadence risk is reduced and accepted with explicit audio-quality gates.
+Config tuning improved observability and found partial improvements, but every
+Config-only full-media candidate missed ASR `0.999`. The remaining failure mode
+appears to be generated RTP/media scheduling pressure starving SIP
+control-plane polling, especially on the caller.
+
+Beta report `20260615T030513Z` is not a clean performance comparison baseline:
+the beta perf path still used the old `perf-tests` feature bundle that compiled
+media/RTP/infra diagnostic instrumentation into the benchmark binary. Compare
+clean beta performance against `20260612T211608Z` or a newer run using
+`perf-tests` without targeted diagnostic features. Diagnostic reruns must name
+the exact feature set, for example `perf-media-diagnostics` or
+`perf-infra-memory-diagnostics`.
+
+## Beta Call Setup Tail RCA
+
+The release-blocking 100-125 ms setup tail seen during the 2026-06-15 beta
+candidate investigation was not RTP encode/send throughput. Targeted
+call-setup diagnostics put the outliers inside Alice's outbound INVITE send
+path, specifically below `action.send_invite_with_options` /
+`outbound_send.dispatch_outbound`. Bob accept, media allocation, RTP
+encode-to-wire, and `wait_for_answered` were not the first delayed stages.
+
+Root cause: `TransactionManager::send_request` waited up to `100 ms` after
+successful client transaction initiation to catch asynchronous transport
+errors. That wait was on the critical path for successful INVITE client sends,
+so ordinary successful setup could inherit a 100 ms tail. The beta fix removes
+that fixed wait for `InviteClient` transactions and uses an immediate
+event-drain/error check instead. Non-INVITE client sends keep the old safety
+window for now because the NOTIFY auth-retry integration path still depends on
+pending-options lifecycle during that window.
+
+Validation:
+
+| Check | Result |
+| --- | --- |
+| Clean RTP steady-state short repeats | `10/10` passed; p99 range `13.9-25.9 ms`, no 100 ms tail |
+| Clean backpressure short repeats | `3/3` passed; phase p99 range `12.7-27.9 ms`, drops/timeouts `0` |
+| Focused INVITE regression test | `send_request` returns under `80 ms` and still sends the INVITE |
+| NOTIFY auth retry regression | Passed after keeping the non-INVITE safety wait |
+| Full beta gate `20260615T105337Z` | `0` failures, `0` skips, PBX enabled, clean `perf-tests` feature set |
+
+Clean beta comparison against `20260612T211608Z`:
+
+| Gate | 20260612 baseline | 20260615 clean fix run | Read |
+| --- | --- | --- | --- |
+| `pbx-media-server` @ 1000 CPS | p99 `12.4 ms`, ASR `1.0000`, no knee | p99 `13.0 ms`, ASR `1.0000`, no knee | Recovered from the contaminated `115.1 ms` / 1000-CPS-knee run |
+| `pbx-media-server` headline | `1857.1` achieved CPS @ target `2000`, p99 `12.7 ms` | `1857.1` achieved CPS @ target `2000`, p99 `12.8 ms` | Equivalent |
+| `perf_backpressure_step` max setup | max `113.6 ms` in baseline phase | max `23.8 ms`; no drops/timeouts | 100 ms tail removed |
+| Long soak caller setup | p99 `49.9 ms`, max `114.9 ms` | p99 `44.1 ms`, max `95.1 ms` | Improved |
+| Long soak RSS post-drain gate | caller `1.24`, receiver `1.00 MB/hr` | caller `0.10`, receiver `0.10 MB/hr` | Improved |
+| Long soak CPU | caller `60.5%`, receiver `41.4%` | caller `57.2%`, receiver `38.8%` | Improved |
+
+Two single beta-run p99s were initially higher than the 2026-06-12 baseline:
+`perf_rtp_steady_state` (`28.7 ms` vs `17.5 ms`) and
+`perf_concurrent_active_calls` (`55.1 ms` vs `51.6 ms`). Follow-up clean repeat
+checks did not reproduce a persistent regression: RTP steady-state repeated at
+`16.4`, `23.2`, `19.8`, `20.4`, and `16.8 ms`; sequential concurrent-call
+repeats passed at `45.7`, `47.6`, and `47.8 ms`. One attempted concurrent-call
+repeat failed with `Address already in use` because it was run in parallel with
+the RTP repeat and is not treated as product evidence.
+
+The beta run used `beta_perf_features=perf-tests`,
+`rvoip_perf_memory_diagnostics=0`, `rvoip_perf_allocator_diagnostics=0`, no
+media/RTP/infra diagnostic features, no RTP/audio pacing default, and no shared
+RTP TX scheduler default. The packaged report is
+`beta-report/20260615T105337Z`, and all generated perf artifacts were under the
+workspace root `target/`; `crates/target/` was not recreated.
 
 ## Common Test Shape
 
@@ -170,6 +238,61 @@ These runs tested library changes in the generated RTP path.
 | `burst_20260610_022419_31492/ae-dialog-8q24000-client-diagnostics` | Same guarded shared scheduler plus pacing target active `3000`. | ASR `1.0000`, `7400/7400`, `0` timeouts, setup p95 `1.65 s`, p99 `4.24 s`, peak pending setups `214`, caller RSS gate `1.09 MB/hr`; pacing skipped `8,350,194`, shared fail `0`, batch max `609`; avg caller CPU `95.3%`. | `7400` incoming, `7400` completed audio receivers, `26,734,334` RTP frames, active audio `0`, retained `0`, receiver RSS gate `0.42 MB/hr`; host full-buffer drops delta `0`. | Keep candidate. Second guarded pass. |
 | `burst_20260610_023645_41698/ae-dialog-8q24000-client-diagnostics` | Same guarded shared scheduler plus pacing target active `3000`. | ASR `1.0000`, `7400/7400`, `0` timeouts, setup p95 `1.62 s`, p99 `7.67 s`, peak pending setups `199`, caller RSS gate `0.93 MB/hr`; pacing skipped `8,342,860`, shared fail `0`, batch max `786`; avg caller CPU `96.4%`. | `7400` incoming, `7400` completed audio receivers, `26,800,350` RTP frames, active audio `0`, retained `0`, receiver RSS gate `0.42 MB/hr`; host full-buffer drops delta `0`. | Keep candidate. Third guarded pass, but not preferred over simpler pacing-only because p99 was less stable. |
 
+## RTP/Audio Hot-Path And Quality Experiments
+
+These experiments tested the next CPU/RTP optimization ideas in isolation and
+added audio-quality counters so pacing can be judged against RTP packet
+continuity, not only SIP setup success.
+
+| Artifact | Experiment | Result | Decision |
+| --- | --- | --- | --- |
+| `criterion_20260614/rtp_packet_serialize_reusable_buffer` | RTP packet serialization benchmark with a per-task reusable `BytesMut` buffer. | G.711-size serialize mean improved from `14.30 ns` to `12.98 ns`; 1200-byte packet serialize improved from `30.15 ns` to `22.42 ns`. | Keep candidate. Small but direct hot-path allocation/serialization win. |
+| `criterion_20260614/rtp_packet_parse_from_owned_bytes` | RTP receive parse prototype using owned `Bytes` and `RtpPacket::parse_from_bytes` to avoid the payload copy. | G.711-size parse improved from `20.76 ns` to `18.37 ns`; 1200-byte parse improved from `33.42 ns` to `18.33 ns`. | Reject/defer after full burst validation. Microbench win did not survive acceptance testing. |
+| `criterion_20260614/g711_codec` | G.711 decode/encode microbenchmarks plus all-256 decode equivalence test. | PCMU optimized encode dispatch regressed from `37.85 ns` to `55.14 ns`; PCMA dispatch improved from `358.53 ns` to `71.93 ns` but is not the current burst hot path. Decode table promotion was rejected because the table path was not bit-exact with the active scalar codec semantics. | Reject PCMU change; defer PCMA until workload evidence exists. Keep benchmark and bit-exact test scaffolding. |
+| `burst_20260614_084753_86424/ae-dialog-8q24000-client-diagnostics` | Full access-edge quality run without pacing and with `RVOIP_MEDIA_AUDIO_QUALITY_DIAGNOSTICS=1`. | Interrupted around `10 min` with no final caller/receiver JSON. Default hold max is `360 s`, so the cutoff was premature. | Invalid/non-citable. Rerun with enough wall time before using as evidence. |
+| `burst_20260614_085822_98195/ae-dialog-8q24000-client-diagnostics` | Full access-edge quality run with `RVOIP_MEDIA_AUDIO_TX_PACING=1`, target active `3000`, and audio-quality diagnostics. | Interrupted around `10 min` with no final caller/receiver JSON. Default hold max is `360 s`, so the cutoff was premature. | Invalid/non-citable. Rerun with enough wall time before using as evidence. |
+| `burst_20260614_092807_22435/ae-dialog-8q24000-quality-smoke` | Shorter quality smoke run without audio TX pacing. | ASR `0.7669`, `5637/7350`, `1585` timeouts, caller RSS gate `21.37 MB/hr`, avg caller CPU `144.97%`. Receiver delivered `5,833,714` frames with avg delivered gap `58.13 ms`, max `349.27 ms`, and `11,102,972` sequence-gap packets. | Reject. Fails ASR, RSS, and audio continuity. |
+| `burst_20260614_092243_13618/ae-dialog-8q24000-quality-smoke` | Shorter quality smoke run with audio TX pacing target active `3000`. | ASR improved to `0.8350`, `6137/7350`, `731` timeouts, caller CPU dropped to `91.99%`, but caller RSS gate still failed at `16.42 MB/hr`. Pacing skipped `7,637,265` of `18,467,011` evaluated ticks (`0.41` skip ratio). Receiver avg delivered gap was `61.50 ms`, max `386.52 ms`, with `4,810,841` sequence-gap packets. | Reject for production. Pacing improved signaling and CPU in this smoke shape, but audio continuity remained unacceptable. |
+| `burst_20260614_095356_66126/ae-dialog-8q24000-client-diagnostics` | Full access-edge quality run with pacing target active `3000`, but the temporary recipe accidentally used `channelCapacity: 60000`. Effective global/transport/transaction capacities were `600000` and incoming/state capacities were `60000`. | ASR `0.9999`, `7399/7400`, no timeouts, `1` teardown failure, caller RSS gate `2.23 MB/hr`; pacing skipped `8,361,020` ticks (`0.22` skip ratio). | Invalid/profile mismatch. Not comparable to canonical candidate settings. Receiver avg delivered gap was `28.19 ms`, max `156.08 ms`, with `2,439,360` sequence-gap packets. |
+| `burst_20260614_100655_73667/ae-dialog-8q24000-client-diagnostics` | Full access-edge quality run with canonical pacing target active `3000`, `channelCapacity: 6000`, `aliceShards: 16`, `capacity: 6000`, and `RVOIP_MEDIA_AUDIO_QUALITY_DIAGNOSTICS=1`. | ASR `1.0000`, `7400/7400`, `0` timeouts, `0` media setup failures, `0` teardown failures, caller RSS gate `2.31 MB/hr`, setup p95 `1.67 s`, p99 `7.70 s`, avg caller CPU `87.1%`. Pacing skipped `8,338,967` of `38,884,629` evaluated ticks (`0.21` skip ratio), max consecutive skip `1`. | Reject for production quality. Signaling, retention, teardown, and RSS gates passed, but receiver avg delivered gap was `28.09 ms`, max `169.47 ms`, jitter max `35.74 ms`, and sequence-gap packets `2,377,368`. |
+| `burst_20260614_102259_86401/ae-dialog-8q24000-client-diagnostics` | Full access-edge quality control run with canonical settings and no audio TX pacing. | ASR `0.9839`, `7281/7400`, `119` timeouts, caller RSS gate `1.92 MB/hr`, setup p95 `13.31 s`, p99 `23.52 s`, avg caller CPU `110.3%`, peak pending setups `771`. | Reject. No-pacing failed signaling and had worse media continuity than canonical pacing: receiver avg delivered gap `28.38 ms`, max `219.42 ms`, jitter max `56.30 ms`, and sequence-gap packets `10,170,488`. |
+| `burst_20260614_103658_93735/ae-dialog-8q24000-client-diagnostics` | Full access-edge quality run with shared generated-audio TX scheduler plus pacing target active `3000`. | ASR `1.0000`, `7400/7400`, `0` timeouts, `0` media setup failures, `0` teardown failures, caller RSS gate `0.31 MB/hr`, setup p95 `1.22 s`, p99 `3.72 s`, avg caller CPU `87.0%`. Pacing skipped `8,327,658` of `38,875,221` evaluated ticks (`0.21` skip ratio); shared batch max `2512`, sent `30,547,563`, fail `0`. | Keep as best candidate but not production accepted. It improved setup tail and receiver continuity versus pacing-only, with avg delivered gap `27.65 ms`, max `156.19 ms`, jitter max `32.40 ms`, and sequence-gap packets `2,082,382`; max gap still exceeds the planned production-quality threshold. |
+| `burst_20260614_114246_22769/ae-dialog-8q24000-client-diagnostics` | Full access-edge quality run with shared+pacing target `3000` plus the owned-Bytes RTP receive parse prototype. | ASR `0.9999`, `7399/7400`, `0` timeouts, `1` teardown failure, caller RSS gate `0.99 MB/hr`, setup p95 `1.50 s`, p99 `3.71 s`, avg caller CPU `84.5%`. | Reject and revert runtime path. CPU improved, but the teardown gate failed and receiver quality worsened versus shared+pacing: avg delivered gap `27.87 ms`, max `259.71 ms`, jitter max `32.45 ms`, and sequence-gap packets `2,233,271`. |
+| `burst_20260614_120614_39416/ae-dialog-8q24000-client-diagnostics` | Full access-edge diagnostic run with shared+pacing target `3000` plus `RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY=1`. The receiver still decoded RTP audio but bypassed `AudioFrame` sample `Vec` allocation and subscriber `try_send`. | ASR `1.0000`, `7400/7400`, `0` timeouts, `0` media setup failures, `0` teardown failures, caller RSS gate `0.41 MB/hr`, setup p95 `1.66 s`, p99 `4.16 s`, avg caller CPU `80.6%`. Pacing skipped `8,320,122` of `38,858,631` evaluated ticks (`0.21` skip ratio); shared batch max `2436`, sent `30,538,509`, fail `0`. | Diagnostic only. Receiver CPU dropped to `33.3%` and decoded `27,704,485` RTP packets with delivered frames `0`; sequence-gap packets improved to `1,795,841`, but delivered-frame cadence cannot be judged because subscriber delivery was intentionally bypassed. Do not promote as production behavior. |
+| `burst_20260614_123119_64870/ae-dialog-8q24000-client-diagnostics` | Full access-edge quality run with shared+pacing target `3000` plus a direct `SessionHandle::audio()` receiver prototype that removed the extra high-level mpsc forwarding hop. | ASR `0.9999`, `7399/7400`, `0` timeouts, `1` teardown failure, caller RSS gate `0.61 MB/hr`, setup p95 `1.66 s`, p99 `7.67 s`, avg caller CPU `83.1%`. Receiver delivered `26,854,710` frames with avg delivered gap `27.82 ms`, max `152.46 ms`, jitter max `38.05 ms`, sequence-gap packets `2,161,905`, and avg receiver CPU `35.8%`. | Reject and revert. The receiver CPU win was real, but the teardown gate failed and setup tail, jitter, and sequence-gap packets were worse than the shared+pacing baseline. |
+
+Current hot-path status:
+
+- Keep the RTP send-task reusable serialization buffer as the first isolated
+  CPU optimization candidate.
+- Keep audio-quality diagnostics. They exposed a real pacing risk that the
+  earlier signaling-only pass/fail gates could not see.
+- The canonical no-pacing control failed ASR and had worse RTP sequence-gap
+  volume than canonical pacing. Pacing improves signaling and reduces packet
+  loss pressure, but it does not yet meet production audio-quality expectations.
+- Shared+pacing is the best full-quality candidate so far: it improved setup
+  p99 and reduced RTP sequence-gap packets versus pacing-only. It still needs
+  repeat runs and an explicit audio gap gate before production recommendation.
+- The RTP receive owned-Bytes parser is not promoted. It improved the parser
+  microbench and caller CPU in one full run, but failed teardown and worsened
+  receiver gap metrics. The runtime env-gated path was reverted; keep only the
+  benchmark/test scaffolding for future parser work.
+- Audio-frame subscriber delivery is material in the burst harness. Skipping
+  delivery reduced receiver CPU from the previous full-run range into the low
+  `30%` range and improved receiver sequence-gap volume, but it also suppresses
+  public audio delivery. Treat this as evidence that `AudioFrame` allocation and
+  subscriber delivery are worth optimizing only with a production-safe frame
+  representation or pooling design, not by promoting the perf skip.
+- Removing the extra `SessionHandle::audio()` receiver forwarding channel was
+  not sufficient as a production-safe shortcut. It reduced receiver CPU while
+  preserving delivered frames, but failed the teardown gate and regressed setup
+  tail/jitter/sequence-gap metrics, so the prototype was reverted.
+- Do not promote G.711 table or PCMU encode changes from this pass. The active
+  deployed G.711 scalar path remains intact and is covered by a bit-exact
+  all-byte decode test.
+- Defer additional RTP receive copy reduction unless a safer ownership design
+  preserves teardown and audio-quality gates in a full burst run.
+
 Failed Call-ID join for the rejected cached-tone/payload-copy run:
 
 | Artifact | Failure buckets |
@@ -208,6 +331,15 @@ are treated as SIP loss.
 | `burst_20260610_020612_97335/ae-dialog-8q24000-client-diagnostics` | `0` | `2,322,696` | `28,964,840` | `28,577,634` |
 | `burst_20260610_022419_31492/ae-dialog-8q24000-client-diagnostics` | `0` | `2,070,238` | `28,870,370` | `28,647,404` |
 | `burst_20260610_023645_41698/ae-dialog-8q24000-client-diagnostics` | `0` | `2,039,107` | `28,903,444` | `28,576,383` |
+| `burst_20260614_092807_22435/ae-dialog-8q24000-quality-smoke` | `0` | `267,973` | `6,172,106` | `15,427,357` |
+| `burst_20260614_092243_13618/ae-dialog-8q24000-quality-smoke` | `0` | `397,524` | `6,466,646` | `10,028,935` |
+| `burst_20260614_095356_66126/ae-dialog-8q24000-client-diagnostics` | `0` | `2,578,397` | `29,011,066` | `28,528,692` |
+| `burst_20260614_100655_73667/ae-dialog-8q24000-client-diagnostics` | `0` | `2,507,783` | `29,052,842` | `28,527,751` |
+| `burst_20260614_102259_86401/ae-dialog-8q24000-client-diagnostics` | `0` | `4,864,587` | `29,240,654` | `n/a` |
+| `burst_20260614_103658_93735/ae-dialog-8q24000-client-diagnostics` | `0` | `2,442,063` | `29,715,634` | `n/a` |
+| `burst_20260614_114246_22769/ae-dialog-8q24000-client-diagnostics` | `0` | `2,432,906` | `29,376,287` | `n/a` |
+| `burst_20260614_120614_39416/ae-dialog-8q24000-client-diagnostics` | `0` | `1,961,321` | `29,726,990` | `n/a` |
+| `burst_20260614_123119_64870/ae-dialog-8q24000-client-diagnostics` | `0` | `2,232,627` | `29,152,184` | `n/a` |
 
 ## Current Working Decisions
 
@@ -224,25 +356,30 @@ are treated as SIP loss.
   reuse, audio TX lock removal, and send stats batching regressed and should
   not be promoted as a bundle.
 - Audio TX pacing with target active `3000` is the first full-media candidate
-  to pass acceptance gates in three repeat runs. It should remain opt-in until
-  the implementation is reviewed for production-facing configuration and
-  diagnostics.
+  to pass signaling/retention/RSS gates in repeat runs, and the canonical
+  quality run also passed signaling gates. It should remain opt-in and should
+  not be promoted as production media guidance because the same run still
+  showed max delivered gaps above `40 ms` and millions of RTP sequence-gap
+  packets.
 - Audio TX pacing target active `4000` passed one probe run, but setup p95/p99
   and host no-socket drops were materially worse than target `3000`; do not
   promote `4000` without more evidence.
 - Shared generated-audio TX scheduling without pacing regressed and should not
   be promoted.
 - Shared generated-audio TX scheduling plus target-`3000` pacing passed three
-  guarded runs after a stop-race fix. Keep it as an opt-in candidate, but do
-  not prefer it over pacing-only yet: it adds scheduler complexity, did not
-  materially reduce caller CPU, and had less stable setup p99 in the third run.
+  guarded runs after a stop-race fix, and its first full quality run improved
+  setup p99 and RTP sequence-gap packets versus pacing-only. Keep it as the
+  best candidate so far, but do not promote it as production media guidance
+  until repeated full quality runs pass an explicit audio gap gate.
 - Per-packet/media setup diagnostics are useful for targeted runs only. Do not
   enable them in acceptance measurements.
 - The cached-tone/payload-copy experiment was rejected and should not be
   promoted.
-- The next library experiment should focus on adaptive media-plane pacing or
-  another small CPU reduction in the generated RTP path; larger SIP queues have
-  not explained the failures.
+- The reusable RTP send serialization buffer is the current small CPU
+  optimization candidate. RTP receive copy reduction was rejected after full
+  burst validation, while audio-frame delivery remains a real receiver-side
+  CPU target that needs a production-safe pooling/shared-frame design before it
+  can be kept.
 
 ## Validation Commands
 
@@ -258,5 +395,10 @@ cargo test -p rvoip-sip --features perf-tests --test config_tests
 cargo test -p rvoip-sip --features perf-tests --test perf_burst_scenarios
 cargo test -p rvoip-sip --release --features perf-tests --test perf_burst_caller --no-run
 cargo test -p rvoip-sip --release --features perf-tests --test perf_burst_receiver --no-run
+cargo test -p rvoip-codec-core test_codec_decode_to_buffer_is_bit_exact_for_all_values --lib
+cargo test -p rvoip-rtp-core --bench packet_parse_serialize --no-run
+cargo test -p rvoip-codec-core --bench g711_codec --no-run
+cargo bench -p rvoip-rtp-core --bench packet_parse_serialize -- --sample-size 20 --measurement-time 2 --warm-up-time 1
+cargo bench -p rvoip-codec-core --bench g711_codec -- --sample-size 20 --measurement-time 2 --warm-up-time 1
 git diff --check
 ```

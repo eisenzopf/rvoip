@@ -29,6 +29,7 @@
 //! - `RVOIP_PERF_BP_SPIKE_SECS`   (default 30)
 //! - `RVOIP_PERF_BP_RECOVERY_SECS` (default 30)
 //! - `RVOIP_PERF_CALL_TIMEOUT_SECS` (default 15)
+//! - `RVOIP_PERF_CALL_SETUP_DIAGNOSTICS=1` captures slow setup samples
 
 #![allow(clippy::needless_return)]
 
@@ -46,14 +47,23 @@ use tokio::task::JoinHandle;
 
 #[path = "support/mod.rs"]
 mod support;
-use support::{LatencyHistogram, LoadProfile, ResourceSampler, ScenarioReport};
+use support::{
+    CallSetupDiagnostics, LatencyHistogram, LoadProfile, ResourceSampler, ScenarioReport,
+};
 
-struct AutoAccept;
+#[derive(Clone)]
+struct AutoAccept {
+    call_setup_diag: CallSetupDiagnostics,
+}
 
 #[async_trait::async_trait]
 impl CallHandler for AutoAccept {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallHandlerDecision {
+        let call_id = call.call_id.clone();
+        let accept_start = Instant::now();
         let _ = call.accept().await;
+        self.call_setup_diag
+            .record_stage("bob_accept", &call_id, accept_start.elapsed());
         CallHandlerDecision::Accept
     }
 }
@@ -71,8 +81,9 @@ struct BobReceiver {
     shutdown: ShutdownHandle,
 }
 
-async fn boot_bob(port: u16) -> BobReceiver {
-    let bob = CallbackPeer::new(AutoAccept, Config::local("perf-bp-bob", port))
+async fn boot_bob(port: u16, call_setup_diag: CallSetupDiagnostics) -> BobReceiver {
+    let cfg = call_setup_diag.configure(Config::local("perf-bp-bob", port));
+    let bob = CallbackPeer::new(AutoAccept { call_setup_diag }, cfg)
         .await
         .expect("perf bob");
     let shutdown = bob.shutdown_handle();
@@ -83,10 +94,9 @@ async fn boot_bob(port: u16) -> BobReceiver {
     BobReceiver { task, shutdown }
 }
 
-async fn boot_alice(port: u16) -> Arc<UnifiedCoordinator> {
-    let coord = UnifiedCoordinator::new(Config::local("perf-bp-alice", port))
-        .await
-        .expect("perf alice");
+async fn boot_alice(port: u16, call_setup_diag: &CallSetupDiagnostics) -> Arc<UnifiedCoordinator> {
+    let cfg = call_setup_diag.configure(Config::local("perf-bp-alice", port));
+    let coord = UnifiedCoordinator::new(cfg).await.expect("perf alice");
     tokio::time::sleep(Duration::from_millis(200)).await;
     coord
 }
@@ -103,6 +113,7 @@ async fn drive_phase(
     counters: Arc<Counters>,
     is_spike_phase: bool,
     call_timeout: Duration,
+    call_setup_diag: CallSetupDiagnostics,
 ) {
     let started = Instant::now();
     let tick = Duration::from_secs_f64(1.0 / cps.max(1.0));
@@ -117,9 +128,11 @@ async fn drive_phase(
         let hist = Arc::clone(&hist);
         let counters = Arc::clone(&counters);
         let handles_for_record = Arc::clone(&handles);
+        let call_setup_diag = call_setup_diag.clone();
         let h = tokio::spawn(async move {
             counters.offered.fetch_add(1, Ordering::Relaxed);
             let t_send = Instant::now();
+            let invite_start = Instant::now();
             let call_id = match alice.invite(Some(from), target).send().await {
                 Ok(id) => id,
                 Err(_) => {
@@ -129,10 +142,26 @@ async fn drive_phase(
                     return;
                 }
             };
+            let invite_send = invite_start.elapsed();
             let handle = alice.session(&call_id);
+            let wait_start = Instant::now();
             match handle.wait_for_answered(Some(call_timeout)).await {
                 Ok(_) => {
-                    hist.record_nanos(t_send.elapsed().as_nanos() as u64);
+                    let wait_answer = wait_start.elapsed();
+                    let setup_elapsed = t_send.elapsed();
+                    let phase = if is_spike_phase {
+                        "alice_setup_spike"
+                    } else {
+                        "alice_setup"
+                    };
+                    call_setup_diag.record_setup(
+                        phase,
+                        &call_id,
+                        invite_send,
+                        wait_answer,
+                        setup_elapsed,
+                    );
+                    hist.record_nanos(setup_elapsed.as_nanos() as u64);
                 }
                 Err(_) => {
                     if is_spike_phase {
@@ -191,8 +220,9 @@ async fn perf_backpressure_step() {
 
     let bob_port = support::ports::next_sip_port();
     let alice_port = support::ports::next_sip_port();
-    let bob = boot_bob(bob_port).await;
-    let alice = boot_alice(alice_port).await;
+    let call_setup_diag = CallSetupDiagnostics::from_env();
+    let bob = boot_bob(bob_port, call_setup_diag.clone()).await;
+    let alice = boot_alice(alice_port, &call_setup_diag).await;
     let from = format!("sip:alice@127.0.0.1:{alice_port}");
     let target = format!("sip:bob@127.0.0.1:{bob_port}");
 
@@ -214,6 +244,7 @@ async fn perf_backpressure_step() {
         Arc::clone(&counters),
         false,
         call_timeout,
+        call_setup_diag.clone(),
     )
     .await;
 
@@ -228,6 +259,7 @@ async fn perf_backpressure_step() {
         Arc::clone(&counters),
         true,
         call_timeout,
+        call_setup_diag.clone(),
     )
     .await;
 
@@ -243,6 +275,7 @@ async fn perf_backpressure_step() {
         Arc::clone(&counters),
         false,
         call_timeout,
+        call_setup_diag.clone(),
     )
     .await;
     let _ = recovery_start; // Used implicitly below
@@ -299,6 +332,9 @@ async fn perf_backpressure_step() {
         .latency(&spike_hist)
         .latency(&recovery_hist)
         .with_resources(resources);
+    if call_setup_diag.enabled() {
+        report.diagnostic_block("call_setup", call_setup_diag.to_json());
+    }
     let json_path = report.write_json();
     report.print_summary(&json_path);
 

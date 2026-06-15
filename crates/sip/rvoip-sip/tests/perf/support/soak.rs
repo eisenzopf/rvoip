@@ -53,8 +53,14 @@ pub fn in_process_resource_sampler_enabled() -> bool {
     !read_bool_env(DISABLE_IN_PROCESS_RESOURCE_SAMPLER_ENV)
 }
 
+#[cfg(feature = "perf-infra-memory-diagnostics")]
 pub fn memory_diagnostics_enabled() -> bool {
     read_bool_env(MEMORY_DIAGNOSTICS_ENV)
+}
+
+#[cfg(not(feature = "perf-infra-memory-diagnostics"))]
+pub fn memory_diagnostics_enabled() -> bool {
+    false
 }
 
 pub fn memory_diagnostic_interval() -> Duration {
@@ -76,9 +82,23 @@ pub fn resource_sampling_diagnostics(role: &str, in_process_enabled: bool) -> se
 }
 
 pub fn media_receive_diagnostics() -> serde_json::Value {
+    let snapshot = rvoip_media_core::diagnostics::snapshot();
     json!({
         "skip_audio_frame_delivery": read_bool_env(SKIP_AUDIO_FRAME_DELIVERY_ENV),
         "skip_audio_frame_delivery_env": SKIP_AUDIO_FRAME_DELIVERY_ENV,
+        "audio_quality_diagnostics": {
+            "enabled": rvoip_media_core::diagnostics::audio_quality_enabled(),
+            "env": "RVOIP_MEDIA_AUDIO_QUALITY_DIAGNOSTICS",
+            "rtp_packets": snapshot.audio_rx_packet_count,
+            "sequence_gap_count": snapshot.audio_rx_sequence_gap_count,
+            "sequence_gap_packets": snapshot.audio_rx_sequence_gap_packets,
+            "sequence_gap_max_packets": snapshot.audio_rx_sequence_gap_max_packets,
+            "interarrival_gap_max_us": ns_to_us(snapshot.audio_rx_interarrival_gap_max_ns),
+            "jitter_max_us": ns_to_us(snapshot.audio_rx_jitter_max_ns),
+            "decoded_frames": snapshot.audio_rx_decoded_frame_count,
+            "delivered_frames": snapshot.audio_rx_delivered_frame_count,
+            "delivered_gap_max_us": ns_to_us(snapshot.audio_rx_delivered_gap_max_ns),
+        },
     })
 }
 
@@ -453,6 +473,45 @@ pub fn media_setup_timing_diagnostics() -> Value {
                 snapshot.audio_tx_send_max_ns,
             ),
             "send_fail": snapshot.audio_tx_send_fail,
+            "pacing": json!({
+                "evaluated": snapshot.audio_tx_pacing_evaluated_count,
+                "skips": snapshot.audio_tx_pacing_skip_count,
+                "skip_ratio": round2(ratio(
+                    snapshot.audio_tx_pacing_skip_count,
+                    snapshot.audio_tx_pacing_evaluated_count,
+                )),
+                "active_max": snapshot.audio_tx_pacing_active_max,
+                "divisor_max": snapshot.audio_tx_pacing_divisor_max,
+                "consecutive_skip_max": snapshot.audio_tx_pacing_consecutive_skip_max,
+            }),
+            "shared": json!({
+                "due": snapshot.audio_tx_shared_due_count,
+                "sent": snapshot.audio_tx_shared_sent_count,
+                "skip": snapshot.audio_tx_shared_skip_count,
+                "fail": snapshot.audio_tx_shared_fail_count,
+                "active_max": snapshot.audio_tx_shared_active_max,
+                "batch_max": snapshot.audio_tx_shared_batch_max,
+            }),
+        }),
+        "audio_rx_quality": json!({
+            "enabled": rvoip_media_core::diagnostics::audio_quality_enabled(),
+            "rtp_packets": snapshot.audio_rx_packet_count,
+            "sequence_gap_count": snapshot.audio_rx_sequence_gap_count,
+            "sequence_gap_packets": snapshot.audio_rx_sequence_gap_packets,
+            "sequence_gap_max_packets": snapshot.audio_rx_sequence_gap_max_packets,
+            "interarrival_gap": timing_ns_json(
+                snapshot.audio_rx_interarrival_gap_count,
+                snapshot.audio_rx_interarrival_gap_ns,
+                snapshot.audio_rx_interarrival_gap_max_ns,
+            ),
+            "jitter_max_us": ns_to_us(snapshot.audio_rx_jitter_max_ns),
+            "decoded_frames": snapshot.audio_rx_decoded_frame_count,
+            "delivered_frames": snapshot.audio_rx_delivered_frame_count,
+            "delivered_gap": timing_ns_json(
+                snapshot.audio_rx_delivered_gap_count,
+                snapshot.audio_rx_delivered_gap_ns,
+                snapshot.audio_rx_delivered_gap_max_ns,
+            ),
         }),
     })
 }
@@ -733,6 +792,7 @@ fn perf_results_dir() -> PathBuf {
     );
     manifest_dir
         .parent()
+        .and_then(|p| p.parent())
         .and_then(|p| p.parent())
         .map(|p| p.join("target").join("perf-results"))
         .unwrap_or_else(|| PathBuf::from("target/perf-results"))
@@ -1372,6 +1432,16 @@ impl EndpointRetentionSampler {
 }
 
 impl MemoryDiagnosticSampler {
+    #[cfg(not(feature = "perf-infra-memory-diagnostics"))]
+    pub fn start(
+        _role: &'static str,
+        _settings: &SoakLoadSettings,
+        _interval: Duration,
+    ) -> Option<Self> {
+        None
+    }
+
+    #[cfg(feature = "perf-infra-memory-diagnostics")]
     pub fn start(
         role: &'static str,
         settings: &SoakLoadSettings,
@@ -1554,6 +1624,7 @@ pub fn memory_diagnostic_summary(series: Option<&MemoryDiagnosticSeries>) -> ser
     }
 }
 
+#[cfg(feature = "perf-infra-memory-diagnostics")]
 fn capture_memory_diagnostic_sample(
     role: &'static str,
     label: &'static str,
@@ -2151,4 +2222,12 @@ pub fn round2(v: f64) -> f64 {
 
 pub fn round4(v: f64) -> f64 {
     (v * 10_000.0).round() / 10_000.0
+}
+
+fn ratio(numerator: u64, denominator: u64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
 }

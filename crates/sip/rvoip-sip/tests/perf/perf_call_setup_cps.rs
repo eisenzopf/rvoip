@@ -221,6 +221,7 @@ async fn run_one_call(
 /// once, return a populated `ScenarioReport`. Peers stay shared across
 /// sweep points so the bind cost is paid once per test.
 async fn run_one_point(
+    report_scenario: String,
     clients: Arc<Vec<LoadClient>>,
     target: String,
     load: LoadProfile,
@@ -329,7 +330,7 @@ async fn run_one_point(
         0.0
     };
 
-    let mut report = ScenarioReport::new("perf_call_setup_cps", load);
+    let mut report = ScenarioReport::new(report_scenario, load);
     let cores = report.environment().cpu_count_physical() as f64;
     let cps_per_core = if cores > 0.0 {
         achieved_cps / cores
@@ -411,6 +412,8 @@ async fn perf_call_setup_cps_inner() {
         .unwrap_or(30);
     let profile =
         std::env::var("RVOIP_PERF_PROFILE").unwrap_or_else(|_| "pbx-media-server".to_string());
+    let report_scenario = std::env::var("RVOIP_PERF_REPORT_SCENARIO")
+        .unwrap_or_else(|_| "perf_call_setup_cps".to_string());
     let client_profile =
         std::env::var("RVOIP_PERF_CLIENT_PROFILE").unwrap_or_else(|_| "endpoint".to_string());
     let recipe_path = std::env::var("RVOIP_PERF_RECIPE_FILE").ok();
@@ -466,6 +469,7 @@ async fn perf_call_setup_cps_inner() {
     }
     let effective_config = json!({
         "profile": profile.clone(),
+        "report_scenario": report_scenario.clone(),
         "client_profile": alice_recipe,
         "alice_shards": alice_shards,
         "recipe_file": recipe_path,
@@ -507,7 +511,7 @@ async fn perf_call_setup_cps_inner() {
     let target = format!("sip:bob@127.0.0.1:{}", bob_port);
 
     let mut sweep = SweepRunner::new(
-        "perf_call_setup_cps",
+        report_scenario.clone(),
         points.clone(),
         "CPS target",
         "achieved_cps",
@@ -533,6 +537,7 @@ async fn perf_call_setup_cps_inner() {
             obj.insert("max_in_flight_limit".to_string(), json!(max_in_flight));
         }
         let report = run_one_point(
+            report_scenario.clone(),
             Arc::clone(&clients),
             target.clone(),
             load,

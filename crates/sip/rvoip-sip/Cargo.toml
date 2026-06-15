@@ -471,13 +471,34 @@ tokio-console = ["dep:console-subscriber"]
 # Opt-in publically-reportable concurrency benchmark suite under
 # tests/perf/. Pulls in hdrhistogram for latency percentiles and sysinfo
 # for environment-block capture. Off by default so `cargo build` /
-# `cargo test` are untouched. See `crates/sip/rvoip-sip/docs/BENCHMARKING.md`.
+# `cargo test` are untouched. This feature intentionally does not compile
+# media/RTP/memory diagnostic instrumentation into the hot path. See
+# `crates/sip/rvoip-sip/docs/BENCHMARKING.md`.
 perf-tests = [
     "dep:hdrhistogram",
     "dep:sysinfo",
+]
+# Targeted perf diagnostics. Enable only the specific instrumentation needed
+# for an investigation run; beta headline performance gates use `perf-tests`
+# alone.
+perf-infra-memory-diagnostics = [
+    "perf-tests",
     "rvoip-infra-common/memory-diagnostics",
+]
+perf-media-diagnostics = [
+    "perf-tests",
     "rvoip-media-core/perf-diagnostics",
+]
+perf-media-memory-diagnostics = [
+    "perf-tests",
+    "rvoip-media-core/memory-diagnostics",
+]
+perf-rtp-memory-diagnostics = [
+    "perf-tests",
     "rvoip-rtp-core/memory-diagnostics",
+]
+perf-call-setup-diagnostics = [
+    "perf-tests",
 ]
 # Perf-only allocator A/B switch. Used by `scripts/perf_soak_split.sh`
 # with `RVOIP_PERF_SYSTEM_ALLOCATOR=1` to disable the mimalloc global

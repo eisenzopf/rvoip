@@ -307,7 +307,10 @@ async fn test_transcoding_over_rtp() {
         .await
         .expect("Failed to transcode PCMU to G.729");
 
-    assert_eq!(g729_data.len(), 10, "G.729 frame should be 10 bytes");
+    assert!(
+        matches!(g729_data.len(), 0 | 2 | 10),
+        "G.729AB payload should be no-data, SID, or speech"
+    );
 
     // Test reverse transcoding
     let pcmu_result = transcoder

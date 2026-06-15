@@ -1,0 +1,47 @@
+[package]
+name = "rvoip-g729"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+description = "Phase-structured G.729AB codec crate with no_std core and conformance tooling"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[lib]
+name = "g729"
+path = "src/lib.rs"
+
+[features]
+default = ["std", "annex_b"]
+std = []
+annex_b = []
+itu_serial = ["std"]
+
+[dependencies]
+
+[dev-dependencies]
+criterion = { workspace = true, default-features = true }
+
+[[bin]]
+name = "g729-cli"
+path = "src/bin/cli.rs"
+required-features = ["std"]
+
+[[bin]]
+name = "encoder"
+path = "src/bin/encoder.rs"
+required-features = ["std", "itu_serial"]
+
+[[bin]]
+name = "decoder"
+path = "src/bin/decoder.rs"
+required-features = ["std", "itu_serial"]
+
+[[bench]]
+name = "codec"
+harness = false
+
+[[bench]]
+name = "dsp_ops"
+harness = false
+required-features = ["std"]

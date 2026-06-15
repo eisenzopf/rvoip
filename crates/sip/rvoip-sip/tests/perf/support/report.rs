@@ -298,9 +298,10 @@ fn target_dir() -> PathBuf {
     let manifest_dir = PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set under cargo"),
     );
-    // crates/sip/rvoip-sip/ → ../../target
+    // crates/sip/rvoip-sip/ -> ../../../target
     manifest_dir
-        .parent() // crates/
+        .parent() // crates/sip
+        .and_then(|p| p.parent()) // crates
         .and_then(|p| p.parent()) // workspace root
         .map(|p| p.join("target"))
         .unwrap_or_else(|| PathBuf::from("target"))

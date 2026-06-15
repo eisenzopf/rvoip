@@ -120,7 +120,14 @@ async fn perf_media_churn() {
         Some(sampler) => Some(sampler.stop().await),
         None => None,
     };
+    #[cfg(feature = "perf-media-diagnostics")]
     let final_counts = controller.diagnostic_counts();
+    #[cfg(not(feature = "perf-media-diagnostics"))]
+    let final_counts = serde_json::json!({
+        "enabled": false,
+        "compiled": false,
+        "feature": "perf-media-diagnostics",
+    });
 
     let mut report = ScenarioReport::new(
         "perf_media_churn",

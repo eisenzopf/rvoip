@@ -192,6 +192,18 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_from_bytes_matches_slice_parse() {
+        let payload = Bytes::from_static(b"test payload data");
+        let original = RtpPacket::new_with_payload(96, 1000, 12345, 0xabcdef01, payload);
+        let serialized = original.serialize().unwrap();
+
+        let parsed_from_slice = RtpPacket::parse(&serialized).unwrap();
+        let parsed_from_bytes = RtpPacket::parse_from_bytes(serialized).unwrap();
+
+        assert_eq!(parsed_from_bytes, parsed_from_slice);
+    }
+
+    #[test]
     fn test_serialize_into_writes_one_payload() {
         let payload = Bytes::from_static(b"abc123");
         let packet = RtpPacket::new_with_payload(96, 1000, 12345, 0xabcdef01, payload.clone());

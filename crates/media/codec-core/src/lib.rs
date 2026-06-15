@@ -161,6 +161,12 @@ pub const SUPPORTED_CODECS: &[&str] = &[
     "PCMU",
     #[cfg(feature = "g711")]
     "PCMA",
+    #[cfg(feature = "g729")]
+    "G729",
+    #[cfg(feature = "g729")]
+    "G729A",
+    #[cfg(feature = "g729")]
+    "G729BA",
 ];
 
 /// Initialize the codec library
@@ -228,7 +234,13 @@ mod tests {
             assert!(SUPPORTED_CODECS.contains(&"PCMA"));
         }
 
-        // G.722 support removed; G.729 lives in media-core, not here.
+        #[cfg(feature = "g729")]
+        {
+            assert!(SUPPORTED_CODECS.contains(&"G729"));
+            assert!(SUPPORTED_CODECS.contains(&"G729A"));
+            assert!(SUPPORTED_CODECS.contains(&"G729BA"));
+        }
+
         #[cfg(any(feature = "opus", feature = "opus-sim"))]
         assert!(SUPPORTED_CODECS.contains(&"opus"));
     }

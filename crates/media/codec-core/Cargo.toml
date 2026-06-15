@@ -27,6 +27,7 @@ workspace = true
 # External dependencies from workspace
 thiserror.workspace = true
 tracing.workspace = true
+rvoip-g729 = { workspace = true, optional = true }
 
 # Crate-specific dependencies not in workspace
 tracing-subscriber = "0.3"   # Logging initialization
@@ -34,11 +35,17 @@ tracing-subscriber = "0.3"   # Logging initialization
 [dev-dependencies]
 # Testing
 tokio.workspace = true       # Async runtime for tests
+criterion = { workspace = true }
+
+[[bench]]
+name = "g711_codec"
+harness = false
 
 [features]
 default = ["g711"]
 
 # Codec features
 g711 = []                    # G.711 μ-law/A-law codec (always available)
+g729 = ["dep:rvoip-g729"]    # G.729A/G.729AB codec
 opus = []                    # Opus codec (real impl in src/codecs/opus.rs)
 opus-sim = []                # Opus codec simulator variant

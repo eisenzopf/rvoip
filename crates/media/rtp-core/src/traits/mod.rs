@@ -43,6 +43,9 @@ pub enum RtpEvent {
         /// Payload type
         payload_type: u8,
 
+        /// RTP sequence number
+        sequence_number: u16,
+
         /// RTP timestamp
         timestamp: u32,
 

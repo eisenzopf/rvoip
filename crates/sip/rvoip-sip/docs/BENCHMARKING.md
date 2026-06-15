@@ -17,21 +17,79 @@ how to produce **absolute numbers** a VoIP engineer can cite when
 evaluating the library's maturity (calls per second, concurrent active
 calls, p99 setup latency, REGs/sec, memory per call).
 For workload-specific `Config` recipes and SIPp matrix knobs, start with
-[`TUNING.md`](TUNING.md).
+[`TUNING.md`](TUNING.md). For carrier burst stress symptoms, knob choices, and
+tradeoffs, use the
+[`Stress Tuning Decision Guide`](TUNING.md#stress-tuning-decision-guide).
 
 The numbers are produced by integration tests gated behind the
 Cargo feature `perf-tests`. Default `cargo build` / `cargo test` are
 untouched — turn the suite on explicitly only when you want to measure.
+`perf-tests` is the clean measurement harness and does not compile media,
+RTP, or memory diagnostic instrumentation into hot paths.
 
 ```bash
 cargo test -p rvoip-sip --features perf-tests --release \
     --test perf_call_setup_cps -- --nocapture
 ```
 
+Enable diagnostic features only for targeted investigation runs:
+
+| Feature | Adds |
+| --- | --- |
+| `perf-infra-memory-diagnostics` | `rvoip-infra-common` memory registry and SIP-side memory hooks |
+| `perf-media-diagnostics` | `rvoip-media-core` media setup/audio-quality counters |
+| `perf-media-memory-diagnostics` | `rvoip-media-core` memory tracking |
+| `perf-rtp-memory-diagnostics` | `rvoip-rtp-core` memory tracking |
+
+For example, a media timing investigation can use
+`--features perf-tests,perf-media-diagnostics`; an RSS-retention
+investigation that needs SIP/infra memory samples can use
+`--features perf-tests,perf-infra-memory-diagnostics` plus
+`RVOIP_PERF_MEMORY_DIAGNOSTICS=1`. Do not use diagnostic feature sets for
+headline beta performance comparisons.
+
 Each test prints a stdout summary table and writes a machine-readable
 JSON file to `target/perf-results/<scenario>.json` matching the schema
 in [§4](#4-output-format-and-schema). Two JSON files can be diff'd
 across commits to track regressions.
+
+All generated benchmark artifacts live under the workspace root
+`target/perf-results/`. `crates/target/` is not a valid output location.
+
+## Clean Beta Comparison: 2026-06-15
+
+The 2026-06-15 clean beta run is packaged at
+`beta-report/20260615T105337Z`. It used the clean `perf-tests` feature set,
+`BETA_SIPP_DIAGNOSTICS=0`, `RVOIP_PERF_MEMORY_DIAGNOSTICS=0`, and
+`RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=0`. No media/RTP/infra diagnostic features,
+RTP/audio pacing default, or shared RTP TX scheduler default were enabled.
+
+Use `20260612T211608Z` as the comparison baseline for this RCA, not the
+diagnostic-contaminated `20260615T030513Z` run.
+
+| Standard beta gate | 20260612 baseline | 20260615 clean fix run | Read |
+| --- | --- | --- | --- |
+| Full beta result | `0` failures, `0` skips | `0` failures, `0` skips | Pass |
+| `pbx-media-server` @ 1000 CPS | p99 `12.4 ms`, ASR `1.0000`, no knee | p99 `13.0 ms`, ASR `1.0000`, no knee | Recovered |
+| `pbx-media-server` headline | `1857.1` achieved CPS @ target `2000`, p99 `12.7 ms` | `1857.1` achieved CPS @ target `2000`, p99 `12.8 ms` | Equivalent |
+| `signaling-only-server-high-performance` headline | `1857.1` achieved CPS, p99 `12.6 ms` | `1857.1` achieved CPS, p99 `12.9 ms` | Equivalent |
+| `perf_backpressure_step` | max setup `113.6 ms`; p99 phases `13.2/12.7/13.5 ms` | max setup `23.8 ms`; p99 phases `14.1/12.9/14.1 ms` | 100 ms tail removed |
+| `perf_soak_candidate` caller | p99 `49.9 ms`, max `114.9 ms`, CPU `60.5%` | p99 `44.1 ms`, max `95.1 ms`, CPU `57.2%` | Improved |
+| `perf_soak_candidate` receiver | CPU `41.4%`, post-drain RSS gate `1.00 MB/hr` | CPU `38.8%`, post-drain RSS gate `0.10 MB/hr` | Improved |
+| Artifact root | older logs referenced `crates/target/perf-results` | report packaged from `target/perf-results`; `crates/target/` absent | Fixed |
+
+The root cause for the 100 ms setup tail was a fixed post-initiation wait in
+`TransactionManager::send_request` for successful INVITE client sends. The
+fix removes that wait for `InviteClient` transactions and keeps the old
+non-INVITE safety window until the pending-options/auth-retry lifecycle is
+cleaned up.
+
+The standard beta run had two single-run p99 values higher than the baseline:
+`perf_rtp_steady_state` (`28.7 ms` vs `17.5 ms`) and
+`perf_concurrent_active_calls` (`55.1 ms` vs `51.6 ms`). Follow-up repeat checks
+did not reproduce those as persistent regressions. RTP steady-state repeated at
+`16.4`, `23.2`, `19.8`, `20.4`, and `16.8 ms`; sequential concurrent-call
+repeats passed at `45.7`, `47.6`, and `47.8 ms`.
 
 > **`--release` is mandatory.** Every scenario asserts
 > `!cfg!(debug_assertions)` at startup. Debug-build numbers are not

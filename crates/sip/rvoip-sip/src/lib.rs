@@ -483,6 +483,9 @@ pub mod adapters;
 #[doc(hidden)]
 pub mod admission_diag;
 pub mod auth;
+#[cfg(feature = "perf-call-setup-diagnostics")]
+#[doc(hidden)]
+pub mod call_setup_diag;
 #[doc(hidden)]
 pub mod cleanup_diag;
 #[doc(hidden)]

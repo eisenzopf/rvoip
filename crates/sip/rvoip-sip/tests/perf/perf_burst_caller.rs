@@ -1324,6 +1324,7 @@ fn burst_run_dir(scenario: &BurstScenario) -> PathBuf {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .and_then(|path| path.parent())
+                .and_then(|path| path.parent())
                 .unwrap()
                 .join("target")
                 .join("perf-results")

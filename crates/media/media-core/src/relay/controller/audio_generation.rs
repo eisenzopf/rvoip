@@ -16,6 +16,7 @@ use crate::diagnostics;
 use rvoip_rtp_core::{RtpSendHandle, RtpSession};
 
 const AUDIO_TX_PHASE_MULTIPLIER: u64 = 0x9E37_79B9_7F4A_7C15;
+#[cfg(any(feature = "perf-diagnostics", test))]
 const DEFAULT_AUDIO_TX_PACING_TARGET_ACTIVE: u64 = 3_000;
 const DEFAULT_SHARED_AUDIO_TX_BATCH_SIZE: usize = 256;
 const SHARED_AUDIO_TX_TICK: Duration = Duration::from_millis(1);
@@ -81,6 +82,7 @@ struct SharedAudioTxEntry {
     pacing_config: Option<AudioTxPacingConfig>,
     pacing_sequence: u64,
     pacing_tick: AtomicU64,
+    pacing_consecutive_skips: AtomicU64,
 }
 
 struct SharedAudioTxRegistration {
@@ -171,16 +173,27 @@ async fn run_shared_audio_tx_scheduler(
         let mut sent_count = 0_u64;
         let mut skip_count = 0_u64;
         let mut fail_count = 0_u64;
+        let mut pacing_evaluated_count = 0_u64;
+        let mut pacing_consecutive_skip_max = 0_u64;
         let mut pacing_divisor_max = 1_u64;
 
         for (index, entry) in due_entries.iter().enumerate() {
             match entry.send_due(active_count).await {
-                SharedAudioTxOutcome::Sent => {
+                SharedAudioTxOutcome::Sent { pacing_evaluated } => {
                     sent_count = sent_count.saturating_add(1);
+                    if pacing_evaluated {
+                        pacing_evaluated_count = pacing_evaluated_count.saturating_add(1);
+                    }
                 }
-                SharedAudioTxOutcome::Skipped { divisor } => {
+                SharedAudioTxOutcome::Skipped {
+                    divisor,
+                    consecutive_skips,
+                } => {
                     skip_count = skip_count.saturating_add(1);
+                    pacing_evaluated_count = pacing_evaluated_count.saturating_add(1);
                     pacing_divisor_max = pacing_divisor_max.max(divisor);
+                    pacing_consecutive_skip_max =
+                        pacing_consecutive_skip_max.max(consecutive_skips);
                 }
                 SharedAudioTxOutcome::Inactive => {}
                 SharedAudioTxOutcome::Failed => {
@@ -200,15 +213,26 @@ async fn run_shared_audio_tx_scheduler(
             fail_count,
             active_count,
         );
-        if skip_count > 0 {
-            diagnostics::record_audio_tx_pacing_batch(skip_count, active_count, pacing_divisor_max);
+        if pacing_evaluated_count > 0 {
+            diagnostics::record_audio_tx_pacing_batch(
+                pacing_evaluated_count,
+                skip_count,
+                active_count,
+                pacing_divisor_max,
+                pacing_consecutive_skip_max,
+            );
         }
     }
 }
 
 enum SharedAudioTxOutcome {
-    Sent,
-    Skipped { divisor: u64 },
+    Sent {
+        pacing_evaluated: bool,
+    },
+    Skipped {
+        divisor: u64,
+        consecutive_skips: u64,
+    },
     Inactive,
     Failed,
 }
@@ -225,9 +249,17 @@ impl SharedAudioTxEntry {
             let should_skip =
                 divisor > 1 && pacing_tick.wrapping_add(self.pacing_sequence) % divisor != 0;
             if should_skip {
+                let consecutive_skips = self
+                    .pacing_consecutive_skips
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1);
                 advance_rtp_timestamp(&self.timestamp, self.samples_per_packet).await;
-                return SharedAudioTxOutcome::Skipped { divisor };
+                return SharedAudioTxOutcome::Skipped {
+                    divisor,
+                    consecutive_skips,
+                };
             }
+            self.pacing_consecutive_skips.store(0, Ordering::Relaxed);
         }
 
         let audio_samples = {
@@ -264,7 +296,9 @@ impl SharedAudioTxEntry {
         };
 
         match send_result {
-            Ok(()) => SharedAudioTxOutcome::Sent,
+            Ok(()) => SharedAudioTxOutcome::Sent {
+                pacing_evaluated: self.pacing_config.is_some(),
+            },
             Err(e) => {
                 if !self.active.load(Ordering::Acquire) || !*self.is_active.read().await {
                     debug!("Shared RTP audio send skipped after stop: {}", e);
@@ -634,6 +668,7 @@ impl AudioTransmitter {
                 pacing_config,
                 pacing_sequence,
                 pacing_tick: AtomicU64::new(0),
+                pacing_consecutive_skips: AtomicU64::new(0),
             });
             self.shared_tx_registration =
                 Some(shared_audio_tx_scheduler().register(entry, initial_delay));
@@ -663,9 +698,12 @@ impl AudioTransmitter {
                 let mut send_total = Duration::ZERO;
                 let mut send_max = Duration::ZERO;
                 let mut pacing_tick = 0_u64;
+                let mut pacing_evaluated_count = 0_u64;
                 let mut pacing_skip_count = 0_u64;
                 let mut pacing_active_max = 0_u64;
                 let mut pacing_divisor_max = 1_u64;
+                let mut pacing_consecutive_skip_count = 0_u64;
+                let mut pacing_consecutive_skip_max = 0_u64;
 
                 while *is_active.read().await {
                     interval_timer.tick().await;
@@ -681,6 +719,7 @@ impl AudioTransmitter {
                     }
 
                     if let Some(pacing) = pacing_config {
+                        pacing_evaluated_count = pacing_evaluated_count.saturating_add(1);
                         let active_count = active_guard.active_count();
                         pacing_active_max = pacing_active_max.max(active_count);
                         let divisor = pacing_divisor(active_count, pacing.target_active);
@@ -691,9 +730,14 @@ impl AudioTransmitter {
 
                         if should_skip {
                             pacing_skip_count = pacing_skip_count.saturating_add(1);
+                            pacing_consecutive_skip_count =
+                                pacing_consecutive_skip_count.saturating_add(1);
+                            pacing_consecutive_skip_max =
+                                pacing_consecutive_skip_max.max(pacing_consecutive_skip_count);
                             advance_rtp_timestamp(&timestamp, samples_per_packet).await;
                             continue;
                         }
+                        pacing_consecutive_skip_count = 0;
                     }
 
                     // Generate audio samples
@@ -766,9 +810,11 @@ impl AudioTransmitter {
                 }
                 if pacing_config.is_some() {
                     diagnostics::record_audio_tx_pacing_batch(
+                        pacing_evaluated_count,
                         pacing_skip_count,
                         pacing_active_max,
                         pacing_divisor_max,
+                        pacing_consecutive_skip_max,
                     );
                 }
 
@@ -846,6 +892,7 @@ async fn advance_rtp_timestamp(timestamp: &Arc<Mutex<u32>>, samples_per_packet: 
     current
 }
 
+#[cfg(any(feature = "perf-diagnostics", test))]
 fn audio_tx_pacing_config_from_env() -> Option<AudioTxPacingConfig> {
     if !env_flag_enabled("RVOIP_MEDIA_AUDIO_TX_PACING") {
         return None;
@@ -860,10 +907,22 @@ fn audio_tx_pacing_config_from_env() -> Option<AudioTxPacingConfig> {
     Some(AudioTxPacingConfig { target_active })
 }
 
+#[cfg(not(any(feature = "perf-diagnostics", test)))]
+fn audio_tx_pacing_config_from_env() -> Option<AudioTxPacingConfig> {
+    None
+}
+
+#[cfg(any(feature = "perf-diagnostics", test))]
 fn shared_audio_tx_scheduler_enabled() -> bool {
     env_flag_enabled("RVOIP_MEDIA_AUDIO_TX_SHARED_SCHEDULER")
 }
 
+#[cfg(not(any(feature = "perf-diagnostics", test)))]
+fn shared_audio_tx_scheduler_enabled() -> bool {
+    false
+}
+
+#[cfg(any(feature = "perf-diagnostics", test))]
 fn shared_audio_tx_batch_size_from_env() -> usize {
     std::env::var("RVOIP_MEDIA_AUDIO_TX_SHARED_BATCH_SIZE")
         .ok()
@@ -872,6 +931,12 @@ fn shared_audio_tx_batch_size_from_env() -> usize {
         .unwrap_or(DEFAULT_SHARED_AUDIO_TX_BATCH_SIZE)
 }
 
+#[cfg(not(any(feature = "perf-diagnostics", test)))]
+fn shared_audio_tx_batch_size_from_env() -> usize {
+    DEFAULT_SHARED_AUDIO_TX_BATCH_SIZE
+}
+
+#[cfg(any(feature = "perf-diagnostics", test))]
 fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
         .map(|value| {

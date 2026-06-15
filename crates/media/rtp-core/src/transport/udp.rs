@@ -657,6 +657,7 @@ impl UdpRtpTransport {
                                         // Create RTP event
                                         let event = RtpEvent::MediaReceived {
                                             payload_type: packet.header.payload_type,
+                                            sequence_number: packet.header.sequence_number,
                                             timestamp: packet.header.timestamp,
                                             marker: packet.header.marker,
                                             payload: packet.payload.clone(), // Use the parsed payload

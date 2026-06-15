@@ -126,19 +126,6 @@ pub fn enabled() -> bool {
     ENABLE_OVERRIDE.load(Ordering::Relaxed) == ENABLE_ON
 }
 
-#[cfg(test)]
-pub(crate) fn reset() {
-    for counter in all_counters() {
-        counter.store(0, Ordering::Relaxed);
-    }
-    for bucket in &LOCK_WAIT_BUCKETS {
-        bucket.store(0, Ordering::Relaxed);
-    }
-    for bucket in &PACING_SLEEP_BUCKETS {
-        bucket.store(0, Ordering::Relaxed);
-    }
-}
-
 pub fn snapshot() -> AdmissionDiagSnapshot {
     AdmissionDiagSnapshot {
         enabled: enabled(),
@@ -354,30 +341,4 @@ fn update_min_nonzero(counter: &AtomicU64, value: u64) {
             Err(next) => current = next,
         }
     }
-}
-
-#[cfg(test)]
-fn all_counters() -> [&'static AtomicU64; 20] {
-    [
-        &ATTEMPTS,
-        &NO_LIMIT_ADMITS,
-        &ADMITS,
-        &REJECTS,
-        &HARD_LIMIT_REJECTS,
-        &OVERLOAD_REJECTS,
-        &OVERLOAD_ENTERED,
-        &OVERLOAD_CLEARED,
-        &PACING_DECISIONS,
-        &OBSERVED_SESSIONS_MAX,
-        &PENDING_MAX,
-        &HARD_LIMIT_MAX,
-        &SOFT_LIMIT_MIN,
-        &SOFT_LIMIT_MAX,
-        &LOCK_WAIT_COUNT,
-        &LOCK_WAIT_SUM_US,
-        &LOCK_WAIT_MAX_US,
-        &PACING_SLEEP_COUNT,
-        &PACING_SLEEP_SUM_US,
-        &PACING_SLEEP_MAX_US,
-    ]
 }

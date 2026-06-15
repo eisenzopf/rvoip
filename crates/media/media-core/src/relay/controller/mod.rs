@@ -508,7 +508,7 @@ impl MediaSessionController {
             .map(|entry| entry.value().max_capacity())
             .sum();
 
-        let mut value = serde_json::json!({
+        let value = serde_json::json!({
             "sessions": self.sessions.len(),
             "rtp_sessions": self.rtp_sessions.len(),
             "rtp_sender_queue_packets": rtp_sender_queue_packets,
@@ -1300,6 +1300,7 @@ impl MediaSessionController {
         let mut g711_alaw = G711Codec::a_law(8000, 1).expect("Failed to create A-law codec");
         let mut decode_buffer = vec![0i16; 160];
         let skip_audio_frame_delivery = perf_skip_audio_frame_delivery();
+        let collect_audio_quality = diagnostics::audio_quality_enabled();
 
         #[cfg(feature = "memory-diagnostics")]
         let _decode_buffer_guard = rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
@@ -1312,6 +1313,11 @@ impl MediaSessionController {
             let mut rtp_count = 0u64;
             let mut decoded_audio_frame_count = 0u64;
             let mut logged_missing_audio_callback = false;
+            let mut last_sequence_number: Option<u16> = None;
+            let mut last_rtp_timestamp: Option<u32> = None;
+            let mut last_rtp_arrival: Option<Instant> = None;
+            let mut last_delivered_at: Option<Instant> = None;
+            let mut jitter_ns = 0.0_f64;
 
             loop {
                 match rtp_events.recv().await {
@@ -1319,6 +1325,7 @@ impl MediaSessionController {
                         match event {
                             rtp_core::session::RtpSessionEvent::PacketReceived(packet) => {
                                 rtp_count += 1;
+                                let packet_arrival = collect_audio_quality.then(Instant::now);
 
                                 if rtp_count % 10 == 0
                                     || rtp_count == 100
@@ -1334,6 +1341,58 @@ impl MediaSessionController {
                                         packet.header.timestamp,
                                         packet.payload.len()
                                     );
+                                }
+
+                                if let Some(arrival) = packet_arrival {
+                                    let sequence_gap_packets =
+                                        if let Some(previous) = last_sequence_number {
+                                            let expected = previous.wrapping_add(1);
+                                            if packet.header.sequence_number == expected {
+                                                0
+                                            } else {
+                                                let gap = packet
+                                                    .header
+                                                    .sequence_number
+                                                    .wrapping_sub(expected);
+                                                if gap < 32_768 {
+                                                    u64::from(gap)
+                                                } else {
+                                                    0
+                                                }
+                                            }
+                                        } else {
+                                            0
+                                        };
+
+                                    let interarrival_gap = last_rtp_arrival
+                                        .map(|previous| arrival.duration_since(previous));
+                                    if let (Some(previous_arrival), Some(previous_timestamp)) =
+                                        (last_rtp_arrival, last_rtp_timestamp)
+                                    {
+                                        let arrival_delta =
+                                            arrival.duration_since(previous_arrival).as_nanos()
+                                                as f64;
+                                        let rtp_delta_samples = packet
+                                            .header
+                                            .timestamp
+                                            .wrapping_sub(previous_timestamp)
+                                            as f64;
+                                        let rtp_delta_ns =
+                                            rtp_delta_samples * 1_000_000_000_f64 / 8_000_f64;
+                                        let transit_delta = (arrival_delta - rtp_delta_ns).abs();
+                                        jitter_ns += (transit_delta - jitter_ns) / 16.0;
+                                    }
+
+                                    diagnostics::record_audio_rx_packet(
+                                        sequence_gap_packets,
+                                        interarrival_gap,
+                                        Some(std::time::Duration::from_nanos(
+                                            jitter_ns.max(0.0).min(u64::MAX as f64) as u64,
+                                        )),
+                                    );
+                                    last_sequence_number = Some(packet.header.sequence_number);
+                                    last_rtp_timestamp = Some(packet.header.timestamp);
+                                    last_rtp_arrival = Some(arrival);
                                 }
 
                                 if decode_buffer.len() < packet.payload.len() {
@@ -1408,6 +1467,9 @@ impl MediaSessionController {
                                     );
                                     continue;
                                 }
+                                if collect_audio_quality {
+                                    diagnostics::record_audio_rx_decoded_frame();
+                                }
 
                                 if skip_audio_frame_delivery {
                                     decoded_audio_frame_count += 1;
@@ -1439,6 +1501,17 @@ impl MediaSessionController {
                                     // Use try_send to avoid blocking the RTP event handler
                                     match sender.try_send(audio_frame) {
                                         Ok(_) => {
+                                            if collect_audio_quality {
+                                                let delivered_at = Instant::now();
+                                                let delivery_gap =
+                                                    last_delivered_at.map(|previous| {
+                                                        delivered_at.duration_since(previous)
+                                                    });
+                                                diagnostics::record_audio_rx_delivered_frame(
+                                                    delivery_gap,
+                                                );
+                                                last_delivered_at = Some(delivered_at);
+                                            }
                                             if decoded_audio_frame_count % 10 == 0
                                                 || decoded_audio_frame_count == 100
                                                 || decoded_audio_frame_count == 101

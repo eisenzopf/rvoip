@@ -412,11 +412,21 @@ pub(crate) async fn execute_action(
                 "Action::CreateMediaSession for session {}",
                 session.session_id
             );
+            #[cfg(feature = "perf-call-setup-diagnostics")]
+            let started = std::time::Instant::now();
             let media_id = media_adapter.create_session(&session.session_id).await?;
+            #[cfg(feature = "perf-call-setup-diagnostics")]
+            crate::call_setup_diag::record_stage(
+                &session.session_id,
+                "action.create_media_session",
+                started.elapsed(),
+            );
             session.media_session_id = Some(media_id.clone());
             info!("Created media session ID: {:?}", media_id);
         }
         Action::GenerateLocalSDP => {
+            #[cfg(feature = "perf-call-setup-diagnostics")]
+            let started = std::time::Instant::now();
             let guard = cleanup_diag::stage_guard(
                 CleanupStage::ActionGenerateLocalSdp,
                 &session.session_id.0,
@@ -446,6 +456,12 @@ pub(crate) async fn execute_action(
             // state machine while SendINVITE is still awaiting, and the auth
             // retry needs the original SDP offer from the store.
             session_store.update_session(session.clone()).await?;
+            #[cfg(feature = "perf-call-setup-diagnostics")]
+            crate::call_setup_diag::record_stage(
+                &session.session_id,
+                "action.generate_local_sdp",
+                started.elapsed(),
+            );
             guard.finish_success();
         }
         Action::SendRejectResponse => {
@@ -2655,6 +2671,8 @@ pub(crate) async fn execute_action(
                     sdp_for_wire,
                 )?;
 
+                #[cfg(feature = "perf-call-setup-diagnostics")]
+                let started = std::time::Instant::now();
                 dialog_adapter
                     .send_invite_with_options(
                         &session.session_id,
@@ -2662,6 +2680,12 @@ pub(crate) async fn execute_action(
                         !suppress_global_proxy,
                     )
                     .await?;
+                #[cfg(feature = "perf-call-setup-diagnostics")]
+                crate::call_setup_diag::record_stage(
+                    &session.session_id,
+                    "action.send_invite_with_options",
+                    started.elapsed(),
+                );
                 debug!(
                     "SendINVITEWithOptions dispatched for session {}: to={}",
                     session.session_id, snapshot.to

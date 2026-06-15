@@ -463,7 +463,10 @@ mod tests {
             pcmu_test_data.len(),
             transcoded_g729.len()
         );
-        assert_eq!(transcoded_g729.len(), 10); // Back to G.729 frame size (10 bytes)
+        assert!(
+            matches!(transcoded_g729.len(), 0 | 2 | 10),
+            "G.729AB payload should be no-data, SID, or speech"
+        );
     }
 
     #[test]

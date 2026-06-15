@@ -374,6 +374,7 @@ fn perf_target_dir() -> PathBuf {
     manifest
         .parent()
         .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
         .map(|p| p.join("target").join("perf-results"))
         .unwrap_or_else(|| PathBuf::from("target/perf-results"))
 }

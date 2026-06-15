@@ -22,6 +22,7 @@
 #![allow(dead_code, unused_imports)]
 
 pub mod burst;
+pub mod call_setup_diag;
 pub mod env;
 pub mod histogram;
 pub mod load;
@@ -34,6 +35,7 @@ pub mod sweep;
 
 // `env::EnvironmentBlock` is captured internally by
 // `ScenarioReport::new` — scenarios don't need a direct re-export.
+pub use call_setup_diag::CallSetupDiagnostics;
 pub use histogram::LatencyHistogram;
 pub use load::LoadProfile;
 pub use report::ScenarioReport;

@@ -280,10 +280,10 @@ impl LifecycleIndex {
             return;
         };
 
-        #[cfg(feature = "perf-tests")]
+        #[cfg(feature = "perf-infra-memory-diagnostics")]
         let lifecycle_entry_was_new = !self.entries.contains_key(&call_id);
         let mut entry = self.entries.entry(call_id.clone()).or_default();
-        #[cfg(feature = "perf-tests")]
+        #[cfg(feature = "perf-infra-memory-diagnostics")]
         if lifecycle_entry_was_new {
             rvoip_infra_common::memory_diagnostics::record_created(
                 "sip.lifecycle.entry",
@@ -394,7 +394,7 @@ impl LifecycleIndex {
     }
 
     pub(crate) fn watcher(&self, call_id: &SessionId) -> watch::Receiver<u64> {
-        #[cfg(feature = "perf-tests")]
+        #[cfg(feature = "perf-infra-memory-diagnostics")]
         let waiter_was_new = !self.waiters.contains_key(call_id);
         let receiver = self
             .waiters
@@ -404,7 +404,7 @@ impl LifecycleIndex {
                 tx
             })
             .subscribe();
-        #[cfg(feature = "perf-tests")]
+        #[cfg(feature = "perf-infra-memory-diagnostics")]
         if waiter_was_new {
             rvoip_infra_common::memory_diagnostics::record_created(
                 "sip.lifecycle.waiter",
@@ -422,7 +422,7 @@ impl LifecycleIndex {
 
         if terminal {
             if self.waiters.remove(call_id).is_some() {
-                #[cfg(feature = "perf-tests")]
+                #[cfg(feature = "perf-infra-memory-diagnostics")]
                 rvoip_infra_common::memory_diagnostics::record_dropped(
                     "sip.lifecycle.waiter",
                     std::mem::size_of::<watch::Sender<u64>>(),
@@ -469,14 +469,14 @@ impl LifecycleIndex {
 
         if terminal_expired {
             if self.entries.remove(call_id).is_some() {
-                #[cfg(feature = "perf-tests")]
+                #[cfg(feature = "perf-infra-memory-diagnostics")]
                 rvoip_infra_common::memory_diagnostics::record_dropped(
                     "sip.lifecycle.entry",
                     std::mem::size_of::<LifecycleEntry>(),
                 );
             }
             if self.waiters.remove(call_id).is_some() {
-                #[cfg(feature = "perf-tests")]
+                #[cfg(feature = "perf-infra-memory-diagnostics")]
                 rvoip_infra_common::memory_diagnostics::record_dropped(
                     "sip.lifecycle.waiter",
                     std::mem::size_of::<watch::Sender<u64>>(),
@@ -507,14 +507,14 @@ fn prune_expired_terminal_entries_from(
     let removed = expired.len();
     for call_id in expired {
         if entries.remove(&call_id).is_some() {
-            #[cfg(feature = "perf-tests")]
+            #[cfg(feature = "perf-infra-memory-diagnostics")]
             rvoip_infra_common::memory_diagnostics::record_dropped(
                 "sip.lifecycle.entry",
                 std::mem::size_of::<LifecycleEntry>(),
             );
         }
         if waiters.remove(&call_id).is_some() {
-            #[cfg(feature = "perf-tests")]
+            #[cfg(feature = "perf-infra-memory-diagnostics")]
             rvoip_infra_common::memory_diagnostics::record_dropped(
                 "sip.lifecycle.waiter",
                 std::mem::size_of::<watch::Sender<u64>>(),

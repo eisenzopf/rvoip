@@ -101,6 +101,9 @@ impl SecurityRtpTransport {
                                         // Create a MediaReceived event with the decrypted packet's payload
                                         let decrypted_event = RtpEvent::MediaReceived {
                                             payload_type: decrypted_packet.header.payload_type,
+                                            sequence_number: decrypted_packet
+                                                .header
+                                                .sequence_number,
                                             timestamp: decrypted_packet.header.timestamp,
                                             marker: decrypted_packet.header.marker,
                                             payload: decrypted_packet.payload.clone(),
@@ -147,6 +150,7 @@ impl SecurityRtpTransport {
 
                                     let rtp_event = RtpEvent::MediaReceived {
                                         payload_type: rtp_packet.header.payload_type,
+                                        sequence_number: rtp_packet.header.sequence_number,
                                         timestamp: rtp_packet.header.timestamp,
                                         marker: rtp_packet.header.marker,
                                         payload: rtp_packet.payload.clone(),
@@ -164,6 +168,7 @@ impl SecurityRtpTransport {
                                     // Create fallback event with raw data
                                     let fallback_event = RtpEvent::MediaReceived {
                                         payload_type: 0,
+                                        sequence_number: 0,
                                         timestamp: 0,
                                         marker: false,
                                         payload: Bytes::copy_from_slice(packet_data),

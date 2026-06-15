@@ -26,6 +26,7 @@
 //! - `RVOIP_PERF_RTP_CALLS`        (single-point default; 50)
 //! - `RVOIP_PERF_RTP_DURATION_SECS` (default 10 — steady-state media window)
 //! - `RVOIP_PERF_CALL_TIMEOUT_SECS` (default 30)
+//! - `RVOIP_PERF_CALL_SETUP_DIAGNOSTICS=1` captures slow setup samples
 
 #![allow(clippy::needless_return)]
 
@@ -45,7 +46,8 @@ use tokio::task::JoinHandle;
 #[path = "support/mod.rs"]
 mod support;
 use support::{
-    parse_sweep_env, LatencyHistogram, LoadProfile, ResourceSampler, ScenarioReport, SweepRunner,
+    parse_sweep_env, CallSetupDiagnostics, LatencyHistogram, LoadProfile, ResourceSampler,
+    ScenarioReport, SweepRunner,
 };
 
 /// PCMU framing: 8 kHz, 20 ms, mono → 160 samples per frame, 50 fps.
@@ -61,12 +63,17 @@ const PPS_PER_STREAM: u64 = 50;
 #[derive(Clone)]
 struct CountingAccept {
     received_frames: Arc<AtomicU64>,
+    call_setup_diag: CallSetupDiagnostics,
 }
 
 #[async_trait::async_trait]
 impl CallHandler for CountingAccept {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallHandlerDecision {
+        let call_id = call.call_id.clone();
+        let accept_start = std::time::Instant::now();
         if let Ok(handle) = call.accept().await {
+            self.call_setup_diag
+                .record_stage("bob_accept", &call_id, accept_start.elapsed());
             let counter = Arc::clone(&self.received_frames);
             tokio::spawn(async move {
                 let audio = match handle.audio().await {
@@ -88,9 +95,16 @@ struct BobReceiver {
     shutdown: ShutdownHandle,
 }
 
-async fn boot_bob(port: u16, received_frames: Arc<AtomicU64>) -> BobReceiver {
-    let cfg = Config::local("perf-bob", port);
-    let handler = CountingAccept { received_frames };
+async fn boot_bob(
+    port: u16,
+    received_frames: Arc<AtomicU64>,
+    call_setup_diag: CallSetupDiagnostics,
+) -> BobReceiver {
+    let cfg = call_setup_diag.configure(Config::local("perf-bob", port));
+    let handler = CountingAccept {
+        received_frames,
+        call_setup_diag,
+    };
     let bob = CallbackPeer::new(handler, cfg)
         .await
         .expect("perf bob: CallbackPeer::new");
@@ -102,8 +116,8 @@ async fn boot_bob(port: u16, received_frames: Arc<AtomicU64>) -> BobReceiver {
     BobReceiver { task, shutdown }
 }
 
-async fn boot_alice(port: u16) -> Arc<UnifiedCoordinator> {
-    let cfg = Config::local("perf-alice", port);
+async fn boot_alice(port: u16, call_setup_diag: &CallSetupDiagnostics) -> Arc<UnifiedCoordinator> {
+    let cfg = call_setup_diag.configure(Config::local("perf-alice", port));
     let coord = UnifiedCoordinator::new(cfg)
         .await
         .expect("perf alice: UnifiedCoordinator::new");
@@ -122,6 +136,7 @@ async fn run_one_point(
     call_timeout: Duration,
     sent_frames: Arc<AtomicU64>,
     received_frames: Arc<AtomicU64>,
+    call_setup_diag: CallSetupDiagnostics,
 ) -> ScenarioReport {
     // Schema-stable LoadProfile shape: `target_cps` carries the
     // stream-count point.
@@ -156,10 +171,12 @@ async fn run_one_point(
         let setup_failed = Arc::clone(&setup_failed);
         let teardown_failed = Arc::clone(&teardown_failed);
         let sent_frames = Arc::clone(&sent_frames);
+        let call_setup_diag = call_setup_diag.clone();
         let mut drop_rx = drop_tx.subscribe();
         handles.push(tokio::spawn(async move {
             // Step 1: establish the call.
             let t_send = std::time::Instant::now();
+            let invite_start = std::time::Instant::now();
             let call_id = match alice.invite(Some(from), target_uri).send().await {
                 Ok(id) => id,
                 Err(_) => {
@@ -167,12 +184,23 @@ async fn run_one_point(
                     return;
                 }
             };
+            let invite_send = invite_start.elapsed();
             let handle = alice.session(&call_id);
+            let wait_start = std::time::Instant::now();
             if handle.wait_for_answered(Some(call_timeout)).await.is_err() {
                 setup_failed.fetch_add(1, Ordering::Relaxed);
                 return;
             }
-            setup_hist.record_nanos(t_send.elapsed().as_nanos() as u64);
+            let wait_answer = wait_start.elapsed();
+            let setup_elapsed = t_send.elapsed();
+            call_setup_diag.record_setup(
+                "alice_setup",
+                &call_id,
+                invite_send,
+                wait_answer,
+                setup_elapsed,
+            );
+            setup_hist.record_nanos(setup_elapsed.as_nanos() as u64);
 
             // Step 2: grab the audio sender for this call.
             let audio = match handle.audio().await {
@@ -294,6 +322,9 @@ async fn run_one_point(
         .latency(&setup_hist)
         .latency(&send_hist)
         .with_resources(resources);
+    if call_setup_diag.enabled() {
+        report.diagnostic_block("call_setup", call_setup_diag.to_json());
+    }
     report
 }
 
@@ -323,9 +354,15 @@ async fn perf_rtp_steady_state() {
     // before each point inside `run_one_point`.
     let sent_frames = Arc::new(AtomicU64::new(0));
     let received_frames = Arc::new(AtomicU64::new(0));
+    let call_setup_diag = CallSetupDiagnostics::from_env();
 
-    let bob = boot_bob(bob_port, Arc::clone(&received_frames)).await;
-    let alice = boot_alice(alice_port).await;
+    let bob = boot_bob(
+        bob_port,
+        Arc::clone(&received_frames),
+        call_setup_diag.clone(),
+    )
+    .await;
+    let alice = boot_alice(alice_port, &call_setup_diag).await;
     let from = format!("sip:alice@127.0.0.1:{}", alice_port);
     let target_uri = format!("sip:bob@127.0.0.1:{}", bob_port);
 
@@ -349,6 +386,7 @@ async fn perf_rtp_steady_state() {
             call_timeout,
             Arc::clone(&sent_frames),
             Arc::clone(&received_frames),
+            call_setup_diag.clone(),
         )
         .await;
         if first_loss.is_none() {

@@ -13,8 +13,10 @@
 //! added copy in the parse path) show up directly. See
 //! `crates/sip/rvoip-sip/docs/PROFILING.md` for the broader workflow.
 
-use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use bytes::{Bytes, BytesMut};
+use criterion::{
+    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
+};
 use rvoip_rtp_core::{RtpHeader, RtpPacket};
 
 const PAYLOAD_SIZES: [(&str, usize); 4] = [
@@ -59,6 +61,24 @@ fn bench_serialize(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_serialize_reusable_buffer(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rtp_packet_serialize_reusable_buffer");
+    for (name, size) in PAYLOAD_SIZES {
+        let packet = make_packet(size);
+        group.throughput(Throughput::Bytes(packet.size() as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(name), &packet, |b, packet| {
+            let mut buffer = BytesMut::with_capacity(packet.size() + 16);
+            b.iter(|| {
+                let bytes = packet
+                    .serialize_into(&mut buffer)
+                    .expect("serialize into reusable buffer");
+                black_box(bytes);
+            });
+        });
+    }
+    group.finish();
+}
+
 fn bench_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("rtp_packet_parse");
     for (name, size) in PAYLOAD_SIZES {
@@ -70,6 +90,26 @@ fn bench_parse(c: &mut Criterion) {
                 let parsed = RtpPacket::parse(black_box(wire)).expect("parse");
                 black_box(parsed);
             });
+        });
+    }
+    group.finish();
+}
+
+fn bench_parse_from_owned_bytes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rtp_packet_parse_from_owned_bytes");
+    for (name, size) in PAYLOAD_SIZES {
+        let packet = make_packet(size);
+        let wire = packet.serialize().expect("serialize");
+        group.throughput(Throughput::Bytes(wire.len() as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(name), &wire, |b, wire| {
+            b.iter_batched(
+                || wire.clone(),
+                |wire| {
+                    let parsed = RtpPacket::parse_from_bytes(black_box(wire)).expect("parse");
+                    black_box(parsed);
+                },
+                BatchSize::SmallInput,
+            );
         });
     }
     group.finish();
@@ -98,7 +138,9 @@ fn bench_parse_serialize_roundtrip(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_serialize,
+    bench_serialize_reusable_buffer,
     bench_parse,
+    bench_parse_from_owned_bytes,
     bench_parse_serialize_roundtrip
 );
 criterion_main!(benches);

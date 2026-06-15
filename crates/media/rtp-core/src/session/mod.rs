@@ -9,7 +9,7 @@ mod stream;
 pub use scheduling::{RtpScheduler, RtpSchedulerStats};
 pub use stream::{RtpStream, RtpStreamStats};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use rand::Rng;
 use std::net::SocketAddr;
@@ -578,6 +578,7 @@ impl RtpSession {
         let send_transport = transport.clone();
         let send_task = spawn_memory_tracked("rtp_core.rtp_session.send_task", async move {
             let mut last_remote_addr = remote_addr;
+            let mut rtp_send_buffer = BytesMut::with_capacity(crate::DEFAULT_MAX_PACKET_SIZE);
 
             while let Some(packet) = sender_rx.recv().await {
                 // Always try to get the current remote address from transport first
@@ -618,7 +619,13 @@ impl RtpSession {
                     dest, packet.header.sequence_number, packet.header.timestamp
                 );
 
-                let send_result = send_transport.send_rtp(&packet, dest).await;
+                let send_result =
+                    if let Some(t) = send_transport.as_any().downcast_ref::<UdpRtpTransport>() {
+                        t.send_rtp_with_buffer(&packet, dest, &mut rtp_send_buffer)
+                            .await
+                    } else {
+                        send_transport.send_rtp(&packet, dest).await
+                    };
 
                 if let Err(e) = send_result {
                     error!("Failed to send RTP packet: {}", e);
@@ -766,6 +773,7 @@ impl RtpSession {
                     }
                     Ok(crate::traits::RtpEvent::MediaReceived {
                         payload_type,
+                        sequence_number,
                         timestamp,
                         payload,
                         source,
@@ -784,7 +792,7 @@ impl RtpSession {
                             cc: 0,
                             marker,
                             payload_type,
-                            sequence_number: 0, // Will be set by stream tracking
+                            sequence_number,
                             timestamp,
                             ssrc,
                             csrc: vec![],

@@ -355,6 +355,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                         source,
                         payload,
                         payload_type,
+                        sequence_number: _,
                         timestamp,
                         marker,
                         ssrc,

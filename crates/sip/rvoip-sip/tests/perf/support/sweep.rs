@@ -691,6 +691,7 @@ fn target_dir() -> PathBuf {
     manifest_dir
         .parent()
         .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
         .map(|p| p.join("target"))
         .unwrap_or_else(|| PathBuf::from("target"))
 }

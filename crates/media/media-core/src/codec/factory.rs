@@ -5,7 +5,11 @@
 
 use crate::codec::audio::common::AudioCodec;
 use crate::codec::audio::g711::G711Codec;
+#[cfg(feature = "g729")]
+use crate::codec::audio::g729::{G729Codec, G729Config};
 use crate::error::{Error, Result};
+#[cfg(feature = "g729")]
+use crate::types::SampleRate;
 
 pub struct CodecFactory;
 
@@ -23,6 +27,12 @@ impl CodecFactory {
         match payload_type {
             0 => Ok(Box::new(G711Codec::mu_law(sample_rate, channels)?)),
             8 => Ok(Box::new(G711Codec::a_law(sample_rate, channels)?)),
+            #[cfg(feature = "g729")]
+            18 => Ok(Box::new(G729Codec::new(
+                SampleRate::Rate8000,
+                1,
+                G729Config::default(),
+            )?)),
             _ => Err(Error::unsupported_payload_type(payload_type)),
         }
     }

@@ -270,6 +270,8 @@ impl OutboundCallBuilder {
     /// Application-staged headers, PAI override, outbound-proxy
     /// override, credentials and Subject ride through the snapshot.
     pub async fn send(self) -> Result<CallId> {
+        #[cfg(feature = "perf-call-setup-diagnostics")]
+        let send_started = std::time::Instant::now();
         let from = self
             .from
             .clone()
@@ -323,6 +325,8 @@ impl OutboundCallBuilder {
         // the event enters the machine. The state-table `CreateDialog`
         // action picks them up.
         let session_id = crate::state_table::SessionId::new();
+        #[cfg(feature = "perf-call-setup-diagnostics")]
+        let create_session_started = std::time::Instant::now();
         self.coord
             .helpers
             .create_session(
@@ -332,6 +336,12 @@ impl OutboundCallBuilder {
                 crate::state_table::Role::UAC,
             )
             .await?;
+        #[cfg(feature = "perf-call-setup-diagnostics")]
+        crate::call_setup_diag::record_stage(
+            &session_id,
+            "outbound_send.create_session",
+            create_session_started.elapsed(),
+        );
 
         if snapshot.credentials.is_some()
             || snapshot.auth.is_some()
@@ -339,6 +349,8 @@ impl OutboundCallBuilder {
             || snapshot.transfer_leg.is_some()
             || !snapshot.extra_headers.is_empty()
         {
+            #[cfg(feature = "perf-call-setup-diagnostics")]
+            let pre_event_state_update_started = std::time::Instant::now();
             let mut session = self.coord.session_state(&session_id).await?;
             if let Some(c) = snapshot.credentials.clone() {
                 session.credentials = Some(c);
@@ -362,23 +374,60 @@ impl OutboundCallBuilder {
                 .store
                 .update_session(session)
                 .await?;
+            #[cfg(feature = "perf-call-setup-diagnostics")]
+            crate::call_setup_diag::record_stage(
+                &session_id,
+                "outbound_send.pre_event_state_update",
+                pre_event_state_update_started.elapsed(),
+            );
         }
 
+        #[cfg(feature = "perf-call-setup-diagnostics")]
+        let stage_options_started = std::time::Instant::now();
         self.coord
             .stage_outbound_options(
                 &session_id,
                 crate::state_machine::executor::PendingOptionsSlot::Invite(snapshot),
             )
             .await?;
+        #[cfg(feature = "perf-call-setup-diagnostics")]
+        crate::call_setup_diag::record_stage(
+            &session_id,
+            "outbound_send.stage_options",
+            stage_options_started.elapsed(),
+        );
+        #[cfg(feature = "perf-call-setup-diagnostics")]
+        let dispatch_started = std::time::Instant::now();
         self.coord
             .dispatch_outbound(
                 &session_id,
                 crate::state_table::EventType::SendOutboundInvite,
             )
             .await?;
+        #[cfg(feature = "perf-call-setup-diagnostics")]
+        crate::call_setup_diag::record_stage(
+            &session_id,
+            "outbound_send.dispatch_outbound",
+            dispatch_started.elapsed(),
+        );
+        #[cfg(feature = "perf-call-setup-diagnostics")]
+        let schedule_timeout_started = std::time::Instant::now();
         self.coord
             .schedule_outbound_setup_timeout(&session_id)
             .await;
+        #[cfg(feature = "perf-call-setup-diagnostics")]
+        {
+            crate::call_setup_diag::record_stage(
+                &session_id,
+                "outbound_send.schedule_timeout",
+                schedule_timeout_started.elapsed(),
+            );
+            crate::call_setup_diag::record_stage(
+                &session_id,
+                "outbound_send.total",
+                send_started.elapsed(),
+            );
+        }
         Ok(session_id)
     }
 }
