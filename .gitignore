@@ -161,3 +161,4 @@ dhat-heap-*.json
 
 ## Local release helpers
 /scripts/sync_beta_train_versions.sh
+/scripts/publish_beta_train_0.2.2.sh
