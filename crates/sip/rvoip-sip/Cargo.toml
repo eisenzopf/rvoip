@@ -398,16 +398,19 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 rvoip-sip-transport.workspace = true
 rvoip-sip-registrar.workspace = true
-rvoip-users-core = { workspace = true, features = ["auth-core"] }
-rvoip-keycloak.workspace = true
-rvoip-redis.workspace = true
-rvoip-audit.workspace = true
-rvoip-oidc.workspace = true
-rvoip-ldap.workspace = true
-rvoip-scim.workspace = true
-rvoip-saml.workspace = true
-rvoip-webauthn.workspace = true
-rvoip-ims-aka.workspace = true
+# Repo-only auth provider fixtures. These are intentionally path-only
+# dev-dependencies so Cargo strips them from the normalized crates.io manifest;
+# several extension crates are still alpha and not part of this beta train.
+rvoip-users-core = { path = "../../identity/users-core", features = ["auth-core"] }
+rvoip-keycloak = { path = "../../extensions/rvoip-keycloak" }
+rvoip-redis = { path = "../../extensions/rvoip-redis" }
+rvoip-audit = { path = "../../extensions/rvoip-audit" }
+rvoip-oidc = { path = "../../extensions/rvoip-oidc" }
+rvoip-ldap = { path = "../../extensions/rvoip-ldap" }
+rvoip-scim = { path = "../../extensions/rvoip-scim" }
+rvoip-saml = { path = "../../extensions/rvoip-saml" }
+rvoip-webauthn = { path = "../../extensions/rvoip-webauthn" }
+rvoip-ims-aka = { path = "../../extensions/rvoip-ims-aka" }
 serial_test = { workspace = true }
 tempfile = "3.14"
 url = "2.5"
