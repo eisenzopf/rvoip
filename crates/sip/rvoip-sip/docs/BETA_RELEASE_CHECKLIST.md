@@ -1,6 +1,6 @@
 # rvoip-sip Beta Release Checklist
 
-Date: 2026-06-15
+Date: 2026-06-16
 
 This checklist is evidence-backed. Checked rows are covered by the latest beta
 report selected by `crates/sip/rvoip-sip/beta-report/latest.txt` or by current
@@ -8,13 +8,12 @@ repository files.
 
 Current reference report:
 
-- `crates/sip/rvoip-sip/beta-report/20260615T105337Z/summary.md`
+- `crates/sip/rvoip-sip/beta-report/20260616T014649Z/summary.md`
 - Result: `0` failures, `0` skips
-- Git revision: `eb4be79f`
+- Git revision: `2bd8c570`
 - Git status at run time: `dirty`
 - Rust/Cargo: `1.95.0`
-- Current release train: `0.2.2`; the archived beta-gate artifact reports
-  runtime crate version `0.2.1` and should not be rewritten.
+- Current release train and runtime crate version: `0.2.2`
 
 ## Documentation
 
@@ -56,6 +55,8 @@ Current reference report:
 - [x] SIPp standalone matrix passes in the reference full gate.
 - [x] Asterisk matrix passes in the reference full gate.
 - [x] FreeSWITCH matrix passes in the reference full gate.
+- [x] PBX matrix covers G.729A and G.729AB audio analyzer rows for Asterisk
+  and FreeSWITCH.
 - [x] baresip strict-UA matrix passes in the reference full gate.
 - [x] Kamailio/OpenSIPS proxy audit records this topology as a non-claim.
 - [x] Dependency advisory audit is archived in the reference report.
@@ -100,7 +101,14 @@ crates/sip/rvoip-sip/scripts/beta_gate.sh --security
 Final external release-gate command:
 
 ```sh
-BETA_RUN_LOCAL_PBX=1 RUSTUP_TOOLCHAIN=1.95 crates/sip/rvoip-sip/scripts/beta_gate.sh --full --require-external
+RVOIP_STRICT_UA_HOST_IP=<local-host-ip> \
+BETA_REPORT_PACKAGE=1 \
+BETA_RUN_LOCAL_PBX=1 \
+BETA_PBX_PROVIDER=both \
+BETA_PBX_API=all \
+BETA_PBX_SCENARIO=all \
+BETA_PBX_G729_PROFILES="g729a g729ab" \
+crates/sip/rvoip-sip/scripts/beta_gate.sh --full --require-external
 ```
 
 Optional external SIPp target command:
@@ -133,18 +141,21 @@ Required release evidence from each interop/perf/security run:
   remain documented separately.
 - Parser fuzz smoke logs are archived for all four parser targets with no
   crashes.
+- PBX interop matrix passed `234 / 234` rows across local Asterisk and local
+  FreeSWITCH, including `12` G.729A/G.729AB analyzer rows.
 - Release notes should cite the reference report directory and its dirty-tree
   caveat.
 
 ## Beta Soak Waiver
 
-The 24-hour release-candidate soak is waived for beta on 2026-06-15. The beta
+The 24-hour release-candidate soak is waived for beta on 2026-06-16. The beta
 bar is the archived 1-hour split soak from
-`crates/sip/rvoip-sip/beta-report/20260615T105337Z/perf-results/perf_soak_caller.json`
+`crates/sip/rvoip-sip/beta-report/20260616T014649Z/perf-results/perf_soak_caller.json`
 and
-`crates/sip/rvoip-sip/beta-report/20260615T105337Z/perf-results/perf_soak_receiver.json`:
+`crates/sip/rvoip-sip/beta-report/20260616T014649Z/perf-results/perf_soak_receiver.json`:
 `9,898 / 9,898` caller calls succeeded, ASR was `1.0`, `500` active media
 calls were held, retained objects after drain were `0`, active Bob audio
 receivers after drain were `0`, transaction runners after drain were `0`, and
-the post-drain RSS growth was `0.1 MB/hr` against the `10 MB/hr` threshold. A
-24-hour soak remains recommended before a broader production-readiness claim.
+the post-drain RSS growth was `0.42 MB/hr` on the caller and `0.21 MB/hr` on
+the receiver against the `10 MB/hr` threshold. A 24-hour soak remains
+recommended before a broader production-readiness claim.

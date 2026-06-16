@@ -62,6 +62,9 @@ pub const ENDPOINT_1002_TONE_HZ: f32 = ENDPOINT_2002_TONE_HZ;
 pub const ENDPOINT_1003_TONE_HZ: f32 = 660.0;
 pub const MIN_RECEIVED_SAMPLES: usize = 12_000;
 pub const TONE_ANALYSIS_WINDOW_SAMPLES: usize = FRAME_SIZE * 10;
+pub const HOLD_RESUME_PRE_HOLD_FRAMES: usize = 100;
+pub const HOLD_RESUME_HELD_FRAMES: usize = 50;
+pub const HOLD_RESUME_POST_RESUME_FRAMES: usize = 200;
 pub const DOMINANCE_RATIO: f32 = 5.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1967,15 +1970,27 @@ async fn run_hold_on_handle(
     });
 
     let mut frame_index = 0usize;
-    send_tone_segment(&sender, ENDPOINT_1001_TONE_HZ, 100, &mut frame_index).await?;
+    send_tone_segment(
+        &sender,
+        ENDPOINT_1001_TONE_HZ,
+        HOLD_RESUME_PRE_HOLD_FRAMES,
+        &mut frame_index,
+    )
+    .await?;
     handle.hold().await?;
     wait_for_local_hold_on_events(&mut call_events, Duration::from_secs(8)).await?;
-    send_tone_segment(&sender, 550.0, 50, &mut frame_index).await?;
+    send_tone_segment(&sender, 550.0, HOLD_RESUME_HELD_FRAMES, &mut frame_index).await?;
     sleep(Duration::from_millis(500)).await;
     handle.resume().await?;
     wait_for_local_resume_on_events(&mut call_events, Duration::from_secs(8)).await?;
-    send_tone_segment(&sender, ENDPOINT_1003_TONE_HZ, 100, &mut frame_index).await?;
-    sleep(Duration::from_secs(1)).await;
+    send_tone_segment(
+        &sender,
+        ENDPOINT_1003_TONE_HZ,
+        HOLD_RESUME_POST_RESUME_FRAMES,
+        &mut frame_index,
+    )
+    .await?;
+    sleep(Duration::from_secs(2)).await;
     drop(sender);
     handle
         .hangup_and_wait(Some(Duration::from_secs(8)))
@@ -2250,7 +2265,14 @@ async fn run_transferor(
         }
         other => return Err(format!("unexpected transfer outcome: {:?}", other).into()),
     }
-    let post_refer_settle = env_duration_secs("PBX_TRANSFER_POST_REFER_SETTLE_SECS", 0);
+    let default_post_refer_settle = match (provider, transport) {
+        (PbxProvider::Asterisk, TransportMode::TlsSrtp) => 2,
+        _ => 0,
+    };
+    let post_refer_settle = env_duration_secs(
+        "PBX_TRANSFER_POST_REFER_SETTLE_SECS",
+        default_post_refer_settle,
+    );
     if !post_refer_settle.is_zero() {
         diag_event(
             &cfg.output_dir,
@@ -2326,9 +2348,17 @@ async fn run_transfer_answering_role(
         None
     };
     let hold_duration = if transferee {
-        env_duration_secs("PBX_TRANSFER_TRANSFEREE_DURATION_SECS", 12)
+        let default = match (cfg.provider, transport) {
+            (PbxProvider::Asterisk, TransportMode::TlsSrtp) => 14,
+            _ => 12,
+        };
+        env_duration_secs("PBX_TRANSFER_TRANSFEREE_DURATION_SECS", default)
     } else {
-        env_duration_secs("PBX_TRANSFER_TARGET_DURATION_SECS", 4)
+        let default = match (cfg.provider, transport) {
+            (PbxProvider::Asterisk, TransportMode::TlsSrtp) => 8,
+            _ => 4,
+        };
+        env_duration_secs("PBX_TRANSFER_TARGET_DURATION_SECS", default)
     };
     diag_event(
         &cfg.output_dir,
@@ -4039,7 +4069,7 @@ fn transfer_settle_duration(provider: PbxProvider, transport: TransportMode) -> 
         }
     }
     let default = match (provider, transport) {
-        (PbxProvider::Asterisk, TransportMode::TlsSrtp) => 5,
+        (PbxProvider::Asterisk, TransportMode::TlsSrtp) => 8,
         _ => 3,
     };
     env_duration_secs(key, default)

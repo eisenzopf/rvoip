@@ -167,6 +167,7 @@ impl CodecMapper {
     }
 
     /// Register an alternate codec name for an already-canonical static payload type.
+    #[cfg(feature = "g729")]
     fn register_static_codec_alias(&mut self, name: &str, payload_type: u8, clock_rate: u32) {
         let name_string = name.to_string();
         self.name_to_payload

@@ -822,7 +822,7 @@ impl MediaSessionController {
         // Get session info to determine codec. DashMap shard guard
         // is held only for the synchronous codec-mapper lookup.
         info!("🔍 Looking for session for dialog: {}", dialog_id);
-        let (codec_payload_type, preferred_codec) = self
+        let (codec_payload_type, _preferred_codec) = self
             .sessions
             .get(dialog_id)
             .ok_or_else(|| {
@@ -867,7 +867,7 @@ impl MediaSessionController {
             }
             #[cfg(feature = "g729")]
             18 => {
-                let annex_b = g729_annex_b_enabled(preferred_codec.as_deref());
+                let annex_b = g729_annex_b_enabled(_preferred_codec.as_deref());
                 let codec = if let Some(existing) = self.g729_tx_codecs.get(dialog_id) {
                     existing.value().clone()
                 } else {
