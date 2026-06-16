@@ -30,6 +30,16 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
+fn is_missing_credentials_for_auth_error(
+    error: &(dyn std::error::Error + Send + Sync + 'static),
+) -> bool {
+    matches!(
+        error.downcast_ref::<SessionError>(),
+        Some(SessionError::MissingCredentialsForInviteAuth)
+            | Some(SessionError::MissingCredentialsForRequestAuth { .. })
+    )
+}
+
 /// Window within which repeated RFC 5626 flow-failure events for the
 /// same AoR collapse to a single re-REGISTER. Matches the guidance in
 /// RFC 5626 §4.4.1 (flow recovery should not storm the registrar).
@@ -2063,10 +2073,17 @@ impl SessionCrossCrateEventHandler {
             )
             .await
         {
-            error!(
-                "Failed to process AuthRequired({}) for session {}: {}",
-                status, session_id, e
-            );
+            if is_missing_credentials_for_auth_error(e.as_ref()) {
+                debug!(
+                    "Failed to process AuthRequired({}) for session {}: {}",
+                    status, session_id, e
+                );
+            } else {
+                error!(
+                    "Failed to process AuthRequired({}) for session {}: {}",
+                    status, session_id, e
+                );
+            }
             if matches!(state_before_auth, Some(crate::types::CallState::Initiating)) {
                 let reason = if let Some(session_error) = e.downcast_ref::<SessionError>() {
                     session_error.to_string()
@@ -2596,10 +2613,17 @@ impl SessionCrossCrateEventHandler {
             )
             .await
         {
-            error!(
-                "Failed to process AuthRequired({}) for session {}: {}",
-                status, session_id, e
-            );
+            if is_missing_credentials_for_auth_error(e.as_ref()) {
+                debug!(
+                    "Failed to process AuthRequired({}) for session {}: {}",
+                    status, session_id, e
+                );
+            } else {
+                error!(
+                    "Failed to process AuthRequired({}) for session {}: {}",
+                    status, session_id, e
+                );
+            }
             if matches!(state_before_auth, Some(crate::types::CallState::Initiating)) {
                 let reason = if let Some(session_error) = e.downcast_ref::<SessionError>() {
                     session_error.to_string()

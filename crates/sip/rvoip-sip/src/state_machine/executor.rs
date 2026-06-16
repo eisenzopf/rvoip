@@ -123,6 +123,16 @@ fn state_machine_event_name(event: &EventType) -> &'static str {
     }
 }
 
+fn is_missing_credentials_for_auth_error(
+    error: &(dyn std::error::Error + Send + Sync + 'static),
+) -> bool {
+    matches!(
+        error.downcast_ref::<crate::errors::SessionError>(),
+        Some(crate::errors::SessionError::MissingCredentialsForInviteAuth)
+            | Some(crate::errors::SessionError::MissingCredentialsForRequestAuth { .. })
+    )
+}
+
 /// Events that flow through the system
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
@@ -671,7 +681,11 @@ impl StateMachine {
                 }
                 Err(e) => {
                     let error_msg = format!("Failed to execute action {:?}: {}", action, e);
-                    error!("{}", error_msg);
+                    if is_missing_credentials_for_auth_error(e.as_ref()) {
+                        debug!("{}", error_msg);
+                    } else {
+                        error!("{}", error_msg);
+                    }
                     errors.push(error_msg.clone());
                     (false, Some(error_msg), Some(e))
                 }
