@@ -5,9 +5,10 @@
 //! in `rvoip-core::identity`; this crate provides the runtime
 //! backends.
 //!
-//! v1 ships a `BearerProvider` (token equality check) — production
-//! OAuth 2.1 + DPoP, OIDC, SIP Digest, Passkey, and AAuth-experimental
-//! backends ship as additional modules behind feature flags.
+//! v1 ships only `BearerProvider` (an in-memory bearer token table).
+//! Production OAuth 2.1 + DPoP, OIDC, SIP Digest, Passkey/WebAuthn,
+//! SCIM/SAML/LDAP, and AAuth pieces live in `rvoip-auth-core`,
+//! `rvoip-users-core`, and dedicated extension crates.
 
 use async_trait::async_trait;
 use rvoip_core::error::{Result, RvoipError};

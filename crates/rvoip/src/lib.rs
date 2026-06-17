@@ -45,7 +45,8 @@
 //! | `sip-stir-shaken` | | RFC 8224 caller-ID attestation; requires `sip` (`rvoip::stir_shaken`) — alpha |
 //! | `voip-3` | | The full experience: every transport **+** vCon / identity / AI-harness extensions — alpha |
 //! | `client` | | Cross-transport client SDK (`rvoip::client`) — alpha |
-//! | `full` | | `voip-3` + `sip-stir-shaken` + `client` |
+//! | `app` | | High-level gateway builder (`rvoip::app`) — alpha |
+//! | `full` | | `voip-3` + `sip-stir-shaken` + `client` + `app` |
 //!
 //! The `vcon`, `identity`, and `harness` conversation-model extensions are
 //! transport-agnostic and reachable **only** through the `voip-3` feature.
@@ -55,7 +56,8 @@
 //! The unifying voip-3 nouns are re-exported at the crate root via
 //! `rvoip::core_traits`; the `Orchestrator` + `Config` at the root directly.
 //! Each transport/extension lives under its own feature-gated module
-//! (`rvoip::sip`, `rvoip::webrtc`, `rvoip::uctp`, `rvoip::client`, …).
+//! (`rvoip::sip`, `rvoip::webrtc`, `rvoip::uctp`, `rvoip::app`,
+//! `rvoip::client`, …).
 
 #![deny(missing_docs)]
 #![warn(rust_2018_idioms)]
@@ -157,6 +159,16 @@ pub mod harness {
 pub mod client {
     pub use rvoip_client::*;
 }
+
+// ---------------------------------------------------------------------------
+// High-level app/gateway API (alpha)
+// ---------------------------------------------------------------------------
+
+/// High-level server/gateway API for building practical cross-transport VoIP
+/// apps without manually wiring adapters, registrar state, core event loops,
+/// and media bridges.
+#[cfg(feature = "app")]
+pub mod app;
 
 /// The version of the rvoip facade crate.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

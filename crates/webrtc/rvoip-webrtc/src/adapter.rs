@@ -21,18 +21,21 @@ use rvoip_core::ids::{ConnectionId, StreamId};
 use rvoip_core::message::Message;
 use rvoip_core::stream::MediaStream;
 use rvoip_sip_core::types::sdp::SdpSession;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, instrument, warn};
-use webrtc::data_channel::DataChannel;
+use webrtc::data_channel::{DataChannel, DataChannelEvent};
 
 use crate::config::WebRtcConfig;
 use crate::errors::{Result, WebRtcError};
-use crate::media::{from_tracks, WebRtcMediaStream};
+use crate::media::{from_tracks_with_dtmf_events, WebRtcMediaStream};
 use crate::peer::{PeerRole, RvoipPeerConnection};
 use crate::sdp::{negotiate_audio, sdp_to_string};
 
 pub const ADAPTER_EVENT_CAP: usize = 256;
+
+const CHAT_DATA_CHANNEL_LABEL: &str = "rvoip-chat";
+const OUTBOUND_MESSAGE_CHANNEL_LABEL: &str = "rvoip-messages";
 
 /// Background reaper poll interval.
 const REAPER_TICK: Duration = Duration::from_secs(30);
@@ -77,6 +80,7 @@ pub struct Route {
     pub local_sdp: Option<String>,
     pub remote_sdp: Option<String>,
     pub data_channel: Arc<DashMap<(), Arc<dyn DataChannel>>>,
+    pub chat_pump_started: Arc<AtomicBool>,
     pub negotiated: NegotiatedCodecs,
     pub held: bool,
     /// Notify all per-route background tasks (track attacher, fail watcher, stats) to exit.
@@ -518,6 +522,57 @@ impl WebRtcAdapter {
         }
     }
 
+    fn spawn_chat_message_pump(&self, conn: ConnectionId, route: &Route) {
+        if route.chat_pump_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let peer = Arc::clone(&route.peer);
+        let events_tx = self.events_tx.clone();
+        tokio::spawn(async move {
+            let Some(dc) = peer
+                .find_seen_data_channel_by_label(CHAT_DATA_CHANNEL_LABEL, Duration::from_secs(5))
+                .await
+            else {
+                debug!(
+                    conn = %conn,
+                    label = CHAT_DATA_CHANNEL_LABEL,
+                    "no normalized WebRTC chat data channel observed"
+                );
+                return;
+            };
+
+            loop {
+                let Some(event) =
+                    RvoipPeerConnection::poll_data_channel(&dc, Duration::from_secs(1)).await
+                else {
+                    continue;
+                };
+                match event {
+                    DataChannelEvent::OnMessage(message) if message.is_string => {
+                        let text = String::from_utf8_lossy(&message.data).into_owned();
+                        if events_tx
+                            .send(AdapterEvent::Message {
+                                connection_id: conn.clone(),
+                                text,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    DataChannelEvent::OnClose => break,
+                    DataChannelEvent::OnError => {
+                        warn!(conn = %conn, "WebRTC chat data channel reported an error");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
     fn build_connection(
         &self,
         conn_id: ConnectionId,
@@ -559,8 +614,15 @@ impl WebRtcAdapter {
     /// `wait_remote_track`, then build the stream with the remote inline (if
     /// arrived) or as send-only (if not — late tracks attach via the
     /// track-attacher spawned in `insert_route`).
-    async fn seed_media_stream(&self, route: &Route) -> Result<()> {
+    async fn seed_media_stream(&self, conn: &ConnectionId, route: &Route) -> Result<()> {
         if !route.streams.is_empty() {
+            return Ok(());
+        }
+        if route.peer.local_audio_track().is_none() {
+            debug!(
+                conn = %conn,
+                "WebRTC route has no negotiated audio yet; leaving media streams empty"
+            );
             return Ok(());
         }
 
@@ -589,13 +651,28 @@ impl WebRtcAdapter {
 
         let stream_id = StreamId::new();
         let has_remote = remote.is_some();
-        let media = from_tracks(
+        let (dtmf_tx, mut dtmf_rx) = mpsc::channel::<crate::media::dtmf::DecodedDtmfEvent>(32);
+        let events_tx = self.events_tx.clone();
+        let conn_for_dtmf = conn.clone();
+        tokio::spawn(async move {
+            while let Some(event) = dtmf_rx.recv().await {
+                let _ = events_tx
+                    .send(AdapterEvent::Dtmf {
+                        connection_id: conn_for_dtmf.clone(),
+                        digits: event.digit.to_string(),
+                        duration_ms: event.duration_ms,
+                    })
+                    .await;
+            }
+        });
+        let media = from_tracks_with_dtmf_events(
             stream_id.clone(),
             codec,
             local,
             local_ssrc,
             payload_type,
             remote,
+            Some(dtmf_tx),
         );
         if has_remote {
             media.enable_webrtc_stats(
@@ -806,6 +883,7 @@ impl WebRtcAdapter {
             local_sdp: Some(answer_sdp),
             remote_sdp: Some(offer_sdp.to_owned()),
             data_channel: Arc::new(DashMap::new()),
+            chat_pump_started: Arc::new(AtomicBool::new(false)),
             negotiated: negotiated.clone(),
             held: false,
             cancel: Arc::clone(&cancel),
@@ -843,7 +921,7 @@ impl WebRtcAdapter {
             .route(conn)
             .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
         if route.streams.is_empty() {
-            self.seed_media_stream(&route)
+            self.seed_media_stream(conn, &route)
                 .await
                 .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
         }
@@ -872,6 +950,10 @@ impl WebRtcAdapter {
                 "WHIP ICE restart requires an inbound (answerer) connection".into(),
             ));
         }
+        route
+            .peer
+            .prepare_answerer_media_for_offer(offer_sdp)
+            .await?;
         let answer = route.peer.renegotiate_as_answerer(offer_sdp).await?;
         if let Some(mut route_mut) = self.routes.get_mut(&conn) {
             route_mut.local_sdp = Some(answer.clone());
@@ -999,6 +1081,7 @@ impl ConnectionAdapter for WebRtcAdapter {
             local_sdp: Some(offer_sdp),
             remote_sdp: None,
             data_channel: Arc::new(DashMap::new()),
+            chat_pump_started: Arc::new(AtomicBool::new(false)),
             negotiated: negotiated.clone(),
             held: false,
             cancel: Arc::clone(&cancel),
@@ -1031,6 +1114,7 @@ impl ConnectionAdapter for WebRtcAdapter {
             .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
 
         self.ensure_media_streams(&conn).await?;
+        self.spawn_chat_message_pump(conn.clone(), &route);
         self.try_send(AdapterEvent::Connected {
             connection_id: conn,
         });
@@ -1143,7 +1227,13 @@ impl ConnectionAdapter for WebRtcAdapter {
             .route(&conn)
             .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
 
-        let dc = if let Some(entry) = route.data_channel.get(&()) {
+        let dc = if let Some(dc) = route
+            .peer
+            .find_seen_data_channel_by_label(CHAT_DATA_CHANNEL_LABEL, Duration::from_millis(100))
+            .await
+        {
+            dc
+        } else if let Some(entry) = route.data_channel.get(&()) {
             entry.value().clone()
         } else {
             let dc = tokio::time::timeout(
@@ -1151,7 +1241,7 @@ impl ConnectionAdapter for WebRtcAdapter {
                 route
                     .peer
                     .peer_connection()
-                    .create_data_channel("rvoip-messages", None),
+                    .create_data_channel(OUTBOUND_MESSAGE_CHANNEL_LABEL, None),
             )
             .await
             .map_err(|_| RvoipError::Adapter("create_data_channel timed out".into()))?

@@ -7,11 +7,10 @@ a standalone Cargo project with its own README and (for multi-process demos) a
 
 ## Beta scope
 
-Every example here targets **`rvoip-sip`, the beta-candidate crate** — the only
-crate in the workspace under the beta contract. Everything else in rvoip
-(WebRTC, UCTP, the orchestrator, the identity stack) is **experimental** and is
-intentionally *not* shown here; for those, see the in-crate examples under each
-crate and the `scripts/demo-*.sh` runners at the repo root.
+Examples 01-10 target **`rvoip-sip`, the beta-candidate crate** — the only crate
+in the workspace under the beta contract. Examples 11-12 are explicitly
+experimental: 11 demonstrates the in-process AI harness path, and 12 proves a
+cross-transport customer escalation workflow using WebRTC plus SIP.
 
 Beta media defaults to **PCMU/PCMA**; **G.729A/G.729AB** is optional and not
 exercised by these examples. Transports are **UDP** (interop-tested) and
@@ -39,6 +38,8 @@ DTLS-SRTP, ICE/TURN, and WebRTC are post-beta.** The source of truth is
 | 08 | [tls-transport](08-tls-transport/) | SIP over TLS (`sips:`) | `Config` TLS | `./run_demo.sh` (needs openssl) |
 | 09 | [ivr-server](09-ivr-server/) | Reactive inbound server | `CallbackPeer` | `./run_demo.sh` |
 | 10 | [call-center-b2bua](10-call-center-b2bua/) | B2BUA bridge + routing | `UnifiedCoordinator` + `server::b2bua` | `./run_demo.sh` |
+| 11 | [ai-harness-demo](11-ai-harness-demo/) | Fake ASR/TTS/dialog + vCon evidence | `rvoip-harness` | `cargo run` |
+| 12 | [customer-escalation-sip-webrtc](12-customer-escalation-sip-webrtc/) | Browser WebRTC chat escalates to Alice's SIP phone | `rvoip::app` gateway API | `cargo run -- --auto-proof` |
 
 ## Conventions
 

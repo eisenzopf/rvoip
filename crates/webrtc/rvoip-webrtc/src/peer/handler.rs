@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::peer::ice::IceCandidateLog;
 
+use parking_lot::Mutex as SyncMutex;
 use tokio::sync::mpsc;
 use tracing::warn;
 use webrtc::data_channel::DataChannel;
@@ -45,6 +46,7 @@ pub struct HandlerChannels {
     pub ice_candidates: IceCandidateLog,
     pub remote_track: mpsc::Sender<Arc<dyn TrackRemote>>,
     pub data_channel: mpsc::Sender<Arc<dyn DataChannel>>,
+    pub data_channels_seen: Arc<SyncMutex<Vec<Arc<dyn DataChannel>>>>,
     /// Outbound (locally-gathered) ICE candidates. Drains in order via the
     /// per-peer `recv_local_ice_candidate()` API so trickle-capable signalers
     /// can forward them to the remote peer.
@@ -72,6 +74,7 @@ impl HandlerChannels {
         let ice_candidates = IceCandidateLog::new();
         let (remote_track_tx, remote_track_rx) = mpsc::channel(cap.max(2));
         let (data_channel_tx, data_channel_rx) = mpsc::channel(cap.max(2));
+        let data_channels_seen = Arc::new(SyncMutex::new(Vec::new()));
         let (local_ice_tx, local_ice_rx) = mpsc::channel(cap.max(2));
         let drops = Arc::new(HandlerDropCounters::default());
         (
@@ -84,6 +87,7 @@ impl HandlerChannels {
                 ice_candidates: ice_candidates.clone(),
                 remote_track: remote_track_tx,
                 data_channel: data_channel_tx,
+                data_channels_seen: Arc::clone(&data_channels_seen),
                 local_ice: local_ice_tx,
                 drops: Arc::clone(&drops),
             },
@@ -93,6 +97,7 @@ impl HandlerChannels {
                 failed: failed_rx,
                 remote_track: remote_track_rx,
                 data_channel: data_channel_rx,
+                data_channels_seen,
                 local_ice: local_ice_rx,
             },
             connected_flag,
@@ -109,6 +114,7 @@ pub struct HandlerReceivers {
     pub failed: mpsc::Receiver<()>,
     pub remote_track: mpsc::Receiver<Arc<dyn TrackRemote>>,
     pub data_channel: mpsc::Receiver<Arc<dyn DataChannel>>,
+    pub data_channels_seen: Arc<SyncMutex<Vec<Arc<dyn DataChannel>>>>,
     pub local_ice: mpsc::Receiver<RTCIceCandidate>,
 }
 
@@ -174,6 +180,10 @@ impl PeerConnectionEventHandler for ConnectionHandler {
     async fn on_ice_connection_state_change(&self, _state: RTCIceConnectionState) {}
 
     async fn on_data_channel(&self, dc: Arc<dyn DataChannel>) {
+        self.channels
+            .data_channels_seen
+            .lock()
+            .push(Arc::clone(&dc));
         if let Err(e) = self.channels.data_channel.try_send(dc) {
             let dropped = self
                 .channels

@@ -35,7 +35,10 @@ run_test() {
     # Create a temporary file to capture output while still showing it
     local temp_output=$(mktemp)
     
-    # Run the test command, showing output in real-time AND capturing it
+    # Run the test command, showing output in real-time AND capturing it.
+    # Enable pipefail only around this pipeline so a failing test command
+    # is not masked by tee's successful exit status.
+    set -o pipefail
     if eval "$test_cmd" 2>&1 | tee "$temp_output"; then
         echo -e "${GREEN}✓ $test_name passed${NC}"
         PASSED_TESTS=$((PASSED_TESTS + 1))
@@ -58,6 +61,7 @@ run_test() {
             FAILED_TESTS+=("$test_name")
         fi
     fi
+    set +o pipefail
     
     # Clean up temporary file
     rm -f "$temp_output"

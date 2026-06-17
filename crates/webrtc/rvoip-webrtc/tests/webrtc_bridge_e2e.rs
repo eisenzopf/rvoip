@@ -13,16 +13,16 @@ use rvoip_core::adapter::{ConnectionAdapter, OriginateRequest};
 use rvoip_core::commands::InboundAction;
 use rvoip_core::config::Config;
 use rvoip_core::connection::Direction;
+use rvoip_core::conversation::ConversationPolicy;
 use rvoip_core::events::Event;
-use rvoip_core::ids::{ParticipantId, SessionId};
+use rvoip_core::ids::{ParticipantId, TenantId};
 use rvoip_core::orchestrator::Orchestrator;
+use rvoip_core::session::SessionMedium;
 use rvoip_webrtc::{WebRtcAdapter, WebRtcConfig, WebRtcServerBuilder};
 
 #[tokio::test]
 async fn whip_webrtc_bridged_to_quic_leg_via_orchestrator() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-
-    let session_id = SessionId::new();
 
     let server = WebRtcServerBuilder::new(WebRtcConfig::loopback())
         .with_whip("127.0.0.1:0")
@@ -31,15 +31,28 @@ async fn whip_webrtc_bridged_to_quic_leg_via_orchestrator() {
         .expect("build server");
 
     let quic_leg = MockQuicLeg::new();
-    let (quic_conn, _quic_stream) = quic_leg.provision_inbound(session_id.clone(), "opus").await;
-
     let orchestrator = Orchestrator::new(Config::default());
     orchestrator
         .register(server.adapter() as Arc<dyn ConnectionAdapter>)
         .expect("register webrtc");
     orchestrator
-        .register(quic_leg as Arc<dyn ConnectionAdapter>)
+        .register(Arc::clone(&quic_leg) as Arc<dyn ConnectionAdapter>)
         .expect("register quic mock");
+
+    let conversation_id = orchestrator
+        .open_conversation(
+            TenantId::new(),
+            ConversationPolicy::default(),
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("open conversation");
+    let session_id = orchestrator
+        .start_session(conversation_id, SessionMedium::Voice, vec![])
+        .await
+        .expect("start session");
+
+    let (quic_conn, _quic_stream) = quic_leg.provision_inbound(session_id.clone(), "opus").await;
 
     let mut events = orchestrator.subscribe_events();
 

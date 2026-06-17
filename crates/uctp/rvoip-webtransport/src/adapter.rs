@@ -73,6 +73,10 @@ pub struct UctpWtConfig {
     /// `rvoip_quic::UctpQuicConfig::coordinator_caps` for semantics —
     /// identical wiring.
     pub coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
+    /// Optional inline RFC 9421 envelope-signature enforcement. Disabled
+    /// by default for compatibility; see
+    /// [`rvoip_uctp::state::Sig9421Config`].
+    pub sig9421: Option<rvoip_uctp::state::Sig9421Config>,
 }
 
 impl UctpWtConfig {
@@ -93,6 +97,7 @@ impl UctpWtConfig {
             subscription_handler: None,
             orchestrator: None,
             coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps::default(),
+            sig9421: None,
         }
     }
 
@@ -123,6 +128,13 @@ impl UctpWtConfig {
     /// [`rvoip_uctp::state::UctpCoordinatorCaps`].
     pub fn with_coordinator_caps(mut self, caps: rvoip_uctp::state::UctpCoordinatorCaps) -> Self {
         self.coordinator_caps = caps;
+        self
+    }
+
+    /// Opt in to inline RFC 9421 envelope-signature verification at
+    /// the adapter ingress boundary.
+    pub fn with_sig9421(mut self, config: rvoip_uctp::state::Sig9421Config) -> Self {
+        self.sig9421 = Some(config);
         self
     }
 }
@@ -170,6 +182,7 @@ impl UctpWtAdapter {
             config.subscription_handler,
             config.orchestrator,
             config.coordinator_caps,
+            config.sig9421,
         );
 
         Ok(Arc::new(Self {

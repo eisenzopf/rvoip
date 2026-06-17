@@ -18,18 +18,19 @@ use crate::bridge::{codec_to_pt, frame_pump, BridgeManager, CrossBridgeHandle};
 use crate::capability::{CapabilityDescriptor, CapabilityIntersection};
 use crate::commands::{AudioSource, InboundAction, MuteDirection};
 use crate::config::Config;
-use crate::connection::Transport;
+use crate::connection::{Direction, Transport};
 use crate::conversation::{Conversation, ConversationPolicy, ConversationState};
 use crate::error::{Result, RvoipError};
 use crate::events::Event;
 use crate::ids::{
     BridgeId, ConnectionId, ConversationId, MessageId, ParticipantId, SessionId, StreamId, TenantId,
 };
-use crate::message::Message;
+use crate::message::{ContentType, Message, MessageOrigin, MessageRecipients};
 use crate::participant::{Participant, ParticipantKind, ParticipantRole};
 use crate::session::{ConnectionRef, Session, SessionMedium, SessionState};
 use crate::stream::StreamKind;
 use crate::vcon::VconBuilderHandle;
+use bytes::Bytes;
 use chrono::Utc;
 use dashmap::DashMap;
 use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
@@ -350,7 +351,7 @@ impl Orchestrator {
         let me = Arc::clone(self);
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
-                me.handle_adapter_event(transport, event);
+                me.handle_adapter_event(transport, event).await;
             }
             debug!(?transport, "adapter event stream ended");
         });
@@ -383,6 +384,55 @@ impl Orchestrator {
     fn track_connection(&self, conn: &ConnectionId, transport: Transport) {
         self.connections
             .insert(conn.clone(), ConnectionEntry { transport });
+    }
+
+    fn bind_connection_to_session(
+        &self,
+        connection_id: &ConnectionId,
+        session_id: &SessionId,
+        participant_id: ParticipantId,
+    ) -> Result<()> {
+        let sess_arc = self
+            .sessions
+            .get(session_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| RvoipError::SessionNotFound(session_id.clone()))?;
+        {
+            let mut sess = sess_arc.write().expect("session lock poisoned");
+            if matches!(sess.state, SessionState::Ended | SessionState::Failed) {
+                return Err(RvoipError::InvalidState(
+                    "bind_connection_to_session: target session is ended",
+                ));
+            }
+            sess.connections.insert(
+                connection_id.clone(),
+                ConnectionRef {
+                    id: connection_id.clone(),
+                    participant_id,
+                },
+            );
+            if sess.state == SessionState::Initiating {
+                sess.state = SessionState::Active;
+            }
+        }
+        self.sessions_by_connection
+            .insert(connection_id.clone(), session_id.clone());
+        Ok(())
+    }
+
+    fn bind_connection_to_session_probe(&self, session_id: &SessionId) -> Result<()> {
+        let sess_arc = self
+            .sessions
+            .get(session_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| RvoipError::SessionNotFound(session_id.clone()))?;
+        let sess = sess_arc.read().expect("session lock poisoned");
+        if matches!(sess.state, SessionState::Ended | SessionState::Failed) {
+            return Err(RvoipError::InvalidState(
+                "originate_connection: target session is ended",
+            ));
+        }
+        Ok(())
     }
 
     /// If `conn` is currently in a cross-transport bridge, return the
@@ -1388,7 +1438,7 @@ impl Orchestrator {
         let _ = self.events.send(event);
     }
 
-    fn handle_adapter_event(&self, transport: Transport, event: AdapterEvent) {
+    async fn handle_adapter_event(&self, transport: Transport, event: AdapterEvent) {
         match event {
             AdapterEvent::InboundConnection { connection } => {
                 self.track_connection(&connection.id, transport);
@@ -1527,6 +1577,64 @@ impl Orchestrator {
                     at: Utc::now(),
                 });
             }
+            AdapterEvent::Message {
+                connection_id,
+                text,
+            } => {
+                let Some((conversation_id, participant_id)) =
+                    self.message_context_for_connection(&connection_id)
+                else {
+                    warn!(
+                        ?transport,
+                        ?connection_id,
+                        "adapter message arrived before connection was accepted into a session"
+                    );
+                    return;
+                };
+                let now = Utc::now();
+                let message = Message {
+                    id: MessageId::new(),
+                    conversation_id: conversation_id.clone(),
+                    origin: MessageOrigin::Connection(connection_id.clone()),
+                    from_participant: participant_id,
+                    to: MessageRecipients::All,
+                    direction: Direction::Inbound,
+                    content_type: ContentType::Text,
+                    body: Bytes::from(text),
+                    attachments: vec![],
+                    in_reply_to: None,
+                    timestamp: now,
+                };
+                if let Err(error) = Self::validate_inline_body(&message) {
+                    warn!(
+                        ?connection_id,
+                        error = %error,
+                        "adapter message rejected by inline body policy"
+                    );
+                    return;
+                }
+                let message_id = message.id.clone();
+                if let Err(error) = self.config.message_store.put(message).await {
+                    warn!(
+                        ?connection_id,
+                        ?conversation_id,
+                        error = %error,
+                        "MessageStore::put failed for adapter message"
+                    );
+                    return;
+                }
+                if let Some(conv_arc) = self.conversation(&conversation_id) {
+                    if let Ok(mut conv) = conv_arc.write() {
+                        conv.messages.push(message_id.clone());
+                        conv.last_activity_at = now;
+                    }
+                }
+                self.emit(Event::MessageReceived {
+                    message_id,
+                    conversation_id,
+                    at: now,
+                });
+            }
             AdapterEvent::StepUpResponse {
                 connection_id,
                 method,
@@ -1555,6 +1663,20 @@ impl Orchestrator {
                 );
             }
         }
+    }
+
+    fn message_context_for_connection(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> Option<(ConversationId, ParticipantId)> {
+        let session_id = self.session_of(connection_id)?;
+        let session_arc = self.session(&session_id)?;
+        let session = session_arc.read().ok()?;
+        let participant_id = session
+            .connections
+            .get(connection_id)
+            .map(|connection| connection.participant_id.clone())?;
+        Some((session.conversation_id.clone(), participant_id))
     }
 
     // ------------------------------------------------------------------
@@ -1676,6 +1798,9 @@ impl Orchestrator {
         &self,
         request: OriginateRequest,
     ) -> Result<ConnectionHandle> {
+        let session_id = request.session_id.clone();
+        let participant_id = request.participant_id.clone();
+        self.bind_connection_to_session_probe(&session_id)?;
         // P6 — caller-selected transport takes precedence; fall back
         // to the v0 "first registered adapter" path when the request
         // doesn't specify (back-compat for single-adapter
@@ -1694,6 +1819,7 @@ impl Orchestrator {
         let adapter = self.adapter(transport)?;
         let handle = adapter.originate(request).await?;
         self.track_connection(&handle.connection.id, transport);
+        self.bind_connection_to_session(&handle.connection.id, &session_id, participant_id)?;
         self.emit(Event::ConnectionOutbound {
             connection_id: handle.connection.id.clone(),
             at: Utc::now(),

@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rvoip support</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7f8;
+      --panel: #ffffff;
+      --ink: #182024;
+      --muted: #66747b;
+      --line: #d9e1e5;
+      --agent: #0f766e;
+      --customer: #31506b;
+      --danger: #b42318;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main {
+      width: min(760px, calc(100vw - 32px));
+      height: min(760px, calc(100vh - 32px));
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 18px 45px rgba(24, 32, 36, 0.10);
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+    h1 {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+    #status {
+      min-width: 142px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: right;
+    }
+    #messages {
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 18px;
+      background: #fbfcfd;
+    }
+    .msg {
+      max-width: 78%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      line-height: 1.35;
+      font-size: 14px;
+      border: 1px solid transparent;
+      overflow-wrap: anywhere;
+    }
+    .agent {
+      align-self: flex-start;
+      background: #ecfdf5;
+      border-color: #bbf7d0;
+      color: #14372f;
+    }
+    .customer {
+      align-self: flex-end;
+      background: #eef5fb;
+      border-color: #c9dceb;
+      color: #1d3447;
+    }
+    .system {
+      align-self: center;
+      max-width: 90%;
+      padding: 7px 10px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 12px;
+      border: 0;
+    }
+    form {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 10px;
+      padding: 14px;
+      border-top: 1px solid var(--line);
+      background: var(--panel);
+    }
+    input {
+      min-width: 0;
+      height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 0 12px;
+      font: inherit;
+      color: var(--ink);
+      background: #fff;
+    }
+    button {
+      height: 42px;
+      border: 0;
+      border-radius: 6px;
+      padding: 0 14px;
+      font: inherit;
+      font-weight: 650;
+      color: #fff;
+      background: var(--customer);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    button.call { background: var(--agent); }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.48;
+    }
+    audio { display: none; }
+    @media (max-width: 560px) {
+      main {
+        width: 100vw;
+        height: 100vh;
+        border: 0;
+        border-radius: 0;
+      }
+      header {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+      #status { text-align: left; }
+      form { grid-template-columns: 1fr; }
+      button, input { width: 100%; }
+      .msg { max-width: 92%; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Support conversation</h1>
+      <div id="status">connecting</div>
+    </header>
+    <section id="messages" aria-live="polite"></section>
+    <form id="chat-form">
+      <input id="message" autocomplete="off" placeholder="Message Alice" disabled>
+      <button id="send" type="submit" disabled>Send</button>
+      <button id="call" class="call" type="button" disabled>Call Alice</button>
+    </form>
+  </main>
+  <audio id="remote-audio" autoplay playsinline></audio>
+  <script>
+    const wsUrl = "__RVOIP_WS_URL__";
+    const callCommand = "CALL_ALICE";
+    const messages = document.querySelector("#messages");
+    const statusEl = document.querySelector("#status");
+    const form = document.querySelector("#chat-form");
+    const input = document.querySelector("#message");
+    const sendButton = document.querySelector("#send");
+    const callButton = document.querySelector("#call");
+    const remoteAudio = document.querySelector("#remote-audio");
+
+    let ws;
+    let pc;
+    let dc;
+    let connectionId = "";
+    let pendingAnswer = null;
+    let localStream = null;
+    let callStarted = false;
+
+    function setStatus(text, error = false) {
+      statusEl.textContent = text;
+      statusEl.style.color = error ? "var(--danger)" : "var(--muted)";
+    }
+
+    function addMessage(kind, text) {
+      const el = document.createElement("div");
+      el.className = `msg ${kind}`;
+      el.textContent = text;
+      messages.appendChild(el);
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    function waitIceGatheringComplete(peer) {
+      if (peer.iceGatheringState === "complete") return Promise.resolve();
+      return new Promise(resolve => {
+        const done = () => {
+          if (peer.iceGatheringState === "complete") {
+            peer.removeEventListener("icegatheringstatechange", done);
+            resolve();
+          }
+        };
+        peer.addEventListener("icegatheringstatechange", done);
+      });
+    }
+
+    function signalOffer() {
+      return new Promise((resolve, reject) => {
+        pendingAnswer = { resolve, reject };
+        ws.send(JSON.stringify({
+          type: "offer",
+          sdp: pc.localDescription.sdp,
+          connection_id: connectionId
+        }));
+      });
+    }
+
+    async function makeOffer() {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await waitIceGatheringComplete(pc);
+      const answer = await signalOffer();
+      await pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
+      connectionId = answer.connection_id;
+    }
+
+    async function connectChat() {
+      ws = new WebSocket(wsUrl, "rvoip.webrtc.v1");
+      ws.onmessage = async event => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "answer" && pendingAnswer) {
+          const pending = pendingAnswer;
+          pendingAnswer = null;
+          pending.resolve(msg);
+        } else if (msg.type === "ice-candidate" && msg.candidate) {
+          await pc.addIceCandidate(JSON.parse(msg.candidate));
+        }
+      };
+      ws.onerror = () => {
+        setStatus("signaling error", true);
+        if (pendingAnswer) pendingAnswer.reject(new Error("signaling error"));
+      };
+      await new Promise((resolve, reject) => {
+        ws.onopen = resolve;
+        ws.onclose = () => reject(new Error("signaling closed"));
+      });
+
+      pc = new RTCPeerConnection({ iceServers: [] });
+      pc.onconnectionstatechange = () => setStatus(pc.connectionState);
+      pc.ontrack = event => {
+        remoteAudio.srcObject = event.streams[0];
+      };
+      dc = pc.createDataChannel("rvoip-chat", { ordered: true });
+      dc.onopen = () => {
+        input.disabled = false;
+        sendButton.disabled = false;
+        callButton.disabled = false;
+        setStatus("chat ready");
+        addMessage("system", "Alice is assigned.");
+      };
+      dc.onmessage = event => addMessage("agent", event.data);
+      dc.onclose = () => setStatus("chat closed", true);
+
+      await makeOffer();
+    }
+
+    async function startCall() {
+      if (callStarted) return;
+      callStarted = true;
+      callButton.disabled = true;
+      setStatus("requesting microphone");
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      for (const track of localStream.getAudioTracks()) {
+        pc.addTrack(track, localStream);
+      }
+      setStatus("renegotiating voice");
+      await makeOffer();
+      dc.send(callCommand);
+      addMessage("system", "Calling Alice...");
+      setStatus("calling Alice");
+    }
+
+    form.addEventListener("submit", event => {
+      event.preventDefault();
+      const text = input.value.trim();
+      if (!text || !dc || dc.readyState !== "open") return;
+      dc.send(text);
+      addMessage("customer", text);
+      input.value = "";
+    });
+
+    callButton.addEventListener("click", async () => {
+      try {
+        await startCall();
+      } catch (error) {
+        callStarted = false;
+        callButton.disabled = false;
+        setStatus(error.message || "call failed", true);
+      }
+    });
+
+    connectChat().catch(error => {
+      setStatus(error.message || "connect failed", true);
+    });
+  </script>
+</body>
+</html>

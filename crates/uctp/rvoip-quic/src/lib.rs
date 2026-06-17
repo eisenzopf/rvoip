@@ -15,4 +15,5 @@ pub use adapter::{UctpQuicAdapter, UctpQuicConfig, ADAPTER_EVENT_CAP};
 pub use client::UctpQuicClient;
 pub use errors::{Result, UctpQuicError};
 pub use media_stream::{spawn_datagram_reader, FanoutContext, QuicDatagramMediaStream};
+pub use rvoip_core::adapter::{AdapterEvent, ConnectionAdapter};
 pub use server::UctpQuicServer;

@@ -51,6 +51,7 @@ impl UctpWtServer {
         subscription_handler: Option<Arc<dyn rvoip_uctp::state::SubscriptionHandler>>,
         orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
         coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
+        sig9421: Option<rvoip_uctp::state::Sig9421Config>,
     ) -> Arc<Self> {
         tokio::spawn(async move {
             while let Some(conn) = accept_rx.recv().await {
@@ -63,6 +64,7 @@ impl UctpWtServer {
                 let subscription_handler = subscription_handler.clone();
                 let orchestrator = orchestrator.clone();
                 let caps = coordinator_caps.clone();
+                let sig9421 = sig9421.clone();
                 tokio::spawn(spawn_peer_session(
                     conn,
                     bearer,
@@ -75,6 +77,7 @@ impl UctpWtServer {
                     subscription_handler,
                     orchestrator,
                     caps,
+                    sig9421,
                 ));
             }
             debug!("rvoip-webtransport::server: accept loop exiting");
@@ -119,6 +122,7 @@ async fn spawn_peer_session(
     subscription_handler: Option<Arc<dyn rvoip_uctp::state::SubscriptionHandler>>,
     orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
     coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
+    sig9421: Option<rvoip_uctp::state::Sig9421Config>,
 ) {
     let peer_addr = conn.remote_address();
     info!(%peer_addr, "rvoip-webtransport: new connection");
@@ -179,27 +183,32 @@ async fn spawn_peer_session(
     > = Arc::new(parking_lot::RwLock::new(Vec::new()));
     let reader_spawned = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    let _coord = match subscription_handler {
-        Some(handler) => UctpCoordinator::start_full_with_caps(
+    let subscription_handler =
+        subscription_handler.unwrap_or_else(|| rvoip_uctp::state::rejecting_handler());
+    let _coord = if let Some(sig9421) = sig9421 {
+        UctpCoordinator::start_full_with_sig9421(
+            "webtransport",
+            in_rx,
+            out_tx,
+            coord_events_tx,
+            bearer,
+            sig9421.verifier,
+            sig9421.policy,
+            Arc::new(rvoip_uctp::state::default_v0_descriptor()),
+            subscription_handler,
+            coordinator_caps,
+        )
+    } else {
+        UctpCoordinator::start_full_with_caps(
             "webtransport",
             in_rx,
             out_tx,
             coord_events_tx,
             bearer,
             Arc::new(rvoip_uctp::state::default_v0_descriptor()),
-            handler,
+            subscription_handler,
             coordinator_caps,
-        ),
-        None => UctpCoordinator::start_full_with_caps(
-            "webtransport",
-            in_rx,
-            out_tx,
-            coord_events_tx,
-            bearer,
-            Arc::new(rvoip_uctp::state::default_v0_descriptor()),
-            rvoip_uctp::state::rejecting_handler(),
-            coordinator_caps,
-        ),
+        )
     };
     // Gap plan §4.2 v1 punch list — capture the coordinator's
     // `Pending` correlator so per-Route adapter code can await

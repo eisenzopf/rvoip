@@ -14,4 +14,4 @@ pub use pump::{
     silent_rtp_packet, silent_rtp_payload, silent_rtp_payload_for_ssrc, CandidatePairStats,
     InboundStats, OutboundStats, WebRtcStatsSnapshot, FRAME_CHANNEL_CAP,
 };
-pub use stream::{from_tracks, WebRtcMediaStream};
+pub use stream::{from_tracks, from_tracks_with_dtmf_events, WebRtcMediaStream};

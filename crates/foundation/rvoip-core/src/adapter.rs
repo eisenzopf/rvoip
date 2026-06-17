@@ -1,179 +1,18 @@
 use crate::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use crate::commands::{AudioSource, MuteDirection};
-use crate::connection::{Connection, Direction, Transport};
+use crate::connection::Transport;
 use crate::error::{Result, RvoipError};
-use crate::identity::{IdentityAssurance, Jwk};
-use crate::ids::{ConnectionId, ParticipantId, PlaybackId, SessionId};
+use crate::identity::IdentityAssurance;
+use crate::ids::ConnectionId;
 use crate::message::Message;
 use crate::stream::MediaStream;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AdapterKind {
-    /// UCTP-native (QUIC, WebTransport, WebSocket).
-    Substrate,
-    /// Gateway to a foreign protocol (SIP, WebRTC).
-    Interop,
-}
-
-#[derive(Clone, Debug)]
-pub struct OriginateRequest {
-    pub session_id: SessionId,
-    pub participant_id: ParticipantId,
-    pub target: String,
-    pub direction: Direction,
-    pub capabilities: CapabilityDescriptor,
-    /// P6 — transport selector. When `Some`, the Orchestrator
-    /// dispatches the originate through the adapter registered for
-    /// this transport. When `None`, the "first registered adapter"
-    /// fallback applies (single-adapter deployments).
-    pub transport: Option<Transport>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ConnectionHandle {
-    pub connection: Connection,
-}
-
-#[derive(Clone, Debug)]
-pub enum RejectReason {
-    Busy,
-    Decline,
-    NotFound,
-    Forbidden,
-    NotAcceptable,
-    ServerError,
-    Custom { code: u16, phrase: String },
-}
-
-#[derive(Clone, Debug)]
-pub enum EndReason {
-    Normal,
-    Cancelled,
-    Failed { detail: String },
-    Timeout,
-    BridgeTorn,
-}
-
-#[derive(Clone, Debug)]
-pub enum TransferTarget {
-    Uri(String),
-    Connection(ConnectionId),
-    Session(SessionId),
-}
-
-/// P2 — handle returned by [`ConnectionAdapter::play_audio`] (and
-/// surfaced by [`crate::Orchestrator::play_audio`]) that lets the
-/// caller stop an in-flight playback. The cancel channel is fired
-/// at-most-once by [`Self::cancel`]; subsequent calls compile-error
-/// because cancel takes `self`.
-#[derive(Debug)]
-pub struct PlaybackHandle {
-    id: PlaybackId,
-    cancel_tx: oneshot::Sender<()>,
-}
-
-impl PlaybackHandle {
-    /// Adapter helper: build a handle + the matching cancel receiver.
-    /// The adapter spawns its playback task watching `cancel_rx`; when
-    /// the consumer calls [`Self::cancel`] the task gets `Ok(())` on
-    /// its receiver and tears down.
-    pub fn new(id: PlaybackId) -> (Self, oneshot::Receiver<()>) {
-        let (tx, rx) = oneshot::channel();
-        (Self { id, cancel_tx: tx }, rx)
-    }
-
-    pub fn id(&self) -> &PlaybackId {
-        &self.id
-    }
-
-    /// Best-effort cancellation. Returns `Err` only when the adapter's
-    /// playback task already exited (receiver dropped) — which means
-    /// playback is already over and cancel is moot.
-    pub fn cancel(self) -> std::result::Result<(), &'static str> {
-        self.cancel_tx
-            .send(())
-            .map_err(|_| "playback already ended")
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct SignatureHeaders {
-    pub signature: String,
-    pub signature_input: String,
-    pub signature_key: Option<Jwk>,
-    pub signature_agent: Option<Jwk>,
-}
-
-/// Adapter-native event surface. rvoip-core normalizes these into the
-/// `events::Event` vocabulary; consumers wanting protocol-native access can
-/// subscribe directly to the adapter.
-#[derive(Clone, Debug)]
-pub enum AdapterEvent {
-    InboundConnection {
-        connection: Connection,
-    },
-    Connected {
-        connection_id: ConnectionId,
-    },
-    /// Per-Connection auth completion. UCTP-family adapters emit this
-    /// immediately after `InboundConnection` once they've matched the
-    /// peer's auth handshake (CONVERSATION_PROTOCOL.md §5.1
-    /// `auth.hello → auth.response → auth.session`) to the just-created
-    /// Connection. Carries the server-issued `identity_id` and the
-    /// peer's `participant_id`, plus the negotiated assurance gradient
-    /// (plan §7 G1 / A1 + A3). SIP / WebRTC adapters that don't run a
-    /// UCTP-style handshake never emit this variant; consumers should
-    /// treat its absence as "auth model not applicable" rather than
-    /// "auth failed".
-    Authenticated {
-        connection_id: ConnectionId,
-        identity_id: String,
-        participant_id: String,
-        assurance: crate::identity::IdentityAssurance,
-    },
-    Ended {
-        connection_id: ConnectionId,
-        reason: EndReason,
-    },
-    Failed {
-        connection_id: ConnectionId,
-        detail: String,
-    },
-    /// DTMF digits decoded from an inbound `connection.dtmf` envelope
-    /// (UCTP-family adapters) or RTP RFC 2833 event (SIP). The
-    /// orchestrator translates this into [`crate::events::Event::DtmfReceived`].
-    /// Plan C2.
-    Dtmf {
-        connection_id: ConnectionId,
-        digits: String,
-        duration_ms: u32,
-    },
-    /// Per-Stream media-quality snapshot the peer or adapter reported
-    /// (UCTP-family: from a `connection.quality` envelope; SIP: from
-    /// RTCP receiver reports). The orchestrator translates this into
-    /// [`crate::events::Event::MediaQuality`]. Plan C2.
-    Quality {
-        connection_id: ConnectionId,
-        snapshot: crate::stream::QualitySnapshot,
-    },
-    /// P12.6 — peer sent an `identity.step-up-response` envelope
-    /// answering a previous `identity.step-up-request` we issued via
-    /// [`ConnectionAdapter::send_step_up_request`]. The orchestrator
-    /// re-emits this as [`crate::events::Event::IdentityStepUpResponseReceived`]
-    /// so the consumer can resolve a credential and call
-    /// [`crate::Orchestrator::complete_step_up`].
-    StepUpResponse {
-        connection_id: ConnectionId,
-        method: String,
-        credential: String,
-    },
-    Native {
-        kind: &'static str,
-        detail: String,
-    },
-}
+pub use rvoip_core_traits::adapter::{
+    AdapterEvent, AdapterKind, ConnectionHandle, EndReason, OriginateRequest, PlaybackHandle,
+    RejectReason, SignatureHeaders, TransferTarget,
+};
 
 /// The cross-transport adapter contract. Every transport-specific crate
 /// (rvoip-sip, rvoip-webrtc, rvoip-quic, rvoip-webtransport, rvoip-websocket)

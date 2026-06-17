@@ -16,6 +16,7 @@ use rvoip_core::error::Result as RvoipResult;
 use rvoip_core::ids::StreamId;
 use rvoip_core::stream::{MediaStream, QualitySnapshot, StreamKind};
 
+use crate::media::dtmf::DecodedDtmfEvent;
 use crate::media::pump::{
     spawn_inbound_pump, spawn_outbound_pump, InboundStats, WebRtcStatsSnapshot,
     DEFAULT_INBOUND_SEND_DEADLINE_MS, FRAME_CHANNEL_CAP,
@@ -32,6 +33,7 @@ struct WebRtcMediaStreamInner {
     pumps: Mutex<Vec<JoinHandle<()>>>,
     remote_attached: AtomicBool,
     inbound_stats: Arc<InboundStats>,
+    dtmf_tx: Option<mpsc::Sender<DecodedDtmfEvent>>,
     /// Local cancel used to stop owned pump tasks on `close()`. The adapter may
     /// also pass a route-level Notify into `enable_webrtc_stats` for global cancel.
     cancel: Arc<Notify>,
@@ -62,6 +64,7 @@ impl WebRtcMediaStream {
             Arc::clone(&self.inner.inbound_stats),
             self.inner.send_deadline_ms,
             Some(Arc::clone(&self.inner.cancel)),
+            self.inner.dtmf_tx.clone(),
         );
         self.inner.pumps.lock().push(handle);
     }
@@ -98,6 +101,20 @@ pub fn from_tracks(
     payload_type: u8,
     remote: Option<Arc<dyn TrackRemote>>,
 ) -> Arc<WebRtcMediaStream> {
+    from_tracks_with_dtmf_events(id, codec, local, local_ssrc, payload_type, remote, None)
+}
+
+/// Build a media stream and route inbound RFC 4733 telephone-events to
+/// `dtmf_tx` instead of forwarding them as ordinary audio frames.
+pub fn from_tracks_with_dtmf_events(
+    id: StreamId,
+    codec: CodecInfo,
+    local: Arc<TrackLocalStaticRTP>,
+    local_ssrc: u32,
+    payload_type: u8,
+    remote: Option<Arc<dyn TrackRemote>>,
+    dtmf_tx: Option<mpsc::Sender<DecodedDtmfEvent>>,
+) -> Arc<WebRtcMediaStream> {
     let (frames_in_tx, frames_in_rx) = mpsc::channel(FRAME_CHANNEL_CAP);
     let (frames_out_tx, frames_out_rx) = mpsc::channel(FRAME_CHANNEL_CAP);
     let inbound_stats = Arc::new(InboundStats::default());
@@ -121,6 +138,7 @@ pub fn from_tracks(
             Arc::clone(&inbound_stats),
             send_deadline_ms,
             Some(Arc::clone(&cancel)),
+            dtmf_tx.clone(),
         ));
         remote_attached.store(true, Ordering::SeqCst);
     }
@@ -136,6 +154,7 @@ pub fn from_tracks(
             pumps: Mutex::new(pumps),
             remote_attached,
             inbound_stats,
+            dtmf_tx,
             cancel,
             send_deadline_ms,
         }),

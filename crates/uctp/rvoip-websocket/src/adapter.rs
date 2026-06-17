@@ -77,6 +77,10 @@ pub struct UctpWsConfig {
     /// Per-peer resource caps (plan D1 / D2). See
     /// `rvoip_quic::UctpQuicConfig::coordinator_caps`.
     pub coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
+    /// Optional inline RFC 9421 envelope-signature enforcement. Disabled
+    /// by default for compatibility; see
+    /// [`rvoip_uctp::state::Sig9421Config`].
+    pub sig9421: Option<rvoip_uctp::state::Sig9421Config>,
     /// Optional `rustls::ServerConfig` for TLS-terminating WSS. When
     /// `Some`, the accept loop wraps each `TcpStream` in
     /// `tokio_rustls::TlsAcceptor::accept(...)` before running the
@@ -94,6 +98,7 @@ impl UctpWsConfig {
             max_concurrent_connections: 1024,
             client_url: None,
             coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps::default(),
+            sig9421: None,
             #[cfg(feature = "wss")]
             tls: None,
         }
@@ -108,6 +113,13 @@ impl UctpWsConfig {
     /// [`rvoip_uctp::state::UctpCoordinatorCaps`].
     pub fn with_coordinator_caps(mut self, caps: rvoip_uctp::state::UctpCoordinatorCaps) -> Self {
         self.coordinator_caps = caps;
+        self
+    }
+
+    /// Opt in to inline RFC 9421 envelope-signature verification at
+    /// the adapter ingress boundary.
+    pub fn with_sig9421(mut self, config: rvoip_uctp::state::Sig9421Config) -> Self {
+        self.sig9421 = Some(config);
         self
     }
 
@@ -159,6 +171,7 @@ impl UctpWsAdapter {
             Arc::clone(&routes),
             config.max_concurrent_connections,
             config.coordinator_caps,
+            config.sig9421,
             #[cfg(feature = "wss")]
             config.tls,
         );

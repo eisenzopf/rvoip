@@ -109,6 +109,11 @@ pub struct UctpQuicConfig {
     /// recompiling. Defaults are the safe values from
     /// `UctpCoordinatorCaps::default()`.
     pub coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
+    /// Optional inline RFC 9421 envelope-signature enforcement. Disabled
+    /// by default for wire compatibility; when set, each peer
+    /// coordinator verifies signed envelopes and applies the configured
+    /// [`Sig9421Policy`](rvoip_uctp::state::Sig9421Policy).
+    pub sig9421: Option<rvoip_uctp::state::Sig9421Config>,
 }
 
 impl UctpQuicConfig {
@@ -128,6 +133,7 @@ impl UctpQuicConfig {
             subscription_handler: None,
             orchestrator: None,
             coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps::default(),
+            sig9421: None,
         }
     }
 
@@ -171,6 +177,14 @@ impl UctpQuicConfig {
     /// frames out to each subscriber's MediaStream.
     pub fn with_orchestrator(mut self, orch: Arc<rvoip_core::Orchestrator>) -> Self {
         self.orchestrator = Some(orch);
+        self
+    }
+
+    /// Opt in to inline RFC 9421 envelope-signature verification at
+    /// the adapter ingress boundary. Existing deployments remain
+    /// unsigned-compatible until this is configured.
+    pub fn with_sig9421(mut self, config: rvoip_uctp::state::Sig9421Config) -> Self {
+        self.sig9421 = Some(config);
         self
     }
 }
@@ -218,6 +232,7 @@ impl UctpQuicAdapter {
             config.subscription_handler,
             config.orchestrator,
             config.coordinator_caps,
+            config.sig9421,
         );
 
         Ok(Arc::new(Self {

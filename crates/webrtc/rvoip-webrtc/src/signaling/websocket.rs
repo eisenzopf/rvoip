@@ -25,10 +25,10 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_tungstenite::{
-    accept_async, accept_async_with_config, accept_hdr_async_with_config,
+    accept_hdr_async_with_config,
     tungstenite::{
         handshake::server::{ErrorResponse, Request, Response as HandshakeResponse},
-        http::{self, StatusCode as TStatus},
+        http,
         protocol::WebSocketConfig,
         Message,
     },
@@ -182,8 +182,17 @@ async fn dispatch_tls(
     // matters when trickle is enabled — H7 follow-up).
     match parsed.msg_type.as_str() {
         "offer" => {
-            let conn_id = adapter.apply_remote_offer(&parsed.sdp).await?;
-            let answer = adapter.local_sdp(&conn_id)?;
+            let (conn_id, answer) = if parsed.connection_id.is_empty() {
+                let conn_id = adapter.apply_remote_offer(&parsed.sdp).await?;
+                let answer = adapter.local_sdp(&conn_id)?;
+                (conn_id, answer)
+            } else {
+                let conn_id = ConnectionId::from_string(parsed.connection_id.clone());
+                let answer = adapter
+                    .apply_ice_restart_offer(conn_id.clone(), &parsed.sdp)
+                    .await?;
+                (conn_id, answer)
+            };
             let out = SignalingMessage {
                 msg_type: "answer".into(),
                 sdp: answer,
@@ -236,28 +245,7 @@ async fn dispatch_tls(
     Ok(())
 }
 
-async fn handle_connection(
-    stream: tokio::net::TcpStream,
-    adapter: Arc<WebRtcAdapter>,
-) -> Result<()> {
-    let max_msg = adapter.ws_max_message_size();
-    let ws = if max_msg < 64 * 1024 * 1024 {
-        let ws_config = WebSocketConfig::default()
-            .max_message_size(Some(max_msg))
-            .max_frame_size(Some(max_msg));
-        accept_async_with_config(stream, Some(ws_config))
-            .await
-            .map_err(|e| WebRtcError::Signaling(format!("{e}")))?
-    } else {
-        accept_async(stream)
-            .await
-            .map_err(|e| WebRtcError::Signaling(format!("{e}")))?
-    };
-    drive_ws_loop(ws, adapter).await
-}
-
-/// Same as [`handle_connection`] but runs a [`WsAuthHook`] during the
-/// WebSocket upgrade. On rejection the server emits a proper HTTP
+/// Runs a [`WsAuthHook`] during the WebSocket upgrade. On rejection the server emits a proper HTTP
 /// response (401/403/429) before the upgrade completes, so JS clients
 /// see the error in `WebSocket.onerror` rather than a closed socket.
 async fn handle_connection_with_auth(
@@ -417,8 +405,17 @@ async fn drive_ws_loop(
 
         match parsed.msg_type.as_str() {
             "offer" => {
-                let conn_id = adapter.apply_remote_offer(&parsed.sdp).await?;
-                let answer = adapter.local_sdp(&conn_id)?;
+                let (conn_id, answer) = if parsed.connection_id.is_empty() {
+                    let conn_id = adapter.apply_remote_offer(&parsed.sdp).await?;
+                    let answer = adapter.local_sdp(&conn_id)?;
+                    (conn_id, answer)
+                } else {
+                    let conn_id = ConnectionId::from_string(parsed.connection_id.clone());
+                    let answer = adapter
+                        .apply_ice_restart_offer(conn_id.clone(), &parsed.sdp)
+                        .await?;
+                    (conn_id, answer)
+                };
                 send_message(
                     &write,
                     &SignalingMessage {

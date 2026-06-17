@@ -32,6 +32,7 @@ impl UctpWsServer {
         routes: Arc<DashMap<ConnectionId, Route>>,
         _max_concurrent: usize,
         coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
+        sig9421: Option<rvoip_uctp::state::Sig9421Config>,
         #[cfg(feature = "wss")] tls: Option<Arc<rustls::ServerConfig>>,
     ) -> Arc<Self> {
         #[cfg(feature = "wss")]
@@ -52,6 +53,7 @@ impl UctpWsServer {
                 let by_uctp_sid = Arc::clone(&by_uctp_sid);
                 let routes = Arc::clone(&routes);
                 let caps = coordinator_caps.clone();
+                let sig9421 = sig9421.clone();
                 #[cfg(feature = "wss")]
                 let tls_acceptor = tls_acceptor.clone();
                 tokio::spawn(async move {
@@ -81,6 +83,7 @@ impl UctpWsServer {
                                 by_uctp_sid,
                                 routes,
                                 caps,
+                                sig9421.clone(),
                             )
                             .await;
                             info!(%peer_addr, "rvoip-websocket: peer disconnected (wss)");
@@ -104,6 +107,7 @@ impl UctpWsServer {
                         by_uctp_sid,
                         routes,
                         caps,
+                        sig9421,
                     )
                     .await;
                     info!(%peer_addr, "rvoip-websocket: peer disconnected");
@@ -146,6 +150,7 @@ async fn spawn_peer_session<S>(
     by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
     routes: Arc<DashMap<ConnectionId, Route>>,
     coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
+    sig9421: Option<rvoip_uctp::state::Sig9421Config>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -158,16 +163,31 @@ async fn spawn_peer_session<S>(
 
     let route_out_tx = out_tx.clone();
 
-    let _coord = UctpCoordinator::start_full_with_caps(
-        "websocket",
-        in_rx,
-        out_tx,
-        coord_events_tx,
-        bearer,
-        Arc::new(rvoip_uctp::state::default_v0_descriptor()),
-        rvoip_uctp::state::rejecting_handler(),
-        coordinator_caps,
-    );
+    let _coord = if let Some(sig9421) = sig9421 {
+        UctpCoordinator::start_full_with_sig9421(
+            "websocket",
+            in_rx,
+            out_tx,
+            coord_events_tx,
+            bearer,
+            sig9421.verifier,
+            sig9421.policy,
+            Arc::new(rvoip_uctp::state::default_v0_descriptor()),
+            rvoip_uctp::state::rejecting_handler(),
+            coordinator_caps,
+        )
+    } else {
+        UctpCoordinator::start_full_with_caps(
+            "websocket",
+            in_rx,
+            out_tx,
+            coord_events_tx,
+            bearer,
+            Arc::new(rvoip_uctp::state::default_v0_descriptor()),
+            rvoip_uctp::state::rejecting_handler(),
+            coordinator_caps,
+        )
+    };
     // Gap plan §4.2 v1 punch list — capture the coordinator's
     // `Pending` correlator so per-Route adapter code can await
     // typed responses.

@@ -1,4 +1,4 @@
-//! Documents intentional capability gaps (trickle ICE, simulcast, hosted TURN).
+//! Documents WebRTC beta-gate capabilities and intentional gaps.
 
 #![cfg(feature = "comprehensive")]
 

@@ -12,13 +12,13 @@ Built on [webrtc-rs](https://webrtc.rs) **`0.20.0-alpha.1`** (Sans-I/O `rtc` cor
 - **Dual role:** gateway/interop adapter (`WebRtcAdapter` → orchestrator) **and** WebRTC server
   (WHIP/WHEP/WS signaling surfaces feeding the same adapter). See
   [`docs/archived/IMPLEMENTATION_PLAN.md`](docs/archived/IMPLEMENTATION_PLAN.md) §1.
-- **In scope:** 1:1 audio + VP8 video interop, full-SDP ICE gathering, Opus + G.711,
-  SCTP data channels, fixture-encoded RTP for deterministic tests, `ConnectionAdapter` for
-  `Transport::WebRtc`, optional WHIP/WHEP and WebSocket JSON signalers, external TURN via
+- **In scope:** WHIP/WHEP and WebSocket JSON signaling, 1:1 audio + VP8 video interop,
+  full-gather and trickle ICE, Opus + G.711, SCTP data channels, RFC 4733 DTMF
+  send/receive, fixture-encoded RTP for deterministic tests, `ConnectionAdapter` for
+  `Transport::WebRtc`, the QUIC bridge demo/test, and external TURN configuration via
   [`IceServerConfig`](src/config.rs).
-- **Out of scope / v1 gaps:** UCTP substrate (see `rvoip-websocket`), multi-party SFU,
-  simulcast/SVC, trickle ICE over signaling (WS `ice-candidate` returns `NotImplemented`),
-  Identity fingerprint binding, standalone TURN relay hosting. See
+- **Out of scope / beta gaps:** UCTP substrate (see `rvoip-websocket`), multi-party SFU/MCU,
+  simulcast/SVC, hosted TURN relay operation, identity fingerprint binding. See
   [`WebRtcFeatureSupport`](src/peer/ice.rs) and `tests/webrtc_capability_gaps.rs`.
 
 ## Features
@@ -125,7 +125,7 @@ Integration tests:
 cargo test -p rvoip-webrtc --features comprehensive
 ```
 
-Capability gap tests (`trickle ICE`, simulcast, TURN config, WS `ice-candidate`):
+Capability tests and non-claim gap tests (trickle ICE, simulcast, TURN config, WS signaling):
 `tests/webrtc_capability_gaps.rs`.
 
 ### Server API (`src/server.rs`)
@@ -151,6 +151,8 @@ implement SFU/MCU fan-out — every connection is an independent peer.
   logic because there is no fan-out.
 - **No mixing / MCU.** Multi-party audio mixing belongs in a media server
   layered on top.
+- **No identity fingerprint binding claim.** DTLS fingerprint pinning hooks exist, but
+  binding them to rvoip identity assurance is not part of the beta claim.
 
 See [`docs/GAP_PLAN.md`](docs/GAP_PLAN.md) §4 for the complete
 out-of-scope list.

@@ -1,5 +1,6 @@
-//! RFC 4733 telephone-event DTMF over the local audio `RtpSender` track.
+//! RFC 4733 telephone-event DTMF over WebRTC RTP tracks.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,7 +10,7 @@ use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
 use webrtc::media_stream::track_local::TrackLocal;
 
 use crate::errors::{Result, WebRtcError};
-use crate::peer::builder::TELEPHONE_EVENT_PAYLOAD_TYPE;
+pub use crate::peer::builder::TELEPHONE_EVENT_PAYLOAD_TYPE;
 use crate::peer::RvoipPeerConnection;
 
 const TICK: Duration = Duration::from_millis(20);
@@ -36,6 +37,90 @@ fn encode_telephone_event(event: u8, end_of_event: bool, volume: u8, duration: u
     let byte1 = e_bit | (volume & 0b0011_1111);
     let dur = duration.to_be_bytes();
     [event, byte1, dur[0], dur[1]]
+}
+
+fn event_to_digit(event: u8) -> Option<char> {
+    match event {
+        0..=9 => Some(char::from(b'0' + event)),
+        10 => Some('*'),
+        11 => Some('#'),
+        12 => Some('A'),
+        13 => Some('B'),
+        14 => Some('C'),
+        15 => Some('D'),
+        _ => None,
+    }
+}
+
+/// Parsed RFC 4733 telephone-event payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TelephoneEventFrame {
+    pub event: u8,
+    pub digit: char,
+    pub end_of_event: bool,
+    pub volume: u8,
+    pub duration_samples: u16,
+    pub duration_ms: u32,
+}
+
+/// Normalized receive-side DTMF event emitted by the inbound RTP pump.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodedDtmfEvent {
+    pub digit: char,
+    pub duration_ms: u32,
+}
+
+/// Decode the 4-byte RFC 4733 telephone-event payload.
+pub fn decode_telephone_event_payload(payload: &[u8]) -> Option<TelephoneEventFrame> {
+    if payload.len() < 4 {
+        return None;
+    }
+    let event = payload[0];
+    let digit = event_to_digit(event)?;
+    let end_of_event = payload[1] & 0b1000_0000 != 0;
+    let volume = payload[1] & 0b0011_1111;
+    let duration_samples = u16::from_be_bytes([payload[2], payload[3]]);
+    let duration_ms = ((duration_samples as u32) * 1000 + 7_999) / 8_000;
+    Some(TelephoneEventFrame {
+        event,
+        digit,
+        end_of_event,
+        volume,
+        duration_samples,
+        duration_ms,
+    })
+}
+
+/// Stateful RFC 4733 receive decoder.
+///
+/// Telephone events are retransmitted, especially the final end-of-event
+/// packet. The decoder emits only once per `(rtp_timestamp, event)` and only
+/// when the end bit is present, so consumers receive a normalized digit
+/// duration instead of every low-level retransmission.
+#[derive(Default)]
+pub struct DtmfDecoder {
+    emitted: HashSet<(u32, u8)>,
+}
+
+impl DtmfDecoder {
+    pub fn decode_packet(
+        &mut self,
+        timestamp: u32,
+        payload_type: u8,
+        payload: &[u8],
+    ) -> Option<DecodedDtmfEvent> {
+        if payload_type != TELEPHONE_EVENT_PAYLOAD_TYPE {
+            return None;
+        }
+        let frame = decode_telephone_event_payload(payload)?;
+        if !frame.end_of_event || !self.emitted.insert((timestamp, frame.event)) {
+            return None;
+        }
+        Some(DecodedDtmfEvent {
+            digit: frame.digit,
+            duration_ms: frame.duration_ms,
+        })
+    }
 }
 
 async fn write_telephone_event(
@@ -183,11 +268,48 @@ mod tests {
         assert_eq!(digit_to_event('5'), Some(5));
         assert_eq!(digit_to_event('#'), Some(11));
         assert_eq!(digit_to_event('x'), None);
+        assert_eq!(event_to_digit(10), Some('*'));
+        assert_eq!(event_to_digit(15), Some('D'));
+        assert_eq!(event_to_digit(16), None);
     }
 
     #[test]
     fn telephone_event_payload_layout() {
         let wire = encode_telephone_event(1, true, 10, 800);
         assert_eq!(wire, [1, 0b1000_1010, 0x03, 0x20]);
+    }
+
+    #[test]
+    fn decode_telephone_event_payload_normalizes_duration() {
+        let wire = encode_telephone_event(11, true, 10, 800);
+        let decoded = decode_telephone_event_payload(&wire).expect("decode");
+        assert_eq!(decoded.digit, '#');
+        assert!(decoded.end_of_event);
+        assert_eq!(decoded.volume, 10);
+        assert_eq!(decoded.duration_samples, 800);
+        assert_eq!(decoded.duration_ms, 100);
+    }
+
+    #[test]
+    fn decoder_emits_only_once_per_final_event() {
+        let mut decoder = DtmfDecoder::default();
+        let progress = encode_telephone_event(5, false, 10, 160);
+        assert_eq!(
+            decoder.decode_packet(123, TELEPHONE_EVENT_PAYLOAD_TYPE, &progress),
+            None
+        );
+
+        let final_payload = encode_telephone_event(5, true, 10, 800);
+        let event = decoder
+            .decode_packet(123, TELEPHONE_EVENT_PAYLOAD_TYPE, &final_payload)
+            .expect("final event");
+        assert_eq!(event.digit, '5');
+        assert_eq!(event.duration_ms, 100);
+
+        assert_eq!(
+            decoder.decode_packet(123, TELEPHONE_EVENT_PAYLOAD_TYPE, &final_payload),
+            None,
+            "RFC 4733 final retransmit should be suppressed"
+        );
     }
 }

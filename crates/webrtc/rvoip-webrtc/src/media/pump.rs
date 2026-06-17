@@ -21,6 +21,8 @@ use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
 use rvoip_core::ids::StreamId;
 use rvoip_core::stream::{MediaFrame, QualitySnapshot};
 
+use crate::media::dtmf::{DecodedDtmfEvent, DtmfDecoder, TELEPHONE_EVENT_PAYLOAD_TYPE};
+
 pub const FRAME_CHANNEL_CAP: usize = 64;
 
 /// Default deadline applied when a caller of `spawn_inbound_pump` does not
@@ -328,9 +330,11 @@ pub fn spawn_inbound_pump(
     stats: Arc<InboundStats>,
     send_deadline_ms: u64,
     cancel: Option<Arc<Notify>>,
+    dtmf_tx: Option<mpsc::Sender<DecodedDtmfEvent>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let deadline = Duration::from_millis(send_deadline_ms);
+        let mut dtmf_decoder = DtmfDecoder::default();
         loop {
             // Honor cancellation as well as the per-poll timeout.
             let poll = tokio::time::timeout(Duration::from_millis(100), track.poll());
@@ -345,6 +349,18 @@ pub fn spawn_inbound_pump(
             match event {
                 TrackRemoteEvent::OnRtpPacket(pkt) => {
                     stats.record_packet();
+                    if pkt.header.payload_type == TELEPHONE_EVENT_PAYLOAD_TYPE {
+                        if let Some(event) = dtmf_decoder.decode_packet(
+                            pkt.header.timestamp,
+                            pkt.header.payload_type,
+                            &pkt.payload,
+                        ) {
+                            if let Some(tx) = &dtmf_tx {
+                                let _ = tx.send(event).await;
+                            }
+                        }
+                        continue;
+                    }
                     // D4 follow-up — emit codec payload bytes only (no RTP
                     // header). The orchestrator's `Transcoder` consumes
                     // codec bytes; the local outbound pump re-wraps with

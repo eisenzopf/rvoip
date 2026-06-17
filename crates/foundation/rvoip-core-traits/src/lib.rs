@@ -16,10 +16,12 @@
 //! the cycle. It depends only on `bytes`, `chrono`, `serde`,
 //! `serde_json`, and `uuid`.
 //!
-//! ## What lives here (V2.A.1)
+//! ## What lives here
 //!
 //! - [`ids`] — every `*Id` newtype (`ConnectionId`, `SessionId`,
 //!   `ConversationId`, `ParticipantId`, `IdentityId`, etc.).
+//! - [`adapter`] — pure adapter-facing request/event/reason structs
+//!   (`AdapterEvent`, `OriginateRequest`, `EndReason`, etc.).
 //! - [`identity`] — the pure-data identity types `IdentityAssurance`,
 //!   `Jwk`, `CredentialKind`, `Credential`, `IdentityKind`,
 //!   `DeviceKind`. The `IdentityProvider` trait + the structs that
@@ -30,11 +32,12 @@
 //! ## Future scope
 //!
 //! Subsequent V2.A.* phases can move more modules here (events,
-//! commands, capability, full identity trait, vcon types, signing,
-//! store traits) as the workspace's appetite for the move-cost
-//! tradeoff grows. The minimal carve-out shipped today is purely
-//! cycle-breaking.
+//! commands, full identity trait, vcon types, signing, store traits,
+//! and eventually the full `ConnectionAdapter` trait once message and
+//! command types have moved) as the workspace's appetite for the
+//! move-cost tradeoff grows.
 
+pub mod adapter;
 pub mod capability;
 pub mod connection;
 pub mod error;

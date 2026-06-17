@@ -211,6 +211,46 @@ async fn play_audio_returns_handle_and_cancel_succeeds() {
 }
 
 #[tokio::test]
+async fn originate_connection_binds_outbound_to_requested_session() {
+    let orch = Orchestrator::new(Config::default());
+    let (adapter, _tx, _counts) = CtrlAdapter::new();
+    orch.register(adapter).expect("register");
+
+    let cid = orch
+        .open_conversation(
+            TenantId::new(),
+            ConversationPolicy::default(),
+            HashMap::new(),
+        )
+        .await
+        .expect("open");
+    let sid = orch
+        .start_session(cid, SessionMedium::Voice, vec![])
+        .await
+        .expect("start");
+    let participant_id = ParticipantId::new();
+
+    let handle = orch
+        .originate_connection(OriginateRequest {
+            session_id: sid.clone(),
+            participant_id: participant_id.clone(),
+            target: "sip:alice@example.com".into(),
+            direction: Direction::Outbound,
+            capabilities: CapabilityDescriptor::default(),
+            transport: Some(Transport::Sip),
+        })
+        .await
+        .expect("originate");
+    let conn_id = handle.connection.id;
+
+    assert_eq!(orch.session_of(&conn_id), Some(sid.clone()));
+    let session = orch.session(&sid).expect("session");
+    let session = session.read().expect("session lock");
+    let conn_ref = session.connections.get(&conn_id).expect("bound conn");
+    assert_eq!(conn_ref.participant_id, participant_id);
+}
+
+#[tokio::test]
 async fn inbound_action_bridge_to_originates_and_bridges() {
     // P2 acceptance — InboundAction::BridgeTo accepts inbound,
     // originates outbound, bridges them, and fires ConnectionsBridged.

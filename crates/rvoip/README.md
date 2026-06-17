@@ -6,7 +6,7 @@
 
 > **Maturity tiers (plain numeric — no `-alpha`/`-beta` suffixes):** `0.1.x` = alpha,
 > `0.2.x` = beta, `1.0` = stable. The **`sip`** surface is **beta (`0.2.2`)**; the other
-> surfaces (`webrtc`, `uctp`, the `voip-3` extensions, `client`) are **alpha (`0.1.0`)** —
+> surfaces (`app`, `webrtc`, `uctp`, the `voip-3` extensions, `client`) are **alpha (`0.1.0`)** —
 > expect breaking changes before `1.0`. Pin exact versions.
 
 `rvoip` is the **facade crate** for the rvoip workspace. It always compiles the **voip-3
@@ -45,6 +45,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 The unifying nouns are re-exported at the crate root from [`rvoip-core-traits`](../foundation/rvoip-core-traits) as `rvoip::core_traits`.
 For a SIP softphone with microphone/speaker audio, see the `rvoip-sip` examples — [`sip_client`](../sip/rvoip-sip/examples/sip_client) (a terminal softphone with CPAL device I/O) and [`pbx`](../sip/rvoip-sip/examples/pbx).
 
+For a compact cross-transport gateway, enable `app` and declare roles,
+transports, assignment, and callbacks through `rvoip::app`:
+
+```toml
+rvoip = { version = "0.2.2", features = ["app"] }
+```
+
+```rust,no_run
+use rvoip::app::*;
+
+# async fn run() -> rvoip::app::AppResult<()> {
+let app = RvoipApp::builder()
+    .webrtc(WebRtcConfig::ws("127.0.0.1:8081")
+        .allow(Role::Customer, [Capability::Text, Capability::Voice]))
+    .sip(SipConfig::bind("127.0.0.1:5060")
+        .domain("callcenter.local")
+        .allow(Role::Employee, [Capability::Voice])
+        .registrar_users([("alice", "password123")]))
+    .employees(EmployeePolicy::named(["alice"]))
+    .customers(CustomerPolicy::webrtc_only())
+    .assignment(AssignmentPolicy::fixed("alice"))
+    .on_message(|ctx, msg| async move {
+        ctx.reply("Alice", format!("Alice received: {}", msg.text)).await
+    })
+    .build()
+    .await?;
+app.run().await
+# }
+```
+
 ## Cargo features
 
 | Feature | Default | Tier | Pulls in |
@@ -56,7 +86,8 @@ For a SIP softphone with microphone/speaker audio, see the `rvoip-sip` examples 
 | `sip-stir-shaken` | | alpha | RFC 8224 caller-ID attestation; **requires `sip`** (`rvoip::stir_shaken`) |
 | `voip-3` | | alpha | The full experience: every transport **+** the vCon / identity / AI-harness extensions |
 | `client` | | alpha | Cross-transport client SDK (`rvoip::client`) |
-| `full` | | | `voip-3` + `sip-stir-shaken` + `client` |
+| `app` | | alpha | High-level gateway builder (`rvoip::app`) for WebRTC/SIP/UCTP app policy |
+| `full` | | | `voip-3` + `sip-stir-shaken` + `client` + `app` |
 
 The transport-agnostic conversation-model extensions — **vCon** emission, **identity**
 backends, and the **AI harness** — are reachable only through the `voip-3` feature.
@@ -78,6 +109,7 @@ rvoip = { version = "0.2.2", features = ["voip-3"] }
 | `rvoip::uctp` (`::protocol`/`::quic`/`::webtransport`/`::websocket`) | `uctp` | [`rvoip-uctp`](../uctp/rvoip-uctp) + substrates |
 | `rvoip::vcon` / `::identity` / `::harness` | `voip-3` | [`rvoip-vcon`](../extensions/rvoip-vcon) · [`rvoip-identity`](../identity/rvoip-identity) · [`rvoip-harness`](../extensions/rvoip-harness) |
 | `rvoip::client` | `client` | [`rvoip-client`](../rvoip-client) |
+| `rvoip::app` | `app` | facade-owned app/gateway layer |
 
 ## Crate map
 
@@ -90,7 +122,7 @@ and [`rvoip-auth-core`](../identity/auth-core).
 
 **Alpha — published at `0.1.0`** (opt-in surfaces): [`rvoip-webrtc`](../webrtc/rvoip-webrtc);
 the UCTP family ([`rvoip-uctp`](../uctp/rvoip-uctp) · [`rvoip-quic`](../uctp/rvoip-quic) · [`rvoip-webtransport`](../uctp/rvoip-webtransport) · [`rvoip-websocket`](../uctp/rvoip-websocket));
-[`rvoip-vcon`](../extensions/rvoip-vcon) · [`rvoip-harness`](../extensions/rvoip-harness) · [`rvoip-stir-shaken`](../extensions/rvoip-stir-shaken);
+[`rvoip::app`](src/app.rs) · [`rvoip-vcon`](../extensions/rvoip-vcon) · [`rvoip-harness`](../extensions/rvoip-harness) · [`rvoip-stir-shaken`](../extensions/rvoip-stir-shaken);
 [`rvoip-identity`](../identity/rvoip-identity) · [`rvoip-users-core`](../identity/users-core); [`rvoip-client`](../rvoip-client).
 
 ## Documentation

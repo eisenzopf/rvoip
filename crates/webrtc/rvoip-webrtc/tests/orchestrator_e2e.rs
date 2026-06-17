@@ -11,9 +11,11 @@ use rvoip_core::adapter::{ConnectionAdapter, OriginateRequest};
 use rvoip_core::commands::InboundAction;
 use rvoip_core::config::Config;
 use rvoip_core::connection::Direction;
+use rvoip_core::conversation::ConversationPolicy;
 use rvoip_core::events::Event;
-use rvoip_core::ids::{ParticipantId, SessionId};
+use rvoip_core::ids::{ParticipantId, SessionId, TenantId};
 use rvoip_core::orchestrator::Orchestrator;
+use rvoip_core::session::SessionMedium;
 use rvoip_webrtc::{WebRtcAdapter, WebRtcConfig, WebRtcServerBuilder};
 
 #[tokio::test]
@@ -78,25 +80,40 @@ async fn whip_inbound_flows_through_orchestrator() {
         other => panic!("expected ConnectionInbound, got {other:?}"),
     };
 
+    let conversation_id = orchestrator
+        .open_conversation(
+            TenantId::new(),
+            ConversationPolicy::default(),
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("open conversation");
+    let session_id = orchestrator
+        .start_session(conversation_id, SessionMedium::Voice, vec![])
+        .await
+        .expect("start session");
+
     orchestrator
         .route_inbound_connection(
             server_conn.clone(),
             InboundAction::Accept {
-                session_id: SessionId::new(),
+                session_id,
                 participant_id: ParticipantId::new(),
             },
         )
         .await
         .expect("orchestrator accept");
 
-    let connected = tokio::time::timeout(Duration::from_secs(10), events.recv())
-        .await
-        .expect("connected event timeout")
-        .expect("event bus open");
-    assert!(
-        matches!(connected, Event::ConnectionConnected { ref connection_id, .. } if *connection_id == server_conn),
-        "expected ConnectionConnected for {server_conn}, got {connected:?}"
-    );
+    loop {
+        let connected = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("connected event timeout")
+            .expect("event bus open");
+        if matches!(connected, Event::ConnectionConnected { ref connection_id, .. } if *connection_id == server_conn)
+        {
+            break;
+        }
+    }
 
     server.shutdown().await;
 }

@@ -58,6 +58,7 @@ pub struct RvoipPeerConnection {
     ice_candidates: IceCandidateLog,
     remote_track_rx: Arc<AsyncMutex<mpsc::Receiver<Arc<dyn TrackRemote>>>>,
     data_channel_rx: Arc<AsyncMutex<mpsc::Receiver<Arc<dyn DataChannel>>>>,
+    data_channels_seen: Arc<SyncMutex<Vec<Arc<dyn DataChannel>>>>,
     local_ice_rx: Arc<AsyncMutex<mpsc::Receiver<RTCIceCandidate>>>,
     local_audio: SyncMutex<Option<Arc<TrackLocalStaticRTP>>>,
     local_audio_ssrc: SyncMutex<Option<u32>>,
@@ -89,6 +90,7 @@ impl RvoipPeerConnection {
             ice_candidates,
             remote_track_rx: Arc::new(AsyncMutex::new(receivers.remote_track)),
             data_channel_rx: Arc::new(AsyncMutex::new(receivers.data_channel)),
+            data_channels_seen: receivers.data_channels_seen,
             local_ice_rx: Arc::new(AsyncMutex::new(receivers.local_ice)),
             local_audio: SyncMutex::new(None),
             local_audio_ssrc: SyncMutex::new(None),
@@ -423,6 +425,35 @@ impl RvoipPeerConnection {
         loop {
             if let Some(dc) = self.try_recv_data_channel().await {
                 return Some(dc);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Find a remote data channel by label without consuming the legacy
+    /// `wait_data_channel` receiver. The handler records every inbound
+    /// DataChannel before forwarding it through the older mpsc surface so
+    /// adapter observers can coexist with tests and applications that still
+    /// receive channels directly.
+    pub async fn find_seen_data_channel_by_label(
+        &self,
+        label: &str,
+        timeout: Duration,
+    ) -> Option<Arc<dyn DataChannel>> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let snapshot = self.data_channels_seen.lock().clone();
+            for dc in snapshot {
+                match dc.label().await {
+                    Ok(dc_label) if dc_label == label => return Some(dc),
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::debug!(error = %err, "failed to read WebRTC data-channel label");
+                    }
+                }
             }
             if tokio::time::Instant::now() >= deadline {
                 return None;

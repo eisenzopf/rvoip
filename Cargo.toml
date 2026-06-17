@@ -48,6 +48,7 @@ members = [
 
     # extensions/ — optional pluggable add-ons.
     "crates/extensions/rvoip-vcon",
+    "crates/extensions/rvoip-vcon-postgres",
     "crates/extensions/rvoip-harness",
     "crates/extensions/rvoip-stir-shaken",
     "crates/extensions/rvoip-keycloak",
@@ -216,6 +217,7 @@ rvoip-users-core    = { path = "crates/identity/users-core", version = "0.1.0" }
 # as optional runtime deps, so their versions must resolve on crates.io
 # regardless of feature activation.
 rvoip-vcon          = { path = "crates/extensions/rvoip-vcon", version = "0.1.0" }
+rvoip-vcon-postgres = { path = "crates/extensions/rvoip-vcon-postgres", version = "0.1.0" }
 rvoip-harness       = { path = "crates/extensions/rvoip-harness", version = "0.1.0" }
 rvoip               = { path = "crates/rvoip", version = "0.2.2" }
 rvoip-uctp          = { path = "crates/uctp/rvoip-uctp", version = "0.1.0" }

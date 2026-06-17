@@ -15,13 +15,16 @@ Spec references point into the sibling design docs:
 
 ## Outstanding `[V1.x]` items
 
-Started or partially landed — these have concrete next steps.
+No tracked V1.x implementation gap from the June 2026 roadmap remains open in
+the current tree.
+
+## Recently closed `[V1.x]` items
 
 | # | Item | Status / next step | Spec source |
 |---|---|---|---|
-| 3.O.8 (follow-up) | WebRTC DTMF (RFC 4733) decode | SIP DTMF, WebRTC quality, and UCTP-family DTMF (P5/P9) are wired. **Remaining:** PT-101 frames flow through `rvoip-webrtc` `media::pump` as `MediaFrame { payload_type: Some(101) }` but no RFC 4733 decoder runs on them — needs a pump-side decoder + event channel. | CONVERSATION_PROTOCOL §7.5, §10.3 |
-| 3.O.9 | Inline envelope signatures enforced at adapter boundary | JCS + verify primitives exist in `signing.rs`; the required-signed policy is **not yet gated at adapter ingress**. | CONVERSATION_PROTOCOL §5.5.1 |
-| 3.O.10 | `rvoip-vcon-postgres` reference store | Crate **absent**; PRD §14.2 #8 calls for shipping it as an optional crate. | INTERFACE_DESIGN §11.5 |
+| 3.O.8 (follow-up) | WebRTC DTMF (RFC 4733) decode | Closed: `rvoip-webrtc` decodes PT-101 telephone-event frames on receive, emits `AdapterEvent::Dtmf`, and suppresses those packets from ordinary audio forwarding. | CONVERSATION_PROTOCOL §7.5, §10.3 |
+| 3.O.9 | Inline envelope signatures enforced at adapter boundary | Closed: QUIC, WebTransport, and WebSocket substrate adapters expose optional `Sig9421Config`; default remains disabled for compatibility. | CONVERSATION_PROTOCOL §5.5.1 |
+| 3.O.10 | `rvoip-vcon-postgres` reference store | Closed: optional `rvoip-vcon-postgres` crate ships typed `rvoip_vcon::VconStore`, SQL migration, content hashes, and an optional byte-store bridge for `rvoip_core::store::VconStore`. | INTERFACE_DESIGN §11.5 |
 
 ## Deferred backlog (per design docs — no work proposed yet)
 

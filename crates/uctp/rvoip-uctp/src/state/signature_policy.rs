@@ -15,6 +15,7 @@
 //! | None            | true                            | reject with `401-1 signature-required`                  |
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::types::MessageType;
 
@@ -79,5 +80,25 @@ impl Sig9421Policy {
     /// policy.
     pub fn requires(&self, msg_type: &MessageType) -> bool {
         self.required_types.contains(msg_type)
+    }
+}
+
+/// Optional inline RFC 9421 enforcement configuration shared by UCTP
+/// substrate adapters. When present, the adapter constructs peer
+/// coordinators with [`UctpCoordinator::start_full_with_sig9421`].
+///
+/// [`UctpCoordinator::start_full_with_sig9421`]: super::UctpCoordinator::start_full_with_sig9421
+#[derive(Clone)]
+pub struct Sig9421Config {
+    pub verifier: Arc<rvoip_auth_core::sig9421::Sig9421Verifier>,
+    pub policy: Sig9421Policy,
+}
+
+impl Sig9421Config {
+    pub fn new(
+        verifier: Arc<rvoip_auth_core::sig9421::Sig9421Verifier>,
+        policy: Sig9421Policy,
+    ) -> Self {
+        Self { verifier, policy }
     }
 }

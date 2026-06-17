@@ -193,6 +193,80 @@ async fn fanout_send_persists_and_dispatches_to_all_active_legs() {
 }
 
 #[tokio::test]
+async fn adapter_message_event_persists_and_emits_message_received() {
+    let orch = Orchestrator::new(Config::default());
+    let (adapter, tx) = MsgAdapter::new();
+    orch.register(adapter).unwrap();
+    let mut events = orch.subscribe_events();
+
+    let cid = orch
+        .open_conversation(
+            TenantId::new(),
+            ConversationPolicy::default(),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let sid = orch
+        .start_session(cid.clone(), SessionMedium::TextChat, vec![])
+        .await
+        .unwrap();
+
+    let conn = ConnectionId::new();
+    let participant = ParticipantId::new();
+    drive_inbound(&tx, conn.clone()).await;
+    orch.route_inbound_connection(
+        conn.clone(),
+        InboundAction::Accept {
+            session_id: sid,
+            participant_id: participant.clone(),
+        },
+    )
+    .await
+    .unwrap();
+
+    tx.send(AdapterEvent::Message {
+        connection_id: conn.clone(),
+        text: "I need to talk to Alice".into(),
+    })
+    .await
+    .unwrap();
+
+    let received = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Ok(Event::MessageReceived {
+                message_id,
+                conversation_id,
+                ..
+            }) = events.recv().await
+            {
+                if conversation_id == cid {
+                    return message_id;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    let page = orch
+        .list_messages(cid, MessageFilter::default(), None)
+        .await
+        .unwrap();
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(page.messages[0].id, received);
+    assert_eq!(
+        page.messages[0].body,
+        Bytes::from("I need to talk to Alice")
+    );
+    assert_eq!(page.messages[0].from_participant, participant);
+    match &page.messages[0].origin {
+        MessageOrigin::Connection(origin_conn) => assert_eq!(origin_conn, &conn),
+        other => panic!("expected connection origin, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn pagination_returns_cursor_when_page_full() {
     let orch = Orchestrator::new(Config::default());
     let cid = orch

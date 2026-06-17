@@ -55,6 +55,7 @@ What you can ship right now on the beta:
 | 🧪 **Test / script writer** | Linear test that drives a call from start to finish | [`StreamPeer`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.StreamPeer.html) |
 | 🤖 **IVR / contact-center dev** | A reactive server that routes, queues, transfers | [`CallbackPeer`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.CallbackPeer.html) |
 | 🔀 **B2BUA / gateway dev** | A back-to-back UA bridging two SIP legs (carrier, SBC, gateway) | [`UnifiedCoordinator`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.UnifiedCoordinator.html) |
+| 🌐 **Cross-transport app dev** | A single gateway accepting browser WebRTC customers and SIP/WebRTC/UCTP employees | `rvoip::app` with the `app` feature (alpha) |
 | 📋 **Registrar / PBX dev** | A SIP REGISTER service with location bindings | [`rvoip-sip-registrar`](crates/sip/sip-registrar) |
 | 🎙️ **Voice-AI agent dev** | A SIP-reachable AI agent (alpha — wire your ASR/TTS via the harness) | `CallbackPeer` + [`rvoip-harness`](crates/extensions/rvoip-harness) (alpha) |
 
@@ -185,7 +186,7 @@ PBX interop), see [`crates/sip/rvoip-sip/examples/`](crates/sip/rvoip-sip/exampl
 | TLS 1.2 / 1.3 transport | ✅ Beta | Cert validation, custom roots, SNI |
 | OAuth 2 / Bearer | ✅ Beta | `rvoip-auth-core` |
 | STIR/SHAKEN signing | 🚧 Alpha | `rvoip-stir-shaken` workspace crate |
-| OIDC / Passkey / DPoP | 🚧 Alpha | `rvoip-identity` workspace crate |
+| OIDC / Passkey / DPoP | 🚧 Alpha | Core primitives and extension crates; `rvoip-identity` currently ships `BearerProvider` only |
 | ICE / TURN / STUN | 🔮 Post-beta | STUN client landed; ICE/TURN are non-claims |
 | ZRTP / MIKEY | 🔮 Post-beta | Not a beta claim |
 
@@ -278,15 +279,16 @@ breaking changes before each graduates to beta.
 
 | Crate | Why it's alpha |
 | --- | --- |
-| [rvoip-client](crates/rvoip-client) | Client SDK — API still in motion |
+| [rvoip-client](crates/rvoip-client) | Client SDK — UCTP QUIC connect/call/end path; SIP/WebRTC dispatch future |
 | [rvoip-uctp](crates/uctp/rvoip-uctp) | UCTP protocol design ongoing ([GAP_PLAN](docs/GAP_PLAN.md)) |
 | [rvoip-quic](crates/uctp/rvoip-quic) | New QUIC substrate adapter |
 | [rvoip-webtransport](crates/uctp/rvoip-webtransport) | New WebTransport substrate adapter |
-| [rvoip-websocket](crates/uctp/rvoip-websocket) | Deferred per rvoip 3 v1.x |
-| [rvoip-webrtc](crates/webrtc/rvoip-webrtc) | Pinned to upstream `webrtc 0.20.0-alpha.1` |
+| [rvoip-websocket](crates/uctp/rvoip-websocket) | UCTP over WebSocket substrate adapter |
+| [rvoip-webrtc](crates/webrtc/rvoip-webrtc) | WHIP/WS signaling, full-gather + trickle ICE, audio/VP8/data channel/DTMF; pinned to upstream `webrtc 0.20.0-alpha.1` |
 | [rvoip-vcon](crates/extensions/rvoip-vcon) | First Rust impl of the IETF vCon draft — publishes |
+| [rvoip-vcon-postgres](crates/extensions/rvoip-vcon-postgres) | Optional Postgres reference store for vCon documents |
 | [rvoip-harness](crates/extensions/rvoip-harness) | ASR / TTS / DialogManager provider traits — publishes |
-| [rvoip-identity](crates/identity/rvoip-identity) | OAuth 2.1 + OIDC + SIP Digest + Passkey backends |
+| [rvoip-identity](crates/identity/rvoip-identity) | Minimal `BearerProvider`; production auth backends live in auth-core/extensions |
 | [rvoip-stir-shaken](crates/extensions/rvoip-stir-shaken) | STIR/SHAKEN signing + verification |
 | [rvoip-users-core](crates/identity/users-core) | Reference user-management service |
 
@@ -298,11 +300,10 @@ Highlights below.
 
 ### 🚧 v1.x — incremental on rvoip 3 v1
 
-- `rvoip-websocket` substrate adapter (graduate WS to ✅ beta)
 - Full **AAuth** production status (waiting on IETF WG adoption)
 - **DTLS-SRTP** fingerprint binding (feature-flagged, design in place)
-- **vCon Postgres** reference store (`rvoip-vcon-postgres`)
-- Inline envelope signature enforcement at adapter ingress
+- RFC 9421 signing policy hardening toward default-on deployments
+- WebRTC beta gate hardening around the current WHIP/WS, ICE, media, data-channel, DTMF, and QUIC-bridge basics
 
 ### 🔮 v2 — next major
 

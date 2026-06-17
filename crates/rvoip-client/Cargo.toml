@@ -28,6 +28,7 @@ rvoip-core-traits = { workspace = true }
 # compile in only what they need. The unifying `Client` dispatches
 # to the matching native client by URL scheme at `connect` time.
 rvoip-uctp        = { workspace = true, optional = true }
+rvoip-quic        = { workspace = true, optional = true }
 rvoip-sip         = { workspace = true, optional = true }
 rvoip-webrtc      = { workspace = true, optional = true }
 
@@ -36,16 +37,22 @@ async-trait = { workspace = true }
 thiserror   = { workspace = true }
 tracing     = { workspace = true }
 chrono      = { workspace = true }
+quinn       = { workspace = true, optional = true }
+rustls      = { workspace = true, optional = true }
+serde_json  = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
 
 [features]
 # Default: UCTP-native client only. SIP / WebRTC are interop and
 # pulled in only when the consumer needs them (browser softphone
 # vs. SIP softphone vs. pure UCTP app).
 default = ["uctp"]
-uctp    = ["dep:rvoip-uctp"]
+uctp    = ["dep:rvoip-uctp", "dep:rvoip-quic", "dep:quinn", "dep:rustls", "dep:serde_json", "dep:webpki-roots"]
 sip     = ["dep:rvoip-sip"]
 webrtc  = ["dep:rvoip-webrtc"]
 full    = ["uctp", "sip", "webrtc"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+rvoip-auth-core.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "rvoip-example-customer-escalation-sip-webrtc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+rvoip = { version = "0.2.2", path = "../../crates/rvoip", features = ["app"] }
+rvoip-core = { version = "0.2.2", path = "../../crates/foundation/rvoip-core" }
+rvoip-media-core = { version = "0.2.2", path = "../../crates/media/media-core", features = ["opus"] }
+rvoip-sip = { version = "0.2.2", path = "../../crates/sip/rvoip-sip" }
+rvoip-webrtc = { version = "0.1.0", path = "../../crates/webrtc/rvoip-webrtc", features = ["signaling-ws"] }
+rustls = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.29"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

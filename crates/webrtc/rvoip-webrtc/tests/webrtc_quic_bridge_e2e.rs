@@ -16,9 +16,11 @@ use rvoip_core::capability::CodecInfo;
 use rvoip_core::commands::InboundAction;
 use rvoip_core::config::Config;
 use rvoip_core::connection::Direction;
+use rvoip_core::conversation::ConversationPolicy;
 use rvoip_core::events::Event;
-use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
+use rvoip_core::ids::{ConnectionId, ParticipantId, StreamId, TenantId};
 use rvoip_core::orchestrator::Orchestrator;
+use rvoip_core::session::SessionMedium;
 use rvoip_core::stream::{MediaFrame, MediaStream, StreamKind};
 use rvoip_quic::{spawn_datagram_reader, QuicDatagramMediaStream};
 use rvoip_webrtc::media::silent_rtp_payload_for_ssrc;
@@ -58,7 +60,6 @@ async fn wait_webrtc_inbound(
 async fn whip_webrtc_bridged_to_real_quic_leg() {
     install_crypto_provider();
 
-    let session_id = SessionId::new();
     let quic = QuicLegHarness::start("127.0.0.1:0".parse().unwrap()).await;
 
     let server = WebRtcServerBuilder::new(WebRtcConfig::loopback())
@@ -76,6 +77,19 @@ async fn whip_webrtc_bridged_to_real_quic_leg() {
         .expect("register quic");
 
     let mut events = orchestrator.subscribe_events();
+
+    let conversation_id = orchestrator
+        .open_conversation(
+            TenantId::new(),
+            ConversationPolicy::default(),
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("open conversation");
+    let session_id = orchestrator
+        .start_session(conversation_id, SessionMedium::Voice, vec![])
+        .await
+        .expect("start session");
 
     // Real UCTP/QUIC inbound leg (auth + session.invite).
     let quic_client = quic.dial_invite(&session_id.to_string(), "quic_peer").await;
