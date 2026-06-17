@@ -90,9 +90,16 @@ async fn main() {
 }
 
 /// Build the SIP UAS config from the environment so the server is reachable by
-/// an external caller (Vapi). `SIP_BIND_IP` defaults to `0.0.0.0` (all
-/// interfaces); behind NAT set `SIP_ADVERTISED_ADDR=<public-ip:port>` so the
-/// Via/Contact the server emits are routable. Returns the config + bound port.
+/// an external caller (Vapi).
+///
+/// On a host where the public IP is bound to the NIC, just `SIP_BIND_IP=<public>`.
+/// On EC2/GCP (1:1 NAT — the NIC has a private IP, the public IP is mapped by the
+/// cloud), bind to the private IP (or `0.0.0.0`) and advertise the public IP for
+/// BOTH signaling and media:
+///   SIP_BIND_IP=0.0.0.0
+///   SIP_ADVERTISED_ADDR=<public-ip>:5060   # Via/Contact (signaling)
+///   SIP_MEDIA_PUBLIC_IP=<public-ip>        # SDP c=/m= (RTP); defaults to the
+///                                          # advertised addr's IP if unset
 fn sip_config() -> (SipConfig, u16) {
     let bind_ip: IpAddr = std::env::var("SIP_BIND_IP")
         .ok()
@@ -104,12 +111,27 @@ fn sip_config() -> (SipConfig, u16) {
         .unwrap_or(5060);
 
     let mut sip = SipConfig::on("connect-bridge", bind_ip, port);
-    if let Some(adv) = std::env::var("SIP_ADVERTISED_ADDR")
+
+    let advertised = std::env::var("SIP_ADVERTISED_ADDR")
         .ok()
-        .and_then(|s| s.parse::<SocketAddr>().ok())
-    {
+        .and_then(|s| s.parse::<SocketAddr>().ok());
+    if let Some(adv) = advertised {
         sip.sip_advertised_addr = Some(adv);
     }
+
+    // Public IP for the RTP/media (SDP) side. Explicit `SIP_MEDIA_PUBLIC_IP`
+    // wins; otherwise reuse the advertised signaling IP. Port 0 keeps the
+    // dynamically-allocated RTP port but swaps in the public IP — the EC2/GCP
+    // 1:1-NAT case. Without this, SDP would advertise the NIC's private IP and
+    // the carrier's audio would never arrive.
+    let media_ip: Option<IpAddr> = std::env::var("SIP_MEDIA_PUBLIC_IP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .or_else(|| advertised.map(|a| a.ip()));
+    if let Some(ip) = media_ip {
+        sip.media_public_addr = Some(SocketAddr::new(ip, 0));
+    }
+
     (sip, port)
 }
 
