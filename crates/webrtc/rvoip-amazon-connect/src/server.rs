@@ -153,7 +153,23 @@ impl ConnectScreenPopServer {
 
         // 1. Extract custom headers and translate to Connect attributes.
         let headers = extract_headers(&call);
+        // Diagnostic: the full inbound header set + the resulting attributes.
+        // Enable with `RUST_LOG=rvoip_amazon_connect::sip_headers=debug` — this is
+        // how you confirm whether a carrier preserved the custom `X-` headers
+        // across a Vapi REFER/transfer (the crux of the end-to-end test).
+        tracing::debug!(
+            target: "rvoip_amazon_connect::sip_headers",
+            count = headers.len(),
+            headers = ?headers,
+            "inbound INVITE headers"
+        );
         let mapped = self.mapping.translate(headers);
+        tracing::debug!(
+            target: "rvoip_amazon_connect::sip_headers",
+            attributes = ?mapped.attributes,
+            skipped = ?mapped.skipped,
+            "mapped Connect contact attributes"
+        );
         info!(
             from = %call.from,
             attributes = mapped.attributes.len(),
