@@ -69,7 +69,10 @@ tracing-subscriber = { workspace = true, optional = true }
 # Batteries-included server (optional — see `server` feature).
 rvoip-sip = { workspace = true, optional = true }
 rvoip-sip-core = { workspace = true, optional = true }
-rvoip-media-core = { workspace = true, optional = true }
+# `opus` enables the Opus codec in the transcoder so the SIP(G.711) ⟷
+# Connect(Opus) bridge can actually convert frames (without it the frame pump
+# drops every frame with "Codec not found: Opus").
+rvoip-media-core = { workspace = true, optional = true, features = ["opus"] }
 
 [build-dependencies]
 prost-build = "0.13"
