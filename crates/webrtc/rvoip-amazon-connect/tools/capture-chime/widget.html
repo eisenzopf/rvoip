@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Connect voice widget — Chime capture harness</title>
+  </head>
+  <body>
+    <h1>Amazon Connect voice widget (capture harness)</h1>
+    <p>Click the floating widget button to start a voice call. The Playwright
+       harness records the Chime signaling WebSocket frames.</p>
+
+    <!-- The exact hosted communications widget snippet (iconType: VOICE).
+         The `authenticate` callback returns the JWT injected by capture.mjs
+         (window.__CONNECT_JWT). If your widget is NOT configured to require a
+         token, the authenticate block is harmless. -->
+    <script type="text/javascript">
+      (function (w, d, x, id) {
+        s = d.createElement('script');
+        s.src = 'https://standardcharter.my.connect.aws/connectwidget/static/amazon-connect-chat-interface-client.js';
+        s.async = 1;
+        s.id = id;
+        d.getElementsByTagName('head')[0].appendChild(s);
+        w[x] = w[x] || function () { (w[x].ac = w[x].ac || []).push(arguments); };
+      })(window, document, 'amazon_connect', 'f33df0fc-322b-4aea-9d38-5b86340364d1');
+      amazon_connect('styles', {
+        iconType: 'VOICE',
+        openChat: { color: '#ffffff', backgroundColor: '#123456' },
+        closeChat: { color: '#ffffff', backgroundColor: '#123456' },
+      });
+      amazon_connect('snippetId', 'QVFJREFIZ1NqZWV5MTExbXUwZXRHZUlvQ2NPT3RQZ1k4bTl0VDhTaTZYcy9YcFVCVHdIQjRxVTFBbjRoV1U4L1RsQit6eEJkQUFBQWJqQnNCZ2txaGtpRzl3MEJCd2FnWHpCZEFnRUFNRmdHQ1NxR1NJYjNEUUVIQVRBZUJnbGdoa2dCWlFNRUFTNHdFUVFNdzI0UERpd240UGRYcTkybUFnRVFnQ3NJcHhHSGpOcTBZd0g0Qnh6QjVLZ0U5UUhTZklwRXJCb21WVzJGZzIzRDdIbU1jZ3ZjaEVpaHN6a3Y6OnFjT1h1aE1XWVRxNFRUV2RGYkJEVzBkdEk3QVVJOUJwZTk0Qkt2czJWbHp4R1Z3Uk05Q1QzdkttOXpTY3g3MEFjWGtJRU1jQ09JVkRKUzJhUGhyZk1RK0t3a05oVW1WZGxWczFCOGRaaWdncElTZkROb1poWGZnNEJ4L2NNZ3FYT2p4RVkxY3ozS2hXRGluUit5Zm9NK0lNU1BDNlZJRT0=');
+      amazon_connect('supportedMessagingContentTypes', [
+        'text/plain',
+        'text/markdown',
+        'application/vnd.amazonaws.connect.message.interactive',
+        'application/vnd.amazonaws.connect.message.interactive.response',
+      ]);
+      // Return the JWT the harness injected (if the widget requires a token).
+      amazon_connect('authenticate', function (callback) {
+        if (window.__CONNECT_JWT) {
+          callback(window.__CONNECT_JWT);
+        } else {
+          console.warn('[harness] no __CONNECT_JWT injected; widget may not require one');
+        }
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,93 @@
+[package]
+name = "rvoip-amazon-connect"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description = "rvoip-core Amazon Connect interop adapter — StartWebRTCContact + Amazon Chime SDK WebRTC media, with SIP-header → contact-attribute translation for agent screen pops"
+
+[features]
+default = []
+# `aws-control` pulls the real AWS SDK control plane (StartWebRTCContact via
+# aws-sdk-connect). Off by default so the crate + unit tests build with zero
+# AWS dependencies and no network/credentials. When enabled it adds
+# `aws-config`/`aws-sdk-connect`; both are configured `default-features = false`
+# to keep the workspace's single `ring` rustls CryptoProvider invariant (the AWS
+# SDK's default `aws-lc-rs` would create a second provider and panic at runtime).
+aws-control = ["dep:aws-config", "dep:aws-sdk-connect", "dep:aws-smithy-types", "dep:tracing-subscriber"]
+# Live end-to-end test against a real Amazon Connect instance (needs creds +
+# AMAZON_CONNECT_INSTANCE_ID / _FLOW_ID / AWS_REGION env vars).
+aws-live = ["aws-control"]
+# `server` adds the batteries-included SIP → Amazon Connect screen-pop server
+# (`ConnectScreenPopServer`): a SIP UAS + media bridge. Pulls the SIP stack and
+# the media-core transcoder, so it is off by default for users who only want
+# the adapter.
+server = ["dep:rvoip-sip", "dep:rvoip-sip-core", "dep:rvoip-media-core"]
+
+[dependencies]
+rvoip-core.workspace = true
+# Reuse the WebRTC peer/media building blocks (RvoipPeerConnection, pumps,
+# WebRtcMediaStream) instead of re-implementing the media plane.
+rvoip-webrtc.workspace = true
+
+tokio = { workspace = true }
+async-trait.workspace = true
+futures.workspace = true
+bytes.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+url = "2"
+
+# Chime signaling: protobuf-over-secure-WebSocket.
+prost = "0.13"
+base64 = { workspace = true }
+# Pinned to the workspace's `ring` provider; used to install the process-default
+# rustls CryptoProvider before the Chime wss connect (the AWS SDK also links
+# aws-lc-rs, so rustls can't auto-select and must be told to use ring).
+rustls = { workspace = true }
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+
+# AWS control plane (optional — see `aws-control` feature).
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio", "credentials-login"], optional = true }
+aws-sdk-connect = { version = "1", default-features = false, features = ["rustls", "rt-tokio"], optional = true }
+aws-smithy-types = { version = "1", optional = true }
+# Logging for the `connect-probe` binary (which requires `aws-control`); kept out
+# of the library's adapter-only dependency tree.
+tracing-subscriber = { workspace = true, optional = true }
+
+# Batteries-included server (optional — see `server` feature).
+rvoip-sip = { workspace = true, optional = true }
+rvoip-sip-core = { workspace = true, optional = true }
+rvoip-media-core = { workspace = true, optional = true }
+
+[build-dependencies]
+prost-build = "0.13"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber.workspace = true
+
+# Standalone live probe — gateway↔Amazon Connect connection test (no SIP/Vapi).
+[[bin]]
+name = "connect-probe"
+path = "src/bin/connect_probe.rs"
+required-features = ["aws-control"]
+
+# Decode base64 Chime SdkSignalFrames (browser capture or probe --dump-frames).
+[[bin]]
+name = "chime-decode"
+path = "src/bin/chime_decode.rs"
+
+[lints]
+workspace = true

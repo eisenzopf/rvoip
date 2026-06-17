@@ -12,6 +12,10 @@ pub enum Transport {
     WebSocket,
     Sip,
     WebRtc,
+    /// Amazon Connect (WebRTC interop via the `StartWebRTCContact` API +
+    /// Amazon Chime SDK media). Like [`Transport::WebRtc`] this is an
+    /// `AdapterKind::Interop` gateway to a foreign protocol.
+    AmazonConnect,
     InProcessAi,
 }
 

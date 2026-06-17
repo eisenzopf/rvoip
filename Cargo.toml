@@ -34,6 +34,7 @@ members = [
 
     # webrtc/ — WebRTC interop product.
     "crates/webrtc/rvoip-webrtc",
+    "crates/webrtc/rvoip-amazon-connect",
 
     # uctp/ — UCTP signaling protocol + its substrate adapters.
     "crates/uctp/rvoip-uctp",
@@ -91,6 +92,7 @@ default-members = [
     "crates/uctp/rvoip-uctp",
     "crates/uctp/rvoip-quic",
     "crates/uctp/rvoip-webtransport",
+    "crates/webrtc/rvoip-amazon-connect",
 ]
 
 # ✨ WORKSPACE PACKAGE INHERITANCE - Define common metadata once!

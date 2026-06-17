@@ -1,0 +1,20 @@
+[package]
+name = "rvoip-example-sip-to-amazon-connect"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[features]
+default = []
+# Use the real Amazon Connect control plane (needs AWS creds + env vars).
+aws-live = ["rvoip-amazon-connect/aws-control"]
+
+[dependencies]
+# `server` pulls the batteries-included SIP UAS + media bridge.
+rvoip-amazon-connect = { version = "0.1.0", path = "../../crates/webrtc/rvoip-amazon-connect", features = ["server"] }
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
