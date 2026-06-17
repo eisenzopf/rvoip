@@ -3,7 +3,7 @@ name = "rvoip-vcon"
 # Alpha-tier but DOES publish — rvoip-core lists rvoip-vcon as an
 # optional runtime dep (vcon-signing feature), so cargo verifies this
 # version exists on crates.io even when the feature isn't activated.
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true

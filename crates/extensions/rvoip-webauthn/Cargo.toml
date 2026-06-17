@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-webauthn"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true
@@ -19,7 +19,7 @@ rvoip-users-core.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
-url = "2.5"
+url = { version = "2.5", features = ["serde"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 webauthn-rs = "0.6.1-dev"
 

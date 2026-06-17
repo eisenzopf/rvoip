@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-keycloak"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true
@@ -18,7 +18,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
-url = "2.5"
+url = { version = "2.5", features = ["serde"] }
 
 rvoip-auth-core.workspace = true
 rvoip-core-traits.workspace = true

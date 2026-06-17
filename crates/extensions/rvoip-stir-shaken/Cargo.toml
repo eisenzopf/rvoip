@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-stir-shaken"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["RVoIP Contributors"]
 description = "STIR/SHAKEN (RFC 8224 / RFC 8225 / ATIS-1000074) signing and verification for rvoip"

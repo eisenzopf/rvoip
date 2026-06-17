@@ -212,34 +212,34 @@ rvoip-codec-core    = { path = "crates/media/codec-core", version = "0.2.3" }
 rvoip-infra-common  = { path = "crates/foundation/infra-common", version = "0.2.3" }
 rvoip-auth-core     = { path = "crates/identity/auth-core", version = "0.2.3" }
 rvoip-core-traits   = { path = "crates/foundation/rvoip-core-traits", version = "0.2.3" }
-rvoip-users-core    = { path = "crates/identity/users-core", version = "0.1.0" }
+rvoip-users-core    = { path = "crates/identity/users-core", version = "0.1.1" }
 
 # Remaining internal crates — alpha-tier (0.1.0) except `rvoip` (the 0.2.2
 # beta facade). All publishable now. rvoip-core lists rvoip-vcon / rvoip-harness
 # as optional runtime deps, so their versions must resolve on crates.io
 # regardless of feature activation.
-rvoip-vcon          = { path = "crates/extensions/rvoip-vcon", version = "0.1.0" }
-rvoip-vcon-postgres = { path = "crates/extensions/rvoip-vcon-postgres", version = "0.1.0" }
-rvoip-harness       = { path = "crates/extensions/rvoip-harness", version = "0.1.0" }
+rvoip-vcon          = { path = "crates/extensions/rvoip-vcon", version = "0.1.1" }
+rvoip-vcon-postgres = { path = "crates/extensions/rvoip-vcon-postgres", version = "0.1.1" }
+rvoip-harness       = { path = "crates/extensions/rvoip-harness", version = "0.1.1" }
 rvoip               = { path = "crates/rvoip", version = "0.2.3" }
-rvoip-uctp          = { path = "crates/uctp/rvoip-uctp", version = "0.1.0" }
-rvoip-quic          = { path = "crates/uctp/rvoip-quic", version = "0.1.0" }
-rvoip-webtransport  = { path = "crates/uctp/rvoip-webtransport", version = "0.1.0" }
-rvoip-websocket     = { path = "crates/uctp/rvoip-websocket", version = "0.1.0" }
-rvoip-webrtc        = { path = "crates/webrtc/rvoip-webrtc", version = "0.1.0" }
-rvoip-identity      = { path = "crates/identity/rvoip-identity", version = "0.1.0" }
-rvoip-client        = { path = "crates/rvoip-client", version = "0.1.0" }
-rvoip-audio-device  = { path = "crates/media/rvoip-audio-device", version = "0.1.0" }
-rvoip-stir-shaken   = { path = "crates/extensions/rvoip-stir-shaken", version = "0.1.0" }
-rvoip-keycloak      = { path = "crates/extensions/rvoip-keycloak", version = "0.1.0" }
-rvoip-redis         = { path = "crates/extensions/rvoip-redis", version = "0.1.0" }
-rvoip-audit         = { path = "crates/extensions/rvoip-audit", version = "0.1.0" }
-rvoip-oidc          = { path = "crates/extensions/rvoip-oidc", version = "0.1.0" }
-rvoip-ldap          = { path = "crates/extensions/rvoip-ldap", version = "0.1.0" }
-rvoip-scim          = { path = "crates/extensions/rvoip-scim", version = "0.1.0" }
-rvoip-saml          = { path = "crates/extensions/rvoip-saml", version = "0.1.0" }
-rvoip-webauthn      = { path = "crates/extensions/rvoip-webauthn", version = "0.1.0" }
-rvoip-ims-aka       = { path = "crates/extensions/rvoip-ims-aka", version = "0.1.0" }
+rvoip-uctp          = { path = "crates/uctp/rvoip-uctp", version = "0.1.1" }
+rvoip-quic          = { path = "crates/uctp/rvoip-quic", version = "0.1.1" }
+rvoip-webtransport  = { path = "crates/uctp/rvoip-webtransport", version = "0.1.1" }
+rvoip-websocket     = { path = "crates/uctp/rvoip-websocket", version = "0.1.1" }
+rvoip-webrtc        = { path = "crates/webrtc/rvoip-webrtc", version = "0.1.1" }
+rvoip-identity      = { path = "crates/identity/rvoip-identity", version = "0.1.1" }
+rvoip-client        = { path = "crates/rvoip-client", version = "0.1.1" }
+rvoip-audio-device  = { path = "crates/media/rvoip-audio-device", version = "0.1.1" }
+rvoip-stir-shaken   = { path = "crates/extensions/rvoip-stir-shaken", version = "0.1.1" }
+rvoip-keycloak      = { path = "crates/extensions/rvoip-keycloak", version = "0.1.1" }
+rvoip-redis         = { path = "crates/extensions/rvoip-redis", version = "0.1.1" }
+rvoip-audit         = { path = "crates/extensions/rvoip-audit", version = "0.1.1" }
+rvoip-oidc          = { path = "crates/extensions/rvoip-oidc", version = "0.1.1" }
+rvoip-ldap          = { path = "crates/extensions/rvoip-ldap", version = "0.1.1" }
+rvoip-scim          = { path = "crates/extensions/rvoip-scim", version = "0.1.1" }
+rvoip-saml          = { path = "crates/extensions/rvoip-saml", version = "0.1.1" }
+rvoip-webauthn      = { path = "crates/extensions/rvoip-webauthn", version = "0.1.1" }
+rvoip-ims-aka       = { path = "crates/extensions/rvoip-ims-aka", version = "0.1.1" }
 rtc = "=0.20.0-alpha.1"
 
 # External dependencies
