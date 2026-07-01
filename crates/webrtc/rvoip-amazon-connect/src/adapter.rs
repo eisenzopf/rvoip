@@ -23,9 +23,7 @@ use rvoip_core::adapter::{
     RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
-use rvoip_core::connection::{
-    Connection, ConnectionState, Direction, Transport, TransportHandle,
-};
+use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
@@ -209,8 +207,8 @@ impl AmazonConnectAdapter {
         );
 
         // 2. Chime signaling JOIN → JOIN_ACK (yields TURN credentials).
-        let join = ChimeSignalingClient::join(&connection_data, self.config.signaling_timeout)
-            .await?;
+        let join =
+            ChimeSignalingClient::join(&connection_data, self.config.signaling_timeout).await?;
 
         // 3. Build the offerer peer connection seeded with the meeting's TURN
         //    servers, then generate the SDP offer.
@@ -459,16 +457,20 @@ impl ConnectionAdapter for AmazonConnectAdapter {
 
     async fn hold(&self, conn: ConnectionId) -> RvoipResult<()> {
         let route = self.route(&conn).map_err(RvoipError::from)?;
-        route.peer.hold_audio().await.map_err(|e| {
-            RvoipError::Adapter(format!("hold: {e}"))
-        })
+        route
+            .peer
+            .hold_audio()
+            .await
+            .map_err(|e| RvoipError::Adapter(format!("hold: {e}")))
     }
 
     async fn resume(&self, conn: ConnectionId) -> RvoipResult<()> {
         let route = self.route(&conn).map_err(RvoipError::from)?;
-        route.peer.resume_audio().await.map_err(|e| {
-            RvoipError::Adapter(format!("resume: {e}"))
-        })
+        route
+            .peer
+            .resume_audio()
+            .await
+            .map_err(|e| RvoipError::Adapter(format!("resume: {e}")))
     }
 
     async fn transfer(&self, _conn: ConnectionId, _target: TransferTarget) -> RvoipResult<()> {

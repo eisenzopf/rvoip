@@ -28,7 +28,7 @@ use rvoip_amazon_connect::signaling::chime::{
 use rvoip_core::capability::CodecInfo;
 use rvoip_core::ids::StreamId;
 use rvoip_core::stream::MediaStream;
-use rvoip_webrtc::media::{from_tracks, fixtures::opus_rtp_packet_for_ssrc};
+use rvoip_webrtc::media::{fixtures::opus_rtp_packet_for_ssrc, from_tracks};
 use rvoip_webrtc::{PeerRole, RvoipPeerConnection, WebRtcConfig};
 
 #[tokio::main]
@@ -108,7 +108,10 @@ async fn run(
     );
     println!(
         "   signaling_host={signaling_host} turn_control_url={}",
-        conn.media_placement.turn_control_url.as_deref().unwrap_or("none")
+        conn.media_placement
+            .turn_control_url
+            .as_deref()
+            .unwrap_or("none")
     );
     if dump_frames {
         println!(
@@ -121,7 +124,10 @@ async fn run(
     // Ensure we always try to end the contact, even on later failure.
     let result = run_media(&conn, dump_frames, audio_secs).await;
     println!("\n— cleanup —");
-    if let Err(e) = starter.stop_contact(conn.contact_id.clone(), instance_id).await {
+    if let Err(e) = starter
+        .stop_contact(conn.contact_id.clone(), instance_id)
+        .await
+    {
         eprintln!("   StopContact failed (non-fatal): {e}");
     } else {
         println!("   StopContact ok");
@@ -206,7 +212,12 @@ async fn run_media(
             let ssrc = peer.local_audio_ssrc().unwrap_or(0);
             let stream = from_tracks(
                 StreamId::new(),
-                CodecInfo { name: "opus".into(), clock_rate_hz: 48000, channels: 2, fmtp: None },
+                CodecInfo {
+                    name: "opus".into(),
+                    clock_rate_hz: 48000,
+                    channels: 2,
+                    fmtp: None,
+                },
                 local,
                 ssrc,
                 111,
@@ -240,11 +251,15 @@ async fn run_media(
                     }
                     _ = tokio::time::sleep_until(deadline) => break,
                 }
-                if tokio::time::Instant::now() >= deadline { break; }
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
             }
             println!("   inbound media frames in {audio_secs}s: {inbound}");
             if inbound == 0 {
-                println!("   ⚠ no inbound audio (agent not answered / one-way) — connection still OK");
+                println!(
+                    "   ⚠ no inbound audio (agent not answered / one-way) — connection still OK"
+                );
             }
             pass("D");
         }
