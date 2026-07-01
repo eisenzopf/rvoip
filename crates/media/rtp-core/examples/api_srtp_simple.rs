@@ -9,6 +9,7 @@ use rvoip_rtp_core::{
     srtp::{SrtpContext, SrtpCryptoKey, SRTP_AES128_CM_SHA1_80},
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use bytes::Bytes;
 use std::time::Duration;
 use tracing::{error, info};
@@ -45,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut combined = Vec::with_capacity(key_data.len() + salt_data.len());
     combined.extend_from_slice(&key_data);
     combined.extend_from_slice(&salt_data);
-    let base64_key = base64::encode(&combined);
+    let base64_key = BASE64.encode(&combined);
 
     info!("✅ SRTP crypto suite: AES_CM_128_HMAC_SHA1_80");
     info!("✅ SRTP key+salt (base64): {}", base64_key);

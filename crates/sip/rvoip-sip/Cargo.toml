@@ -367,7 +367,7 @@ rvoip-sip-core.workspace = true
 rvoip-rtp-core.workspace = true
 rvoip-core-traits.workspace = true
 # RFC 4568 SDES — base64 encoding of `a=crypto: inline:` master keys.
-base64 = "0.21"
+base64 = "0.22"
 rvoip-auth-core.workspace = true
 rvoip-sip-registrar.workspace = true
 
@@ -376,7 +376,7 @@ lazy_static = "1.4"
 arc-swap = "1.7"
 
 # Collections
-dashmap = "5.5"
+dashmap = "6"
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }

@@ -21,6 +21,7 @@ use rvoip_rtp_core::api::{
     },
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use std::fmt;
 use std::net::SocketAddr;
 use std::process;
@@ -110,7 +111,7 @@ async fn main() -> Result<(), ExampleError> {
     let mut combined = Vec::with_capacity(key_data.len() + salt_data.len());
     combined.extend_from_slice(&key_data);
     combined.extend_from_slice(&salt_data);
-    let base64_key = base64::encode(&combined);
+    let base64_key = BASE64.encode(&combined);
 
     // Display key information for demonstration purposes
     info!("Using SRTP crypto suite: AES_CM_128_HMAC_SHA1_80");

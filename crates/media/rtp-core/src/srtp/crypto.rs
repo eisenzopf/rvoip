@@ -6,6 +6,7 @@ use aes::{
     cipher::{generic_array::GenericArray, KeyIvInit, StreamCipher},
     Aes128, Aes256,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use bytes::{BufMut, Bytes, BytesMut};
 use ctr::Ctr64BE;
 use hmac::{Hmac, Mac};
@@ -45,7 +46,8 @@ impl SrtpCryptoKey {
 
     /// Create a key from a base64 string (as used in SDP)
     pub fn from_base64(data: &str) -> Result<Self> {
-        let decoded = base64::decode(data)
+        let decoded = BASE64
+            .decode(data)
             .map_err(|e| Error::SrtpError(format!("Failed to decode base64 key: {}", e)))?;
 
         // Typical format is 30 bytes = 16 bytes key + 14 bytes salt

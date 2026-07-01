@@ -97,7 +97,8 @@ impl WebSocketConnection {
 
         // In WebSocket, we send the raw SIP message as text content
         // RFC 7118 section 7: SIP WebSocket Client and Server Examples
-        let ws_message = WsMessage::Text(String::from_utf8_lossy(&message_bytes).to_string());
+        let ws_message =
+            WsMessage::Text(String::from_utf8_lossy(&message_bytes).to_string().into());
 
         // Acquire lock on the writer
         let mut writer = self.ws_writer.lock().await;
@@ -143,7 +144,7 @@ impl WebSocketConnection {
         // RFC 7118 §5 allows either Text or Binary; choose Binary so we
         // don't re-validate as UTF-8 (the bytes may be arbitrary SIP
         // payload from a previous capture).
-        let ws_message = WsMessage::Binary(bytes.to_vec());
+        let ws_message = WsMessage::Binary(bytes);
 
         let mut writer = self.ws_writer.lock().await;
         writer.send(ws_message).await.map_err(|e| {
@@ -436,7 +437,7 @@ Contact: <sip:alice@127.0.0.1>\r\n\
 Content-Length: 0\r\n\
 \r\n";
 
-        let text_frame = WsMessage::Text(sip_text.to_string());
+        let text_frame = WsMessage::Text(sip_text.to_string().into());
         let result = connection.process_ws_message(text_frame).unwrap();
 
         assert!(result.is_some());
@@ -448,7 +449,7 @@ Content-Length: 0\r\n\
         }
 
         // Test processing a ping frame
-        let ping_frame = WsMessage::Ping(vec![1, 2, 3]);
+        let ping_frame = WsMessage::Ping(vec![1, 2, 3].into());
         let result = connection.process_ws_message(ping_frame).unwrap();
         assert!(
             result.is_none(),
@@ -456,7 +457,7 @@ Content-Length: 0\r\n\
         );
 
         // Test processing a pong frame
-        let pong_frame = WsMessage::Pong(vec![1, 2, 3]);
+        let pong_frame = WsMessage::Pong(vec![1, 2, 3].into());
         let result = connection.process_ws_message(pong_frame).unwrap();
         assert!(
             result.is_none(),

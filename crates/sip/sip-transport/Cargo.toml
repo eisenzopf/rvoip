@@ -46,8 +46,8 @@ rustls-native-certs = { version = "0.8", optional = true }
 webpki-roots = { version = "0.26", optional = true }
 
 # WebSocket support
-tokio-tungstenite = { version = "0.20", optional = true }
-http = { version = "0.2", optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+http = { version = "1", optional = true }
 
 # RFC 3263 NAPTR/SRV/A resolver (opt-in via `dns` feature).
 # `HickoryResolver` and the `hickory` submodule are gated on this.

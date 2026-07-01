@@ -260,14 +260,14 @@ proptest = "1.4"
 async-trait = "0.1"
 futures = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
-dashmap = "5.5"
+dashmap = "6"
 parking_lot = "0.12"
 rand = { version = "0.8", features = ["small_rng"] }
 clap = { version = "4.0", features = ["derive"] }
 
 # Additional dependencies used by various crates
 serde_bytes = "0.11"
-base64 = "0.21"
+base64 = "0.22"
 nom = "7.1"
 log = "0.4"
 ordered-float = { version = "4.2.0", features = ["serde"] }
@@ -293,7 +293,7 @@ aes = "0.8"
 md-5 = "0.10"
 ring = "0.17"
 rcgen = "0.14"
-x509-parser = "0.15"
+x509-parser = "0.18"
 webpki-roots = "0.26"
 serial_test = "3.1"
 fastrand = "2.0"
