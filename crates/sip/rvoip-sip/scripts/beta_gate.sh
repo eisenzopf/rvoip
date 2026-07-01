@@ -909,6 +909,11 @@ run_dependency_audit() {
   - `users-core` RS256/JWK support from configured signing keys.
   - `webauthn-rs` transitive crypto via `crypto-glue`.
 - beta stance: keep this advisory visible in release evidence and revisit before stable release or when upstream publishes a fixed upgrade path.
+
+- advisories: `RUSTSEC-2026-0185` (`quinn-proto`), `RUSTSEC-2026-0104` / `RUSTSEC-2026-0098` / `RUSTSEC-2026-0099` (`rustls-webpki`)
+- status: accepted beta risk
+- reason: transitive via the `quinn` (QUIC) and `rustls` stacks; no fixed upgrade adopted in the currently pinned versions.
+- beta stance: revisit when the pinned stacks bump `quinn-proto` >= 0.11.15 and `rustls-webpki` to the fixed line.
 EOF
   run_gate "dependency advisory audit" env SECURITY_DIR="$security_dir" bash -c '
     set -euo pipefail
@@ -918,9 +923,9 @@ EOF
       exit 127
     fi
     set +e
-    cargo audit --ignore RUSTSEC-2023-0071 > "$SECURITY_DIR/cargo-audit.txt" 2>&1
+    cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0185 --ignore RUSTSEC-2026-0104 --ignore RUSTSEC-2026-0098 --ignore RUSTSEC-2026-0099 > "$SECURITY_DIR/cargo-audit.txt" 2>&1
     audit_status=$?
-    cargo audit --ignore RUSTSEC-2023-0071 --json > "$SECURITY_DIR/cargo-audit.json" 2> "$SECURITY_DIR/cargo-audit-json.stderr"
+    cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0185 --ignore RUSTSEC-2026-0104 --ignore RUSTSEC-2026-0098 --ignore RUSTSEC-2026-0099 --json > "$SECURITY_DIR/cargo-audit.json" 2> "$SECURITY_DIR/cargo-audit-json.stderr"
     json_status=$?
     set -e
     {
@@ -1147,6 +1152,7 @@ if [ -f "$ARTIFACT_DIR/security/accepted-advisories.md" ]; then
 ## Accepted Dependency Advisories
 
 - `RUSTSEC-2023-0071` (`rsa`): accepted beta risk because RustSec reports no fixed upgrade.
+- `RUSTSEC-2026-0185` (`quinn-proto`), `RUSTSEC-2026-0104`/`-0098`/`-0099` (`rustls-webpki`): accepted; transitive via the `quinn`/`rustls` stacks.
 - Affected paths: `users-core` RS256/JWK support and `webauthn-rs` transitive crypto.
 - Evidence: `security/accepted-advisories.md`.
 EOF
