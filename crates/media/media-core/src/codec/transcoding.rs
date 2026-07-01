@@ -505,4 +505,61 @@ mod tests {
             to_codec: 18
         })); // Opus -> G.729
     }
+
+    /// Full Opus<->G.711 round trip through the real codecs, exercising BOTH
+    /// converted directions: PCMU (8 kHz mono) -> Opus (48 kHz stereo)
+    /// [up-sample + up-mix] and back [down-mix + down-sample]. A 1 kHz tone
+    /// must survive (this path had no test before, and is where the resampler
+    /// bug lived). Requires the `opus` feature (Opus is off by default, like G.729).
+    #[cfg(feature = "opus")]
+    #[tokio::test]
+    async fn pcmu_opus_roundtrip_preserves_tone() {
+        use crate::codec::factory::CodecFactory;
+        use crate::types::AudioFrame;
+
+        fn goertzel_mag(samples: &[i16], sample_rate: f64, freq: f64) -> f64 {
+            let n = samples.len() as f64;
+            let k = (freq / sample_rate * n).round();
+            let coeff = 2.0 * (2.0 * std::f64::consts::PI * k / n).cos();
+            let (mut s1, mut s2) = (0.0_f64, 0.0_f64);
+            for &x in samples {
+                let s = x as f64 + coeff * s1 - s2;
+                s2 = s1;
+                s1 = s;
+            }
+            (s1 * s1 + s2 * s2 - coeff * s1 * s2).sqrt()
+        }
+
+        let frames = 10usize;
+        let spf = 160usize; // 20 ms @ 8 kHz
+        let mut pcmu = CodecFactory::create_codec_default(0).unwrap(); // PCMU
+        let mut transcoder = create_test_transcoder();
+
+        let mut recovered: Vec<i16> = Vec::new();
+        for f in 0..frames {
+            let samples: Vec<i16> = (0..spf)
+                .map(|j| {
+                    let i = (f * spf + j) as f64;
+                    (10_000.0 * (2.0 * std::f64::consts::PI * 1000.0 * i / 8000.0).sin()) as i16
+                })
+                .collect();
+            let frame = AudioFrame::new(samples, 8000, 1, (f * spf) as u32);
+            let pcmu_in = pcmu.encode(&frame).unwrap();
+            // PCMU(8k mono) -> Opus(48k stereo): up-sample + up-mix + encode.
+            let opus = transcoder.pcmu_to_opus(&pcmu_in).await.unwrap();
+            // Opus(48k stereo) -> PCMU(8k mono): decode + down-mix + down-sample.
+            let pcmu_out = transcoder.opus_to_pcmu(&opus).await.unwrap();
+            let decoded = pcmu.decode(&pcmu_out).unwrap();
+            recovered.extend_from_slice(&decoded.samples);
+        }
+
+        // Skip warm-up frames (codec + filter state), analyze steady state.
+        let steady = &recovered[2 * spf..];
+        let tone = goertzel_mag(steady, 8000.0, 1000.0);
+        let off = goertzel_mag(steady, 8000.0, 3000.0);
+        assert!(
+            tone > off * 3.0,
+            "1 kHz tone lost through Opus<->G.711 round trip: tone={tone}, off={off}"
+        );
+    }
 }
