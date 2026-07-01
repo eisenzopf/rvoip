@@ -74,7 +74,11 @@ fn now_ms() -> u64 {
 /// params. The attendee **join token is NOT in the URL** — it authenticates via
 /// the `Sec-WebSocket-Protocol` subprotocol header (see [`ChimeSignalingClient::join`]).
 fn build_signaling_url(signaling_url: &str) -> String {
-    let sep = if signaling_url.contains('?') { '&' } else { '?' };
+    let sep = if signaling_url.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
     format!(
         "{signaling_url}{sep}X-Chime-Control-Protocol-Version=3&X-Amzn-Chime-Send-Close-On-Error=1"
     )
@@ -214,7 +218,11 @@ async fn recv_until(ws: &mut Ws, wanted: FrameType, timeout: Duration) -> Result
     let deadline = async {
         loop {
             match recv_frame(ws).await? {
-                None => return Err(ConnectError::Signaling("socket closed during handshake".into())),
+                None => {
+                    return Err(ConnectError::Signaling(
+                        "socket closed during handshake".into(),
+                    ))
+                }
                 Some(frame) => {
                     if frame.r#type == FrameType::Notification as i32 {
                         continue;
@@ -344,7 +352,8 @@ impl ChimeJoin {
         timeout: Duration,
         keepalive_interval: Duration,
     ) -> Result<(String, ChimeSession)> {
-        let sub = build_subscribe_frame(offer_sdp, self.audio_host.clone(), self.attendee_id.clone());
+        let sub =
+            build_subscribe_frame(offer_sdp, self.audio_host.clone(), self.attendee_id.clone());
         send_frame(&mut self.ws, &sub).await?;
 
         let ack = recv_until(&mut self.ws, FrameType::SubscribeAck, timeout).await?;
@@ -355,8 +364,7 @@ impl ChimeJoin {
 
         let cancel = Arc::new(Notify::new());
         let (ended_tx, ended_rx) = oneshot::channel();
-        let handle =
-            spawn_session_loop(self.ws, keepalive_interval, Arc::clone(&cancel), ended_tx);
+        let handle = spawn_session_loop(self.ws, keepalive_interval, Arc::clone(&cancel), ended_tx);
 
         Ok((
             answer,
@@ -514,7 +522,10 @@ mod tests {
         assert_eq!(ice.len(), 2);
         assert_eq!(ice[0].username.as_deref(), Some("user"));
         assert_eq!(ice[0].credential.as_deref(), Some("pass"));
-        assert_eq!(ice[0].urls, vec!["turn:1.2.3.4:3478?transport=udp".to_string()]);
+        assert_eq!(
+            ice[0].urls,
+            vec!["turn:1.2.3.4:3478?transport=udp".to_string()]
+        );
     }
 
     #[test]

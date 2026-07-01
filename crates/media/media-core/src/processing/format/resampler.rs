@@ -1,7 +1,12 @@
 //! Audio Resampler - Sample rate conversion
 //!
-//! This module implements sample rate conversion using linear interpolation
-//! for basic resampling needs.
+//! Up-sampling uses linear/cubic interpolation. Down-sampling additionally runs
+//! the signal through an anti-aliasing low-pass **before** decimation — without
+//! it, content above the output Nyquist folds back into the band as harsh
+//! distortion (e.g. the 48 kHz -> 8 kHz Opus->G.711 leg).
+//!
+//! The resampler operates on a single (mono) stream; callers must de-interleave
+//! multi-channel audio first (see `FormatConverter`).
 
 use crate::error::{AudioProcessingError, Result};
 use tracing::{debug, warn};
@@ -29,6 +34,67 @@ pub struct Resampler {
     prev_sample: i16,
     /// Whether this is the first sample
     first_sample: bool,
+    /// Anti-aliasing low-pass applied before down-sampling (empty when
+    /// up-sampling — interpolation doesn't alias). Cascaded biquads for a
+    /// steeper roll-off; state persists across frames for continuity.
+    antialias: Vec<Biquad>,
+}
+
+/// One RBJ-cookbook biquad section (Direct Form I), used to build the
+/// anti-aliasing low-pass applied before down-sampling.
+#[derive(Debug, Clone)]
+struct Biquad {
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
+    x1: f64,
+    x2: f64,
+    y1: f64,
+    y2: f64,
+}
+
+impl Biquad {
+    /// Low-pass biquad at `cutoff_hz` for a stream sampled at `sample_rate_hz`.
+    fn low_pass(sample_rate_hz: f64, cutoff_hz: f64, q: f64) -> Self {
+        let w0 = 2.0 * std::f64::consts::PI * cutoff_hz / sample_rate_hz;
+        let (sin_w0, cos_w0) = w0.sin_cos();
+        let alpha = sin_w0 / (2.0 * q);
+        let a0 = 1.0 + alpha;
+        Self {
+            b0: ((1.0 - cos_w0) / 2.0) / a0,
+            b1: (1.0 - cos_w0) / a0,
+            b2: ((1.0 - cos_w0) / 2.0) / a0,
+            a1: (-2.0 * cos_w0) / a0,
+            a2: (1.0 - alpha) / a0,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
+    }
+
+    /// Process one sample (Direct Form I), advancing filter state.
+    #[inline]
+    fn process(&mut self, x: f64) -> f64 {
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+
+    /// Clear filter memory.
+    fn reset(&mut self) {
+        self.x1 = 0.0;
+        self.x2 = 0.0;
+        self.y1 = 0.0;
+        self.y2 = 0.0;
+    }
 }
 
 impl Resampler {
@@ -53,6 +119,22 @@ impl Resampler {
             input_rate, output_rate, ratio
         );
 
+        // Anti-aliasing: down-sampling folds everything above the output Nyquist
+        // back into the audible band. Pre-filter with a low-pass at ~0.42x the
+        // output rate (keeps the voice band, kills the fold-back). Two
+        // Butterworth-Q sections ~= 4th order (~24 dB/octave). Up-sampling does
+        // not alias, so no filter is used there.
+        let antialias = if output_rate < input_rate {
+            let fc = 0.42 * output_rate as f64;
+            let q = std::f64::consts::FRAC_1_SQRT_2;
+            vec![
+                Biquad::low_pass(input_rate as f64, fc, q),
+                Biquad::low_pass(input_rate as f64, fc, q),
+            ]
+        } else {
+            Vec::new()
+        };
+
         Ok(Self {
             config: ResamplerConfig {
                 input_rate,
@@ -63,6 +145,7 @@ impl Resampler {
             position: 0.0,
             prev_sample: 0,
             first_sample: true,
+            antialias,
         })
     }
 
@@ -79,28 +162,47 @@ impl Resampler {
             return Ok(Vec::new());
         }
 
+        // Anti-alias pre-filter for down-sampling (no-op when up-sampling, where
+        // `antialias` is empty). Filtered in f64 with state carried across
+        // frames for continuity.
+        let filtered: Option<Vec<i16>> = if self.antialias.is_empty() {
+            None
+        } else {
+            Some(
+                input_samples
+                    .iter()
+                    .map(|&s| {
+                        let mut x = s as f64;
+                        for bq in &mut self.antialias {
+                            x = bq.process(x);
+                        }
+                        x.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16
+                    })
+                    .collect(),
+            )
+        };
+        let source: &[i16] = filtered.as_deref().unwrap_or(input_samples);
+
         // Deterministic output length. Use round() not ceil() so that
         // exact integer ratios (6.0×) don't pick up a phantom extra
         // sample from floating-point representation drift.
-        let output_len = ((input_samples.len() as f64) * self.ratio).round() as usize;
+        let output_len = ((source.len() as f64) * self.ratio).round() as usize;
         let mut output_samples = Vec::with_capacity(output_len);
 
         // Generate exactly `output_len` samples. Index the input by a
         // ratio-derived float position; the loop bound (an integer)
         // never drifts.
-        let input_len = input_samples.len();
+        let input_len = source.len();
         for i in 0..output_len {
             // Position in source frame for output sample `i`.
             self.position = (i as f64) / self.ratio;
-            let sample = self.interpolate_sample(input_samples)?;
+            let sample = self.interpolate_sample(source)?;
             output_samples.push(sample);
         }
 
         // Update state for next frame
-        if !input_samples.is_empty() {
-            self.prev_sample = input_samples[input_len - 1];
-            self.first_sample = false;
-        }
+        self.prev_sample = source[input_len - 1];
+        self.first_sample = false;
 
         Ok(output_samples)
     }
@@ -110,6 +212,9 @@ impl Resampler {
         self.position = 0.0;
         self.prev_sample = 0;
         self.first_sample = true;
+        for bq in &mut self.antialias {
+            bq.reset();
+        }
         debug!("Resampler reset");
     }
 
@@ -255,5 +360,24 @@ mod tests {
         // Should approximately halve the number of samples
         assert!(output.len() >= input.len() / 2 - 1);
         assert!(output.len() <= input.len() / 2 + 1);
+    }
+
+    #[test]
+    fn downsampling_attenuates_above_output_nyquist() {
+        // A 6 kHz tone at 48 kHz is above the 4 kHz output Nyquist. Naive
+        // decimation folds it to 2 kHz at full amplitude; the anti-alias
+        // low-pass must suppress it instead.
+        let fs = 48_000.0_f64;
+        let f = 6_000.0_f64;
+        let input: Vec<i16> = (0..4_800)
+            .map(|i| ((2.0 * std::f64::consts::PI * f * (i as f64) / fs).sin() * 10_000.0) as i16)
+            .collect();
+        let mut rs = Resampler::new(48_000, 8_000, 5).unwrap();
+        let out = rs.resample(&input).unwrap();
+        let rms = (out.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / out.len() as f64).sqrt();
+        assert!(
+            rms < 2_500.0,
+            "6 kHz tone not attenuated on downsample: rms={rms}"
+        );
     }
 }

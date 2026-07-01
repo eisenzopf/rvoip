@@ -20,14 +20,13 @@ use std::io::Read;
 
 use base64::Engine as _;
 use prost::Message as _;
-use rvoip_amazon_connect::signaling::proto::{
-    sdk_signal_frame::Type as FrameType, SdkSignalFrame,
-};
+use rvoip_amazon_connect::signaling::proto::{sdk_signal_frame::Type as FrameType, SdkSignalFrame};
 
 fn main() {
     let input = match std::env::args().nth(1) {
-        Some(path) => std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| fail(&format!("read {path}: {e}"))),
+        Some(path) => {
+            std::fs::read_to_string(&path).unwrap_or_else(|e| fail(&format!("read {path}: {e}")))
+        }
         None => {
             let mut s = String::new();
             std::io::stdin()
@@ -120,13 +119,22 @@ fn print_frame(dir: &str, f: &SdkSignalFrame, byte_len: usize) {
         println!(
             "      SUBSCRIBE_ACK: duplex={:?} sdp_answer={} compressed_sdp={} tracks={}",
             s.duplex,
-            s.sdp_answer.as_ref().map(|a| format!("{} chars", a.len())).unwrap_or_else(|| "none".into()),
-            s.compressed_sdp_answer.as_ref().map(|c| format!("{} bytes", c.len())).unwrap_or_else(|| "none".into()),
+            s.sdp_answer
+                .as_ref()
+                .map(|a| format!("{} chars", a.len()))
+                .unwrap_or_else(|| "none".into()),
+            s.compressed_sdp_answer
+                .as_ref()
+                .map(|c| format!("{} bytes", c.len()))
+                .unwrap_or_else(|| "none".into()),
             s.tracks.len(),
         );
     }
     if let Some(e) = &f.error {
-        println!("      ERROR: status={:?} description={:?}", e.status, e.description);
+        println!(
+            "      ERROR: status={:?} description={:?}",
+            e.status, e.description
+        );
     }
 }
 

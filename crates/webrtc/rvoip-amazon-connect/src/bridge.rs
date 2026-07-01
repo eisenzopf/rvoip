@@ -46,10 +46,7 @@ impl Drop for StreamBridge {
 ///
 /// Each stream's `frames_in()`/`frames_out()` channels are single-take, so this
 /// must be called exactly once per stream pair.
-pub fn bridge_streams(
-    a: Arc<dyn MediaStream>,
-    b: Arc<dyn MediaStream>,
-) -> Result<StreamBridge> {
+pub fn bridge_streams(a: Arc<dyn MediaStream>, b: Arc<dyn MediaStream>) -> Result<StreamBridge> {
     let a_name = a.codec().name;
     let b_name = b.codec().name;
     let a_pt = codec_to_pt(&a_name)
@@ -62,15 +59,33 @@ pub fn bridge_streams(
     // 8 kHz⟷48 kHz flip). No transcoder needed when both sides share a PT.
     let (transcoder_a_to_b, transcoder_b_to_a) = if a_pt != b_pt {
         (
-            Some(Transcoder::new(Arc::new(TokioRwLock::new(FormatConverter::new())))),
-            Some(Transcoder::new(Arc::new(TokioRwLock::new(FormatConverter::new())))),
+            Some(Transcoder::new(Arc::new(TokioRwLock::new(
+                FormatConverter::new(),
+            )))),
+            Some(Transcoder::new(Arc::new(TokioRwLock::new(
+                FormatConverter::new(),
+            )))),
         )
     } else {
         (None, None)
     };
 
-    let a_to_b = spawn_pump("connect:a->b", a.frames_in(), b.frames_out(), transcoder_a_to_b, a_pt, b_pt);
-    let b_to_a = spawn_pump("connect:b->a", b.frames_in(), a.frames_out(), transcoder_b_to_a, b_pt, a_pt);
+    let a_to_b = spawn_pump(
+        "connect:a->b",
+        a.frames_in(),
+        b.frames_out(),
+        transcoder_a_to_b,
+        a_pt,
+        b_pt,
+    );
+    let b_to_a = spawn_pump(
+        "connect:b->a",
+        b.frames_in(),
+        a.frames_out(),
+        transcoder_b_to_a,
+        b_pt,
+        a_pt,
+    );
 
     Ok(StreamBridge { a_to_b, b_to_a })
 }

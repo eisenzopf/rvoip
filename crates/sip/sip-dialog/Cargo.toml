@@ -45,7 +45,7 @@ anyhow.workspace = true
 rand.workspace = true
 
 # Crate-specific dependencies not in workspace
-http = "0.2"
+http = "1"
 # arc-swap — lock-free atomic Arc swap used for `event_subscribers`
 # (the broadcast hot path needs lock-free reads).
 arc-swap = "1.7"

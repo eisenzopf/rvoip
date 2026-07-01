@@ -56,10 +56,7 @@ impl Default for ConnectConfig {
 impl ConnectConfig {
     /// Construct with the required AWS identifiers; everything else takes the
     /// defaults above.
-    pub fn new(
-        instance_id: impl Into<String>,
-        contact_flow_id: impl Into<String>,
-    ) -> Self {
+    pub fn new(instance_id: impl Into<String>, contact_flow_id: impl Into<String>) -> Self {
         Self {
             instance_id: instance_id.into(),
             contact_flow_id: contact_flow_id.into(),

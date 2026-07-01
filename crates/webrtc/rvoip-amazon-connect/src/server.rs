@@ -56,7 +56,11 @@ impl ScreenPopServerConfig {
         connect: ConnectConfig,
         starter: Arc<dyn ConnectContactStarter>,
     ) -> Self {
-        Self { sip, connect, starter }
+        Self {
+            sip,
+            connect,
+            starter,
+        }
     }
 }
 
@@ -210,7 +214,8 @@ impl ConnectScreenPopServer {
 
         // 5. Bridge the two legs (transcoding G.711 ⟷ Opus).
         let bridge = bridge_streams(sip_stream, connect_stream)?;
-        self.by_connect.insert(connect_conn.clone(), session_id.clone());
+        self.by_connect
+            .insert(connect_conn.clone(), session_id.clone());
         self.active.insert(
             session_id.clone(),
             ActiveContact {

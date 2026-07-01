@@ -31,7 +31,7 @@ async-trait.workspace = true
 dashmap.workspace = true
 
 # Crate-specific dependencies
-config = "0.13"
+config = "0.14"
 once_cell = "1.18.0"
 mimalloc = { version = "0.1", default-features = false }
 libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"], optional = true }

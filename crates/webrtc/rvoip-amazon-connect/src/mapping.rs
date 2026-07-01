@@ -190,8 +190,14 @@ mod tests {
             ("X-Vapi-Customer-Id", "cust_42"),
             ("X-Account.Tier", "gold"),
         ]));
-        assert_eq!(out.attributes.get("Vapi-Customer-Id"), Some(&"cust_42".to_string()));
-        assert_eq!(out.attributes.get("Account_Tier"), Some(&"gold".to_string()));
+        assert_eq!(
+            out.attributes.get("Vapi-Customer-Id"),
+            Some(&"cust_42".to_string())
+        );
+        assert_eq!(
+            out.attributes.get("Account_Tier"),
+            Some(&"gold".to_string())
+        );
         assert!(out.skipped.is_empty());
         assert_eq!(out.dropped_for_size, 0);
     }
@@ -227,10 +233,7 @@ mod tests {
     fn enforces_byte_cap_and_counts_drops() {
         let big = "v".repeat(MAX_ATTRIBUTE_BYTES); // single value already at the cap
         let m = AttributeMapping::default();
-        let out = m.translate(headers(&[
-            ("X-Small", "ok"),
-            ("X-Big", big.as_str()),
-        ]));
+        let out = m.translate(headers(&[("X-Small", "ok"), ("X-Big", big.as_str())]));
         // X-Small fits; X-Big blows the budget and is dropped.
         assert_eq!(out.attributes.get("Small"), Some(&"ok".to_string()));
         assert!(out.attributes.get("Big").is_none());

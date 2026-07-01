@@ -9,7 +9,7 @@ use crate::security::SecurityKeyExchange;
 use crate::srtp::crypto::SrtpCryptoKey;
 use crate::srtp::{SrtpCryptoSuite, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80};
 use crate::Error;
-use base64;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rand::{rngs::OsRng, RngCore};
 
 /// SDES crypto attribute representation
@@ -226,7 +226,7 @@ impl Sdes {
         keysalt.extend_from_slice(&salt);
 
         // Base64 encode key+salt
-        let key_info = base64::encode(&keysalt);
+        let key_info = BASE64.encode(&keysalt);
 
         // Create crypto attribute
         let attr = SdesCryptoAttribute::new(tag, crypto_suite_str, &key_info);
@@ -319,7 +319,8 @@ impl Sdes {
         let key_info = selected.key_info.as_str();
 
         // Base64 decode key+salt
-        let keysalt = base64::decode(key_info)
+        let keysalt = BASE64
+            .decode(key_info)
             .map_err(|_| Error::ParseError("Invalid Base64 encoding in key info".into()))?;
 
         if keysalt.len() < 30 {

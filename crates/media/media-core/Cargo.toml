@@ -31,7 +31,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # State management
-dashmap = "5.5"
+dashmap = "6"
 # Lock-free / lighter mutexes for the hot media-plane paths
 # (jitter buffer, mixer cache, codec). `parking_lot` is faster than
 # `std::sync::Mutex` and never blocks on `.await`.

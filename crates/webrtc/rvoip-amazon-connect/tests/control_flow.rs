@@ -57,8 +57,9 @@ async fn originate_passes_translated_attributes_to_control_plane() {
         signaling_url: "wss://signal.invalid/control/m1".into(),
     });
 
-    let config = ConnectConfig::new("instance-123", "flow-abc")
-        .with_attribute_mapping(AttributeMapping::default().rename("X-Vapi-Customer-Id", "customerId"));
+    let config = ConnectConfig::new("instance-123", "flow-abc").with_attribute_mapping(
+        AttributeMapping::default().rename("X-Vapi-Customer-Id", "customerId"),
+    );
     let adapter = AmazonConnectAdapter::new(config, starter);
 
     // Translate a SIP custom-header set the way application glue would.
@@ -74,15 +75,24 @@ async fn originate_passes_translated_attributes_to_control_plane() {
     let result = adapter
         .originate_contact(mapped.attributes.clone(), Some("Caller".into()), None)
         .await;
-    assert!(result.is_err(), "expected signaling failure against invalid URL");
+    assert!(
+        result.is_err(),
+        "expected signaling failure against invalid URL"
+    );
 
     let req = last.lock().take().expect("control plane was invoked");
     assert_eq!(req.instance_id, "instance-123");
     assert_eq!(req.contact_flow_id, "flow-abc");
     assert_eq!(req.display_name, "Caller");
     // Renamed + sanitized attributes flowed through to StartWebRTCContact.
-    assert_eq!(req.attributes.get("customerId"), Some(&"cust-42".to_string()));
-    assert_eq!(req.attributes.get("Account-Tier"), Some(&"gold".to_string()));
+    assert_eq!(
+        req.attributes.get("customerId"),
+        Some(&"cust-42".to_string())
+    );
+    assert_eq!(
+        req.attributes.get("Account-Tier"),
+        Some(&"gold".to_string())
+    );
     assert!(!req.attributes.contains_key("Subject"));
 
     // And the failure was counted.
@@ -93,8 +103,9 @@ async fn originate_passes_translated_attributes_to_control_plane() {
 #[test]
 fn attributes_translate_into_a_btreemap_for_the_request() {
     let mapping = AttributeMapping::default();
-    let headers: BTreeMap<String, String> =
-        [("X-Foo".to_string(), "bar".to_string())].into_iter().collect();
+    let headers: BTreeMap<String, String> = [("X-Foo".to_string(), "bar".to_string())]
+        .into_iter()
+        .collect();
     let mapped = mapping.translate(headers);
     assert_eq!(mapped.attributes.get("Foo"), Some(&"bar".to_string()));
 }

@@ -10,6 +10,7 @@ use crate::srtp::{
 
 use crate::api::common::config::SrtpProfile;
 use crate::api::common::error::MediaTransportError;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
 /// SRTP configuration for the API layer
 #[derive(Debug, Clone)]
@@ -101,7 +102,7 @@ impl SrtpConfig {
                 let mut combined = Vec::with_capacity(key.len() + salt.len());
                 combined.extend_from_slice(key);
                 combined.extend_from_slice(salt);
-                Ok(base64::encode(&combined))
+                Ok(BASE64.encode(&combined))
             },
             _ => Err(MediaTransportError::ConfigError(
                 "Missing SRTP master key or salt".to_string()
@@ -111,7 +112,7 @@ impl SrtpConfig {
 
     /// Parse a base64 encoded key+salt (as used in SDP)
     pub fn from_base64(data: &str) -> Result<Self, MediaTransportError> {
-        let decoded = base64::decode(data)
+        let decoded = BASE64.decode(data)
             .map_err(|e| MediaTransportError::ConfigError(
                 format!("Failed to decode base64 key: {}", e)
             ))?;

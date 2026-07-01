@@ -101,8 +101,7 @@ mod aws {
         /// Resolve AWS configuration from the standard environment/profile
         /// chain (optionally pinning a region) and build the client.
         pub async fn from_env(region: Option<String>) -> Self {
-            let mut loader =
-                aws_config::defaults(aws_config::BehaviorVersion::latest());
+            let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
             if let Some(region) = region {
                 loader = loader.region(aws_config::Region::new(region));
             }
