@@ -118,6 +118,32 @@ pub const SRTP_AEAD_AES_256_GCM: SrtpCryptoSuite = SrtpCryptoSuite {
     tag_length: 16,                             // 128 bits for GCM
 };
 
+impl SrtpCryptoSuite {
+    /// Validate that the suite's parameters are internally consistent.
+    ///
+    /// The HMAC-SHA1 authentication tag is truncated from a fixed 20-byte
+    /// digest, so any HMAC-SHA1 suite must declare `tag_length <= 20`.
+    /// The built-in suites all satisfy this; the check guards against a
+    /// hand-constructed `SrtpCryptoSuite` literal (the fields are public)
+    /// whose oversized `tag_length` would otherwise panic when the tag is
+    /// sliced out of the digest during protect/unprotect.
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        const HMAC_SHA1_OUTPUT_LEN: usize = 20;
+        match self.authentication {
+            SrtpAuthenticationAlgorithm::HmacSha1_80 | SrtpAuthenticationAlgorithm::HmacSha1_32 => {
+                if self.tag_length > HMAC_SHA1_OUTPUT_LEN {
+                    return Err(crate::Error::SrtpError(format!(
+                        "SRTP suite tag_length {} exceeds HMAC-SHA1 output {}",
+                        self.tag_length, HMAC_SHA1_OUTPUT_LEN
+                    )));
+                }
+            }
+            SrtpAuthenticationAlgorithm::Null => {}
+        }
+        Ok(())
+    }
+}
+
 /// SRTP context for a session
 pub struct SrtpContext {
     /// Whether encryption is enabled
@@ -180,6 +206,7 @@ impl ProtectedRtpPacket {
 impl SrtpContext {
     /// Create a new SRTP context
     pub fn new(suite: SrtpCryptoSuite, key: crypto::SrtpCryptoKey) -> Result<Self, crate::Error> {
+        suite.validate()?;
         let crypto = crypto::SrtpCrypto::new(suite, key)?;
 
         Ok(Self {

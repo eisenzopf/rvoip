@@ -43,11 +43,32 @@ use rvoip_media_core::codec::audio::g711::G711Codec;
 
 /// SIP G.711 PCMU sample rate (8 kHz / 20 ms / 160 samples per frame).
 const G711_SAMPLE_RATE: u32 = 8_000;
-const G711_FRAME_SAMPLES: usize = 160; // 20 ms @ 8 kHz mono
 
 /// Frame channel depth. Same default as `rvoip-webrtc` (see
 /// `crates/webrtc/rvoip-webrtc/src/media/pump.rs::FRAME_CHANNEL_CAP`).
 const FRAME_CHANNEL_CAP: usize = 64;
+
+/// Next outbound RTP timestamp for the G.711 (8 kHz) leg.
+///
+/// RFC 3550: the RTP timestamp is expressed in the *destination* payload
+/// format's clock and counts samples emitted. The upstream/source RTP
+/// timestamp (`_upstream_rtp_ts`) is **deliberately ignored**: when the source
+/// leg runs on a different clock — e.g. Amazon Connect Opus at 48 kHz, which
+/// advances +960 per 20 ms — stamping that value onto the 8 kHz G.711 leg makes
+/// the timestamp climb 6× too fast (960 vs 160) and the caller's jitter buffer
+/// reads ~100 ms of false jitter (fast, regular clicking). Mature transcoders
+/// (Asterisk `lastts += samples`, FreeSWITCH, rtpengine) always regenerate the
+/// timestamp on the destination clock; we do the same, advancing by the number
+/// of samples actually emitted so partial frames stay correct.
+fn advance_outbound_timestamp(
+    clock: &mut u32,
+    samples_emitted: usize,
+    _upstream_rtp_ts: u32,
+) -> u32 {
+    let ts = *clock;
+    *clock = clock.wrapping_add(samples_emitted as u32);
+    ts
+}
 
 /// One-take wrapper for the inbound `MediaFrame` receiver — mirrors the
 /// `WebRtcMediaStream` shape so consumers calling `frames_in()` twice get
@@ -199,16 +220,18 @@ impl SipMediaStream {
                                 continue;
                             }
                         };
-                        // Carry the upstream RTP timestamp when present;
-                        // otherwise advance our own monotonic clock.
-                        audio_frame.timestamp = if media_frame.timestamp_rtp != 0 {
-                            media_frame.timestamp_rtp
-                        } else {
-                            next_timestamp
-                        };
-                        next_timestamp = audio_frame
-                            .timestamp
-                            .wrapping_add(G711_FRAME_SAMPLES as u32);
+                        // Generate the outbound RTP timestamp on the G.711
+                        // 8 kHz clock, advancing by the samples we actually
+                        // emit. The upstream `timestamp_rtp` is intentionally
+                        // NOT reused — for a transcoded leg (e.g. Opus 48 kHz →
+                        // G.711 8 kHz) it lives on the source clock and would
+                        // climb 6× too fast. See `advance_outbound_timestamp`.
+                        let samples_emitted = audio_frame.samples.len();
+                        audio_frame.timestamp = advance_outbound_timestamp(
+                            &mut next_timestamp,
+                            samples_emitted,
+                            media_frame.timestamp_rtp,
+                        );
                         if let Err(e) = coordinator_out.send_audio(&session_id_out, audio_frame).await {
                             tracing::trace!(target: "rvoip_sip", error = %e, "SipMediaStream: send_audio failed");
                             // Don't break — the session may briefly be in
@@ -359,5 +382,48 @@ mod rfc4733_tests {
     fn short_payload_returns_none() {
         assert_eq!(parse_rfc4733_digit(&[5, 0, 0]), None);
         assert_eq!(parse_rfc4733_digit(&[]), None);
+    }
+}
+
+#[cfg(test)]
+mod outbound_timestamp_tests {
+    use super::advance_outbound_timestamp;
+
+    /// A full 20 ms G.711 frame at 8 kHz mono.
+    const G711_FRAME_SAMPLES: usize = 160;
+
+    /// Regression: the outbound G.711 timestamp must run on its own 8 kHz clock
+    /// (+160 per 20 ms frame) and ignore the upstream timestamp — even when the
+    /// source is Opus at 48 kHz (which advances +960 per frame). Passing the
+    /// 48 kHz value through made the caller hear ~100 ms of jitter (fast clicks).
+    #[test]
+    fn ignores_upstream_48khz_timestamp_and_advances_by_160() {
+        let mut clock = 0u32;
+        // Simulated Amazon Connect Opus 48 kHz timestamps: +960 per 20 ms.
+        let upstream = [1_000_000u32, 1_000_960, 1_001_920, 1_002_880];
+        let out: Vec<u32> = upstream
+            .iter()
+            .map(|&u| advance_outbound_timestamp(&mut clock, G711_FRAME_SAMPLES, u))
+            .collect();
+        // Clean 8 kHz cadence: +160 each, NOT +960, and independent of upstream.
+        assert_eq!(out, vec![0, 160, 320, 480]);
+    }
+
+    /// Partial frames advance the clock by their actual sample count.
+    #[test]
+    fn advances_by_actual_samples_for_partial_frames() {
+        let mut clock = 500u32;
+        assert_eq!(advance_outbound_timestamp(&mut clock, 80, 9_999_999), 500);
+        assert_eq!(advance_outbound_timestamp(&mut clock, 160, 0), 580);
+        assert_eq!(clock, 740);
+    }
+
+    /// The clock wraps at u32 like an RTP timestamp.
+    #[test]
+    fn wraps_at_u32_boundary() {
+        let mut clock = u32::MAX - 100;
+        let first = advance_outbound_timestamp(&mut clock, 160, 0);
+        assert_eq!(first, u32::MAX - 100);
+        assert_eq!(clock, 59); // (MAX - 100) + 160 wraps to 59
     }
 }

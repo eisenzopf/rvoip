@@ -22,14 +22,39 @@
 # Run `cargo deny check bans` locally; CI runs it on every PR via
 # `.github/workflows/cargo-deny.yml`.
 
-# Lint advisories database (security advisories from RustSec).
-# Permissive in v1: we don't want CI red on advisories unrelated to
-# the bans guard while the workspace stabilizes. Tighten later.
+# RustSec security-advisory scanning. Enforced in CI (cargo-deny.yml runs
+# `check advisories`) alongside the local beta release gate's `cargo audit`.
+# Accepted transitive advisories are listed in `ignore` with rationale.
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-ignore = []
+# Unmaintained advisories are informational here, matching the beta release
+# gate's `cargo audit` (which does not fail the build on them). The ones
+# currently present are all deep transitive: paste, proc-macro-error2,
+# audiopus_sys (via the opus codec), async-std, rustls-pemfile. Tighten to
+# "workspace" or "all" once those transitive stacks are cleaned up.
+unmaintained = "none"
+# Mirrors the accepted-advisory set enforced by the beta release gate
+# (crates/sip/rvoip-sip/scripts/beta_gate.sh -> `cargo audit`). Each is
+# transitive with no fixed upgrade adopted in the currently pinned versions;
+# full rationale is in the gate's security/accepted-advisories.md. Revisit
+# before stable release / when the upstream stacks publish fixes.
+ignore = [
+    # `rsa` — RustSec reports no fixed upgrade. Transitive via users-core
+    # RS256/JWK support and webauthn-rs crypto-glue.
+    "RUSTSEC-2023-0071",
+    # `quinn-proto` — transitive via the QUIC stack. Revisit at quinn-proto >= 0.11.15.
+    "RUSTSEC-2026-0185",
+    # `rustls-webpki` — transitive via the rustls stack. Revisit on the fixed line.
+    "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    # `anyhow` (RUSTSEC-2026-0190) — unsound `Error::downcast_mut` after
+    # `Error::context`. Ubiquitous transitive dep; the affected pattern is not
+    # used in rvoip. Revisit when anyhow publishes the fix.
+    "RUSTSEC-2026-0190",
+]
 
 # License compliance — permissive default; revisit when shipping
 # binary releases. The workspace itself publishes under MIT only, but
@@ -75,6 +100,11 @@ wrappers = [
     # follow-up; tracked separately from P12).
     "rvoip-sip",
     "rvoip-webrtc",
+    # bridgefu media adapter — drives the Orchestrator/bridge impl directly
+    # (Orchestrator::bridge_connections, bridge::frame_pump::spawn_pump,
+    # ConnectionAdapter), so it consumes `rvoip-core` rather than
+    # `rvoip-core-traits`. Same category as `rvoip-webrtc`.
+    "rvoip-amazon-connect",
     "rvoip-quic",
     "rvoip-webtransport",
     "rvoip-websocket",

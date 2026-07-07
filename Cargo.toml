@@ -141,18 +141,23 @@ unused_assignments = "warn"
 async_fn_in_trait = "allow"
 
 [workspace.lints.clippy]
+# Lint GROUPS must carry a lower priority than the specific-lint overrides
+# below, otherwise cargo errors with "lint group X has the same priority (0)
+# as a lint" (and the group `allow`s silently fail to apply — which is why
+# `cargo clippy` was surfacing pedantic/nursery noise despite these lines).
+# priority = -1 lets the per-lint settings win.
 # Allow stylistic and pedantic lints that don't affect correctness
-pedantic = "allow"
-style = "allow"
-complexity = "allow"
-perf = "allow"
-cargo = "allow"
-nursery = "allow"
+pedantic = { level = "allow", priority = -1 }
+style = { level = "allow", priority = -1 }
+complexity = { level = "allow", priority = -1 }
+perf = { level = "allow", priority = -1 }
+cargo = { level = "allow", priority = -1 }
+nursery = { level = "allow", priority = -1 }
 
 # Keep important correctness lints as warnings/errors
-correctness = "warn"
-suspicious = "warn"
-restriction = "allow"
+correctness = { level = "warn", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+restriction = { level = "allow", priority = -1 }
 
 # Allow specific common patterns that are acceptable
 len_zero = "allow"

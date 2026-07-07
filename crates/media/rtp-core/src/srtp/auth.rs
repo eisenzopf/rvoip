@@ -57,7 +57,16 @@ impl SrtpAuthenticator {
                 // Finalize and get the result
                 let result = mac.finalize().into_bytes();
 
-                // Truncate to the required tag length
+                // Truncate to the required tag length. Guard against a
+                // misconfigured suite whose tag_length exceeds the 20-byte
+                // HMAC-SHA1 output (otherwise the slice below panics).
+                if self.tag_length > result.len() {
+                    return Err(Error::SrtpError(format!(
+                        "auth tag_length {} exceeds HMAC-SHA1 output {}",
+                        self.tag_length,
+                        result.len()
+                    )));
+                }
                 let tag = result.as_slice()[..self.tag_length].to_vec();
 
                 Ok(tag)

@@ -8,6 +8,20 @@ use quick_xml::events::{BytesDecl, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use std::io::Cursor;
 
+/// Decode and XML-entity-unescape a text event's content.
+///
+/// Replaces `BytesText::unescape`, removed in quick-xml 0.37+: `decode()`
+/// handles the byte->str decoding and `escape::unescape` resolves entity
+/// references (`&amp;` etc.), matching the old method's behaviour.
+fn decode_text(e: &BytesText) -> Result<String> {
+    let decoded = e
+        .decode()
+        .map_err(|err| RegistrarError::PidfError(err.to_string()))?;
+    let unescaped = quick_xml::escape::unescape(&decoded)
+        .map_err(|err| RegistrarError::PidfError(err.to_string()))?;
+    Ok(unescaped.into_owned())
+}
+
 /// PIDF (Presence Information Data Format) generator and parser
 pub struct PidfGenerator;
 
@@ -208,10 +222,7 @@ impl PidfGenerator {
                 }
                 Ok(Event::Text(ref e)) => {
                     if in_basic {
-                        let status_text = e
-                            .unescape()
-                            .map_err(|err| RegistrarError::PidfError(err.to_string()))?
-                            .to_string();
+                        let status_text = decode_text(e)?;
                         presence.basic_status = if status_text == "open" {
                             BasicStatus::Open
                         } else {
@@ -219,11 +230,7 @@ impl PidfGenerator {
                         };
                         in_basic = false;
                     } else if in_note {
-                        presence.note = Some(
-                            e.unescape()
-                                .map_err(|err| RegistrarError::PidfError(err.to_string()))?
-                                .to_string(),
-                        );
+                        presence.note = Some(decode_text(e)?);
                         in_note = false;
                     }
                 }

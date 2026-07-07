@@ -23,6 +23,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          # Run only the bans check for now. Tighten with `advisories`
-          # and `licenses` checks once the workspace is closer to v1.
-          command: check bans sources
+          # advisories: RUSTSEC scanning (accepted transitive advisories are
+          #   ignored in deny.toml, mirroring the beta release gate).
+          # bans/sources: dependency-direction + registry guard.
+          # `licenses` is still deferred until closer to v1.
+          command: check advisories bans sources

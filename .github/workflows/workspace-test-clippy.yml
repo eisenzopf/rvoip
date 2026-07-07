@@ -1,0 +1,60 @@
+# Workspace test + clippy gate.
+#
+# Why this exists: until now the only place `cargo test` / clippy ran across the
+# workspace was the local `beta_gate.sh`. CI enforced only fmt, cargo-deny, and
+# example builds — so a test regression could land on main without CI catching
+# it. This workflow makes the core test suite and clippy block PRs.
+#
+# Two jobs:
+#   test   — `cargo test` over the default-members (SIP + media + foundation).
+#            Those are the service-free, security-relevant crates. The extension
+#            crates (postgres/redis/keycloak/ldap/…) need live services to test
+#            and are excluded here; broadening to `--workspace` is a follow-up
+#            once CI provisions those services.
+#   clippy — `cargo clippy` across the whole workspace. NOT `-D warnings` yet:
+#            the tree carries ~500 pre-existing pedantic/style warnings (mostly
+#            codec-core and rvoip-sip). This gate still fails on clippy
+#            hard-errors and denied lints — e.g. a regression of the
+#            lint-group-priority misconfig fixed in the root Cargo.toml.
+#            Tightening to `-D warnings` is a follow-up after the warning cleanup.
+
+name: workspace-test-clippy
+
+on:
+  push:
+    branches: [main]
+    paths: ["crates/**", "Cargo.toml", "Cargo.lock"]
+  pull_request:
+    paths: ["crates/**", "Cargo.toml", "Cargo.lock"]
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    name: cargo test (core)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libopus-dev pkg-config cmake
+      - name: Test
+        # No `--workspace`: `cargo test` runs the default-members set curated in
+        # the root Cargo.toml (the service-free core). See header comment.
+        run: cargo test
+
+  clippy:
+    name: cargo clippy (workspace)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libopus-dev pkg-config cmake
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets

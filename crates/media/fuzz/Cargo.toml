@@ -1,0 +1,62 @@
+[package]
+name = "rvoip-media-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# Path deps against local code so the fuzzers always exercise current parsers.
+rvoip-rtp-core = { path = "../rtp-core" }
+# default-features = false keeps the fuzz build lean (no libopus / C deps); the
+# g711 payload path is pure Rust and does not need the optional codec features.
+rvoip-media-core = { path = "../media-core", default-features = false }
+
+[[bin]]
+name = "rtp_packet"
+path = "fuzz_targets/rtp_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtcp_packet"
+path = "fuzz_targets/rtcp_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "srtp_unprotect"
+path = "fuzz_targets/srtp_unprotect.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dtls_record"
+path = "fuzz_targets/dtls_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stun_response"
+path = "fuzz_targets/stun_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "g711_unpack"
+path = "fuzz_targets/g711_unpack.rs"
+test = false
+doc = false
+bench = false
+
+# Detach from the parent workspace so cargo-fuzz builds this crate standalone
+# (mirrors crates/sip/fuzz).
+[workspace]

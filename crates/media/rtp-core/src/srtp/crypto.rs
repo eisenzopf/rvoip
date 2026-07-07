@@ -683,7 +683,16 @@ fn hmac_sha1(data: &[u8], key: &[u8], tag_length: usize) -> Result<Vec<u8>> {
     // Finalize and get the result
     let result = mac.finalize().into_bytes();
 
-    // Truncate to the requested tag length
+    // Truncate to the requested tag length. Guard against a misconfigured
+    // suite whose tag_length exceeds the 20-byte HMAC-SHA1 output (otherwise
+    // the slice below panics).
+    if tag_length > result.len() {
+        return Err(Error::SrtpError(format!(
+            "auth tag_length {} exceeds HMAC-SHA1 output {}",
+            tag_length,
+            result.len()
+        )));
+    }
     let tag = result.as_slice()[..tag_length].to_vec();
 
     Ok(tag)

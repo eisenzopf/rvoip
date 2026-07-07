@@ -280,9 +280,13 @@ fn parse_dlrr_block(buf: &mut impl Buf, length: usize) -> Result<DlrrBlock> {
 }
 
 fn parse_statistics_summary_block(buf: &mut impl Buf) -> Result<StatisticsSummaryBlock> {
-    if buf.remaining() < 16 {
+    // 18 bytes of mandatory fixed fields are read below (ssrc..dup_packets);
+    // the optional jitter/ttl fields are length-checked individually. The
+    // guard previously read 16, which allowed a 2-byte over-read (panic) on a
+    // truncated block. See fuzz regression test `xr_statistics_summary_truncated`.
+    if buf.remaining() < 18 {
         return Err(Error::BufferTooSmall {
-            required: 16,
+            required: 18,
             available: buf.remaining(),
         });
     }
@@ -344,9 +348,12 @@ fn parse_statistics_summary_block(buf: &mut impl Buf) -> Result<StatisticsSummar
 }
 
 fn parse_voip_metrics_block(buf: &mut impl Buf) -> Result<VoipMetricsBlock> {
-    if buf.remaining() < 24 {
+    // 32 bytes of mandatory fixed fields are read below (ssrc..jb_abs_max).
+    // The guard previously read 24, allowing an 8-byte over-read (panic) on a
+    // truncated block.
+    if buf.remaining() < 32 {
         return Err(Error::BufferTooSmall {
-            required: 24,
+            required: 32,
             available: buf.remaining(),
         });
     }

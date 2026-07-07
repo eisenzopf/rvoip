@@ -96,6 +96,9 @@ Environment:
   RVOIP_PERF_MIN_SUCCESS_PCT     SIPp pass threshold. Defaults to 99.9.
   BETA_RUN_STRICT_UA=0           Disable the baresip strict-UA gate; fails with --require-external.
   BETA_RUN_LONG_SOAK=0           Disable the ignored soak test; fails with --require-external.
+  BETA_PERF_REGRESSION_FAIL=1    Make a perf regression vs the previous run a hard gate failure. Default 0 (report-only + perf-audit.md).
+  BETA_PERF_REGRESSION_TOLERANCE_PCT  Throughput/RSS regression tolerance (percent). Defaults to 15.
+  BETA_PERF_LATENCY_TOLERANCE_PCT     Latency p50/p95/p99 regression tolerance (percent). Defaults to 25.
   BETA_RUN_FUZZ_SMOKE=0          Disable parser fuzz-smoke coverage; fails with --require-external.
   BETA_FUZZ_TOOLCHAIN            Rust toolchain used by cargo-fuzz. Defaults to nightly.
   BETA_FUZZ_SMOKE_RUNS           libFuzzer runs per parser target. Defaults to 1000.
@@ -631,6 +634,7 @@ write_report_manifest() {
 - \`security/cargo-audit.txt\`
 - \`security/fuzz/\`
 - \`perf-results/\`
+- \`perf-audit.md\` (current-vs-previous perf regression audit)
 
 The report directory is a packaged copy of the beta-gate artifact tree plus
 the current raw perf result files. Logs, matrices, redacted
@@ -942,8 +946,10 @@ EOF
 
 run_fuzz_smoke_target() {
   local target="$1"
+  # Optional 2nd arg overrides the fuzz crate dir for this target, so one gate
+  # can cover multiple fuzz crates (SIP + media). Defaults to the SIP crate.
   local fuzz_dir="$ARTIFACT_DIR/security/fuzz"
-  local fuzz_crate_dir="${BETA_FUZZ_CRATE_DIR:-$CRATE_DIR/../fuzz}"
+  local fuzz_crate_dir="${2:-${BETA_FUZZ_CRATE_DIR:-$CRATE_DIR/../fuzz}}"
   mkdir -p "$fuzz_dir"
   run_gate "parser fuzz smoke ($target)" env \
     FUZZ_CRATE_DIR="$fuzz_crate_dir" \
@@ -980,10 +986,20 @@ run_fuzz_smoke_gates() {
     skip_gate "parser fuzz smoke" "BETA_RUN_FUZZ_SMOKE=0 disables required parser fuzz-smoke evidence."
     return
   fi
+  # SIP parser fuzz targets (crates/sip/fuzz).
   run_fuzz_smoke_target sip_message
   run_fuzz_smoke_target uri
   run_fuzz_smoke_target header
   run_fuzz_smoke_target sdp
+  # RTP / RTCP / SRTP / DTLS / STUN / payload media parser fuzz targets
+  # (crates/media/fuzz). The 2nd arg points the gate at that fuzz crate.
+  local media_fuzz_dir="$WORKSPACE_ROOT/crates/media/fuzz"
+  run_fuzz_smoke_target rtp_packet "$media_fuzz_dir"
+  run_fuzz_smoke_target rtcp_packet "$media_fuzz_dir"
+  run_fuzz_smoke_target srtp_unprotect "$media_fuzz_dir"
+  run_fuzz_smoke_target dtls_record "$media_fuzz_dir"
+  run_fuzz_smoke_target stun_response "$media_fuzz_dir"
+  run_fuzz_smoke_target g711_unpack "$media_fuzz_dir"
 }
 
 run_security_gates() {
@@ -1009,6 +1025,9 @@ run_local_gates() {
     -p rvoip-sip-registrar \
     -p rvoip-sip-proxy \
     --all-targets
+  # rtp-core is compile-checked above but its tests (RTP/RTCP/SRTP parsers +
+  # the malformed-input regression guards) were not run by the local gate.
+  run_gate "rtp-core tests" cargo test -p rvoip-rtp-core --all-targets
   run_gate "rvoip-sip unit tests" cargo test -p rvoip-sip --lib
   run_gate "rvoip-sip integration tests" cargo test -p rvoip-sip --tests --features generated-validation,dev-insecure-tls
   run_gate "rvoip-sip doctests" cargo test -p rvoip-sip --doc
@@ -1041,6 +1060,54 @@ run_interop_gates() {
   fi
 
   run_proxy_descope_audit
+}
+
+run_perf_regression_audit() {
+  # Audit this run's perf JSON against the most recent prior beta-report run and
+  # flag degradations beyond tolerance. Report-only by default (a WARN that still
+  # passes the gate) so dev-box run-to-run variance does not block releases; set
+  # BETA_PERF_REGRESSION_FAIL=1 to make a regression a hard failure (e.g. on a
+  # dedicated perf host). Either way perf-audit.md is written into the report.
+  local current="$WORKSPACE_ROOT/target/perf-results"
+  if [ ! -d "$current" ] || [ -z "$(ls "$current"/*.json 2>/dev/null)" ]; then
+    skip_gate "perf regression audit" "no current perf-results to compare."
+    return
+  fi
+  # The current run's report package is written only at the end of the gate, so
+  # every match here is a prior run; the newest one with perf JSON is the baseline.
+  local baseline=""
+  local d
+  # Sort by directory name (ISO timestamp) descending, so the newest prior run
+  # wins regardless of mtime changes from copying/restoring report packages.
+  for d in $(ls -d "$(beta_report_root)"/*/perf-results 2>/dev/null | sort -r); do
+    if [ -n "$(ls "$d"/*.json 2>/dev/null)" ]; then
+      baseline="$d"
+      break
+    fi
+  done
+  if [ -z "$baseline" ]; then
+    skip_gate "perf regression audit" \
+      "no prior beta-report run with perf-results; this run establishes the baseline."
+    return
+  fi
+  local tol="${BETA_PERF_REGRESSION_TOLERANCE_PCT:-15}"
+  local lat_tol="${BETA_PERF_LATENCY_TOLERANCE_PCT:-25}"
+  local out="$ARTIFACT_DIR/perf-audit.md"
+  if [ "${BETA_PERF_REGRESSION_FAIL:-0}" = "1" ]; then
+    run_gate "perf regression audit" python3 "$SCRIPT_DIR/perf_audit.py" \
+      --baseline "$baseline" --current "$current" --out "$out" \
+      --tolerance-pct "$tol" --latency-tolerance-pct "$lat_tol" \
+      --fail-on-regression
+  else
+    run_gate "perf regression audit" python3 "$SCRIPT_DIR/perf_audit.py" \
+      --baseline "$baseline" --current "$current" --out "$out" \
+      --tolerance-pct "$tol" --latency-tolerance-pct "$lat_tol"
+    # Report-only mode still passed the gate above; surface any regression on the
+    # console so it is not lost among the PASS rows.
+    if grep -q "^status: REGRESSION" "$out" 2>/dev/null; then
+      echo "WARNING: perf regression audit flagged degradations vs $baseline (report-only; see perf-audit.md). Set BETA_PERF_REGRESSION_FAIL=1 to gate on it." >&2
+    fi
+  fi
 }
 
 run_perf_gates() {
@@ -1116,6 +1183,9 @@ run_perf_gates() {
   else
     skip_gate "perf soak" "BETA_RUN_LONG_SOAK=0 disables release-candidate soak evidence."
   fi
+
+  # Compare this run's perf metrics against the previous run and flag regressions.
+  run_perf_regression_audit
 }
 
 write_environment_report
