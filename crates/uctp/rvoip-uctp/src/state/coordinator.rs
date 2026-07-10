@@ -20,7 +20,7 @@ use crate::errors::{Result, UctpError};
 use crate::ids::{ConnectionId, EnvelopeId, SessionId};
 use crate::payloads;
 use crate::types::MessageType;
-use rvoip_auth_core::BearerValidator;
+use rvoip_auth_core::{AuthenticatedPrincipal, BearerValidator};
 use rvoip_core::capability::{
     negotiate_streams, CapabilityDescriptor, CodecInfo, NegotiationOutcome, StreamOffer,
 };
@@ -121,6 +121,7 @@ enum PeerAuthState {
         /// field is intentionally retained but unread.
         #[allow(dead_code)]
         assurance: IdentityAssurance,
+        principal: AuthenticatedPrincipal,
     },
 }
 
@@ -839,7 +840,13 @@ impl UctpCoordinator {
     /// / connid for caller diagnostics) and returns `false` so the
     /// caller can short-circuit the handler.
     async fn require_authenticated(&self, env: &UctpEnvelope) -> Result<bool> {
-        let is_authed = matches!(&*self.peer_auth.lock(), PeerAuthState::Authenticated { .. });
+        let is_authed = match &*self.peer_auth.lock() {
+            PeerAuthState::Authenticated { principal, .. } => principal
+                .expires_at
+                .map(|expiry| expiry > chrono::Utc::now())
+                .unwrap_or(true),
+            PeerAuthState::Unauthenticated => false,
+        };
         if is_authed {
             return Ok(true);
         }
@@ -1025,6 +1032,11 @@ impl UctpCoordinator {
                         .validate_aauth(&subject, &actor)
                         .instrument(aauth_span)
                         .await
+                        .map(|assurance| {
+                            let mut principal = AuthenticatedPrincipal::from_assurance(assurance);
+                            principal.subject = subject;
+                            principal
+                        })
                 }
                 None => {
                     warn!(
@@ -1043,17 +1055,20 @@ impl UctpCoordinator {
                 transport = %self.transport,
             );
             self.bearer
-                .validate(&payload.credential)
+                .validate_principal(&payload.credential)
                 .instrument(bearer_span)
                 .await
         };
         match validation {
-            Ok(assurance) => {
+            Ok(principal) => {
+                let assurance = principal.assurance.clone();
                 let session = payloads::auth::AuthSession {
-                    identity_id: format!("id_{}", uuid::Uuid::new_v4().simple()),
-                    participant_id: format!("part_{}", uuid::Uuid::new_v4().simple()),
+                    identity_id: principal.subject.clone(),
+                    participant_id: principal.subject.clone(),
                     session_token: format!("tok_{}", uuid::Uuid::new_v4().simple()),
-                    expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                    expires_at: principal
+                        .expires_at
+                        .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(1)),
                     assurance: assurance_label(&assurance).into(),
                     reachability: Vec::new(),
                 };
@@ -1064,6 +1079,7 @@ impl UctpCoordinator {
                     identity_id: session.identity_id.clone(),
                     participant_id: session.participant_id.clone(),
                     assurance: assurance.clone(),
+                    principal,
                 };
                 let reply =
                     UctpEnvelope::new(MessageType::AuthSession, serde_json::to_value(&session)?)
@@ -1715,11 +1731,12 @@ impl UctpCoordinator {
         );
         let validation = self
             .bearer
-            .validate(&payload.credential)
+            .validate_principal(&payload.credential)
             .instrument(bearer_span)
             .await;
         match validation {
-            Ok(assurance) => {
+            Ok(principal) => {
+                let assurance = principal.assurance.clone();
                 // Reuse identity_id / participant_id from the prior
                 // auth state if present. The wire spec treats refresh
                 // as continuity (same logical session); reissuing
@@ -1745,7 +1762,9 @@ impl UctpCoordinator {
                     identity_id: identity_id.clone(),
                     participant_id: participant_id.clone(),
                     session_token: format!("tok_{}", uuid::Uuid::new_v4().simple()),
-                    expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                    expires_at: principal
+                        .expires_at
+                        .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(1)),
                     assurance: assurance_label(&assurance).into(),
                     reachability: Vec::new(),
                 };
@@ -1754,6 +1773,7 @@ impl UctpCoordinator {
                     identity_id: identity_id.clone(),
                     participant_id: participant_id.clone(),
                     assurance: assurance.clone(),
+                    principal,
                 };
                 let reply =
                     UctpEnvelope::new(MessageType::AuthSession, serde_json::to_value(&session)?)

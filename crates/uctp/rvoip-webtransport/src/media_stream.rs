@@ -16,7 +16,7 @@ use rvoip_core::connection::Direction;
 use rvoip_core::error::Result as RvoipResult;
 use rvoip_core::ids::StreamId;
 use rvoip_core::stream::{MediaFrame, MediaStream, QualitySnapshot, StreamKind};
-use rvoip_uctp::substrate::datagram::{pack, MediaDatagram};
+use rvoip_uctp::substrate::datagram::{pack, pack_rtp, unpack_rtp, MediaDatagram};
 use tokio::sync::mpsc;
 use tracing::{debug, trace_span, warn};
 
@@ -48,8 +48,11 @@ impl WebTransportDatagramMediaStream {
 
         let session_for_pump = session.clone();
         let stream_id_for_pump = id.clone();
+        let default_payload_type = rvoip_core::bridge::codec_to_pt(&codec.name).unwrap_or(111);
+        let ssrc = stable_ssrc(&id);
         tokio::spawn(async move {
             let mut seq: u32 = 0;
+            let mut rtp_seq: u16 = 0;
             while let Some(frame) = out_rx.recv().await {
                 let _span = trace_span!(
                     "uctp.stream.frame",
@@ -59,11 +62,31 @@ impl WebTransportDatagramMediaStream {
                     seq,
                 )
                 .entered();
+                let rtp = match pack_rtp(
+                    frame.payload,
+                    frame.payload_type.unwrap_or(default_payload_type),
+                    rtp_seq,
+                    frame.timestamp_rtp,
+                    ssrc,
+                ) {
+                    Ok(packet) => packet,
+                    Err(error) => {
+                        metrics::counter!(
+                            "uctp_datagram_drops_total",
+                            "direction" => "out",
+                            "transport" => "webtransport",
+                            "reason" => "rtp-encode"
+                        )
+                        .increment(1);
+                        debug!(%error, "rvoip-webtransport: RTP encode failed");
+                        continue;
+                    }
+                };
                 let datagram = MediaDatagram {
                     flags: 0,
                     stream_local_id,
                     seq,
-                    payload: frame.payload,
+                    payload: rtp,
                 };
                 let bytes = pack(&datagram);
                 if let Err(e) = session_for_pump.send_datagram(bytes) {
@@ -84,6 +107,7 @@ impl WebTransportDatagramMediaStream {
                 )
                 .increment(1);
                 seq = seq.wrapping_add(1);
+                rtp_seq = rtp_seq.wrapping_add(1);
             }
             debug!("rvoip-webtransport: outbound pump exiting");
         });
@@ -202,6 +226,19 @@ pub fn spawn_datagram_reader(
                         Some(stream) => {
                             // Tight scope for the non-Send span guard;
                             // it must drop before the fanout await.
+                            let rtp = match unpack_rtp(datagram.payload) {
+                                Ok(rtp) => rtp,
+                                Err(_) => {
+                                    metrics::counter!(
+                                        "uctp_datagram_drops_total",
+                                        "direction" => "in",
+                                        "transport" => "webtransport",
+                                        "reason" => "invalid-rtp"
+                                    )
+                                    .increment(1);
+                                    continue;
+                                }
+                            };
                             let frame = {
                                 let _span = trace_span!(
                                     "uctp.stream.frame",
@@ -214,10 +251,10 @@ pub fn spawn_datagram_reader(
                                 let frame = MediaFrame {
                                     stream_id: stream.id(),
                                     kind: stream.kind(),
-                                    payload: datagram.payload,
-                                    timestamp_rtp: 0,
+                                    payload: rtp.payload,
+                                    timestamp_rtp: rtp.timestamp,
                                     captured_at: Utc::now(),
-                                    payload_type: None,
+                                    payload_type: Some(rtp.payload_type),
                                 };
                                 match stream.inbound_tx().try_send(frame.clone()) {
                                     Ok(_) => {
@@ -271,4 +308,11 @@ pub fn spawn_datagram_reader(
             }
         }
     });
+}
+
+fn stable_ssrc(stream_id: &StreamId) -> u32 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    stream_id.hash(&mut hasher);
+    hasher.finish() as u32
 }

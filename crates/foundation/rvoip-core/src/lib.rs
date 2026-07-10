@@ -111,6 +111,7 @@
 
 pub mod adapter;
 pub mod bridge;
+pub mod broadcast;
 pub mod capability;
 pub mod commands;
 pub mod config;
@@ -121,6 +122,7 @@ pub mod events;
 pub mod harness;
 pub mod identity;
 pub mod ids;
+pub mod media_graph;
 pub mod message;
 pub mod orchestrator;
 pub mod participant;
@@ -136,6 +138,7 @@ pub use adapter::{
     PlaybackHandle, RejectReason, SignatureHeaders, TransferTarget,
 };
 pub use bridge::{BridgeError, BridgeHandle, BridgeManager};
+pub use broadcast::{BroadcastDescriptor, BroadcastPublisher, BroadcastTransport};
 pub use capability::{CapabilityDescriptor, CapabilityIntersection, CodecInfo, NegotiatedCodecs};
 pub use commands::{
     AttachmentRef, AudioSource, Command, InboundAction, ListenerSink, ListenerTarget,
@@ -152,12 +155,14 @@ pub use identity::{
 };
 pub use ids::{
     AiAttachmentId, AttachmentId, BridgeId, ConnectionId, ConversationId, DeviceId, IdentityId,
-    ListenerId, MessageId, ParticipantId, PlaybackId, RecordingId, SessionId, StreamId, TenantId,
-    TranscriptionId,
+    ListenerId, MediaRouteId, MessageId, ParticipantId, PlaybackId, RecordingId, SessionId,
+    StreamId, TenantId, TranscriptionId,
 };
+pub use media_graph::{start_media_graph, MediaGraphHandle, MediaGraphPolicy};
 pub use message::{ContentType, Message, MessageOrigin, MessageRecipients};
 pub use orchestrator::Orchestrator;
 pub use participant::{Participant, ParticipantKind, ParticipantRole};
+pub use rvoip_core_traits::data::{DataMessage, DataReliability};
 pub use session::{Session, SessionMedium, SessionState};
 pub use store::{
     ConversationFilter, ConversationStore, MemoryConversationStore, MemoryMessageStore,

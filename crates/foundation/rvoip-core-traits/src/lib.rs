@@ -40,8 +40,11 @@
 pub mod adapter;
 pub mod capability;
 pub mod connection;
+pub mod data;
 pub mod error;
 pub mod harness;
 pub mod identity;
 pub mod ids;
 pub mod stream;
+
+pub use data::{DataMessage, DataReliability};

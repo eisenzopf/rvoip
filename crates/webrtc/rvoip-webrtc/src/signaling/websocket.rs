@@ -103,13 +103,25 @@ pub async fn serve_tls_listener(
     tls: crate::tls::TlsConfig,
     adapter: Arc<WebRtcAdapter>,
 ) -> Result<()> {
+    serve_tls_listener_with_auth(listener, tls, adapter, Arc::new(AnonymousAuth)).await
+}
+
+/// WSS listener with the same authentication policy as plaintext WS.
+#[cfg(feature = "tls-rustls")]
+pub async fn serve_tls_listener_with_auth(
+    listener: TcpListener,
+    tls: crate::tls::TlsConfig,
+    adapter: Arc<WebRtcAdapter>,
+    auth: Arc<dyn WsAuthHook>,
+) -> Result<()> {
     loop {
-        let (stream, _) = listener
+        let (stream, peer_addr) = listener
             .accept()
             .await
             .map_err(|e| WebRtcError::Signaling(format!("{e}")))?;
         let acceptor = tls.acceptor.clone();
         let adapter = Arc::clone(&adapter);
+        let auth = Arc::clone(&auth);
         tokio::spawn(async move {
             let tls_stream = match acceptor.accept(stream).await {
                 Ok(s) => s,
@@ -118,7 +130,7 @@ pub async fn serve_tls_listener(
                     return;
                 }
             };
-            if let Err(e) = handle_tls_connection(tls_stream, adapter).await {
+            if let Err(e) = handle_tls_connection(tls_stream, adapter, auth, peer_addr).await {
                 tracing::warn!("wss signaling connection error: {e}");
             }
         });
@@ -129,12 +141,74 @@ pub async fn serve_tls_listener(
 async fn handle_tls_connection(
     stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     adapter: Arc<WebRtcAdapter>,
+    auth: Arc<dyn WsAuthHook>,
+    peer_addr: SocketAddr,
 ) -> Result<()> {
     // Same flow as `handle_connection` but parameterized over the stream type.
     // We re-use the handshake by inlining the tungstenite accept here.
-    let ws = tokio_tungstenite::accept_async(stream)
+    let mut subprotocols = Vec::new();
+    let mut query_token = None;
+    let callback = |request: &Request,
+                    mut response: HandshakeResponse|
+     -> std::result::Result<HandshakeResponse, ErrorResponse> {
+        if let Some(value) = request
+            .headers()
+            .get("sec-websocket-protocol")
+            .and_then(|value| value.to_str().ok())
+        {
+            subprotocols.extend(
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+            );
+            if let Some(protocol) = subprotocols
+                .iter()
+                .find(|value| !value.starts_with("token."))
+            {
+                if let Ok(value) = protocol.parse::<http::HeaderValue>() {
+                    response
+                        .headers_mut()
+                        .insert("sec-websocket-protocol", value);
+                }
+            }
+        }
+        if let Some(query) = request.uri().query() {
+            query_token = query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("access_token="))
+                .map(str::to_string);
+        }
+        Ok(response)
+    };
+    let ws = tokio_tungstenite::accept_hdr_async(stream, callback)
         .await
         .map_err(|e| WebRtcError::Signaling(format!("{e}")))?;
+    if let Err(rejection) = auth
+        .authenticate(&subprotocols, query_token.as_deref(), peer_addr)
+        .await
+    {
+        let code = match rejection {
+            AuthRejection::Unauthorized { .. } => 4401,
+            AuthRejection::Forbidden => 4403,
+            AuthRejection::Throttled { .. } => 4429,
+        };
+        let (mut write, _) = ws.split();
+        let _ = write
+            .send(Message::Close(Some(
+                tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code:
+                        tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Library(
+                            code,
+                        ),
+                    reason: "unauthorized".into(),
+                },
+            )))
+            .await;
+        adapter.note_signaling_error();
+        return Ok(());
+    }
     let (write, mut read) = ws.split();
     let write: Arc<AsyncMutex<_>> = Arc::new(AsyncMutex::new(write));
     let mut forwarder_spawned: Option<ConnectionId> = None;

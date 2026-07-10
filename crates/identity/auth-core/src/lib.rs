@@ -56,7 +56,9 @@ pub mod sip_digest;
 pub mod types;
 
 pub use aauth::{AAuthValidator, ActorClaims, ActorTokenValidator};
-pub use bearer::{bearer_stub, BearerAuthError, BearerValidator};
+pub use bearer::{
+    bearer_stub, AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError, BearerValidator,
+};
 pub use dpop::{
     jwk_thumbprint, DpopError, DpopProof, DpopValidator, ValidatedDpop, DEFAULT_IAT_LEEWAY,
     DEFAULT_JTI_CACHE_CAPACITY,

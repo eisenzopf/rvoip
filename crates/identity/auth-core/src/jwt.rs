@@ -22,7 +22,9 @@ use rvoip_core_traits::identity::IdentityAssurance;
 use rvoip_core_traits::ids::IdentityId;
 use serde::Deserialize;
 
-use crate::bearer::{BearerAuthError, BearerValidator};
+use crate::bearer::{
+    AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError, BearerValidator,
+};
 use crate::providers::{
     CredentialAuthError, TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
@@ -56,6 +58,8 @@ struct Claims {
     realm_access: Option<RoleAccess>,
     #[serde(default)]
     resource_access: Option<HashMap<String, RoleAccess>>,
+    #[serde(default, alias = "tenant")]
+    tenant_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,6 +202,13 @@ impl JwtValidator {
 #[async_trait]
 impl BearerValidator for JwtValidator {
     async fn validate(&self, token: &str) -> Result<IdentityAssurance, BearerAuthError> {
+        Ok(self.validate_principal(token).await?.assurance)
+    }
+
+    async fn validate_principal(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
         if token.is_empty() {
             return Err(BearerAuthError::Empty);
         }
@@ -210,7 +221,8 @@ impl BearerValidator for JwtValidator {
             revocation_context.as_ref(),
         )
         .await?;
-        let identity = IdentityId::from_string(claims.sub);
+        let subject = claims.sub.clone();
+        let identity = IdentityId::from_string(subject.clone());
         let scopes = scopes_from_claims(
             claims.scope,
             claims.scopes,
@@ -218,10 +230,21 @@ impl BearerValidator for JwtValidator {
             claims.realm_access,
             claims.resource_access,
         );
-        Ok(IdentityAssurance::UserAuthorized {
+        let assurance = IdentityAssurance::UserAuthorized {
             identity: identity.clone(),
             user_id: identity,
+            scopes: scopes.clone(),
+        };
+        Ok(AuthenticatedPrincipal {
+            subject,
+            tenant: claims.tenant_id,
             scopes,
+            issuer: claims.iss,
+            expires_at: claims
+                .exp
+                .and_then(|seconds| chrono::DateTime::from_timestamp(seconds as i64, 0)),
+            method: AuthenticationMethod::Jwt,
+            assurance,
         })
     }
 }

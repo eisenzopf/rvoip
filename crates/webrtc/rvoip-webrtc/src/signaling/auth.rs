@@ -15,6 +15,7 @@
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
+use rvoip_auth_core::{AuthenticatedPrincipal, BearerAuthError, BearerValidator};
 
 /// Authentication context attached to a request after a successful
 /// authenticate hook. Echoed onto the route for downstream consumers
@@ -28,6 +29,8 @@ pub struct AuthContext {
     /// Optional hint about which session the caller is acting on
     /// (extracted from the URL path or a custom header).
     pub session_hint: Option<String>,
+    /// Full validated principal retained for ownership and tenant policy.
+    pub principal: Option<AuthenticatedPrincipal>,
 }
 
 impl AuthContext {
@@ -36,6 +39,7 @@ impl AuthContext {
             subject: "anonymous".to_string(),
             scopes: Vec::new(),
             session_hint: None,
+            principal: None,
         }
     }
 
@@ -151,6 +155,7 @@ impl WhipAuthHook for BearerStaticTokenAuth {
                 subject: "static-token-bearer".into(),
                 scopes: self.scopes.clone(),
                 session_hint: None,
+                principal: None,
             }),
             _ => Err(AuthRejection::Unauthorized {
                 www_authenticate: format!("Bearer realm=\"{}\"", self.realm),
@@ -178,11 +183,110 @@ impl WsAuthHook for BearerStaticTokenAuth {
                 subject: "static-token-bearer".into(),
                 scopes: self.scopes.clone(),
                 session_hint: None,
+                principal: None,
             }),
             _ => Err(AuthRejection::Unauthorized {
                 www_authenticate: format!("Bearer realm=\"{}\"", self.realm),
             }),
         }
+    }
+}
+
+/// First-party bridge from `rvoip-auth-core` validators into both WebRTC
+/// signaling surfaces.
+pub struct AuthCoreHook {
+    validator: std::sync::Arc<dyn BearerValidator>,
+    realm: String,
+    pub allow_query_tokens: bool,
+}
+
+impl AuthCoreHook {
+    pub fn new(validator: std::sync::Arc<dyn BearerValidator>) -> Self {
+        Self {
+            validator,
+            realm: "rvoip".into(),
+            allow_query_tokens: false,
+        }
+    }
+
+    pub fn with_realm(mut self, realm: impl Into<String>) -> Self {
+        self.realm = realm.into();
+        self
+    }
+
+    pub fn allow_query_tokens(mut self, allow: bool) -> Self {
+        self.allow_query_tokens = allow;
+        self
+    }
+
+    async fn validate(
+        &self,
+        token: Option<&str>,
+        required_scope: &str,
+    ) -> Result<AuthContext, AuthRejection> {
+        let Some(token) = token.filter(|token| !token.is_empty()) else {
+            return Err(self.unauthorized());
+        };
+        let principal =
+            self.validator
+                .validate_principal(token)
+                .await
+                .map_err(|error| match error {
+                    BearerAuthError::Unavailable(_) => AuthRejection::Throttled {
+                        retry_after_secs: 1,
+                    },
+                    _ => self.unauthorized(),
+                })?;
+        if !principal.has_scope(required_scope) {
+            return Err(AuthRejection::Forbidden);
+        }
+        Ok(AuthContext {
+            subject: principal.subject.clone(),
+            scopes: principal.scopes.clone(),
+            session_hint: None,
+            principal: Some(principal),
+        })
+    }
+
+    fn unauthorized(&self) -> AuthRejection {
+        AuthRejection::Unauthorized {
+            www_authenticate: format!("Bearer realm=\"{}\"", self.realm),
+        }
+    }
+}
+
+#[async_trait]
+impl WhipAuthHook for AuthCoreHook {
+    async fn authenticate(
+        &self,
+        _method: &str,
+        path: &str,
+        bearer: Option<&str>,
+        _peer_addr: SocketAddr,
+    ) -> Result<AuthContext, AuthRejection> {
+        let scope = if path.starts_with("/whep") {
+            "whep:subscribe"
+        } else {
+            "whip:publish"
+        };
+        self.validate(bearer, scope).await
+    }
+}
+
+#[async_trait]
+impl WsAuthHook for AuthCoreHook {
+    async fn authenticate(
+        &self,
+        subprotocols: &[String],
+        query_token: Option<&str>,
+        _peer_addr: SocketAddr,
+    ) -> Result<AuthContext, AuthRejection> {
+        let from_subprotocol = subprotocols
+            .iter()
+            .find_map(|value| value.strip_prefix("token."));
+        let token =
+            from_subprotocol.or_else(|| self.allow_query_tokens.then_some(query_token).flatten());
+        self.validate(token, "webrtc:connect").await
     }
 }
 

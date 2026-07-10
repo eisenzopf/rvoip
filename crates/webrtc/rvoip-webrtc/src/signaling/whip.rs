@@ -47,7 +47,9 @@ use webrtc::peer_connection::RTCIceCandidateInit;
 
 use crate::adapter::WebRtcAdapter;
 use crate::errors::{Result, WebRtcError};
-use crate::signaling::auth::{extract_bearer, AnonymousAuth, AuthRejection, WhipAuthHook};
+use crate::signaling::auth::{
+    extract_bearer, AnonymousAuth, AuthContext, AuthRejection, WhipAuthHook,
+};
 
 const CT_TRICKLE: &str = "application/trickle-ice-sdpfrag";
 const CT_SDP: &str = "application/sdp";
@@ -61,6 +63,9 @@ pub struct WhipState {
     /// Pluggable Bearer-token enforcement (RFC 9725 §4.1). Default
     /// [`AnonymousAuth`] accepts everything — back-compat with pre-G2.
     auth: Arc<dyn WhipAuthHook>,
+    /// Connection ownership established by the authenticated POST. PATCH and
+    /// DELETE must present the same principal subject.
+    owners: Arc<DashMap<ConnectionId, String>>,
 }
 
 impl WhipState {
@@ -69,6 +74,7 @@ impl WhipState {
             adapter,
             rate: Arc::new(DashMap::new()),
             auth: Arc::new(AnonymousAuth),
+            owners: Arc::new(DashMap::new()),
         }
     }
 
@@ -180,7 +186,20 @@ pub async fn serve_tls_with_shutdown(
     adapter: Arc<WebRtcAdapter>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    let state = WhipState::new(Arc::clone(&adapter));
+    serve_tls_with_auth_and_shutdown(listener, tls, adapter, Arc::new(AnonymousAuth), shutdown)
+        .await
+}
+
+/// HTTPS WHIP/WHEP with the same auth hook used by the plaintext listener.
+#[cfg(feature = "tls-rustls")]
+pub async fn serve_tls_with_auth_and_shutdown(
+    listener: std::net::TcpListener,
+    tls: crate::tls::TlsConfig,
+    adapter: Arc<WebRtcAdapter>,
+    auth: Arc<dyn WhipAuthHook>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    let state = WhipState::new(Arc::clone(&adapter)).with_auth(auth);
     let app = build_router(state, &adapter);
     let handle = axum_server::Handle::new();
     let handle_for_shutdown = handle.clone();
@@ -363,7 +382,7 @@ async fn check_auth(
     path: &str,
     headers: &HeaderMap,
     addr: SocketAddr,
-) -> std::result::Result<(), Response> {
+) -> std::result::Result<AuthContext, Response> {
     let bearer = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -373,7 +392,7 @@ async fn check_auth(
         .authenticate(method, path, bearer.as_deref(), addr)
         .await
     {
-        Ok(_ctx) => Ok(()),
+        Ok(ctx) => Ok(ctx),
         Err(AuthRejection::Unauthorized { www_authenticate }) => {
             state.adapter.note_signaling_error();
             let mut resp_headers = HeaderMap::new();
@@ -393,6 +412,22 @@ async fn check_auth(
             }
             Err((StatusCode::TOO_MANY_REQUESTS, resp_headers, "throttled").into_response())
         }
+    }
+}
+
+fn check_owner(
+    state: &WhipState,
+    id: &ConnectionId,
+    auth: &AuthContext,
+) -> std::result::Result<(), Response> {
+    match state.owners.get(id) {
+        Some(owner) if owner.value() == &auth.subject => Ok(()),
+        Some(_) => Err((
+            StatusCode::FORBIDDEN,
+            "connection belongs to another principal",
+        )
+            .into_response()),
+        None => Err(StatusCode::NOT_FOUND.into_response()),
     }
 }
 
@@ -426,9 +461,10 @@ async fn whip_post(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    if let Err(resp) = check_auth(&state, "POST", &format!("/whip/{tag}"), &headers, addr).await {
-        return resp;
-    }
+    let auth = match check_auth(&state, "POST", &format!("/whip/{tag}"), &headers, addr).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
     if !state.allow_request(addr.ip()) {
         return (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response();
     }
@@ -469,6 +505,8 @@ async fn whip_post(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
 
+    state.owners.insert(conn_id.clone(), auth.subject);
+
     let headers = build_session_headers(&state.adapter, &conn_id);
     (StatusCode::CREATED, headers, answer).into_response()
 }
@@ -486,16 +524,19 @@ async fn whip_patch(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    if let Err(resp) =
-        check_auth(&state, "PATCH", &format!("/whip/{conn_id}"), &headers, addr).await
+    let auth = match check_auth(&state, "PATCH", &format!("/whip/{conn_id}"), &headers, addr).await
     {
-        return resp;
-    }
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
     if !state.allow_request(addr.ip()) {
         return (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response();
     }
     let content_type = content_type_of(&headers);
     let id = ConnectionId::from_string(conn_id);
+    if let Err(response) = check_owner(&state, &id, &auth) {
+        return response;
+    }
 
     if content_type == CT_TRICKLE {
         if body.trim().is_empty() {
@@ -600,9 +641,10 @@ async fn whep_post(
     headers: HeaderMap,
     _body: String,
 ) -> Response {
-    if let Err(resp) = check_auth(&state, "POST", &format!("/whep/{tag}"), &headers, addr).await {
-        return resp;
-    }
+    let auth = match check_auth(&state, "POST", &format!("/whep/{tag}"), &headers, addr).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
     if !state.allow_request(addr.ip()) {
         return (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response();
     }
@@ -620,6 +662,7 @@ async fn whep_post(
     {
         Ok(handle) => {
             let conn_id = handle.connection.id.clone();
+            state.owners.insert(conn_id.clone(), auth.subject);
             match state.adapter.local_sdp(&conn_id) {
                 Ok(sdp) => {
                     let mut headers = build_session_headers(&state.adapter, &conn_id);
@@ -646,11 +689,11 @@ async fn whep_patch(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    if let Err(resp) =
-        check_auth(&state, "PATCH", &format!("/whep/{conn_id}"), &headers, addr).await
+    let auth = match check_auth(&state, "PATCH", &format!("/whep/{conn_id}"), &headers, addr).await
     {
-        return resp;
-    }
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
     let ct = content_type_of(&headers);
     if !ct.is_empty() && ct != CT_SDP {
         return (
@@ -663,6 +706,9 @@ async fn whep_patch(
         return (StatusCode::BAD_REQUEST, "empty WHEP answer body").into_response();
     }
     let id = ConnectionId::from_string(conn_id);
+    if let Err(response) = check_owner(&state, &id, &auth) {
+        return response;
+    }
     match state.adapter.accept_remote_answer(id, &body).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(WebRtcError::ConnectionNotFound) => StatusCode::NOT_FOUND.into_response(),
@@ -679,7 +725,7 @@ async fn whip_delete(
     Path(conn_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(resp) = check_auth(
+    let auth = match check_auth(
         &state,
         "DELETE",
         &format!("/whip/{conn_id}"),
@@ -688,13 +734,18 @@ async fn whip_delete(
     )
     .await
     {
-        return resp;
-    }
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
     let id = ConnectionId::from_string(conn_id);
+    if let Err(response) = check_owner(&state, &id, &auth) {
+        return response;
+    }
     let _ = state
         .adapter
-        .end(id, rvoip_core::adapter::EndReason::Normal)
+        .end(id.clone(), rvoip_core::adapter::EndReason::Normal)
         .await;
+    state.owners.remove(&id);
     StatusCode::OK.into_response()
 }
 
@@ -704,5 +755,26 @@ async fn whep_delete(
     Path(conn_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    whip_delete(State(state), ConnectInfo(addr), Path(conn_id), headers).await
+    let auth = match check_auth(
+        &state,
+        "DELETE",
+        &format!("/whep/{conn_id}"),
+        &headers,
+        addr,
+    )
+    .await
+    {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+    let id = ConnectionId::from_string(conn_id);
+    if let Err(response) = check_owner(&state, &id, &auth) {
+        return response;
+    }
+    let _ = state
+        .adapter
+        .end(id.clone(), rvoip_core::adapter::EndReason::Normal)
+        .await;
+    state.owners.remove(&id);
+    StatusCode::OK.into_response()
 }

@@ -14,8 +14,8 @@ description = "rvoip-core WebRTC interop adapter built on webrtc-rs 0.20.0-alpha
 
 [features]
 default = []
-signaling-whip = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http", "dep:serde_json"]
-signaling-ws = ["dep:tokio-tungstenite", "dep:serde_json"]
+signaling-whip = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http", "dep:serde_json", "dep:rvoip-auth-core"]
+signaling-ws = ["dep:tokio-tungstenite", "dep:serde_json", "dep:rvoip-auth-core"]
 client = ["dep:serde_json"]
 comprehensive = ["client", "signaling-ws", "dep:serde_json"]
 # D3a — cpal-backed microphone capture + speaker playback, real Opus encoder.

@@ -8,6 +8,48 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::errors::SubstrateError;
 
+/// RTP fields recovered from a UCTP media datagram body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RtpMediaPayload {
+    pub payload: Bytes,
+    pub payload_type: u8,
+    pub sequence_number: u16,
+    pub timestamp: u32,
+    pub ssrc: u32,
+}
+
+/// Construct the complete RTP packet required by UCTP §10.1.
+pub fn pack_rtp(
+    payload: Bytes,
+    payload_type: u8,
+    sequence_number: u16,
+    timestamp: u32,
+    ssrc: u32,
+) -> Result<Bytes, SubstrateError> {
+    rvoip_rtp_core::RtpPacket::new_with_payload(
+        payload_type,
+        sequence_number,
+        timestamp,
+        ssrc,
+        payload,
+    )
+    .serialize()
+    .map_err(|_| SubstrateError::InvalidDatagram("RTP serialization failed"))
+}
+
+/// Parse and validate the complete RTP packet carried after the UCTP header.
+pub fn unpack_rtp(payload: Bytes) -> Result<RtpMediaPayload, SubstrateError> {
+    let packet = rvoip_rtp_core::RtpPacket::parse_from_bytes(payload)
+        .map_err(|_| SubstrateError::InvalidDatagram("invalid RTP packet"))?;
+    Ok(RtpMediaPayload {
+        payload: packet.payload,
+        payload_type: packet.header.payload_type,
+        sequence_number: packet.header.sequence_number,
+        timestamp: packet.header.timestamp,
+        ssrc: packet.header.ssrc,
+    })
+}
+
 /// In-memory shape of a UCTP media datagram. Wire layout above.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaDatagram {
@@ -69,6 +111,19 @@ mod tests {
         let bytes = pack(&d);
         let d2 = unpack(&bytes).unwrap();
         assert_eq!(d, d2);
+    }
+
+    #[test]
+    fn rtp_body_roundtrip_is_a_complete_packet() {
+        let payload = Bytes::from_static(b"opus-frame");
+        let rtp = pack_rtp(payload.clone(), 111, 7, 9_600, 0x1234_5678).unwrap();
+        assert_eq!(rtp[0] >> 6, 2, "RTP version must be two");
+        let parsed = unpack_rtp(rtp).unwrap();
+        assert_eq!(parsed.payload, payload);
+        assert_eq!(parsed.payload_type, 111);
+        assert_eq!(parsed.sequence_number, 7);
+        assert_eq!(parsed.timestamp, 9_600);
+        assert_eq!(parsed.ssrc, 0x1234_5678);
     }
 
     #[test]

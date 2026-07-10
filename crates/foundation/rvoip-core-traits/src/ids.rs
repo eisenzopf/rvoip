@@ -51,6 +51,7 @@ id_type!(ParticipantId, "part");
 id_type!(IdentityId, "id");
 id_type!(DeviceId, "dev");
 id_type!(BridgeId, "brdg");
+id_type!(MediaRouteId, "route");
 id_type!(TenantId, "tnt");
 id_type!(RecordingId, "rec");
 id_type!(ListenerId, "lstn");

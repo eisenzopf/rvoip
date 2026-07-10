@@ -49,7 +49,7 @@ impl UctpQuicServer {
         by_connection: Arc<DashMap<ConnectionId, String>>,
         by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
         routes: Arc<DashMap<ConnectionId, Route>>,
-        _max_concurrent: usize,
+        max_concurrent: usize,
         quinn_stats_interval: Duration,
         subscription_handler: Option<Arc<dyn rvoip_uctp::state::SubscriptionHandler>>,
         orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
@@ -57,7 +57,24 @@ impl UctpQuicServer {
         sig9421: Option<rvoip_uctp::state::Sig9421Config>,
     ) -> Arc<Self> {
         tokio::spawn(async move {
+            let connection_slots = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
             while let Some(conn) = accept_rx.recv().await {
+                let permit = match Arc::clone(&connection_slots).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        metrics::counter!(
+                            "uctp_connections_rejected_total",
+                            "transport" => "quic",
+                            "reason" => "capacity"
+                        )
+                        .increment(1);
+                        conn.close(
+                            quinn::VarInt::from_u32(0x100),
+                            b"connection capacity reached",
+                        );
+                        continue;
+                    }
+                };
                 let bearer = bearer.clone();
                 let events_tx = events_tx.clone();
                 let by_connection = Arc::clone(&by_connection);
@@ -67,19 +84,27 @@ impl UctpQuicServer {
                 let orchestrator = orchestrator.clone();
                 let caps = coordinator_caps.clone();
                 let sig9421 = sig9421.clone();
-                tokio::spawn(spawn_peer_session(
-                    conn,
-                    bearer,
-                    events_tx,
-                    by_connection,
-                    by_uctp_sid,
-                    routes,
-                    quinn_stats_interval,
-                    subscription_handler,
-                    orchestrator,
-                    caps,
-                    sig9421,
-                ));
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    metrics::gauge!("uctp_active_connections", "transport" => "quic")
+                        .increment(1.0);
+                    spawn_peer_session(
+                        conn,
+                        bearer,
+                        events_tx,
+                        by_connection,
+                        by_uctp_sid,
+                        routes,
+                        quinn_stats_interval,
+                        subscription_handler,
+                        orchestrator,
+                        caps,
+                        sig9421,
+                    )
+                    .await;
+                    metrics::gauge!("uctp_active_connections", "transport" => "quic")
+                        .decrement(1.0);
+                });
             }
             debug!("rvoip-quic::server: accept loop exiting");
         });

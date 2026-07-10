@@ -171,12 +171,17 @@ impl WebRtcServerBuilder {
             whips_addr = Some(resolved);
             let whip_adapter = Arc::clone(&adapter);
             let signal = Arc::clone(&shutdown);
+            let auth = self
+                .whip_auth
+                .clone()
+                .unwrap_or_else(|| Arc::new(crate::signaling::auth::AnonymousAuth));
             tasks.push(spawn_signaling_task(async move {
                 let shutdown = async move { signal.notified().await };
-                crate::signaling::whip::serve_tls_with_shutdown(
+                crate::signaling::whip::serve_tls_with_auth_and_shutdown(
                     std_listener,
                     tls,
                     whip_adapter,
+                    auth,
                     shutdown,
                 )
                 .await
@@ -221,10 +226,14 @@ impl WebRtcServerBuilder {
             );
             let ws_adapter = Arc::clone(&adapter);
             let signal = Arc::clone(&shutdown);
+            let auth = self
+                .ws_auth
+                .clone()
+                .unwrap_or_else(|| Arc::new(crate::signaling::auth::AnonymousAuth));
             tasks.push(spawn_signaling_task(async move {
                 tokio::select! {
                     _ = signal.notified() => Ok(()),
-                    r = crate::signaling::websocket::serve_tls_listener(listener, tls, ws_adapter) => r,
+                    r = crate::signaling::websocket::serve_tls_listener_with_auth(listener, tls, ws_adapter, auth) => r,
                 }
             }));
         }

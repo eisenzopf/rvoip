@@ -21,6 +21,7 @@ dev-dangerous = []
 # Workspace internal
 rvoip-core.workspace = true
 rvoip-auth-core.workspace = true
+rvoip-rtp-core.workspace = true
 
 # Async runtime + concurrency primitives
 tokio = { workspace = true }

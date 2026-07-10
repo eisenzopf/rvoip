@@ -25,6 +25,7 @@ use crate::events::Event;
 use crate::ids::{
     BridgeId, ConnectionId, ConversationId, MessageId, ParticipantId, SessionId, StreamId, TenantId,
 };
+use crate::media_graph::{start_media_graph, MediaGraphHandle, MediaGraphPolicy};
 use crate::message::{ContentType, Message, MessageOrigin, MessageRecipients};
 use crate::participant::{Participant, ParticipantKind, ParticipantRole};
 use crate::session::{ConnectionRef, Session, SessionMedium, SessionState};
@@ -56,6 +57,11 @@ pub struct Orchestrator {
     /// SIP-fast-path `BridgeHandle`s from media-core). Dropping a handle
     /// from this map aborts its two pump tasks.
     cross_bridges: Arc<DashMap<BridgeId, CrossBridgeHandle>>,
+    /// One graph per source Connection. Each graph owns that Connection's
+    /// single-take `frames_in()` receiver and supports dynamic call,
+    /// recording, UCTP, and MOQT sinks.
+    media_graphs: Arc<DashMap<ConnectionId, MediaGraphHandle>>,
+    media_graph_init: Arc<tokio::sync::Mutex<()>>,
     pub admission: Arc<Semaphore>,
     adapters: Arc<DashMap<Transport, Arc<dyn ConnectionAdapter>>>,
     connections: Arc<DashMap<ConnectionId, ConnectionEntry>>,
@@ -266,6 +272,8 @@ impl Orchestrator {
             config,
             bridges: BridgeManager::new(),
             cross_bridges: Arc::new(DashMap::new()),
+            media_graphs: Arc::new(DashMap::new()),
+            media_graph_init: Arc::new(tokio::sync::Mutex::new(())),
             admission,
             adapters: Arc::new(DashMap::new()),
             connections: Arc::new(DashMap::new()),
@@ -305,6 +313,8 @@ impl Orchestrator {
             config,
             bridges: BridgeManager::new(),
             cross_bridges: Arc::new(DashMap::new()),
+            media_graphs: Arc::new(DashMap::new()),
+            media_graph_init: Arc::new(tokio::sync::Mutex::new(())),
             admission,
             adapters: Arc::new(DashMap::new()),
             connections: Arc::new(DashMap::new()),
@@ -379,6 +389,16 @@ impl Orchestrator {
         let transport = entry.transport;
         drop(entry);
         self.adapter(transport)
+    }
+
+    /// Return the registered transport that owns a live connection. Useful to
+    /// policy layers that pair heterogeneous inbound legs without depending
+    /// on adapter-private route maps.
+    pub fn connection_transport(&self, conn: &ConnectionId) -> Result<Transport> {
+        self.connections
+            .get(conn)
+            .map(|entry| entry.transport)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))
     }
 
     fn track_connection(&self, conn: &ConnectionId, transport: Transport) {
@@ -456,6 +476,19 @@ impl Orchestrator {
     }
 
     fn forget_connection(&self, conn: &ConnectionId) {
+        // Tear down bridge routes before shutting down the source graph.
+        let bridge_ids: Vec<BridgeId> = self
+            .cross_bridges
+            .iter()
+            .filter(|entry| &entry.value().a == conn || &entry.value().b == conn)
+            .map(|entry| entry.key().clone())
+            .collect();
+        for bridge_id in bridge_ids {
+            self.cross_bridges.remove(&bridge_id);
+        }
+        if let Some((_, graph)) = self.media_graphs.remove(conn) {
+            graph.shutdown();
+        }
         self.connections.remove(conn);
         // P1.10 — if this Connection was bound to a Session, detach it
         // and auto-end the Session when it loses its last Connection.
@@ -1396,8 +1429,27 @@ impl Orchestrator {
                 continue;
             };
             let tx = stream.frames_out();
-            if tx.send(frame.clone()).await.is_ok() {
-                delivered += 1;
+            match tx.try_send(frame.clone()) {
+                Ok(()) => delivered += 1,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    metrics::counter!(
+                        "rvoip_fanout_drops_total",
+                        "reason" => "subscriber-queue-full"
+                    )
+                    .increment(1);
+                    debug!(
+                        ?subscriber_connid,
+                        "fanout_frame: slow subscriber queue full"
+                    );
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    metrics::counter!(
+                        "rvoip_fanout_drops_total",
+                        "reason" => "subscriber-closed"
+                    )
+                    .increment(1);
+                    self.subscriber_streams.remove(&key);
+                }
             }
         }
         delivered
@@ -3045,75 +3097,38 @@ impl Orchestrator {
             }
         };
 
-        let a_pt = codec_to_pt(&a_audio.codec().name)
+        // Validate codecs before either graph consumes a single-take source.
+        codec_to_pt(&a_audio.codec().name)
             .ok_or_else(|| RvoipError::UnsupportedCodec(a_audio.codec().name.clone()))?;
-        let b_pt = codec_to_pt(&b_audio.codec().name)
+        codec_to_pt(&b_audio.codec().name)
             .ok_or_else(|| RvoipError::UnsupportedCodec(b_audio.codec().name.clone()))?;
 
-        // One transcoder per direction with its own FormatConverter.
-        //
-        // FormatConverter caches a Resampler keyed by the *input* sample
-        // rate, so sharing across directions would thrash the cache (and
-        // could cross-contaminate state) on every flip — e.g. G.711-mu
-        // (8 kHz) <-> Opus (48 kHz) would tear down and rebuild the
-        // resampler on every frame. Per-direction also removes the
-        // RwLock contention point under bidirectional traffic.
-        let (transcoder_a_to_b, transcoder_b_to_a) = if a_pt != b_pt {
-            (
-                Some(Transcoder::new(Arc::new(TokioRwLock::new(
-                    FormatConverter::new(),
-                )))),
-                Some(Transcoder::new(Arc::new(TokioRwLock::new(
-                    FormatConverter::new(),
-                )))),
-            )
-        } else {
-            (None, None)
+        let a_graph = self
+            .media_graph_for_stream(a.clone(), Arc::clone(&a_audio))
+            .await?;
+        let b_graph = self
+            .media_graph_for_stream(b.clone(), Arc::clone(&b_audio))
+            .await?;
+        let a_to_b = a_graph.add_sink(b_audio.codec(), b_audio.frames_out())?;
+        let b_to_a = match b_graph.add_sink(a_audio.codec(), a_audio.frames_out()) {
+            Ok(route) => route,
+            Err(error) => {
+                a_graph.remove_sink(a_to_b);
+                return Err(error);
+            }
         };
-
-        // Single-take channels per MediaStream contract.
-        let a_in = a_audio.frames_in();
-        let a_out = a_audio.frames_out();
-        let b_in = b_audio.frames_in();
-        let b_out = b_audio.frames_out();
-
-        // Gap plan §4.2 v1 punch list — wire each pump with a swap
-        // channel so `Orchestrator::renegotiate_media` can hot-swap
-        // the transcoders after a successful codec renegotiation.
-        let (swap_a_to_b_tx, swap_a_to_b_rx) =
-            tokio::sync::mpsc::channel::<frame_pump::TranscoderSwap>(4);
-        let (swap_b_to_a_tx, swap_b_to_a_rx) =
-            tokio::sync::mpsc::channel::<frame_pump::TranscoderSwap>(4);
-        let a_to_b = frame_pump::spawn_pump_with_swap(
-            "a->b",
-            a_in,
-            b_out,
-            transcoder_a_to_b,
-            a_pt,
-            b_pt,
-            swap_a_to_b_rx,
-        );
-        let b_to_a = frame_pump::spawn_pump_with_swap(
-            "b->a",
-            b_in,
-            a_out,
-            transcoder_b_to_a,
-            b_pt,
-            a_pt,
-            swap_b_to_a_rx,
-        );
 
         let id = BridgeId::new();
         self.cross_bridges.insert(
             id.clone(),
-            CrossBridgeHandle::with_swap_channels(
+            CrossBridgeHandle::with_media_graphs(
                 id.clone(),
                 a.clone(),
                 b.clone(),
-                a_to_b.abort_handle(),
-                b_to_a.abort_handle(),
-                swap_a_to_b_tx,
-                swap_b_to_a_tx,
+                a_graph,
+                b_graph,
+                a_to_b,
+                b_to_a,
             ),
         );
         self.emit(Event::ConnectionsBridged {
@@ -3123,6 +3138,71 @@ impl Orchestrator {
             at: Utc::now(),
         });
         Ok(id)
+    }
+
+    /// Return the reusable media graph for a Connection, creating it from the
+    /// Connection's audio stream on first use. Broadcast adapters call this
+    /// method to attach a sink without stealing frames from an active bridge.
+    pub async fn media_graph_for_connection(
+        &self,
+        connection_id: ConnectionId,
+    ) -> Result<MediaGraphHandle> {
+        if let Some(graph) = self.media_graphs.get(&connection_id) {
+            return Ok(graph.value().clone());
+        }
+        let adapter = self.adapter_for(&connection_id)?;
+        let stream = adapter
+            .streams(connection_id.clone())
+            .await?
+            .into_iter()
+            .find(|stream| stream.kind() == StreamKind::Audio)
+            .ok_or(RvoipError::AdmissionRejected("no audio stream"))?;
+        self.media_graph_for_stream(connection_id, stream).await
+    }
+
+    async fn media_graph_for_stream(
+        &self,
+        connection_id: ConnectionId,
+        stream: Arc<dyn crate::stream::MediaStream>,
+    ) -> Result<MediaGraphHandle> {
+        if let Some(graph) = self.media_graphs.get(&connection_id) {
+            return Ok(graph.value().clone());
+        }
+        // Serialize first-use so concurrent bridge/broadcast requests cannot
+        // both take the same MediaStream receiver.
+        let _guard = self.media_graph_init.lock().await;
+        if let Some(graph) = self.media_graphs.get(&connection_id) {
+            return Ok(graph.value().clone());
+        }
+        let graph = start_media_graph(
+            stream.frames_in(),
+            stream.codec(),
+            MediaGraphPolicy::default(),
+        )?;
+        self.media_graphs.insert(connection_id, graph.clone());
+        Ok(graph)
+    }
+
+    /// Attach an arbitrary destination to a Connection's source graph.
+    pub async fn attach_media_sink(
+        &self,
+        connection_id: ConnectionId,
+        codec: crate::capability::CodecInfo,
+        target: tokio::sync::mpsc::Sender<crate::stream::MediaFrame>,
+    ) -> Result<crate::ids::MediaRouteId> {
+        self.media_graph_for_connection(connection_id)
+            .await?
+            .add_sink(codec, target)
+    }
+
+    pub fn detach_media_sink(
+        &self,
+        connection_id: &ConnectionId,
+        route_id: crate::ids::MediaRouteId,
+    ) -> bool {
+        self.media_graphs
+            .get(connection_id)
+            .is_some_and(|graph| graph.remove_sink(route_id))
     }
 
     pub async fn unbridge_connections(&self, bridge_id: BridgeId) -> Result<()> {
