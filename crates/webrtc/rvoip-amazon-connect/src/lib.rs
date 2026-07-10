@@ -32,7 +32,7 @@ pub mod bridge;
 #[cfg(feature = "server")]
 pub mod server;
 
-pub use adapter::{AmazonConnectAdapter, ConnectMetrics, ADAPTER_EVENT_CAP};
+pub use adapter::{AmazonConnectAdapter, ConnectMetrics, ContactTarget, ADAPTER_EVENT_CAP};
 pub use config::ConnectConfig;
 pub use control::{ConnectContactStarter, ConnectionData, MediaPlacement, StartContactRequest};
 pub use errors::{ConnectError, Result};
@@ -42,10 +42,18 @@ pub use mapping::{AttributeMapping, MappedAttributes, UnmappedPolicy, MAX_ATTRIB
 pub use control::AwsConnectStarter;
 
 #[cfg(feature = "server")]
-pub use server::{ConnectScreenPopServer, ScreenPopServerConfig};
+pub use server::{
+    request_uri_user, to_uri_user, uri_user_part, ConnectScreenPopServer, ContactRoute,
+    ContactRouter, RouteDecision, RouteMetrics, ScreenPopServerConfig,
+};
 
 /// Re-export of the SIP UAS config (`rvoip_sip::Config`) so callers can build a
 /// [`ScreenPopServerConfig`] without depending on `rvoip-sip` directly. Build
 /// one with `SipConfig::local(name, port)`.
 #[cfg(feature = "server")]
 pub use rvoip_sip::Config as SipConfig;
+
+/// Re-export of the inbound-INVITE wrapper so a [`server::ContactRouter`]
+/// closure can be written without a direct `rvoip-sip` dependency.
+#[cfg(feature = "server")]
+pub use rvoip_sip::IncomingCall;

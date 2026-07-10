@@ -15,6 +15,8 @@
 //! The Connect contact flow + agent CCP then perform the actual screen pop from
 //! the attributes (an AWS-side configuration task).
 
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -28,12 +30,50 @@ use rvoip_sip::{
 use rvoip_sip_core::types::headers::{HeaderAccess, HeaderName, TypedHeader};
 use tracing::{info, warn};
 
-use crate::adapter::AmazonConnectAdapter;
+use crate::adapter::{AmazonConnectAdapter, ContactTarget};
 use crate::bridge::{bridge_streams, StreamBridge};
 use crate::config::ConnectConfig;
 use crate::control::ConnectContactStarter;
 use crate::errors::{ConnectError, Result};
 use crate::mapping::AttributeMapping;
+
+/// The Connect target a [`ContactRouter`] selected for one inbound call.
+///
+/// Every `None` field falls back to the server-wide [`ConnectConfig`] /
+/// [`AttributeMapping`], so a route only needs to carry what differs per
+/// tenant.
+#[derive(Clone, Debug, Default)]
+pub struct ContactRoute {
+    /// Metrics/logging label for this route (e.g. the tenant name). Keyed
+    /// into [`ConnectScreenPopServer::route_metrics`].
+    pub label: String,
+    /// Amazon Connect instance id override.
+    pub instance_id: Option<String>,
+    /// Contact-flow id override.
+    pub contact_flow_id: Option<String>,
+    /// Per-route SIP-header → attribute mapping override.
+    pub attribute_mapping: Option<AttributeMapping>,
+    /// Display-name fallback override (used when the INVITE supplies none).
+    pub default_display_name: Option<String>,
+}
+
+/// A [`ContactRouter`]'s verdict for one inbound INVITE.
+pub enum RouteDecision {
+    /// Bridge the call into Connect with these per-call parameters.
+    Route(ContactRoute),
+    /// Reject the INVITE with this SIP status/reason (e.g. `404 Not Found`
+    /// for an unknown tenant).
+    Reject {
+        /// SIP status code (4xx/5xx/6xx).
+        status: u16,
+        /// SIP reason phrase.
+        reason: String,
+    },
+}
+
+/// Per-call routing hook: inspect the inbound INVITE (Request-URI / To user
+/// part, headers, …) and pick the Connect target — the multi-tenant enabler.
+pub type ContactRouter = Arc<dyn Fn(&IncomingCall) -> RouteDecision + Send + Sync>;
 
 /// Configuration for the turnkey screen-pop server — one object, batteries
 /// included.
@@ -47,10 +87,13 @@ pub struct ScreenPopServerConfig {
     /// The control-plane starter. Use `AwsConnectStarter` (feature
     /// `aws-control`) for the real path, or a mock in tests.
     pub starter: Arc<dyn ConnectContactStarter>,
+    /// Optional per-call router. `None` preserves the classic behaviour:
+    /// every INVITE goes to `connect`'s instance/flow with its mapping.
+    pub router: Option<ContactRouter>,
 }
 
 impl ScreenPopServerConfig {
-    /// Construct with the three required pieces.
+    /// Construct with the three required pieces (no per-call routing).
     pub fn new(
         sip: SipConfig,
         connect: ConnectConfig,
@@ -60,7 +103,14 @@ impl ScreenPopServerConfig {
             sip,
             connect,
             starter,
+            router: None,
         }
+    }
+
+    /// Set the per-call router (builder-style).
+    pub fn with_router(mut self, router: ContactRouter) -> Self {
+        self.router = Some(router);
+        self
     }
 }
 
@@ -69,6 +119,28 @@ impl ScreenPopServerConfig {
 struct ActiveContact {
     _bridge: StreamBridge,
     connect_conn: ConnectionId,
+    /// Route label for per-route metrics (`None` on the unrouted path).
+    route_label: Option<String>,
+}
+
+/// Per-route (per-tenant) counters, updated by `handle_call`/teardown.
+#[derive(Default)]
+struct RouteStats {
+    contacts_started: AtomicU64,
+    failures: AtomicU64,
+    active_sessions: AtomicI64,
+}
+
+/// Snapshot of one route's counters (see
+/// [`ConnectScreenPopServer::route_metrics`]).
+#[derive(Clone, Debug, Default)]
+pub struct RouteMetrics {
+    /// Contacts successfully started (StartWebRTCContact succeeded).
+    pub contacts_started: u64,
+    /// Calls that failed anywhere between accept and bridge.
+    pub failures: u64,
+    /// Currently bridged calls.
+    pub active_sessions: u64,
 }
 
 /// The running server.
@@ -76,6 +148,9 @@ pub struct ConnectScreenPopServer {
     coordinator: Arc<UnifiedCoordinator>,
     adapter: Arc<AmazonConnectAdapter>,
     mapping: AttributeMapping,
+    router: Option<ContactRouter>,
+    /// Per-route-label counters; populated only when a router is configured.
+    route_stats: DashMap<String, Arc<RouteStats>>,
     /// Authoritative map of live bridges, keyed by SIP session. Removal from
     /// this map is the single teardown "claim" so the two directions
     /// (SIP-ended, Connect-ended) never double-tear-down.
@@ -98,6 +173,8 @@ impl ConnectScreenPopServer {
             coordinator,
             adapter,
             mapping,
+            router: config.router,
+            route_stats: DashMap::new(),
             active: Arc::new(DashMap::new()),
             by_connect: Arc::new(DashMap::new()),
         }))
@@ -106,6 +183,32 @@ impl ConnectScreenPopServer {
     /// The underlying Connect adapter (e.g. to read metrics).
     pub fn adapter(&self) -> &Arc<AmazonConnectAdapter> {
         &self.adapter
+    }
+
+    /// Snapshot of the per-route counters, keyed by [`ContactRoute::label`].
+    /// Empty when no router is configured (use
+    /// [`AmazonConnectAdapter::metrics`] for the process-wide view).
+    pub fn route_metrics(&self) -> BTreeMap<String, RouteMetrics> {
+        self.route_stats
+            .iter()
+            .map(|e| {
+                (
+                    e.key().clone(),
+                    RouteMetrics {
+                        contacts_started: e.contacts_started.load(Ordering::Relaxed),
+                        failures: e.failures.load(Ordering::Relaxed),
+                        active_sessions: e.active_sessions.load(Ordering::Relaxed).max(0) as u64,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn stats_for(&self, label: &str) -> Arc<RouteStats> {
+        self.route_stats
+            .entry(label.to_string())
+            .or_default()
+            .clone()
     }
 
     /// Run the accept loop forever: each inbound INVITE is translated, the
@@ -150,10 +253,47 @@ impl ConnectScreenPopServer {
         }
     }
 
-    /// Translate headers → attributes, answer SIP, originate Connect, bridge.
+    /// Route the call, then translate → answer → originate → bridge. A
+    /// configured router can divert the call to a per-tenant Connect target
+    /// or reject it outright (e.g. `404` for an unknown tenant).
     async fn handle_call(self: &Arc<Self>, call: IncomingCall) -> Result<()> {
+        // 0. Per-call routing decision (multi-tenant hook).
+        let route = match &self.router {
+            Some(router) => match router(&call) {
+                RouteDecision::Route(route) => Some(route),
+                RouteDecision::Reject { status, reason } => {
+                    info!(
+                        to = %call.to,
+                        status,
+                        reason = %reason,
+                        "router rejected inbound SIP call"
+                    );
+                    call.reject(status, &reason);
+                    return Ok(());
+                }
+            },
+            None => None,
+        };
+
+        let stats = route.as_ref().map(|r| self.stats_for(&r.label));
+        let result = self.bridge_call(call, route).await;
+        if result.is_err() {
+            if let Some(stats) = stats {
+                stats.failures.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        result
+    }
+
+    /// Translate headers → attributes, answer SIP, originate Connect, bridge.
+    async fn bridge_call(
+        self: &Arc<Self>,
+        call: IncomingCall,
+        route: Option<ContactRoute>,
+    ) -> Result<()> {
         let session_id = call.call_id.clone();
         let display_name = Some(call.from.clone());
+        let route_label = route.as_ref().map(|r| r.label.clone());
 
         // 1. Extract custom headers and translate to Connect attributes.
         let headers = extract_headers(&call);
@@ -167,7 +307,11 @@ impl ConnectScreenPopServer {
             headers = ?headers,
             "inbound INVITE headers"
         );
-        let mapped = self.mapping.translate(headers);
+        let mapping = route
+            .as_ref()
+            .and_then(|r| r.attribute_mapping.as_ref())
+            .unwrap_or(&self.mapping);
+        let mapped = mapping.translate(headers);
         tracing::debug!(
             target: "rvoip_amazon_connect::sip_headers",
             attributes = ?mapped.attributes,
@@ -176,6 +320,7 @@ impl ConnectScreenPopServer {
         );
         info!(
             from = %call.from,
+            route = route_label.as_deref().unwrap_or("-"),
             attributes = mapped.attributes.len(),
             "inbound SIP call → Amazon Connect screen pop"
         );
@@ -197,11 +342,25 @@ impl ConnectScreenPopServer {
         .map_err(|e| ConnectError::Signaling(format!("SIP media stream: {e}")))?
             as Arc<dyn MediaStream>;
 
-        // 4. Place the inbound WebRTC contact into Amazon Connect.
+        // 4. Place the inbound WebRTC contact into Amazon Connect, honouring
+        //    the route's per-call instance/flow override.
+        let target = route
+            .as_ref()
+            .map(|r| ContactTarget {
+                instance_id: r.instance_id.clone(),
+                contact_flow_id: r.contact_flow_id.clone(),
+                default_display_name: r.default_display_name.clone(),
+            })
+            .unwrap_or_default();
         let connect_conn = self
             .adapter
-            .originate_contact(mapped.attributes, display_name, None)
+            .originate_contact_to(target, mapped.attributes, display_name, None)
             .await?;
+        if let Some(label) = &route_label {
+            self.stats_for(label)
+                .contacts_started
+                .fetch_add(1, Ordering::Relaxed);
+        }
 
         let connect_streams = self
             .adapter
@@ -221,9 +380,19 @@ impl ConnectScreenPopServer {
             ActiveContact {
                 _bridge: bridge,
                 connect_conn,
+                route_label: route_label.clone(),
             },
         );
-        info!(session = %session_id, "bridged SIP ⟷ Amazon Connect");
+        if let Some(label) = &route_label {
+            self.stats_for(label)
+                .active_sessions
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        info!(
+            session = %session_id,
+            route = route_label.as_deref().unwrap_or("-"),
+            "bridged SIP ⟷ Amazon Connect"
+        );
 
         Ok(())
     }
@@ -275,6 +444,7 @@ impl ConnectScreenPopServer {
     async fn on_sip_ended(&self, sip_session: &SipSessionId) {
         if let Some((_, active)) = self.active.remove(sip_session) {
             self.by_connect.remove(&active.connect_conn);
+            self.release_route_slot(&active);
             info!(session = %sip_session, "SIP leg ended — leaving Amazon Connect meeting");
             let _ = self
                 .adapter
@@ -293,6 +463,7 @@ impl ConnectScreenPopServer {
         };
         if let Some((_, active)) = self.active.remove(&sip_session) {
             self.by_connect.remove(&active.connect_conn);
+            self.release_route_slot(&active);
             info!(session = %sip_session, "Amazon Connect leg ended — hanging up SIP carrier (BYE)");
             // BYE the carrier.
             let _ = self.coordinator.hangup(&sip_session).await;
@@ -307,6 +478,81 @@ impl ConnectScreenPopServer {
     /// Tear down a bridged contact by SIP session (public manual teardown).
     pub async fn end(&self, sip_session: &SipSessionId) {
         self.on_sip_ended(sip_session).await;
+    }
+
+    /// Decrement the per-route active-session gauge for a torn-down contact.
+    fn release_route_slot(&self, active: &ActiveContact) {
+        if let Some(label) = &active.route_label {
+            self.stats_for(label)
+                .active_sessions
+                .fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// User part of the INVITE Request-URI — the primary multi-tenant routing
+/// key (CONTRACTS B.4: R-URI user, then To user, then default tenant).
+pub fn request_uri_user(call: &IncomingCall) -> Option<String> {
+    call.raw_request().and_then(|r| r.uri().user.clone())
+}
+
+/// User part of the To-header URI — the fallback routing key. Reads the
+/// typed To header when the parsed request is available, else parses the
+/// legacy `call.to` string.
+pub fn to_uri_user(call: &IncomingCall) -> Option<String> {
+    if let Some(to) = call.raw_request().and_then(|r| r.to()) {
+        return to.0.uri.user.clone();
+    }
+    uri_user_part(&call.to).map(str::to_string)
+}
+
+/// Extract the user part from a SIP URI string, tolerating a display name,
+/// angle brackets, and URI/header params: `"Bob" <sip:sales@x.y;tag=1>` →
+/// `sales`. Returns `None` when there is no user part.
+pub fn uri_user_part(uri: &str) -> Option<&str> {
+    let s = uri.trim();
+    // Strip a display name + angle brackets if present.
+    let s = match (s.find('<'), s.find('>')) {
+        (Some(open), Some(close)) if open < close => &s[open + 1..close],
+        _ => s,
+    };
+    let s = s
+        .strip_prefix("sips:")
+        .or_else(|| s.strip_prefix("sip:"))
+        .unwrap_or(s);
+    let user = &s[..s.find('@')?];
+    // Drop password / params that legally precede '@' only via ';'/':'.
+    let user = user.split(|c| c == ':' || c == ';').next().unwrap_or(user);
+    (!user.is_empty()).then_some(user)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uri_user_part;
+
+    #[test]
+    fn parses_plain_and_bracketed_uris() {
+        assert_eq!(uri_user_part("sip:banking@10.0.0.1"), Some("banking"));
+        assert_eq!(uri_user_part("sips:sales@example.com:5061"), Some("sales"));
+        assert_eq!(
+            uri_user_part("\"Vapi\" <sip:support@example.com;transport=udp>;tag=abc"),
+            Some("support")
+        );
+        assert_eq!(uri_user_part("<sip:a@b>"), Some("a"));
+    }
+
+    #[test]
+    fn strips_password_and_uri_params_from_user() {
+        assert_eq!(uri_user_part("sip:bob:secret@example.com"), Some("bob"));
+        assert_eq!(uri_user_part("sip:bob;p=1@example.com"), Some("bob"));
+    }
+
+    #[test]
+    fn no_user_part_yields_none() {
+        assert_eq!(uri_user_part("sip:10.0.0.1"), None);
+        assert_eq!(uri_user_part("sip:@example.com"), None);
+        assert_eq!(uri_user_part(""), None);
+        assert_eq!(uri_user_part("tel:+14155550100"), None);
     }
 }
 

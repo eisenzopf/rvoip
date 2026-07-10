@@ -41,6 +41,23 @@ use crate::signaling::ChimeSignalingClient;
 /// Event channel depth (mirrors rvoip-webrtc's `ADAPTER_EVENT_CAP`).
 pub const ADAPTER_EVENT_CAP: usize = 256;
 
+/// Per-call override of the Amazon Connect contact target.
+///
+/// Every `None` field falls back to the adapter's [`ConnectConfig`], so a
+/// default-constructed target reproduces the classic single-target behaviour.
+/// This is the multi-tenant hook: one adapter (one credential chain, one
+/// region) can place contacts into different Connect instances/flows per call.
+#[derive(Clone, Debug, Default)]
+pub struct ContactTarget {
+    /// Amazon Connect instance id override.
+    pub instance_id: Option<String>,
+    /// Contact-flow id override.
+    pub contact_flow_id: Option<String>,
+    /// Display-name fallback override, used when the caller supplies no
+    /// per-call display name.
+    pub default_display_name: Option<String>,
+}
+
 /// One active Amazon Connect contact: the Chime peer connection, its signaling
 /// session, and the bridged media stream(s).
 #[derive(Clone)]
@@ -149,8 +166,23 @@ impl AmazonConnectAdapter {
         display_name: Option<String>,
         description: Option<String>,
     ) -> crate::errors::Result<ConnectionId> {
+        self.originate_contact_to(ContactTarget::default(), attributes, display_name, description)
+            .await
+    }
+
+    /// Like [`Self::originate_contact`], but with a per-call
+    /// [`ContactTarget`] override of the instance/flow (multi-tenant
+    /// routing). `None` fields fall back to the adapter's [`ConnectConfig`].
+    pub async fn originate_contact_to(
+        &self,
+        target: ContactTarget,
+        attributes: BTreeMap<String, String>,
+        display_name: Option<String>,
+        description: Option<String>,
+    ) -> crate::errors::Result<ConnectionId> {
         let (conn_id, _negotiated) = self
             .establish(
+                target,
                 attributes,
                 display_name,
                 description,
@@ -165,6 +197,7 @@ impl AmazonConnectAdapter {
     /// `Connected` on success; increments the failure counter otherwise.
     async fn establish(
         &self,
+        target: ContactTarget,
         attributes: BTreeMap<String, String>,
         display_name: Option<String>,
         description: Option<String>,
@@ -172,7 +205,7 @@ impl AmazonConnectAdapter {
         _participant_id: ParticipantId,
     ) -> crate::errors::Result<(ConnectionId, NegotiatedCodecs)> {
         match self
-            .establish_inner(attributes, display_name, description)
+            .establish_inner(target, attributes, display_name, description)
             .await
         {
             Ok(ok) => Ok(ok),
@@ -185,15 +218,22 @@ impl AmazonConnectAdapter {
 
     async fn establish_inner(
         &self,
+        target: ContactTarget,
         attributes: BTreeMap<String, String>,
         display_name: Option<String>,
         description: Option<String>,
     ) -> crate::errors::Result<(ConnectionId, NegotiatedCodecs)> {
         // 1. Control plane: StartWebRTCContact (attributes drive the screen pop).
         let request = StartContactRequest {
-            instance_id: self.config.instance_id.clone(),
-            contact_flow_id: self.config.contact_flow_id.clone(),
-            display_name: display_name.unwrap_or_else(|| self.config.default_display_name.clone()),
+            instance_id: target
+                .instance_id
+                .unwrap_or_else(|| self.config.instance_id.clone()),
+            contact_flow_id: target
+                .contact_flow_id
+                .unwrap_or_else(|| self.config.contact_flow_id.clone()),
+            display_name: display_name
+                .or(target.default_display_name)
+                .unwrap_or_else(|| self.config.default_display_name.clone()),
             attributes,
             description,
             client_token: None,
@@ -403,6 +443,7 @@ impl ConnectionAdapter for AmazonConnectAdapter {
     async fn originate(&self, request: OriginateRequest) -> RvoipResult<ConnectionHandle> {
         let (conn_id, negotiated) = self
             .establish(
+                ContactTarget::default(),
                 BTreeMap::new(),
                 None,
                 None,
@@ -542,6 +583,86 @@ impl ConnectionAdapter for AmazonConnectAdapter {
         // The Connect/Chime media leg is authenticated by the attendee join
         // token at the control plane, not by an rvoip-native signature.
         Ok(IdentityAssurance::Anonymous)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::ConnectionData;
+
+    /// Records every `StartContactRequest`, then fails so `establish` stops
+    /// before the Chime signaling step (all we test is control-plane input).
+    struct CapturingStarter {
+        seen: SyncMutex<Vec<StartContactRequest>>,
+    }
+
+    #[async_trait]
+    impl ConnectContactStarter for CapturingStarter {
+        async fn start_webrtc_contact(
+            &self,
+            request: StartContactRequest,
+        ) -> crate::errors::Result<ConnectionData> {
+            self.seen.lock().push(request);
+            Err(ConnectError::Control("test stops after capture".into()))
+        }
+    }
+
+    fn adapter_with_capture() -> (Arc<AmazonConnectAdapter>, Arc<CapturingStarter>) {
+        let starter = Arc::new(CapturingStarter {
+            seen: SyncMutex::new(Vec::new()),
+        });
+        let mut config = ConnectConfig::new("inst-default", "flow-default");
+        config.default_display_name = "config-default".into();
+        let adapter = AmazonConnectAdapter::new(config, starter.clone());
+        (adapter, starter)
+    }
+
+    #[tokio::test]
+    async fn contact_target_overrides_reach_start_contact_request() {
+        let (adapter, starter) = adapter_with_capture();
+        let target = ContactTarget {
+            instance_id: Some("inst-tenant".into()),
+            contact_flow_id: Some("flow-tenant".into()),
+            default_display_name: Some("tenant-name".into()),
+        };
+        let _ = adapter
+            .originate_contact_to(target, BTreeMap::new(), None, None)
+            .await;
+
+        let seen = starter.seen.lock();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].instance_id, "inst-tenant");
+        assert_eq!(seen[0].contact_flow_id, "flow-tenant");
+        assert_eq!(seen[0].display_name, "tenant-name");
+    }
+
+    #[tokio::test]
+    async fn default_target_falls_back_to_config() {
+        let (adapter, starter) = adapter_with_capture();
+        let _ = adapter
+            .originate_contact(BTreeMap::new(), None, None)
+            .await;
+
+        let seen = starter.seen.lock();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].instance_id, "inst-default");
+        assert_eq!(seen[0].contact_flow_id, "flow-default");
+        assert_eq!(seen[0].display_name, "config-default");
+    }
+
+    #[tokio::test]
+    async fn caller_display_name_beats_target_default() {
+        let (adapter, starter) = adapter_with_capture();
+        let target = ContactTarget {
+            default_display_name: Some("tenant-name".into()),
+            ..Default::default()
+        };
+        let _ = adapter
+            .originate_contact_to(target, BTreeMap::new(), Some("sip:caller@x".into()), None)
+            .await;
+
+        assert_eq!(starter.seen.lock()[0].display_name, "sip:caller@x");
     }
 }
 
