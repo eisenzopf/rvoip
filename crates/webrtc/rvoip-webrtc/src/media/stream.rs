@@ -12,7 +12,7 @@ use webrtc::media_stream::track_remote::TrackRemote;
 
 use rvoip_core::capability::CodecInfo;
 use rvoip_core::connection::Direction;
-use rvoip_core::error::Result as RvoipResult;
+use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::ids::StreamId;
 use rvoip_core::stream::{MediaStream, QualitySnapshot, StreamKind};
 
@@ -180,11 +180,17 @@ impl MediaStream for WebRtcMediaStream {
     }
 
     fn frames_in(&self) -> mpsc::Receiver<rvoip_core::stream::MediaFrame> {
+        self.try_frames_in().unwrap_or_else(|_| mpsc::channel(1).1)
+    }
+
+    fn try_frames_in(&self) -> RvoipResult<mpsc::Receiver<rvoip_core::stream::MediaFrame>> {
         self.inner
             .frames_in_rx
             .lock()
             .take()
-            .unwrap_or_else(|| mpsc::channel(1).1)
+            .ok_or(RvoipError::InvalidState(
+                "WebRTC media receiver has already been acquired",
+            ))
     }
 
     fn frames_out(&self) -> mpsc::Sender<rvoip_core::stream::MediaFrame> {
@@ -203,5 +209,43 @@ impl MediaStream for WebRtcMediaStream {
             handle.abort();
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod receiver_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn second_receiver_acquisition_is_a_typed_error() {
+        let (frames_in_tx, frames_in_rx) = mpsc::channel(1);
+        let (frames_out_tx, _frames_out_rx) = mpsc::channel(1);
+        let stream = WebRtcMediaStream {
+            inner: Arc::new(WebRtcMediaStreamInner {
+                id: StreamId::new(),
+                codec: CodecInfo {
+                    name: "opus".into(),
+                    clock_rate_hz: 48_000,
+                    channels: 1,
+                    fmtp: None,
+                },
+                direction: Direction::Inbound,
+                frames_in_tx,
+                frames_in_rx: Mutex::new(Some(frames_in_rx)),
+                frames_out_tx,
+                pumps: Mutex::new(Vec::new()),
+                remote_attached: AtomicBool::new(false),
+                inbound_stats: Arc::new(InboundStats::default()),
+                dtmf_tx: None,
+                cancel: Arc::new(Notify::new()),
+                send_deadline_ms: DEFAULT_INBOUND_SEND_DEADLINE_MS,
+            }),
+        };
+
+        assert!(stream.try_frames_in().is_ok());
+        assert!(matches!(
+            stream.try_frames_in(),
+            Err(RvoipError::InvalidState(_))
+        ));
     }
 }

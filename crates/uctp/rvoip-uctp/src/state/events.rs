@@ -9,6 +9,7 @@ use crate::ids::{ConnectionId, SessionId, StreamId};
 /// One coordinator event. Adapter crates map this to
 /// `rvoip_core::AdapterEvent` per design doc §4.4.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum UctpSessionEvent {
     /// Peer sent `auth.session` — we are authenticated.
     Authenticated {
@@ -73,6 +74,11 @@ pub enum UctpSessionEvent {
         /// `method` field so downstream consumers can distinguish how
         /// the DTMF was carried (RTP events vs SIP INFO bridging).
         method: String,
+    },
+
+    DataMessage {
+        connid: ConnectionId,
+        message: rvoip_core::DataMessage,
     },
 
     /// Peer sent `connection.quality` (CONVERSATION_PROTOCOL.md §10.3) —

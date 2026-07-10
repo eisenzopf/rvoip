@@ -22,6 +22,7 @@ use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::ConnectionId;
 use rvoip_core::message::Message;
 use rvoip_core::stream::MediaStream;
+use rvoip_core::{DataMessage, DataReliability};
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads;
 use rvoip_uctp::types::MessageType;
@@ -36,6 +37,7 @@ pub const ADAPTER_EVENT_CAP: usize = 256;
 #[derive(Clone)]
 pub(crate) struct Route {
     pub sid: String,
+    pub binding: rvoip_uctp::adapter_helpers::AuthenticatedConnectionBinding,
     pub out_tx: mpsc::Sender<UctpEnvelope>,
     /// Gap plan §4.2 v1 punch list — see rvoip-quic Route doc.
     pub pending: Arc<rvoip_uctp::substrate::Pending>,
@@ -414,7 +416,9 @@ impl ConnectionAdapter for UctpWtAdapter {
             .map_err(|e| RvoipError::Adapter(format!("encode stream.opened: {e}")))?,
         )
         .with_sid(route.sid.clone())
-        .with_connid(subscriber.to_string());
+        .with_connid(
+            rvoip_uctp::adapter_helpers::require_bound_wire_connection(&route.binding)?.to_string(),
+        );
         route
             .out_tx
             .send(opened_env)
@@ -429,26 +433,49 @@ impl ConnectionAdapter for UctpWtAdapter {
             .route(&conn)
             .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
         let content_type_str = content_type_to_wire(&message.content_type);
-        let payload = payloads::message::MessageSend {
-            msg_id: message.id.to_string(),
-            from: message.from_participant.to_string(),
-            to: serde_json::json!(["all"]),
+        let data = DataMessage {
+            label: "rvoip-messages".into(),
             content_type: content_type_str.into(),
-            body: String::from_utf8_lossy(&message.body).to_string(),
-            attachments: Vec::new(),
-            in_reply_to_msg: message.in_reply_to.map(|m| m.to_string()),
+            bytes: message.body.clone(),
+            reliability: DataReliability::ReliableOrdered,
+            message_id: message.id.clone(),
         };
+        let mut payload = payloads::message::MessageSend::from_data_message(
+            &data,
+            message.from_participant.to_string(),
+            serde_json::json!(["all"]),
+        )
+        .map_err(|error| RvoipError::Adapter(format!("invalid message: {error}")))?;
+        payload.in_reply_to_msg = message.in_reply_to.map(|m| m.to_string());
         let env = UctpEnvelope::new(
             MessageType::MessageSend,
             serde_json::to_value(payload).unwrap(),
         )
         .with_cid(message.conversation_id.to_string())
-        .with_sid(route.sid);
+        .with_sid(route.sid.clone())
+        .with_connid(
+            rvoip_uctp::adapter_helpers::require_bound_wire_connection(&route.binding)?.to_string(),
+        );
         route
             .out_tx
             .send(env)
             .await
             .map_err(|_| RvoipError::Adapter("peer channel closed".into()))
+    }
+
+    async fn send_data_message(&self, conn: ConnectionId, message: DataMessage) -> RvoipResult<()> {
+        let route = self
+            .route(&conn)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
+        let wire_connection_id =
+            rvoip_uctp::adapter_helpers::require_bound_wire_connection(&route.binding)?;
+        rvoip_uctp::adapter_helpers::send_data_message_via_envelope(
+            &route.out_tx,
+            &route.sid,
+            &wire_connection_id,
+            &message,
+        )
+        .await
     }
 
     async fn send_dtmf(
@@ -473,7 +500,9 @@ impl ConnectionAdapter for UctpWtAdapter {
             serde_json::to_value(payload).unwrap(),
         )
         .with_sid(route.sid.clone())
-        .with_connid(conn.to_string());
+        .with_connid(
+            rvoip_uctp::adapter_helpers::require_bound_wire_connection(&route.binding)?.to_string(),
+        );
         route
             .out_tx
             .send(env)
@@ -494,11 +523,13 @@ impl ConnectionAdapter for UctpWtAdapter {
             .get(&conn)
             .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?
             .clone();
+        let wire_connection_id =
+            rvoip_uctp::adapter_helpers::require_bound_wire_connection(&route.binding)?;
         rvoip_uctp::adapter_helpers::renegotiate_via_envelope(
             &route.out_tx,
             &route.pending,
             &route.sid,
-            &conn,
+            &wire_connection_id,
             &capabilities,
             rvoip_uctp::adapter_helpers::DEFAULT_RENEGOTIATE_TIMEOUT,
         )

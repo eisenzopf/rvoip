@@ -180,7 +180,7 @@ async fn adapter_emits_inbound_connection_on_session_invite() {
         break ev;
     };
 
-    match event {
+    let core_connection_id = match event {
         AdapterEvent::InboundConnection { connection } => {
             assert_eq!(connection.transport, Transport::Quic);
             assert_eq!(connection.session_id.as_str(), "sess_adapter_test");
@@ -212,7 +212,21 @@ async fn adapter_emits_inbound_connection_on_session_invite() {
                 rvoip_core::stream::MediaStream::kind(via_adapter[0].as_ref()),
                 rvoip_core::stream::StreamKind::Audio
             );
+            connection.id
         }
         other => panic!("expected InboundConnection, got {:?}", other),
-    }
+    };
+
+    let error = adapter
+        .send_data_message(
+            core_connection_id,
+            rvoip_core::DataMessage::reliable(
+                "bridgefu.context.v1",
+                "text/plain",
+                "must not leak a core connection ID",
+            ),
+        )
+        .await
+        .expect_err("outbound data before connection.offer must fail");
+    assert!(error.to_string().contains("not ready"));
 }

@@ -485,7 +485,7 @@ async fn authenticated_adapter_event_emits_connection_authenticated_event() {
     // consumers (admission controllers, SIP-bridge routers) can react
     // to auth completion without subscribing to adapter internals.
     use rvoip_core::events::Event;
-    use rvoip_core::identity::IdentityAssurance;
+    use rvoip_core::identity::{AuthenticatedPrincipal, AuthenticationMethod, IdentityAssurance};
 
     let orch = Orchestrator::new(Config::default());
     let (adapter, events_tx) = StubAdapter::new();
@@ -494,14 +494,22 @@ async fn authenticated_adapter_event_emits_connection_authenticated_event() {
     let mut events = orch.subscribe_events();
 
     let connid = ConnectionId::new();
+    let principal = AuthenticatedPrincipal {
+        subject: "id_test_42".into(),
+        tenant: Some("tenant-a".into()),
+        scopes: vec!["calls:read".into()],
+        issuer: Some("https://issuer.example".into()),
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+        method: AuthenticationMethod::Jwt,
+        assurance: IdentityAssurance::Anonymous,
+    };
 
     // Adapter emits Authenticated for the new Connection.
     events_tx
-        .send(AdapterEvent::Authenticated {
+        .send(AdapterEvent::PrincipalAuthenticated {
             connection_id: connid.clone(),
-            identity_id: "id_test_42".into(),
             participant_id: "part_alice".into(),
-            assurance: IdentityAssurance::Anonymous,
+            principal: principal.clone(),
         })
         .await
         .expect("send");
@@ -534,6 +542,33 @@ async fn authenticated_adapter_event_emits_connection_authenticated_event() {
             assert!(matches!(assurance, IdentityAssurance::Anonymous));
         }
         other => panic!("expected ConnectionAuthenticated, got {:?}", other),
+    }
+
+    let rich_event = loop {
+        let ev = tokio::time::timeout(Duration::from_millis(500), events.recv())
+            .await
+            .expect("event timeout")
+            .expect("event bus closed");
+        if matches!(&ev, Event::ConnectionPrincipalAuthenticated { .. }) {
+            break ev;
+        }
+    };
+    match rich_event {
+        Event::ConnectionPrincipalAuthenticated {
+            connection_id,
+            principal: event_principal,
+            ..
+        } => {
+            assert_eq!(connection_id, connid);
+            assert_eq!(event_principal.ownership_key(), principal.ownership_key());
+            assert_eq!(
+                orch.connection_principal(&connid)
+                    .expect("principal retained on route")
+                    .ownership_key(),
+                principal.ownership_key()
+            );
+        }
+        other => panic!("expected ConnectionPrincipalAuthenticated, got {other:?}"),
     }
 }
 

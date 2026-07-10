@@ -110,6 +110,26 @@ fn invite(sid: &str, participant: &str) -> UctpEnvelope {
     }
 }
 
+fn connection_offer(sid: &str, connid: &str, participant: &str) -> UctpEnvelope {
+    UctpEnvelope::new(
+        MessageType::ConnectionOffer,
+        serde_json::json!({
+            "by_participant": participant,
+            "substrate": "quic",
+            "capabilities": {},
+            "streams_offered": [{
+                "id": format!("strm_{connid}"),
+                "kind": "audio",
+                "direction": "sendrecv",
+                "codec_preferences": ["opus"]
+            }],
+            "substrate_setup": null
+        }),
+    )
+    .with_sid(sid)
+    .with_connid(connid)
+}
+
 async fn drive_auth_quic(
     client: &Arc<UctpQuicClient>,
     inbound: &mut tokio::sync::mpsc::Receiver<UctpEnvelope>,
@@ -233,6 +253,10 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
             break connection_id;
         }
     };
+    client_a
+        .send(connection_offer("sess_3p", "conn_wire_a", "part_a"))
+        .await
+        .expect("offer a");
     client_b
         .send(invite("sess_3p_b", "part_b"))
         .await
@@ -244,6 +268,10 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
             break connection_id;
         }
     };
+    client_b
+        .send(connection_offer("sess_3p_b", "conn_wire_b", "part_b"))
+        .await
+        .expect("offer b");
     client_s
         .send(invite("sess_3p_s", "part_s"))
         .await
@@ -255,6 +283,11 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
             break connection_id;
         }
     };
+    client_s
+        .send(connection_offer("sess_3p_s", "conn_wire_s", "part_s"))
+        .await
+        .expect("offer s");
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Look up each publisher's server-side audio strm_id.
     let strm_a = quic_adapter

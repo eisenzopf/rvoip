@@ -3,9 +3,14 @@
 //! Drives the coordinator with synthetic inbound envelopes and asserts
 //! both outbound envelopes and emitted [`UctpSessionEvent`]s.
 
+use async_trait::async_trait;
 use chrono::Utc;
-use rvoip_auth_core::bearer_stub;
+use rvoip_auth_core::{
+    bearer_stub, AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError, BearerValidator,
+};
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo};
+use rvoip_core::identity::IdentityAssurance;
+use rvoip_core::ids::IdentityId;
 use rvoip_uctp::{
     envelope::UctpEnvelope,
     payloads::{auth, connection, session},
@@ -17,6 +22,44 @@ use tokio::sync::mpsc;
 
 mod common;
 use common::drive_auth_handshake;
+
+struct StablePrincipalValidator;
+
+#[async_trait]
+impl BearerValidator for StablePrincipalValidator {
+    async fn validate(&self, token: &str) -> Result<IdentityAssurance, BearerAuthError> {
+        Ok(self.validate_principal(token).await?.assurance)
+    }
+
+    async fn validate_principal(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+        if token.is_empty() {
+            return Err(BearerAuthError::Empty);
+        }
+        let subject = if token == "other-owner" {
+            "user:bob"
+        } else {
+            "user:alice"
+        };
+        let identity = IdentityId::from_string(subject);
+        let assurance = IdentityAssurance::UserAuthorized {
+            identity: identity.clone(),
+            user_id: identity,
+            scopes: vec!["calls:read".into()],
+        };
+        Ok(AuthenticatedPrincipal {
+            subject: subject.into(),
+            tenant: Some("tenant-a".into()),
+            scopes: vec!["calls:read".into()],
+            issuer: Some("https://issuer.example".into()),
+            expires_at: None,
+            method: AuthenticationMethod::Bearer,
+            assurance,
+        })
+    }
+}
 
 fn auth_hello_env() -> UctpEnvelope {
     let payload = auth::AuthHello {
@@ -237,6 +280,14 @@ fn connection_offer_env(sid: &str, connid: &str, prefs: &[&str]) -> UctpEnvelope
     }
 }
 
+async fn establish_session(in_tx: &mpsc::Sender<UctpEnvelope>, sid: &str) {
+    in_tx
+        .send(session_invite_env(sid, &format!("conv_{sid}")))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+}
+
 fn answerer_with(codecs: &[&str]) -> Arc<CapabilityDescriptor> {
     Arc::new(CapabilityDescriptor {
         audio_codecs: codecs
@@ -270,6 +321,7 @@ async fn connection_offer_with_disjoint_codecs_emits_488() {
     );
 
     drive_auth_handshake(&in_tx, &mut out_rx).await;
+    establish_session(&in_tx, "sess_x").await;
 
     let env = connection_offer_env("sess_x", "conn_y", &["g.722", "g.711-mu"]);
     let offer_id = env.id.clone();
@@ -302,6 +354,7 @@ async fn connection_offer_with_overlapping_codecs_is_accepted() {
     );
 
     drive_auth_handshake(&in_tx, &mut out_rx).await;
+    establish_session(&in_tx, "sess_x").await;
 
     let env = connection_offer_env("sess_x", "conn_y", &["opus"]);
     in_tx.send(env).await.unwrap();
@@ -309,6 +362,55 @@ async fn connection_offer_with_overlapping_codecs_is_accepted() {
     // No outbound envelope should arrive — accepting is silent in v0
     // (the spec doesn't mandate an immediate ack for connection.offer).
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(out_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn connection_offer_for_unknown_session_is_rejected_without_open_event() {
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let _coord = UctpCoordinator::start("quic", in_rx, out_tx, events_tx, bearer_stub());
+
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
+    let _ = events_rx.recv().await; // Authenticated
+    let offer = connection_offer_env("sess_missing", "conn_orphan", &["opus"]);
+    let offer_id = offer.id.clone();
+    in_tx.send(offer).await.unwrap();
+
+    let reply = out_rx.recv().await.expect("expected unknown-sid error");
+    assert_eq!(reply.msg_type, MessageType::Error);
+    assert_eq!(reply.in_reply_to.as_deref(), Some(offer_id.as_str()));
+    let payload: rvoip_uctp::payloads::control::Error = reply.decode_payload().unwrap();
+    assert_eq!(payload.code, 404);
+    assert_eq!(payload.reason, "unknown-sid");
+    assert!(events_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn duplicate_connection_offer_reemits_idempotent_open_for_same_connection() {
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let _coord = UctpCoordinator::start("quic", in_rx, out_tx, events_tx, bearer_stub());
+
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
+    let _ = events_rx.recv().await; // Authenticated
+    establish_session(&in_tx, "sess_duplicate").await;
+    let _ = events_rx.recv().await; // InboundInvite
+    let offer = connection_offer_env("sess_duplicate", "conn_duplicate", &["opus"]);
+    in_tx.send(offer.clone()).await.unwrap();
+    in_tx.send(offer).await.unwrap();
+
+    for _ in 0..2 {
+        match events_rx.recv().await.expect("ConnectionOpened") {
+            UctpSessionEvent::ConnectionOpened { sid, connid, .. } => {
+                assert_eq!(sid.as_str(), "sess_duplicate");
+                assert_eq!(connid.as_str(), "conn_duplicate");
+            }
+            other => panic!("expected ConnectionOpened, got {other:?}"),
+        }
+    }
     assert!(out_rx.try_recv().is_err());
 }
 
@@ -647,6 +749,7 @@ async fn inbound_dtmf_send_emits_session_event() {
 
     drive_auth_handshake(&in_tx, &mut out_rx).await;
     let _ = events_rx.recv().await; // Authenticated
+    establish_session(&in_tx, "sess_dtmf").await;
 
     // Bring up a Connection via a successful offer.
     in_tx
@@ -700,6 +803,124 @@ async fn inbound_dtmf_send_emits_session_event() {
 }
 
 #[tokio::test]
+async fn inbound_message_send_preserves_binary_data_and_rejects_unsupported_reliability() {
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+
+    let descriptor = answerer_with(&["opus"]);
+    let _coord = UctpCoordinator::start_with_descriptor(
+        "quic",
+        in_rx,
+        out_tx,
+        events_tx,
+        bearer_stub(),
+        descriptor,
+    );
+
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
+    let _ = events_rx.recv().await; // Authenticated
+    establish_session(&in_tx, "sess_message").await;
+    in_tx
+        .send(connection_offer_env(
+            "sess_message",
+            "conn_message",
+            &["opus"],
+        ))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+
+    let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+    let env = UctpEnvelope {
+        v: 1,
+        msg_type: MessageType::MessageSend,
+        id: format!("env_{}", uuid::Uuid::new_v4().simple()),
+        ts: Utc::now(),
+        cid: Some("conv_message".into()),
+        sid: Some("sess_message".into()),
+        connid: Some("conn_message".into()),
+        in_reply_to: None,
+        payload: serde_json::json!({
+            "msg_id": message_id,
+            "from": "part_alice",
+            "to": "all",
+            "content_type": "application/octet-stream",
+            "label": "bridgefu.context.v1",
+            "reliability": {"mode": "reliable_ordered"},
+            "body": "AP8HKg==",
+            "body_encoding": "base64",
+            "attachments": []
+        }),
+        signature: None,
+    };
+    in_tx.send(env).await.unwrap();
+
+    let message = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if let Some(UctpSessionEvent::DataMessage { connid, message }) = events_rx.recv().await
+            {
+                assert_eq!(connid.to_string(), "conn_message");
+                return message;
+            }
+        }
+    })
+    .await
+    .expect("data-message event timeout");
+    assert_eq!(message.message_id.to_string(), message_id);
+    assert_eq!(message.label, "bridgefu.context.v1");
+    assert_eq!(message.content_type, "application/octet-stream");
+    assert_eq!(message.bytes.as_ref(), &[0, 0xff, 7, 42]);
+
+    let rejected_id = format!("env_{}", uuid::Uuid::new_v4().simple());
+    let rejected = UctpEnvelope {
+        v: 1,
+        msg_type: MessageType::MessageSend,
+        id: rejected_id.clone(),
+        ts: Utc::now(),
+        cid: Some("conv_message".into()),
+        sid: Some("sess_message".into()),
+        connid: Some("conn_message".into()),
+        in_reply_to: None,
+        payload: serde_json::json!({
+            "msg_id": format!("msg_{}", uuid::Uuid::new_v4().simple()),
+            "from": "part_alice",
+            "to": "all",
+            "content_type": "text/plain",
+            "label": "chat",
+            "reliability": {"mode": "reliable_unordered"},
+            "body": "unsupported",
+            "body_encoding": "utf8",
+            "attachments": []
+        }),
+        signature: None,
+    };
+    in_tx.send(rejected).await.unwrap();
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let envelope = out_rx.recv().await.expect("coordinator output closed");
+            if envelope.in_reply_to.as_deref() == Some(rejected_id.as_str()) {
+                return envelope;
+            }
+        }
+    })
+    .await
+    .expect("unsupported-reliability error timeout");
+    assert_eq!(error.msg_type, MessageType::Error);
+    let payload: rvoip_uctp::payloads::control::Error = error.decode_payload().unwrap();
+    assert_eq!(payload.code, 422);
+    assert_eq!(payload.category, "capability");
+    assert_eq!(payload.reason, "unsupported-reliability");
+    while let Ok(event) = events_rx.try_recv() {
+        assert!(
+            !matches!(event, UctpSessionEvent::DataMessage { .. }),
+            "a rejected message must not reach the adapter event stream"
+        );
+    }
+}
+
+#[tokio::test]
 async fn inbound_connection_quality_emits_per_stream_events() {
     // C2: a peer sending `connection.quality` with multiple streams
     // produces one `UctpSessionEvent::Quality` per stream entry, so
@@ -722,6 +943,7 @@ async fn inbound_connection_quality_emits_per_stream_events() {
 
     drive_auth_handshake(&in_tx, &mut out_rx).await;
     let _ = events_rx.recv().await; // Authenticated
+    establish_session(&in_tx, "sess_q").await;
 
     in_tx
         .send(connection_offer_env("sess_q", "conn_q", &["opus"]))
@@ -807,7 +1029,7 @@ async fn inbound_connection_quality_emits_per_stream_events() {
 #[tokio::test]
 async fn auth_refresh_updates_session_with_fresh_token() {
     // D4: a peer that already authenticated sends `auth.refresh` with
-    // a new (valid, non-empty stub) token. Coordinator validates,
+    // a new token for the same owner. Coordinator validates,
     // updates `PeerAuthState`, and replies with a fresh `auth.session`
     // envelope. The original identity_id / participant_id are
     // preserved across the refresh (continuity of logical session).
@@ -815,7 +1037,13 @@ async fn auth_refresh_updates_session_with_fresh_token() {
     let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
 
-    let _coord = UctpCoordinator::start("quic", in_rx, out_tx, events_tx, bearer_stub());
+    let _coord = UctpCoordinator::start(
+        "quic",
+        in_rx,
+        out_tx,
+        events_tx,
+        Arc::new(StablePrincipalValidator),
+    );
 
     // Initial auth handshake.
     drive_auth_handshake(&in_tx, &mut out_rx).await;
@@ -829,12 +1057,13 @@ async fn auth_refresh_updates_session_with_fresh_token() {
         other => panic!("expected Authenticated, got {:?}", other),
     };
 
-    // Send auth.refresh with a different (still valid stub) token.
+    // Send auth.refresh with a different credential for the same owner.
     let refresh_env = UctpEnvelope::new(
         MessageType::AuthRefresh,
         serde_json::to_value(auth::AuthRefresh {
             method: "bearer".into(),
             credential: "refreshed-token-xyz".into(),
+            actor_token: None,
         })
         .unwrap(),
     );
@@ -853,6 +1082,9 @@ async fn auth_refresh_updates_session_with_fresh_token() {
     assert_eq!(payload.participant_id, initial_identity.1);
     // But the session token is fresh.
     assert!(payload.session_token.starts_with("tok_"));
+    let remaining = payload.expires_at - Utc::now();
+    assert!(remaining <= chrono::Duration::hours(1));
+    assert!(remaining > chrono::Duration::minutes(59));
 
     // Authenticated event re-emitted with the same identity ids.
     let post_refresh = events_rx.recv().await.expect("post-refresh Authenticated");
@@ -867,6 +1099,58 @@ async fn auth_refresh_updates_session_with_fresh_token() {
         }
         other => panic!("expected Authenticated, got {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn auth_refresh_rejects_ownership_switch_and_preserves_prior_principal() {
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+
+    let coord = UctpCoordinator::start(
+        "quic",
+        in_rx,
+        out_tx,
+        events_tx,
+        Arc::new(StablePrincipalValidator),
+    );
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
+    let _ = events_rx.recv().await;
+
+    in_tx
+        .send(UctpEnvelope::new(
+            MessageType::AuthRefresh,
+            serde_json::to_value(auth::AuthRefresh {
+                method: "bearer".into(),
+                credential: "other-owner".into(),
+                actor_token: None,
+            })
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    let reply = out_rx.recv().await.expect("refresh rejection");
+    assert_eq!(reply.msg_type, MessageType::Error);
+    let error: rvoip_uctp::payloads::control::Error = reply.decode_payload().unwrap();
+    assert_eq!(error.code, 401);
+    assert_eq!(error.reason, "refresh-failed");
+    assert_eq!(
+        coord
+            .authenticated_principal()
+            .expect("prior principal retained")
+            .subject,
+        "user:alice"
+    );
+
+    in_tx
+        .send(session_invite_env("sess_after_owner_reject", "conv_owner"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        events_rx.recv().await,
+        Some(UctpSessionEvent::InboundInvite { .. })
+    ));
 }
 
 #[tokio::test]
@@ -890,6 +1174,7 @@ async fn auth_refresh_with_empty_token_emits_401_and_preserves_session() {
         serde_json::to_value(auth::AuthRefresh {
             method: "bearer".into(),
             credential: String::new(),
+            actor_token: None,
         })
         .unwrap(),
     );

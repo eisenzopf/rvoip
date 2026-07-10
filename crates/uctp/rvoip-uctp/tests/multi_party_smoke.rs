@@ -75,6 +75,27 @@ fn offer_env(sid: &str, connid: &str, strm_id: &str) -> UctpEnvelope {
     }
 }
 
+fn invite_env(sid: &str) -> UctpEnvelope {
+    UctpEnvelope {
+        v: 1,
+        msg_type: MessageType::SessionInvite,
+        id: format!("env_{}", uuid::Uuid::new_v4().simple()),
+        ts: Utc::now(),
+        cid: Some(format!("conv_{sid}")),
+        sid: Some(sid.into()),
+        connid: None,
+        in_reply_to: None,
+        payload: serde_json::json!({
+            "from": "part_publisher",
+            "to": ["part_remote"],
+            "medium": "voice",
+            "intent": "synchronous-engagement",
+            "capabilities_offer": {}
+        }),
+        signature: None,
+    }
+}
+
 fn ready_env(sid: &str, connid: &str) -> UctpEnvelope {
     UctpEnvelope {
         v: 1,
@@ -153,6 +174,8 @@ async fn connection_ready_emits_stream_opened_and_registers_publisher() {
     );
 
     drive_auth_handshake(&in_tx, &mut out_rx).await;
+    in_tx.send(invite_env("sess_a")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // 1. Send connection.offer — coordinator runs negotiation (passes;
     //    descriptor has opus, offer has opus) and stores accepted streams.
@@ -237,6 +260,8 @@ async fn duplicate_connection_ready_does_not_re_emit_stream_opened() {
     );
 
     drive_auth_handshake(&in_tx, &mut out_rx).await;
+    in_tx.send(invite_env("sess_b")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     in_tx
         .send(offer_env("sess_b", "conn_b", "strm_x"))

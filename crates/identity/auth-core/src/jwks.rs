@@ -31,7 +31,10 @@ use serde::Deserialize;
 use tracing::{debug, warn};
 use url::Url;
 
-use crate::bearer::{BearerAuthError, BearerValidator};
+use crate::bearer::{
+    ensure_principal_active, AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError,
+    BearerValidator,
+};
 use crate::providers::{
     CredentialAuthError, TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
@@ -86,6 +89,8 @@ struct TokenClaims {
     realm_access: Option<RoleAccess>,
     #[serde(default)]
     resource_access: Option<HashMap<String, RoleAccess>>,
+    #[serde(default, alias = "tenant", alias = "tid")]
+    tenant_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -359,6 +364,13 @@ fn decoding_key_from_jwk(jwk: &JwksKey) -> Result<DecodingKey, BearerAuthError> 
 #[async_trait]
 impl BearerValidator for JwksJwtValidator {
     async fn validate(&self, token: &str) -> Result<IdentityAssurance, BearerAuthError> {
+        Ok(self.validate_principal(token).await?.assurance)
+    }
+
+    async fn validate_principal(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
         if token.is_empty() {
             return Err(BearerAuthError::Empty);
         }
@@ -385,8 +397,11 @@ impl BearerValidator for JwksJwtValidator {
         )
         .await?;
 
-        // 4. Map claims to IdentityAssurance::UserAuthorized.
-        let identity = IdentityId::from_string(claims.sub);
+        // 4. Preserve the authorization claims alongside the legacy
+        // IdentityAssurance projection.
+        let subject = claims.sub.clone();
+        let expires_at = claims.exp.map(expiration_from_unix).transpose()?;
+        let identity = IdentityId::from_string(subject.clone());
         let scopes = scopes_from_claims(
             claims.scope,
             claims.scopes,
@@ -394,12 +409,28 @@ impl BearerValidator for JwksJwtValidator {
             claims.realm_access,
             claims.resource_access,
         );
-        Ok(IdentityAssurance::UserAuthorized {
+        let assurance = IdentityAssurance::UserAuthorized {
             identity: identity.clone(),
             user_id: identity,
+            scopes: scopes.clone(),
+        };
+        ensure_principal_active(AuthenticatedPrincipal {
+            subject,
+            tenant: claims.tenant_id,
             scopes,
+            issuer: claims.iss,
+            expires_at,
+            method: AuthenticationMethod::Oidc,
+            assurance,
         })
     }
+}
+
+fn expiration_from_unix(seconds: u64) -> Result<chrono::DateTime<chrono::Utc>, BearerAuthError> {
+    i64::try_from(seconds)
+        .ok()
+        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+        .ok_or_else(|| BearerAuthError::Invalid("token exp is outside the supported range".into()))
 }
 
 async fn check_revocation(

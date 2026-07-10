@@ -118,14 +118,7 @@ fn render_prometheus_with_stats_includes_outbound_series() {
     use rvoip_webrtc::adapter::WebRtcMetrics;
     use rvoip_webrtc::media::pump::{CandidatePairStats, OutboundStats};
     use rvoip_webrtc::media::WebRtcStatsSnapshot;
-    let metrics = WebRtcMetrics {
-        inbound_total: 0,
-        outbound_total: 0,
-        active_sessions: 0,
-        signaling_errors_total: 0,
-        sessions_rejected_over_cap: 0,
-        reaped_total: 0,
-    };
+    let metrics = WebRtcMetrics::default();
     let snap = WebRtcStatsSnapshot {
         packets_received: 100,
         bytes_received: 12_000,

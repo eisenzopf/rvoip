@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use rvoip_auth_core::{
-    ApiKeyVerifier, BearerAuthError, BearerValidator, CredentialAuthError, DigestAlgorithm,
-    DigestSecret, DigestSecretProvider, PasswordVerifier,
+    ApiKeyVerifier, AuthenticationMethod, BearerAuthError, BearerValidator, CredentialAuthError,
+    DigestAlgorithm, DigestSecret, DigestSecretProvider, PasswordVerifier,
 };
 use rvoip_core_traits::identity::IdentityAssurance;
 use tempfile::TempDir;
@@ -49,6 +49,18 @@ async fn users_core_provider_implements_auth_core_traits() {
         .await
         .unwrap();
     assert_user_authorized(bearer);
+
+    let principal = BearerValidator::validate_principal(provider.as_ref(), &seeded.access_token)
+        .await
+        .unwrap();
+    assert_eq!(principal.subject, seeded.user.id);
+    assert_eq!(
+        principal.issuer.as_deref(),
+        Some("https://users.rvoip.local")
+    );
+    assert_eq!(principal.method, AuthenticationMethod::Jwt);
+    assert!(principal.expires_at.is_some());
+    assert!(!principal.scopes.is_empty());
 
     provider
         .auth_service()

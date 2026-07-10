@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rvoip_auth_core::{
-    ApiKeyVerifier, BearerAuthError, BearerValidator, CredentialAuthError, DigestSecret,
-    DigestSecretProvider, JwtValidator, PasswordVerifier, TokenRevocationChecker,
+    ApiKeyVerifier, AuthenticatedPrincipal, BearerAuthError, BearerValidator, CredentialAuthError,
+    DigestSecret, DigestSecretProvider, JwtValidator, PasswordVerifier, TokenRevocationChecker,
     TokenRevocationContext, TokenRevocationStatus,
 };
 use rvoip_core_traits::identity::IdentityAssurance;
@@ -79,9 +79,17 @@ impl TokenRevocationChecker for UsersCoreTokenRevocationChecker {
 #[async_trait]
 impl BearerValidator for UsersCoreAuthProvider {
     async fn validate(&self, token: &str) -> Result<IdentityAssurance, BearerAuthError> {
-        let assurance = self.jwt_validator.validate(token).await?;
-        self.ensure_assurance_user_active(&assurance).await?;
-        Ok(assurance)
+        Ok(self.validate_principal(token).await?.assurance)
+    }
+
+    async fn validate_principal(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+        let principal = self.jwt_validator.validate_principal(token).await?;
+        self.ensure_assurance_user_active(&principal.assurance)
+            .await?;
+        Ok(principal)
     }
 }
 

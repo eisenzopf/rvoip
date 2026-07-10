@@ -15,7 +15,8 @@ use tokio::sync::mpsc;
 // downstream `use rvoip_core::identity::IdentityAssurance` etc. keep
 // working unchanged.
 pub use rvoip_core_traits::identity::{
-    Credential, CredentialKind, DeviceKind, IdentityAssurance, IdentityKind, Jwk,
+    AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError, Credential, CredentialKind,
+    DeviceKind, IdentityAssurance, IdentityKind, Jwk, PrincipalOwnershipKey,
 };
 
 #[derive(Clone, Debug)]

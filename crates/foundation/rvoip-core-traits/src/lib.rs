@@ -47,4 +47,10 @@ pub mod identity;
 pub mod ids;
 pub mod stream;
 
-pub use data::{DataMessage, DataReliability};
+pub use data::{
+    DataMessage, DataMessageValidationError, DataReliability, MAX_CONTENT_TYPE_BYTES,
+    MAX_DATA_LABEL_BYTES, MAX_DATA_MESSAGE_BYTES, MAX_DATA_MESSAGE_ID_BYTES,
+};
+pub use identity::{
+    AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError, PrincipalOwnershipKey,
+};

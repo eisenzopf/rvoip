@@ -7,8 +7,8 @@
 use chrono::Utc;
 use jsonwebtoken::{encode, Algorithm, DecodingKey, EncodingKey, Header};
 use rvoip_auth_core::{
-    BearerAuthError, BearerValidator, CredentialAuthError, JwtValidator, TokenRevocationChecker,
-    TokenRevocationContext, TokenRevocationStatus,
+    AuthenticationMethod, BearerAuthError, BearerValidator, CredentialAuthError, JwtValidator,
+    TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
 use rvoip_core_traits::identity::IdentityAssurance;
 use serde::Serialize;
@@ -32,6 +32,8 @@ struct TestClaims {
     scopes: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     roles: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tenant_id: Option<String>,
 }
 
 impl Default for TestClaims {
@@ -45,6 +47,7 @@ impl Default for TestClaims {
             scope: None,
             scopes: None,
             roles: None,
+            tenant_id: None,
         }
     }
 }
@@ -98,6 +101,42 @@ async fn valid_hmac_token_yields_user_authorized() {
             assert!(scopes.is_empty());
         }
         other => panic!("expected UserAuthorized, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn principal_preserves_jwt_authorization_claims() {
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let expires_at = (Utc::now() + chrono::Duration::hours(1)).timestamp();
+    let token = mint(&TestClaims {
+        sub: "shared-subject".into(),
+        exp: expires_at,
+        iss: Some("https://issuer.example".into()),
+        scope: Some("calls:read calls:write".into()),
+        tenant_id: Some("tenant-a".into()),
+        ..Default::default()
+    });
+
+    let principal = validator.validate_principal(&token).await.unwrap();
+
+    assert_eq!(principal.subject, "shared-subject");
+    assert_eq!(principal.tenant.as_deref(), Some("tenant-a"));
+    assert_eq!(principal.issuer.as_deref(), Some("https://issuer.example"));
+    assert_eq!(principal.scopes, vec!["calls:read", "calls:write"]);
+    assert_eq!(principal.method, AuthenticationMethod::Jwt);
+    assert_eq!(
+        principal.expires_at.expect("expiry").timestamp(),
+        expires_at
+    );
+    assert!(!principal.is_expired());
+    match principal.assurance {
+        IdentityAssurance::UserAuthorized {
+            identity, scopes, ..
+        } => {
+            assert_eq!(identity.as_str(), "shared-subject");
+            assert_eq!(scopes, vec!["calls:read", "calls:write"]);
+        }
+        other => panic!("expected UserAuthorized, got {other:?}"),
     }
 }
 
@@ -178,6 +217,22 @@ async fn expired_token_rejects() {
     assert!(
         matches!(result, Err(BearerAuthError::Invalid(_))),
         "expired token must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn principal_boundary_rejects_token_inside_decoder_leeway() {
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let token = mint(&TestClaims {
+        // jsonwebtoken accepts this inside its default 60-second clock-skew
+        // leeway; the principal boundary must still reject it as inactive.
+        exp: (Utc::now() - chrono::Duration::seconds(1)).timestamp(),
+        ..Default::default()
+    });
+
+    let result = validator.validate_principal(&token).await;
+    assert!(
+        matches!(result, Err(BearerAuthError::Invalid(ref reason)) if reason.contains("expired"))
     );
 }
 

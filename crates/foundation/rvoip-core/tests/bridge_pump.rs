@@ -16,6 +16,7 @@ use rvoip_core::adapter::{
     OriginateRequest, RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
+use rvoip_core::commands::{AttachmentRef, ListenerSink, ListenerTarget, RecordingTarget};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::events::Event;
 use rvoip_core::identity::IdentityAssurance;
@@ -23,7 +24,12 @@ use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
 use rvoip_core::message::Message;
 use rvoip_core::stream::{MediaFrame, MediaStream, QualitySnapshot, StreamKind};
 use rvoip_core::{Config, Orchestrator, RvoipError};
-use tokio::sync::mpsc;
+use rvoip_harness::{
+    AsrConfig, AsrProvider, AsrResult, AsrStream, ListenOnlyDialog, NoOpTtsProvider,
+    VecRecordingSink,
+};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use tokio::sync::{mpsc, Barrier, Notify};
 
 // =====================================================================
 // MockMediaStream
@@ -118,6 +124,23 @@ struct MockAdapter {
     streams: dashmap::DashMap<ConnectionId, Arc<MockMediaStream>>,
     events_tx: mpsc::Sender<AdapterEvent>,
     events_rx: StdMutex<Option<mpsc::Receiver<AdapterEvent>>>,
+    stream_gates: dashmap::DashMap<ConnectionId, Arc<StreamLookupGate>>,
+}
+
+struct StreamLookupGate {
+    armed: AtomicBool,
+    entered: Notify,
+    release: Notify,
+}
+
+impl StreamLookupGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            armed: AtomicBool::new(true),
+            entered: Notify::new(),
+            release: Notify::new(),
+        })
+    }
 }
 
 impl MockAdapter {
@@ -128,11 +151,18 @@ impl MockAdapter {
             streams: dashmap::DashMap::new(),
             events_tx,
             events_rx: StdMutex::new(Some(events_rx)),
+            stream_gates: dashmap::DashMap::new(),
         })
     }
 
     fn register_connection(&self, id: ConnectionId, stream: Arc<MockMediaStream>) {
         self.streams.insert(id, stream);
+    }
+
+    fn gate_next_stream_lookup(&self, id: ConnectionId) -> Arc<StreamLookupGate> {
+        let gate = StreamLookupGate::new();
+        self.stream_gates.insert(id, Arc::clone(&gate));
+        gate
     }
 
     async fn announce(&self, id: ConnectionId, session_id: SessionId) {
@@ -196,6 +226,16 @@ impl ConnectionAdapter for MockAdapter {
         &self,
         c: ConnectionId,
     ) -> rvoip_core::error::Result<Vec<Arc<dyn MediaStream>>> {
+        let gate = self
+            .stream_gates
+            .get(&c)
+            .map(|entry| Arc::clone(entry.value()));
+        if let Some(gate) = gate {
+            if gate.armed.swap(false, Ordering::SeqCst) {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
+        }
         match self.streams.get(&c) {
             Some(s) => Ok(vec![s.clone() as Arc<dyn MediaStream>]),
             None => Ok(Vec::new()),
@@ -251,6 +291,56 @@ fn mk_frame(stream_id: StreamId, byte: u8) -> MediaFrame {
         captured_at: Utc::now(),
         payload_type: None,
     }
+}
+
+struct CountingAsrProvider {
+    pushes: Arc<AtomicUsize>,
+}
+
+struct CountingAsrStream {
+    pushes: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl AsrProvider for CountingAsrProvider {
+    async fn open_stream(
+        &self,
+        _conn: ConnectionId,
+        _config: AsrConfig,
+    ) -> rvoip_core::error::Result<Box<dyn AsrStream>> {
+        Ok(Box::new(CountingAsrStream {
+            pushes: Arc::clone(&self.pushes),
+        }))
+    }
+}
+
+#[async_trait]
+impl AsrStream for CountingAsrStream {
+    async fn push(&self, _frame: MediaFrame) -> rvoip_core::error::Result<()> {
+        self.pushes.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn next(&self) -> Option<AsrResult> {
+        std::future::pending().await
+    }
+
+    async fn close(&self) -> rvoip_core::error::Result<()> {
+        Ok(())
+    }
+}
+
+async fn wait_for_sink_count(graph: &rvoip_core::media_graph::MediaGraphHandle, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if graph.snapshot().await.sinks.len() == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("media graph sink count did not converge");
 }
 
 /// Spin up an Orchestrator with one MockAdapter (Quic transport) holding
@@ -358,6 +448,52 @@ async fn bridge_already_bridged_returns_error() {
     matches!(err, RvoipError::AdmissionRejected(_));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_bridge_attempts_reserve_both_connections_atomically() {
+    let (orch, _a, _b, conn_a, conn_b) = setup_two_connection_orchestrator("opus", "opus").await;
+    let barrier = Arc::new(Barrier::new(33));
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..32 {
+        let orch = Arc::clone(&orch);
+        let conn_a = conn_a.clone();
+        let conn_b = conn_b.clone();
+        let barrier = Arc::clone(&barrier);
+        tasks.spawn(async move {
+            barrier.wait().await;
+            orch.bridge_connections(conn_a, conn_b).await
+        });
+    }
+    barrier.wait().await;
+
+    let mut successes = Vec::new();
+    let mut rejected = 0;
+    while let Some(result) = tasks.join_next().await {
+        match result.expect("bridge task") {
+            Ok(bridge_id) => successes.push(bridge_id),
+            Err(RvoipError::AdmissionRejected("connection already bridged")) => rejected += 1,
+            Err(error) => panic!("unexpected bridge result: {error}"),
+        }
+    }
+    assert_eq!(successes.len(), 1);
+    assert_eq!(rejected, 31);
+
+    let a_graph = orch
+        .media_graph_for_connection(conn_a)
+        .await
+        .expect("A graph");
+    let b_graph = orch
+        .media_graph_for_connection(conn_b)
+        .await
+        .expect("B graph");
+    assert_eq!(a_graph.snapshot().await.sinks.len(), 1);
+    assert_eq!(b_graph.snapshot().await.sinks.len(), 1);
+    orch.unbridge_connections(successes.pop().unwrap())
+        .await
+        .expect("unbridge winner");
+    assert!(a_graph.latest_snapshot().sinks.is_empty());
+    assert!(b_graph.latest_snapshot().sinks.is_empty());
+}
+
 #[tokio::test]
 async fn unbridge_aborts_pumps_and_emits_event() {
     let (orch, stream_a, stream_b, conn_a, conn_b) =
@@ -369,6 +505,14 @@ async fn unbridge_aborts_pumps_and_emits_event() {
         .bridge_connections(conn_a.clone(), conn_b.clone())
         .await
         .expect("bridge");
+    let a_graph = orch
+        .media_graph_for_connection(conn_a.clone())
+        .await
+        .expect("A graph");
+    let b_graph = orch
+        .media_graph_for_connection(conn_b.clone())
+        .await
+        .expect("B graph");
 
     // Confirm one frame propagates.
     stream_a.inject(mk_frame(stream_a.id(), 7)).await;
@@ -382,6 +526,14 @@ async fn unbridge_aborts_pumps_and_emits_event() {
     orch.unbridge_connections(bridge_id.clone())
         .await
         .expect("unbridge");
+    assert!(
+        a_graph.latest_snapshot().sinks.is_empty(),
+        "unbridge acknowledgement must follow A route removal"
+    );
+    assert!(
+        b_graph.latest_snapshot().sinks.is_empty(),
+        "unbridge acknowledgement must follow B route removal"
+    );
 
     // The pump task is aborted; subsequent injects don't propagate.
     stream_a.inject(mk_frame(stream_a.id(), 99)).await;
@@ -405,4 +557,187 @@ async fn unbridge_aborts_pumps_and_emits_event() {
         }
     }
     assert!(saw, "expected Event::ConnectionsUnbridged within 3s");
+}
+
+#[tokio::test]
+async fn terminal_bridge_route_removes_owner_and_allows_rebridge() {
+    let (orch, stream_a, stream_b, conn_a, conn_b) =
+        setup_two_connection_orchestrator("opus", "opus").await;
+    let mut events = orch.subscribe_events();
+    let closed_target = stream_b.take_external_out();
+    drop(closed_target);
+    let first = orch
+        .bridge_connections(conn_a.clone(), conn_b.clone())
+        .await
+        .expect("first bridge");
+
+    stream_a.inject(mk_frame(stream_a.id(), 1)).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match events.recv().await {
+                Ok(Event::ConnectionsUnbridged { bridge_id, .. }) if bridge_id == first => return,
+                Ok(_) => continue,
+                Err(error) => panic!("event stream closed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("terminal route did not remove bridge owner");
+
+    let second = orch
+        .bridge_connections(conn_a, conn_b)
+        .await
+        .expect("bridge ownership was not released");
+    orch.unbridge_connections(second)
+        .await
+        .expect("remove replacement bridge");
+}
+
+#[tokio::test]
+async fn concurrent_graph_initialization_takes_source_once() {
+    let (orch, _stream_a, _stream_b, conn_a, _conn_b) =
+        setup_two_connection_orchestrator("opus", "opus").await;
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..32 {
+        let orch = Arc::clone(&orch);
+        let conn_a = conn_a.clone();
+        tasks.spawn(async move {
+            orch.media_graph_for_connection(conn_a)
+                .await
+                .expect("graph")
+                .id()
+                .to_string()
+        });
+    }
+
+    let mut graph_ids = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        graph_ids.push(result.expect("join"));
+    }
+    assert_eq!(graph_ids.len(), 32);
+    assert!(graph_ids.iter().all(|id| id == &graph_ids[0]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_graph_init_for_one_connection_does_not_block_another() {
+    let adapter = MockAdapter::new(Transport::Quic);
+    let conn_a = ConnectionId::new();
+    let conn_b = ConnectionId::new();
+    let stream_a = MockMediaStream::new("opus");
+    let stream_b = MockMediaStream::new("opus");
+    adapter.register_connection(conn_a.clone(), stream_a);
+    adapter.register_connection(conn_b.clone(), stream_b);
+    let gate = adapter.gate_next_stream_lookup(conn_a.clone());
+
+    let orch = Orchestrator::new(Config::default());
+    orch.register(adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register");
+    let session = SessionId::new();
+    adapter.announce(conn_a.clone(), session.clone()).await;
+    adapter.announce(conn_b.clone(), session).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let slow = {
+        let orch = Arc::clone(&orch);
+        tokio::spawn(async move { orch.media_graph_for_connection(conn_a).await })
+    };
+    gate.entered.notified().await;
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        orch.media_graph_for_connection(conn_b),
+    )
+    .await
+    .expect("independent graph init was blocked by connection A")
+    .expect("B graph");
+    gate.release.notify_one();
+    slow.await.expect("slow init task").expect("A graph");
+}
+
+#[tokio::test]
+async fn bridge_recording_ai_and_listener_share_one_source_and_cleanup_routes() {
+    let (orch, stream_a, stream_b, conn_a, conn_b) =
+        setup_two_connection_orchestrator("opus", "opus").await;
+    let mut b_out = stream_b.take_external_out();
+    let bridge_id = orch
+        .bridge_connections(conn_a.clone(), conn_b)
+        .await
+        .expect("bridge");
+
+    let recording = Arc::new(VecRecordingSink::new("memory:rec/fanout"));
+    orch.register_recording_sink("fanout", recording.clone());
+    let recording_id = orch
+        .start_recording(RecordingTarget::Connection(conn_a.clone()), "fanout")
+        .await
+        .expect("recording");
+
+    let asr_pushes = Arc::new(AtomicUsize::new(0));
+    orch.register_asr_provider(
+        "fanout",
+        Arc::new(CountingAsrProvider {
+            pushes: Arc::clone(&asr_pushes),
+        }),
+    );
+    orch.register_tts_provider("fanout", Arc::new(NoOpTtsProvider));
+    orch.register_dialog_manager("fanout", Arc::new(ListenOnlyDialog));
+    let ai_id = orch
+        .attach_ai(conn_a.clone(), "fanout", std::collections::HashMap::new())
+        .await
+        .expect("AI attachment");
+
+    let listener_id = orch
+        .attach_listener(
+            ListenerTarget::Connection(conn_a.clone()),
+            ListenerSink::Channel,
+        )
+        .expect("listener");
+    let mut listener = orch
+        .listener_channel(&listener_id)
+        .expect("listener channel");
+
+    let graph = orch
+        .media_graph_for_connection(conn_a.clone())
+        .await
+        .expect("source graph");
+    wait_for_sink_count(&graph, 4).await;
+
+    stream_a.inject(mk_frame(stream_a.id(), 42)).await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), b_out.recv())
+            .await
+            .expect("bridge timeout")
+            .expect("bridge closed")
+            .payload[0],
+        42
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), listener.recv())
+            .await
+            .expect("listener timeout")
+            .expect("listener closed")
+            .payload[0],
+        42
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while recording.bytes().is_empty() || asr_pushes.load(Ordering::Relaxed) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("observer fanout timeout");
+
+    orch.stop_recording(recording_id)
+        .await
+        .expect("stop recording");
+    orch.detach(AttachmentRef::Ai(ai_id))
+        .await
+        .expect("detach AI");
+    orch.detach(AttachmentRef::Listener(listener_id))
+        .await
+        .expect("detach listener");
+    wait_for_sink_count(&graph, 1).await;
+
+    orch.unbridge_connections(bridge_id)
+        .await
+        .expect("unbridge");
+    wait_for_sink_count(&graph, 0).await;
 }

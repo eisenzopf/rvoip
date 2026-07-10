@@ -331,6 +331,14 @@ tracing-appender = "0.2"
 env_logger = "0.11"
 criterion = { version = "0.5", features = ["html_reports"] }
 
+# webrtc-rs 0.20.0-alpha.1 does not dial DataChannels created after the SCTP
+# handshake and drops received DCEP partial-reliability parameters. Keep this
+# exact reviewed revision until a replacement is explicitly approved. A port
+# to the current rtc line is kept on the fork for review; do not submit it
+# upstream without project-owner approval.
+[patch.crates-io]
+rtc = { git = "https://github.com/eisenzopf/rtc", rev = "1e5b7d4be6d94850694f2519f4c235d16c871d53" }
+
 # 🔧 Optimization Profiles for Binary Size Reduction
 
 [profile.release]

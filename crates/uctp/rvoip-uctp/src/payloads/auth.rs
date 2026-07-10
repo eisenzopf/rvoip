@@ -82,6 +82,10 @@ pub struct AuthRefresh {
     pub method: String,
     /// The new credential body. Replaces the prior one on success.
     pub credential: String,
+    /// Replacement actor token when `method` is `aauth`. Both credentials are
+    /// validated as a pair and are discarded immediately after validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_token: Option<String>,
 }
 
 /// Device descriptor sent in `auth.hello`.

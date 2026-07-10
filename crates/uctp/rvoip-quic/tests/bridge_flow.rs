@@ -208,8 +208,9 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
     // assert pairing after the loop.
     let mut conn_ids: Vec<ConnectionId> = Vec::new();
     let mut authenticated: Vec<(ConnectionId, String, String)> = Vec::new();
+    let mut principals = Vec::new();
     for _ in 0..60 {
-        if conn_ids.len() == 2 && authenticated.len() == 2 {
+        if conn_ids.len() == 2 && authenticated.len() == 2 && principals.len() == 2 {
             break;
         }
         match tokio::time::timeout(Duration::from_millis(200), events.recv()).await {
@@ -223,6 +224,13 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
                 ..
             })) => {
                 authenticated.push((connection_id, identity_id, participant_id));
+            }
+            Ok(Ok(Event::ConnectionPrincipalAuthenticated {
+                connection_id,
+                principal,
+                ..
+            })) => {
+                principals.push((connection_id, principal));
             }
             _ => continue,
         }
@@ -240,6 +248,26 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
             conn_ids.contains(auth_connid),
             "ConnectionAuthenticated connection_id {:?} does not match any InboundConnection",
             auth_connid
+        );
+    }
+    assert_eq!(
+        principals.len(),
+        2,
+        "expected each UCTP connection to retain its complete principal"
+    );
+    for (connection_id, principal) in &principals {
+        let legacy_subject = authenticated
+            .iter()
+            .find(|(candidate, _, _)| candidate == connection_id)
+            .map(|(_, identity_id, _)| identity_id)
+            .expect("rich principal has matching legacy auth event");
+        assert_eq!(&principal.subject, legacy_subject);
+        assert_eq!(
+            orchestrator
+                .connection_principal(connection_id)
+                .expect("principal retained on orchestrator route")
+                .ownership_key(),
+            principal.ownership_key()
         );
     }
 

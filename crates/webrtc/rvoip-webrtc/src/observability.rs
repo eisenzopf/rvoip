@@ -54,6 +54,12 @@ pub fn render_prometheus(metrics: &WebRtcMetrics) -> String {
         "Sessions reaped by the idle/failure reaper (counter).",
         metrics.reaped_total,
     );
+    emit_counter(
+        &mut out,
+        "rvoip_webrtc_data_messages_dropped_total",
+        "Data messages dropped because the bounded adapter event queue was full (counter).",
+        metrics.data_messages_dropped_total,
+    );
     out
 }
 
@@ -214,6 +220,7 @@ mod tests {
             signaling_errors_total: 1,
             sessions_rejected_over_cap: 0,
             reaped_total: 4,
+            data_messages_dropped_total: 5,
         };
         let body = render_prometheus(&m);
 
@@ -224,6 +231,7 @@ mod tests {
             "rvoip_webrtc_signaling_errors_total",
             "rvoip_webrtc_sessions_rejected_over_cap",
             "rvoip_webrtc_reaped_total",
+            "rvoip_webrtc_data_messages_dropped_total",
         ] {
             assert!(
                 body.contains(&format!("# HELP {series}")),

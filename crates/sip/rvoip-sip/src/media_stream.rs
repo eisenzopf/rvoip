@@ -31,7 +31,7 @@ use tokio::task::JoinHandle;
 
 use rvoip_core::capability::CodecInfo;
 use rvoip_core::connection::Direction;
-use rvoip_core::error::Result as RvoipResult;
+use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::ids::StreamId;
 use rvoip_core::stream::{MediaFrame, MediaStream, QualitySnapshot, StreamKind};
 
@@ -278,13 +278,18 @@ impl MediaStream for SipMediaStream {
     }
 
     fn frames_in(&self) -> mpsc::Receiver<MediaFrame> {
-        // Single-take per the `MediaStream` trait contract.
+        self.try_frames_in().unwrap_or_else(|_| mpsc::channel(1).1)
+    }
+
+    fn try_frames_in(&self) -> RvoipResult<mpsc::Receiver<MediaFrame>> {
         self.inner
             .frames_in_rx
             .lock()
-            .ok()
-            .and_then(|mut g| g.take())
-            .unwrap_or_else(|| mpsc::channel(1).1)
+            .map_err(|_| RvoipError::InvalidState("SIP media receiver lock is poisoned"))?
+            .take()
+            .ok_or(RvoipError::InvalidState(
+                "SIP media receiver has already been acquired",
+            ))
     }
 
     fn frames_out(&self) -> mpsc::Sender<MediaFrame> {
@@ -425,5 +430,38 @@ mod outbound_timestamp_tests {
         let first = advance_outbound_timestamp(&mut clock, 160, 0);
         assert_eq!(first, u32::MAX - 100);
         assert_eq!(clock, 59); // (MAX - 100) + 160 wraps to 59
+    }
+}
+
+#[cfg(test)]
+mod receiver_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn second_receiver_acquisition_is_a_typed_error() {
+        let (_frames_in_tx, frames_in_rx) = mpsc::channel(1);
+        let (frames_out_tx, _frames_out_rx) = mpsc::channel(1);
+        let stream = SipMediaStream {
+            inner: Arc::new(SipMediaStreamInner {
+                stream_id: StreamId::new(),
+                codec: CodecInfo {
+                    name: "g.711-mu".into(),
+                    clock_rate_hz: G711_SAMPLE_RATE,
+                    channels: 1,
+                    fmtp: None,
+                },
+                direction: Direction::Inbound,
+                frames_in_rx: Mutex::new(Some(frames_in_rx)),
+                frames_out_tx,
+                pumps: Mutex::new(Vec::new()),
+                cancel: Arc::new(Notify::new()),
+            }),
+        };
+
+        assert!(stream.try_frames_in().is_ok());
+        assert!(matches!(
+            stream.try_frames_in(),
+            Err(RvoipError::InvalidState(_))
+        ));
     }
 }

@@ -173,6 +173,26 @@ fn invite(sid: &str, participant: &str) -> UctpEnvelope {
     }
 }
 
+fn connection_offer(sid: &str, connid: &str, participant: &str) -> UctpEnvelope {
+    UctpEnvelope::new(
+        MessageType::ConnectionOffer,
+        serde_json::json!({
+            "by_participant": participant,
+            "substrate": "quic",
+            "capabilities": {},
+            "streams_offered": [{
+                "id": format!("strm_{connid}"),
+                "kind": "audio",
+                "direction": "sendrecv",
+                "codec_preferences": ["opus"]
+            }],
+            "substrate_setup": null
+        }),
+    )
+    .with_sid(sid)
+    .with_connid(connid)
+}
+
 #[tokio::test]
 async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -238,6 +258,14 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
             break connection_id;
         }
     };
+    client_a
+        .send(connection_offer(
+            "sess_a",
+            "conn_wire_a",
+            "part_a_publisher",
+        ))
+        .await
+        .unwrap();
     client_b
         .send(invite("sess_b", "part_b_subscriber"))
         .await
@@ -249,6 +277,15 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
             break connection_id;
         }
     };
+    client_b
+        .send(connection_offer(
+            "sess_b",
+            "conn_wire_b",
+            "part_b_subscriber",
+        ))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Look up the publisher's server-side StreamId (the default audio
     // stream the adapter created on InboundInvite).
@@ -428,6 +465,15 @@ async fn fanout_with_no_subscription_does_not_leak_frames() {
     drive_auth_quic(&client_b, &mut in_b).await;
     client_a.send(invite("sess_a", "part_a")).await.unwrap();
     client_b.send(invite("sess_b", "part_b")).await.unwrap();
+    client_a
+        .send(connection_offer("sess_a", "conn_wire_a", "part_a"))
+        .await
+        .unwrap();
+    client_b
+        .send(connection_offer("sess_b", "conn_wire_b", "part_b"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let mut conn_ids: Vec<ConnectionId> = Vec::new();
     for _ in 0..50 {

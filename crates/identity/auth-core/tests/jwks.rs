@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use jsonwebtoken::{encode, EncodingKey, Header};
-use rvoip_auth_core::{BearerAuthError, BearerValidator, JwksJwtValidator};
+use rvoip_auth_core::{AuthenticationMethod, BearerAuthError, BearerValidator, JwksJwtValidator};
 use rvoip_core_traits::identity::IdentityAssurance;
 use serde::Serialize;
 use serde_json::json;
@@ -74,6 +74,8 @@ struct Claims {
     realm_access: Option<RoleAccessClaims>,
     #[serde(skip_serializing_if = "Option::is_none")]
     resource_access: Option<HashMap<String, RoleAccessClaims>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tenant_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -102,6 +104,7 @@ fn mint_with_kid(
         scope: scope.map(|s| s.into()),
         realm_access: None,
         resource_access: None,
+        tenant_id: None,
     };
     encode(
         &header,
@@ -131,6 +134,7 @@ fn mint_with_keycloak_roles() -> String {
             roles: vec!["admin".to_string()],
         }),
         resource_access: Some(resource_access),
+        tenant_id: None,
     };
     encode(
         &header,
@@ -151,6 +155,7 @@ fn mint_with_issuer(issuer: &str) -> String {
         scope: None,
         realm_access: None,
         resource_access: None,
+        tenant_id: None,
     };
     encode(
         &header,
@@ -203,6 +208,52 @@ async fn valid_jwt_resolved_via_jwks_yields_user_authorized() {
             assert_eq!(scopes, vec!["read:calls"]);
         }
         other => panic!("expected UserAuthorized, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn principal_preserves_jwks_authorization_claims() {
+    let server = setup_server(jwks_body(TEST_KID)).await;
+    let validator = JwksJwtValidator::new(jwks_url(&server));
+    let expires_at = Utc::now().timestamp() + 3600;
+    let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+    header.kid = Some(TEST_KID.to_string());
+    let token = encode(
+        &header,
+        &Claims {
+            sub: "shared-subject".into(),
+            exp: expires_at,
+            aud: None,
+            iss: Some("https://issuer.example".into()),
+            scope: Some("calls:read calls:write".into()),
+            realm_access: None,
+            resource_access: None,
+            tenant_id: Some("tenant-a".into()),
+        },
+        &EncodingKey::from_rsa_pem(TEST_PRIVATE_PEM.as_bytes()).expect("rsa pem"),
+    )
+    .expect("encode JWT");
+
+    let principal = validator.validate_principal(&token).await.unwrap();
+
+    assert_eq!(principal.subject, "shared-subject");
+    assert_eq!(principal.tenant.as_deref(), Some("tenant-a"));
+    assert_eq!(principal.issuer.as_deref(), Some("https://issuer.example"));
+    assert_eq!(principal.scopes, vec!["calls:read", "calls:write"]);
+    assert_eq!(principal.method, AuthenticationMethod::Oidc);
+    assert_eq!(
+        principal.expires_at.expect("expiry").timestamp(),
+        expires_at
+    );
+    assert!(!principal.is_expired());
+    match principal.assurance {
+        IdentityAssurance::UserAuthorized {
+            identity, scopes, ..
+        } => {
+            assert_eq!(identity.as_str(), "shared-subject");
+            assert_eq!(scopes, vec!["calls:read", "calls:write"]);
+        }
+        other => panic!("expected UserAuthorized, got {other:?}"),
     }
 }
 
@@ -284,6 +335,18 @@ async fn expired_token_rejects_even_when_kid_resolves() {
     let token = mint("id_x", -600, None, None);
     let result = validator.validate(&token).await;
     assert!(matches!(result, Err(BearerAuthError::Invalid(_))));
+}
+
+#[tokio::test]
+async fn principal_boundary_rejects_jwks_token_inside_decoder_leeway() {
+    let server = setup_server(jwks_body(TEST_KID)).await;
+    let validator = JwksJwtValidator::new(jwks_url(&server));
+
+    let token = mint("id_x", -1, None, None);
+    let result = validator.validate_principal(&token).await;
+    assert!(
+        matches!(result, Err(BearerAuthError::Invalid(ref reason)) if reason.contains("expired"))
+    );
 }
 
 #[tokio::test]

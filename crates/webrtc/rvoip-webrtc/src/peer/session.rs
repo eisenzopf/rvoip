@@ -420,6 +420,23 @@ impl RvoipPeerConnection {
         self.data_channel_rx.lock().await.try_recv().ok()
     }
 
+    /// Snapshot every remotely-created DataChannel observed by the peer
+    /// handler. Adapter-level pumps use this non-consuming view so no channel
+    /// is lost when the compatibility receiver is full or another caller has
+    /// already drained it.
+    pub(crate) fn seen_data_channels(&self) -> Vec<Arc<dyn DataChannel>> {
+        self.data_channels_seen.lock().clone()
+    }
+
+    /// Remove a closed/rejected channel from the bounded non-consuming
+    /// registry so adapter scans cannot resurrect it and a replacement can
+    /// use the released slot.
+    pub(crate) fn forget_seen_data_channel(&self, target: &Arc<dyn DataChannel>) {
+        self.data_channels_seen
+            .lock()
+            .retain(|channel| !Arc::ptr_eq(channel, target));
+    }
+
     pub async fn wait_data_channel(&self, timeout: Duration) -> Option<Arc<dyn DataChannel>> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {

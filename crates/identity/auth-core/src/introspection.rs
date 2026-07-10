@@ -10,12 +10,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use rvoip_core_traits::identity::IdentityAssurance;
 use rvoip_core_traits::ids::IdentityId;
 use serde::Deserialize;
 use url::Url;
 
-use crate::bearer::{BearerAuthError, BearerValidator};
+use crate::bearer::{
+    ensure_principal_active, AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError,
+    BearerValidator,
+};
 
 /// OAuth2 token introspection validator for opaque Bearer tokens.
 #[derive(Clone)]
@@ -56,6 +60,10 @@ struct IntrospectionResponse {
     scopes: Option<Vec<String>>,
     #[serde(default)]
     iss: Option<String>,
+    #[serde(default)]
+    exp: Option<u64>,
+    #[serde(default, alias = "tenant", alias = "tid")]
+    tenant_id: Option<String>,
     #[serde(default)]
     aud: Option<IntrospectionAudience>,
 }
@@ -208,6 +216,13 @@ impl OAuth2IntrospectionValidator {
 #[async_trait]
 impl BearerValidator for OAuth2IntrospectionValidator {
     async fn validate(&self, token: &str) -> Result<IdentityAssurance, BearerAuthError> {
+        Ok(self.validate_principal(token).await?.assurance)
+    }
+
+    async fn validate_principal(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
         if token.is_empty() {
             return Err(BearerAuthError::Empty);
         }
@@ -218,6 +233,13 @@ impl BearerValidator for OAuth2IntrospectionValidator {
         validate_issuer(&response, self.inner.issuers.as_ref())?;
         validate_audience(&response, self.inner.audiences.as_ref())?;
 
+        let expires_at = response.exp.map(expiration_from_unix).transpose()?;
+        if expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
+            return Err(BearerAuthError::Invalid(
+                "active introspection response is expired".into(),
+            ));
+        }
+
         let subject = response
             .sub
             .or(response.username)
@@ -225,14 +247,32 @@ impl BearerValidator for OAuth2IntrospectionValidator {
             .ok_or_else(|| {
                 BearerAuthError::Invalid("active introspection response missing subject".into())
             })?;
-        let identity = IdentityId::from_string(subject);
+        let identity = IdentityId::from_string(subject.clone());
         let scopes = scopes_from_response(response.scope, response.scopes);
-        Ok(IdentityAssurance::UserAuthorized {
+        let assurance = IdentityAssurance::UserAuthorized {
             identity: identity.clone(),
             user_id: identity,
+            scopes: scopes.clone(),
+        };
+        ensure_principal_active(AuthenticatedPrincipal {
+            subject,
+            tenant: response.tenant_id,
             scopes,
+            issuer: response.iss,
+            expires_at,
+            method: AuthenticationMethod::OAuth2Introspection,
+            assurance,
         })
     }
+}
+
+fn expiration_from_unix(seconds: u64) -> Result<chrono::DateTime<Utc>, BearerAuthError> {
+    i64::try_from(seconds)
+        .ok()
+        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+        .ok_or_else(|| {
+            BearerAuthError::Invalid("introspection exp is outside the supported range".into())
+        })
 }
 
 fn validate_issuer(

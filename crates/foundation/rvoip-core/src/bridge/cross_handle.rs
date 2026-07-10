@@ -19,7 +19,9 @@ use tokio::task::AbortHandle;
 use super::frame_pump::TranscoderSwap;
 use crate::error::{Result, RvoipError};
 use crate::ids::{BridgeId, ConnectionId, MediaRouteId};
-use crate::media_graph::MediaGraphHandle;
+use crate::media_graph::{
+    ManagedMediaRoute, MediaGraphHandle, MediaGraphRouteState, MediaGraphRouteStatus,
+};
 
 enum CrossBridgeBackend {
     Pumps {
@@ -28,12 +30,82 @@ enum CrossBridgeBackend {
         swap_a_to_b: Option<mpsc::Sender<TranscoderSwap>>,
         swap_b_to_a: Option<mpsc::Sender<TranscoderSwap>>,
     },
+    ManagedMediaGraphs {
+        a_graph: MediaGraphHandle,
+        b_graph: MediaGraphHandle,
+        a_to_b: Option<ManagedMediaRoute>,
+        b_to_a: Option<ManagedMediaRoute>,
+    },
+    LegacyMediaGraphs {
+        a_graph: MediaGraphHandle,
+        b_graph: MediaGraphHandle,
+        a_to_b: Option<MediaRouteId>,
+        b_to_a: Option<MediaRouteId>,
+    },
+}
+
+/// Cloneable snapshot of only the state needed for a transcoder swap. The
+/// Orchestrator captures this while holding its bridge-map guard, then drops
+/// the guard before any channel or media-graph await.
+#[derive(Clone)]
+pub(crate) enum CrossBridgeSwapController {
+    Pumps {
+        a_to_b: mpsc::Sender<TranscoderSwap>,
+        b_to_a: mpsc::Sender<TranscoderSwap>,
+    },
     MediaGraphs {
         a_graph: MediaGraphHandle,
         b_graph: MediaGraphHandle,
         a_to_b: MediaRouteId,
         b_to_a: MediaRouteId,
     },
+}
+
+impl CrossBridgeSwapController {
+    pub(crate) async fn swap_transcoders(
+        self,
+        mut a_to_b_swap: TranscoderSwap,
+        mut b_to_a_swap: TranscoderSwap,
+    ) -> Result<()> {
+        match self {
+            Self::MediaGraphs {
+                a_graph,
+                b_graph,
+                a_to_b,
+                b_to_a,
+            } => {
+                a_graph
+                    .update_route(a_to_b, a_to_b_swap.new_from_pt, a_to_b_swap.new_to_pt)
+                    .await?;
+                b_graph
+                    .update_route(b_to_a, b_to_a_swap.new_from_pt, b_to_a_swap.new_to_pt)
+                    .await?;
+                Ok(())
+            }
+            Self::Pumps { a_to_b, b_to_a } => {
+                // Await acknowledgements from the pumps so successful return
+                // means both directions observed the new codec state.
+                let (a_ack_tx, a_ack_rx) = tokio::sync::oneshot::channel();
+                let (b_ack_tx, b_ack_rx) = tokio::sync::oneshot::channel();
+                a_to_b_swap.ack = Some(a_ack_tx);
+                b_to_a_swap.ack = Some(b_ack_tx);
+
+                // A closed receiver means that direction is already ending.
+                // Preserve the established best-effort behavior.
+                let a_send_ok = a_to_b.send(a_to_b_swap).await.is_ok();
+                let b_send_ok = b_to_a.send(b_to_a_swap).await.is_ok();
+
+                let timeout = std::time::Duration::from_secs(1);
+                if a_send_ok {
+                    let _ = tokio::time::timeout(timeout, a_ack_rx).await;
+                }
+                if b_send_ok {
+                    let _ = tokio::time::timeout(timeout, b_ack_rx).await;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 pub struct CrossBridgeHandle {
@@ -109,12 +181,175 @@ impl CrossBridgeHandle {
             a,
             b,
             created_at: Utc::now(),
-            backend: CrossBridgeBackend::MediaGraphs {
+            backend: CrossBridgeBackend::LegacyMediaGraphs {
+                a_graph,
+                b_graph,
+                a_to_b: Some(a_to_b),
+                b_to_a: Some(b_to_a),
+            },
+        }
+    }
+
+    /// Managed-route variant used by the Orchestrator. The original
+    /// `with_media_graphs` constructor remains source compatible for callers
+    /// that still own route IDs directly.
+    pub fn with_managed_media_graphs(
+        id: BridgeId,
+        a: ConnectionId,
+        b: ConnectionId,
+        a_graph: MediaGraphHandle,
+        b_graph: MediaGraphHandle,
+        a_to_b: ManagedMediaRoute,
+        b_to_a: ManagedMediaRoute,
+    ) -> Self {
+        Self {
+            id,
+            a,
+            b,
+            created_at: Utc::now(),
+            backend: CrossBridgeBackend::ManagedMediaGraphs {
+                a_graph,
+                b_graph,
+                a_to_b: Some(a_to_b),
+                b_to_a: Some(b_to_a),
+            },
+        }
+    }
+
+    pub fn media_route_statuses(&self) -> Option<(MediaGraphRouteStatus, MediaGraphRouteStatus)> {
+        let CrossBridgeBackend::ManagedMediaGraphs { a_to_b, b_to_a, .. } = &self.backend else {
+            return None;
+        };
+        Some((a_to_b.as_ref()?.status(), b_to_a.as_ref()?.status()))
+    }
+
+    /// Capture the swap channels or graph route IDs without retaining a
+    /// reference to this handle. This is crate-private so the public bridge
+    /// API and constructors remain unchanged.
+    pub(crate) fn swap_controller(&self) -> Result<CrossBridgeSwapController> {
+        match &self.backend {
+            CrossBridgeBackend::Pumps {
+                swap_a_to_b,
+                swap_b_to_a,
+                ..
+            } => Ok(CrossBridgeSwapController::Pumps {
+                a_to_b: swap_a_to_b.clone().ok_or(RvoipError::NotImplemented(
+                    "CrossBridgeHandle::swap_transcoders — bridge built without swap channels",
+                ))?,
+                b_to_a: swap_b_to_a.clone().ok_or(RvoipError::NotImplemented(
+                    "CrossBridgeHandle::swap_transcoders — bridge built without swap channels",
+                ))?,
+            }),
+            CrossBridgeBackend::ManagedMediaGraphs {
                 a_graph,
                 b_graph,
                 a_to_b,
                 b_to_a,
-            },
+            } => Ok(CrossBridgeSwapController::MediaGraphs {
+                a_graph: a_graph.clone(),
+                b_graph: b_graph.clone(),
+                a_to_b: a_to_b
+                    .as_ref()
+                    .ok_or(RvoipError::InvalidState("bridge route is stopped"))?
+                    .id()
+                    .clone(),
+                b_to_a: b_to_a
+                    .as_ref()
+                    .ok_or(RvoipError::InvalidState("bridge route is stopped"))?
+                    .id()
+                    .clone(),
+            }),
+            CrossBridgeBackend::LegacyMediaGraphs {
+                a_graph,
+                b_graph,
+                a_to_b,
+                b_to_a,
+            } => Ok(CrossBridgeSwapController::MediaGraphs {
+                a_graph: a_graph.clone(),
+                b_graph: b_graph.clone(),
+                a_to_b: a_to_b
+                    .clone()
+                    .ok_or(RvoipError::InvalidState("bridge route is stopped"))?,
+                b_to_a: b_to_a
+                    .clone()
+                    .ok_or(RvoipError::InvalidState("bridge route is stopped"))?,
+            }),
+        }
+    }
+
+    /// Converge both media directions before the orchestrator reports the
+    /// bridge removed. Drop remains a best-effort fallback for cancellation.
+    pub async fn stop(&mut self) -> Result<()> {
+        match &mut self.backend {
+            CrossBridgeBackend::Pumps { a_to_b, b_to_a, .. } => {
+                a_to_b.abort();
+                b_to_a.abort();
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    while !a_to_b.is_finished() || !b_to_a.is_finished() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .map_err(|_| RvoipError::InvalidState("bridge pump shutdown timed out"))?;
+                Ok(())
+            }
+            CrossBridgeBackend::ManagedMediaGraphs { a_to_b, b_to_a, .. } => {
+                let a = a_to_b.take();
+                let b = b_to_a.take();
+                let a_status = a.as_ref().map(ManagedMediaRoute::status);
+                let b_status = b.as_ref().map(ManagedMediaRoute::status);
+                let (a_result, b_result) = tokio::join!(
+                    async move {
+                        match a {
+                            Some(route) => route.remove().await,
+                            None => Ok(false),
+                        }
+                    },
+                    async move {
+                        match b {
+                            Some(route) => route.remove().await,
+                            None => Ok(false),
+                        }
+                    }
+                );
+                for (result, status) in [(a_result, a_status), (b_result, b_status)] {
+                    if let Err(error) = result {
+                        let already_terminal = status.is_some_and(|status| {
+                            matches!(status.state(), MediaGraphRouteState::Terminal(_))
+                        });
+                        if !already_terminal {
+                            return Err(error);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            CrossBridgeBackend::LegacyMediaGraphs {
+                a_graph,
+                b_graph,
+                a_to_b,
+                b_to_a,
+            } => {
+                let a = a_to_b.take();
+                let b = b_to_a.take();
+                let (a_result, b_result) = tokio::join!(
+                    async {
+                        match a {
+                            Some(route) => a_graph.remove_sink_and_wait(route).await.map(|_| ()),
+                            None => Ok(()),
+                        }
+                    },
+                    async {
+                        match b {
+                            Some(route) => b_graph.remove_sink_and_wait(route).await.map(|_| ()),
+                            None => Ok(()),
+                        }
+                    }
+                );
+                a_result?;
+                b_result?;
+                Ok(())
+            }
         }
     }
 
@@ -136,91 +371,38 @@ impl CrossBridgeHandle {
     /// send (legacy fire-and-forget).
     pub async fn swap_transcoders(
         &self,
-        mut a_to_b_swap: TranscoderSwap,
-        mut b_to_a_swap: TranscoderSwap,
+        a_to_b_swap: TranscoderSwap,
+        b_to_a_swap: TranscoderSwap,
     ) -> Result<()> {
-        let CrossBridgeBackend::Pumps {
-            swap_a_to_b,
-            swap_b_to_a,
-            ..
-        } = &self.backend
-        else {
-            if let CrossBridgeBackend::MediaGraphs {
-                a_graph,
-                b_graph,
-                a_to_b,
-                b_to_a,
-            } = &self.backend
-            {
-                a_graph
-                    .update_route(
-                        a_to_b.clone(),
-                        a_to_b_swap.new_from_pt,
-                        a_to_b_swap.new_to_pt,
-                    )
-                    .await?;
-                b_graph
-                    .update_route(
-                        b_to_a.clone(),
-                        b_to_a_swap.new_from_pt,
-                        b_to_a_swap.new_to_pt,
-                    )
-                    .await?;
-                return Ok(());
-            }
-            unreachable!();
-        };
-        let Some(a_tx) = swap_a_to_b.as_ref() else {
-            return Err(RvoipError::NotImplemented(
-                "CrossBridgeHandle::swap_transcoders — bridge built without swap channels",
-            ));
-        };
-        let Some(b_tx) = swap_b_to_a.as_ref() else {
-            return Err(RvoipError::NotImplemented(
-                "CrossBridgeHandle::swap_transcoders — bridge built without swap channels",
-            ));
-        };
-        // Wire ack channels if the caller didn't supply them. We then
-        // await both acks below to provide the "swap is live" contract.
-        let (a_ack_tx, a_ack_rx) = tokio::sync::oneshot::channel();
-        let (b_ack_tx, b_ack_rx) = tokio::sync::oneshot::channel();
-        a_to_b_swap.ack = Some(a_ack_tx);
-        b_to_a_swap.ack = Some(b_ack_tx);
-
-        // Send. A closed receiver (pump exited) is silently skipped —
-        // the bridge is on its way out anyway.
-        let a_send_ok = a_tx.send(a_to_b_swap).await.is_ok();
-        let b_send_ok = b_tx.send(b_to_a_swap).await.is_ok();
-
-        // Await acks with timeout. A pump that exited won't ack — that
-        // direction is left in its pre-swap state but the call still
-        // returns Ok so the caller proceeds.
-        let to = std::time::Duration::from_secs(1);
-        if a_send_ok {
-            let _ = tokio::time::timeout(to, a_ack_rx).await;
-        }
-        if b_send_ok {
-            let _ = tokio::time::timeout(to, b_ack_rx).await;
-        }
-        Ok(())
+        self.swap_controller()?
+            .swap_transcoders(a_to_b_swap, b_to_a_swap)
+            .await
     }
 }
 
 impl Drop for CrossBridgeHandle {
     fn drop(&mut self) {
-        match &self.backend {
+        match &mut self.backend {
             CrossBridgeBackend::Pumps { a_to_b, b_to_a, .. } => {
                 a_to_b.abort();
                 b_to_a.abort();
             }
-            CrossBridgeBackend::MediaGraphs {
+            CrossBridgeBackend::ManagedMediaGraphs { a_to_b, b_to_a, .. } => {
+                a_to_b.take();
+                b_to_a.take();
+            }
+            CrossBridgeBackend::LegacyMediaGraphs {
                 a_graph,
                 b_graph,
                 a_to_b,
                 b_to_a,
             } => {
-                a_graph.remove_sink(a_to_b.clone());
-                b_graph.remove_sink(b_to_a.clone());
+                if let Some(route) = a_to_b.take() {
+                    a_graph.remove_sink(route);
+                }
+                if let Some(route) = b_to_a.take() {
+                    b_graph.remove_sink(route);
+                }
             }
         }
     }

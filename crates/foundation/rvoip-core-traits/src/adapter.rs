@@ -1,6 +1,7 @@
 use crate::capability::CapabilityDescriptor;
 use crate::connection::{Connection, Direction, Transport};
-use crate::identity::{IdentityAssurance, Jwk};
+use crate::data::DataMessage;
+use crate::identity::{AuthenticatedPrincipal, IdentityAssurance, Jwk};
 use crate::ids::{ConnectionId, ParticipantId, PlaybackId, SessionId};
 use crate::stream::QualitySnapshot;
 use tokio::sync::oneshot;
@@ -99,6 +100,7 @@ pub struct SignatureHeaders {
 /// orchestration event vocabulary; consumers wanting protocol-native
 /// access can subscribe directly to the adapter.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum AdapterEvent {
     InboundConnection {
         connection: Connection,
@@ -111,6 +113,13 @@ pub enum AdapterEvent {
         identity_id: String,
         participant_id: String,
         assurance: IdentityAssurance,
+    },
+    /// Additive full-principal authentication event. The legacy
+    /// `Authenticated` variant remains unchanged for source compatibility.
+    PrincipalAuthenticated {
+        connection_id: ConnectionId,
+        participant_id: String,
+        principal: AuthenticatedPrincipal,
     },
     Ended {
         connection_id: ConnectionId,
@@ -132,6 +141,10 @@ pub enum AdapterEvent {
     Message {
         connection_id: ConnectionId,
         text: String,
+    },
+    DataMessage {
+        connection_id: ConnectionId,
+        message: DataMessage,
     },
     StepUpResponse {
         connection_id: ConnectionId,

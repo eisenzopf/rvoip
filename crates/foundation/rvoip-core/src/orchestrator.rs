@@ -22,25 +22,124 @@ use crate::connection::{Direction, Transport};
 use crate::conversation::{Conversation, ConversationPolicy, ConversationState};
 use crate::error::{Result, RvoipError};
 use crate::events::Event;
+use crate::identity::AuthenticatedPrincipal;
 use crate::ids::{
-    BridgeId, ConnectionId, ConversationId, MessageId, ParticipantId, SessionId, StreamId, TenantId,
+    BridgeId, ConnectionId, ConversationId, MediaRouteId, MessageId, ParticipantId, SessionId,
+    StreamId, TenantId,
 };
-use crate::media_graph::{start_media_graph, MediaGraphHandle, MediaGraphPolicy};
+use crate::media_graph::{
+    start_media_graph, validate_media_graph_codec, ManagedMediaRoute, MediaGraphHandle,
+    MediaGraphPolicy, MediaGraphRouteStatus,
+};
 use crate::message::{ContentType, Message, MessageOrigin, MessageRecipients};
 use crate::participant::{Participant, ParticipantKind, ParticipantRole};
 use crate::session::{ConnectionRef, Session, SessionMedium, SessionState};
 use crate::stream::StreamKind;
 use crate::vcon::VconBuilderHandle;
+use crate::DataMessage;
 use bytes::Bytes;
 use chrono::Utc;
 use dashmap::DashMap;
 use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
+use rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent;
 use rvoip_media_core::codec::transcoding::Transcoder;
 use rvoip_media_core::processing::format::FormatConverter;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
-use tokio::sync::{broadcast, RwLock as TokioRwLock, Semaphore};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock as TokioRwLock, Semaphore};
 use tracing::{debug, instrument, warn};
+
+/// Cross-crate observers must not be able to create one Tokio task per event.
+/// A single lazy worker serializes publication and bounds the memory retained
+/// when a coordinator or one of its handlers is slow.
+const CROSS_CRATE_EVENT_QUEUE_CAPACITY: usize = 256;
+
+#[async_trait::async_trait]
+trait CrossCrateEventSink: Send + Sync {
+    async fn publish(&self, event: RvoipCrossCrateEvent) -> std::result::Result<(), String>;
+}
+
+#[async_trait::async_trait]
+impl CrossCrateEventSink for GlobalEventCoordinator {
+    async fn publish(&self, event: RvoipCrossCrateEvent) -> std::result::Result<(), String> {
+        GlobalEventCoordinator::publish(self, Arc::new(event))
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CrossCrateEnqueueResult {
+    Enqueued,
+    DroppedFull,
+    DroppedClosed,
+}
+
+struct CrossCrateEventPublisher {
+    sink: Arc<dyn CrossCrateEventSink>,
+    capacity: usize,
+    sender: OnceLock<mpsc::Sender<RvoipCrossCrateEvent>>,
+}
+
+impl CrossCrateEventPublisher {
+    fn new(sink: Arc<dyn CrossCrateEventSink>) -> Self {
+        Self::with_capacity(sink, CROSS_CRATE_EVENT_QUEUE_CAPACITY)
+    }
+
+    fn with_capacity(sink: Arc<dyn CrossCrateEventSink>, capacity: usize) -> Self {
+        assert!(capacity > 0, "cross-crate event queue must be non-empty");
+        Self {
+            sink,
+            capacity,
+            sender: OnceLock::new(),
+        }
+    }
+
+    fn enqueue(&self, event: RvoipCrossCrateEvent) -> CrossCrateEnqueueResult {
+        let sender = self.sender.get_or_init(|| {
+            let (sender, mut receiver) = mpsc::channel(self.capacity);
+            let sink = Arc::clone(&self.sink);
+            tokio::spawn(async move {
+                while let Some(event) = receiver.recv().await {
+                    if let Err(error) = sink.publish(event).await {
+                        metrics::counter!("rvoip_core_cross_crate_event_publish_failures_total")
+                            .increment(1);
+                        warn!(
+                            %error,
+                            "rvoip-core cross-crate event publish failed"
+                        );
+                    }
+                }
+            });
+            sender
+        });
+
+        match sender.try_send(event) {
+            Ok(()) => CrossCrateEnqueueResult::Enqueued,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                metrics::counter!(
+                    "rvoip_core_cross_crate_events_dropped_total",
+                    "reason" => "queue_full"
+                )
+                .increment(1);
+                debug!(
+                    capacity = self.capacity,
+                    "cross-crate event queue full; dropping event"
+                );
+                CrossCrateEnqueueResult::DroppedFull
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                metrics::counter!(
+                    "rvoip_core_cross_crate_events_dropped_total",
+                    "reason" => "worker_closed"
+                )
+                .increment(1);
+                warn!("cross-crate event worker closed; dropping event");
+                CrossCrateEnqueueResult::DroppedClosed
+            }
+        }
+    }
+}
 
 /// Per-connection registration tracked by the orchestrator so subsequent
 /// commands (`end`, `hold`, `transfer`, `send_dtmf`, ...) can route to the
@@ -48,6 +147,59 @@ use tracing::{debug, instrument, warn};
 #[derive(Clone, Debug)]
 struct ConnectionEntry {
     transport: Transport,
+    principal: Option<AuthenticatedPrincipal>,
+}
+
+#[derive(Debug)]
+struct ConnectionLifecycleState {
+    generation: u64,
+    active: bool,
+}
+
+#[derive(Clone)]
+struct ConnectionLifecycleTicket {
+    connection_id: ConnectionId,
+    generation: u64,
+    state: Arc<Mutex<ConnectionLifecycleState>>,
+}
+
+/// RAII reservation for both connection slots in a pending bridge. The
+/// ownership rows remain after commit and become the active bridge index;
+/// cancellation or any setup error rolls them back automatically.
+struct BridgeReservation {
+    bridge_id: BridgeId,
+    a: ConnectionId,
+    b: ConnectionId,
+    owners: Arc<DashMap<ConnectionId, BridgeId>>,
+    lock: Arc<Mutex<()>>,
+    committed: bool,
+}
+
+impl BridgeReservation {
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for BridgeReservation {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for connection_id in [&self.a, &self.b] {
+            let owned_by_reservation = self
+                .owners
+                .get(connection_id)
+                .is_some_and(|owner| owner.value() == &self.bridge_id);
+            if owned_by_reservation {
+                self.owners.remove(connection_id);
+            }
+        }
+    }
 }
 
 pub struct Orchestrator {
@@ -57,19 +209,28 @@ pub struct Orchestrator {
     /// SIP-fast-path `BridgeHandle`s from media-core). Dropping a handle
     /// from this map aborts its two pump tasks.
     cross_bridges: Arc<DashMap<BridgeId, CrossBridgeHandle>>,
+    /// Atomic connection ownership for both pending and active cross bridges.
+    cross_bridge_owners: Arc<DashMap<ConnectionId, BridgeId>>,
+    bridge_ownership_lock: Arc<Mutex<()>>,
     /// One graph per source Connection. Each graph owns that Connection's
     /// single-take `frames_in()` receiver and supports dynamic call,
     /// recording, UCTP, and MOQT sinks.
     media_graphs: Arc<DashMap<ConnectionId, MediaGraphHandle>>,
-    media_graph_init: Arc<tokio::sync::Mutex<()>>,
+    /// Per-connection first-use serialization. Entries live only as long as
+    /// the tracked Connection, so slow initialization on one call never
+    /// blocks independent calls and the lock table remains bounded.
+    media_graph_inits: Arc<DashMap<ConnectionId, Arc<tokio::sync::Mutex<()>>>>,
     pub admission: Arc<Semaphore>,
     adapters: Arc<DashMap<Transport, Arc<dyn ConnectionAdapter>>>,
     connections: Arc<DashMap<ConnectionId, ConnectionEntry>>,
+    /// Generation-checked setup commit barrier. Async setup can do slow work
+    /// without holding a mutex, then atomically commit only if every source is
+    /// still on the generation captured before setup began.
+    connection_lifecycles: Arc<DashMap<ConnectionId, Arc<Mutex<ConnectionLifecycleState>>>>,
     events: broadcast::Sender<Event>,
-    /// Optional cross-crate publication. When `Some`, every emitted event is
-    /// also published through `infra-common::GlobalEventCoordinator` as the
-    /// `RvoipCrossCrateEvent::Core(...)` variant.
-    coordinator: Option<Arc<GlobalEventCoordinator>>,
+    /// Optional bounded cross-crate publication. A single lazily-started FIFO
+    /// worker publishes normalized events without peer-controlled task growth.
+    cross_crate_publisher: Option<Arc<CrossCrateEventPublisher>>,
     /// Per-Session multi-party subscription routing tables. v0.x MP1 lands
     /// the data structure + API; MP2 wires the UCTP coordinator to call
     /// `add_subscription` on `stream.subscribe`; MP3 wires the media-path
@@ -147,7 +308,7 @@ pub struct Orchestrator {
     /// listener-target Connection ending fires the abort so the
     /// forwarder task doesn't leak after its source dies. Bug-fix
     /// round of the gap-plan completion sweep.
-    listener_tasks: Arc<DashMap<crate::ids::ListenerId, tokio::task::AbortHandle>>,
+    listener_tasks: Arc<DashMap<crate::ids::ListenerId, MediaTaskHandle>>,
     /// P9 — per-Session quality accumulator. Each `AdapterEvent::Quality`
     /// updates the aggregator for the Session that owns the
     /// Connection; `end_session` snapshots + fills
@@ -171,7 +332,8 @@ pub struct Orchestrator {
 /// P5 — internal handles for live attachments.
 pub(crate) struct RecordingHandle {
     pub sink: Arc<dyn crate::harness::RecordingSink>,
-    pub abort: tokio::task::AbortHandle,
+    pub media: MediaTapHandle,
+    pub connection_ids: Vec<ConnectionId>,
     /// P5 — `false` while paused; pump task watches this and drops
     /// frames silently rather than writing them to the sink. Resumed
     /// by flipping back to `true`.
@@ -183,7 +345,97 @@ pub(crate) struct RecordingHandle {
     pub _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 pub(crate) struct TranscriptionHandle {
-    pub abort: tokio::task::AbortHandle,
+    pub media: MediaTapHandle,
+    pub connection_id: ConnectionId,
+}
+
+/// A graph route owned by an observer attachment. Dropping it removes only
+/// that observer from the reusable source graph; bridge and broadcast routes
+/// remain intact.
+pub(crate) struct MediaTapRoute {
+    route: Option<ManagedMediaRoute>,
+}
+
+impl MediaTapRoute {
+    fn new(route: ManagedMediaRoute) -> Self {
+        Self { route: Some(route) }
+    }
+
+    fn status(&self) -> Option<MediaGraphRouteStatus> {
+        self.route.as_ref().map(ManagedMediaRoute::status)
+    }
+
+    fn take(&mut self) -> Option<ManagedMediaRoute> {
+        self.route.take()
+    }
+
+    fn detach(&mut self) {
+        self.route.take();
+    }
+}
+
+impl Drop for MediaTapRoute {
+    fn drop(&mut self) {
+        self.detach();
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct MediaTapHandle {
+    routes: Vec<MediaTapRoute>,
+    tasks: Vec<tokio::task::AbortHandle>,
+}
+
+impl MediaTapHandle {
+    fn push(&mut self, route: MediaTapRoute, task: tokio::task::AbortHandle) {
+        self.routes.push(route);
+        self.tasks.push(task);
+    }
+
+    fn stop(&mut self) {
+        drop(self.begin_stop());
+    }
+
+    fn statuses(&self) -> Vec<MediaGraphRouteStatus> {
+        self.routes
+            .iter()
+            .filter_map(MediaTapRoute::status)
+            .collect()
+    }
+
+    fn begin_stop(&mut self) -> Vec<ManagedMediaRoute> {
+        for task in self.tasks.drain(..) {
+            task.abort();
+        }
+        self.routes
+            .drain(..)
+            .filter_map(|mut route| route.take())
+            .collect()
+    }
+
+    async fn stop_and_wait(&mut self) {
+        let routes = self.begin_stop();
+        for route in routes {
+            let _ = route.remove().await;
+        }
+    }
+}
+
+impl Drop for MediaTapHandle {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+pub(crate) struct MediaTaskHandle {
+    abort: tokio::task::AbortHandle,
+    connection_ids: Vec<ConnectionId>,
+}
+
+impl Drop for MediaTaskHandle {
+    fn drop(&mut self) {
+        self.abort.abort();
+    }
 }
 /// P9 — running aggregator for per-Session quality samples.
 /// Accumulated by `handle_adapter_event` on `AdapterEvent::Quality`
@@ -245,7 +497,8 @@ impl QualityAggregator {
 }
 
 pub(crate) struct AiAttachmentHandle {
-    pub abort: tokio::task::AbortHandle,
+    pub media: MediaTapHandle,
+    pub connection_id: ConnectionId,
     /// P5 — flips to `true` when a TTS playback is in flight and to
     /// `false` when it isn't. Barge-in inspects this to decide
     /// whether an incoming ASR partial should cancel a playback.
@@ -272,13 +525,16 @@ impl Orchestrator {
             config,
             bridges: BridgeManager::new(),
             cross_bridges: Arc::new(DashMap::new()),
+            cross_bridge_owners: Arc::new(DashMap::new()),
+            bridge_ownership_lock: Arc::new(Mutex::new(())),
             media_graphs: Arc::new(DashMap::new()),
-            media_graph_init: Arc::new(tokio::sync::Mutex::new(())),
+            media_graph_inits: Arc::new(DashMap::new()),
             admission,
             adapters: Arc::new(DashMap::new()),
             connections: Arc::new(DashMap::new()),
+            connection_lifecycles: Arc::new(DashMap::new()),
             events,
-            coordinator: None,
+            cross_crate_publisher: None,
             subscriptions: Arc::new(crate::subscriptions::SubscriptionRegistry::new()),
             publisher_registry: std::sync::OnceLock::new(),
             subscriber_streams: Arc::new(DashMap::new()),
@@ -313,13 +569,16 @@ impl Orchestrator {
             config,
             bridges: BridgeManager::new(),
             cross_bridges: Arc::new(DashMap::new()),
+            cross_bridge_owners: Arc::new(DashMap::new()),
+            bridge_ownership_lock: Arc::new(Mutex::new(())),
             media_graphs: Arc::new(DashMap::new()),
-            media_graph_init: Arc::new(tokio::sync::Mutex::new(())),
+            media_graph_inits: Arc::new(DashMap::new()),
             admission,
             adapters: Arc::new(DashMap::new()),
             connections: Arc::new(DashMap::new()),
+            connection_lifecycles: Arc::new(DashMap::new()),
             events,
-            coordinator: Some(coordinator),
+            cross_crate_publisher: Some(Arc::new(CrossCrateEventPublisher::new(coordinator))),
             subscriptions: Arc::new(crate::subscriptions::SubscriptionRegistry::new()),
             publisher_registry: std::sync::OnceLock::new(),
             subscriber_streams: Arc::new(DashMap::new()),
@@ -401,9 +660,143 @@ impl Orchestrator {
             .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))
     }
 
+    /// Return the complete principal last authenticated for this connection.
+    ///
+    /// The principal is cleared with the route on connection teardown. Policy
+    /// layers should compare its ownership key rather than subject alone.
+    pub fn connection_principal(&self, conn: &ConnectionId) -> Result<AuthenticatedPrincipal> {
+        self.connections
+            .get(conn)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?
+            .principal
+            .clone()
+            .ok_or(RvoipError::InvalidState(
+                "connection has no authenticated principal",
+            ))
+    }
+
     fn track_connection(&self, conn: &ConnectionId, transport: Transport) {
         self.connections
-            .insert(conn.clone(), ConnectionEntry { transport });
+            .entry(conn.clone())
+            .and_modify(|entry| entry.transport = transport)
+            .or_insert(ConnectionEntry {
+                transport,
+                principal: None,
+            });
+        self.activate_connection_lifecycle(conn);
+    }
+
+    fn track_connection_principal(
+        &self,
+        conn: &ConnectionId,
+        transport: Transport,
+        principal: AuthenticatedPrincipal,
+    ) {
+        self.connections
+            .entry(conn.clone())
+            .and_modify(|entry| {
+                entry.transport = transport;
+                entry.principal = Some(principal.clone());
+            })
+            .or_insert(ConnectionEntry {
+                transport,
+                principal: Some(principal),
+            });
+        self.activate_connection_lifecycle(conn);
+    }
+
+    fn activate_connection_lifecycle(&self, connection_id: &ConnectionId) {
+        let state = self
+            .connection_lifecycles
+            .entry(connection_id.clone())
+            .or_insert_with(|| {
+                Arc::new(Mutex::new(ConnectionLifecycleState {
+                    generation: 1,
+                    active: true,
+                }))
+            })
+            .clone();
+        let mut state = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.active {
+            state.generation = state.generation.saturating_add(1);
+            state.active = true;
+        }
+    }
+
+    fn capture_connection_lifecycles(
+        &self,
+        connection_ids: &[ConnectionId],
+    ) -> Result<Vec<ConnectionLifecycleTicket>> {
+        let mut connection_ids = connection_ids.to_vec();
+        connection_ids.sort();
+        connection_ids.dedup();
+        let mut tickets = Vec::with_capacity(connection_ids.len());
+        for connection_id in connection_ids {
+            if !self.connections.contains_key(&connection_id) {
+                return Err(RvoipError::ConnectionNotFound(connection_id));
+            }
+            let state = self
+                .connection_lifecycles
+                .get(&connection_id)
+                .map(|entry| Arc::clone(entry.value()))
+                .ok_or_else(|| RvoipError::ConnectionNotFound(connection_id.clone()))?;
+            let generation = {
+                let state_guard = state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if !state_guard.active {
+                    return Err(RvoipError::ConnectionNotFound(connection_id));
+                }
+                state_guard.generation
+            };
+            tickets.push(ConnectionLifecycleTicket {
+                connection_id,
+                generation,
+                state,
+            });
+        }
+        Ok(tickets)
+    }
+
+    fn lock_connection_lifecycles<'a>(
+        &self,
+        tickets: &'a [ConnectionLifecycleTicket],
+    ) -> Result<Vec<std::sync::MutexGuard<'a, ConnectionLifecycleState>>> {
+        let guards = tickets
+            .iter()
+            .map(|ticket| {
+                ticket
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+            })
+            .collect::<Vec<_>>();
+        for (ticket, state) in tickets.iter().zip(&guards) {
+            if !state.active
+                || state.generation != ticket.generation
+                || !self.connections.contains_key(&ticket.connection_id)
+            {
+                return Err(RvoipError::ConnectionNotFound(ticket.connection_id.clone()));
+            }
+        }
+        Ok(guards)
+    }
+
+    fn validate_connection_lifecycles(&self, tickets: &[ConnectionLifecycleTicket]) -> Result<()> {
+        drop(self.lock_connection_lifecycles(tickets)?);
+        Ok(())
+    }
+
+    fn invalidate_connection_lifecycle(&self, connection_id: &ConnectionId) {
+        if let Some(state) = self.connection_lifecycles.get(connection_id) {
+            let mut state = state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.active = false;
+            state.generation = state.generation.saturating_add(1);
+        }
     }
 
     fn bind_connection_to_session(
@@ -463,33 +856,357 @@ impl Orchestrator {
     /// the bridged peer needs to inject the corresponding RFC 4733
     /// telephone-event packets onto its outbound RTP.
     fn bridge_peer_of(&self, conn: &ConnectionId) -> Option<ConnectionId> {
-        for entry in self.cross_bridges.iter() {
-            let h = entry.value();
-            if &h.a == conn {
-                return Some(h.b.clone());
+        let bridge_id = self
+            .cross_bridge_owners
+            .get(conn)
+            .map(|owner| owner.value().clone())?;
+        self.cross_bridges.get(&bridge_id).and_then(|entry| {
+            let bridge = entry.value();
+            if &bridge.a == conn {
+                Some(bridge.b.clone())
+            } else if &bridge.b == conn {
+                Some(bridge.a.clone())
+            } else {
+                None
             }
-            if &h.b == conn {
-                return Some(h.a.clone());
-            }
-        }
-        None
+        })
     }
 
-    fn forget_connection(&self, conn: &ConnectionId) {
-        // Tear down bridge routes before shutting down the source graph.
-        let bridge_ids: Vec<BridgeId> = self
-            .cross_bridges
+    fn reserve_cross_bridge(
+        &self,
+        bridge_id: BridgeId,
+        a: ConnectionId,
+        b: ConnectionId,
+    ) -> Result<BridgeReservation> {
+        let _guard = self
+            .bridge_ownership_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.cross_bridge_owners.contains_key(&a) || self.cross_bridge_owners.contains_key(&b) {
+            return Err(RvoipError::AdmissionRejected("connection already bridged"));
+        }
+        self.cross_bridge_owners
+            .insert(a.clone(), bridge_id.clone());
+        self.cross_bridge_owners
+            .insert(b.clone(), bridge_id.clone());
+        Ok(BridgeReservation {
+            bridge_id,
+            a,
+            b,
+            owners: Arc::clone(&self.cross_bridge_owners),
+            lock: Arc::clone(&self.bridge_ownership_lock),
+            committed: false,
+        })
+    }
+
+    fn release_cross_bridge_ownership(
+        &self,
+        bridge_id: &BridgeId,
+        a: &ConnectionId,
+        b: &ConnectionId,
+    ) {
+        let _guard = self
+            .bridge_ownership_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for connection_id in [a, b] {
+            let owned_by_bridge = self
+                .cross_bridge_owners
+                .get(connection_id)
+                .is_some_and(|owner| owner.value() == bridge_id);
+            if owned_by_bridge {
+                self.cross_bridge_owners.remove(connection_id);
+            }
+        }
+    }
+
+    async fn remove_cross_bridge_internal(&self, bridge_id: &BridgeId) -> Result<bool> {
+        let Some((_, mut handle)) = self.cross_bridges.remove(bridge_id) else {
+            return Ok(false);
+        };
+        let a = handle.a.clone();
+        let b = handle.b.clone();
+        let result = handle.stop().await;
+        self.release_cross_bridge_ownership(bridge_id, &a, &b);
+        result.map(|_| true)
+    }
+
+    fn supervise_cross_bridge_routes(
+        &self,
+        bridge_id: BridgeId,
+        statuses: (MediaGraphRouteStatus, MediaGraphRouteStatus),
+    ) {
+        for status in [statuses.0, statuses.1] {
+            let cross_bridges = Arc::clone(&self.cross_bridges);
+            let owners = Arc::clone(&self.cross_bridge_owners);
+            let ownership_lock = Arc::clone(&self.bridge_ownership_lock);
+            let events = self.events.clone();
+            let cross_crate_publisher = self.cross_crate_publisher.clone();
+            let bridge_id = bridge_id.clone();
+            tokio::spawn(async move {
+                let _ = status.wait_terminal().await;
+                let Some((_, mut handle)) = cross_bridges.remove(&bridge_id) else {
+                    return;
+                };
+                let a = handle.a.clone();
+                let b = handle.b.clone();
+                let result = handle.stop().await;
+                {
+                    let _guard = ownership_lock
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    for connection_id in [&a, &b] {
+                        let owned = owners
+                            .get(connection_id)
+                            .is_some_and(|owner| owner.value() == &bridge_id);
+                        if owned {
+                            owners.remove(connection_id);
+                        }
+                    }
+                }
+                match result {
+                    Ok(()) => {
+                        let event = Event::ConnectionsUnbridged {
+                            bridge_id,
+                            at: Utc::now(),
+                        };
+                        let _ = Self::emit_to_channels(
+                            &events,
+                            cross_crate_publisher.as_deref(),
+                            event,
+                        );
+                    }
+                    Err(error) => warn!(
+                        %bridge_id,
+                        %error,
+                        "failed to converge bridge after media route terminated"
+                    ),
+                }
+            });
+        }
+    }
+
+    /// Remove observer attachments that name an abruptly-ended Connection.
+    ///
+    /// Session-scoped attachments may own routes for several Connections. If
+    /// any source ends, the whole attachment is stopped: silently continuing a
+    /// partial recording/transcription would produce an artifact whose shape
+    /// no longer matches the caller's request.
+    fn spawn_route_removals(routes: Vec<ManagedMediaRoute>) {
+        if routes.is_empty() {
+            return;
+        }
+        tokio::spawn(async move {
+            for route in routes {
+                let _ = route.remove().await;
+            }
+        });
+    }
+
+    fn remove_recording_owner(&self, recording_id: &crate::ids::RecordingId) -> bool {
+        let Some((_, mut handle)) = self.recordings.remove(recording_id) else {
+            return false;
+        };
+        let routes = handle.media.begin_stop();
+        let sink = Arc::clone(&handle.sink);
+        drop(handle);
+        self.emit(Event::RecordingStopped {
+            recording_id: recording_id.clone(),
+            at: Utc::now(),
+        });
+        let recording_id = recording_id.clone();
+        let events = self.events.clone();
+        let cross_crate_publisher = self.cross_crate_publisher.clone();
+        tokio::spawn(async move {
+            for route in routes {
+                let _ = route.remove().await;
+            }
+            let Ok(artifact) = sink.close().await else {
+                return;
+            };
+            let event = Event::RecordingComplete {
+                recording_id,
+                sink: artifact.url,
+                vcon_ref: None,
+                at: Utc::now(),
+            };
+            let _ = Self::emit_to_channels(&events, cross_crate_publisher.as_deref(), event);
+        });
+        true
+    }
+
+    fn remove_transcription_owner(&self, id: &crate::ids::TranscriptionId) -> bool {
+        let Some((_, mut handle)) = self.transcriptions.remove(id) else {
+            return false;
+        };
+        let routes = handle.media.begin_stop();
+        drop(handle);
+        Self::spawn_route_removals(routes);
+        true
+    }
+
+    fn remove_ai_owner(&self, id: &crate::ids::AiAttachmentId) -> bool {
+        let Some((_, mut handle)) = self.ai_attachments.remove(id) else {
+            return false;
+        };
+        let routes = handle.media.begin_stop();
+        drop(handle);
+        Self::spawn_route_removals(routes);
+        self.emit(Event::AiDetached {
+            attachment_id: id.clone(),
+            at: Utc::now(),
+        });
+        true
+    }
+
+    fn remove_listener_owner(&self, id: &crate::ids::ListenerId) -> bool {
+        let removed = self.listener_tasks.remove(id).is_some();
+        self.listener_channels.remove(id);
+        if removed {
+            self.emit(Event::ListenerDetached {
+                listener_id: id.clone(),
+                at: Utc::now(),
+            });
+        }
+        removed
+    }
+
+    fn supervise_recording_routes(
+        self: &Arc<Self>,
+        recording_id: crate::ids::RecordingId,
+        statuses: Vec<MediaGraphRouteStatus>,
+    ) {
+        for status in statuses {
+            let weak = Arc::downgrade(self);
+            let recording_id = recording_id.clone();
+            tokio::spawn(async move {
+                let _ = status.wait_terminal().await;
+                if let Some(orchestrator) = weak.upgrade() {
+                    orchestrator.remove_recording_owner(&recording_id);
+                }
+            });
+        }
+    }
+
+    fn supervise_transcription_routes(
+        self: &Arc<Self>,
+        transcription_id: crate::ids::TranscriptionId,
+        statuses: Vec<MediaGraphRouteStatus>,
+    ) {
+        for status in statuses {
+            let weak = Arc::downgrade(self);
+            let transcription_id = transcription_id.clone();
+            tokio::spawn(async move {
+                let _ = status.wait_terminal().await;
+                if let Some(orchestrator) = weak.upgrade() {
+                    orchestrator.remove_transcription_owner(&transcription_id);
+                }
+            });
+        }
+    }
+
+    fn supervise_ai_routes(
+        self: &Arc<Self>,
+        attachment_id: crate::ids::AiAttachmentId,
+        statuses: Vec<MediaGraphRouteStatus>,
+    ) {
+        for status in statuses {
+            let weak = Arc::downgrade(self);
+            let attachment_id = attachment_id.clone();
+            tokio::spawn(async move {
+                let _ = status.wait_terminal().await;
+                if let Some(orchestrator) = weak.upgrade() {
+                    orchestrator.remove_ai_owner(&attachment_id);
+                }
+            });
+        }
+    }
+
+    fn supervise_listener_route(
+        self: &Arc<Self>,
+        listener_id: crate::ids::ListenerId,
+        status: MediaGraphRouteStatus,
+    ) {
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let _ = status.wait_terminal().await;
+            if let Some(orchestrator) = weak.upgrade() {
+                orchestrator.remove_listener_owner(&listener_id);
+            }
+        });
+    }
+
+    fn cleanup_media_attachments_for_connection(&self, conn: &ConnectionId) {
+        let recording_ids: Vec<_> = self
+            .recordings
             .iter()
-            .filter(|entry| &entry.value().a == conn || &entry.value().b == conn)
+            .filter(|entry| entry.value().connection_ids.contains(conn))
             .map(|entry| entry.key().clone())
             .collect();
-        for bridge_id in bridge_ids {
-            self.cross_bridges.remove(&bridge_id);
+        for recording_id in recording_ids {
+            self.remove_recording_owner(&recording_id);
         }
-        if let Some((_, graph)) = self.media_graphs.remove(conn) {
-            graph.shutdown();
+
+        let transcription_ids: Vec<_> = self
+            .transcriptions
+            .iter()
+            .filter(|entry| &entry.value().connection_id == conn)
+            .map(|entry| entry.key().clone())
+            .collect();
+        for transcription_id in transcription_ids {
+            self.remove_transcription_owner(&transcription_id);
         }
+
+        let ai_ids: Vec<_> = self
+            .ai_attachments
+            .iter()
+            .filter(|entry| &entry.value().connection_id == conn)
+            .map(|entry| entry.key().clone())
+            .collect();
+        for attachment_id in ai_ids {
+            self.remove_ai_owner(&attachment_id);
+        }
+
+        let listener_ids: Vec<_> = self
+            .listener_tasks
+            .iter()
+            .filter(|entry| entry.value().connection_ids.contains(conn))
+            .map(|entry| entry.key().clone())
+            .collect();
+        for listener_id in listener_ids {
+            // MediaTaskHandle::drop aborts the parent; its JoinSet aborts each
+            // child, and each child's MediaTapRoute removes its graph sink.
+            self.remove_listener_owner(&listener_id);
+        }
+    }
+
+    async fn forget_connection(&self, conn: &ConnectionId) {
+        // Invalidate setup tickets before removing any owner registry. A setup
+        // already in flight can finish its slow work, but its final commit is
+        // now guaranteed to fail rather than resurrecting stale state.
+        self.invalidate_connection_lifecycle(conn);
         self.connections.remove(conn);
+
+        // Tear down bridge routes before shutting down the source graph.
+        if let Some(bridge_id) = self
+            .cross_bridge_owners
+            .get(conn)
+            .map(|owner| owner.value().clone())
+        {
+            match self.remove_cross_bridge_internal(&bridge_id).await {
+                Ok(true) => self.emit(Event::ConnectionsUnbridged {
+                    bridge_id,
+                    at: Utc::now(),
+                }),
+                Ok(false) => {}
+                Err(error) => warn!(%error, "failed to converge bridge during disconnect"),
+            }
+        }
+        self.cleanup_media_attachments_for_connection(conn);
+        if let Some((_, graph)) = self.media_graphs.remove(conn) {
+            let _ = graph.shutdown_and_wait().await;
+        }
+        self.media_graph_inits.remove(conn);
         // P1.10 — if this Connection was bound to a Session, detach it
         // and auto-end the Session when it loses its last Connection.
         // Must run before subscription cleanup so the Session lookup
@@ -514,6 +1231,7 @@ impl Orchestrator {
         // a strong reference to the dead Connection's quinn handle.
         self.subscriber_streams
             .retain(|(_, sub, pubr, _), _| sub != conn && pubr != conn);
+        self.connection_lifecycles.remove(conn);
     }
 
     // --- Conversation / Session / Participant lifecycle (P1) -----------
@@ -1004,7 +1722,7 @@ impl Orchestrator {
             let store = Arc::clone(&self.config.vcon_store);
             let sid_clone = session_id.clone();
             let events_tx = self.events.clone();
-            let coordinator = self.coordinator.clone();
+            let cross_crate_publisher = self.cross_crate_publisher.clone();
             tokio::spawn(async move {
                 match store.put(&tenant_id, &sid_clone, bytes).await {
                     Ok(handle) => {
@@ -1013,11 +1731,11 @@ impl Orchestrator {
                             handle,
                             at: Utc::now(),
                         };
-                        if let Some(coord) = coordinator {
-                            let cross = ev.to_cross_crate();
-                            let _ = coord.publish(Arc::new(cross)).await;
-                        }
-                        let _ = events_tx.send(ev);
+                        let _ = Self::emit_to_channels(
+                            &events_tx,
+                            cross_crate_publisher.as_deref(),
+                            ev,
+                        );
                     }
                     Err(e) => warn!(?e, "VconStore::put failed; VconReady not emitted"),
                 }
@@ -1475,19 +2193,22 @@ impl Orchestrator {
             .get_or_init(|| Arc::new(crate::subscriptions::PublisherRegistry::new()))
     }
 
+    fn emit_to_channels(
+        events: &broadcast::Sender<Event>,
+        cross_crate_publisher: Option<&CrossCrateEventPublisher>,
+        event: Event,
+    ) -> Option<CrossCrateEnqueueResult> {
+        let cross_crate_result =
+            cross_crate_publisher.map(|publisher| publisher.enqueue(event.to_cross_crate()));
+        // Cross-crate backpressure must never suppress rich in-process events.
+        let _ = events.send(event);
+        cross_crate_result
+    }
+
     /// Publish an event on the in-process broadcast channel and, if a
-    /// `GlobalEventCoordinator` is configured, on the cross-crate bus too.
+    /// coordinator is configured, enqueue it on the bounded cross-crate FIFO.
     fn emit(&self, event: Event) {
-        if let Some(coordinator) = &self.coordinator {
-            let cross = event.to_cross_crate();
-            let coord = Arc::clone(coordinator);
-            tokio::spawn(async move {
-                if let Err(err) = coord.publish(Arc::new(cross)).await {
-                    warn!(?err, "rvoip-core cross-crate event publish failed");
-                }
-            });
-        }
-        let _ = self.events.send(event);
+        let _ = Self::emit_to_channels(&self.events, self.cross_crate_publisher.as_deref(), event);
     }
 
     async fn handle_adapter_event(&self, transport: Transport, event: AdapterEvent) {
@@ -1519,11 +2240,34 @@ impl Orchestrator {
                     at: Utc::now(),
                 });
             }
+            AdapterEvent::PrincipalAuthenticated {
+                connection_id,
+                participant_id,
+                principal,
+            } => {
+                self.track_connection_principal(&connection_id, transport, principal.clone());
+                let at = Utc::now();
+                // Preserve the legacy normalized event for existing
+                // subscribers, then publish the complete principal additively.
+                self.emit(Event::ConnectionAuthenticated {
+                    connection_id: connection_id.clone(),
+                    identity_id: principal.subject.clone(),
+                    participant_id: participant_id.clone(),
+                    assurance: principal.assurance.clone(),
+                    at,
+                });
+                self.emit(Event::ConnectionPrincipalAuthenticated {
+                    connection_id,
+                    participant_id,
+                    principal,
+                    at,
+                });
+            }
             AdapterEvent::Ended {
                 connection_id,
                 reason,
             } => {
-                self.forget_connection(&connection_id);
+                self.forget_connection(&connection_id).await;
                 self.emit(Event::ConnectionEnded {
                     connection_id,
                     reason,
@@ -1534,7 +2278,7 @@ impl Orchestrator {
                 connection_id,
                 detail,
             } => {
-                self.forget_connection(&connection_id);
+                self.forget_connection(&connection_id).await;
                 self.emit(Event::ConnectionFailed {
                     connection_id,
                     detail,
@@ -1687,6 +2431,96 @@ impl Orchestrator {
                     at: now,
                 });
             }
+            AdapterEvent::DataMessage {
+                connection_id,
+                message,
+            } => {
+                if let Err(error) = message.validate() {
+                    warn!(
+                        ?connection_id,
+                        error = %error,
+                        "invalid adapter data message rejected"
+                    );
+                    return;
+                }
+                if !self.connections.contains_key(&connection_id) {
+                    warn!(
+                        ?transport,
+                        ?connection_id,
+                        "data message rejected for untracked connection"
+                    );
+                    return;
+                }
+                self.emit(Event::DataMessageReceived {
+                    connection_id: connection_id.clone(),
+                    message: message.clone(),
+                    at: Utc::now(),
+                });
+
+                if !matches!(message.label.as_str(), "rvoip-chat" | "rvoip-messages") {
+                    return;
+                }
+                let Some((conversation_id, participant_id)) =
+                    self.message_context_for_connection(&connection_id)
+                else {
+                    warn!(
+                        ?transport,
+                        ?connection_id,
+                        "legacy data-message projection arrived before session attachment"
+                    );
+                    return;
+                };
+                let now = Utc::now();
+                let media_type = message
+                    .content_type
+                    .split(';')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_lowercase();
+                let content_type =
+                    if media_type == "application/json" || media_type.ends_with("+json") {
+                        ContentType::Json
+                    } else if media_type.starts_with("text/") {
+                        ContentType::Text
+                    } else {
+                        ContentType::Binary
+                    };
+                let legacy = Message {
+                    id: message.message_id.clone(),
+                    conversation_id: conversation_id.clone(),
+                    origin: MessageOrigin::Connection(connection_id.clone()),
+                    from_participant: participant_id,
+                    to: MessageRecipients::All,
+                    direction: Direction::Inbound,
+                    content_type,
+                    body: message.bytes,
+                    attachments: vec![],
+                    in_reply_to: None,
+                    timestamp: now,
+                };
+                let message_id = legacy.id.clone();
+                if let Err(error) = self.config.message_store.put(legacy).await {
+                    warn!(
+                        ?connection_id,
+                        ?conversation_id,
+                        error = %error,
+                        "MessageStore::put failed for projected data message"
+                    );
+                    return;
+                }
+                if let Some(conv_arc) = self.conversation(&conversation_id) {
+                    if let Ok(mut conv) = conv_arc.write() {
+                        conv.messages.push(message_id.clone());
+                        conv.last_activity_at = now;
+                    }
+                }
+                self.emit(Event::MessageReceived {
+                    message_id,
+                    conversation_id,
+                    at: now,
+                });
+            }
             AdapterEvent::StepUpResponse {
                 connection_id,
                 method,
@@ -1712,6 +2546,13 @@ impl Orchestrator {
                     ?kind,
                     ?detail,
                     "adapter native event (unmapped)"
+                );
+            }
+            _ => {
+                metrics::counter!("rvoip_core_unhandled_adapter_events_total").increment(1);
+                debug!(
+                    ?transport,
+                    "adapter event variant has no orchestrator mapping; dropping"
                 );
             }
         }
@@ -1960,6 +2801,27 @@ impl Orchestrator {
             at: Utc::now(),
         });
         Ok(())
+    }
+
+    pub async fn send_data_message(
+        &self,
+        connection_id: ConnectionId,
+        message: DataMessage,
+    ) -> Result<()> {
+        self.send_data_message_to_connection(connection_id, message)
+            .await
+    }
+
+    pub async fn send_data_message_to_connection(
+        &self,
+        connection_id: ConnectionId,
+        message: DataMessage,
+    ) -> Result<()> {
+        message
+            .validate()
+            .map_err(|error| RvoipError::Adapter(format!("invalid data message: {error}")))?;
+        let adapter = self.adapter_for(&connection_id)?;
+        adapter.send_data_message(connection_id, message).await
     }
 
     /// P4 — fan-out a Message to every active Connection across every
@@ -2263,6 +3125,7 @@ impl Orchestrator {
                 "recording target has no Connections",
             ));
         }
+        let lifecycle_tickets = self.capture_connection_lifecycles(&conns)?;
 
         // V2.B — per-tenant Semaphore admission. When the tenant has
         // a `max_concurrent_recordings` quota, the semaphore was
@@ -2287,48 +3150,50 @@ impl Orchestrator {
 
         let rid = crate::ids::RecordingId::new();
         let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-        let me = Arc::clone(self);
-        let sink_for_task = Arc::clone(&sink);
-        let conns_for_task = conns.clone();
-        let paused_for_task = Arc::clone(&paused);
-        let task = tokio::spawn(async move {
-            for cid in conns_for_task {
-                if let Ok(adapter) = me.adapter_for(&cid) {
-                    if let Ok(streams) = adapter.streams(cid.clone()).await {
-                        for stream in streams
-                            .into_iter()
-                            .filter(|s| s.kind() == StreamKind::Audio)
-                        {
-                            let sink_clone = Arc::clone(&sink_for_task);
-                            let paused_clone = Arc::clone(&paused_for_task);
-                            tokio::spawn(async move {
-                                let mut rx = stream.frames_in();
-                                while let Some(frame) = rx.recv().await {
-                                    if paused_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                                        // Drop frame silently while paused.
-                                        continue;
-                                    }
-                                    if sink_clone.write(frame).await.is_err() {
-                                        break;
-                                    }
-                                }
-                            });
-                        }
+        let connection_ids = conns.clone();
+        let mut media = MediaTapHandle::default();
+        for connection_id in conns {
+            let (route, mut receiver) = match self.media_tap_for_connection(connection_id, 64).await
+            {
+                Ok(tap) => tap,
+                // Preserve the pre-graph API contract: recording admission
+                // can reserve a quota slot before a transport publishes its
+                // first audio stream. Once a stream exists, callers can stop
+                // and restart the recording to attach it.
+                Err(RvoipError::AdmissionRejected("no audio stream")) => continue,
+                Err(error) => return Err(error),
+            };
+            let sink_for_task = Arc::clone(&sink);
+            let paused_for_task = Arc::clone(&paused);
+            let task = tokio::spawn(async move {
+                while let Some(frame) = receiver.recv().await {
+                    if paused_for_task.load(std::sync::atomic::Ordering::Relaxed) {
+                        continue;
+                    }
+                    if sink_for_task.write(frame).await.is_err() {
+                        break;
                     }
                 }
-            }
-            futures_alive().await;
-        });
+            });
+            media.push(route, task.abort_handle());
+        }
 
-        // V2.B — the permit (if any) is stored in the handle and
-        // drops alongside it on stop_recording.
+        let statuses = media.statuses();
+        if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
+            media.stop_and_wait().await;
+            let _ = sink.close().await;
+            return Err(error);
+        }
+        let lifecycle_guards = self.lock_connection_lifecycles(&lifecycle_tickets)?;
+        // V2.B — the permit (if any) is stored in the handle and drops
+        // alongside it on stop_recording or terminal route cleanup.
         let _ = tenant_id;
         self.recordings.insert(
             rid.clone(),
             RecordingHandle {
                 sink: Arc::clone(&sink),
-                abort: task.abort_handle(),
+                media,
+                connection_ids: connection_ids.clone(),
                 paused: Arc::clone(&paused),
                 _permit: permit,
             },
@@ -2337,6 +3202,8 @@ impl Orchestrator {
             recording_id: rid.clone(),
             at: Utc::now(),
         });
+        drop(lifecycle_guards);
+        self.supervise_recording_routes(rid.clone(), statuses);
         Ok(rid)
     }
 
@@ -2344,11 +3211,12 @@ impl Orchestrator {
         &self,
         recording_id: crate::ids::RecordingId,
     ) -> Result<crate::harness::RecordingArtifact> {
-        let (_, handle) = self
+        let (_, mut handle) = self
             .recordings
             .remove(&recording_id)
             .ok_or_else(|| RvoipError::AdmissionRejected("recording not found"))?;
-        handle.abort.abort();
+        drop(handle._permit.take());
+        handle.media.stop_and_wait().await;
         // V2.B — permit drops with the handle struct, releasing the
         // tenant's admission slot.
         let artifact = handle.sink.close().await?;
@@ -2430,70 +3298,64 @@ impl Orchestrator {
                 })
                 .ok_or_else(|| RvoipError::SessionNotFound(sid))?,
         };
+        let lifecycle_tickets = self.capture_connection_lifecycles(std::slice::from_ref(&conn))?;
 
         let tid = crate::ids::TranscriptionId::new();
+        let stream: Arc<dyn crate::harness::AsrStream> = Arc::from(
+            provider
+                .open_stream(conn.clone(), crate::harness::AsrConfig::default())
+                .await?,
+        );
+        let (route, mut receiver) = self.media_tap_for_connection(conn.clone(), 64).await?;
         let me = Arc::clone(self);
         let task = tokio::spawn(async move {
-            let stream = match provider
-                .open_stream(conn.clone(), crate::harness::AsrConfig::default())
-                .await
-            {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-            // Producer: frames → stream.push.
-            let stream_arc: Arc<dyn crate::harness::AsrStream> = Arc::from(stream);
-            let stream_for_push = Arc::clone(&stream_arc);
-            let conn_for_push = conn.clone();
-            let push_task = {
-                let me = Arc::clone(&me);
-                tokio::spawn(async move {
-                    if let Ok(adapter) = me.adapter_for(&conn_for_push) {
-                        if let Ok(streams) = adapter.streams(conn_for_push).await {
-                            for s in streams
-                                .into_iter()
-                                .filter(|s| s.kind() == StreamKind::Audio)
-                            {
-                                let stream_clone = Arc::clone(&stream_for_push);
-                                tokio::spawn(async move {
-                                    let mut rx = s.frames_in();
-                                    while let Some(f) = rx.recv().await {
-                                        if stream_clone.push(f).await.is_err() {
-                                            break;
-                                        }
-                                    }
-                                });
-                            }
+            loop {
+                tokio::select! {
+                    frame = receiver.recv() => {
+                        let Some(frame) = frame else { break; };
+                        if stream.push(frame).await.is_err() {
+                            break;
                         }
                     }
-                })
-            };
-            // Consumer: stream.next → TranscriptTurn event.
-            while let Some(result) = stream_arc.next().await {
-                me.emit(Event::TranscriptTurn {
-                    stream_id: result.stream_id,
-                    speaker: result.speaker,
-                    text: result.text,
-                    confidence: result.confidence,
-                    is_final: result.is_final,
-                    assigned_provider: Some(provider_name.clone()),
-                    at: Utc::now(),
-                });
+                    result = stream.next() => {
+                        let Some(result) = result else { break; };
+                        me.emit(Event::TranscriptTurn {
+                            stream_id: result.stream_id,
+                            speaker: result.speaker,
+                            text: result.text,
+                            confidence: result.confidence,
+                            is_final: result.is_final,
+                            assigned_provider: Some(provider_name.clone()),
+                            at: Utc::now(),
+                        });
+                    }
+                }
             }
-            let _ = push_task;
+            let _ = stream.close().await;
         });
+        let mut media = MediaTapHandle::default();
+        media.push(route, task.abort_handle());
+        let statuses = media.statuses();
+        if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
+            media.stop_and_wait().await;
+            return Err(error);
+        }
+        let lifecycle_guards = self.lock_connection_lifecycles(&lifecycle_tickets)?;
         self.transcriptions.insert(
             tid.clone(),
             TranscriptionHandle {
-                abort: task.abort_handle(),
+                media,
+                connection_id: conn.clone(),
             },
         );
+        drop(lifecycle_guards);
+        self.supervise_transcription_routes(tid.clone(), statuses);
         Ok(tid)
     }
 
     pub async fn stop_transcription(&self, id: crate::ids::TranscriptionId) -> Result<()> {
-        if let Some((_, h)) = self.transcriptions.remove(&id) {
-            h.abort.abort();
+        if let Some((_, mut handle)) = self.transcriptions.remove(&id) {
+            handle.media.stop_and_wait().await;
             Ok(())
         } else {
             Err(RvoipError::AdmissionRejected("transcription not found"))
@@ -2520,6 +3382,8 @@ impl Orchestrator {
         provider_ref: impl Into<String>,
         config: std::collections::HashMap<String, String>,
     ) -> Result<crate::ids::AiAttachmentId> {
+        let lifecycle_tickets =
+            self.capture_connection_lifecycles(std::slice::from_ref(&connection_id))?;
         // P6 — tenant attribution + AI quota enforcement.
         let tenant_id = self
             .session_of(&connection_id)
@@ -2600,6 +3464,14 @@ impl Orchestrator {
         let speak_cancel: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>> =
             Arc::new(tokio::sync::Mutex::new(None));
 
+        let stream: Arc<dyn crate::harness::AsrStream> = Arc::from(
+            asr.open_stream(connection_id.clone(), crate::harness::AsrConfig::default())
+                .await?,
+        );
+        let (route, mut receiver) = self
+            .media_tap_for_connection(connection_id.clone(), 64)
+            .await?;
+
         let me = Arc::clone(self);
         let connection_id_for_task = connection_id.clone();
         let aid_for_task = aid.clone();
@@ -2607,116 +3479,109 @@ impl Orchestrator {
         let speak_cancel_for_task = Arc::clone(&speak_cancel);
         let task = tokio::spawn(async move {
             let connection_id = connection_id_for_task;
-            let stream: Arc<dyn crate::harness::AsrStream> = match asr
-                .open_stream(connection_id.clone(), crate::harness::AsrConfig::default())
-                .await
-            {
-                Ok(s) => Arc::from(s),
-                Err(_) => return,
-            };
-            // Push loop.
-            let conn_for_push = connection_id.clone();
             let stream_for_push = Arc::clone(&stream);
-            let me_for_push = Arc::clone(&me);
-            let _push = tokio::spawn(async move {
-                if let Ok(adapter) = me_for_push.adapter_for(&conn_for_push) {
-                    if let Ok(streams) = adapter.streams(conn_for_push).await {
-                        for s in streams
-                            .into_iter()
-                            .filter(|s| s.kind() == StreamKind::Audio)
-                        {
-                            let sc = Arc::clone(&stream_for_push);
-                            tokio::spawn(async move {
-                                let mut rx = s.frames_in();
-                                while let Some(f) = rx.recv().await {
-                                    if sc.push(f).await.is_err() {
-                                        break;
-                                    }
-                                }
-                            });
+            let push_loop = async move {
+                while let Some(frame) = receiver.recv().await {
+                    if stream_for_push.push(frame).await.is_err() {
+                        break;
+                    }
+                }
+            };
+            let dialog_loop = async {
+                while let Some(asr_result) = stream.next().await {
+                    // P5 barge-in: if user speech detected while we're
+                    // speaking, cancel current playback + fire event.
+                    if speaking_for_task.load(std::sync::atomic::Ordering::Relaxed) {
+                        if let Some(tx) = speak_cancel_for_task.lock().await.take() {
+                            let _ = tx.send(());
                         }
+                        speaking_for_task.store(false, std::sync::atomic::Ordering::Relaxed);
+                        me.emit(Event::BargeInDetected {
+                            connection_id: connection_id.clone(),
+                            ai_attachment_id: aid_for_task.clone(),
+                            at: Utc::now(),
+                        });
                     }
-                }
-            });
-            // Dialog loop with barge-in.
-            while let Some(asr_result) = stream.next().await {
-                // P5 barge-in: if user speech detected while we're
-                // speaking, cancel current playback + fire event.
-                if speaking_for_task.load(std::sync::atomic::Ordering::Relaxed) {
-                    if let Some(tx) = speak_cancel_for_task.lock().await.take() {
-                        let _ = tx.send(());
+                    if !asr_result.is_final {
+                        continue;
                     }
-                    speaking_for_task.store(false, std::sync::atomic::Ordering::Relaxed);
-                    me.emit(Event::BargeInDetected {
-                        connection_id: connection_id.clone(),
-                        ai_attachment_id: aid_for_task.clone(),
-                        at: Utc::now(),
-                    });
-                }
-                if !asr_result.is_final {
-                    continue;
-                }
-                let action = match dialog.turn(&asr_result).await {
-                    Ok(a) => a,
-                    Err(_) => break,
-                };
-                match action {
-                    crate::harness::DialogAction::Listen => continue,
-                    crate::harness::DialogAction::End => break,
-                    crate::harness::DialogAction::Say { text, voice } => {
-                        let playback = match tts
-                            .synthesize(crate::harness::TtsRequest {
-                                voice,
-                                text,
-                                sample_rate_hz: None,
-                            })
-                            .await
-                        {
-                            Ok(p) => p,
-                            Err(_) => continue,
-                        };
-                        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
-                        *speak_cancel_for_task.lock().await = Some(cancel_tx);
-                        speaking_for_task.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let action = match dialog.turn(&asr_result).await {
+                        Ok(a) => a,
+                        Err(_) => break,
+                    };
+                    match action {
+                        crate::harness::DialogAction::Listen => continue,
+                        crate::harness::DialogAction::End => break,
+                        crate::harness::DialogAction::Say { text, voice } => {
+                            let playback = match tts
+                                .synthesize(crate::harness::TtsRequest {
+                                    voice,
+                                    text,
+                                    sample_rate_hz: None,
+                                })
+                                .await
+                            {
+                                Ok(p) => p,
+                                Err(_) => continue,
+                            };
+                            let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+                            *speak_cancel_for_task.lock().await = Some(cancel_tx);
+                            speaking_for_task.store(true, std::sync::atomic::Ordering::Relaxed);
 
-                        if let Ok(adapter) = me.adapter_for(&connection_id) {
-                            if let Ok(streams) = adapter.streams(connection_id.clone()).await {
-                                let out =
-                                    streams.into_iter().find(|s| s.kind() == StreamKind::Audio);
-                                if let Some(audio) = out {
-                                    let tx = audio.frames_out();
-                                    loop {
-                                        tokio::select! {
-                                            _ = &mut cancel_rx => {
-                                                let _ = playback.cancel().await;
-                                                break;
-                                            }
-                                            frame_opt = playback.next_frame() => {
-                                                let Some(frame) = frame_opt else {
+                            if let Ok(adapter) = me.adapter_for(&connection_id) {
+                                if let Ok(streams) = adapter.streams(connection_id.clone()).await {
+                                    let out =
+                                        streams.into_iter().find(|s| s.kind() == StreamKind::Audio);
+                                    if let Some(audio) = out {
+                                        let tx = audio.frames_out();
+                                        loop {
+                                            tokio::select! {
+                                                _ = &mut cancel_rx => {
+                                                    let _ = playback.cancel().await;
                                                     break;
-                                                };
-                                                let _ = tx.send(frame).await;
+                                                }
+                                                frame_opt = playback.next_frame() => {
+                                                    let Some(frame) = frame_opt else {
+                                                        break;
+                                                    };
+                                                    let _ = tx.send(frame).await;
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
+                            speaking_for_task.store(false, std::sync::atomic::Ordering::Relaxed);
+                            // Drain any stale cancel sender (defensive).
+                            let _ = speak_cancel_for_task.lock().await.take();
                         }
-                        speaking_for_task.store(false, std::sync::atomic::Ordering::Relaxed);
-                        // Drain any stale cancel sender (defensive).
-                        let _ = speak_cancel_for_task.lock().await.take();
                     }
                 }
+            };
+            tokio::pin!(push_loop, dialog_loop);
+            tokio::select! {
+                _ = &mut push_loop => {}
+                _ = &mut dialog_loop => {}
             }
+            let _ = stream.close().await;
         });
+        let mut media = MediaTapHandle::default();
+        media.push(route, task.abort_handle());
 
         // V2.B — permit (if any) stored in the handle; releases on
         // Drop when detach removes the entry.
         let _ = tenant_id;
+        let statuses = media.statuses();
+        if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
+            media.stop_and_wait().await;
+            return Err(error);
+        }
+        let lifecycle_guards = self.lock_connection_lifecycles(&lifecycle_tickets)?;
         self.ai_attachments.insert(
             aid.clone(),
             AiAttachmentHandle {
-                abort: task.abort_handle(),
+                media,
+                connection_id: connection_id.clone(),
                 speaking,
                 speak_cancel,
                 _permit: ai_permit,
@@ -2728,6 +3593,8 @@ impl Orchestrator {
             provider_ref,
             at: Utc::now(),
         });
+        drop(lifecycle_guards);
+        self.supervise_ai_routes(aid.clone(), statuses);
         Ok(aid)
     }
 
@@ -2764,6 +3631,7 @@ impl Orchestrator {
                 "listener target has no Connections",
             ));
         }
+        let lifecycle_tickets = self.capture_connection_lifecycles(&conns)?;
 
         let lid = crate::ids::ListenerId::new();
         let me = Arc::clone(self);
@@ -2772,11 +3640,6 @@ impl Orchestrator {
         // receiver via `listener_channels`; File/Url sinks just log
         // the byte count (full file/HTTP implementations live in
         // consumer crates).
-        let sink_kind = match sink {
-            ListenerSink::Channel => "channel",
-            ListenerSink::File { .. } => "file",
-            ListenerSink::Url(_) => "url",
-        };
         let (tx_for_channel, rx_for_channel) = match sink {
             ListenerSink::Channel => {
                 let (t, r) = tokio::sync::mpsc::channel::<crate::stream::MediaFrame>(256);
@@ -2789,49 +3652,67 @@ impl Orchestrator {
                 .insert(lid.clone(), Mutex::new(Some(rx)));
         }
         let lid_for_task = lid.clone();
+        let connection_ids = conns.clone();
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move {
+            if start_rx.await.is_err() {
+                return;
+            }
+            let mut tasks = tokio::task::JoinSet::new();
             for cid in conns {
-                let Ok(adapter) = me.adapter_for(&cid) else {
-                    continue;
-                };
-                let streams = match adapter.streams(cid.clone()).await {
-                    Ok(s) => s,
+                let (route, mut receiver) = match me.media_tap_for_connection(cid, 64).await {
+                    Ok(tap) => tap,
                     Err(_) => continue,
                 };
-                for s in streams
-                    .into_iter()
-                    .filter(|s| s.kind() == StreamKind::Audio)
-                {
-                    let tx_clone = tx_for_channel.clone();
-                    let lid_clone = lid_for_task.clone();
-                    tokio::spawn(async move {
-                        let mut rx = s.frames_in();
-                        while let Some(frame) = rx.recv().await {
-                            if let Some(tx) = &tx_clone {
-                                if tx.send(frame).await.is_err() {
-                                    break;
-                                }
-                            } else {
-                                // File/URL — drop after counting.
-                                let _ = (frame, &lid_clone);
-                            }
-                        }
-                    });
+                if let Some(status) = route.status() {
+                    me.supervise_listener_route(lid_for_task.clone(), status);
                 }
+                let tx_clone = tx_for_channel.clone();
+                let lid_clone = lid_for_task.clone();
+                tasks.spawn(async move {
+                    // Holding the route in this task couples graph membership
+                    // to the task lifetime. JoinSet aborts children on drop.
+                    let _route = route;
+                    while let Some(frame) = receiver.recv().await {
+                        if let Some(tx) = &tx_clone {
+                            if tx.send(frame).await.is_err() {
+                                break;
+                            }
+                        } else {
+                            // File/URL — drop after counting. Full persistence
+                            // is supplied by consumer crates.
+                            let _ = (frame, &lid_clone);
+                        }
+                    }
+                });
             }
-            let _ = sink_kind;
-            // Hold the parent task alive so its abort_handle remains
-            // meaningful for the lifetime of the listener.
-            futures_alive().await;
+            while tasks.join_next().await.is_some() {
+                // Keep remaining source taps alive until each source closes or
+                // detach aborts this parent (which drops and aborts JoinSet).
+            }
+            me.remove_listener_owner(&lid_for_task);
         });
-        // Bug-fix sweep — register the abort handle so `detach` can
-        // tear down the listener cleanly (was leaking before).
-        self.listener_tasks.insert(lid.clone(), task.abort_handle());
-
+        let lifecycle_guards = match self.lock_connection_lifecycles(&lifecycle_tickets) {
+            Ok(guards) => guards,
+            Err(error) => {
+                task.abort();
+                self.listener_channels.remove(&lid);
+                return Err(error);
+            }
+        };
+        self.listener_tasks.insert(
+            lid.clone(),
+            MediaTaskHandle {
+                abort: task.abort_handle(),
+                connection_ids: connection_ids.clone(),
+            },
+        );
         self.emit(Event::ListenerAttached {
             listener_id: lid.clone(),
             at: Utc::now(),
         });
+        drop(lifecycle_guards);
+        let _ = start_tx.send(());
         Ok(lid)
     }
 
@@ -2850,9 +3731,13 @@ impl Orchestrator {
         use crate::commands::AttachmentRef;
         match attachment {
             AttachmentRef::Ai(id) => {
-                if let Some((_, h)) = self.ai_attachments.remove(&id) {
-                    h.abort.abort();
-                    // V2.B — permit drops with the handle struct.
+                if let Some((_, mut handle)) = self.ai_attachments.remove(&id) {
+                    let routes = handle.media.begin_stop();
+                    // Release admission before waiting on graph acknowledgement.
+                    drop(handle._permit.take());
+                    for route in routes {
+                        let _ = route.remove().await;
+                    }
                     self.emit(Event::AiDetached {
                         attachment_id: id,
                         at: Utc::now(),
@@ -2863,16 +3748,7 @@ impl Orchestrator {
                 }
             }
             AttachmentRef::Listener(id) => {
-                if let Some((_, abort)) = self.listener_tasks.remove(&id) {
-                    abort.abort();
-                }
-                // Drop any cached channel receiver so a re-attach with
-                // the same ID (unlikely, but defensive) starts clean.
-                self.listener_channels.remove(&id);
-                self.emit(Event::ListenerDetached {
-                    listener_id: id,
-                    at: Utc::now(),
-                });
+                self.remove_listener_owner(&id);
                 Ok(())
             }
             AttachmentRef::Recording(id) => self.stop_recording(id).await.map(|_| ()),
@@ -2955,19 +3831,19 @@ impl Orchestrator {
                         } else {
                             (make_swap(peer_pt, new_pt), make_swap(new_pt, peer_pt))
                         };
-                        // Re-fetch the bridge entry just to call
-                        // swap_transcoders. The entry guard is held
-                        // only across this single .await — swap_transcoders
-                        // itself sends on the swap channels and (with
-                        // A3) awaits the pumps' acks. The guard never
-                        // covers a media-path operation.
-                        let swap_result = {
-                            if let Some(entry) = self.cross_bridges.get(&bridge_id) {
-                                let bridge = entry.value();
-                                bridge.swap_transcoders(a_swap, b_swap).await
-                            } else {
-                                Ok(())
+                        // Snapshot only cloneable swap state while the map
+                        // entry is guarded. Channel backpressure, pump acks,
+                        // and graph updates all happen after the guard drops.
+                        let swap_controller = self
+                            .cross_bridges
+                            .get(&bridge_id)
+                            .map(|entry| entry.value().swap_controller());
+                        let swap_result = match swap_controller {
+                            Some(Ok(controller)) => {
+                                controller.swap_transcoders(a_swap, b_swap).await
                             }
+                            Some(Err(error)) => Err(error),
+                            None => Ok(()),
                         };
                         if let Err(e) = swap_result {
                             warn!(
@@ -3045,13 +3921,9 @@ impl Orchestrator {
                 "cannot bridge a connection to itself",
             ));
         }
-        // Reject if either ConnectionId is already in a cross-transport bridge.
-        for entry in self.cross_bridges.iter() {
-            let h = entry.value();
-            if h.a == a || h.b == a || h.a == b || h.b == b {
-                return Err(RvoipError::AdmissionRejected("connection already bridged"));
-            }
-        }
+        let lifecycle_tickets = self.capture_connection_lifecycles(&[a.clone(), b.clone()])?;
+        let id = BridgeId::new();
+        let reservation = self.reserve_cross_bridge(id.clone(), a.clone(), b.clone())?;
 
         let a_transport = self
             .connections
@@ -3109,34 +3981,55 @@ impl Orchestrator {
         let b_graph = self
             .media_graph_for_stream(b.clone(), Arc::clone(&b_audio))
             .await?;
-        let a_to_b = a_graph.add_sink(b_audio.codec(), b_audio.frames_out())?;
-        let b_to_a = match b_graph.add_sink(a_audio.codec(), a_audio.frames_out()) {
+        let a_to_b = a_graph.add_managed_sink(b_audio.codec(), b_audio.frames_out())?;
+        if a_to_b.wait_active().await.is_err() {
+            let _ = a_to_b.remove().await;
+            return Err(RvoipError::InvalidState(
+                "first bridge route terminated during setup",
+            ));
+        }
+        let b_to_a = match b_graph.add_managed_sink(a_audio.codec(), a_audio.frames_out()) {
             Ok(route) => route,
             Err(error) => {
-                a_graph.remove_sink(a_to_b);
+                let _ = a_to_b.remove().await;
                 return Err(error);
             }
         };
+        if b_to_a.wait_active().await.is_err() {
+            let (a_result, b_result) = tokio::join!(a_to_b.remove(), b_to_a.remove());
+            let _ = (a_result, b_result);
+            return Err(RvoipError::InvalidState(
+                "second bridge route terminated during setup",
+            ));
+        }
 
-        let id = BridgeId::new();
-        self.cross_bridges.insert(
+        let mut handle = CrossBridgeHandle::with_managed_media_graphs(
             id.clone(),
-            CrossBridgeHandle::with_media_graphs(
-                id.clone(),
-                a.clone(),
-                b.clone(),
-                a_graph,
-                b_graph,
-                a_to_b,
-                b_to_a,
-            ),
+            a.clone(),
+            b.clone(),
+            a_graph,
+            b_graph,
+            a_to_b,
+            b_to_a,
         );
+        let statuses = handle
+            .media_route_statuses()
+            .expect("media-graph bridge exposes route statuses");
+        if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
+            let _ = handle.stop().await;
+            return Err(error);
+        }
+        let lifecycle_guards = self.lock_connection_lifecycles(&lifecycle_tickets)?;
+        self.cross_bridges.insert(id.clone(), handle);
+        reservation.commit();
         self.emit(Event::ConnectionsBridged {
             bridge_id: id.clone(),
             a,
             b,
             at: Utc::now(),
         });
+        drop(lifecycle_guards);
+        self.supervise_cross_bridge_routes(id.clone(), statuses);
         Ok(id)
     }
 
@@ -3168,19 +4061,59 @@ impl Orchestrator {
         if let Some(graph) = self.media_graphs.get(&connection_id) {
             return Ok(graph.value().clone());
         }
-        // Serialize first-use so concurrent bridge/broadcast requests cannot
-        // both take the same MediaStream receiver.
-        let _guard = self.media_graph_init.lock().await;
+        // Serialize first-use only for this Connection so concurrent
+        // bridge/broadcast requests cannot both take its single receiver,
+        // without coupling independent calls to one global mutex.
+        let init_lock = self
+            .media_graph_inits
+            .entry(connection_id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = init_lock.lock().await;
         if let Some(graph) = self.media_graphs.get(&connection_id) {
             return Ok(graph.value().clone());
         }
-        let graph = start_media_graph(
-            stream.frames_in(),
-            stream.codec(),
-            MediaGraphPolicy::default(),
-        )?;
-        self.media_graphs.insert(connection_id, graph.clone());
+        let codec = stream.codec();
+        // Validation must precede the destructive single-consumer take. Once
+        // acquired, a receiver cannot be put back into a MediaStream.
+        validate_media_graph_codec(&codec)?;
+        let source = stream.try_frames_in()?;
+        let graph = start_media_graph(source, codec, MediaGraphPolicy::default())?;
+        self.media_graphs
+            .insert(connection_id.clone(), graph.clone());
+        // The adapter stream lookup above is asynchronous. A disconnect may
+        // have removed the Connection while it was in flight; insert first,
+        // then revalidate so either this path or `forget_connection` observes
+        // and shuts down the graph in every interleaving.
+        if !self.connections.contains_key(&connection_id) {
+            if let Some((_, stale)) = self.media_graphs.remove(&connection_id) {
+                stale.shutdown();
+            }
+            return Err(RvoipError::ConnectionNotFound(connection_id));
+        }
         Ok(graph)
+    }
+
+    /// Attach a bounded observer channel to a Connection's reusable source
+    /// graph. The returned route owns its graph membership and removes itself
+    /// on drop, which makes attachment cancellation leak-free.
+    async fn media_tap_for_connection(
+        &self,
+        connection_id: ConnectionId,
+        channel_capacity: usize,
+    ) -> Result<(
+        MediaTapRoute,
+        tokio::sync::mpsc::Receiver<crate::stream::MediaFrame>,
+    )> {
+        let graph = self.media_graph_for_connection(connection_id).await?;
+        let source_codec = graph.latest_snapshot().source_codec;
+        let (target, receiver) = tokio::sync::mpsc::channel(channel_capacity.max(1));
+        let route = graph.add_managed_sink(source_codec, target)?;
+        route
+            .wait_active()
+            .await
+            .map_err(|_| RvoipError::InvalidState("media graph route terminated during setup"))?;
+        Ok((MediaTapRoute::new(route), receiver))
     }
 
     /// Attach an arbitrary destination to a Connection's source graph.
@@ -3190,9 +4123,30 @@ impl Orchestrator {
         codec: crate::capability::CodecInfo,
         target: tokio::sync::mpsc::Sender<crate::stream::MediaFrame>,
     ) -> Result<crate::ids::MediaRouteId> {
-        self.media_graph_for_connection(connection_id)
-            .await?
-            .add_sink(codec, target)
+        let lifecycle_tickets =
+            self.capture_connection_lifecycles(std::slice::from_ref(&connection_id))?;
+        let graph = self.media_graph_for_connection(connection_id).await?;
+        let route_id = graph.add_sink(codec, target)?;
+        if let Err(error) = await_media_route(&graph, &route_id).await {
+            let _ = graph.remove_sink_and_wait(route_id).await;
+            return Err(error);
+        }
+        if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
+            let _ = graph.remove_sink_and_wait(route_id).await;
+            return Err(error);
+        }
+        let lifecycle_error = match self.lock_connection_lifecycles(&lifecycle_tickets) {
+            Ok(guards) => {
+                drop(guards);
+                None
+            }
+            Err(error) => Some(error),
+        };
+        if let Some(error) = lifecycle_error {
+            let _ = graph.remove_sink_and_wait(route_id).await;
+            return Err(error);
+        }
+        Ok(route_id)
     }
 
     pub fn detach_media_sink(
@@ -3206,8 +4160,9 @@ impl Orchestrator {
     }
 
     pub async fn unbridge_connections(&self, bridge_id: BridgeId) -> Result<()> {
-        // Cross-transport bridges first (new path). Drop aborts both pumps.
-        if let Some((_, _handle)) = self.cross_bridges.remove(&bridge_id) {
+        // Cross-transport bridges first. Do not publish success until both
+        // media directions have acknowledged removal or pump termination.
+        if self.remove_cross_bridge_internal(&bridge_id).await? {
             self.emit(Event::ConnectionsUnbridged {
                 bridge_id,
                 at: Utc::now(),
@@ -3251,11 +4206,29 @@ fn tenant_id_for_index(
         .unwrap_or_default()
 }
 
-/// Helper that blocks until the holding task is aborted. Used by
-/// `start_recording` to keep the per-connection spawn task alive so
-/// its abort handle remains meaningful.
-async fn futures_alive() {
-    std::future::pending::<()>().await;
+/// `MediaGraphHandle::add_sink` is deliberately nonblocking. Orchestrator
+/// operations have a stronger contract: once bridge/attach returns, the route
+/// must already be active so the caller's first frame is not lost while the
+/// graph actor is still processing its command queue.
+async fn await_media_route(graph: &MediaGraphHandle, route_id: &MediaRouteId) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        if graph
+            .snapshot()
+            .await
+            .sinks
+            .iter()
+            .any(|sink| &sink.route_id == route_id)
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(RvoipError::InvalidState(
+                "media graph route activation timed out",
+            ));
+        }
+        tokio::task::yield_now().await;
+    }
 }
 
 /// Gap plan §4.2 v1 punch list — construct a [`TranscoderSwap`] for
@@ -3278,5 +4251,147 @@ fn make_swap(from_pt: u8, to_pt: u8) -> frame_pump::TranscoderSwap {
         // needs synchronization. `make_swap` leaves it None so the
         // caller decides.
         ack: None,
+    }
+}
+
+#[cfg(test)]
+mod cross_crate_publisher_tests {
+    use super::*;
+    use rvoip_infra_common::events::cross_crate::RvoipCoreCrossCrateEvent;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::sync::Semaphore as TokioSemaphore;
+
+    struct RecordingSink {
+        events: Mutex<Vec<String>>,
+        block_first: AtomicBool,
+        first_started: TokioSemaphore,
+        release_first: TokioSemaphore,
+        delivered: TokioSemaphore,
+        active: AtomicUsize,
+        max_active: AtomicUsize,
+    }
+
+    impl RecordingSink {
+        fn new(block_first: bool) -> Self {
+            Self {
+                events: Mutex::new(Vec::new()),
+                block_first: AtomicBool::new(block_first),
+                first_started: TokioSemaphore::new(0),
+                release_first: TokioSemaphore::new(0),
+                delivered: TokioSemaphore::new(0),
+                active: AtomicUsize::new(0),
+                max_active: AtomicUsize::new(0),
+            }
+        }
+
+        fn event_ids(&self) -> Vec<String> {
+            self.events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CrossCrateEventSink for RecordingSink {
+        async fn publish(&self, event: RvoipCrossCrateEvent) -> std::result::Result<(), String> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+
+            if self.block_first.swap(false, Ordering::SeqCst) {
+                self.first_started.add_permits(1);
+                let permit = self
+                    .release_first
+                    .acquire()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                permit.forget();
+            }
+
+            let id = match event {
+                RvoipCrossCrateEvent::Core(RvoipCoreCrossCrateEvent::ConnectionInbound {
+                    connection_id,
+                }) => connection_id,
+                _ => return Err("unexpected cross-crate test event".to_owned()),
+            };
+            self.events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(id);
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            self.delivered.add_permits(1);
+            Ok(())
+        }
+    }
+
+    fn inbound_event(id: &str) -> Event {
+        Event::ConnectionInbound {
+            connection_id: ConnectionId::from_string(id),
+            at: Utc::now(),
+        }
+    }
+
+    async fn consume_permits(semaphore: &TokioSemaphore, count: u32) {
+        let permit = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            semaphore.acquire_many(count),
+        )
+        .await
+        .expect("timed out waiting for event publication")
+        .expect("test semaphore closed");
+        permit.forget();
+    }
+
+    #[tokio::test]
+    async fn cross_crate_publisher_preserves_fifo_with_one_worker() {
+        let sink = Arc::new(RecordingSink::new(false));
+        let publisher = CrossCrateEventPublisher::with_capacity(sink.clone(), 8);
+
+        for id in ["one", "two", "three"] {
+            assert_eq!(
+                publisher.enqueue(inbound_event(id).to_cross_crate()),
+                CrossCrateEnqueueResult::Enqueued
+            );
+        }
+        consume_permits(&sink.delivered, 3).await;
+
+        assert_eq!(sink.event_ids(), ["one", "two", "three"]);
+        assert_eq!(sink.max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn saturation_drops_cross_crate_only_and_keeps_in_process_delivery() {
+        let sink = Arc::new(RecordingSink::new(true));
+        let publisher = CrossCrateEventPublisher::with_capacity(sink.clone(), 2);
+        let (events, _) = broadcast::channel(8);
+        let mut in_process = events.subscribe();
+
+        let _ = Orchestrator::emit_to_channels(&events, Some(&publisher), inbound_event("one"));
+        consume_permits(&sink.first_started, 1).await;
+        let _ = Orchestrator::emit_to_channels(&events, Some(&publisher), inbound_event("two"));
+        let _ = Orchestrator::emit_to_channels(&events, Some(&publisher), inbound_event("three"));
+        assert_eq!(
+            Orchestrator::emit_to_channels(&events, Some(&publisher), inbound_event("four")),
+            Some(CrossCrateEnqueueResult::DroppedFull)
+        );
+        // Even an event rejected by the cross-crate queue must remain visible
+        // on the rich, in-process bus.
+
+        sink.release_first.add_permits(1);
+        consume_permits(&sink.delivered, 3).await;
+        assert_eq!(sink.event_ids(), ["one", "two", "three"]);
+
+        let mut observed = Vec::new();
+        for _ in 0..4 {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(1), in_process.recv())
+                .await
+                .expect("timed out waiting for in-process event")
+                .expect("in-process event bus closed");
+            let Event::ConnectionInbound { connection_id, .. } = event else {
+                panic!("unexpected in-process event");
+            };
+            observed.push(connection_id.to_string());
+        }
+        assert_eq!(observed, ["one", "two", "three", "four"]);
     }
 }

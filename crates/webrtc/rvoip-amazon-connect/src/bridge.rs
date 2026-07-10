@@ -1,20 +1,17 @@
 //! Direct media bridge between two `MediaStream`s, with transcoding.
 //!
-//! This replicates the recipe `rvoip_core::Orchestrator::bridge_connections`
-//! uses (one [`Transcoder`] per direction when the RTP payload types differ,
-//! plus a [`spawn_pump`] each way), but operates directly on two
-//! `Arc<dyn MediaStream>` so the connector can bridge an inbound SIP leg (G.711)
-//! to the Amazon Connect / Chime leg (Opus) without registering both in an
-//! Orchestrator connection table.
+//! This uses the same reusable `MediaGraph` path as
+//! `rvoip_core::Orchestrator::bridge_connections`, but operates directly on
+//! two `Arc<dyn MediaStream>` values so the connector can bridge an inbound
+//! SIP leg (G.711) to the Amazon Connect / Chime leg (Opus) without
+//! registering both in an Orchestrator connection table.
 
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
-use tokio::task::AbortHandle;
-
-use rvoip_core::capability::CodecInfo;
-use rvoip_core::media_graph::{start_media_graph, MediaGraphHandle, MediaGraphPolicy};
-use rvoip_core::stream::{MediaFrame, MediaStream};
+use rvoip_core::media_graph::{
+    start_media_graph, validate_media_graph_codec, MediaGraphHandle, MediaGraphPolicy,
+};
+use rvoip_core::stream::MediaStream;
 
 use crate::errors::{ConnectError, Result};
 
@@ -25,8 +22,6 @@ pub struct StreamBridge {
     b_graph: MediaGraphHandle,
     a_to_b: rvoip_core::ids::MediaRouteId,
     b_to_a: rvoip_core::ids::MediaRouteId,
-    a_to_b_timestamps: AbortHandle,
-    b_to_a_timestamps: AbortHandle,
 }
 
 impl StreamBridge {
@@ -50,68 +45,44 @@ impl Drop for StreamBridge {
         self.b_graph.remove_sink(self.b_to_a.clone());
         self.a_graph.shutdown();
         self.b_graph.shutdown();
-        self.a_to_b_timestamps.abort();
-        self.b_to_a_timestamps.abort();
     }
-}
-
-fn timestamp_adjusting_sink(
-    source_codec: &CodecInfo,
-    target_codec: &CodecInfo,
-    target: mpsc::Sender<MediaFrame>,
-) -> (mpsc::Sender<MediaFrame>, AbortHandle) {
-    let (tx, mut rx) = mpsc::channel::<MediaFrame>(10);
-    let source_rate = u64::from(source_codec.clock_rate_hz.max(1));
-    let target_rate = u64::from(target_codec.clock_rate_hz.max(1));
-    let task = tokio::spawn(async move {
-        let mut last_source = None::<u32>;
-        let mut last_target = None::<u32>;
-        while let Some(mut frame) = rx.recv().await {
-            let source_timestamp = frame.timestamp_rtp;
-            let target_timestamp = match (last_source, last_target) {
-                (Some(source), Some(target_timestamp)) => {
-                    let source_delta = u64::from(source_timestamp.wrapping_sub(source));
-                    let target_delta = (source_delta * target_rate + source_rate / 2) / source_rate;
-                    target_timestamp.wrapping_add(target_delta as u32)
-                }
-                _ => source_timestamp,
-            };
-            frame.timestamp_rtp = target_timestamp;
-            last_source = Some(source_timestamp);
-            last_target = Some(target_timestamp);
-            if target.send(frame).await.is_err() {
-                break;
-            }
-        }
-    });
-    (tx, task.abort_handle())
 }
 
 /// Bridge two media streams bidirectionally, transcoding when their codecs map
 /// to different RTP payload types (e.g. G.711-mu ⟷ Opus).
 ///
-/// Each stream's `frames_in()`/`frames_out()` channels are single-take, so this
-/// must be called exactly once per stream pair.
+/// Each stream's inbound receiver is single-take. A repeated bridge attempt is
+/// rejected rather than receiving an already-closed compatibility channel.
 pub fn bridge_streams(a: Arc<dyn MediaStream>, b: Arc<dyn MediaStream>) -> Result<StreamBridge> {
     let a_codec = a.codec();
     let b_codec = b.codec();
-    let a_graph = start_media_graph(a.frames_in(), a_codec, MediaGraphPolicy::default())
+    // Reject unsupported codecs before either destructive receiver take. This
+    // keeps a validation failure from permanently consuming a usable stream.
+    validate_media_graph_codec(&a_codec)
         .map_err(|error| ConnectError::Mapping(error.to_string()))?;
-    let b_graph = start_media_graph(b.frames_in(), b_codec, MediaGraphPolicy::default())
+    validate_media_graph_codec(&b_codec)
         .map_err(|error| ConnectError::Mapping(error.to_string()))?;
-    let (a_to_b_sink, a_to_b_timestamps) =
-        timestamp_adjusting_sink(&a.codec(), &b.codec(), b.frames_out());
-    let (b_to_a_sink, b_to_a_timestamps) =
-        timestamp_adjusting_sink(&b.codec(), &a.codec(), a.frames_out());
+    let a_graph = start_media_graph(
+        a.try_frames_in()
+            .map_err(|error| ConnectError::Mapping(error.to_string()))?,
+        a_codec.clone(),
+        MediaGraphPolicy::default(),
+    )
+    .map_err(|error| ConnectError::Mapping(error.to_string()))?;
+    let b_graph = start_media_graph(
+        b.try_frames_in()
+            .map_err(|error| ConnectError::Mapping(error.to_string()))?,
+        b_codec.clone(),
+        MediaGraphPolicy::default(),
+    )
+    .map_err(|error| ConnectError::Mapping(error.to_string()))?;
     let a_to_b = a_graph
-        .add_sink(b.codec(), a_to_b_sink)
+        .add_sink(b_codec, b.frames_out())
         .map_err(|error| ConnectError::Mapping(error.to_string()))?;
-    let b_to_a = match b_graph.add_sink(a.codec(), b_to_a_sink) {
+    let b_to_a = match b_graph.add_sink(a_codec, a.frames_out()) {
         Ok(route) => route,
         Err(error) => {
             a_graph.remove_sink(a_to_b);
-            a_to_b_timestamps.abort();
-            b_to_a_timestamps.abort();
             return Err(ConnectError::Mapping(error.to_string()));
         }
     };
@@ -121,7 +92,5 @@ pub fn bridge_streams(a: Arc<dyn MediaStream>, b: Arc<dyn MediaStream>) -> Resul
         b_graph,
         a_to_b,
         b_to_a,
-        a_to_b_timestamps,
-        b_to_a_timestamps,
     })
 }

@@ -20,7 +20,9 @@ use crate::errors::{Result, UctpError};
 use crate::ids::{ConnectionId, EnvelopeId, SessionId};
 use crate::payloads;
 use crate::types::MessageType;
-use rvoip_auth_core::{AuthenticatedPrincipal, BearerValidator};
+use rvoip_auth_core::{
+    ensure_principal_active, AuthenticatedPrincipal, BearerAuthError, BearerValidator,
+};
 use rvoip_core::capability::{
     negotiate_streams, CapabilityDescriptor, CodecInfo, NegotiationOutcome, StreamOffer,
 };
@@ -764,6 +766,7 @@ impl UctpCoordinator {
                     MessageType::StreamSubscribe => self.handle_stream_subscribe(env).await,
                     MessageType::StreamUnsubscribe => self.handle_stream_unsubscribe(env).await,
                     MessageType::DtmfSend => self.handle_dtmf_send(env).await,
+                    MessageType::MessageSend => self.handle_message_send(env).await,
                     MessageType::ConnectionQuality => self.handle_connection_quality(env).await,
                     MessageType::AuthRefresh => self.handle_auth_refresh(env).await,
                     MessageType::IdentityStepUpResponse => self.handle_step_up_response(env).await,
@@ -832,6 +835,16 @@ impl UctpCoordinator {
             env = env.with_connid(c);
         }
         self.send_out(env).await
+    }
+
+    /// Snapshot the complete principal established by the current peer auth
+    /// handshake. Protocol adapters use this additive accessor to enrich
+    /// route events without changing the legacy UCTP event shape.
+    pub fn authenticated_principal(&self) -> Option<AuthenticatedPrincipal> {
+        match &*self.peer_auth.lock() {
+            PeerAuthState::Authenticated { principal, .. } => Some(principal.clone()),
+            PeerAuthState::Unauthenticated => None,
+        }
     }
 
     /// Returns `true` if the peer has completed the auth handshake.
@@ -1026,17 +1039,13 @@ impl UctpCoordinator {
             );
             match self.aauth.as_ref() {
                 Some(validator) => {
-                    let subject = payload.credential.clone();
-                    let actor = payload.actor_token.clone().unwrap_or_default();
                     validator
-                        .validate_aauth(&subject, &actor)
+                        .validate_principal(
+                            &payload.credential,
+                            payload.actor_token.as_deref().unwrap_or_default(),
+                        )
                         .instrument(aauth_span)
                         .await
-                        .map(|assurance| {
-                            let mut principal = AuthenticatedPrincipal::from_assurance(assurance);
-                            principal.subject = subject;
-                            principal
-                        })
                 }
                 None => {
                     warn!(
@@ -1059,6 +1068,7 @@ impl UctpCoordinator {
                 .instrument(bearer_span)
                 .await
         };
+        let validation = validation.and_then(with_effective_uctp_expiry);
         match validation {
             Ok(principal) => {
                 let assurance = principal.assurance.clone();
@@ -1068,7 +1078,7 @@ impl UctpCoordinator {
                     session_token: format!("tok_{}", uuid::Uuid::new_v4().simple()),
                     expires_at: principal
                         .expires_at
-                        .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(1)),
+                        .expect("effective UCTP principals always have a finite expiry"),
                     assurance: assurance_label(&assurance).into(),
                     reachability: Vec::new(),
                 };
@@ -1208,6 +1218,10 @@ impl UctpCoordinator {
 
     async fn handle_connection_offer(&self, env: UctpEnvelope) -> Result<()> {
         let payload: payloads::connection::ConnectionOffer = env.decode_payload()?;
+        let sid = SessionId::from_string(env.sid.clone().ok_or(UctpError::MissingField("sid"))?);
+        if !self.sessions.contains_key(&sid) {
+            return self.not_found(&env, "unknown-sid").await;
+        }
         let connid_str = env
             .connid
             .clone()
@@ -1298,7 +1312,10 @@ impl UctpCoordinator {
                         participant: publisher_participant.clone(),
                     })
                     .collect();
-                let machine_ref = self.connections.entry(connid).or_insert_with(|| {
+                let chosen_codec = accepted
+                    .first()
+                    .and_then(|stream| stream.chosen_codec.clone());
+                let machine_ref = self.connections.entry(connid.clone()).or_insert_with(|| {
                     Mutex::new(ConnectionMachine::new_negotiating_with_span(
                         lifetime_span.clone(),
                     ))
@@ -1312,7 +1329,16 @@ impl UctpCoordinator {
                     "transport" => self.transport
                 )
                 .increment(1);
-                Ok(())
+                // `EnteredSpan` is !Send; close both synchronous tracing
+                // scopes before awaiting event delivery on the spawned driver.
+                drop(_span);
+                drop(_lifetime_enter);
+                self.emit_event(UctpSessionEvent::ConnectionOpened {
+                    sid,
+                    connid,
+                    chosen_codec,
+                })
+                .await
             }
         }
     }
@@ -1715,6 +1741,43 @@ impl UctpCoordinator {
         .await
     }
 
+    async fn handle_message_send(&self, env: UctpEnvelope) -> Result<()> {
+        let payload: payloads::message::MessageSend = match env.decode_payload() {
+            Ok(payload) => payload,
+            Err(_) => {
+                return self
+                    .emit_error(env.id.clone(), 400, "protocol", "malformed-data-message")
+                    .await
+                    .or_else(|_| Ok(()));
+            }
+        };
+        let message = match payload.to_data_message() {
+            Ok(message) => message,
+            Err(payloads::message::MessagePayloadError::UnsupportedReliability) => {
+                return self
+                    .emit_error(env.id.clone(), 422, "capability", "unsupported-reliability")
+                    .await
+                    .or_else(|_| Ok(()));
+            }
+            Err(_) => {
+                return self
+                    .emit_error(env.id.clone(), 400, "protocol", "invalid-data-message")
+                    .await
+                    .or_else(|_| Ok(()));
+            }
+        };
+        let connid_str = env
+            .connid
+            .clone()
+            .ok_or(UctpError::MissingField("connid"))?;
+        let connid = ConnectionId::from_string(connid_str);
+        if !self.connections.contains_key(&connid) {
+            return self.not_found(&env, "unknown-connid").await;
+        }
+        self.emit_event(UctpSessionEvent::DataMessage { connid, message })
+            .await
+    }
+
     /// Handle inbound `auth.refresh` — plan D4. Validates the new
     /// credential, updates `PeerAuthState` on success, and replies
     /// with a fresh `auth.session` envelope. On validation failure
@@ -1724,47 +1787,69 @@ impl UctpCoordinator {
     /// token, so a momentary refresh hiccup doesn't drop the call.
     async fn handle_auth_refresh(&self, env: UctpEnvelope) -> Result<()> {
         let payload: payloads::auth::AuthRefresh = env.decode_payload()?;
-        let bearer_span = info_span!(
+        let prior = match &*self.peer_auth.lock() {
+            PeerAuthState::Authenticated {
+                identity_id,
+                participant_id,
+                principal,
+                ..
+            } => Some((
+                identity_id.clone(),
+                participant_id.clone(),
+                principal.ownership_key(),
+            )),
+            PeerAuthState::Unauthenticated => None,
+        };
+        let Some((identity_id, participant_id, prior_owner)) = prior else {
+            return self.emit_error(env.id, 401, "auth", "refresh-failed").await;
+        };
+
+        let refresh_span = info_span!(
             "uctp.auth.refresh",
             method = %payload.method,
             transport = %self.transport,
         );
-        let validation = self
-            .bearer
-            .validate_principal(&payload.credential)
-            .instrument(bearer_span)
-            .await;
+        let validation = if payload.method == "aauth" {
+            match self.aauth.as_ref() {
+                Some(validator) => {
+                    validator
+                        .validate_principal(
+                            &payload.credential,
+                            payload.actor_token.as_deref().unwrap_or_default(),
+                        )
+                        .instrument(refresh_span)
+                        .await
+                }
+                None => Err(BearerAuthError::Invalid(
+                    "AAuth refresh requested without an AAuth validator".into(),
+                )),
+            }
+        } else {
+            self.bearer
+                .validate_principal(&payload.credential)
+                .instrument(refresh_span)
+                .await
+        }
+        .and_then(with_effective_uctp_expiry)
+        .and_then(|principal| {
+            if principal.ownership_key() == prior_owner {
+                Ok(principal)
+            } else {
+                Err(BearerAuthError::Invalid(
+                    "refresh credential changes principal ownership".into(),
+                ))
+            }
+        });
         match validation {
             Ok(principal) => {
                 let assurance = principal.assurance.clone();
-                // Reuse identity_id / participant_id from the prior
-                // auth state if present. The wire spec treats refresh
-                // as continuity (same logical session); reissuing
-                // brand-new ids would force re-binding on consumers.
-                let (identity_id, participant_id) = match &*self.peer_auth.lock() {
-                    PeerAuthState::Authenticated {
-                        identity_id,
-                        participant_id,
-                        ..
-                    } => (identity_id.clone(), participant_id.clone()),
-                    PeerAuthState::Unauthenticated => {
-                        // Refresh without prior auth — synthesize fresh
-                        // ids. This shouldn't be reachable post-A1
-                        // because the gate refuses non-auth envelopes
-                        // from un-authed peers, but be defensive.
-                        (
-                            format!("id_{}", uuid::Uuid::new_v4().simple()),
-                            format!("part_{}", uuid::Uuid::new_v4().simple()),
-                        )
-                    }
-                };
                 let session = payloads::auth::AuthSession {
                     identity_id: identity_id.clone(),
                     participant_id: participant_id.clone(),
                     session_token: format!("tok_{}", uuid::Uuid::new_v4().simple()),
                     expires_at: principal
                         .expires_at
-                        .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(1)),
+                        .expect("effective UCTP principals always have a finite expiry"),
                     assurance: assurance_label(&assurance).into(),
                     reachability: Vec::new(),
                 };
@@ -1835,6 +1920,16 @@ impl UctpCoordinator {
         }
         Ok(())
     }
+}
+
+fn with_effective_uctp_expiry(
+    mut principal: AuthenticatedPrincipal,
+) -> std::result::Result<AuthenticatedPrincipal, BearerAuthError> {
+    principal = ensure_principal_active(principal)?;
+    if principal.expires_at.is_none() {
+        principal.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+    }
+    Ok(principal)
 }
 
 /// Map a typed `IdentityAssurance` to the wire-format string used in

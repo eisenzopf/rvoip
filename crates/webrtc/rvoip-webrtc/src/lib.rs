@@ -12,6 +12,7 @@
 
 pub mod adapter;
 pub mod config;
+pub mod data_message;
 pub mod errors;
 pub mod identity;
 pub mod media;

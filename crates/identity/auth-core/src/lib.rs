@@ -57,7 +57,8 @@ pub mod types;
 
 pub use aauth::{AAuthValidator, ActorClaims, ActorTokenValidator};
 pub use bearer::{
-    bearer_stub, AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError, BearerValidator,
+    bearer_stub, ensure_principal_active, AuthenticatedPrincipal, AuthenticationMethod,
+    BearerAuthError, BearerValidator, PrincipalOwnershipKey,
 };
 pub use dpop::{
     jwk_thumbprint, DpopError, DpopProof, DpopValidator, ValidatedDpop, DEFAULT_IAT_LEEWAY,

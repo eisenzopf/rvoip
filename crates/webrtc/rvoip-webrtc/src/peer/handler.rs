@@ -16,6 +16,8 @@ use webrtc::peer_connection::{
     RTCSignalingState,
 };
 
+pub(crate) const MAX_SEEN_DATA_CHANNELS: usize = 64;
+
 /// Per-channel drop counters surfaced via [`HandlerChannels::drops`].
 #[derive(Default, Debug)]
 pub struct HandlerDropCounters {
@@ -180,10 +182,30 @@ impl PeerConnectionEventHandler for ConnectionHandler {
     async fn on_ice_connection_state_change(&self, _state: RTCIceConnectionState) {}
 
     async fn on_data_channel(&self, dc: Arc<dyn DataChannel>) {
-        self.channels
-            .data_channels_seen
-            .lock()
-            .push(Arc::clone(&dc));
+        let accepted = {
+            let mut seen = self.channels.data_channels_seen.lock();
+            if seen.len() >= MAX_SEEN_DATA_CHANNELS {
+                false
+            } else {
+                seen.push(Arc::clone(&dc));
+                true
+            }
+        };
+        if !accepted {
+            let dropped = self
+                .channels
+                .drops
+                .data_channel
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
+            warn!(
+                dropped,
+                maximum = MAX_SEEN_DATA_CHANNELS,
+                "too many remotely-created WebRTC data channels; closing excess channel"
+            );
+            let _ = dc.close().await;
+            return;
+        }
         if let Err(e) = self.channels.data_channel.try_send(dc) {
             let dropped = self
                 .channels

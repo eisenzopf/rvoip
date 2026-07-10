@@ -55,4 +55,5 @@ full    = ["uctp", "sip", "webrtc"]
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
 rvoip-auth-core.workspace = true
+rvoip-core.workspace = true
 serde_json.workspace = true

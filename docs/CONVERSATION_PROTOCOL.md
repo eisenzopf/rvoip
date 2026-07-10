@@ -1125,8 +1125,11 @@ Messages are atomic asynchronous events in a Conversation. They do not require a
     "msg_id": "msg_...",
     "from": "part_...",
     "to": ["part_..."] | "all",
+    "label": "rvoip-messages",        // DataChannel/application label; defaults to rvoip-messages
     "content_type": "text/plain" | "application/json" | "application/octet-stream" | "image/png" | ...,
-    "body": "Hello, world",            // string for text/json; base64 for binary; reference URL for large attachments
+    "reliability": { "mode": "reliable_ordered" },
+    "body": "Hello, world",
+    "body_encoding": "utf8" | "base64",
     "attachments": [
       {
         "id": "...",
@@ -1139,6 +1142,22 @@ Messages are atomic asynchronous events in a Conversation. They do not require a
   }
 }
 ```
+
+`label`, `reliability`, and `body_encoding` are optional on legacy payloads;
+their defaults are `rvoip-messages`, `reliable_ordered`, and `utf8`. New
+senders MUST set `body_encoding` to `base64` for arbitrary binary bytes. The
+current UCTP QUIC, WebTransport, and WebSocket signaling substrates provide
+reliable ordered delivery and reject other reliability modes with an explicit
+`422 capability/unsupported-reliability` error. A gateway may preserve richer
+reliability policies when translating directly to a WebRTC DataChannel.
+
+The transport-neutral DataMessage profile carries `connid` on the envelope so
+the receiver can enforce connection ownership and route the event to the
+correct application leg. Message IDs, labels, content types, and decoded
+bodies are validated before delivery; the decoded inline body limit is 64 KiB.
+For this profile, `payload.from` is a legacy presentation field only: receivers
+MUST derive the authoritative sender from the authenticated Connection route
+and MUST NOT use `from` for ownership or authorization.
 
 ### 9.2 Receipts
 

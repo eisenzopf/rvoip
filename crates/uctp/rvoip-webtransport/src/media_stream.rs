@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use rvoip_core::capability::CodecInfo;
 use rvoip_core::connection::Direction;
-use rvoip_core::error::Result as RvoipResult;
+use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::ids::StreamId;
 use rvoip_core::stream::{MediaFrame, MediaStream, QualitySnapshot, StreamKind};
 use rvoip_uctp::substrate::datagram::{pack, pack_rtp, unpack_rtp, MediaDatagram};
@@ -157,11 +157,17 @@ impl MediaStream for WebTransportDatagramMediaStream {
     }
 
     fn frames_in(&self) -> mpsc::Receiver<MediaFrame> {
-        let mut guard = self.in_rx.lock().expect("poisoned");
-        guard.take().unwrap_or_else(|| {
-            let (_tx, rx) = mpsc::channel(1);
-            rx
-        })
+        self.try_frames_in().unwrap_or_else(|_| mpsc::channel(1).1)
+    }
+
+    fn try_frames_in(&self) -> RvoipResult<mpsc::Receiver<MediaFrame>> {
+        self.in_rx
+            .lock()
+            .map_err(|_| RvoipError::InvalidState("WebTransport media receiver lock is poisoned"))?
+            .take()
+            .ok_or(RvoipError::InvalidState(
+                "WebTransport media receiver has already been acquired",
+            ))
     }
 
     fn frames_out(&self) -> mpsc::Sender<MediaFrame> {
@@ -315,4 +321,37 @@ fn stable_ssrc(stream_id: &StreamId) -> u32 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     stream_id.hash(&mut hasher);
     hasher.finish() as u32
+}
+
+#[cfg(test)]
+mod receiver_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn second_receiver_acquisition_is_a_typed_error() {
+        let (inbound_tx, inbound_rx) = mpsc::channel(1);
+        let (out_tx, _out_rx) = mpsc::channel(1);
+        let stream = WebTransportDatagramMediaStream {
+            id: StreamId::new(),
+            kind: StreamKind::Audio,
+            codec: CodecInfo {
+                name: "opus".into(),
+                clock_rate_hz: 48_000,
+                channels: 1,
+                fmtp: None,
+            },
+            direction: Direction::Inbound,
+            stream_local_id: 1,
+            in_rx: StdMutex::new(Some(inbound_rx)),
+            out_tx,
+            inbound_tx,
+            quality: parking_lot::RwLock::new(QualitySnapshot::default()),
+        };
+
+        assert!(stream.try_frames_in().is_ok());
+        assert!(matches!(
+            stream.try_frames_in(),
+            Err(RvoipError::InvalidState(_))
+        ));
+    }
 }

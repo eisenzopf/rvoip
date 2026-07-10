@@ -1653,6 +1653,7 @@ impl OrchestrationCrossCrateEvent {
 /// `Event` API; this wire form exists for cross-crate observers (logging
 /// sinks, harness, telemetry, the rvoip facade).
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum RvoipCoreCrossCrateEvent {
     // --- Conversation lifecycle ---
     ConversationOpened {
@@ -1744,6 +1745,11 @@ pub enum RvoipCoreCrossCrateEvent {
     MessageReceived {
         message_id: String,
         conversation_id: String,
+    },
+    DataMessageReceived {
+        connection_id: String,
+        body_size: usize,
+        reliability: String,
     },
     MessageSent {
         message_id: String,
@@ -1859,6 +1865,7 @@ impl RvoipCoreCrossCrateEvent {
             Self::ListenerAttached { .. } => "rvoip_core.listener_attached",
             Self::ListenerDetached { .. } => "rvoip_core.listener_detached",
             Self::MessageReceived { .. } => "rvoip_core.message_received",
+            Self::DataMessageReceived { .. } => "rvoip_core.data_message_received",
             Self::MessageSent { .. } => "rvoip_core.message_sent",
             Self::MessageDelivered { .. } => "rvoip_core.message_delivered",
             Self::MessageRead { .. } => "rvoip_core.message_read",
@@ -1903,6 +1910,7 @@ impl RvoipCoreCrossCrateEvent {
         "rvoip_core.listener_attached",
         "rvoip_core.listener_detached",
         "rvoip_core.message_received",
+        "rvoip_core.data_message_received",
         "rvoip_core.message_sent",
         "rvoip_core.message_delivered",
         "rvoip_core.message_read",

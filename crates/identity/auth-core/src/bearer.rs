@@ -11,127 +11,50 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use rvoip_core_traits::identity::{IdentityAssurance, Jwk};
-use thiserror::Error;
 
-/// Authentication mechanism that established an [`AuthenticatedPrincipal`].
+// Compatibility re-export: the canonical type now lives in the dependency-
+// cycle-free core trait surface, but existing `auth_core::bearer::*` imports
+// continue to work.
+pub use rvoip_core_traits::identity::{
+    AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError, PrincipalOwnershipKey,
+};
+
+/// Reject a validator result whose credential has already expired.
 ///
-/// This deliberately describes the credential family rather than a concrete
-/// issuer implementation. Protocol adapters can make authorization decisions
-/// without depending on JWT, OIDC, SIP, or AAuth implementation crates.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AuthenticationMethod {
-    Anonymous,
-    Bearer,
-    Jwt,
-    Oidc,
-    OAuth2Introspection,
-    Dpop,
-    SipDigest,
-    MutualTls,
-    AAuth,
-    ApiKey,
-}
-
-/// Transport-neutral result of a successful authentication.
-///
-/// Older rvoip authentication hooks returned only [`IdentityAssurance`],
-/// which meant adapters lost the token subject, tenant, issuer, expiry, and
-/// scopes before they could enforce resource ownership. This structure is the
-/// common identity carried from the signaling boundary into SIP, WebRTC,
-/// UCTP, and application policy.
-#[derive(Clone, Debug)]
-pub struct AuthenticatedPrincipal {
-    pub subject: String,
-    pub tenant: Option<String>,
-    pub scopes: Vec<String>,
-    pub issuer: Option<String>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub method: AuthenticationMethod,
-    pub assurance: IdentityAssurance,
-}
-
-impl AuthenticatedPrincipal {
-    pub fn anonymous() -> Self {
-        Self {
-            subject: "anonymous".into(),
-            tenant: None,
-            scopes: Vec::new(),
-            issuer: None,
-            expires_at: None,
-            method: AuthenticationMethod::Anonymous,
-            assurance: IdentityAssurance::Anonymous,
+/// JWT libraries commonly allow clock-skew leeway while decoding.  The
+/// principal boundary is deliberately stricter: once the advertised expiry
+/// has passed, protocol adapters must not retain or authorize the principal.
+pub fn ensure_principal_active(
+    principal: AuthenticatedPrincipal,
+) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+    if principal.subject.trim().is_empty() {
+        return Err(BearerAuthError::Invalid(
+            "authenticated principal subject is empty".into(),
+        ));
+    }
+    if principal.subject.chars().any(char::is_control) {
+        return Err(BearerAuthError::Invalid(
+            "authenticated principal subject contains control characters".into(),
+        ));
+    }
+    for (name, value) in [
+        ("issuer", principal.issuer.as_deref()),
+        ("tenant", principal.tenant.as_deref()),
+    ] {
+        if value.is_some_and(|value| value.chars().any(char::is_control)) {
+            return Err(BearerAuthError::Invalid(format!(
+                "authenticated principal {name} contains control characters"
+            )));
         }
     }
-
-    pub fn has_scope(&self, scope: &str) -> bool {
-        self.scopes.iter().any(|candidate| candidate == scope)
+    if principal.is_expired() {
+        Err(BearerAuthError::Invalid(
+            "authenticated principal is expired".into(),
+        ))
+    } else {
+        Ok(principal)
     }
-
-    pub fn require_scope(&self, scope: &str) -> Result<(), BearerAuthError> {
-        if self.has_scope(scope) {
-            Ok(())
-        } else {
-            Err(BearerAuthError::Invalid(format!(
-                "principal is missing required scope {scope}"
-            )))
-        }
-    }
-
-    /// Compatibility mapping for validators that have not yet overridden
-    /// [`BearerValidator::validate_principal`]. Production JWT/JWKS/OAuth
-    /// validators should return a richer principal directly.
-    pub fn from_assurance(assurance: IdentityAssurance) -> Self {
-        let (subject, scopes, expires_at) = match &assurance {
-            IdentityAssurance::Anonymous => ("anonymous".into(), Vec::new(), None),
-            IdentityAssurance::Pseudonymous { ephemeral_key } => {
-                let subject = ephemeral_key
-                    .0
-                    .get("kid")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("pseudonymous")
-                    .to_string();
-                (subject, Vec::new(), None)
-            }
-            IdentityAssurance::Identified { credential_kind } => {
-                (format!("identified:{credential_kind:?}"), Vec::new(), None)
-            }
-            IdentityAssurance::TaskScoped {
-                identity,
-                scopes,
-                expires_at,
-                ..
-            } => (identity.to_string(), scopes.clone(), Some(*expires_at)),
-            IdentityAssurance::UserAuthorized {
-                identity, scopes, ..
-            } => (identity.to_string(), scopes.clone(), None),
-            IdentityAssurance::DtlsFingerprint { value, .. } => {
-                (format!("dtls:{value}"), Vec::new(), None)
-            }
-        };
-        Self {
-            subject,
-            tenant: None,
-            scopes,
-            issuer: None,
-            expires_at,
-            method: AuthenticationMethod::Bearer,
-            assurance,
-        }
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum BearerAuthError {
-    #[error("empty bearer token")]
-    Empty,
-
-    #[error("invalid bearer token: {0}")]
-    Invalid(String),
-
-    #[error("validator unavailable: {0}")]
-    Unavailable(String),
 }
 
 /// Validates a bearer token and produces the resulting [`IdentityAssurance`]
@@ -147,9 +70,8 @@ pub trait BearerValidator: Send + Sync {
         &self,
         token: &str,
     ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
-        self.validate(token)
-            .await
-            .map(AuthenticatedPrincipal::from_assurance)
+        let assurance = self.validate(token).await?;
+        ensure_principal_active(AuthenticatedPrincipal::from_assurance(assurance))
     }
 }
 

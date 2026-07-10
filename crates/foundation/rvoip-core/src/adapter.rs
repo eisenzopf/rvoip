@@ -6,6 +6,7 @@ use crate::identity::IdentityAssurance;
 use crate::ids::ConnectionId;
 use crate::message::Message;
 use crate::stream::MediaStream;
+use crate::DataMessage;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -67,6 +68,11 @@ pub trait ConnectionAdapter: Send + Sync {
     }
 
     async fn send_message(&self, conn: ConnectionId, message: Message) -> Result<()>;
+    async fn send_data_message(&self, _conn: ConnectionId, _message: DataMessage) -> Result<()> {
+        Err(RvoipError::NotImplemented(
+            "ConnectionAdapter::send_data_message",
+        ))
+    }
     async fn send_dtmf(&self, conn: ConnectionId, digits: &str, duration_ms: u32) -> Result<()>;
     async fn renegotiate_media(
         &self,

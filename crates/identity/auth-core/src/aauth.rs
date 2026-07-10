@@ -23,10 +23,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rvoip_core_traits::identity::{CredentialKind, IdentityAssurance};
+use rvoip_core_traits::identity::IdentityAssurance;
 use rvoip_core_traits::ids::IdentityId;
 
-use crate::bearer::{BearerAuthError, BearerValidator};
+use crate::bearer::{
+    ensure_principal_active, AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError,
+    BearerValidator,
+};
 
 /// Validates an AAuth actor token. Mirrors [`BearerValidator`]'s
 /// shape but returns the actor's identity + scopes rather than a
@@ -34,6 +37,32 @@ use crate::bearer::{BearerAuthError, BearerValidator};
 #[async_trait]
 pub trait ActorTokenValidator: Send + Sync {
     async fn validate_actor(&self, token: &str) -> Result<ActorClaims, BearerAuthError>;
+
+    /// Validate an actor token without discarding issuer or expiry metadata.
+    ///
+    /// Existing actor validators remain source compatible through this
+    /// mapping. Validators backed by JWT/JWKS should override this method so
+    /// the combined AAuth credential expires no later than the actor token.
+    async fn validate_actor_principal(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+        let claims = self.validate_actor(token).await?;
+        let assurance = IdentityAssurance::UserAuthorized {
+            identity: claims.identity.clone(),
+            user_id: claims.identity.clone(),
+            scopes: claims.scopes.clone(),
+        };
+        ensure_principal_active(AuthenticatedPrincipal {
+            subject: claims.identity.to_string(),
+            tenant: None,
+            scopes: claims.scopes,
+            issuer: None,
+            expires_at: None,
+            method: AuthenticationMethod::Bearer,
+            assurance,
+        })
+    }
 }
 
 /// Output of [`ActorTokenValidator::validate_actor`] — the actor's
@@ -43,6 +72,48 @@ pub trait ActorTokenValidator: Send + Sync {
 pub struct ActorClaims {
     pub identity: IdentityId,
     pub scopes: Vec<String>,
+}
+
+fn actor_claims_from_principal(principal: &AuthenticatedPrincipal) -> ActorClaims {
+    let identity = match &principal.assurance {
+        IdentityAssurance::UserAuthorized { identity, .. }
+        | IdentityAssurance::TaskScoped { identity, .. } => identity.clone(),
+        _ => IdentityId::from_string(principal.subject.clone()),
+    };
+    ActorClaims {
+        identity,
+        scopes: principal.scopes.clone(),
+    }
+}
+
+#[async_trait]
+impl ActorTokenValidator for crate::jwt::JwtValidator {
+    async fn validate_actor(&self, token: &str) -> Result<ActorClaims, BearerAuthError> {
+        let principal = BearerValidator::validate_principal(self, token).await?;
+        Ok(actor_claims_from_principal(&principal))
+    }
+
+    async fn validate_actor_principal(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+        BearerValidator::validate_principal(self, token).await
+    }
+}
+
+#[async_trait]
+impl ActorTokenValidator for crate::jwks::JwksJwtValidator {
+    async fn validate_actor(&self, token: &str) -> Result<ActorClaims, BearerAuthError> {
+        let principal = BearerValidator::validate_principal(self, token).await?;
+        Ok(actor_claims_from_principal(&principal))
+    }
+
+    async fn validate_actor_principal(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+        BearerValidator::validate_principal(self, token).await
+    }
 }
 
 /// AAuth combined validator. Wraps a subject [`BearerValidator`] and
@@ -71,17 +142,13 @@ impl AAuthValidator {
         Arc::new(Self { subject, actor })
     }
 
-    /// Validate an AAuth pair. The subject token is validated via the
-    /// subject [`BearerValidator`]; the actor token is validated via
-    /// the [`ActorTokenValidator`]. On success, returns
-    /// [`IdentityAssurance::UserAuthorized`] with the actor as
-    /// `identity` and the subject as `user_id`. Scopes are the union
-    /// of both tokens' scopes (preserving subject-first order).
-    pub async fn validate_aauth(
+    /// Validate an AAuth pair while retaining the subject token's ownership
+    /// boundary. Neither credential string is copied into the result.
+    pub async fn validate_principal(
         &self,
         subject_token: &str,
         actor_token: &str,
-    ) -> Result<IdentityAssurance, BearerAuthError> {
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
         if subject_token.is_empty() {
             return Err(BearerAuthError::Empty);
         }
@@ -90,18 +157,18 @@ impl AAuthValidator {
                 "actor_token required for method=aauth".into(),
             ));
         }
-        let subject_assurance = self.subject.validate(subject_token).await?;
-        let actor_claims = self.actor.validate_actor(actor_token).await?;
+        let subject_principal =
+            ensure_principal_active(self.subject.validate_principal(subject_token).await?)?;
+        let actor_principal =
+            ensure_principal_active(self.actor.validate_actor_principal(actor_token).await?)?;
 
         // The subject must validate as user-authorized. Anonymous /
         // pseudonymous / identified-without-authorization subject
         // tokens are not enough to support an AAuth claim because the
         // resulting IdentityAssurance::UserAuthorized requires a
         // concrete `user_id` to attach to.
-        let (subject_identity, subject_scopes) = match subject_assurance {
-            IdentityAssurance::UserAuthorized {
-                user_id, scopes, ..
-            } => (user_id, scopes),
+        let subject_identity = match &subject_principal.assurance {
+            IdentityAssurance::UserAuthorized { user_id, .. } => user_id.clone(),
             other => {
                 return Err(BearerAuthError::Invalid(format!(
                     "AAuth subject token must validate to UserAuthorized; got {}",
@@ -110,20 +177,58 @@ impl AAuthValidator {
             }
         };
 
-        let mut merged_scopes = subject_scopes;
-        for s in actor_claims.scopes {
-            if !merged_scopes.contains(&s) {
-                merged_scopes.push(s);
+        let actor_identity = match &actor_principal.assurance {
+            IdentityAssurance::UserAuthorized { identity, .. }
+            | IdentityAssurance::TaskScoped { identity, .. } => identity.clone(),
+            _ => IdentityId::from_string(actor_principal.subject.clone()),
+        };
+
+        let mut merged_scopes = subject_principal.scopes.clone();
+        for s in &actor_principal.scopes {
+            if !merged_scopes.contains(s) {
+                merged_scopes.push(s.clone());
             }
         }
 
-        let _ = CredentialKind::AAuth; // tagged in design docs; not stored on UserAuthorized.
-
-        Ok(IdentityAssurance::UserAuthorized {
+        let assurance = IdentityAssurance::UserAuthorized {
             user_id: subject_identity,
-            identity: actor_claims.identity,
+            identity: actor_identity,
+            scopes: merged_scopes.clone(),
+        };
+        let expires_at = earliest_expiry(subject_principal.expires_at, actor_principal.expires_at);
+
+        ensure_principal_active(AuthenticatedPrincipal {
+            subject: subject_principal.subject,
+            tenant: subject_principal.tenant,
             scopes: merged_scopes,
+            issuer: subject_principal.issuer,
+            expires_at,
+            method: AuthenticationMethod::AAuth,
+            assurance,
         })
+    }
+
+    /// Compatibility projection for callers that only consume assurance.
+    pub async fn validate_aauth(
+        &self,
+        subject_token: &str,
+        actor_token: &str,
+    ) -> Result<IdentityAssurance, BearerAuthError> {
+        Ok(self
+            .validate_principal(subject_token, actor_token)
+            .await?
+            .assurance)
+    }
+}
+
+fn earliest_expiry(
+    subject: Option<chrono::DateTime<chrono::Utc>>,
+    actor: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    match (subject, actor) {
+        (Some(subject), Some(actor)) => Some(subject.min(actor)),
+        (Some(expiry), None) | (None, Some(expiry)) => Some(expiry),
+        (None, None) => None,
     }
 }
 

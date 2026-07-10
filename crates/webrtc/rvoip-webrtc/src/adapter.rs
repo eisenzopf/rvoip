@@ -1,5 +1,6 @@
 //! `WebRtcAdapter` — `rvoip_core::ConnectionAdapter` for WebRTC interop.
 
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -18,13 +19,14 @@ use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, 
 use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::{ConnectionId, StreamId};
-use rvoip_core::message::Message;
+use rvoip_core::message::{ContentType, Message};
 use rvoip_core::stream::MediaStream;
+use rvoip_core::{DataMessage, DataReliability};
 use rvoip_sip_core::types::sdp::SdpSession;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, watch, Mutex as AsyncMutex, Notify};
 use tracing::{debug, info, instrument, warn};
-use webrtc::data_channel::{DataChannel, DataChannelEvent};
+use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelState};
 
 use crate::config::WebRtcConfig;
 use crate::errors::{Result, WebRtcError};
@@ -34,14 +36,17 @@ use crate::sdp::{negotiate_audio, sdp_to_string};
 
 pub const ADAPTER_EVENT_CAP: usize = 256;
 
-const CHAT_DATA_CHANNEL_LABEL: &str = "rvoip-chat";
 const OUTBOUND_MESSAGE_CHANNEL_LABEL: &str = "rvoip-messages";
+const MAX_DATA_CHANNELS_PER_ROUTE: usize = 64;
+const DATA_CHANNEL_SCAN_INTERVAL: Duration = Duration::from_millis(25);
+const DATA_CHANNEL_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Background reaper poll interval.
 const REAPER_TICK: Duration = Duration::from_secs(30);
 
 /// Snapshot of operational metrics exposed by [`WebRtcAdapter::metrics`].
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct WebRtcMetrics {
     pub inbound_total: u64,
     pub outbound_total: u64,
@@ -49,6 +54,7 @@ pub struct WebRtcMetrics {
     pub signaling_errors_total: u64,
     pub sessions_rejected_over_cap: u64,
     pub reaped_total: u64,
+    pub data_messages_dropped_total: u64,
 }
 
 /// Typed `TransportHandle` carrying the originating connection id and a weak
@@ -58,11 +64,13 @@ pub struct WebRtcTransportHandle {
     pub connection_id: ConnectionId,
     routes: std::sync::Weak<DashMap<ConnectionId, Route>>,
     cancel: Arc<Notify>,
+    data_cancel: watch::Sender<bool>,
 }
 
 impl WebRtcTransportHandle {
     pub fn cancel(&self) {
         self.cancel.notify_waiters();
+        let _ = self.data_cancel.send(true);
     }
 
     pub fn route_exists(&self) -> bool {
@@ -74,19 +82,32 @@ impl WebRtcTransportHandle {
 }
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct Route {
     pub peer: Arc<RvoipPeerConnection>,
     pub streams: Arc<DashMap<StreamId, Arc<WebRtcMediaStream>>>,
     pub local_sdp: Option<String>,
     pub remote_sdp: Option<String>,
-    pub data_channel: Arc<DashMap<(), Arc<dyn DataChannel>>>,
-    pub chat_pump_started: Arc<AtomicBool>,
+    /// Outbound/reusable channels keyed by exact label + RFC 8832 reliability.
+    pub data_channel: Arc<DashMap<String, Arc<dyn DataChannel>>>,
+    data_channel_create: Arc<AsyncMutex<()>>,
+    data_channels_pumped: Arc<SyncMutex<HashSet<usize>>>,
+    data_channel_keys: Arc<DashMap<usize, String>>,
+    data_pump_started: Arc<AtomicBool>,
+    data_cancel: watch::Sender<bool>,
     pub negotiated: NegotiatedCodecs,
     pub held: bool,
     /// Notify all per-route background tasks (track attacher, fail watcher, stats) to exit.
     pub cancel: Arc<Notify>,
     /// Set by the fail watcher when the underlying PC enters `Failed`/`Closed`.
     pub failed_at: Arc<SyncMutex<Option<Instant>>>,
+}
+
+impl Route {
+    fn cancel_tasks(&self) {
+        self.cancel.notify_waiters();
+        let _ = self.data_cancel.send(true);
+    }
 }
 
 /// D2 — per-route DTLS fingerprint pinning policy.
@@ -122,6 +143,7 @@ pub struct WebRtcAdapter {
     metrics_errors: Arc<AtomicU64>,
     metrics_rejected: Arc<AtomicU64>,
     metrics_reaped: Arc<AtomicU64>,
+    metrics_data_dropped: Arc<AtomicU64>,
     /// Live session count incremented before any per-session work and
     /// decremented on route removal. Replaces `routes.len()` for cap checks
     /// so concurrent originate/apply_remote_offer can't race past the cap.
@@ -148,6 +170,7 @@ impl WebRtcAdapter {
             metrics_errors: Arc::new(AtomicU64::new(0)),
             metrics_rejected: Arc::new(AtomicU64::new(0)),
             metrics_reaped: Arc::clone(&metrics_reaped),
+            metrics_data_dropped: Arc::new(AtomicU64::new(0)),
             live_sessions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             fingerprint_policy: SyncRwLock::new(None),
         });
@@ -240,6 +263,7 @@ impl WebRtcAdapter {
             signaling_errors_total: self.metrics_errors.load(Ordering::Relaxed),
             sessions_rejected_over_cap: self.metrics_rejected.load(Ordering::Relaxed),
             reaped_total: self.metrics_reaped.load(Ordering::Relaxed),
+            data_messages_dropped_total: self.metrics_data_dropped.load(Ordering::Relaxed),
         }
     }
 
@@ -252,6 +276,7 @@ impl WebRtcAdapter {
         self.metrics_errors.store(0, Ordering::Relaxed);
         self.metrics_rejected.store(0, Ordering::Relaxed);
         self.metrics_reaped.store(0, Ordering::Relaxed);
+        self.metrics_data_dropped.store(0, Ordering::Relaxed);
     }
 
     /// Public accessor for the configured concurrent-session cap.
@@ -522,55 +547,304 @@ impl WebRtcAdapter {
         }
     }
 
-    fn spawn_chat_message_pump(&self, conn: ConnectionId, route: &Route) {
-        if route.chat_pump_started.swap(true, Ordering::AcqRel) {
+    fn spawn_data_message_manager(&self, conn: ConnectionId, route: &Route) {
+        if route.data_pump_started.swap(true, Ordering::AcqRel) {
             return;
         }
 
         let peer = Arc::clone(&route.peer);
+        let channels = Arc::clone(&route.data_channel);
+        let pumped = Arc::clone(&route.data_channels_pumped);
+        let channel_keys = Arc::clone(&route.data_channel_keys);
         let events_tx = self.events_tx.clone();
+        let dropped = Arc::clone(&self.metrics_data_dropped);
+        let mut cancel = route.data_cancel.subscribe();
         tokio::spawn(async move {
-            let Some(dc) = peer
-                .find_seen_data_channel_by_label(CHAT_DATA_CHANNEL_LABEL, Duration::from_secs(5))
-                .await
-            else {
-                debug!(
-                    conn = %conn,
-                    label = CHAT_DATA_CHANNEL_LABEL,
-                    "no normalized WebRTC chat data channel observed"
-                );
-                return;
-            };
-
+            let mut scan = tokio::time::interval(DATA_CHANNEL_SCAN_INTERVAL);
+            scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                let Some(event) =
-                    RvoipPeerConnection::poll_data_channel(&dc, Duration::from_secs(1)).await
-                else {
-                    continue;
-                };
-                match event {
-                    DataChannelEvent::OnMessage(message) if message.is_string => {
-                        let text = String::from_utf8_lossy(&message.data).into_owned();
-                        if events_tx
-                            .send(AdapterEvent::Message {
-                                connection_id: conn.clone(),
-                                text,
-                            })
-                            .await
-                            .is_err()
-                        {
+                if *cancel.borrow() {
+                    break;
+                }
+
+                // Locally-created channels do not pass through
+                // PeerConnectionEventHandler::on_data_channel, so include the
+                // route cache as well as every remotely-seen channel.
+                let mut candidates: Vec<Arc<dyn DataChannel>> = channels
+                    .iter()
+                    .map(|entry| Arc::clone(entry.value()))
+                    .collect();
+                candidates.extend(peer.seen_data_channels());
+                for channel in candidates {
+                    if let Err(error) = Self::register_data_channel_pump(
+                        conn.clone(),
+                        Arc::clone(&peer),
+                        channel,
+                        Arc::clone(&channels),
+                        Arc::clone(&pumped),
+                        Arc::clone(&channel_keys),
+                        events_tx.clone(),
+                        Arc::clone(&dropped),
+                        cancel.clone(),
+                    )
+                    .await
+                    {
+                        debug!(conn = %conn, error = %error, "ignoring invalid WebRTC data channel");
+                    }
+                }
+
+                tokio::select! {
+                    changed = cancel.changed() => {
+                        if changed.is_err() || *cancel.borrow() {
                             break;
                         }
                     }
-                    DataChannelEvent::OnClose => break,
-                    DataChannelEvent::OnError => {
-                        warn!(conn = %conn, "WebRTC chat data channel reported an error");
-                        break;
-                    }
-                    _ => {}
+                    _ = scan.tick() => {}
                 }
             }
         });
+    }
+
+    async fn register_data_channel_pump(
+        conn: ConnectionId,
+        peer: Arc<RvoipPeerConnection>,
+        channel: Arc<dyn DataChannel>,
+        channels: Arc<DashMap<String, Arc<dyn DataChannel>>>,
+        pumped: Arc<SyncMutex<HashSet<usize>>>,
+        channel_keys: Arc<DashMap<usize, String>>,
+        events_tx: mpsc::Sender<AdapterEvent>,
+        dropped: Arc<AtomicU64>,
+        mut cancel: watch::Receiver<bool>,
+    ) -> std::result::Result<bool, String> {
+        if *cancel.borrow() {
+            return Ok(false);
+        }
+
+        let channel_identity = data_channel_identity(&channel);
+        if pumped.lock().contains(&channel_identity) {
+            if let Some(cache_key) = channel_keys.get(&channel_identity) {
+                channels
+                    .entry(cache_key.value().clone())
+                    .or_insert_with(|| Arc::clone(&channel));
+            }
+            return Ok(false);
+        }
+
+        let state = match channel.ready_state().await {
+            Ok(state) => state,
+            Err(error) => {
+                peer.forget_seen_data_channel(&channel);
+                remove_cached_data_channel(&channels, &channel);
+                return Err(error.to_string());
+            }
+        };
+        if matches!(
+            state,
+            RTCDataChannelState::Closing | RTCDataChannelState::Closed
+        ) {
+            peer.forget_seen_data_channel(&channel);
+            remove_cached_data_channel(&channels, &channel);
+            return Ok(false);
+        }
+        let metadata = async {
+            let label = channel.label().await.map_err(|error| error.to_string())?;
+            let protocol = channel
+                .protocol()
+                .await
+                .map_err(|error| error.to_string())?;
+            let reliability = crate::data_message::reliability_from_channel(channel.as_ref())
+                .await
+                .map_err(|error| error.to_string())?;
+            let cache_key = crate::data_message::cache_key_parts(&label, &reliability)
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>((label, protocol, reliability, cache_key))
+        }
+        .await;
+        let (label, protocol, reliability, cache_key) = match metadata {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                peer.forget_seen_data_channel(&channel);
+                remove_cached_data_channel(&channels, &channel);
+                let _ = channel.close().await;
+                return Err(error);
+            }
+        };
+        let over_limit = {
+            let mut registered = pumped.lock();
+            if registered.contains(&channel_identity) {
+                return Ok(false);
+            }
+            if registered.len() >= MAX_DATA_CHANNELS_PER_ROUTE {
+                true
+            } else {
+                registered.insert(channel_identity);
+                false
+            }
+        };
+        if over_limit {
+            peer.forget_seen_data_channel(&channel);
+            remove_cached_data_channel(&channels, &channel);
+            let _ = channel.close().await;
+            return Err(format!(
+                "per-route data-channel limit reached ({MAX_DATA_CHANNELS_PER_ROUTE})"
+            ));
+        }
+
+        if protocol == crate::data_message::DATA_MESSAGE_SUBPROTOCOL {
+            channel_keys.insert(channel_identity, cache_key.clone());
+            channels
+                .entry(cache_key)
+                .or_insert_with(|| Arc::clone(&channel));
+        }
+
+        let channel_for_cleanup = Arc::clone(&channel);
+        let channels_for_cleanup = Arc::clone(&channels);
+        let pumped_for_cleanup = Arc::clone(&pumped);
+        let keys_for_cleanup = Arc::clone(&channel_keys);
+        let peer_for_cleanup = Arc::clone(&peer);
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    changed = cancel.changed() => {
+                        if changed.is_err() || *cancel.borrow() {
+                            break;
+                        }
+                    }
+                    event = channel.poll() => {
+                        match event {
+                            Some(DataChannelEvent::OnMessage(frame)) => {
+                                match crate::data_message::decode_data_message(
+                                    &label,
+                                    &protocol,
+                                    reliability.clone(),
+                                    &frame.data,
+                                    frame.is_string,
+                                ) {
+                                    Ok(message) => {
+                                        if events_tx.try_send(AdapterEvent::DataMessage {
+                                            connection_id: conn.clone(),
+                                            message,
+                                        }).is_err() {
+                                            dropped.fetch_add(1, Ordering::Relaxed);
+                                            warn!(conn = %conn, label, "WebRTC adapter event queue full; dropping data message");
+                                        }
+                                    }
+                                    Err(error) => {
+                                        warn!(conn = %conn, label, error = %error, "dropping invalid WebRTC data message");
+                                    }
+                                }
+                            }
+                            Some(DataChannelEvent::OnClose | DataChannelEvent::OnError) | None => break,
+                            Some(_) => {}
+                        }
+                    }
+                }
+            }
+            keys_for_cleanup.remove(&data_channel_identity(&channel_for_cleanup));
+            pumped_for_cleanup
+                .lock()
+                .remove(&data_channel_identity(&channel_for_cleanup));
+            remove_cached_data_channel(&channels_for_cleanup, &channel_for_cleanup);
+            peer_for_cleanup.forget_seen_data_channel(&channel_for_cleanup);
+        });
+        Ok(true)
+    }
+
+    async fn wait_data_channel_open(channel: &Arc<dyn DataChannel>) -> RvoipResult<()> {
+        let deadline = tokio::time::Instant::now() + DATA_CHANNEL_OPERATION_TIMEOUT;
+        loop {
+            let state = channel
+                .ready_state()
+                .await
+                .map_err(|error| RvoipError::Adapter(format!("data channel state: {error}")))?;
+            match state {
+                RTCDataChannelState::Open => return Ok(()),
+                RTCDataChannelState::Closing | RTCDataChannelState::Closed => {
+                    return Err(RvoipError::Adapter(
+                        "data channel closed before it opened".into(),
+                    ));
+                }
+                _ if tokio::time::Instant::now() >= deadline => {
+                    return Err(RvoipError::Adapter("data channel open timed out".into()));
+                }
+                _ => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    }
+
+    async fn data_channel_for_message(
+        &self,
+        conn: &ConnectionId,
+        route: &Route,
+        message: &DataMessage,
+    ) -> RvoipResult<Arc<dyn DataChannel>> {
+        let cache_key = crate::data_message::cache_key(message)
+            .map_err(|error| RvoipError::Adapter(error.to_string()))?;
+        let cached = route
+            .data_channel
+            .get(&cache_key)
+            .map(|entry| Arc::clone(entry.value()));
+        if let Some(channel) = cached {
+            match Self::wait_data_channel_open(&channel).await {
+                Ok(()) => return Ok(channel),
+                Err(error) => {
+                    remove_cached_data_channel(&route.data_channel, &channel);
+                    let _ = channel.close().await;
+                    debug!(conn = %conn, error = %error, "evicted unusable cached WebRTC data channel");
+                }
+            }
+        }
+
+        let _create_guard = route.data_channel_create.lock().await;
+        let cached = route
+            .data_channel
+            .get(&cache_key)
+            .map(|entry| Arc::clone(entry.value()));
+        if let Some(channel) = cached {
+            match Self::wait_data_channel_open(&channel).await {
+                Ok(()) => return Ok(channel),
+                Err(error) => {
+                    remove_cached_data_channel(&route.data_channel, &channel);
+                    let _ = channel.close().await;
+                    debug!(conn = %conn, error = %error, "evicted unusable cached WebRTC data channel");
+                }
+            }
+        }
+        if route.data_channels_pumped.lock().len() >= MAX_DATA_CHANNELS_PER_ROUTE {
+            return Err(RvoipError::Adapter(format!(
+                "per-route data-channel limit reached ({MAX_DATA_CHANNELS_PER_ROUTE})"
+            )));
+        }
+
+        let options = crate::data_message::options_for_reliability(&message.reliability)
+            .map_err(|error| RvoipError::Adapter(error.to_string()))?;
+        let channel = tokio::time::timeout(
+            DATA_CHANNEL_OPERATION_TIMEOUT,
+            route.peer.create_data_channel(&message.label, options),
+        )
+        .await
+        .map_err(|_| RvoipError::Adapter("create_data_channel timed out".into()))?
+        .map_err(|error| RvoipError::Adapter(error.to_string()))?;
+        route.data_channel.insert(cache_key, Arc::clone(&channel));
+        if let Err(error) = Self::wait_data_channel_open(&channel).await {
+            remove_cached_data_channel(&route.data_channel, &channel);
+            let _ = channel.close().await;
+            return Err(error);
+        }
+        Self::register_data_channel_pump(
+            conn.clone(),
+            Arc::clone(&route.peer),
+            Arc::clone(&channel),
+            Arc::clone(&route.data_channel),
+            Arc::clone(&route.data_channels_pumped),
+            Arc::clone(&route.data_channel_keys),
+            self.events_tx.clone(),
+            Arc::clone(&self.metrics_data_dropped),
+            route.data_cancel.subscribe(),
+        )
+        .await
+        .map_err(RvoipError::Adapter)?;
+        Ok(channel)
     }
 
     fn build_connection(
@@ -601,11 +875,13 @@ impl WebRtcAdapter {
         &self,
         conn_id: ConnectionId,
         cancel: Arc<Notify>,
+        data_cancel: watch::Sender<bool>,
     ) -> Arc<WebRtcTransportHandle> {
         Arc::new(WebRtcTransportHandle {
             connection_id: conn_id,
             routes: Arc::downgrade(&self.routes),
             cancel,
+            data_cancel,
         })
     }
 
@@ -769,7 +1045,8 @@ impl WebRtcAdapter {
         let peer_fail = route.peer.clone();
         tokio::spawn(async move {
             peer_fail.wait_failed().await;
-            if routes_fail.remove(&conn_fail).is_some() {
+            if let Some((_, route)) = routes_fail.remove(&conn_fail) {
+                route.cancel_tasks();
                 let _ = events_fail
                     .send(AdapterEvent::Failed {
                         connection_id: conn_fail,
@@ -815,7 +1092,7 @@ impl WebRtcAdapter {
             }
             for id in victims {
                 if let Some((_, route)) = routes.remove(&id) {
-                    route.cancel.notify_waiters();
+                    route.cancel_tasks();
                     let _ = route.peer.close().await;
                     // Mirror release_session_slot inline (we don't have &self here).
                     let mut cur = live_sessions.load(Ordering::Acquire);
@@ -877,13 +1154,18 @@ impl WebRtcAdapter {
         let negotiated = negotiate_audio(&self.config.capabilities, &self.config.capabilities)?;
 
         let cancel = Arc::new(Notify::new());
+        let (data_cancel, _) = watch::channel(false);
         let route = Route {
             peer: Arc::clone(&peer),
             streams: Arc::new(DashMap::new()),
             local_sdp: Some(answer_sdp),
             remote_sdp: Some(offer_sdp.to_owned()),
             data_channel: Arc::new(DashMap::new()),
-            chat_pump_started: Arc::new(AtomicBool::new(false)),
+            data_channel_create: Arc::new(AsyncMutex::new(())),
+            data_channels_pumped: Arc::new(SyncMutex::new(HashSet::new())),
+            data_channel_keys: Arc::new(DashMap::new()),
+            data_pump_started: Arc::new(AtomicBool::new(false)),
+            data_cancel: data_cancel.clone(),
             negotiated: negotiated.clone(),
             held: false,
             cancel: Arc::clone(&cancel),
@@ -899,7 +1181,7 @@ impl WebRtcAdapter {
         self.insert_route(conn_id.clone(), route);
         slot.commit();
 
-        let handle = self.make_transport_handle(conn_id.clone(), cancel);
+        let handle = self.make_transport_handle(conn_id.clone(), cancel, data_cancel);
         let connection =
             self.build_connection(conn_id.clone(), Direction::Inbound, negotiated, handle);
         self.try_send(AdapterEvent::InboundConnection { connection });
@@ -1066,6 +1348,23 @@ impl ConnectionAdapter for WebRtcAdapter {
                 .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
         }
 
+        // Ensure the initial offer contains an SCTP m-line. Once the
+        // association is negotiated, arbitrary labeled channels can be
+        // opened later without media renegotiation.
+        let bootstrap_reliability = DataReliability::ReliableOrdered;
+        let bootstrap_options =
+            crate::data_message::options_for_reliability(&bootstrap_reliability)
+                .map_err(|error| RvoipError::Adapter(error.to_string()))?;
+        let bootstrap_channel = peer
+            .create_data_channel(OUTBOUND_MESSAGE_CHANNEL_LABEL, bootstrap_options)
+            .await
+            .map_err(|error| RvoipError::Adapter(error.to_string()))?;
+        let bootstrap_key = crate::data_message::cache_key_parts(
+            OUTBOUND_MESSAGE_CHANNEL_LABEL,
+            &bootstrap_reliability,
+        )
+        .map_err(|error| RvoipError::Adapter(error.to_string()))?;
+
         let offer_sdp = peer
             .create_offer_and_gather()
             .await
@@ -1075,13 +1374,20 @@ impl ConnectionAdapter for WebRtcAdapter {
             .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
 
         let cancel = Arc::new(Notify::new());
+        let (data_cancel, _) = watch::channel(false);
+        let data_channels = Arc::new(DashMap::new());
+        data_channels.insert(bootstrap_key, bootstrap_channel);
         let route = Route {
             peer,
             streams: Arc::new(DashMap::new()),
             local_sdp: Some(offer_sdp),
             remote_sdp: None,
-            data_channel: Arc::new(DashMap::new()),
-            chat_pump_started: Arc::new(AtomicBool::new(false)),
+            data_channel: data_channels,
+            data_channel_create: Arc::new(AsyncMutex::new(())),
+            data_channels_pumped: Arc::new(SyncMutex::new(HashSet::new())),
+            data_channel_keys: Arc::new(DashMap::new()),
+            data_pump_started: Arc::new(AtomicBool::new(false)),
+            data_cancel: data_cancel.clone(),
             negotiated: negotiated.clone(),
             held: false,
             cancel: Arc::clone(&cancel),
@@ -1092,7 +1398,7 @@ impl ConnectionAdapter for WebRtcAdapter {
         self.insert_route(conn_id.clone(), route);
         slot.commit();
 
-        let handle = self.make_transport_handle(conn_id.clone(), cancel);
+        let handle = self.make_transport_handle(conn_id.clone(), cancel, data_cancel);
         let mut connection =
             self.build_connection(conn_id, Direction::Outbound, negotiated, handle);
         connection.session_id = request.session_id;
@@ -1114,7 +1420,7 @@ impl ConnectionAdapter for WebRtcAdapter {
             .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
 
         self.ensure_media_streams(&conn).await?;
-        self.spawn_chat_message_pump(conn.clone(), &route);
+        self.spawn_data_message_manager(conn.clone(), &route);
         self.try_send(AdapterEvent::Connected {
             connection_id: conn,
         });
@@ -1123,7 +1429,7 @@ impl ConnectionAdapter for WebRtcAdapter {
 
     async fn reject(&self, conn: ConnectionId, _reason: RejectReason) -> RvoipResult<()> {
         if let Some((_, route)) = self.routes.remove(&conn) {
-            route.cancel.notify_waiters();
+            route.cancel_tasks();
             route.peer.close().await.ok();
             self.release_session_slot();
         }
@@ -1137,7 +1443,7 @@ impl ConnectionAdapter for WebRtcAdapter {
     #[instrument(skip(self), fields(conn = %conn, reason = ?reason))]
     async fn end(&self, conn: ConnectionId, reason: EndReason) -> RvoipResult<()> {
         if let Some((_, route)) = self.routes.remove(&conn) {
-            route.cancel.notify_waiters();
+            route.cancel_tasks();
             route.peer.close().await.ok();
             self.release_session_slot();
             info!(conn = %conn, "ended");
@@ -1223,39 +1529,42 @@ impl ConnectionAdapter for WebRtcAdapter {
     }
 
     async fn send_message(&self, conn: ConnectionId, message: Message) -> RvoipResult<()> {
+        let content_type = legacy_message_content_type(&message.content_type);
+        let data_message = DataMessage {
+            label: OUTBOUND_MESSAGE_CHANNEL_LABEL.into(),
+            content_type,
+            bytes: message.body,
+            reliability: DataReliability::ReliableOrdered,
+            message_id: message.id,
+        };
+        self.send_data_message(conn, data_message).await
+    }
+
+    async fn send_data_message(&self, conn: ConnectionId, message: DataMessage) -> RvoipResult<()> {
+        let encoded = crate::data_message::encode_data_message(&message)
+            .map_err(|error| RvoipError::Adapter(error.to_string()))?;
         let route = self
             .route(&conn)
             .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
-
-        let dc = if let Some(dc) = route
-            .peer
-            .find_seen_data_channel_by_label(CHAT_DATA_CHANNEL_LABEL, Duration::from_millis(100))
-            .await
-        {
-            dc
-        } else if let Some(entry) = route.data_channel.get(&()) {
-            entry.value().clone()
-        } else {
-            let dc = tokio::time::timeout(
-                Duration::from_secs(2),
-                route
-                    .peer
-                    .peer_connection()
-                    .create_data_channel(OUTBOUND_MESSAGE_CHANNEL_LABEL, None),
-            )
-            .await
-            .map_err(|_| RvoipError::Adapter("create_data_channel timed out".into()))?
-            .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
-            route.data_channel.insert((), Arc::clone(&dc));
-            dc
+        let channel = self
+            .data_channel_for_message(&conn, &route, &message)
+            .await?;
+        let send = async {
+            match encoded {
+                crate::data_message::EncodedDataMessage::Text(frame) => {
+                    channel.send_text(&frame).await
+                }
+                crate::data_message::EncodedDataMessage::Binary(frame) => channel.send(frame).await,
+            }
         };
-
-        let body = String::from_utf8_lossy(&message.body).into_owned();
-        tokio::time::timeout(Duration::from_secs(2), dc.send_text(&body))
-            .await
-            .map_err(|_| RvoipError::Adapter("data channel send timed out".into()))?
-            .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
-        Ok(())
+        let result = match tokio::time::timeout(DATA_CHANNEL_OPERATION_TIMEOUT, send).await {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(error)) => RvoipError::Adapter(error.to_string()),
+            Err(_) => RvoipError::Adapter("data channel send timed out".into()),
+        };
+        remove_cached_data_channel(&route.data_channel, &channel);
+        let _ = channel.close().await;
+        Err(result)
     }
 
     async fn renegotiate_media(
@@ -1368,9 +1677,33 @@ impl Drop for WebRtcAdapter {
         // Cancel each route's background tasks; peer connections will be dropped
         // when their Arc refcount hits zero.
         for entry in self.routes.iter() {
-            entry.value().cancel.notify_waiters();
+            entry.value().cancel_tasks();
         }
     }
+}
+
+fn remove_cached_data_channel(
+    channels: &DashMap<String, Arc<dyn DataChannel>>,
+    channel: &Arc<dyn DataChannel>,
+) {
+    let keys: Vec<String> = channels
+        .iter()
+        .filter(|entry| Arc::ptr_eq(entry.value(), channel))
+        .map(|entry| entry.key().clone())
+        .collect();
+    for key in keys {
+        let should_remove = channels
+            .get(&key)
+            .map(|entry| Arc::ptr_eq(entry.value(), channel))
+            .unwrap_or(false);
+        if should_remove {
+            channels.remove(&key);
+        }
+    }
+}
+
+fn data_channel_identity(channel: &Arc<dyn DataChannel>) -> usize {
+    Arc::as_ptr(channel) as *const () as usize
 }
 
 /// QUIC-bridge-flake fix — attach `track` to **every** stream in the
@@ -1422,6 +1755,28 @@ fn payload_type_for_audio_codec(codec: &CodecInfo) -> u8 {
         // Fall back to Opus PT — the engine only registers a handful of
         // audio codecs and the negotiation path narrows to Opus by default.
         crate::media::pump::OPUS_PT_DEFAULT
+    }
+}
+
+fn legacy_message_content_type(content_type: &ContentType) -> String {
+    match content_type {
+        ContentType::Text => "text/plain; charset=utf-8".into(),
+        ContentType::Json => "application/json".into(),
+        ContentType::Binary | ContentType::Image | ContentType::Audio => {
+            "application/octet-stream".into()
+        }
+        ContentType::Attachment(value) => {
+            let candidate = DataMessage::reliable(
+                OUTBOUND_MESSAGE_CHANNEL_LABEL,
+                value.clone(),
+                bytes::Bytes::new(),
+            );
+            if candidate.validate().is_ok() {
+                value.clone()
+            } else {
+                "application/octet-stream".into()
+            }
+        }
     }
 }
 

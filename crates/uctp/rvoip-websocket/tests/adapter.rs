@@ -121,12 +121,75 @@ async fn ws_adapter_emits_inbound_connection_on_session_invite() {
         break ev;
     };
 
-    match event {
+    let core_connection_id = match event {
         AdapterEvent::InboundConnection { connection } => {
             assert_eq!(connection.transport, Transport::WebSocket);
             assert_eq!(connection.session_id.as_str(), "sess_ws_adapter_test");
             assert_eq!(connection.participant_id.as_str(), "part_alice");
+            connection.id
         }
         other => panic!("expected InboundConnection, got {:?}", other),
-    }
+    };
+
+    let wire_connection_id = "conn_ws_wire";
+    client
+        .send(
+            UctpEnvelope::new(
+                MessageType::ConnectionOffer,
+                serde_json::to_value(rvoip_uctp::payloads::connection::ConnectionOffer {
+                    by_participant: "part_alice".into(),
+                    substrate: "websocket".into(),
+                    capabilities: serde_json::Value::Object(Default::default()),
+                    streams_offered: vec![rvoip_uctp::payloads::connection::StreamOffer {
+                        id: "strm_ws_data".into(),
+                        kind: "audio".into(),
+                        direction: "sendrecv".into(),
+                        codec_preferences: vec!["opus".into()],
+                    }],
+                    substrate_setup: serde_json::Value::Null,
+                })
+                .unwrap(),
+            )
+            .with_sid("sess_ws_adapter_test")
+            .with_connid(wire_connection_id),
+        )
+        .await
+        .expect("send connection offer");
+    client
+        .send(
+            UctpEnvelope::new(
+                MessageType::MessageSend,
+                serde_json::json!({
+                    "msg_id": "msg_ws_data",
+                    "from": "part_alice",
+                    "to": "all",
+                    "content_type": "text/plain",
+                    "label": "bridgefu.context.v1",
+                    "body": "hello over WebSocket",
+                    "body_encoding": "utf8",
+                    "attachments": []
+                }),
+            )
+            .with_sid("sess_ws_adapter_test")
+            .with_connid(wire_connection_id),
+        )
+        .await
+        .expect("send data message");
+
+    let received_connection = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let AdapterEvent::DataMessage {
+                connection_id,
+                message,
+            } = events.recv().await.expect("event channel closed")
+            {
+                assert_eq!(message.bytes.as_ref(), b"hello over WebSocket");
+                break connection_id;
+            }
+        }
+    })
+    .await
+    .expect("DataMessage timeout");
+    assert_eq!(received_connection, core_connection_id);
+    assert_ne!(received_connection.as_str(), wire_connection_id);
 }

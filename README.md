@@ -43,6 +43,7 @@ The full design lives under [`docs/`](docs/):
 | [INTERFACE_DESIGN.md](docs/INTERFACE_DESIGN.md) | Crate architecture and dependency rules |
 | [GAP_PLAN.md](docs/GAP_PLAN.md) | Implementation status (v1 shipped May 2026) |
 | [CONVERSATION_PROTOCOL.md](docs/CONVERSATION_PROTOCOL.md) | UCTP wire specification |
+| [BRIDGEFU_FOUNDATIONS_MIGRATION.md](docs/BRIDGEFU_FOUNDATIONS_MIGRATION.md) | Principal, DataMessage, MediaGraph, and WebRTC fork migration notes |
 
 <a id="build-with-rvoip-today"></a>
 ## 🎯 Build with rvoip today

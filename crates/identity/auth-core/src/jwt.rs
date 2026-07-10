@@ -23,7 +23,8 @@ use rvoip_core_traits::ids::IdentityId;
 use serde::Deserialize;
 
 use crate::bearer::{
-    AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError, BearerValidator,
+    ensure_principal_active, AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError,
+    BearerValidator,
 };
 use crate::providers::{
     CredentialAuthError, TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
@@ -58,7 +59,7 @@ struct Claims {
     realm_access: Option<RoleAccess>,
     #[serde(default)]
     resource_access: Option<HashMap<String, RoleAccess>>,
-    #[serde(default, alias = "tenant")]
+    #[serde(default, alias = "tenant", alias = "tid")]
     tenant_id: Option<String>,
 }
 
@@ -222,6 +223,7 @@ impl BearerValidator for JwtValidator {
         )
         .await?;
         let subject = claims.sub.clone();
+        let expires_at = claims.exp.map(expiration_from_unix).transpose()?;
         let identity = IdentityId::from_string(subject.clone());
         let scopes = scopes_from_claims(
             claims.scope,
@@ -235,18 +237,23 @@ impl BearerValidator for JwtValidator {
             user_id: identity,
             scopes: scopes.clone(),
         };
-        Ok(AuthenticatedPrincipal {
+        ensure_principal_active(AuthenticatedPrincipal {
             subject,
             tenant: claims.tenant_id,
             scopes,
             issuer: claims.iss,
-            expires_at: claims
-                .exp
-                .and_then(|seconds| chrono::DateTime::from_timestamp(seconds as i64, 0)),
+            expires_at,
             method: AuthenticationMethod::Jwt,
             assurance,
         })
     }
+}
+
+fn expiration_from_unix(seconds: u64) -> Result<chrono::DateTime<chrono::Utc>, BearerAuthError> {
+    i64::try_from(seconds)
+        .ok()
+        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+        .ok_or_else(|| BearerAuthError::Invalid("token exp is outside the supported range".into()))
 }
 
 async fn check_revocation(

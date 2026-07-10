@@ -1,5 +1,5 @@
 use crate::adapter::{EndReason, TransferTarget};
-use crate::identity::IdentityAssurance;
+use crate::identity::{AuthenticatedPrincipal, IdentityAssurance};
 use crate::ids::{
     AiAttachmentId, BridgeId, ConnectionId, ConversationId, IdentityId, ListenerId, MessageId,
     ParticipantId, RecordingId, SessionId, StreamId, TenantId,
@@ -7,6 +7,7 @@ use crate::ids::{
 use crate::store::VconHandle;
 use crate::stream::QualitySnapshot;
 use crate::vcon::VconRef;
+use crate::DataMessage;
 use chrono::{DateTime, Utc};
 use rvoip_infra_common::events::cross_crate::{RvoipCoreCrossCrateEvent, RvoipCrossCrateEvent};
 
@@ -22,6 +23,7 @@ use rvoip_infra_common::events::cross_crate::{RvoipCoreCrossCrateEvent, RvoipCro
 /// are added by the cross-crate envelope wrapper at publish time, per
 /// INTERFACE_DESIGN §5.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Event {
     // --- Conversation lifecycle ---
     ConversationOpened {
@@ -77,6 +79,14 @@ pub enum Event {
         identity_id: String,
         participant_id: String,
         assurance: IdentityAssurance,
+        at: DateTime<Utc>,
+    },
+    /// Complete principal retained alongside the legacy authentication event.
+    /// Authorization decisions should compare `principal.ownership_key()`.
+    ConnectionPrincipalAuthenticated {
+        connection_id: ConnectionId,
+        participant_id: String,
+        principal: AuthenticatedPrincipal,
         at: DateTime<Utc>,
     },
     /// Early states (per INTERFACE_DESIGN §5).
@@ -151,6 +161,11 @@ pub enum Event {
     MessageReceived {
         message_id: MessageId,
         conversation_id: ConversationId,
+        at: DateTime<Utc>,
+    },
+    DataMessageReceived {
+        connection_id: ConnectionId,
+        message: DataMessage,
         at: DateTime<Utc>,
     },
     MessageSent {
@@ -401,22 +416,20 @@ impl Event {
                     connection_id: connection_id.to_string(),
                 }
             }
-            ConnectionAuthenticated {
-                connection_id,
-                identity_id,
-                ..
-            } => {
-                // Cross-crate boundary: there's no dedicated
-                // ConnectionAuthenticated variant yet (adding one would
-                // require an infra-common change). The closest existing
-                // signal is `IdentityAssuranceChanged`, which carries
-                // the same connection_id + identity_id pair. Downstream
-                // services that need the assurance level or
-                // participant_id should subscribe to the in-process
-                // `Event::ConnectionAuthenticated` directly.
+            ConnectionAuthenticated { connection_id, .. } => {
+                // Authentication context is tenant-sensitive. The global
+                // cross-crate bus is not tenant-authorized, so it receives
+                // only a lifecycle marker; rich identity stays on the typed
+                // in-process event and connection route.
                 RvoipCoreCrossCrateEvent::IdentityAssuranceChanged {
                     connection_id: connection_id.to_string(),
-                    identity_id: Some(identity_id.clone()),
+                    identity_id: None,
+                }
+            }
+            ConnectionPrincipalAuthenticated { connection_id, .. } => {
+                RvoipCoreCrossCrateEvent::IdentityAssuranceChanged {
+                    connection_id: connection_id.to_string(),
+                    identity_id: None,
                 }
             }
             ConnectionProgress {
@@ -505,6 +518,15 @@ impl Event {
             } => RvoipCoreCrossCrateEvent::MessageReceived {
                 message_id: message_id.to_string(),
                 conversation_id: conversation_id.to_string(),
+            },
+            DataMessageReceived {
+                connection_id,
+                message,
+                ..
+            } => RvoipCoreCrossCrateEvent::DataMessageReceived {
+                connection_id: connection_id.to_string(),
+                body_size: message.bytes.len(),
+                reliability: format!("{:?}", message.reliability),
             },
             MessageSent {
                 message_id,

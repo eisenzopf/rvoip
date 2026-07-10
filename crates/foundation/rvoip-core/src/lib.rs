@@ -150,19 +150,25 @@ pub use conversation::{Conversation, ConversationPolicy, ConversationState};
 pub use error::{Result, RvoipError};
 pub use events::{AnomalyKind, ConnectionProgressKind, Event, SessionQualityReport, UsageKind};
 pub use identity::{
-    Credential, CredentialKind, Device, DtlsFingerprint, Identity, IdentityAssurance,
-    IdentityProvider, Jwk,
+    AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError, Credential, CredentialKind,
+    Device, DtlsFingerprint, Identity, IdentityAssurance, IdentityProvider, Jwk,
+    PrincipalOwnershipKey,
 };
 pub use ids::{
     AiAttachmentId, AttachmentId, BridgeId, ConnectionId, ConversationId, DeviceId, IdentityId,
     ListenerId, MediaRouteId, MessageId, ParticipantId, PlaybackId, RecordingId, SessionId,
     StreamId, TenantId, TranscriptionId,
 };
-pub use media_graph::{start_media_graph, MediaGraphHandle, MediaGraphPolicy};
+pub use media_graph::{
+    start_media_graph, MediaGraphHandle, MediaGraphPolicy, DEFAULT_MEDIA_GRAPH_MAX_SINKS,
+};
 pub use message::{ContentType, Message, MessageOrigin, MessageRecipients};
 pub use orchestrator::Orchestrator;
 pub use participant::{Participant, ParticipantKind, ParticipantRole};
-pub use rvoip_core_traits::data::{DataMessage, DataReliability};
+pub use rvoip_core_traits::data::{
+    DataMessage, DataMessageValidationError, DataReliability, MAX_CONTENT_TYPE_BYTES,
+    MAX_DATA_LABEL_BYTES, MAX_DATA_MESSAGE_BYTES, MAX_DATA_MESSAGE_ID_BYTES,
+};
 pub use session::{Session, SessionMedium, SessionState};
 pub use store::{
     ConversationFilter, ConversationStore, MemoryConversationStore, MemoryMessageStore,

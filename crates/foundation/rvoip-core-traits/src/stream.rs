@@ -51,7 +51,24 @@ pub trait MediaStream: Send + Sync {
     fn codec(&self) -> CodecInfo;
     fn direction(&self) -> Direction;
 
+    /// Acquire the stream's inbound receiver.
+    ///
+    /// This legacy API is intentionally retained for source compatibility.
+    /// Built-in streams are single-consumer and return a closed receiver when
+    /// it has already been acquired. New orchestration code should use
+    /// [`Self::try_frames_in`] so duplicate acquisition is reported rather
+    /// than silently behaving like end-of-stream.
     fn frames_in(&self) -> mpsc::Receiver<MediaFrame>;
+
+    /// Fallibly acquire the stream's single-consumer inbound receiver.
+    ///
+    /// The default delegates to [`Self::frames_in`] so third-party stream
+    /// implementations remain source compatible. Built-in transports
+    /// override this method and return [`crate::error::RvoipError::InvalidState`]
+    /// when ownership has already been transferred.
+    fn try_frames_in(&self) -> Result<mpsc::Receiver<MediaFrame>> {
+        Ok(self.frames_in())
+    }
     fn frames_out(&self) -> mpsc::Sender<MediaFrame>;
 
     fn quality_snapshot(&self) -> QualitySnapshot;

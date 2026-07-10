@@ -74,6 +74,13 @@ impl MockMediaStream {
             .take()
             .expect("output receiver taken once")
     }
+
+    fn input_receiver_is_available(&self) -> bool {
+        self.inbound_rx
+            .lock()
+            .expect("input receiver lock")
+            .is_some()
+    }
 }
 
 #[async_trait]
@@ -251,4 +258,18 @@ async fn assert_g711_opus_round_trip(codec: &str, payload_type: u8) {
 async fn pcmu_and_pcma_flow_bidirectionally_with_opus() {
     assert_g711_opus_round_trip("PCMU", 0).await;
     assert_g711_opus_round_trip("PCMA", 8).await;
+}
+
+#[test]
+fn unsupported_codec_is_rejected_before_either_receiver_is_taken() {
+    let supported = MockMediaStream::new("pcmu", 8_000);
+    let unsupported = MockMediaStream::new("not-a-real-codec", 8_000);
+
+    assert!(bridge_streams(
+        Arc::clone(&supported) as Arc<dyn MediaStream>,
+        Arc::clone(&unsupported) as Arc<dyn MediaStream>,
+    )
+    .is_err());
+    assert!(supported.input_receiver_is_available());
+    assert!(unsupported.input_receiver_is_available());
 }
