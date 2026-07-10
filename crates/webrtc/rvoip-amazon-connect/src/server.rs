@@ -16,10 +16,15 @@
 //! the attributes (an AWS-side configuration task).
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use dashmap::DashMap;
+use parking_lot::Mutex as SyncMutex;
 use rvoip_core::adapter::{AdapterEvent, ConnectionAdapter, EndReason};
 use rvoip_core::ids::ConnectionId;
 use rvoip_core::stream::MediaStream;
@@ -28,9 +33,12 @@ use rvoip_sip::{
     UnifiedCoordinator,
 };
 use rvoip_sip_core::types::headers::{HeaderAccess, HeaderName, TypedHeader};
+use tokio::sync::{broadcast, watch};
 use tracing::{info, warn};
 
-use crate::adapter::{AmazonConnectAdapter, ContactTarget};
+use crate::adapter::{
+    AmazonConnectAdapter, ContactSetupObserver, ContactSetupStage, ContactTarget,
+};
 use crate::bridge::{bridge_streams, StreamBridge};
 use crate::config::ConnectConfig;
 use crate::control::ConnectContactStarter;
@@ -123,12 +131,479 @@ struct ActiveContact {
     connect_conn: ConnectionId,
     /// Route label for per-route metrics (`None` on the unrouted path).
     route_label: Option<String>,
+    setup: Arc<SetupAttempt>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScreenPopMediaLeg {
     Sip,
     Connect,
+}
+
+/// Sanitized lifecycle stages exposed to authenticated control planes. No SIP
+/// headers, AWS contact ids, SDP, credentials, or error strings are included.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenPopLifecycleStage {
+    SipInviteReceived,
+    AttributesMapped,
+    ContactStarted,
+    MediaConnected,
+    TeardownStarted,
+    Terminated,
+    Failed,
+}
+
+/// One sanitized screen-pop lifecycle notification.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ScreenPopLifecycleEvent {
+    pub stage: ScreenPopLifecycleStage,
+    /// Sanitized, length-bounded correlation id from `X-Correlation-Id`.
+    pub correlation_id: Option<String>,
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Default)]
+struct SetupAttemptState {
+    cancelled: bool,
+    cleanup_claimed: bool,
+    promoted: bool,
+    connect_conn: Option<ConnectionId>,
+    lifecycle_stage: Option<ScreenPopLifecycleStage>,
+    cleanup_attempt_complete: bool,
+}
+
+struct SetupAttempt {
+    session_id: SipSessionId,
+    correlation_id: Option<String>,
+    state: SyncMutex<SetupAttemptState>,
+    cancel_tx: watch::Sender<bool>,
+}
+
+impl SetupAttempt {
+    fn new(session_id: SipSessionId, correlation_id: Option<String>) -> Arc<Self> {
+        let (cancel_tx, _) = watch::channel(false);
+        Arc::new(Self {
+            session_id,
+            correlation_id,
+            state: SyncMutex::new(SetupAttemptState::default()),
+            cancel_tx,
+        })
+    }
+
+    async fn cancelled(&self) {
+        let mut rx = self.cancel_tx.subscribe();
+        if *rx.borrow() {
+            return;
+        }
+        let _ = rx.wait_for(|cancelled| *cancelled).await;
+    }
+
+    fn signal_cancel(&self) {
+        self.cancel_tx.send_replace(true);
+    }
+
+    fn transition(&self, next: ScreenPopLifecycleStage) -> bool {
+        let mut state = self.state.lock();
+        if matches!(
+            next,
+            ScreenPopLifecycleStage::Terminated | ScreenPopLifecycleStage::Failed
+        ) && !state.cleanup_attempt_complete
+        {
+            return false;
+        }
+        let next_rank = lifecycle_rank(next);
+        if state
+            .lifecycle_stage
+            .is_some_and(|current| lifecycle_rank(current) >= next_rank)
+        {
+            return false;
+        }
+        state.lifecycle_stage = Some(next);
+        true
+    }
+
+    fn mark_cleanup_attempt_complete(&self) {
+        self.state.lock().cleanup_attempt_complete = true;
+    }
+}
+
+fn lifecycle_rank(stage: ScreenPopLifecycleStage) -> u8 {
+    match stage {
+        ScreenPopLifecycleStage::SipInviteReceived => 0,
+        ScreenPopLifecycleStage::AttributesMapped => 1,
+        ScreenPopLifecycleStage::ContactStarted => 2,
+        ScreenPopLifecycleStage::MediaConnected => 3,
+        ScreenPopLifecycleStage::TeardownStarted => 4,
+        ScreenPopLifecycleStage::Terminated | ScreenPopLifecycleStage::Failed => 5,
+    }
+}
+
+enum ContactClaim<T> {
+    Setup {
+        attempt: Arc<SetupAttempt>,
+        connect_conn: Option<ConnectionId>,
+    },
+    Active(T),
+    EarlySipEnd,
+    EarlyConnectEnd,
+    None,
+}
+
+const EVENT_TOMBSTONE_CAPACITY: usize = 4_096;
+const EVENT_TOMBSTONE_TTL: Duration = Duration::from_secs(120);
+
+struct BoundedTombstones<K> {
+    entries: SyncMutex<HashMap<K, Instant>>,
+}
+
+impl<K> Default for BoundedTombstones<K> {
+    fn default() -> Self {
+        Self {
+            entries: SyncMutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl<K> BoundedTombstones<K>
+where
+    K: Clone + Eq + Hash,
+{
+    fn prune(entries: &mut HashMap<K, Instant>, now: Instant) {
+        entries.retain(|_, inserted| now.duration_since(*inserted) <= EVENT_TOMBSTONE_TTL);
+        while entries.len() >= EVENT_TOMBSTONE_CAPACITY {
+            let Some(oldest) = entries
+                .iter()
+                .min_by_key(|(_, inserted)| **inserted)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            entries.remove(&oldest);
+        }
+    }
+
+    fn insert(&self, key: K) {
+        let now = Instant::now();
+        let mut entries = self.entries.lock();
+        Self::prune(&mut entries, now);
+        entries.insert(key, now);
+    }
+
+    fn take(&self, key: &K) -> bool {
+        let now = Instant::now();
+        let mut entries = self.entries.lock();
+        Self::prune(&mut entries, now);
+        entries.remove(key).is_some()
+    }
+
+    fn contains(&self, key: &K) -> bool {
+        let now = Instant::now();
+        let mut entries = self.entries.lock();
+        Self::prune(&mut entries, now);
+        entries.contains_key(key)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.lock().len()
+    }
+}
+
+/// All setup/active/reverse indexes share this registry. Promotion and setup
+/// cancellation serialize on `SetupAttempt::state`, eliminating the old gap
+/// where reverse routing existed but the active entry did not.
+struct ContactRegistry<T> {
+    setups: DashMap<SipSessionId, Arc<SetupAttempt>>,
+    active: DashMap<SipSessionId, T>,
+    by_connect: DashMap<ConnectionId, SipSessionId>,
+    early_sip_ends: BoundedTombstones<SipSessionId>,
+    early_connect_ends: BoundedTombstones<ConnectionId>,
+    finished_sip: BoundedTombstones<SipSessionId>,
+    finished_connect: BoundedTombstones<ConnectionId>,
+    routing_lock: SyncMutex<()>,
+}
+
+impl<T> Default for ContactRegistry<T> {
+    fn default() -> Self {
+        Self {
+            setups: DashMap::new(),
+            active: DashMap::new(),
+            by_connect: DashMap::new(),
+            early_sip_ends: BoundedTombstones::default(),
+            early_connect_ends: BoundedTombstones::default(),
+            finished_sip: BoundedTombstones::default(),
+            finished_connect: BoundedTombstones::default(),
+            routing_lock: SyncMutex::new(()),
+        }
+    }
+}
+
+impl<T> ContactRegistry<T> {
+    fn register(
+        &self,
+        session_id: SipSessionId,
+        correlation_id: Option<String>,
+    ) -> Option<Arc<SetupAttempt>> {
+        use dashmap::mapref::entry::Entry;
+        let _routing = self.routing_lock.lock();
+        if self.active.contains_key(&session_id) || self.finished_sip.contains(&session_id) {
+            return None;
+        }
+        match self.setups.entry(session_id.clone()) {
+            Entry::Occupied(_) => None,
+            Entry::Vacant(entry) => {
+                let attempt = SetupAttempt::new(session_id, correlation_id);
+                if self.early_sip_ends.take(&attempt.session_id) {
+                    attempt.state.lock().cancelled = true;
+                    attempt.signal_cancel();
+                }
+                entry.insert(Arc::clone(&attempt));
+                Some(attempt)
+            }
+        }
+    }
+
+    fn bind_connect(&self, attempt: &Arc<SetupAttempt>, conn: ConnectionId) -> bool {
+        let _routing = self.routing_lock.lock();
+        let mut state = attempt.state.lock();
+        if state.cancelled || state.cleanup_claimed {
+            return false;
+        }
+        state.connect_conn = Some(conn.clone());
+        self.by_connect
+            .insert(conn.clone(), attempt.session_id.clone());
+        if self.early_connect_ends.take(&conn) {
+            state.cancelled = true;
+            attempt.signal_cancel();
+            return false;
+        }
+        true
+    }
+
+    fn promote(&self, attempt: &Arc<SetupAttempt>, active: T) -> std::result::Result<(), T> {
+        use dashmap::mapref::entry::Entry;
+        let _routing = self.routing_lock.lock();
+        let mut state = attempt.state.lock();
+        if state.cancelled || state.cleanup_claimed {
+            return Err(active);
+        }
+        match self.active.entry(attempt.session_id.clone()) {
+            Entry::Occupied(_) => return Err(active),
+            Entry::Vacant(entry) => {
+                entry.insert(active);
+            }
+        }
+        state.promoted = true;
+        drop(state);
+        self.setups.remove(&attempt.session_id);
+        Ok(())
+    }
+
+    fn claim_sip(&self, session_id: &SipSessionId) -> ContactClaim<T> {
+        let attempt = {
+            let _routing = self.routing_lock.lock();
+            self.setups
+                .get(session_id)
+                .map(|entry| Arc::clone(entry.value()))
+        };
+        if let Some(attempt) = attempt {
+            let mut state = attempt.state.lock();
+            if state.promoted {
+                drop(state);
+                return self.claim_active_or_early(session_id);
+            }
+            if state.cleanup_claimed {
+                return ContactClaim::None;
+            }
+            state.cancelled = true;
+            state.cleanup_claimed = true;
+            let connect_conn = state.connect_conn.clone();
+            drop(state);
+            attempt.signal_cancel();
+            return ContactClaim::Setup {
+                attempt,
+                connect_conn,
+            };
+        }
+        self.claim_active_or_early(session_id)
+    }
+
+    fn claim_active_or_early(&self, session_id: &SipSessionId) -> ContactClaim<T> {
+        let _routing = self.routing_lock.lock();
+        if let Some((_, active)) = self.active.remove(session_id) {
+            // Mark finished while holding the same lock that register uses,
+            // before cleanup performs any await.
+            self.finished_sip.insert(session_id.clone());
+            ContactClaim::Active(active)
+        } else if self.finished_sip.contains(session_id) {
+            ContactClaim::None
+        } else {
+            self.early_sip_ends.insert(session_id.clone());
+            ContactClaim::EarlySipEnd
+        }
+    }
+
+    fn claim_connect(&self, conn: &ConnectionId) -> ContactClaim<T> {
+        let session_id = {
+            let _routing = self.routing_lock.lock();
+            let Some(session_id) = self.by_connect.get(conn).map(|entry| entry.value().clone())
+            else {
+                if self.finished_connect.contains(conn) {
+                    return ContactClaim::None;
+                }
+                self.early_connect_ends.insert(conn.clone());
+                return ContactClaim::EarlyConnectEnd;
+            };
+            session_id
+        };
+        self.claim_sip(&session_id)
+    }
+
+    fn finish(&self, attempt: &SetupAttempt, conn: Option<&ConnectionId>) {
+        self.setups.remove(&attempt.session_id);
+        self.early_sip_ends.take(&attempt.session_id);
+        self.finished_sip.insert(attempt.session_id.clone());
+        if let Some(conn) = conn {
+            let _routing = self.routing_lock.lock();
+            self.by_connect.remove(conn);
+            self.early_connect_ends.take(conn);
+            self.finished_connect.insert(conn.clone());
+        }
+    }
+
+    #[cfg(test)]
+    fn live_is_empty(&self) -> bool {
+        self.setups.is_empty()
+            && self.active.is_empty()
+            && self.by_connect.is_empty()
+            && self.early_sip_ends.len() == 0
+            && self.early_connect_ends.len() == 0
+    }
+}
+
+#[async_trait]
+trait EstablishedConnectionCleanup: Send + Sync {
+    async fn end_established(&self, connection_id: ConnectionId);
+}
+
+#[async_trait]
+impl EstablishedConnectionCleanup for AmazonConnectAdapter {
+    async fn end_established(&self, connection_id: ConnectionId) {
+        if let Err(error) = self.end(connection_id, EndReason::Normal).await {
+            warn!(%error, "failed to end Connect connection completed after cancellation");
+        }
+    }
+}
+
+/// Owns the establishment task independently of the caller future. If the
+/// caller is cancelled or dropped, `Drop` installs a consumer that waits for
+/// setup and immediately ends any connection it returns.
+struct EstablishmentOwner {
+    task: Option<tokio::task::JoinHandle<Result<ConnectionId>>>,
+    cleanup: Arc<dyn EstablishedConnectionCleanup>,
+}
+
+impl EstablishmentOwner {
+    fn new(
+        task: tokio::task::JoinHandle<Result<ConnectionId>>,
+        cleanup: Arc<dyn EstablishedConnectionCleanup>,
+    ) -> Self {
+        Self {
+            task: Some(task),
+            cleanup,
+        }
+    }
+
+    async fn wait(&mut self) -> Result<ConnectionId> {
+        let result = match self.task.as_mut() {
+            Some(task) => task
+                .await
+                .map_err(|error| ConnectError::Signaling(format!("Connect setup task: {error}")))?,
+            None => {
+                return Err(ConnectError::Signaling(
+                    "Connect setup task was already consumed".into(),
+                ))
+            }
+        };
+        self.task.take();
+        result
+    }
+}
+
+impl Drop for EstablishmentOwner {
+    fn drop(&mut self) {
+        let Some(task) = self.task.take() else {
+            return;
+        };
+        let cleanup = Arc::clone(&self.cleanup);
+        tokio::spawn(async move {
+            if let Ok(Ok(connection_id)) = task.await {
+                cleanup.end_established(connection_id).await;
+            }
+        });
+    }
+}
+
+#[async_trait]
+trait ScreenPopCleanupActions: Send + Sync {
+    async fn hangup_sip(&self, session_id: &SipSessionId) -> std::result::Result<(), String>;
+    async fn stop_connect(&self, connection_id: &ConnectionId) -> std::result::Result<(), String>;
+}
+
+struct RuntimeCleanupActions {
+    coordinator: Arc<UnifiedCoordinator>,
+    adapter: Arc<AmazonConnectAdapter>,
+}
+
+#[async_trait]
+impl ScreenPopCleanupActions for RuntimeCleanupActions {
+    async fn hangup_sip(&self, session_id: &SipSessionId) -> std::result::Result<(), String> {
+        match self.coordinator.hangup(session_id).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let detail = error.to_string();
+                let normalized = detail.to_ascii_lowercase();
+                if normalized.contains("already")
+                    || normalized.contains("ended")
+                    || normalized.contains("not found")
+                    || normalized.contains("unknown")
+                {
+                    Ok(())
+                } else {
+                    Err(detail)
+                }
+            }
+        }
+    }
+
+    async fn stop_connect(&self, connection_id: &ConnectionId) -> std::result::Result<(), String> {
+        self.adapter
+            .end(connection_id.clone(), EndReason::Normal)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+async fn release_resources(
+    cleanup: &dyn ScreenPopCleanupActions,
+    session_id: &SipSessionId,
+    connection_id: Option<&ConnectionId>,
+) -> std::result::Result<(), Vec<String>> {
+    let mut failures = Vec::new();
+    if let Err(error) = cleanup.hangup_sip(session_id).await {
+        failures.push(format!("SIP hangup: {error}"));
+    }
+    if let Some(connection_id) = connection_id {
+        if let Err(error) = cleanup.stop_connect(connection_id).await {
+            failures.push(format!("Connect stop: {error}"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures)
+    }
 }
 
 /// Per-route (per-tenant) counters, updated by `handle_call`/teardown.
@@ -162,10 +637,9 @@ pub struct ConnectScreenPopServer {
     /// Authoritative map of live bridges, keyed by SIP session. Removal from
     /// this map is the single teardown "claim" so the two directions
     /// (SIP-ended, Connect-ended) never double-tear-down.
-    active: Arc<DashMap<SipSessionId, ActiveContact>>,
-    /// Reverse index: Connect connection → SIP session, so an adapter `Ended`
-    /// event can find the SIP leg to hang up.
-    by_connect: Arc<DashMap<ConnectionId, SipSessionId>>,
+    registry: Arc<ContactRegistry<ActiveContact>>,
+    lifecycle_tx: broadcast::Sender<ScreenPopLifecycleEvent>,
+    cleanup: Arc<dyn ScreenPopCleanupActions>,
 }
 
 impl ConnectScreenPopServer {
@@ -176,6 +650,11 @@ impl ConnectScreenPopServer {
             .await
             .map_err(|e| ConnectError::Signaling(format!("SIP coordinator: {e}")))?;
         let adapter = AmazonConnectAdapter::new(config.connect, config.starter);
+        let cleanup: Arc<dyn ScreenPopCleanupActions> = Arc::new(RuntimeCleanupActions {
+            coordinator: Arc::clone(&coordinator),
+            adapter: Arc::clone(&adapter),
+        });
+        let (lifecycle_tx, _) = broadcast::channel(256);
 
         Ok(Arc::new(Self {
             coordinator,
@@ -183,14 +662,36 @@ impl ConnectScreenPopServer {
             mapping,
             router: config.router,
             route_stats: DashMap::new(),
-            active: Arc::new(DashMap::new()),
-            by_connect: Arc::new(DashMap::new()),
+            registry: Arc::new(ContactRegistry::default()),
+            lifecycle_tx,
+            cleanup,
         }))
     }
 
     /// The underlying Connect adapter (e.g. to read metrics).
     pub fn adapter(&self) -> &Arc<AmazonConnectAdapter> {
         &self.adapter
+    }
+
+    /// Subscribe to sanitized lifecycle events. Authentication and tenant
+    /// authorization belong to the caller exposing these diagnostics.
+    pub fn subscribe_lifecycle(&self) -> broadcast::Receiver<ScreenPopLifecycleEvent> {
+        self.lifecycle_tx.subscribe()
+    }
+
+    fn emit_lifecycle(&self, attempt: &SetupAttempt, stage: ScreenPopLifecycleStage) {
+        if !attempt.transition(stage) {
+            return;
+        }
+        let _ = self.lifecycle_tx.send(ScreenPopLifecycleEvent {
+            stage,
+            correlation_id: attempt.correlation_id.clone(),
+            occurred_at: chrono::Utc::now(),
+        });
+    }
+
+    fn emit_terminal_once(&self, attempt: &SetupAttempt, stage: ScreenPopLifecycleStage) {
+        self.emit_lifecycle(attempt, stage);
     }
 
     /// Clone the source graph for an active screen-pop call. This is the
@@ -201,7 +702,8 @@ impl ConnectScreenPopServer {
         call_id: &str,
         leg: ScreenPopMediaLeg,
     ) -> Option<rvoip_core::media_graph::MediaGraphHandle> {
-        self.active
+        self.registry
+            .active
             .iter()
             .find(|entry| entry.key().to_string() == call_id)
             .map(|entry| match leg {
@@ -211,7 +713,8 @@ impl ConnectScreenPopServer {
     }
 
     pub fn active_call_ids(&self) -> Vec<String> {
-        self.active
+        self.registry
+            .active
             .iter()
             .map(|entry| entry.key().to_string())
             .collect()
@@ -289,6 +792,14 @@ impl ConnectScreenPopServer {
     /// configured router can divert the call to a per-tenant Connect target
     /// or reject it outright (e.g. `404` for an unknown tenant).
     async fn handle_call(self: &Arc<Self>, call: IncomingCall) -> Result<()> {
+        let session_id = call.call_id.clone();
+        let correlation_id = correlation_id_from_headers(&extract_headers(&call));
+        let Some(setup) = self.registry.register(session_id.clone(), correlation_id) else {
+            call.reject(482, "Call Already Exists");
+            return Ok(());
+        };
+        self.emit_lifecycle(&setup, ScreenPopLifecycleStage::SipInviteReceived);
+
         // 0. Per-call routing decision (multi-tenant hook).
         let route = match &self.router {
             Some(router) => match router(&call) {
@@ -301,6 +812,10 @@ impl ConnectScreenPopServer {
                         "router rejected inbound SIP call"
                     );
                     call.reject(status, &reason);
+                    self.emit_lifecycle(&setup, ScreenPopLifecycleStage::TeardownStarted);
+                    setup.mark_cleanup_attempt_complete();
+                    self.emit_terminal_once(&setup, ScreenPopLifecycleStage::Terminated);
+                    self.registry.finish(&setup, None);
                     return Ok(());
                 }
             },
@@ -308,13 +823,27 @@ impl ConnectScreenPopServer {
         };
 
         let stats = route.as_ref().map(|r| self.stats_for(&r.label));
-        let result = self.bridge_call(call, route).await;
+        let result = self.bridge_call(call, route, Arc::clone(&setup)).await;
+        let cancelled = matches!(result, Err(ConnectError::Cancelled));
         if result.is_err() {
-            if let Some(stats) = stats {
-                stats.failures.fetch_add(1, Ordering::Relaxed);
+            if !cancelled {
+                if let Some(stats) = stats {
+                    stats.failures.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            if let ContactClaim::Setup {
+                attempt,
+                connect_conn,
+            } = self.registry.claim_sip(&session_id)
+            {
+                self.cleanup_setup(attempt, connect_conn, !cancelled).await;
             }
         }
-        result
+        if cancelled {
+            Ok(())
+        } else {
+            result
+        }
     }
 
     /// Translate headers → attributes, answer SIP, originate Connect, bridge.
@@ -322,6 +851,7 @@ impl ConnectScreenPopServer {
         self: &Arc<Self>,
         call: IncomingCall,
         route: Option<ContactRoute>,
+        setup: Arc<SetupAttempt>,
     ) -> Result<()> {
         let session_id = call.call_id.clone();
         let display_name = Some(call.from.clone());
@@ -344,6 +874,7 @@ impl ConnectScreenPopServer {
             .and_then(|r| r.attribute_mapping.as_ref())
             .unwrap_or(&self.mapping);
         let mapped = mapping.translate(headers);
+        self.emit_lifecycle(&setup, ScreenPopLifecycleStage::AttributesMapped);
         tracing::debug!(
             target: "rvoip_amazon_connect::sip_headers",
             attributes = ?mapped.attributes,
@@ -358,21 +889,26 @@ impl ConnectScreenPopServer {
         );
 
         // 2. Answer the SIP leg.
-        let handle = call
-            .accept()
-            .await
-            .map_err(|e| ConnectError::Signaling(format!("SIP accept: {e}")))?;
+        let handle = tokio::select! {
+            biased;
+            _ = setup.cancelled() => return Err(ConnectError::Cancelled),
+            accepted = call.accept() => accepted
+                .map_err(|e| ConnectError::Signaling(format!("SIP accept: {e}")))?,
+        };
         let sip_session: SipSessionId = handle.id().clone();
 
         // 3. Build the SIP media stream (inbound G.711).
-        let sip_stream = rvoip_sip::media_stream::SipMediaStream::new(
-            Arc::clone(&self.coordinator),
-            sip_session.clone(),
-            rvoip_core::connection::Direction::Inbound,
-        )
-        .await
-        .map_err(|e| ConnectError::Signaling(format!("SIP media stream: {e}")))?
-            as Arc<dyn MediaStream>;
+        let sip_stream = tokio::select! {
+            biased;
+            _ = setup.cancelled() => return Err(ConnectError::Cancelled),
+            stream = rvoip_sip::media_stream::SipMediaStream::new(
+                Arc::clone(&self.coordinator),
+                sip_session.clone(),
+                rvoip_core::connection::Direction::Inbound,
+            ) => stream
+                .map_err(|e| ConnectError::Signaling(format!("SIP media stream: {e}")))?
+                    as Arc<dyn MediaStream>,
+        };
 
         // 4. Place the inbound WebRTC contact into Amazon Connect, honouring
         //    the route's per-call instance/flow override.
@@ -384,10 +920,52 @@ impl ConnectScreenPopServer {
                 default_display_name: r.default_display_name.clone(),
             })
             .unwrap_or_default();
-        let connect_conn = self
-            .adapter
-            .originate_contact_to(target, mapped.attributes, display_name, None)
-            .await?;
+        let weak_server = Arc::downgrade(self);
+        let setup_for_observer = Arc::clone(&setup);
+        let observer: ContactSetupObserver = Arc::new(move |stage| {
+            if stage == ContactSetupStage::ContactStarted {
+                if let Some(server) = weak_server.upgrade() {
+                    server.emit_lifecycle(
+                        &setup_for_observer,
+                        ScreenPopLifecycleStage::ContactStarted,
+                    );
+                }
+            }
+        });
+        let adapter = Arc::clone(&self.adapter);
+        let cleanup: Arc<dyn EstablishedConnectionCleanup> = adapter.clone();
+        let task = tokio::spawn(async move {
+            adapter
+                .originate_contact_to_observed(
+                    target,
+                    mapped.attributes,
+                    display_name,
+                    None,
+                    Some(observer),
+                )
+                .await
+        });
+        let mut establishment = EstablishmentOwner::new(task, cleanup);
+        let connect_conn = tokio::select! {
+            biased;
+            _ = setup.cancelled() => {
+                match establishment.wait().await {
+                    Ok(connection_id) => {
+                        self.adapter
+                            .end(connection_id, EndReason::Normal)
+                            .await
+                            .map_err(|error| ConnectError::Control(error.to_string()))?;
+                        return Err(ConnectError::Cancelled);
+                    }
+                    Err(error) => return Err(error),
+                }
+            },
+            connected = establishment.wait() => connected?,
+        };
+        if !self.registry.bind_connect(&setup, connect_conn.clone()) {
+            let _ = self.adapter.end(connect_conn, EndReason::Normal).await;
+            return Err(ConnectError::Cancelled);
+        }
         if let Some(label) = &route_label {
             self.stats_for(label)
                 .contacts_started
@@ -407,18 +985,20 @@ impl ConnectScreenPopServer {
         let bridge = bridge_streams(sip_stream, connect_stream)?;
         let sip_graph = bridge.a_graph();
         let connect_graph = bridge.b_graph();
-        self.by_connect
-            .insert(connect_conn.clone(), session_id.clone());
-        self.active.insert(
-            session_id.clone(),
-            ActiveContact {
-                _bridge: bridge,
-                sip_graph,
-                connect_graph,
-                connect_conn,
-                route_label: route_label.clone(),
-            },
-        );
+        let active = ActiveContact {
+            _bridge: bridge,
+            sip_graph,
+            connect_graph,
+            connect_conn: connect_conn.clone(),
+            route_label: route_label.clone(),
+            setup: Arc::clone(&setup),
+        };
+        if let Err(active) = self.registry.promote(&setup, active) {
+            drop(active);
+            let _ = self.adapter.end(connect_conn, EndReason::Normal).await;
+            return Err(ConnectError::Cancelled);
+        }
+        self.emit_lifecycle(&setup, ScreenPopLifecycleStage::MediaConnected);
         if let Some(label) = &route_label {
             self.stats_for(label)
                 .active_sessions
@@ -446,13 +1026,14 @@ impl ConnectScreenPopServer {
         let me = Arc::clone(self);
         tokio::spawn(async move {
             while let Some(event) = events.next().await {
-                let call_id = match event {
-                    SipEvent::CallEnded { call_id, .. }
-                    | SipEvent::CallFailed { call_id, .. }
-                    | SipEvent::CallCancelled { call_id } => call_id,
+                let (call_id, failed) = match event {
+                    SipEvent::CallEnded { call_id, .. } | SipEvent::CallCancelled { call_id } => {
+                        (call_id, false)
+                    }
+                    SipEvent::CallFailed { call_id, .. } => (call_id, true),
                     _ => continue,
                 };
-                me.on_sip_ended(&call_id).await;
+                me.on_sip_ended_with_status(&call_id, failed).await;
             }
         });
         Ok(())
@@ -465,12 +1046,12 @@ impl ConnectScreenPopServer {
         let me = Arc::clone(self);
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
-                let connect_conn = match event {
-                    AdapterEvent::Ended { connection_id, .. }
-                    | AdapterEvent::Failed { connection_id, .. } => connection_id,
+                let (connect_conn, failed) = match event {
+                    AdapterEvent::Ended { connection_id, .. } => (connection_id, false),
+                    AdapterEvent::Failed { connection_id, .. } => (connection_id, true),
                     _ => continue,
                 };
-                me.on_connect_ended(&connect_conn).await;
+                me.on_connect_ended(&connect_conn, failed).await;
             }
         });
     }
@@ -478,37 +1059,95 @@ impl ConnectScreenPopServer {
     /// SIP leg ended → LEAVE the Chime meeting. Claims teardown by removing the
     /// `active` entry (so the reverse watcher no-ops).
     async fn on_sip_ended(&self, sip_session: &SipSessionId) {
-        if let Some((_, active)) = self.active.remove(sip_session) {
-            self.by_connect.remove(&active.connect_conn);
-            self.release_route_slot(&active);
-            info!(session = %sip_session, "SIP leg ended — leaving Amazon Connect meeting");
-            let _ = self
-                .adapter
-                .end(active.connect_conn, EndReason::Normal)
-                .await;
-            // Dropping `active` aborts the bridge pumps.
+        self.on_sip_ended_with_status(sip_session, false).await;
+    }
+
+    async fn on_sip_ended_with_status(&self, sip_session: &SipSessionId, failed: bool) {
+        match self.registry.claim_sip(sip_session) {
+            ContactClaim::Setup {
+                attempt,
+                connect_conn,
+            } => self.cleanup_setup(attempt, connect_conn, failed).await,
+            ContactClaim::Active(active) => {
+                info!(session = %sip_session, "SIP leg ended — leaving Amazon Connect meeting");
+                self.cleanup_active(active, failed).await;
+            }
+            ContactClaim::EarlySipEnd | ContactClaim::EarlyConnectEnd | ContactClaim::None => {}
         }
     }
 
     /// Connect/agent leg ended → BYE the SIP carrier. Resolves the SIP session
     /// from the reverse index, then claims teardown via the same `active`
     /// removal so the two directions can't double-fire.
-    async fn on_connect_ended(&self, connect_conn: &ConnectionId) {
-        let Some(sip_session) = self.by_connect.get(connect_conn).map(|e| e.value().clone()) else {
-            return;
-        };
-        if let Some((_, active)) = self.active.remove(&sip_session) {
-            self.by_connect.remove(&active.connect_conn);
-            self.release_route_slot(&active);
-            info!(session = %sip_session, "Amazon Connect leg ended — hanging up SIP carrier (BYE)");
-            // BYE the carrier.
-            let _ = self.coordinator.hangup(&sip_session).await;
-            // Release the adapter route + close the (already-ended) Chime peer.
-            let _ = self
-                .adapter
-                .end(active.connect_conn, EndReason::Normal)
-                .await;
+    async fn on_connect_ended(&self, connect_conn: &ConnectionId, failed: bool) {
+        match self.registry.claim_connect(connect_conn) {
+            ContactClaim::Setup {
+                attempt,
+                connect_conn,
+            } => self.cleanup_setup(attempt, connect_conn, failed).await,
+            ContactClaim::Active(active) => {
+                info!(session = %active.setup.session_id, "Amazon Connect leg ended — hanging up SIP carrier (BYE)");
+                self.cleanup_active(active, failed).await;
+            }
+            ContactClaim::EarlySipEnd | ContactClaim::EarlyConnectEnd | ContactClaim::None => {}
         }
+    }
+
+    async fn cleanup_setup(
+        &self,
+        attempt: Arc<SetupAttempt>,
+        connect_conn: Option<ConnectionId>,
+        failed: bool,
+    ) {
+        self.emit_lifecycle(&attempt, ScreenPopLifecycleStage::TeardownStarted);
+        // Both operations are intentionally idempotent. If cancellation raced
+        // before the adapter returned a connection id, its started-contact
+        // guard owns StopContact while this still releases the SIP resource.
+        let cleanup_result = release_resources(
+            self.cleanup.as_ref(),
+            &attempt.session_id,
+            connect_conn.as_ref(),
+        )
+        .await;
+        if let Err(errors) = &cleanup_result {
+            warn!(?errors, session = %attempt.session_id, "screen-pop setup cleanup incomplete");
+        }
+        self.registry.finish(&attempt, connect_conn.as_ref());
+        attempt.mark_cleanup_attempt_complete();
+        self.emit_terminal_once(
+            &attempt,
+            if failed || cleanup_result.is_err() {
+                ScreenPopLifecycleStage::Failed
+            } else {
+                ScreenPopLifecycleStage::Terminated
+            },
+        );
+    }
+
+    async fn cleanup_active(&self, active: ActiveContact, failed: bool) {
+        self.emit_lifecycle(&active.setup, ScreenPopLifecycleStage::TeardownStarted);
+        self.release_route_slot(&active);
+        let cleanup_result = release_resources(
+            self.cleanup.as_ref(),
+            &active.setup.session_id,
+            Some(&active.connect_conn),
+        )
+        .await;
+        if let Err(errors) = &cleanup_result {
+            warn!(?errors, session = %active.setup.session_id, "active screen-pop cleanup incomplete");
+        }
+        self.registry
+            .finish(&active.setup, Some(&active.connect_conn));
+        active.setup.mark_cleanup_attempt_complete();
+        self.emit_terminal_once(
+            &active.setup,
+            if failed || cleanup_result.is_err() {
+                ScreenPopLifecycleStage::Failed
+            } else {
+                ScreenPopLifecycleStage::Terminated
+            },
+        );
+        // Dropping active stops both graph directions.
     }
 
     /// Tear down a bridged contact by SIP session (public manual teardown).
@@ -520,12 +1159,20 @@ impl ConnectScreenPopServer {
     /// [`Self::active_call_ids`]. Returns `false` when the call is no longer
     /// active, which lets HTTP control planes make hangup idempotent.
     pub async fn end_by_call_id(&self, call_id: &str) -> bool {
-        let Some(session) = self
-            .active
+        let session = self
+            .registry
+            .setups
             .iter()
             .find(|entry| entry.key().to_string() == call_id)
             .map(|entry| entry.key().clone())
-        else {
+            .or_else(|| {
+                self.registry
+                    .active
+                    .iter()
+                    .find(|entry| entry.key().to_string() == call_id)
+                    .map(|entry| entry.key().clone())
+            });
+        let Some(session) = session else {
             return false;
         };
         self.on_sip_ended(&session).await;
@@ -580,7 +1227,8 @@ pub fn uri_user_part(uri: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::uri_user_part;
+    use super::*;
+    use tokio::sync::Barrier;
 
     #[test]
     fn parses_plain_and_bracketed_uris() {
@@ -605,6 +1253,363 @@ mod tests {
         assert_eq!(uri_user_part("sip:@example.com"), None);
         assert_eq!(uri_user_part(""), None);
         assert_eq!(uri_user_part("tel:+14155550100"), None);
+    }
+
+    #[test]
+    fn correlation_id_preserves_safe_phone_fingerprint() {
+        assert_eq!(
+            sanitize_correlation_id("  +14155550199  "),
+            Some("+14155550199".into())
+        );
+        assert_eq!(
+            sanitize_correlation_id("corr@example.com"),
+            Some("corr@example.com".into())
+        );
+        assert_eq!(sanitize_correlation_id("unsafe\r\nvalue"), None);
+        assert_eq!(sanitize_correlation_id(&"x".repeat(129)), None);
+    }
+
+    #[tokio::test]
+    async fn connect_end_between_reverse_bind_and_active_promotion_cancels_setup() {
+        let registry = Arc::new(ContactRegistry::<()>::default());
+        let session = SipSessionId::from_string("race-session");
+        let attempt = registry
+            .register(session.clone(), Some("corr-race".into()))
+            .expect("register setup");
+        let conn = ConnectionId::new();
+        let reverse_bound = Arc::new(Barrier::new(2));
+        let allow_promotion = Arc::new(Barrier::new(2));
+
+        let promoter = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            let attempt = Arc::clone(&attempt);
+            let conn = conn.clone();
+            let reverse_bound = Arc::clone(&reverse_bound);
+            let allow_promotion = Arc::clone(&allow_promotion);
+            async move {
+                assert!(registry.bind_connect(&attempt, conn));
+                reverse_bound.wait().await;
+                allow_promotion.wait().await;
+                registry.promote(&attempt, ())
+            }
+        });
+
+        reverse_bound.wait().await;
+        match registry.claim_connect(&conn) {
+            ContactClaim::Setup {
+                attempt: claimed,
+                connect_conn,
+            } => {
+                assert!(Arc::ptr_eq(&attempt, &claimed));
+                assert_eq!(connect_conn.as_ref(), Some(&conn));
+            }
+            _ => panic!("Connect end must claim the in-progress setup"),
+        }
+        allow_promotion.wait().await;
+        assert!(promoter.await.expect("promoter task").is_err());
+        assert!(*attempt.cancel_tx.borrow());
+        assert!(matches!(registry.claim_sip(&session), ContactClaim::None));
+        registry.finish(&attempt, Some(&conn));
+        assert!(matches!(registry.claim_connect(&conn), ContactClaim::None));
+        assert!(registry.live_is_empty());
+    }
+
+    #[tokio::test]
+    async fn connect_end_before_reverse_bind_is_replayed_at_bind() {
+        let registry = ContactRegistry::<()>::default();
+        let session = SipSessionId::from_string("early-end-session");
+        let attempt = registry
+            .register(session, Some("corr-early".into()))
+            .expect("register setup");
+        let conn = ConnectionId::new();
+
+        assert!(matches!(
+            registry.claim_connect(&conn),
+            ContactClaim::EarlyConnectEnd
+        ));
+        assert!(!registry.bind_connect(&attempt, conn.clone()));
+        assert!(*attempt.cancel_tx.borrow());
+        assert!(registry.promote(&attempt, ()).is_err());
+        assert!(matches!(
+            registry.claim_sip(&attempt.session_id),
+            ContactClaim::Setup { .. }
+        ));
+        registry.finish(&attempt, Some(&conn));
+        assert!(matches!(registry.claim_connect(&conn), ContactClaim::None));
+        assert!(registry.live_is_empty());
+    }
+
+    #[test]
+    fn sip_cancel_arriving_before_setup_registration_is_replayed() {
+        let registry = ContactRegistry::<()>::default();
+        let session = SipSessionId::from_string("pre-register-cancel");
+        assert!(matches!(
+            registry.claim_sip(&session),
+            ContactClaim::EarlySipEnd
+        ));
+
+        let attempt = registry
+            .register(session, Some("corr-cancel".into()))
+            .expect("register setup");
+        assert!(*attempt.cancel_tx.borrow());
+        assert!(registry.promote(&attempt, ()).is_err());
+        assert!(matches!(
+            registry.claim_sip(&attempt.session_id),
+            ContactClaim::Setup { .. }
+        ));
+        registry.finish(&attempt, None);
+        assert!(registry.live_is_empty());
+    }
+
+    #[test]
+    fn duplicate_session_is_rejected_after_promotion_without_replacement() {
+        let registry = ContactRegistry::<()>::default();
+        let session = SipSessionId::from_string("duplicate-active");
+        let attempt = registry
+            .register(session.clone(), Some("corr-active".into()))
+            .expect("register setup");
+        let conn = ConnectionId::new();
+        assert!(registry.bind_connect(&attempt, conn.clone()));
+        assert!(registry.promote(&attempt, ()).is_ok());
+
+        assert!(registry.register(session.clone(), None).is_none());
+        assert!(matches!(
+            registry.claim_sip(&session),
+            ContactClaim::Active(())
+        ));
+        registry.finish(&attempt, Some(&conn));
+        assert!(registry.register(session, None).is_none());
+        assert!(matches!(
+            registry.claim_sip(&attempt.session_id),
+            ContactClaim::None
+        ));
+        assert!(matches!(registry.claim_connect(&conn), ContactClaim::None));
+        assert!(registry.live_is_empty());
+    }
+
+    #[test]
+    fn unmatched_event_tombstones_are_bounded() {
+        let registry = ContactRegistry::<()>::default();
+        for index in 0..(EVENT_TOMBSTONE_CAPACITY + 32) {
+            let session = SipSessionId::from_string(format!("unmatched-{index}"));
+            assert!(matches!(
+                registry.claim_sip(&session),
+                ContactClaim::EarlySipEnd
+            ));
+        }
+        assert!(registry.early_sip_ends.len() <= EVENT_TOMBSTONE_CAPACITY);
+    }
+
+    #[derive(Default)]
+    struct MockEstablishedCleanup {
+        ended: tokio::sync::Mutex<Vec<ConnectionId>>,
+    }
+
+    #[async_trait]
+    impl EstablishedConnectionCleanup for MockEstablishedCleanup {
+        async fn end_established(&self, connection_id: ConnectionId) {
+            self.ended.lock().await.push(connection_id);
+        }
+    }
+
+    #[tokio::test]
+    async fn caller_cancel_after_route_owned_barrier_consumes_and_ends_late_success() {
+        let route_owned = Arc::new(Barrier::new(2));
+        let allow_return = Arc::new(Barrier::new(2));
+        let conn = ConnectionId::new();
+        let task = tokio::spawn({
+            let route_owned = Arc::clone(&route_owned);
+            let allow_return = Arc::clone(&allow_return);
+            let conn = conn.clone();
+            async move {
+                // Exact test barrier corresponding to ContactSetupStage::RouteOwned:
+                // the adapter route exists and its cleanup guard is disarmed.
+                route_owned.wait().await;
+                allow_return.wait().await;
+                Ok(conn)
+            }
+        });
+        let cleanup = Arc::new(MockEstablishedCleanup::default());
+        let cleanup_trait: Arc<dyn EstablishedConnectionCleanup> = cleanup.clone();
+        let owner = EstablishmentOwner::new(task, cleanup_trait);
+
+        route_owned.wait().await;
+        drop(owner);
+        allow_return.wait().await;
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if cleanup.ended.lock().await.as_slice() == [conn.clone()] {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("late successful connection was ended");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_rejects_contact_started_after_teardown_wins_race() {
+        let attempt = SetupAttempt::new(
+            SipSessionId::from_string("lifecycle-race"),
+            Some("corr-life".into()),
+        );
+        assert!(attempt.transition(ScreenPopLifecycleStage::SipInviteReceived));
+        let teardown_entered = Arc::new(Barrier::new(2));
+        let allow_late_start = Arc::new(Barrier::new(2));
+        let late_start = tokio::spawn({
+            let attempt = Arc::clone(&attempt);
+            let teardown_entered = Arc::clone(&teardown_entered);
+            let allow_late_start = Arc::clone(&allow_late_start);
+            async move {
+                teardown_entered.wait().await;
+                allow_late_start.wait().await;
+                attempt.transition(ScreenPopLifecycleStage::ContactStarted)
+            }
+        });
+
+        assert!(attempt.transition(ScreenPopLifecycleStage::TeardownStarted));
+        teardown_entered.wait().await;
+        allow_late_start.wait().await;
+        assert!(!late_start.await.expect("late start task"));
+        assert!(!attempt.transition(ScreenPopLifecycleStage::Terminated));
+        attempt.mark_cleanup_attempt_complete();
+        assert!(attempt.transition(ScreenPopLifecycleStage::Terminated));
+    }
+
+    #[derive(Default)]
+    struct MockCleanupActions {
+        sip: SyncMutex<Vec<SipSessionId>>,
+        connect: SyncMutex<Vec<ConnectionId>>,
+        sip_failure: Option<String>,
+        connect_failure: Option<String>,
+    }
+
+    #[async_trait]
+    impl ScreenPopCleanupActions for MockCleanupActions {
+        async fn hangup_sip(&self, session_id: &SipSessionId) -> std::result::Result<(), String> {
+            self.sip.lock().push(session_id.clone());
+            self.sip_failure.clone().map_or(Ok(()), Err)
+        }
+
+        async fn stop_connect(
+            &self,
+            connection_id: &ConnectionId,
+        ) -> std::result::Result<(), String> {
+            self.connect.lock().push(connection_id.clone());
+            self.connect_failure.clone().map_or(Ok(()), Err)
+        }
+    }
+
+    #[tokio::test]
+    async fn setup_cleanup_releases_sip_and_connect_resources() {
+        let cleanup = MockCleanupActions::default();
+        let session = SipSessionId::from_string("cleanup-session");
+        let conn = ConnectionId::new();
+
+        release_resources(&cleanup, &session, Some(&conn))
+            .await
+            .expect("both resources released");
+
+        assert_eq!(cleanup.sip.lock().as_slice(), &[session]);
+        assert_eq!(cleanup.connect.lock().as_slice(), &[conn]);
+    }
+
+    struct PausingCleanupActions {
+        cleanup_started: Arc<Barrier>,
+        allow_cleanup: Arc<Barrier>,
+    }
+
+    #[async_trait]
+    impl ScreenPopCleanupActions for PausingCleanupActions {
+        async fn hangup_sip(&self, _session_id: &SipSessionId) -> std::result::Result<(), String> {
+            self.cleanup_started.wait().await;
+            self.allow_cleanup.wait().await;
+            Ok(())
+        }
+
+        async fn stop_connect(
+            &self,
+            _connection_id: &ConnectionId,
+        ) -> std::result::Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_registration_is_rejected_while_active_cleanup_is_awaiting() {
+        let registry = Arc::new(ContactRegistry::<()>::default());
+        let session = SipSessionId::from_string("cleanup-barrier");
+        let attempt = registry
+            .register(session.clone(), Some("corr-cleanup".into()))
+            .expect("register setup");
+        let conn = ConnectionId::new();
+        assert!(registry.bind_connect(&attempt, conn.clone()));
+        assert!(registry.promote(&attempt, ()).is_ok());
+        assert!(matches!(
+            registry.claim_sip(&session),
+            ContactClaim::Active(())
+        ));
+
+        let cleanup_started = Arc::new(Barrier::new(2));
+        let allow_cleanup = Arc::new(Barrier::new(2));
+        let cleanup = Arc::new(PausingCleanupActions {
+            cleanup_started: Arc::clone(&cleanup_started),
+            allow_cleanup: Arc::clone(&allow_cleanup),
+        });
+        let cleanup_task = tokio::spawn({
+            let cleanup = Arc::clone(&cleanup);
+            let session = session.clone();
+            let conn = conn.clone();
+            async move { release_resources(cleanup.as_ref(), &session, Some(&conn)).await }
+        });
+
+        cleanup_started.wait().await;
+        assert!(
+            registry.register(session.clone(), None).is_none(),
+            "tearing-down session must remain reserved during awaited cleanup"
+        );
+        allow_cleanup.wait().await;
+        cleanup_task
+            .await
+            .expect("cleanup task")
+            .expect("cleanup succeeds");
+        registry.finish(&attempt, Some(&conn));
+        assert!(registry.register(session, None).is_none());
+        assert!(registry.live_is_empty());
+    }
+
+    #[tokio::test]
+    async fn incomplete_cleanup_attempts_both_resources_and_requires_failed_terminal() {
+        let cleanup = MockCleanupActions {
+            connect_failure: Some("ownership retained".into()),
+            ..Default::default()
+        };
+        let session = SipSessionId::from_string("cleanup-failure");
+        let conn = ConnectionId::new();
+        let attempt = SetupAttempt::new(session.clone(), Some("corr-failure".into()));
+        assert!(attempt.transition(ScreenPopLifecycleStage::TeardownStarted));
+
+        let result = release_resources(&cleanup, &session, Some(&conn)).await;
+        assert!(result.is_err());
+        assert_eq!(cleanup.sip.lock().as_slice(), &[session]);
+        assert_eq!(cleanup.connect.lock().as_slice(), &[conn]);
+        attempt.mark_cleanup_attempt_complete();
+        assert!(attempt.transition(ScreenPopLifecycleStage::Failed));
+        assert!(!attempt.transition(ScreenPopLifecycleStage::Terminated));
+    }
+
+    #[test]
+    fn lifecycle_stage_serializes_to_stable_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ScreenPopLifecycleStage::SipInviteReceived).unwrap(),
+            "\"sip_invite_received\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ScreenPopLifecycleStage::MediaConnected).unwrap(),
+            "\"media_connected\""
+        );
     }
 }
 
@@ -633,4 +1638,24 @@ fn extract_headers(call: &IncomingCall) -> Vec<(String, String)> {
             (k.clone(), value)
         })
         .collect()
+}
+
+fn correlation_id_from_headers(headers: &[(String, String)]) -> Option<String> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("X-Correlation-Id"))
+        .and_then(|(_, value)| sanitize_correlation_id(value))
+}
+
+fn sanitize_correlation_id(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    if value.is_empty() || value.len() > 128 {
+        return None;
+    }
+    value
+        .bytes()
+        .all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'+' | b'@')
+        })
+        .then(|| value.to_string())
 }

@@ -13,6 +13,24 @@ use async_trait::async_trait;
 
 use crate::errors::Result;
 
+#[cfg(any(feature = "aws-control", test))]
+fn is_already_ended_stop_error(detail: &str) -> bool {
+    let normalized = detail.to_ascii_lowercase();
+    normalized.contains("already ended")
+        || normalized.contains("already stopped")
+        || normalized.contains("contactnotfound")
+        || normalized.contains("resourcenotfound")
+}
+
+#[cfg(any(feature = "aws-control", test))]
+fn is_transient_stop_error(detail: &str) -> bool {
+    let normalized = detail.to_ascii_lowercase();
+    normalized.contains("throttl")
+        || normalized.contains("timeout")
+        || normalized.contains("serviceunavailable")
+        || normalized.contains("internalfailure")
+}
+
 /// A request to start an inbound WebRTC contact (maps to `StartWebRTCContact`).
 #[derive(Clone, Debug)]
 pub struct StartContactRequest {
@@ -31,6 +49,15 @@ pub struct StartContactRequest {
     /// Idempotency token (maps to `ClientToken`). When `None` the SDK
     /// generates one.
     pub client_token: Option<String>,
+}
+
+/// Idempotent request to terminate a previously started Connect contact.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StopContactRequest {
+    /// Amazon Connect instance that owns the contact.
+    pub instance_id: String,
+    /// Contact id returned by `StartWebRTCContact`.
+    pub contact_id: String,
 }
 
 /// The subset of `StartWebRTCContact`'s `ConnectionData` the media plane needs
@@ -78,6 +105,18 @@ pub trait ConnectContactStarter: Send + Sync {
     /// Place an inbound WebRTC contact and return the data needed to join the
     /// Chime meeting.
     async fn start_webrtc_contact(&self, request: StartContactRequest) -> Result<ConnectionData>;
+
+    /// Terminate a contact started by this control plane. Implementations must
+    /// be idempotent: stopping an already-ended contact is success.
+    ///
+    /// The default preserves source compatibility for existing custom
+    /// starters, but reports the missing capability rather than silently
+    /// leaking a started contact.
+    async fn stop_contact(&self, _request: StopContactRequest) -> Result<()> {
+        Err(crate::errors::ConnectError::Control(
+            "contact termination is not implemented by this starter".into(),
+        ))
+    }
 }
 
 #[cfg(feature = "aws-control")]
@@ -164,6 +203,29 @@ mod aws {
 
             map_response(out)
         }
+
+        async fn stop_contact(&self, request: StopContactRequest) -> Result<()> {
+            // Connect's StopContact is effectively idempotent for our owner
+            // model: the adapter removes a route before invoking it, so this
+            // is issued at most once per local contact. AWS-side already-ended
+            // contacts are accepted by StopContact.
+            match self
+                .stop_contact(request.contact_id, request.instance_id)
+                .await
+            {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let detail = error.to_string();
+                    if is_already_ended_stop_error(&detail) {
+                        Ok(())
+                    } else if is_transient_stop_error(&detail) {
+                        Err(ConnectError::TransientControl(detail))
+                    } else {
+                        Err(error)
+                    }
+                }
+            }
+        }
     }
 
     fn map_response(
@@ -216,3 +278,18 @@ mod aws {
 
 #[cfg(feature = "aws-control")]
 pub use aws::AwsConnectStarter;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stop_error_classification_is_idempotent_and_retry_bounded_input() {
+        assert!(is_already_ended_stop_error(
+            "ResourceNotFoundException: contact already ended"
+        ));
+        assert!(is_transient_stop_error("ThrottlingException"));
+        assert!(is_transient_stop_error("request timeout"));
+        assert!(!is_transient_stop_error("AccessDeniedException"));
+    }
+}

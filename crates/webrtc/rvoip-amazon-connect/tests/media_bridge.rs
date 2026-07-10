@@ -15,6 +15,7 @@ use rvoip_core::capability::CodecInfo;
 use rvoip_core::connection::Direction;
 use rvoip_core::ids::StreamId;
 use rvoip_core::stream::{MediaFrame, MediaStream, QualitySnapshot, StreamKind};
+use rvoip_media_core::codec::audio::G711Codec;
 use tokio::sync::mpsc;
 
 struct MockMediaStream {
@@ -46,6 +47,13 @@ impl MockMediaStream {
     }
 
     async fn inject(&self, payload: Bytes, payload_type: u8, timestamp_rtp: u32) {
+        assert!(
+            self.try_inject(payload, payload_type, timestamp_rtp).await,
+            "bridge source remains open"
+        );
+    }
+
+    async fn try_inject(&self, payload: Bytes, payload_type: u8, timestamp_rtp: u32) -> bool {
         self.inbound_tx
             .send(MediaFrame {
                 stream_id: self.id.clone(),
@@ -56,7 +64,7 @@ impl MockMediaStream {
                 payload_type: Some(payload_type),
             })
             .await
-            .expect("bridge source remains open");
+            .is_ok()
     }
 
     fn take_output(&self) -> mpsc::Receiver<MediaFrame> {
@@ -107,7 +115,34 @@ impl MediaStream for MockMediaStream {
     }
 }
 
-async fn assert_g711_opus_round_trip(codec: &str, payload_type: u8, silence_byte: u8) {
+fn tone_samples(frame_count: usize) -> Vec<i16> {
+    let sample_count = frame_count * 160;
+    (0..sample_count)
+        .map(|sample| {
+            let phase = 2.0 * std::f32::consts::PI * 440.0 * sample as f32 / 8_000.0;
+            (phase.sin() * 10_000.0) as i16
+        })
+        .collect()
+}
+
+fn rms(samples: &[i16]) -> f64 {
+    let energy = samples
+        .iter()
+        .map(|sample| f64::from(*sample).powi(2))
+        .sum::<f64>()
+        / samples.len().max(1) as f64;
+    energy.sqrt()
+}
+
+fn zero_crossings(samples: &[i16]) -> usize {
+    samples
+        .windows(2)
+        .filter(|pair| (pair[0] < 0 && pair[1] >= 0) || (pair[0] >= 0 && pair[1] < 0))
+        .count()
+}
+
+async fn assert_g711_opus_round_trip(codec: &str, payload_type: u8) {
+    const FRAMES: usize = 10;
     let sip = MockMediaStream::new(codec, 8_000);
     let connect = MockMediaStream::new("opus", 48_000);
     let mut sip_output = sip.take_output();
@@ -118,30 +153,102 @@ async fn assert_g711_opus_round_trip(codec: &str, payload_type: u8, silence_byte
     )
     .expect("create SIP↔Connect bridge");
 
-    // One 20 ms G.711 frame (8 kHz × 20 ms = 160 samples).
-    sip.inject(Bytes::from(vec![silence_byte; 160]), payload_type, 1_600)
+    let tone = tone_samples(FRAMES);
+    let mut g711_codec = if payload_type == 0 {
+        G711Codec::mu_law(8_000, 1).expect("PCMU codec")
+    } else {
+        G711Codec::a_law(8_000, 1).expect("PCMA codec")
+    };
+    let mut encoded_frames = Vec::with_capacity(FRAMES);
+    for (index, samples) in tone.chunks_exact(160).enumerate() {
+        let mut encoded = vec![0; 160];
+        let written = g711_codec
+            .encode_to_buffer(samples, &mut encoded)
+            .expect("encode deterministic G.711 tone");
+        encoded.truncate(written);
+        encoded_frames.push(encoded.clone());
+        sip.inject(
+            Bytes::from(encoded),
+            payload_type,
+            8_000 + index as u32 * 160,
+        )
         .await;
-    let opus = tokio::time::timeout(Duration::from_secs(2), connect_output.recv())
-        .await
-        .expect("G.711→Opus media timeout")
-        .expect("Connect sink remains open");
-    assert_eq!(opus.payload_type, Some(111));
-    assert!(!opus.payload.is_empty(), "Opus packet must contain audio");
+    }
 
-    // Feed the production encoder's packet back through the reverse graph.
-    connect.inject(opus.payload, 111, 9_600).await;
-    let g711 = tokio::time::timeout(Duration::from_secs(2), sip_output.recv())
-        .await
-        .expect("Opus→G.711 media timeout")
-        .expect("SIP sink remains open");
-    assert_eq!(g711.payload_type, Some(payload_type));
-    assert_eq!(g711.payload.len(), 160, "one 20 ms G.711 frame");
+    let mut opus_frames = Vec::with_capacity(FRAMES);
+    for index in 0..FRAMES {
+        let opus = tokio::time::timeout(Duration::from_secs(2), connect_output.recv())
+            .await
+            .expect("G.711→Opus media timeout")
+            .expect("Connect sink remains open");
+        assert_eq!(opus.payload_type, Some(111));
+        assert!(!opus.payload.is_empty(), "Opus packet must contain audio");
+        assert_eq!(
+            opus.timestamp_rtp,
+            8_000 + index as u32 * 960,
+            "Opus clock advances 960 ticks per 20 ms"
+        );
+        opus_frames.push(opus);
+    }
 
+    // Feed production Opus packets back through the reverse graph and verify
+    // the 48 kHz clock is translated back to 8 kHz.
+    for opus in opus_frames {
+        connect.inject(opus.payload, 111, opus.timestamp_rtp).await;
+    }
+    let mut decoded = Vec::with_capacity(FRAMES * 160);
+    for index in 0..FRAMES {
+        let g711 = tokio::time::timeout(Duration::from_secs(2), sip_output.recv())
+            .await
+            .expect("Opus→G.711 media timeout")
+            .expect("SIP sink remains open");
+        assert_eq!(g711.payload_type, Some(payload_type));
+        assert_eq!(g711.payload.len(), 160, "one 20 ms G.711 frame");
+        assert_eq!(
+            g711.timestamp_rtp,
+            8_000 + index as u32 * 160,
+            "G.711 clock advances 160 ticks per 20 ms"
+        );
+        let mut pcm = vec![0_i16; 160];
+        let samples = g711_codec
+            .decode_to_buffer(&g711.payload, &mut pcm)
+            .expect("decode bridged G.711 tone");
+        decoded.extend_from_slice(&pcm[..samples]);
+    }
+
+    // Ignore two frames of codec warm-up. The remaining signal must preserve
+    // meaningful energy and the 440 Hz zero-crossing fingerprint.
+    let input = &tone[320..];
+    let output = &decoded[320..];
+    let energy_ratio = rms(output) / rms(input);
+    assert!(
+        (0.35..=1.65).contains(&energy_ratio),
+        "decoded tone energy ratio {energy_ratio:.3} outside codec tolerance"
+    );
+    let input_crossings = zero_crossings(input);
+    let output_crossings = zero_crossings(output);
+    let crossing_error = input_crossings.abs_diff(output_crossings);
+    assert!(
+        crossing_error <= input_crossings / 5 + 2,
+        "tone fingerprint changed: input crossings={input_crossings}, output={output_crossings}"
+    );
+
+    let post_teardown_payload = encoded_frames[0].clone();
     bridge.stop();
+    tokio::task::yield_now().await;
+    let _ = sip
+        .try_inject(Bytes::from(post_teardown_payload), payload_type, 99_000)
+        .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), connect_output.recv())
+            .await
+            .is_err(),
+        "no media may be delivered after bridge teardown"
+    );
 }
 
 #[tokio::test]
 async fn pcmu_and_pcma_flow_bidirectionally_with_opus() {
-    assert_g711_opus_round_trip("PCMU", 0, 0xff).await;
-    assert_g711_opus_round_trip("PCMA", 8, 0xd5).await;
+    assert_g711_opus_round_trip("PCMU", 0).await;
+    assert_g711_opus_round_trip("PCMA", 8).await;
 }

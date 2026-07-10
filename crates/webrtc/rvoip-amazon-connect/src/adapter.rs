@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::Mutex as SyncMutex;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, info, instrument, warn};
 
 use rvoip_core::adapter::{
@@ -34,7 +34,7 @@ use rvoip_webrtc::media::{from_tracks_with_dtmf_events, WebRtcMediaStream};
 use rvoip_webrtc::{PeerRole, RvoipPeerConnection, WebRtcConfig};
 
 use crate::config::ConnectConfig;
-use crate::control::{ConnectContactStarter, StartContactRequest};
+use crate::control::{ConnectContactStarter, StartContactRequest, StopContactRequest};
 use crate::errors::ConnectError;
 use crate::signaling::ChimeSignalingClient;
 
@@ -71,6 +71,141 @@ struct Route {
     failed_at: Arc<SyncMutex<Option<Instant>>>,
     /// Amazon Connect contact id (for correlation / logging).
     contact_id: String,
+    /// Control-plane ownership retained until teardown.
+    stop_request: StopContactRequest,
+    cleanup_permit: Arc<OwnedSemaphorePermit>,
+}
+
+const MAX_OWNED_CONTACT_CLEANUPS: usize = 4_096;
+
+struct PendingCleanupRecord {
+    request: StopContactRequest,
+    _permit: Arc<OwnedSemaphorePermit>,
+}
+
+type PendingCleanupMap = Arc<DashMap<String, PendingCleanupRecord>>;
+
+/// Observable milestones inside the adapter's control/media setup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContactSetupStage {
+    /// `StartWebRTCContact` succeeded and cleanup ownership was acquired.
+    ContactStarted,
+    /// Route insertion completed and the route owns StopContact cleanup.
+    RouteOwned,
+}
+
+/// Non-blocking setup observer used by the screen-pop server lifecycle feed.
+pub type ContactSetupObserver = Arc<dyn Fn(ContactSetupStage) + Send + Sync>;
+
+/// Cancellation-safe owner for a successfully started Connect contact. On
+/// ordinary failures and future cancellation, `Drop` schedules StopContact.
+/// Successful setup disarms it only after the route owns the stop request.
+struct StartedContactGuard {
+    starter: Arc<dyn ConnectContactStarter>,
+    request: Option<StopContactRequest>,
+    permit: Arc<OwnedSemaphorePermit>,
+    pending: PendingCleanupMap,
+}
+
+impl StartedContactGuard {
+    fn new(
+        starter: Arc<dyn ConnectContactStarter>,
+        request: StopContactRequest,
+        permit: Arc<OwnedSemaphorePermit>,
+        pending: PendingCleanupMap,
+    ) -> Self {
+        Self {
+            starter,
+            request: Some(request),
+            permit,
+            pending,
+        }
+    }
+
+    fn disarm(&mut self) -> Option<StopContactRequest> {
+        self.request.take()
+    }
+
+    fn request(&self) -> Option<StopContactRequest> {
+        self.request.clone()
+    }
+
+    async fn stop_now(&mut self) -> crate::errors::Result<()> {
+        let Some(request) = self.request.take() else {
+            return Ok(());
+        };
+        match stop_contact_with_retry(&self.starter, request.clone()).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.pending.insert(
+                    request.contact_id.clone(),
+                    PendingCleanupRecord {
+                        request,
+                        _permit: Arc::clone(&self.permit),
+                    },
+                );
+                Err(error)
+            }
+        }
+    }
+}
+
+const STOP_CONTACT_ATTEMPTS: usize = 3;
+
+async fn stop_contact_with_retry(
+    starter: &Arc<dyn ConnectContactStarter>,
+    request: StopContactRequest,
+) -> crate::errors::Result<()> {
+    for attempt in 1..=STOP_CONTACT_ATTEMPTS {
+        match starter.stop_contact(request.clone()).await {
+            Ok(()) => return Ok(()),
+            Err(ConnectError::TransientControl(detail)) if attempt < STOP_CONTACT_ATTEMPTS => {
+                warn!(attempt, %detail, "transient StopContact failure; retrying");
+                tokio::time::sleep(Duration::from_millis(10 * attempt as u64)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(ConnectError::TransientControl(
+        "StopContact retry budget exhausted".into(),
+    ))
+}
+
+impl Drop for StartedContactGuard {
+    fn drop(&mut self) {
+        let Some(request) = self.request.take() else {
+            return;
+        };
+        let starter = Arc::clone(&self.starter);
+        let pending = Arc::clone(&self.pending);
+        let permit = Arc::clone(&self.permit);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Err(error) = stop_contact_with_retry(&starter, request.clone()).await {
+                    pending.insert(
+                        request.contact_id.clone(),
+                        PendingCleanupRecord {
+                            request,
+                            _permit: permit,
+                        },
+                    );
+                    warn!(%error, "failed to stop Connect contact during setup cleanup");
+                }
+            });
+        } else {
+            pending.insert(
+                request.contact_id.clone(),
+                PendingCleanupRecord {
+                    request: request.clone(),
+                    _permit: permit,
+                },
+            );
+            warn!(
+                contact_id = %request.contact_id,
+                "cannot stop Connect contact: no Tokio runtime during cleanup"
+            );
+        }
+    }
 }
 
 /// Lightweight runtime counters.
@@ -93,6 +228,8 @@ pub struct AmazonConnectAdapter {
     events_rx: SyncMutex<Option<mpsc::Receiver<AdapterEvent>>>,
     contacts_started: Arc<AtomicUsize>,
     failures: Arc<AtomicUsize>,
+    cleanup_slots: Arc<Semaphore>,
+    pending_cleanups: PendingCleanupMap,
 }
 
 impl AmazonConnectAdapter {
@@ -117,6 +254,8 @@ impl AmazonConnectAdapter {
             events_rx: SyncMutex::new(Some(events_rx)),
             contacts_started: Arc::new(AtomicUsize::new(0)),
             failures: Arc::new(AtomicUsize::new(0)),
+            cleanup_slots: Arc::new(Semaphore::new(MAX_OWNED_CONTACT_CLEANUPS)),
+            pending_cleanups: Arc::new(DashMap::new()),
         })
     }
 
@@ -155,6 +294,28 @@ impl AmazonConnectAdapter {
         }
     }
 
+    /// Number of Connect contacts whose StopContact ownership is retained
+    /// after the bounded retry budget was exhausted.
+    pub fn pending_cleanup_count(&self) -> usize {
+        self.pending_cleanups.len()
+    }
+
+    /// Retry one retained StopContact operation by Amazon contact id. Returns
+    /// `false` when no pending ownership exists. The record and its bounded
+    /// capacity permit are removed only after success/already-ended.
+    pub async fn retry_pending_cleanup(&self, contact_id: &str) -> crate::errors::Result<bool> {
+        let Some(request) = self
+            .pending_cleanups
+            .get(contact_id)
+            .map(|record| record.request.clone())
+        else {
+            return Ok(false);
+        };
+        stop_contact_with_retry(&self.starter, request).await?;
+        self.pending_cleanups.remove(contact_id);
+        Ok(true)
+    }
+
     /// **Primary entry point.** Start an inbound WebRTC contact in Amazon
     /// Connect with the given contact `attributes` (the screen-pop channel),
     /// join the Chime meeting, establish audio, and return the connected
@@ -185,6 +346,21 @@ impl AmazonConnectAdapter {
         display_name: Option<String>,
         description: Option<String>,
     ) -> crate::errors::Result<ConnectionId> {
+        self.originate_contact_to_observed(target, attributes, display_name, description, None)
+            .await
+    }
+
+    /// Like [`Self::originate_contact_to`], with a non-blocking observer for
+    /// control-plane setup milestones. Existing callers can keep using the
+    /// compatibility wrapper above.
+    pub async fn originate_contact_to_observed(
+        &self,
+        target: ContactTarget,
+        attributes: BTreeMap<String, String>,
+        display_name: Option<String>,
+        description: Option<String>,
+        observer: Option<ContactSetupObserver>,
+    ) -> crate::errors::Result<ConnectionId> {
         let (conn_id, _negotiated) = self
             .establish(
                 target,
@@ -193,6 +369,7 @@ impl AmazonConnectAdapter {
                 description,
                 SessionId::new(),
                 ParticipantId::new(),
+                observer,
             )
             .await?;
         Ok(conn_id)
@@ -208,9 +385,10 @@ impl AmazonConnectAdapter {
         description: Option<String>,
         _session_id: SessionId,
         _participant_id: ParticipantId,
+        observer: Option<ContactSetupObserver>,
     ) -> crate::errors::Result<(ConnectionId, NegotiatedCodecs)> {
         match self
-            .establish_inner(target, attributes, display_name, description)
+            .establish_inner(target, attributes, display_name, description, observer)
             .await
         {
             Ok(ok) => Ok(ok),
@@ -227,7 +405,15 @@ impl AmazonConnectAdapter {
         attributes: BTreeMap<String, String>,
         display_name: Option<String>,
         description: Option<String>,
+        observer: Option<ContactSetupObserver>,
     ) -> crate::errors::Result<(ConnectionId, NegotiatedCodecs)> {
+        let cleanup_permit = Arc::new(
+            Arc::clone(&self.cleanup_slots)
+                .try_acquire_owned()
+                .map_err(|_| {
+                    ConnectError::Control("Connect cleanup ownership capacity exhausted".into())
+                })?,
+        );
         // 1. Control plane: StartWebRTCContact (attributes drive the screen pop).
         let request = StartContactRequest {
             instance_id: target
@@ -243,68 +429,105 @@ impl AmazonConnectAdapter {
             description,
             client_token: None,
         };
+        let instance_id = request.instance_id.clone();
         let connection_data = self.starter.start_webrtc_contact(request).await?;
         self.contacts_started.fetch_add(1, Ordering::Relaxed);
+        let mut cleanup = StartedContactGuard::new(
+            Arc::clone(&self.starter),
+            StopContactRequest {
+                instance_id,
+                contact_id: connection_data.contact_id.clone(),
+            },
+            Arc::clone(&cleanup_permit),
+            Arc::clone(&self.pending_cleanups),
+        );
+        if let Some(observer) = observer.as_ref() {
+            observer(ContactSetupStage::ContactStarted);
+        }
         info!(
             contact_id = %connection_data.contact_id,
             meeting_id = %connection_data.meeting_id,
             "started Amazon Connect WebRTC contact"
         );
 
-        // 2. Chime signaling JOIN → JOIN_ACK (yields TURN credentials).
-        let join =
-            ChimeSignalingClient::join(&connection_data, self.config.signaling_timeout).await?;
+        let outcome = async {
+            // 2. Chime signaling JOIN → JOIN_ACK (yields TURN credentials).
+            let join =
+                ChimeSignalingClient::join(&connection_data, self.config.signaling_timeout).await?;
 
-        // 3. Build the offerer peer connection seeded with the meeting's TURN
-        //    servers, then generate the SDP offer.
-        let mut webrtc = self.webrtc.clone();
-        let mut ice = webrtc.ice_servers.clone();
-        ice.extend(join.ice_servers());
-        webrtc.ice_servers = ice;
+            // 3. Build the offerer peer connection seeded with the meeting's TURN
+            //    servers, then generate the SDP offer.
+            let mut webrtc = self.webrtc.clone();
+            let mut ice = webrtc.ice_servers.clone();
+            ice.extend(join.ice_servers());
+            webrtc.ice_servers = ice;
 
-        let peer = RvoipPeerConnection::new(&webrtc, PeerRole::Offerer).await?;
-        peer.add_local_audio_track().await?;
-        let offer_sdp = peer.create_offer_and_gather().await?;
+            let peer = RvoipPeerConnection::new(&webrtc, PeerRole::Offerer).await?;
+            peer.add_local_audio_track().await?;
+            let offer_sdp = peer.create_offer_and_gather().await?;
 
-        // 4. SUBSCRIBE(offer) → SUBSCRIBE_ACK(answer); session keeps the socket.
-        let (answer_sdp, mut session) = join
-            .subscribe(
-                offer_sdp,
-                self.config.signaling_timeout,
-                self.config.keepalive_interval,
-            )
-            .await?;
-        // Take the "Chime ended on its own" signal so we can surface a
-        // reverse-direction `Ended` (e.g. agent hangup) before storing the session.
-        let chime_ended = session.take_ended_signal();
-        peer.set_remote_answer(&answer_sdp).await?;
+            // 4. SUBSCRIBE(offer) → SUBSCRIBE_ACK(answer); session keeps the socket.
+            let (answer_sdp, mut session) = join
+                .subscribe(
+                    offer_sdp,
+                    self.config.signaling_timeout,
+                    self.config.keepalive_interval,
+                )
+                .await?;
+            // Take the "Chime ended on its own" signal so we can surface a
+            // reverse-direction `Ended` (e.g. agent hangup) before storing the session.
+            let chime_ended = session.take_ended_signal();
+            peer.set_remote_answer(&answer_sdp).await?;
 
-        // 5. Wait for DTLS/ICE to come up.
-        peer.wait_connected(self.config.media_connect_timeout)
-            .await?;
+            // 5. Wait for DTLS/ICE to come up.
+            peer.wait_connected(self.config.media_connect_timeout)
+                .await?;
 
-        // 6. Seed the bridgeable audio media stream.
-        let conn_id = ConnectionId::new();
-        let negotiated = NegotiatedCodecs::default();
-        let cancel = Arc::new(Notify::new());
-        let route = Route {
-            peer: Arc::clone(&peer),
-            chime: Arc::new(SyncMutex::new(Some(session))),
-            streams: Arc::new(DashMap::new()),
-            negotiated: negotiated.clone(),
-            cancel: Arc::clone(&cancel),
-            failed_at: Arc::new(SyncMutex::new(None)),
-            contact_id: connection_data.contact_id.clone(),
-        };
-        self.seed_media_stream(&conn_id, &route).await;
-        self.spawn_fail_watcher(conn_id.clone(), &route);
-        self.spawn_chime_end_watcher(conn_id.clone(), chime_ended, Arc::clone(&cancel));
-        self.routes.insert(conn_id.clone(), route);
+            // 6. Seed the bridgeable audio media stream.
+            let conn_id = ConnectionId::new();
+            let negotiated = NegotiatedCodecs::default();
+            let cancel = Arc::new(Notify::new());
+            let Some(stop_request) = cleanup.request() else {
+                return Err(ConnectError::Control(
+                    "started contact cleanup ownership was lost".into(),
+                ));
+            };
+            let route = Route {
+                peer: Arc::clone(&peer),
+                chime: Arc::new(SyncMutex::new(Some(session))),
+                streams: Arc::new(DashMap::new()),
+                negotiated: negotiated.clone(),
+                cancel: Arc::clone(&cancel),
+                failed_at: Arc::new(SyncMutex::new(None)),
+                contact_id: connection_data.contact_id.clone(),
+                stop_request,
+                cleanup_permit,
+            };
+            self.seed_media_stream(&conn_id, &route).await;
+            self.spawn_fail_watcher(conn_id.clone(), &route);
+            self.spawn_chime_end_watcher(conn_id.clone(), chime_ended, Arc::clone(&cancel));
+            self.routes.insert(conn_id.clone(), route);
+            let _route_owns_cleanup = cleanup.disarm();
+            if let Some(observer) = observer.as_ref() {
+                observer(ContactSetupStage::RouteOwned);
+            }
 
-        self.try_send(AdapterEvent::Connected {
-            connection_id: conn_id.clone(),
-        });
-        Ok((conn_id, negotiated))
+            self.try_send(AdapterEvent::Connected {
+                connection_id: conn_id.clone(),
+            });
+            Ok((conn_id, negotiated))
+        }
+        .await;
+
+        match outcome {
+            Ok(success) => Ok(success),
+            Err(setup_error) => match cleanup.stop_now().await {
+                Ok(()) => Err(setup_error),
+                Err(cleanup_error) => Err(ConnectError::Control(format!(
+                    "setup failed ({setup_error}); StopContact cleanup failed ({cleanup_error})"
+                ))),
+            },
+        }
     }
 
     /// Build the audio `WebRtcMediaStream` (outbound from our mic track,
@@ -419,7 +642,7 @@ impl AmazonConnectAdapter {
         }
     }
 
-    async fn teardown(&self, conn: &ConnectionId) {
+    async fn teardown(&self, conn: &ConnectionId) -> crate::errors::Result<()> {
         if let Some((_, route)) = self.routes.remove(conn) {
             route.cancel.notify_waiters();
             // Take the session out from under the (non-Send) parking_lot guard
@@ -429,8 +652,21 @@ impl AmazonConnectAdapter {
                 session.shutdown().await;
             }
             route.peer.close().await.ok();
+            if let Err(error) =
+                stop_contact_with_retry(&self.starter, route.stop_request.clone()).await
+            {
+                self.pending_cleanups.insert(
+                    route.stop_request.contact_id.clone(),
+                    PendingCleanupRecord {
+                        request: route.stop_request,
+                        _permit: Arc::clone(&route.cleanup_permit),
+                    },
+                );
+                return Err(error);
+            }
             info!(conn = %conn, contact_id = %route.contact_id, "ended Amazon Connect contact");
         }
+        Ok(())
     }
 }
 
@@ -454,6 +690,7 @@ impl ConnectionAdapter for AmazonConnectAdapter {
                 None,
                 request.session_id.clone(),
                 request.participant_id.clone(),
+                None,
             )
             .await
             .map_err(RvoipError::from)?;
@@ -483,7 +720,7 @@ impl ConnectionAdapter for AmazonConnectAdapter {
     }
 
     async fn reject(&self, conn: ConnectionId, _reason: RejectReason) -> RvoipResult<()> {
-        self.teardown(&conn).await;
+        self.teardown(&conn).await.map_err(RvoipError::from)?;
         self.try_send(AdapterEvent::Failed {
             connection_id: conn,
             detail: "rejected".into(),
@@ -493,7 +730,7 @@ impl ConnectionAdapter for AmazonConnectAdapter {
 
     #[instrument(skip(self), fields(conn = %conn, reason = ?reason))]
     async fn end(&self, conn: ConnectionId, reason: EndReason) -> RvoipResult<()> {
-        self.teardown(&conn).await;
+        self.teardown(&conn).await.map_err(RvoipError::from)?;
         self.try_send(AdapterEvent::Ended {
             connection_id: conn,
             reason,
@@ -597,6 +834,97 @@ mod tests {
     use crate::control::ConnectionData;
     use std::future::pending;
     use tokio::sync::oneshot;
+
+    struct StopRecordingStarter {
+        signaling_url: String,
+        stopped: mpsc::UnboundedSender<StopContactRequest>,
+    }
+
+    struct ScriptedStopStarter {
+        attempts: AtomicUsize,
+        transient_failures: usize,
+        permanent_failure: bool,
+    }
+
+    struct RecoveringStopStarter {
+        attempts: AtomicUsize,
+        transient_failures_remaining: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ConnectContactStarter for RecoveringStopStarter {
+        async fn start_webrtc_contact(
+            &self,
+            _request: StartContactRequest,
+        ) -> crate::errors::Result<ConnectionData> {
+            Err(ConnectError::Control("unused".into()))
+        }
+
+        async fn stop_contact(&self, _request: StopContactRequest) -> crate::errors::Result<()> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            let remaining = self.transient_failures_remaining.fetch_update(
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            );
+            if remaining.is_ok() {
+                Err(ConnectError::TransientControl("temporary outage".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ConnectContactStarter for ScriptedStopStarter {
+        async fn start_webrtc_contact(
+            &self,
+            _request: StartContactRequest,
+        ) -> crate::errors::Result<ConnectionData> {
+            Err(ConnectError::Control("unused".into()))
+        }
+
+        async fn stop_contact(&self, _request: StopContactRequest) -> crate::errors::Result<()> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.permanent_failure {
+                Err(ConnectError::Control("permanent stop failure".into()))
+            } else if attempt <= self.transient_failures {
+                Err(ConnectError::TransientControl(format!(
+                    "transient stop failure {attempt}"
+                )))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ConnectContactStarter for StopRecordingStarter {
+        async fn start_webrtc_contact(
+            &self,
+            _request: StartContactRequest,
+        ) -> crate::errors::Result<ConnectionData> {
+            Ok(ConnectionData {
+                contact_id: "owned-contact".into(),
+                participant_id: "participant".into(),
+                participant_token: "participant-token".into(),
+                meeting_id: "meeting".into(),
+                media_region: "local".into(),
+                attendee_id: "attendee".into(),
+                join_token: "join-token".into(),
+                media_placement: crate::control::MediaPlacement {
+                    signaling_url: self.signaling_url.clone(),
+                    audio_host_url: "audio.local".into(),
+                    ..Default::default()
+                },
+            })
+        }
+
+        async fn stop_contact(&self, request: StopContactRequest) -> crate::errors::Result<()> {
+            let _ = self.stopped.send(request);
+            Ok(())
+        }
+    }
 
     /// Records every `StartContactRequest`, then fails so `establish` stops
     /// before the Chime signaling step (all we test is control-plane input).
@@ -723,6 +1051,245 @@ mod tests {
             .expect("drop signal sender survived until cancellation");
         assert_eq!(adapter.metrics().active_sessions, 0);
         assert_eq!(adapter.metrics().contacts_started, 0);
+    }
+
+    #[tokio::test]
+    async fn cancelling_after_contact_start_stops_owned_contact() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local signaling listener");
+        let address = listener.local_addr().expect("listener address");
+        let (stopped_tx, mut stopped_rx) = mpsc::unbounded_channel();
+        let starter = Arc::new(StopRecordingStarter {
+            signaling_url: format!("ws://{address}/control/meeting"),
+            stopped: stopped_tx,
+        });
+        let adapter =
+            AmazonConnectAdapter::new(ConnectConfig::new("instance-owned", "flow"), starter);
+        let (started_tx, started_rx) = oneshot::channel();
+        let started_tx = Arc::new(SyncMutex::new(Some(started_tx)));
+        let observer: ContactSetupObserver = Arc::new(move |stage| {
+            if stage == ContactSetupStage::ContactStarted {
+                if let Some(tx) = started_tx.lock().take() {
+                    let _ = tx.send(());
+                }
+            }
+        });
+
+        let task = tokio::spawn({
+            let adapter = Arc::clone(&adapter);
+            async move {
+                adapter
+                    .originate_contact_to_observed(
+                        ContactTarget::default(),
+                        BTreeMap::new(),
+                        None,
+                        None,
+                        Some(observer),
+                    )
+                    .await
+            }
+        });
+        started_rx.await.expect("contact-start observer");
+        task.abort();
+        let _ = task.await;
+
+        let stopped = tokio::time::timeout(Duration::from_secs(1), stopped_rx.recv())
+            .await
+            .expect("StopContact timeout")
+            .expect("StopContact request");
+        assert_eq!(stopped.instance_id, "instance-owned");
+        assert_eq!(stopped.contact_id, "owned-contact");
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn post_start_signaling_failure_stops_owned_contact() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local signaling listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("signaling connection");
+            drop(stream);
+        });
+        let (stopped_tx, mut stopped_rx) = mpsc::unbounded_channel();
+        let starter = Arc::new(StopRecordingStarter {
+            signaling_url: format!("ws://{address}/control/meeting"),
+            stopped: stopped_tx,
+        });
+        let adapter =
+            AmazonConnectAdapter::new(ConnectConfig::new("instance-failed", "flow"), starter);
+
+        let result = adapter.originate_contact(BTreeMap::new(), None, None).await;
+        assert!(result.is_err());
+        server.await.expect("signaling server");
+        let stopped = tokio::time::timeout(Duration::from_secs(1), stopped_rx.recv())
+            .await
+            .expect("StopContact timeout")
+            .expect("StopContact request");
+        assert_eq!(stopped.instance_id, "instance-failed");
+        assert_eq!(stopped.contact_id, "owned-contact");
+    }
+
+    #[tokio::test]
+    async fn stop_contact_retries_transient_failures_with_a_fixed_budget() {
+        let starter = Arc::new(ScriptedStopStarter {
+            attempts: AtomicUsize::new(0),
+            transient_failures: 2,
+            permanent_failure: false,
+        });
+        let starter_trait: Arc<dyn ConnectContactStarter> = starter.clone();
+        stop_contact_with_retry(
+            &starter_trait,
+            StopContactRequest {
+                instance_id: "instance".into(),
+                contact_id: "contact".into(),
+            },
+        )
+        .await
+        .expect("third StopContact attempt succeeds");
+        assert_eq!(starter.attempts.load(Ordering::SeqCst), 3);
+
+        let exhausted = Arc::new(ScriptedStopStarter {
+            attempts: AtomicUsize::new(0),
+            transient_failures: STOP_CONTACT_ATTEMPTS,
+            permanent_failure: false,
+        });
+        let exhausted_trait: Arc<dyn ConnectContactStarter> = exhausted.clone();
+        assert!(stop_contact_with_retry(
+            &exhausted_trait,
+            StopContactRequest {
+                instance_id: "instance".into(),
+                contact_id: "contact".into(),
+            },
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            exhausted.attempts.load(Ordering::SeqCst),
+            STOP_CONTACT_ATTEMPTS
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_contact_does_not_retry_permanent_failure() {
+        let starter = Arc::new(ScriptedStopStarter {
+            attempts: AtomicUsize::new(0),
+            transient_failures: 0,
+            permanent_failure: true,
+        });
+        let starter_trait: Arc<dyn ConnectContactStarter> = starter.clone();
+        assert!(stop_contact_with_retry(
+            &starter_trait,
+            StopContactRequest {
+                instance_id: "instance".into(),
+                contact_id: "contact".into(),
+            },
+        )
+        .await
+        .is_err());
+        assert_eq!(starter.attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_stop_retains_bounded_ownership_until_retry_succeeds() {
+        let starter = Arc::new(RecoveringStopStarter {
+            attempts: AtomicUsize::new(0),
+            transient_failures_remaining: AtomicUsize::new(STOP_CONTACT_ATTEMPTS),
+        });
+        let adapter =
+            AmazonConnectAdapter::new(ConnectConfig::new("instance", "flow"), starter.clone());
+        let permit = Arc::new(
+            Arc::clone(&adapter.cleanup_slots)
+                .try_acquire_owned()
+                .expect("cleanup capacity"),
+        );
+        let request = StopContactRequest {
+            instance_id: "instance".into(),
+            contact_id: "pending-contact".into(),
+        };
+        let starter_trait: Arc<dyn ConnectContactStarter> = starter.clone();
+        let mut guard = StartedContactGuard::new(
+            starter_trait,
+            request,
+            permit,
+            Arc::clone(&adapter.pending_cleanups),
+        );
+
+        assert!(guard.stop_now().await.is_err());
+        assert_eq!(
+            starter.attempts.load(Ordering::SeqCst),
+            STOP_CONTACT_ATTEMPTS
+        );
+        assert_eq!(adapter.pending_cleanup_count(), 1);
+
+        assert!(adapter
+            .retry_pending_cleanup("pending-contact")
+            .await
+            .expect("retry succeeds"));
+        assert_eq!(
+            starter.attempts.load(Ordering::SeqCst),
+            STOP_CONTACT_ATTEMPTS + 1
+        );
+        assert_eq!(adapter.pending_cleanup_count(), 0);
+        assert!(!adapter
+            .retry_pending_cleanup("pending-contact")
+            .await
+            .expect("missing record is not an error"));
+    }
+
+    #[tokio::test]
+    async fn active_route_teardown_retains_failed_stop_until_retry_succeeds() {
+        let starter = Arc::new(RecoveringStopStarter {
+            attempts: AtomicUsize::new(0),
+            transient_failures_remaining: AtomicUsize::new(STOP_CONTACT_ATTEMPTS),
+        });
+        let adapter =
+            AmazonConnectAdapter::new(ConnectConfig::new("instance", "flow"), starter.clone());
+        let peer = RvoipPeerConnection::new(&WebRtcConfig::default(), PeerRole::Offerer)
+            .await
+            .expect("test peer");
+        let conn = ConnectionId::new();
+        let permit = Arc::new(
+            Arc::clone(&adapter.cleanup_slots)
+                .try_acquire_owned()
+                .expect("cleanup capacity"),
+        );
+        adapter.routes.insert(
+            conn.clone(),
+            Route {
+                peer,
+                chime: Arc::new(SyncMutex::new(None)),
+                streams: Arc::new(DashMap::new()),
+                negotiated: NegotiatedCodecs::default(),
+                cancel: Arc::new(Notify::new()),
+                failed_at: Arc::new(SyncMutex::new(None)),
+                contact_id: "active-pending-contact".into(),
+                stop_request: StopContactRequest {
+                    instance_id: "instance".into(),
+                    contact_id: "active-pending-contact".into(),
+                },
+                cleanup_permit: permit,
+            },
+        );
+
+        assert!(adapter.end(conn, EndReason::Normal).await.is_err());
+        assert_eq!(
+            starter.attempts.load(Ordering::SeqCst),
+            STOP_CONTACT_ATTEMPTS
+        );
+        assert_eq!(adapter.pending_cleanup_count(), 1);
+
+        assert!(adapter
+            .retry_pending_cleanup("active-pending-contact")
+            .await
+            .expect("retry succeeds"));
+        assert_eq!(
+            starter.attempts.load(Ordering::SeqCst),
+            STOP_CONTACT_ATTEMPTS + 1
+        );
+        assert_eq!(adapter.pending_cleanup_count(), 0);
     }
 
     #[tokio::test]

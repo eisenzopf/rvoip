@@ -13,6 +13,11 @@ pub enum ConnectError {
     #[error("StartWebRTCContact failed: {0}")]
     Control(String),
 
+    /// Retryable Connect control-plane failure (throttling, timeout, or
+    /// temporary service unavailability).
+    #[error("transient Amazon Connect control failure: {0}")]
+    TransientControl(String),
+
     /// The control-plane response was missing a field we require to join the
     /// Chime meeting (signaling URL, join token, etc.).
     #[error("incomplete ConnectionData from StartWebRTCContact: missing {0}")]
@@ -40,6 +45,10 @@ pub enum ConnectError {
     /// A timeout waiting on a signaling step or media establishment.
     #[error("timeout waiting for {0}")]
     Timeout(&'static str),
+
+    /// The SIP or Connect peer ended while setup was still in progress.
+    #[error("screen-pop setup cancelled")]
+    Cancelled,
 
     /// SIP-header → attribute translation produced an invalid attribute set.
     #[error("attribute mapping error: {0}")]
