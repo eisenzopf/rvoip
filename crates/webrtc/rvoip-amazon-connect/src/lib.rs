@@ -44,7 +44,7 @@ pub use control::AwsConnectStarter;
 #[cfg(feature = "server")]
 pub use server::{
     request_uri_user, to_uri_user, uri_user_part, ConnectScreenPopServer, ContactRoute,
-    ContactRouter, RouteDecision, RouteMetrics, ScreenPopServerConfig,
+    ContactRouter, RouteDecision, RouteMetrics, ScreenPopMediaLeg, ScreenPopServerConfig,
 };
 
 /// Re-export of the SIP UAS config (`rvoip_sip::Config`) so callers can build a

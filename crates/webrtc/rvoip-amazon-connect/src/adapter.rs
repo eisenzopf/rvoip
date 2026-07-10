@@ -166,8 +166,13 @@ impl AmazonConnectAdapter {
         display_name: Option<String>,
         description: Option<String>,
     ) -> crate::errors::Result<ConnectionId> {
-        self.originate_contact_to(ContactTarget::default(), attributes, display_name, description)
-            .await
+        self.originate_contact_to(
+            ContactTarget::default(),
+            attributes,
+            display_name,
+            description,
+        )
+        .await
     }
 
     /// Like [`Self::originate_contact`], but with a per-call
@@ -590,6 +595,8 @@ impl ConnectionAdapter for AmazonConnectAdapter {
 mod tests {
     use super::*;
     use crate::control::ConnectionData;
+    use std::future::pending;
+    use tokio::sync::oneshot;
 
     /// Records every `StartContactRequest`, then fails so `establish` stops
     /// before the Chime signaling step (all we test is control-plane input).
@@ -640,9 +647,7 @@ mod tests {
     #[tokio::test]
     async fn default_target_falls_back_to_config() {
         let (adapter, starter) = adapter_with_capture();
-        let _ = adapter
-            .originate_contact(BTreeMap::new(), None, None)
-            .await;
+        let _ = adapter.originate_contact(BTreeMap::new(), None, None).await;
 
         let seen = starter.seen.lock();
         assert_eq!(seen.len(), 1);
@@ -663,6 +668,114 @@ mod tests {
             .await;
 
         assert_eq!(starter.seen.lock()[0].display_name, "sip:caller@x");
+    }
+
+    /// A starter whose in-flight control request reports when cancellation
+    /// drops it. This is the hermetic stand-in for an AWS SDK request future.
+    struct CancellationStarter {
+        entered: Notify,
+        dropped: SyncMutex<Option<oneshot::Sender<()>>>,
+    }
+
+    #[async_trait]
+    impl ConnectContactStarter for CancellationStarter {
+        async fn start_webrtc_contact(
+            &self,
+            _request: StartContactRequest,
+        ) -> crate::errors::Result<ConnectionData> {
+            struct DropSignal(Option<oneshot::Sender<()>>);
+
+            impl Drop for DropSignal {
+                fn drop(&mut self) {
+                    if let Some(tx) = self.0.take() {
+                        let _ = tx.send(());
+                    }
+                }
+            }
+
+            let _drop_signal = DropSignal(self.dropped.lock().take());
+            self.entered.notify_one();
+            pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_originate_drops_inflight_control_request() {
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let starter = Arc::new(CancellationStarter {
+            entered: Notify::new(),
+            dropped: SyncMutex::new(Some(dropped_tx)),
+        });
+        let adapter =
+            AmazonConnectAdapter::new(ConnectConfig::new("instance", "flow"), starter.clone());
+
+        let task = tokio::spawn({
+            let adapter = adapter.clone();
+            async move { adapter.originate_contact(BTreeMap::new(), None, None).await }
+        });
+        starter.entered.notified().await;
+        task.abort();
+        let _ = task.await;
+
+        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("cancelled control future was dropped")
+            .expect("drop signal sender survived until cancellation");
+        assert_eq!(adapter.metrics().active_sessions, 0);
+        assert_eq!(adapter.metrics().contacts_started, 0);
+    }
+
+    #[tokio::test]
+    async fn remote_chime_end_surfaces_adapter_ended_event() {
+        let (adapter, _starter) = adapter_with_capture();
+        let mut events = adapter.subscribe_events();
+        let conn = ConnectionId::new();
+        let (remote_ended_tx, remote_ended_rx) = oneshot::channel();
+
+        adapter.spawn_chime_end_watcher(
+            conn.clone(),
+            Some(remote_ended_rx),
+            Arc::new(Notify::new()),
+        );
+        remote_ended_tx.send(()).expect("watcher is alive");
+
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("Ended event timeout")
+            .expect("adapter event stream remains open");
+        match event {
+            AdapterEvent::Ended {
+                connection_id,
+                reason,
+            } => {
+                assert_eq!(connection_id, conn);
+                assert!(matches!(reason, EndReason::Normal));
+            }
+            other => panic!("expected remote Ended event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_cancellation_suppresses_remote_ended_event() {
+        let (adapter, _starter) = adapter_with_capture();
+        let mut events = adapter.subscribe_events();
+        let cancel = Arc::new(Notify::new());
+        let (remote_ended_tx, remote_ended_rx) = oneshot::channel::<()>();
+
+        adapter.spawn_chime_end_watcher(
+            ConnectionId::new(),
+            Some(remote_ended_rx),
+            Arc::clone(&cancel),
+        );
+        cancel.notify_one();
+        drop(remote_ended_tx);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), events.recv())
+                .await
+                .is_err(),
+            "local teardown must not loop back as a remote Ended event"
+        );
     }
 }
 

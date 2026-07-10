@@ -1,0 +1,17 @@
+{
+  "instance_id": "instance-123",
+  "contact_flow_id": "flow-abc",
+  "display_name": "Vapi caller",
+  "description": "Golden Vapi transfer",
+  "headers": [
+    ["X-Correlation-Id", "corr-golden-0001"],
+    ["X-Vapi-Call-Id", "vapi-call-0001"],
+    ["X-Account-Tier", "gold"],
+    ["Subject", "must-not-cross-the-screen-pop-boundary"]
+  ],
+  "expected_attributes": {
+    "Account-Tier": "gold",
+    "correlation_id": "corr-golden-0001",
+    "vapi_call_id": "vapi-call-0001"
+  }
+}

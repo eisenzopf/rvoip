@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use serde::Deserialize;
 
 use rvoip_amazon_connect::control::{
     ConnectContactStarter, ConnectionData, MediaPlacement, StartContactRequest,
@@ -22,6 +23,21 @@ use rvoip_amazon_connect::{AmazonConnectAdapter, AttributeMapping, ConnectConfig
 struct MockStarter {
     last: Arc<Mutex<Option<StartContactRequest>>>,
     signaling_url: String,
+}
+
+#[derive(Deserialize)]
+struct ScreenPopFixture {
+    instance_id: String,
+    contact_flow_id: String,
+    display_name: String,
+    description: String,
+    headers: Vec<(String, String)>,
+    expected_attributes: BTreeMap<String, String>,
+}
+
+fn screen_pop_fixture() -> ScreenPopFixture {
+    serde_json::from_str(include_str!("fixtures/vapi_screen_pop.json"))
+        .expect("valid Vapi screen-pop fixture")
 }
 
 #[async_trait]
@@ -50,49 +66,63 @@ impl ConnectContactStarter for MockStarter {
 
 #[tokio::test]
 async fn originate_passes_translated_attributes_to_control_plane() {
+    let fixture = screen_pop_fixture();
     let last = Arc::new(Mutex::new(None));
+    // A localhost TCP double accepts and closes during the WebSocket handshake
+    // after the mock control call, without DNS or any AWS/Chime dependency.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("ephemeral listener");
+    let address = listener.local_addr().expect("listener address");
+    let signaling_double = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("signaling connection");
+        drop(stream);
+    });
     let starter = Arc::new(MockStarter {
         last: Arc::clone(&last),
-        // Reserved-for-docs TLD: connect attempt fails quickly, after control.
-        signaling_url: "wss://signal.invalid/control/m1".into(),
+        signaling_url: format!("ws://{address}/control/m1"),
     });
 
-    let config = ConnectConfig::new("instance-123", "flow-abc").with_attribute_mapping(
-        AttributeMapping::default().rename("X-Vapi-Customer-Id", "customerId"),
-    );
+    let mapping = AttributeMapping::default()
+        .rename("X-Correlation-Id", "correlation_id")
+        .rename("X-Vapi-Call-Id", "vapi_call_id");
+    let config = ConnectConfig::new(&fixture.instance_id, &fixture.contact_flow_id)
+        .with_attribute_mapping(mapping.clone());
     let adapter = AmazonConnectAdapter::new(config, starter);
 
-    // Translate a SIP custom-header set the way application glue would.
-    let headers: Vec<(String, String)> = vec![
-        ("X-Vapi-Customer-Id".into(), "cust-42".into()),
-        ("X-Account-Tier".into(), "gold".into()),
-        ("Subject".into(), "ignored".into()),
-    ];
-    let mapping = AttributeMapping::default().rename("X-Vapi-Customer-Id", "customerId");
-    let mapped = mapping.translate(headers);
+    // Translate the golden Vapi transfer headers exactly as server glue does.
+    let mapped = mapping.translate(fixture.headers);
+    assert_eq!(mapped.attributes, fixture.expected_attributes);
 
     // The media leg will fail (unreachable signaling URL), but control must run.
     let result = adapter
-        .originate_contact(mapped.attributes.clone(), Some("Caller".into()), None)
+        .originate_contact(
+            mapped.attributes.clone(),
+            Some(fixture.display_name.clone()),
+            Some(fixture.description.clone()),
+        )
         .await;
     assert!(
         result.is_err(),
         "expected signaling failure against invalid URL"
     );
+    signaling_double.await.expect("signaling double task");
 
     let req = last.lock().take().expect("control plane was invoked");
-    assert_eq!(req.instance_id, "instance-123");
-    assert_eq!(req.contact_flow_id, "flow-abc");
-    assert_eq!(req.display_name, "Caller");
-    // Renamed + sanitized attributes flowed through to StartWebRTCContact.
+    assert_eq!(req.instance_id, fixture.instance_id);
+    assert_eq!(req.contact_flow_id, fixture.contact_flow_id);
+    assert_eq!(req.display_name, fixture.display_name);
     assert_eq!(
-        req.attributes.get("customerId"),
-        Some(&"cust-42".to_string())
+        req.description.as_deref(),
+        Some(fixture.description.as_str())
     );
+    // The release-blocking screen-pop contract: the correlation id is passed
+    // to StartWebRTCContact under Amazon's expected attribute key.
     assert_eq!(
-        req.attributes.get("Account-Tier"),
-        Some(&"gold".to_string())
+        req.attributes.get("correlation_id"),
+        Some(&"corr-golden-0001".to_string())
     );
+    assert_eq!(req.attributes, fixture.expected_attributes);
     assert!(!req.attributes.contains_key("Subject"));
 
     // And the failure was counted.

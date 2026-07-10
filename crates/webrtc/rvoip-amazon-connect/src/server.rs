@@ -118,9 +118,17 @@ impl ScreenPopServerConfig {
 /// Connect connection so it can be torn down when the SIP leg ends.
 struct ActiveContact {
     _bridge: StreamBridge,
+    sip_graph: rvoip_core::media_graph::MediaGraphHandle,
+    connect_graph: rvoip_core::media_graph::MediaGraphHandle,
     connect_conn: ConnectionId,
     /// Route label for per-route metrics (`None` on the unrouted path).
     route_label: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScreenPopMediaLeg {
+    Sip,
+    Connect,
 }
 
 /// Per-route (per-tenant) counters, updated by `handle_call`/teardown.
@@ -183,6 +191,30 @@ impl ConnectScreenPopServer {
     /// The underlying Connect adapter (e.g. to read metrics).
     pub fn adapter(&self) -> &Arc<AmazonConnectAdapter> {
         &self.adapter
+    }
+
+    /// Clone the source graph for an active screen-pop call. This is the
+    /// observer seam used by Bridgefu to add UCTP or MOQT broadcast sinks
+    /// without competing with the SIP↔Connect bridge for `frames_in()`.
+    pub fn media_graph(
+        &self,
+        call_id: &str,
+        leg: ScreenPopMediaLeg,
+    ) -> Option<rvoip_core::media_graph::MediaGraphHandle> {
+        self.active
+            .iter()
+            .find(|entry| entry.key().to_string() == call_id)
+            .map(|entry| match leg {
+                ScreenPopMediaLeg::Sip => entry.value().sip_graph.clone(),
+                ScreenPopMediaLeg::Connect => entry.value().connect_graph.clone(),
+            })
+    }
+
+    pub fn active_call_ids(&self) -> Vec<String> {
+        self.active
+            .iter()
+            .map(|entry| entry.key().to_string())
+            .collect()
     }
 
     /// Snapshot of the per-route counters, keyed by [`ContactRoute::label`].
@@ -373,12 +405,16 @@ impl ConnectScreenPopServer {
 
         // 5. Bridge the two legs (transcoding G.711 ⟷ Opus).
         let bridge = bridge_streams(sip_stream, connect_stream)?;
+        let sip_graph = bridge.a_graph();
+        let connect_graph = bridge.b_graph();
         self.by_connect
             .insert(connect_conn.clone(), session_id.clone());
         self.active.insert(
             session_id.clone(),
             ActiveContact {
                 _bridge: bridge,
+                sip_graph,
+                connect_graph,
                 connect_conn,
                 route_label: route_label.clone(),
             },
@@ -478,6 +514,22 @@ impl ConnectScreenPopServer {
     /// Tear down a bridged contact by SIP session (public manual teardown).
     pub async fn end(&self, sip_session: &SipSessionId) {
         self.on_sip_ended(sip_session).await;
+    }
+
+    /// Tear down a bridged contact by the stable string form returned from
+    /// [`Self::active_call_ids`]. Returns `false` when the call is no longer
+    /// active, which lets HTTP control planes make hangup idempotent.
+    pub async fn end_by_call_id(&self, call_id: &str) -> bool {
+        let Some(session) = self
+            .active
+            .iter()
+            .find(|entry| entry.key().to_string() == call_id)
+            .map(|entry| entry.key().clone())
+        else {
+            return false;
+        };
+        self.on_sip_ended(&session).await;
+        true
     }
 
     /// Decrement the per-route active-session gauge for a torn-down contact.

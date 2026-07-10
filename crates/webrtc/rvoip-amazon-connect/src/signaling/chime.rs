@@ -398,13 +398,17 @@ impl ChimeSession {
 
     /// Signal LEAVE and await the background task's exit.
     pub async fn shutdown(self) {
-        self.cancel.notify_waiters();
+        // There is exactly one session loop. `notify_one` retains a permit if
+        // shutdown races task startup; `notify_waiters` would lose that signal
+        // when the loop has not polled `notified()` yet and could hang until
+        // the next keepalive or socket event.
+        self.cancel.notify_one();
         let _ = self.handle.await;
     }
 
     /// Abort without a graceful LEAVE (used on hard teardown / drop paths).
     pub fn abort(&self) {
-        self.cancel.notify_waiters();
+        self.cancel.notify_one();
         self.handle.abort();
     }
 }
@@ -494,6 +498,123 @@ fn spawn_session_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::MediaPlacement;
+    use crate::signaling::proto::{SdkJoinAckFrame, SdkSubscribeAckFrame};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+    use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
+    use tokio_tungstenite::{accept_hdr_async, WebSocketStream};
+
+    async fn local_connection() -> (TcpListener, ConnectionData) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock Chime signaling server");
+        let address = listener.local_addr().expect("mock server address");
+        let connection = ConnectionData {
+            contact_id: "contact-test".into(),
+            participant_id: "participant-test".into(),
+            participant_token: "participant-token-test".into(),
+            meeting_id: "meeting-test".into(),
+            media_region: "local".into(),
+            attendee_id: "attendee-test".into(),
+            join_token: "join-token-test".into(),
+            media_placement: MediaPlacement {
+                signaling_url: format!("ws://{address}/control/meeting-test"),
+                audio_host_url: "audio.local.test".into(),
+                ..Default::default()
+            },
+        };
+        (listener, connection)
+    }
+
+    async fn recv_client_frame(ws: &mut WebSocketStream<TcpStream>) -> SdkSignalFrame {
+        loop {
+            let message = ws
+                .next()
+                .await
+                .expect("client websocket remains open")
+                .expect("valid client websocket frame");
+            if let WsMessage::Binary(bytes) = message {
+                assert_eq!(bytes.first().copied(), Some(FRAME_TYPE_RTC));
+                return SdkSignalFrame::decode(&bytes[1..]).expect("valid Chime protobuf");
+            }
+        }
+    }
+
+    async fn send_server_frame(ws: &mut WebSocketStream<TcpStream>, frame: SdkSignalFrame) {
+        let mut bytes = Vec::with_capacity(frame.encoded_len() + 1);
+        bytes.push(FRAME_TYPE_RTC);
+        frame.encode(&mut bytes).expect("encode mock Chime frame");
+        ws.send(WsMessage::Binary(bytes.into()))
+            .await
+            .expect("send mock Chime frame");
+    }
+
+    async fn accept_chime_websocket(tcp: TcpStream) -> WebSocketStream<TcpStream> {
+        accept_hdr_async(tcp, |request: &Request, mut response: Response| {
+            let offered = request
+                .headers()
+                .get(SEC_WEBSOCKET_PROTOCOL)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            assert!(offered
+                .split(',')
+                .any(|value| value.trim() == "_aws_wt_session"));
+            response.headers_mut().insert(
+                SEC_WEBSOCKET_PROTOCOL,
+                "_aws_wt_session".parse().expect("static subprotocol"),
+            );
+            Ok(response)
+        })
+        .await
+        .expect("accept WebSocket handshake")
+    }
+
+    async fn accept_join_and_subscribe(listener: TcpListener) -> WebSocketStream<TcpStream> {
+        let (tcp, _) = listener.accept().await.expect("accept mock Chime client");
+        let mut ws = accept_chime_websocket(tcp).await;
+
+        let join = recv_client_frame(&mut ws).await;
+        assert_eq!(join.r#type, FrameType::Join as i32);
+        assert_eq!(join.join.and_then(|frame| frame.protocol_version), Some(2));
+        send_server_frame(
+            &mut ws,
+            SdkSignalFrame {
+                timestamp_ms: now_ms(),
+                r#type: FrameType::JoinAck as i32,
+                joinack: Some(SdkJoinAckFrame::default()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let subscribe = recv_client_frame(&mut ws).await;
+        assert_eq!(subscribe.r#type, FrameType::Subscribe as i32);
+        let subscribe = subscribe.sub.expect("SUBSCRIBE body");
+        assert_eq!(subscribe.sdp_offer.as_deref(), Some("v=0\r\n"));
+        assert_eq!(subscribe.audio_host.as_deref(), Some("audio.local.test"));
+        assert_eq!(
+            subscribe
+                .send_streams
+                .first()
+                .and_then(|stream| stream.attendee_id.as_deref()),
+            Some("attendee-test")
+        );
+        send_server_frame(
+            &mut ws,
+            SdkSignalFrame {
+                timestamp_ms: now_ms(),
+                r#type: FrameType::SubscribeAck as i32,
+                suback: Some(SdkSubscribeAckFrame {
+                    sdp_answer: Some("v=0\r\na=mock-answer\r\n".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await;
+        ws
+    }
 
     #[test]
     fn signaling_url_matches_chime_sdk() {
@@ -544,5 +665,89 @@ mod tests {
         let decoded = SdkSignalFrame::decode(&buf[..]).unwrap();
         assert_eq!(decoded.r#type, FrameType::Join as i32);
         assert_eq!(decoded.join.unwrap().protocol_version, Some(2));
+    }
+
+    #[tokio::test]
+    async fn signaling_timeout_is_hermetic_and_typed() {
+        let (listener, connection) = local_connection().await;
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.expect("accept mock client");
+            let mut ws = accept_chime_websocket(tcp).await;
+            let join = recv_client_frame(&mut ws).await;
+            assert_eq!(join.r#type, FrameType::Join as i32);
+            // Deliberately never send JOIN_ACK.
+            std::future::pending::<()>().await;
+        });
+
+        let result = ChimeSignalingClient::join(&connection, Duration::from_millis(100)).await;
+        assert!(matches!(
+            result,
+            Err(ConnectError::Timeout("chime signaling handshake"))
+        ));
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn local_shutdown_sends_leave_without_remote_end_signal() {
+        let (listener, connection) = local_connection().await;
+        let server = tokio::spawn(async move {
+            let mut ws = accept_join_and_subscribe(listener).await;
+            let leave = recv_client_frame(&mut ws).await;
+            assert_eq!(leave.r#type, FrameType::Leave as i32);
+            leave.leave.is_some()
+        });
+
+        let join = ChimeSignalingClient::join(&connection, Duration::from_secs(1))
+            .await
+            .expect("JOIN succeeds");
+        let (answer, mut session) = join
+            .subscribe(
+                "v=0\r\n".into(),
+                Duration::from_secs(1),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("SUBSCRIBE succeeds");
+        assert_eq!(answer, "v=0\r\na=mock-answer\r\n");
+        let ended = session.take_ended_signal().expect("one end signal");
+        session.shutdown().await;
+
+        assert!(
+            ended.await.is_err(),
+            "local shutdown is not a remote hangup"
+        );
+        assert!(
+            server.await.expect("mock server task"),
+            "LEAVE body present"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_websocket_close_fires_end_signal() {
+        let (listener, connection) = local_connection().await;
+        let server = tokio::spawn(async move {
+            let mut ws = accept_join_and_subscribe(listener).await;
+            ws.close(None).await.expect("close mock Chime socket");
+        });
+
+        let join = ChimeSignalingClient::join(&connection, Duration::from_secs(1))
+            .await
+            .expect("JOIN succeeds");
+        let (_answer, mut session) = join
+            .subscribe(
+                "v=0\r\n".into(),
+                Duration::from_secs(1),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("SUBSCRIBE succeeds");
+        let ended = session.take_ended_signal().expect("one end signal");
+
+        tokio::time::timeout(Duration::from_secs(1), ended)
+            .await
+            .expect("remote close end-signal timeout")
+            .expect("remote close sends the end signal");
+        server.await.expect("mock server task");
     }
 }
