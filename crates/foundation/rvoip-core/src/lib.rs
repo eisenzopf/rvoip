@@ -56,7 +56,8 @@
 //! ```
 //!
 //! [`Orchestrator::register`] dispatches every per-connection command
-//! ([`Orchestrator::route_inbound_connection`], [`Orchestrator::originate_connection`],
+//! ([`Orchestrator::route_inbound_connection`], [`Orchestrator::prepare_outbound_connection`],
+//! [`PreparedOutboundConnection::commit`], [`Orchestrator::originate_connection`],
 //! [`Orchestrator::end_connection`], [`Orchestrator::hold`], [`Orchestrator::resume`],
 //! [`Orchestrator::transfer_connection`], [`Orchestrator::send_dtmf`],
 //! [`Orchestrator::mute`], [`Orchestrator::unmute`],
@@ -176,7 +177,7 @@ pub use media_graph::{
     start_media_graph, MediaGraphHandle, MediaGraphPolicy, DEFAULT_MEDIA_GRAPH_MAX_SINKS,
 };
 pub use message::{ContentType, Message, MessageOrigin, MessageRecipients};
-pub use orchestrator::Orchestrator;
+pub use orchestrator::{Orchestrator, PreparedOutboundConnection};
 pub use participant::{Participant, ParticipantKind, ParticipantRole};
 pub use rvoip_core_traits::data::{
     DataMessage, DataMessageValidationError, DataReliability, MAX_CONTENT_TYPE_BYTES,

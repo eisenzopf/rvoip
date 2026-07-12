@@ -40,6 +40,14 @@ pub struct Config {
     /// realistic mobile network jitter without holding admission for
     /// pathologically dead peers.
     pub bridge_stream_deadline: Duration,
+    /// Maximum time an outbound route may remain prepared but uncommitted.
+    ///
+    /// A prepared route is deliberately invisible to Sessions and event
+    /// consumers while an application durably records its Connection ID.
+    /// Core aborts and closes the provisional adapter route when this
+    /// deadline expires. A finite default prevents abandoned durable-bind
+    /// attempts from retaining adapter or admission capacity indefinitely.
+    pub outbound_preparation_timeout: Duration,
     /// P6 — `Event::CapacityReport` emit cadence. None disables the
     /// scheduler entirely.
     pub capacity_report_interval: Option<Duration>,
@@ -56,6 +64,7 @@ impl Default for Config {
             vcon_store: Arc::new(MemoryVconStore::new()),
             message_store: Arc::new(MemoryMessageStore::new()),
             bridge_stream_deadline: Duration::from_secs(5),
+            outbound_preparation_timeout: Duration::from_secs(30),
             capacity_report_interval: Some(Duration::from_secs(30)),
         }
     }

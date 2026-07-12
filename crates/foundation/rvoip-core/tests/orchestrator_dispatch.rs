@@ -39,6 +39,7 @@ struct CallCounts {
     resume: AtomicUsize,
     transfer: AtomicUsize,
     dtmf: AtomicUsize,
+    activate: AtomicUsize,
     reject_reasons: Mutex<Vec<RejectReason>>,
 }
 
@@ -66,6 +67,7 @@ const CLEANUP_HANG: usize = 2;
 const COMMAND_SUCCEED: usize = 0;
 const COMMAND_FAIL: usize = 1;
 const COMMAND_TERMINAL: usize = 2;
+const COMMAND_HANG: usize = 3;
 
 #[derive(Clone)]
 struct StubEventSender(mpsc::Sender<OrchestratorAdapterEvent>);
@@ -266,6 +268,7 @@ impl ConnectionAdapter for StubAdapter {
         Ok(ConnectionHandle { connection: conn })
     }
     async fn activate_outbound(&self, conn: ConnectionId) -> Result<()> {
+        self.counts.activate.fetch_add(1, Ordering::SeqCst);
         match self.activate_behavior.load(Ordering::SeqCst) {
             COMMAND_SUCCEED => Ok(()),
             COMMAND_FAIL => Err(RvoipError::InvalidState("stub activation failure")),
@@ -281,6 +284,7 @@ impl ConnectionAdapter for StubAdapter {
                 );
                 Ok(())
             }
+            COMMAND_HANG => std::future::pending().await,
             _ => unreachable!("unknown activation behavior"),
         }
     }
@@ -1449,6 +1453,274 @@ fn outbound_request(session_id: SessionId) -> OriginateRequest {
         capabilities: CapabilityDescriptor::default(),
         transport: Some(Transport::Sip),
     }
+}
+
+#[tokio::test]
+async fn prepared_outbound_is_invisible_until_commit_then_activates_once() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let (adapter, _, counts) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+    let mut events = orchestrator.subscribe_events();
+
+    let prepared = orchestrator
+        .prepare_outbound_connection(outbound_request(session_id.clone()))
+        .await
+        .unwrap();
+    let connection_id = prepared.connection_id().clone();
+    assert_eq!(prepared.transport(), Transport::Sip);
+    assert_eq!(orchestrator.session_of(&connection_id), None);
+    assert_eq!(counts.activate.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        orchestrator
+            .end_connection(connection_id.clone(), EndReason::Normal)
+            .await,
+        Err(RvoipError::AdmissionRejected(
+            "connection is not operational"
+        ))
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), events.recv())
+            .await
+            .is_err()
+    );
+
+    let handle = prepared.commit().await.unwrap();
+    assert_eq!(handle.connection.id, connection_id);
+    assert_eq!(orchestrator.session_of(&connection_id), Some(session_id));
+    assert_eq!(counts.activate.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        Event::ConnectionOutbound { connection_id: id, .. } if id == connection_id
+    ));
+}
+
+#[tokio::test]
+async fn prepared_outbound_explicit_abort_and_drop_fail_closed_before_bind() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let (adapter, _, counts) = StubAdapter::new();
+    orchestrator.register(adapter).unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+    let mut events = orchestrator.subscribe_events();
+
+    let explicit = orchestrator
+        .prepare_outbound_connection(outbound_request(session_id.clone()))
+        .await
+        .unwrap();
+    let explicit_id = explicit.connection_id().clone();
+    explicit.abort().await.unwrap();
+    assert!(matches!(
+        orchestrator.connection_transport(&explicit_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+    assert_eq!(orchestrator.session_of(&explicit_id), None);
+
+    let dropped = orchestrator
+        .prepare_outbound_connection(outbound_request(session_id))
+        .await
+        .unwrap();
+    let dropped_id = dropped.connection_id().clone();
+    drop(dropped);
+    wait_for_count(&counts.end, 2).await;
+    assert!(matches!(
+        orchestrator.connection_transport(&dropped_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+    assert_eq!(orchestrator.session_of(&dropped_id), None);
+    assert_eq!(counts.activate.load(Ordering::SeqCst), 0);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), events.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn prepared_outbound_timeout_makes_stale_commit_fail_closed() {
+    let mut config = Config::default();
+    config.outbound_preparation_timeout = Duration::from_millis(25);
+    let orchestrator = Orchestrator::new(config);
+    let (adapter, _, counts) = StubAdapter::new();
+    orchestrator.register(adapter).unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+    let prepared = orchestrator
+        .prepare_outbound_connection(outbound_request(session_id))
+        .await
+        .unwrap();
+    let connection_id = prepared.connection_id().clone();
+
+    wait_for_count(&counts.end, 1).await;
+    assert!(matches!(
+        prepared.commit().await,
+        Err(RvoipError::AdmissionRejected(
+            "outbound preparation is no longer pending"
+        ))
+    ));
+    assert!(matches!(
+        orchestrator.connection_transport(&connection_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+    assert_eq!(counts.activate.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn prepared_outbound_session_end_during_pause_compensates_route() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let (adapter, _, counts) = StubAdapter::new();
+    orchestrator.register(adapter).unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+    let prepared = orchestrator
+        .prepare_outbound_connection(outbound_request(session_id.clone()))
+        .await
+        .unwrap();
+    let connection_id = prepared.connection_id().clone();
+
+    orchestrator
+        .end_session(session_id, EndReason::Normal)
+        .await
+        .unwrap();
+    assert!(matches!(
+        prepared.commit().await,
+        Err(RvoipError::InvalidState(
+            "originate_connection: target session is ended"
+        ))
+    ));
+    assert_eq!(counts.end.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.activate.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        orchestrator.connection_transport(&connection_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn cancelling_commit_during_activation_retires_exact_route() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let (adapter, _, counts) = StubAdapter::new();
+    adapter.set_activate_behavior(COMMAND_HANG);
+    orchestrator.register(adapter).unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+    let prepared = orchestrator
+        .prepare_outbound_connection(outbound_request(session_id.clone()))
+        .await
+        .unwrap();
+    let connection_id = prepared.connection_id().clone();
+
+    let commit = tokio::spawn(prepared.commit());
+    wait_for_count(&counts.activate, 1).await;
+    commit.abort();
+    assert!(commit.await.unwrap_err().is_cancelled());
+    wait_for_count(&counts.end, 1).await;
+
+    assert!(matches!(
+        orchestrator.connection_transport(&connection_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+    assert_eq!(orchestrator.session_of(&connection_id), None);
+    let session = orchestrator.session(&session_id).unwrap();
+    let session = session.read().unwrap();
+    assert_eq!(session.state, rvoip_core::session::SessionState::Initiating);
+    assert!(!session.connections.contains_key(&connection_id));
+}
+
+#[tokio::test]
+async fn prepared_outbound_capacity_is_bounded_and_recovers_after_abort() {
+    let mut config = Config::default();
+    config.max_concurrent_setups = 1;
+    let orchestrator = Orchestrator::new(config);
+    let (adapter, _, _) = StubAdapter::new();
+    orchestrator.register(adapter).unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+    let first = orchestrator
+        .prepare_outbound_connection(outbound_request(session_id.clone()))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        orchestrator
+            .prepare_outbound_connection(outbound_request(session_id.clone()))
+            .await,
+        Err(RvoipError::AdmissionRejected(
+            "outbound preparation capacity is full"
+        ))
+    ));
+    first.abort().await.unwrap();
+    let after_abort = orchestrator
+        .prepare_outbound_connection(outbound_request(session_id))
+        .await
+        .unwrap();
+    after_abort.abort().await.unwrap();
+}
+
+#[tokio::test]
+async fn draining_prepared_outbound_supervisor_aborts_tickets_and_rejects_new_work() {
+    let mut config = Config::default();
+    config.max_concurrent_setups = 2;
+    let orchestrator = Orchestrator::new(config);
+    let (adapter, _, counts) = StubAdapter::new();
+    orchestrator.register(adapter).unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+    let first = orchestrator
+        .prepare_outbound_connection(outbound_request(session_id.clone()))
+        .await
+        .unwrap();
+    let second = orchestrator
+        .prepare_outbound_connection(outbound_request(session_id.clone()))
+        .await
+        .unwrap();
+
+    orchestrator.drain_prepared_outbound_connections().await;
+    wait_for_count(&counts.end, 2).await;
+    assert!(matches!(
+        first.commit().await,
+        Err(RvoipError::AdmissionRejected(
+            "outbound preparation is no longer pending"
+        ))
+    ));
+    assert!(matches!(
+        second.commit().await,
+        Err(RvoipError::AdmissionRejected(
+            "outbound preparation is no longer pending"
+        ))
+    ));
+    assert!(matches!(
+        orchestrator
+            .prepare_outbound_connection(outbound_request(session_id))
+            .await,
+        Err(RvoipError::AdmissionRejected(
+            "outbound preparation supervisor is draining"
+        ))
+    ));
+    orchestrator.drain_prepared_outbound_connections().await;
+}
+
+#[tokio::test]
+async fn two_phase_prepare_rejects_legacy_adapter_but_existing_originate_remains_compatible() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let (adapter, _, counts) = StubAdapter::new_for_with_capability(Transport::Sip, false);
+    orchestrator.register(adapter).unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+
+    assert!(matches!(
+        orchestrator
+            .prepare_outbound_connection(outbound_request(session_id.clone()))
+            .await,
+        Err(RvoipError::InvalidState(
+            "adapter does not support staged outbound activation"
+        ))
+    ));
+    let handle = orchestrator
+        .originate_connection(outbound_request(session_id))
+        .await
+        .unwrap();
+    assert_eq!(
+        orchestrator.session_of(&handle.connection.id),
+        Some(handle.connection.session_id)
+    );
+    assert_eq!(counts.activate.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
