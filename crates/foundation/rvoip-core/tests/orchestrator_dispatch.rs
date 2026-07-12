@@ -50,6 +50,8 @@ struct StubAdapter {
     inbound_contexts: Mutex<HashMap<ConnectionId, InboundConnectionContext>>,
     lifecycle: AdapterLifecycleSinkSlot,
     lifecycle_capable: bool,
+    admission_confirmation_capable: bool,
+    admission_outcomes: Mutex<Vec<(ConnectionId, u64, bool)>>,
     reject_behavior: AtomicUsize,
     end_behavior: AtomicUsize,
     accept_behavior: AtomicUsize,
@@ -97,6 +99,14 @@ impl StubAdapter {
         transport: Transport,
         lifecycle_capable: bool,
     ) -> (Arc<Self>, StubEventSender, Arc<CallCounts>) {
+        Self::new_for_with_capabilities(transport, lifecycle_capable, true)
+    }
+
+    fn new_for_with_capabilities(
+        transport: Transport,
+        lifecycle_capable: bool,
+        admission_confirmation_capable: bool,
+    ) -> (Arc<Self>, StubEventSender, Arc<CallCounts>) {
         let (tx, rx) = mpsc::channel(16);
         let counts = Arc::new(CallCounts::default());
         let adapter = Arc::new(Self {
@@ -107,6 +117,8 @@ impl StubAdapter {
             inbound_contexts: Mutex::new(HashMap::new()),
             lifecycle: AdapterLifecycleSinkSlot::default(),
             lifecycle_capable,
+            admission_confirmation_capable,
+            admission_outcomes: Mutex::new(Vec::new()),
             reject_behavior: AtomicUsize::new(CLEANUP_SUCCEED),
             end_behavior: AtomicUsize::new(CLEANUP_SUCCEED),
             accept_behavior: AtomicUsize::new(COMMAND_SUCCEED),
@@ -115,6 +127,10 @@ impl StubAdapter {
             next_outbound_id: Mutex::new(None),
         });
         (adapter, StubEventSender(tx), counts)
+    }
+
+    fn admission_outcomes(&self) -> Vec<(ConnectionId, u64, bool)> {
+        self.admission_outcomes.lock().unwrap().clone()
     }
 
     fn set_cleanup_behavior(&self, reject: usize, end: usize) {
@@ -184,6 +200,21 @@ impl ConnectionAdapter for StubAdapter {
         } else {
             AdapterLifecycleCapabilities::default()
         }
+    }
+    fn supports_inbound_admission_confirmation(&self) -> bool {
+        self.admission_confirmation_capable
+    }
+    fn notify_inbound_admission_outcome(
+        &self,
+        connection_id: &ConnectionId,
+        lifecycle_generation: u64,
+        accepted: bool,
+    ) {
+        self.admission_outcomes.lock().unwrap().push((
+            connection_id.clone(),
+            lifecycle_generation,
+            accepted,
+        ));
     }
     fn install_lifecycle_sink(&self, sink: Arc<dyn AdapterLifecycleSink>) -> Result<()> {
         self.lifecycle
@@ -1380,6 +1411,16 @@ async fn wait_for_count(counter: &AtomicUsize, expected: usize) {
     .expect("counter reached expected value");
 }
 
+async fn wait_for_admission_outcomes(adapter: &StubAdapter, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while adapter.admission_outcomes().len() != expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("admission outcome count reached expected value");
+}
+
 async fn start_voice_session(orchestrator: &Arc<Orchestrator>) -> SessionId {
     let conversation_id = orchestrator
         .open_conversation(
@@ -1408,6 +1449,372 @@ fn outbound_request(session_id: SessionId) -> OriginateRequest {
         capabilities: CapabilityDescriptor::default(),
         transport: Some(Transport::Sip),
     }
+}
+
+#[tokio::test]
+async fn admission_confirmation_accepts_once_after_publication_commit() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(1, Duration::from_secs(1))
+        .unwrap();
+    let (adapter, sender, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let (connection, principal) =
+        prepare_atomic_inbound(&adapter, "tenant-confirm", "confirmation-secret");
+    let connection_id = connection.id.clone();
+    announce_atomic_inbound(&sender, connection.clone(), principal.clone()).await;
+    let admission = admissions.recv().await.unwrap();
+    assert!(adapter.admission_outcomes().is_empty());
+
+    admission.accept().await.unwrap();
+    assert_eq!(
+        adapter.admission_outcomes(),
+        vec![(connection_id.clone(), 1, true)]
+    );
+    assert_eq!(
+        orchestrator.connection_transport(&connection_id).unwrap(),
+        Transport::Sip
+    );
+
+    // Duplicate handoff and terminal delivery cannot overwrite the committed
+    // accepted result for this exact generation.
+    announce_atomic_inbound(&sender, connection, principal).await;
+    adapter.mark_ended(&connection_id);
+    adapter
+        .deliver_terminal(AdapterEvent::Ended {
+            connection_id: connection_id.clone(),
+            reason: EndReason::Normal,
+        })
+        .await;
+    assert_eq!(adapter.admission_outcomes(), vec![(connection_id, 1, true)]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_confirmation_publish_terminal_race_has_one_final_outcome() {
+    for _ in 0..32 {
+        let orchestrator = Orchestrator::new(Config::default());
+        let mut admissions = orchestrator
+            .install_inbound_admission_gate(1, Duration::from_secs(1))
+            .unwrap();
+        let (adapter, sender, _) = StubAdapter::new();
+        orchestrator.register(adapter.clone()).unwrap();
+        let (connection, principal) =
+            prepare_atomic_inbound(&adapter, "tenant-race", "race-secret");
+        let connection_id = connection.id.clone();
+        announce_atomic_inbound(&sender, connection, principal).await;
+        let admission = admissions.recv().await.unwrap();
+
+        let barrier = Arc::new(Barrier::new(3));
+        let accept_barrier = Arc::clone(&barrier);
+        let accept = tokio::spawn(async move {
+            accept_barrier.wait().await;
+            admission.accept().await
+        });
+        let terminal_barrier = Arc::clone(&barrier);
+        let terminal_adapter = Arc::clone(&adapter);
+        let terminal_id = connection_id.clone();
+        let terminal = tokio::spawn(async move {
+            terminal_barrier.wait().await;
+            terminal_adapter.mark_ended(&terminal_id);
+            terminal_adapter
+                .deliver_terminal(AdapterEvent::Ended {
+                    connection_id: terminal_id,
+                    reason: EndReason::Normal,
+                })
+                .await;
+        });
+
+        barrier.wait().await;
+        let accept_result = accept.await.unwrap();
+        terminal.await.unwrap();
+        wait_for_admission_outcomes(&adapter, 1).await;
+        assert_eq!(
+            adapter.admission_outcomes(),
+            vec![(connection_id.clone(), 1, accept_result.is_ok())]
+        );
+        assert!(matches!(
+            orchestrator.connection_transport(&connection_id),
+            Err(RvoipError::ConnectionNotFound(_))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn outbound_terminal_with_gate_emits_no_inbound_admission_confirmation() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let _admissions = orchestrator
+        .install_inbound_admission_gate(1, Duration::from_secs(1))
+        .unwrap();
+    let (adapter, _, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+    let handle = orchestrator
+        .originate_connection(outbound_request(session_id))
+        .await
+        .unwrap();
+    let connection_id = handle.connection.id;
+
+    assert!(adapter.admission_outcomes().is_empty());
+    adapter.mark_ended(&connection_id);
+    adapter
+        .deliver_terminal(AdapterEvent::Ended {
+            connection_id,
+            reason: EndReason::Normal,
+        })
+        .await;
+    assert!(adapter.admission_outcomes().is_empty());
+}
+
+#[tokio::test]
+async fn admission_confirmation_reports_explicit_drop_and_timeout_rejections() {
+    // Explicit policy rejection.
+    let explicit = Orchestrator::new(Config::default());
+    let mut explicit_admissions = explicit
+        .install_inbound_admission_gate(1, Duration::from_secs(1))
+        .unwrap();
+    let (explicit_adapter, explicit_sender, _) = StubAdapter::new();
+    explicit.register(explicit_adapter.clone()).unwrap();
+    let (connection, principal) =
+        prepare_atomic_inbound(&explicit_adapter, "tenant-explicit", "explicit-secret");
+    let explicit_id = connection.id.clone();
+    announce_atomic_inbound(&explicit_sender, connection, principal).await;
+    explicit_admissions
+        .recv()
+        .await
+        .unwrap()
+        .reject(RejectReason::Forbidden)
+        .await
+        .unwrap();
+    assert_eq!(
+        explicit_adapter.admission_outcomes(),
+        vec![(explicit_id, 1, false)]
+    );
+
+    // Dropping a delivered ticket closes its decision channel.
+    let dropped = Orchestrator::new(Config::default());
+    let mut dropped_admissions = dropped
+        .install_inbound_admission_gate(1, Duration::from_secs(1))
+        .unwrap();
+    let (dropped_adapter, dropped_sender, _) = StubAdapter::new();
+    dropped.register(dropped_adapter.clone()).unwrap();
+    let (connection, principal) =
+        prepare_atomic_inbound(&dropped_adapter, "tenant-dropped", "dropped-secret");
+    let dropped_id = connection.id.clone();
+    announce_atomic_inbound(&dropped_sender, connection, principal).await;
+    drop(dropped_admissions.recv().await.unwrap());
+    wait_for_admission_outcomes(&dropped_adapter, 1).await;
+    assert_eq!(
+        dropped_adapter.admission_outcomes(),
+        vec![(dropped_id, 1, false)]
+    );
+
+    // An unresolved ticket reaches the configured decision deadline.
+    let timed_out = Orchestrator::new(Config::default());
+    let mut timed_out_admissions = timed_out
+        .install_inbound_admission_gate(1, Duration::from_millis(30))
+        .unwrap();
+    let (timed_out_adapter, timed_out_sender, _) = StubAdapter::new();
+    timed_out.register(timed_out_adapter.clone()).unwrap();
+    let (connection, principal) =
+        prepare_atomic_inbound(&timed_out_adapter, "tenant-timeout", "timeout-secret");
+    let timed_out_id = connection.id.clone();
+    announce_atomic_inbound(&timed_out_sender, connection, principal).await;
+    let timed_out_ticket = timed_out_admissions.recv().await.unwrap();
+    wait_for_admission_outcomes(&timed_out_adapter, 1).await;
+    assert_eq!(
+        timed_out_adapter.admission_outcomes(),
+        vec![(timed_out_id, 1, false)]
+    );
+    assert!(timed_out_ticket.accept().await.is_err());
+}
+
+#[tokio::test]
+async fn admission_confirmation_reports_receiver_loss_and_capacity_rejection() {
+    let closed = Orchestrator::new(Config::default());
+    let closed_admissions = closed
+        .install_inbound_admission_gate(1, Duration::from_secs(1))
+        .unwrap();
+    drop(closed_admissions);
+    let (closed_adapter, closed_sender, _) = StubAdapter::new();
+    closed.register(closed_adapter.clone()).unwrap();
+    let (connection, principal) =
+        prepare_atomic_inbound(&closed_adapter, "tenant-closed", "closed-secret");
+    let closed_id = connection.id.clone();
+    announce_atomic_inbound(&closed_sender, connection, principal).await;
+    wait_for_admission_outcomes(&closed_adapter, 1).await;
+    assert_eq!(
+        closed_adapter.admission_outcomes(),
+        vec![(closed_id, 1, false)]
+    );
+
+    let saturated = Orchestrator::new(Config::default());
+    let mut saturated_admissions = saturated
+        .install_inbound_admission_gate(1, Duration::from_secs(2))
+        .unwrap();
+    let (saturated_adapter, saturated_sender, _) = StubAdapter::new();
+    saturated.register(saturated_adapter.clone()).unwrap();
+    let (first, first_principal) =
+        prepare_atomic_inbound(&saturated_adapter, "tenant-first", "first-secret");
+    let first_id = first.id.clone();
+    announce_atomic_inbound(&saturated_sender, first, first_principal).await;
+    let first_ticket = saturated_admissions.recv().await.unwrap();
+    let (second, second_principal) =
+        prepare_atomic_inbound(&saturated_adapter, "tenant-second", "second-secret");
+    let second_id = second.id.clone();
+    announce_atomic_inbound(&saturated_sender, second, second_principal).await;
+    wait_for_admission_outcomes(&saturated_adapter, 1).await;
+    assert_eq!(
+        saturated_adapter.admission_outcomes(),
+        vec![(second_id.clone(), 1, false)]
+    );
+    first_ticket.reject(RejectReason::Forbidden).await.unwrap();
+    assert_eq!(
+        saturated_adapter.admission_outcomes(),
+        vec![(second_id, 1, false), (first_id, 1, false)]
+    );
+}
+
+#[tokio::test]
+async fn admission_confirmation_reports_malformed_and_cross_transport_collision() {
+    let malformed = Orchestrator::new(Config::default());
+    let _malformed_admissions = malformed
+        .install_inbound_admission_gate(1, Duration::from_secs(1))
+        .unwrap();
+    let (malformed_adapter, malformed_sender, _) = StubAdapter::new();
+    malformed.register(malformed_adapter.clone()).unwrap();
+    let mut malformed_connection = fake_inbound_connection();
+    malformed_connection.direction = Direction::Outbound;
+    let malformed_id = malformed_connection.id.clone();
+    malformed_adapter.mark_live(malformed_id.clone());
+    announce_atomic_inbound(
+        &malformed_sender,
+        malformed_connection,
+        authenticated_principal("tenant-malformed"),
+    )
+    .await;
+    wait_for_admission_outcomes(&malformed_adapter, 1).await;
+    assert_eq!(
+        malformed_adapter.admission_outcomes(),
+        vec![(malformed_id, 1, false)]
+    );
+
+    let collision = Orchestrator::new(Config::default());
+    let mut collision_admissions = collision
+        .install_inbound_admission_gate(2, Duration::from_secs(1))
+        .unwrap();
+    let (sip, sip_sender, _) = StubAdapter::new_for(Transport::Sip);
+    let (webrtc, webrtc_sender, _) = StubAdapter::new_for(Transport::WebRtc);
+    collision.register(sip.clone()).unwrap();
+    collision.register(webrtc.clone()).unwrap();
+    let (owner, owner_principal) = prepare_atomic_inbound(&sip, "tenant-owner", "owner-secret");
+    let connection_id = owner.id.clone();
+    announce_atomic_inbound(&sip_sender, owner, owner_principal).await;
+    let owner_ticket = collision_admissions.recv().await.unwrap();
+    let mut attacker = fake_inbound_connection_for(Transport::WebRtc);
+    attacker.id = connection_id.clone();
+    webrtc.mark_live(connection_id.clone());
+    announce_atomic_inbound(
+        &webrtc_sender,
+        attacker,
+        authenticated_principal("tenant-attacker"),
+    )
+    .await;
+    wait_for_admission_outcomes(&webrtc, 1).await;
+    assert_eq!(
+        webrtc.admission_outcomes(),
+        vec![(connection_id.clone(), 1, false)]
+    );
+    assert!(sip.admission_outcomes().is_empty());
+    owner_ticket.accept().await.unwrap();
+    assert_eq!(sip.admission_outcomes(), vec![(connection_id, 1, true)]);
+}
+
+#[tokio::test]
+async fn admission_confirmation_terminal_and_stale_decisions_are_generation_safe() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(1, Duration::from_secs(2))
+        .unwrap();
+    let (adapter, sender, counts) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let (connection, principal) =
+        prepare_atomic_inbound(&adapter, "tenant-terminal", "terminal-secret");
+    let connection_id = connection.id.clone();
+    announce_atomic_inbound(&sender, connection, principal).await;
+    let stale_ticket = admissions.recv().await.unwrap();
+    adapter.mark_ended(&connection_id);
+    adapter
+        .deliver_terminal(AdapterEvent::Ended {
+            connection_id: connection_id.clone(),
+            reason: EndReason::Normal,
+        })
+        .await;
+    assert_eq!(
+        adapter.admission_outcomes(),
+        vec![(connection_id.clone(), 1, false)]
+    );
+    assert!(stale_ticket.accept().await.is_err());
+    assert_eq!(
+        adapter.admission_outcomes(),
+        vec![(connection_id.clone(), 1, false)]
+    );
+
+    // A prohibited replacement is rejected under the tombstone's next
+    // generation. The stale generation-one acceptance cannot affect it.
+    let mut replacement = fake_inbound_connection();
+    replacement.id = connection_id.clone();
+    let replacement_principal = authenticated_principal("tenant-replacement");
+    adapter.mark_live(connection_id.clone());
+    adapter.set_inbound_context(
+        InboundConnectionContext::new(
+            connection_id.clone(),
+            Transport::Sip,
+            &replacement_principal,
+            None,
+            InboundSignalingMetadata::default(),
+        )
+        .unwrap(),
+    );
+    announce_atomic_inbound(&sender, replacement, replacement_principal).await;
+    wait_for_count(&counts.reject, 1).await;
+    wait_for_admission_outcomes(&adapter, 2).await;
+    assert_eq!(
+        adapter.admission_outcomes(),
+        vec![(connection_id.clone(), 1, false), (connection_id, 2, false)]
+    );
+}
+
+#[tokio::test]
+async fn admission_confirmation_defaults_noop_and_no_gate_stays_compatible() {
+    let gated = Orchestrator::new(Config::default());
+    let mut admissions = gated
+        .install_inbound_admission_gate(1, Duration::from_secs(1))
+        .unwrap();
+    let (default_adapter, sender, _) =
+        StubAdapter::new_for_with_capabilities(Transport::Sip, true, false);
+    gated.register(default_adapter.clone()).unwrap();
+    let (connection, principal) =
+        prepare_atomic_inbound(&default_adapter, "tenant-default", "default-secret");
+    announce_atomic_inbound(&sender, connection, principal).await;
+    admissions.recv().await.unwrap().accept().await.unwrap();
+    assert!(default_adapter.admission_outcomes().is_empty());
+
+    let compatibility = Orchestrator::new(Config::default());
+    let (capable_adapter, sender, _) = StubAdapter::new();
+    compatibility.register(capable_adapter.clone()).unwrap();
+    let (connection, principal) =
+        prepare_atomic_inbound(&capable_adapter, "tenant-no-gate", "no-gate-secret");
+    let connection_id = connection.id.clone();
+    announce_atomic_inbound(&sender, connection, principal).await;
+    wait_for_connection_principal(&compatibility, &connection_id).await;
+    capable_adapter.mark_ended(&connection_id);
+    capable_adapter
+        .deliver_terminal(AdapterEvent::Ended {
+            connection_id,
+            reason: EndReason::Normal,
+        })
+        .await;
+    assert!(capable_adapter.admission_outcomes().is_empty());
 }
 
 #[tokio::test]

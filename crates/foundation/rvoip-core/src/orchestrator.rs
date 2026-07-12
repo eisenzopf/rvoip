@@ -159,6 +159,7 @@ impl CrossCrateEventPublisher {
 #[derive(Debug)]
 struct ConnectionEntry {
     transport: Transport,
+    direction: Direction,
     principal: Option<AuthenticatedPrincipal>,
     inbound_context: Option<InboundConnectionContext>,
     inbound_context_retired: bool,
@@ -280,6 +281,7 @@ struct ConnectionLifecycleState {
     generation: u64,
     active: bool,
     retired: bool,
+    admission_outcomes_notified: HashSet<(u64, Transport)>,
 }
 
 #[derive(Clone)]
@@ -287,6 +289,23 @@ struct ConnectionLifecycleTicket {
     connection_id: ConnectionId,
     generation: u64,
     state: Arc<Mutex<ConnectionLifecycleState>>,
+}
+
+struct InboundAdmissionNotification {
+    adapter: Arc<dyn ConnectionAdapter>,
+    connection_id: ConnectionId,
+    lifecycle_generation: u64,
+    accepted: bool,
+}
+
+impl InboundAdmissionNotification {
+    fn deliver(self) {
+        self.adapter.notify_inbound_admission_outcome(
+            &self.connection_id,
+            self.lifecycle_generation,
+            self.accepted,
+        );
+    }
 }
 
 /// Breaks the Orchestrator↔adapter ownership cycle while still providing a
@@ -1165,7 +1184,7 @@ impl Orchestrator {
             return false;
         }
         if let Some(mut entry) = self.connections.get_mut(conn) {
-            if entry.transport != transport {
+            if entry.transport != transport || entry.direction != Direction::Inbound {
                 return false;
             }
             if !entry.inbound_context_retired && entry.inbound_context.is_none() {
@@ -1184,6 +1203,7 @@ impl Orchestrator {
                 conn.clone(),
                 ConnectionEntry {
                     transport,
+                    direction: Direction::Inbound,
                     principal: None,
                     inbound_context,
                     inbound_context_retired: false,
@@ -1224,11 +1244,20 @@ impl Orchestrator {
         // A colliding adapter may already have retained an attachment token;
         // drain it without exposing or storing it in the owning core route.
         let _ = adapter.take_inbound_context(&connection_id);
+        let admission_notification = self.claim_current_inbound_admission_notification(
+            &connection_id,
+            transport,
+            false,
+            false,
+        );
         metrics::counter!(
             "rvoip_core_connection_transport_collision_total",
             "transport" => format!("{transport:?}")
         )
         .increment(1);
+        if let Some(notification) = admission_notification {
+            notification.deliver();
+        }
         let _ = tokio::time::timeout(INBOUND_ADMISSION_ADAPTER_CLEANUP_TIMEOUT, async {
             if adapter
                 .reject(connection_id.clone(), RejectReason::ServerError)
@@ -1328,7 +1357,7 @@ impl Orchestrator {
             return false;
         }
         if let Some(mut entry) = self.connections.get_mut(conn) {
-            if entry.transport != transport {
+            if entry.transport != transport || entry.direction != Direction::Inbound {
                 return false;
             }
             if entry
@@ -1345,6 +1374,7 @@ impl Orchestrator {
                 conn.clone(),
                 ConnectionEntry {
                     transport,
+                    direction: Direction::Inbound,
                     principal: Some(principal),
                     inbound_context: None,
                     inbound_context_retired: false,
@@ -1363,6 +1393,11 @@ impl Orchestrator {
             .connections
             .get_mut(conn)
             .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
+        if entry.direction != Direction::Inbound {
+            return Err(RvoipError::AdmissionRejected(
+                "connection direction is not inbound",
+            ));
+        }
         if entry.inbound_publication == InboundPublicationState::NotInbound {
             entry.inbound_publication = InboundPublicationState::Unseen;
         }
@@ -1389,6 +1424,7 @@ impl Orchestrator {
                     generation: 1,
                     active: true,
                     retired: false,
+                    admission_outcomes_notified: HashSet::new(),
                 }))
             })
             .clone();
@@ -1416,8 +1452,127 @@ impl Orchestrator {
                 generation: 1,
                 active: false,
                 retired: true,
+                admission_outcomes_notified: HashSet::new(),
             })),
         );
+    }
+
+    fn inbound_admission_confirmation_adapter(
+        &self,
+        transport: Transport,
+    ) -> Option<Arc<dyn ConnectionAdapter>> {
+        if self.inbound_admission_gate.get().is_none() {
+            return None;
+        }
+        let adapter = self.adapter(transport).ok()?;
+        adapter
+            .supports_inbound_admission_confirmation()
+            .then_some(adapter)
+    }
+
+    fn claim_ticketed_inbound_admission_notification(
+        &self,
+        lifecycle: &ConnectionLifecycleTicket,
+        transport: Transport,
+        accepted: bool,
+    ) -> Option<InboundAdmissionNotification> {
+        let adapter = self.inbound_admission_confirmation_adapter(transport)?;
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let current = self.connection_lifecycles.get(&lifecycle.connection_id)?;
+        if !Arc::ptr_eq(current.value(), &lifecycle.state) {
+            return None;
+        }
+        let mut state = lifecycle
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.active || state.retired || state.generation != lifecycle.generation {
+            return None;
+        }
+        if !state
+            .admission_outcomes_notified
+            .insert((lifecycle.generation, transport))
+        {
+            return None;
+        }
+        Some(InboundAdmissionNotification {
+            adapter,
+            connection_id: lifecycle.connection_id.clone(),
+            lifecycle_generation: lifecycle.generation,
+            accepted,
+        })
+    }
+
+    /// Claim a notification for a transport route that never acquired core
+    /// ownership (malformed input or an ID collision), or for the currently
+    /// tracked inbound route during terminal cleanup.
+    fn claim_current_inbound_admission_notification(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+        accepted: bool,
+        require_owned_inbound: bool,
+    ) -> Option<InboundAdmissionNotification> {
+        let adapter = self.inbound_admission_confirmation_adapter(transport)?;
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lifecycle = if let Some(existing) = self.connection_lifecycles.get(connection_id) {
+            Arc::clone(existing.value())
+        } else {
+            if require_owned_inbound {
+                return None;
+            }
+            if self.connection_lifecycles.len() >= self.connection_id_budget.load(Ordering::Relaxed)
+            {
+                metrics::counter!(
+                    "rvoip_core_inbound_admission_confirmation_dropped_total",
+                    "reason" => "connection_id_budget"
+                )
+                .increment(1);
+                return None;
+            }
+            let lifecycle = Arc::new(Mutex::new(ConnectionLifecycleState {
+                generation: 1,
+                active: false,
+                retired: true,
+                admission_outcomes_notified: HashSet::new(),
+            }));
+            self.connection_lifecycles
+                .insert(connection_id.clone(), Arc::clone(&lifecycle));
+            lifecycle
+        };
+        let mut state = lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if require_owned_inbound {
+            let entry = self.connections.get(connection_id)?;
+            if !state.active
+                || state.retired
+                || entry.transport != transport
+                || entry.direction != Direction::Inbound
+                || entry.inbound_publication == InboundPublicationState::NotInbound
+            {
+                return None;
+            }
+        }
+        let lifecycle_generation = state.generation;
+        if !state
+            .admission_outcomes_notified
+            .insert((lifecycle_generation, transport))
+        {
+            return None;
+        }
+        Some(InboundAdmissionNotification {
+            adapter,
+            connection_id: connection_id.clone(),
+            lifecycle_generation,
+            accepted,
+        })
     }
 
     /// Reserve a never-before-seen ID for one outbound route. Unlike the
@@ -1449,6 +1604,7 @@ impl Orchestrator {
             generation: 1,
             active: true,
             retired: false,
+            admission_outcomes_notified: HashSet::new(),
         }));
         self.connection_lifecycles
             .insert(connection_id.clone(), Arc::clone(&state));
@@ -1456,6 +1612,7 @@ impl Orchestrator {
             connection_id.clone(),
             ConnectionEntry {
                 transport,
+                direction: Direction::Outbound,
                 principal: None,
                 inbound_context: None,
                 inbound_context_retired: true,
@@ -1806,6 +1963,7 @@ impl Orchestrator {
             .get_mut(&lifecycle.connection_id)
             .ok_or_else(|| RvoipError::ConnectionNotFound(lifecycle.connection_id.clone()))?;
         if entry.transport != transport
+            || entry.direction != Direction::Outbound
             || entry.inbound_publication != InboundPublicationState::NotInbound
         {
             return Err(RvoipError::AdmissionRejected(
@@ -2219,6 +2377,7 @@ impl Orchestrator {
                         generation: 1,
                         active: false,
                         retired: true,
+                        admission_outcomes_notified: HashSet::new(),
                     })),
                 );
             } else {
@@ -2282,8 +2441,17 @@ impl Orchestrator {
         })
     }
 
-    async fn forget_connection(&self, conn: &ConnectionId) -> ForgottenConnection {
+    async fn forget_inbound_connection(
+        &self,
+        conn: &ConnectionId,
+        transport: Transport,
+    ) -> ForgottenConnection {
+        let admission_notification =
+            self.claim_current_inbound_admission_notification(conn, transport, false, true);
         let forgotten = self.begin_connection_teardown(conn);
+        if let Some(notification) = admission_notification {
+            notification.deliver();
+        }
         self.finish_connection_teardown(conn, forgotten).await
     }
 
@@ -3314,7 +3482,9 @@ impl Orchestrator {
         if !self.adapter_connection_is_live(pending.transport, &pending.connection_id) {
             return false;
         }
-        let Ok(_lifecycle) =
+        let gated = self.inbound_admission_gate.get().is_some();
+        let confirmation_adapter = self.inbound_admission_confirmation_adapter(pending.transport);
+        let Ok(mut lifecycles) =
             self.lock_connection_lifecycles(std::slice::from_ref(&pending.lifecycle))
         else {
             return false;
@@ -3322,10 +3492,9 @@ impl Orchestrator {
         let Some(mut entry) = self.connections.get_mut(&pending.connection_id) else {
             return false;
         };
-        if entry.transport != pending.transport {
+        if entry.transport != pending.transport || entry.direction != Direction::Inbound {
             return false;
         }
-        let gated = self.inbound_admission_gate.get().is_some();
         let expected_state = if gated {
             InboundPublicationState::Pending(pending.lifecycle.generation)
         } else {
@@ -3356,7 +3525,28 @@ impl Orchestrator {
         let retained_principal = entry.principal.clone();
         entry.inbound_publication = InboundPublicationState::Published;
         entry.normalized_lifecycle_was_visible = true;
+        let admission_notification = if let Some(adapter) = confirmation_adapter {
+            let state = lifecycles
+                .first_mut()
+                .expect("one lifecycle was locked for inbound publication");
+            if state
+                .admission_outcomes_notified
+                .insert((pending.lifecycle.generation, pending.transport))
+            {
+                Some(InboundAdmissionNotification {
+                    adapter,
+                    connection_id: pending.connection_id.clone(),
+                    lifecycle_generation: pending.lifecycle.generation,
+                    accepted: true,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         drop(entry);
+        drop(lifecycles);
 
         self.emit(Event::ConnectionInbound {
             connection_id: pending.connection_id.clone(),
@@ -3401,6 +3591,9 @@ impl Orchestrator {
                 at: deferred.at,
             });
         }
+        if let Some(notification) = admission_notification {
+            notification.deliver();
+        }
         true
     }
 
@@ -3413,10 +3606,19 @@ impl Orchestrator {
         let transport = claimed.transport;
         let connection_id = claimed.connection_id.clone();
         let normalized_lifecycle_was_visible = claimed.normalized_lifecycle_was_visible;
+        let admission_notification = self.claim_ticketed_inbound_admission_notification(
+            &claimed.lifecycle,
+            transport,
+            false,
+        );
         // Retire the lifecycle and erase all principal/attachment context
         // synchronously, before invoking an adapter that may hang or retain a
         // hostile peer indefinitely. Adapter cleanup is tracked separately.
-        let Some(forgotten) = self.begin_claimed_inbound_teardown(&claimed) else {
+        let forgotten = self.begin_claimed_inbound_teardown(&claimed);
+        if let Some(notification) = admission_notification {
+            notification.deliver();
+        }
+        let Some(forgotten) = forgotten else {
             return false;
         };
         self.adapter_cleanup_quarantines.insert(
@@ -4211,7 +4413,8 @@ impl Orchestrator {
                     return;
                 }
                 if !self.adapter_connection_is_live(transport, &connection.id) {
-                    self.forget_connection(&connection.id).await;
+                    self.forget_inbound_connection(&connection.id, transport)
+                        .await;
                     return;
                 }
                 let at = Utc::now();
@@ -4409,7 +4612,8 @@ impl Orchestrator {
                     return;
                 }
                 if !self.adapter_connection_is_live(transport, &connection.id) {
-                    self.forget_connection(&connection.id).await;
+                    self.forget_inbound_connection(&connection.id, transport)
+                        .await;
                     return;
                 }
                 let observed_at = Utc::now();
@@ -4478,7 +4682,9 @@ impl Orchestrator {
                 if self.connection_owned_by_other_transport(&connection_id, transport) {
                     return;
                 }
-                let forgotten = self.forget_connection(&connection_id).await;
+                let forgotten = self
+                    .forget_inbound_connection(&connection_id, transport)
+                    .await;
                 self.resolve_adapter_cleanup_quarantine_from_terminal(&connection_id, transport);
                 if forgotten.was_tracked && forgotten.normalized_lifecycle_was_visible {
                     self.emit(Event::ConnectionEnded {
@@ -4495,7 +4701,9 @@ impl Orchestrator {
                 if self.connection_owned_by_other_transport(&connection_id, transport) {
                     return;
                 }
-                let forgotten = self.forget_connection(&connection_id).await;
+                let forgotten = self
+                    .forget_inbound_connection(&connection_id, transport)
+                    .await;
                 self.resolve_adapter_cleanup_quarantine_from_terminal(&connection_id, transport);
                 if forgotten.was_tracked && forgotten.normalized_lifecycle_was_visible {
                     self.emit(Event::ConnectionFailed {

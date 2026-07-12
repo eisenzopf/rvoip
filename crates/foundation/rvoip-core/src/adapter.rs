@@ -238,6 +238,40 @@ pub trait ConnectionAdapter: Send + Sync {
         AdapterLifecycleCapabilities::default()
     }
 
+    /// Whether this adapter consumes final inbound-admission confirmations.
+    ///
+    /// This is intentionally a separate, source-compatible capability rather
+    /// than a field on [`AdapterLifecycleCapabilities`]. Existing adapters
+    /// therefore remain build-compatible and default to the historical
+    /// behavior.
+    fn supports_inbound_admission_confirmation(&self) -> bool {
+        false
+    }
+
+    /// Report the final policy outcome for one exact inbound lifecycle.
+    ///
+    /// Core calls this synchronously, at most once for a
+    /// `(transport, connection_id, lifecycle_generation)` tuple, and only
+    /// when an inbound admission gate is installed. `accepted` becomes true
+    /// only after publication has committed; every fail-closed disposition is
+    /// false. The callback deliberately carries no principal, credentials,
+    /// attachment context, or signaling metadata.
+    ///
+    /// Implementations must return promptly and be idempotent. An adapter may
+    /// use the generation to reject a delayed notification for a superseded
+    /// local waiter. Waiting for this callback belongs inside the adapter's
+    /// protocol task; it must not block the Orchestrator event loop.
+    /// `accepted=true` is a policy/publication result, not a continuing
+    /// liveness guarantee: a terminal event may follow immediately and must
+    /// independently cancel or close the adapter's protocol waiter/response.
+    fn notify_inbound_admission_outcome(
+        &self,
+        _connection_id: &ConnectionId,
+        _lifecycle_generation: u64,
+        _accepted: bool,
+    ) {
+    }
+
     /// Install the Orchestrator's terminal-event fallback. The default is a
     /// no-op for adapters that cannot overrun their lifecycle event path.
     fn install_lifecycle_sink(&self, _sink: Arc<dyn AdapterLifecycleSink>) -> Result<()> {
