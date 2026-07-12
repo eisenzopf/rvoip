@@ -108,6 +108,13 @@ pub enum OperationalTransferOutcome {
 #[non_exhaustive]
 pub enum OperationalEventKind {
     Connected,
+    /// Coalesced proof that core consumed media from this exact live
+    /// Connection. `generation` is consecutive for the Connection lifecycle
+    /// even when lower-level graph observations were overwritten under
+    /// backpressure.
+    MediaActivity {
+        generation: u64,
+    },
     Ended {
         reason: OperationalEndReason,
     },
@@ -131,6 +138,10 @@ impl fmt::Debug for OperationalEventKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Connected => formatter.write_str("Connected"),
+            Self::MediaActivity { generation } => formatter
+                .debug_struct("MediaActivity")
+                .field("generation", generation)
+                .finish(),
             Self::Ended { reason } => formatter
                 .debug_struct("Ended")
                 .field("reason", reason)
@@ -309,7 +320,7 @@ impl OperationalEventStream {
         true
     }
 
-    fn mark_degraded(&self) {
+    pub(crate) fn mark_degraded(&self) {
         if !self.degraded.swap(true, Ordering::AcqRel) {
             metrics::counter!("rvoip_core_operational_event_stream_failures_total").increment(1);
             tracing::error!("authoritative operational event receiver unavailable; failing closed");

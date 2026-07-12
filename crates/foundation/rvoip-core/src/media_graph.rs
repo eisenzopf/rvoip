@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use rvoip_media_core::codec::audio::{AudioCodec, OpusApplication, OpusCodec, OpusConfig};
 use rvoip_media_core::codec::factory::CodecFactory;
 use rvoip_media_core::error::CodecError;
@@ -31,6 +32,8 @@ use crate::stream::MediaFrame;
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const SNAPSHOT_PUBLISH_INTERVAL: Duration = Duration::from_secs(1);
+/// Maximum publication cadence for retained source-activity observations.
+pub const MEDIA_GRAPH_ACTIVITY_OBSERVATION_INTERVAL: Duration = Duration::from_secs(1);
 const RECENT_EVICTION_LIMIT: usize = 64;
 const CONTROL_QUEUE_CAPACITY: usize = 256;
 const SINK_EVENT_QUEUE_CAPACITY: usize = 256;
@@ -99,6 +102,18 @@ impl Default for MediaGraphPolicy {
             minimum_eviction_samples: 50,
         }
     }
+}
+
+/// Latest coalesced proof that the graph consumed media from its single
+/// authoritative source receiver.
+///
+/// `source_frames` is diagnostic only. Consumers that persist activity should
+/// assign their own consecutive delivery generation because this retained
+/// value can skip counts while they are backpressured.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MediaGraphActivityObservation {
+    pub source_frames: u64,
+    pub observed_at: DateTime<Utc>,
 }
 
 /// Current state of the graph's single source receiver.
@@ -444,6 +459,7 @@ pub struct MediaGraphHandle {
     latest_snapshot: RetainedSnapshot,
     snapshot_in_flight: Arc<AtomicBool>,
     completion: watch::Receiver<Option<MediaGraphSourceState>>,
+    activity: watch::Receiver<Option<MediaGraphActivityObservation>>,
     route_statuses: RouteStatusRegistry,
     sink_admission: Arc<SinkAdmissionState>,
 }
@@ -451,6 +467,15 @@ pub struct MediaGraphHandle {
 impl MediaGraphHandle {
     pub fn id(&self) -> &MediaGraphId {
         &self.graph_id
+    }
+
+    /// Subscribe to a bounded retained source-activity observation.
+    ///
+    /// The graph publishes at most one value per configured observation
+    /// interval and overwrites an unread value with the newest one. A slow
+    /// observer therefore cannot stall or grow memory in the media path.
+    pub fn subscribe_activity(&self) -> watch::Receiver<Option<MediaGraphActivityObservation>> {
+        self.activity.clone()
     }
 
     pub fn add_sink(
@@ -1295,12 +1320,31 @@ fn prune_sink_tasks(registry: &SinkTaskRegistry) {
 
 /// Start a media graph task that owns `source` for its lifetime.
 pub fn start_media_graph(
-    mut source: mpsc::Receiver<MediaFrame>,
+    source: mpsc::Receiver<MediaFrame>,
     source_codec: CodecInfo,
     policy: MediaGraphPolicy,
 ) -> Result<MediaGraphHandle> {
+    start_media_graph_with_activity_interval(
+        source,
+        source_codec,
+        policy,
+        MEDIA_GRAPH_ACTIVITY_OBSERVATION_INTERVAL,
+    )
+}
+
+fn start_media_graph_with_activity_interval(
+    mut source: mpsc::Receiver<MediaFrame>,
+    source_codec: CodecInfo,
+    policy: MediaGraphPolicy,
+    activity_observation_interval: Duration,
+) -> Result<MediaGraphHandle> {
     let graph_id = MediaGraphId::new();
     validate_media_graph_codec(&source_codec)?;
+    if activity_observation_interval.is_zero() {
+        return Err(RvoipError::InvalidState(
+            "media graph activity observation interval is invalid",
+        ));
+    }
     let initial_source_pt = payload_type_for_codec(&source_codec)
         .expect("validated media graph codec has an RTP payload type");
     let initial_snapshot = MediaGraphSnapshot {
@@ -1324,6 +1368,7 @@ pub fn start_media_graph(
     let sink_tasks = Arc::new(Mutex::new(Vec::new()));
     let sink_tasks_for_actor = Arc::clone(&sink_tasks);
     let (completion_tx, completion_rx) = watch::channel(None);
+    let (activity_tx, activity_rx) = watch::channel(None);
     let route_statuses: RouteStatusRegistry = Arc::new(Mutex::new(HashMap::new()));
     let route_statuses_for_actor = Arc::clone(&route_statuses);
     let sink_admission = Arc::new(SinkAdmissionState::new(policy.max_sinks));
@@ -1354,11 +1399,15 @@ pub fn start_media_graph(
         // discard media rather than replaying stale RTP to a future attachment.
         let mut source_routing_started = false;
         let mut snapshot_dirty = false;
+        let mut pending_activity_at = None;
         let mut snapshot_tick = tokio::time::interval(SNAPSHOT_PUBLISH_INTERVAL);
         snapshot_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut activity_tick = tokio::time::interval(activity_observation_interval);
+        activity_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Consume interval's immediate first tick; the initial retained
         // snapshot was already published before spawning the actor.
         snapshot_tick.tick().await;
+        activity_tick.tick().await;
 
         loop {
             tokio::select! {
@@ -1705,6 +1754,11 @@ pub fn start_media_graph(
                         break;
                     };
                     stats.source_frames = stats.source_frames.saturating_add(1);
+                    let observed_at = Utc::now();
+                    pending_activity_at = Some(
+                        pending_activity_at
+                            .map_or(observed_at, |previous: DateTime<Utc>| previous.max(observed_at)),
+                    );
                     snapshot_dirty = true;
                     metrics::counter!("rvoip_media_graph_source_frames_total").increment(1);
                     if !source_routing_started {
@@ -1793,9 +1847,21 @@ pub fn start_media_graph(
                         );
                     }
                 }
+                _ = activity_tick.tick() => {
+                    publish_pending_activity(
+                        &activity_tx,
+                        &mut pending_activity_at,
+                        stats.source_frames,
+                    );
+                }
             }
         }
 
+        // Preserve the last accepted frame even when the source closes or a
+        // graceful graph shutdown happens before the next coalescing tick.
+        // Lifecycle ownership is revalidated by the Orchestrator before this
+        // retained observation can become an authoritative event.
+        publish_pending_activity(&activity_tx, &mut pending_activity_at, stats.source_frames);
         sinks.clear();
         groups.clear();
         aggregate_metrics.set_sink_count(0);
@@ -1822,9 +1888,24 @@ pub fn start_media_graph(
         latest_snapshot,
         snapshot_in_flight,
         completion: completion_rx,
+        activity: activity_rx,
         route_statuses,
         sink_admission,
     })
+}
+
+fn publish_pending_activity(
+    sender: &watch::Sender<Option<MediaGraphActivityObservation>>,
+    pending_at: &mut Option<DateTime<Utc>>,
+    source_frames: u64,
+) {
+    let Some(observed_at) = pending_at.take() else {
+        return;
+    };
+    sender.send_replace(Some(MediaGraphActivityObservation {
+        source_frames,
+        observed_at,
+    }));
 }
 
 fn publish_actor_snapshot(
@@ -2232,6 +2313,66 @@ mod tests {
         assert_eq!(a_rx.recv().await.unwrap().payload[0], 7);
         assert_eq!(b_rx.recv().await.unwrap().payload[0], 7);
         graph.shutdown();
+    }
+
+    #[tokio::test]
+    async fn source_activity_is_retained_and_coalesced_per_interval() {
+        let (source_tx, source_rx) = mpsc::channel(64);
+        for value in 0..32 {
+            source_tx.try_send(frame(value)).unwrap();
+        }
+        let graph = start_media_graph_with_activity_interval(
+            source_rx,
+            codec("pcmu", 8_000),
+            MediaGraphPolicy::default(),
+            Duration::from_millis(40),
+        )
+        .unwrap();
+        let mut activity = graph.subscribe_activity();
+        tokio::time::timeout(Duration::from_secs(1), activity.changed())
+            .await
+            .expect("coalesced observation deadline")
+            .expect("activity publisher remains live");
+        let first = activity
+            .borrow_and_update()
+            .clone()
+            .expect("activity observation");
+        assert_eq!(first.source_frames, 32);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(60), activity.changed())
+                .await
+                .is_err(),
+            "idle ticks do not manufacture activity"
+        );
+
+        source_tx.send(frame(33)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), activity.changed())
+            .await
+            .expect("next observation deadline")
+            .expect("activity publisher remains live");
+        let second = activity
+            .borrow_and_update()
+            .clone()
+            .expect("next activity observation");
+        assert_eq!(second.source_frames, 33);
+        assert!(second.observed_at >= first.observed_at);
+        graph.shutdown_and_wait().await.unwrap();
+    }
+
+    #[test]
+    fn zero_activity_observation_interval_is_rejected() {
+        let (_source_tx, source_rx) = mpsc::channel(1);
+        assert!(matches!(
+            start_media_graph_with_activity_interval(
+                source_rx,
+                codec("pcmu", 8_000),
+                MediaGraphPolicy::default(),
+                Duration::ZERO,
+            ),
+            Err(RvoipError::InvalidState(
+                "media graph activity observation interval is invalid"
+            ))
+        ));
     }
 
     #[tokio::test]

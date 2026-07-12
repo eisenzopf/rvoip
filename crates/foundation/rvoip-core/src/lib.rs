@@ -175,7 +175,8 @@ pub use ids::{
 };
 pub use inbound_admission::InboundAdmission;
 pub use media_graph::{
-    start_media_graph, MediaGraphHandle, MediaGraphPolicy, DEFAULT_MEDIA_GRAPH_MAX_SINKS,
+    start_media_graph, MediaGraphActivityObservation, MediaGraphHandle, MediaGraphPolicy,
+    DEFAULT_MEDIA_GRAPH_MAX_SINKS, MEDIA_GRAPH_ACTIVITY_OBSERVATION_INTERVAL,
 };
 pub use message::{ContentType, Message, MessageOrigin, MessageRecipients};
 pub use operational_events::{

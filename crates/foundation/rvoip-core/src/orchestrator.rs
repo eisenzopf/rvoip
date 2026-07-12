@@ -279,6 +279,12 @@ enum OperationalEventDecision {
     Reject(ClaimedInboundRejection),
 }
 
+enum MediaActivityLifecycleDecision {
+    Publish,
+    AwaitConnected,
+    Retired,
+}
+
 enum AtomicPendingUpdate {
     Handled,
     Reject(ClaimedInboundRejection),
@@ -2733,6 +2739,47 @@ impl Orchestrator {
     fn validate_connection_lifecycles(&self, tickets: &[ConnectionLifecycleTicket]) -> Result<()> {
         drop(self.lock_connection_lifecycles(tickets)?);
         Ok(())
+    }
+
+    /// Revalidate a media observation against the exact route incarnation
+    /// after acquiring the authoritative event-order lock. This is the final
+    /// fence that prevents a retained graph observation from appearing after
+    /// terminal teardown or against a colliding transport route.
+    fn media_activity_lifecycle_decision(
+        &self,
+        lifecycle: &ConnectionLifecycleTicket,
+        transport: Transport,
+    ) -> MediaActivityLifecycleDecision {
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(current) = self.connection_lifecycles.get(&lifecycle.connection_id) else {
+            return MediaActivityLifecycleDecision::Retired;
+        };
+        if !Arc::ptr_eq(current.value(), &lifecycle.state) {
+            return MediaActivityLifecycleDecision::Retired;
+        }
+        let state = lifecycle
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.active || state.retired || state.generation != lifecycle.generation {
+            return MediaActivityLifecycleDecision::Retired;
+        }
+        let Some(entry) = self.connections.get(&lifecycle.connection_id) else {
+            return MediaActivityLifecycleDecision::Retired;
+        };
+        if entry.transport != transport
+            || entry.inbound_publication != InboundPublicationState::Published
+        {
+            return MediaActivityLifecycleDecision::Retired;
+        }
+        if state.operational_connected_emitted {
+            MediaActivityLifecycleDecision::Publish
+        } else {
+            MediaActivityLifecycleDecision::AwaitConnected
+        }
     }
 
     fn begin_ticketed_connection_teardown(
@@ -8108,10 +8155,27 @@ impl Orchestrator {
         // Validation must precede the destructive single-consumer take. Once
         // acquired, a receiver cannot be put back into a MediaStream.
         validate_media_graph_codec(&codec)?;
+        let transport = self.connection_transport(&connection_id)?;
+        let mut lifecycles =
+            self.capture_connection_lifecycles(std::slice::from_ref(&connection_id))?;
+        let lifecycle = lifecycles
+            .pop()
+            .expect("one connection lifecycle was captured");
         let source = stream.try_frames_in()?;
         let graph = start_media_graph(source, codec, MediaGraphPolicy::default())?;
         self.media_graphs
             .insert(connection_id.clone(), graph.clone());
+        if let Err(error) = self.supervise_media_activity(
+            connection_id.clone(),
+            transport,
+            lifecycle,
+            graph.subscribe_activity(),
+        ) {
+            if let Some((_, stale)) = self.media_graphs.remove(&connection_id) {
+                stale.shutdown();
+            }
+            return Err(error);
+        }
         // The adapter stream lookup above is asynchronous. A disconnect may
         // have removed the Connection while it was in flight; insert first,
         // then revalidate so either this path or `forget_connection` observes
@@ -8123,6 +8187,103 @@ impl Orchestrator {
             return Err(RvoipError::ConnectionNotFound(connection_id));
         }
         Ok(graph)
+    }
+
+    fn supervise_media_activity(
+        &self,
+        connection_id: ConnectionId,
+        transport: Transport,
+        lifecycle: ConnectionLifecycleTicket,
+        mut activity: tokio::sync::watch::Receiver<
+            Option<crate::media_graph::MediaGraphActivityObservation>,
+        >,
+    ) -> Result<()> {
+        if self.operational_event_stream.get().is_none() {
+            return Ok(());
+        }
+        self.ensure_operational_event_stream_healthy()?;
+        let owner = self
+            .self_weak
+            .get()
+            .expect("orchestrator self reference is initialized")
+            .clone();
+        let spawned = self.connection_lifecycle_tasks.spawn(async move {
+            let mut generation = 0_u64;
+            let mut delivered_source_frames = 0_u64;
+            while activity.changed().await.is_ok() {
+                let Some(orchestrator) = owner.upgrade() else {
+                    break;
+                };
+                // Terminal handlers use the same lock. The lifecycle check
+                // below therefore either publishes before terminal or sees
+                // the retired exact ticket and exits; it can never resurrect
+                // activity after an Ended/Failed event.
+                let _operational_order = orchestrator.operational_event_order.lock().await;
+                let observation = activity.borrow_and_update().clone();
+                let Some(observation) = observation else {
+                    continue;
+                };
+                match orchestrator.media_activity_lifecycle_decision(&lifecycle, transport) {
+                    MediaActivityLifecycleDecision::Publish => {}
+                    MediaActivityLifecycleDecision::AwaitConnected => continue,
+                    MediaActivityLifecycleDecision::Retired => break,
+                }
+                let Some(next_generation) = generation.checked_add(1) else {
+                    if let Some(stream) = orchestrator.operational_event_stream.get() {
+                        stream.mark_degraded();
+                    }
+                    break;
+                };
+                let delivered = orchestrator
+                    .emit_operational(
+                        connection_id.clone(),
+                        transport,
+                        observation.observed_at,
+                        OperationalEventKind::MediaActivity {
+                            generation: next_generation,
+                        },
+                    )
+                    .await;
+                if !delivered {
+                    break;
+                }
+                generation = next_generation;
+                let coalesced = observation
+                    .source_frames
+                    .saturating_sub(delivered_source_frames)
+                    .saturating_sub(1);
+                delivered_source_frames = observation.source_frames;
+                metrics::counter!("rvoip_core_media_activity_events_total").increment(1);
+                metrics::counter!("rvoip_core_media_activity_coalesced_frames_total")
+                    .increment(coalesced);
+            }
+            debug!(
+                ?transport,
+                ?connection_id,
+                generation,
+                "media activity observer stopped"
+            );
+        });
+        if spawned {
+            Ok(())
+        } else if self
+            .connection_lifecycle_tasks
+            .draining
+            .load(Ordering::Acquire)
+        {
+            Err(RvoipError::InvalidState(
+                "connection lifecycle supervisor is draining",
+            ))
+        } else {
+            metrics::counter!(
+                "rvoip_core_media_activity_observer_rejections_total",
+                "reason" => "capacity"
+            )
+            .increment(1);
+            Err(RvoipError::AdmissionRejected(
+                "connection lifecycle task capacity is full",
+            ))
+        }
     }
 
     /// Attach a bounded observer channel to a Connection's reusable source
