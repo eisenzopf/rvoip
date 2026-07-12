@@ -38,6 +38,7 @@
 //! move-cost tradeoff grows.
 
 pub mod adapter;
+pub mod broadcast;
 pub mod capability;
 pub mod connection;
 pub mod data;
@@ -47,6 +48,13 @@ pub mod identity;
 pub mod ids;
 pub mod stream;
 
+pub use broadcast::{
+    BroadcastDescriptor, BroadcastDrainDescriptor, BroadcastDrainReason, BroadcastDrainRequest,
+    BroadcastDrainState, BroadcastEndpoint, BroadcastHealthDescriptor, BroadcastHealthIssue,
+    BroadcastHealthStatus, BroadcastLifecycleDescriptor, BroadcastLifecycleState,
+    BroadcastProtocolDescriptor, BroadcastProtocolFamily, BroadcastPublisher, BroadcastRelayHop,
+    BroadcastRelayRole, BroadcastResource, BroadcastSubstrate, BroadcastTransport,
+};
 pub use data::{
     DataMessage, DataMessageValidationError, DataReliability, MAX_CONTENT_TYPE_BYTES,
     MAX_DATA_LABEL_BYTES, MAX_DATA_MESSAGE_BYTES, MAX_DATA_MESSAGE_ID_BYTES,

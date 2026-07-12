@@ -139,7 +139,13 @@ pub use adapter::{
     PlaybackHandle, RejectReason, SignatureHeaders, TransferTarget,
 };
 pub use bridge::{BridgeError, BridgeHandle, BridgeManager};
-pub use broadcast::{BroadcastDescriptor, BroadcastPublisher, BroadcastTransport};
+pub use broadcast::{
+    BroadcastDescriptor, BroadcastDrainDescriptor, BroadcastDrainReason, BroadcastDrainRequest,
+    BroadcastDrainState, BroadcastEndpoint, BroadcastHealthDescriptor, BroadcastHealthIssue,
+    BroadcastHealthStatus, BroadcastLifecycleDescriptor, BroadcastLifecycleState,
+    BroadcastProtocolDescriptor, BroadcastProtocolFamily, BroadcastPublisher, BroadcastRelayHop,
+    BroadcastRelayRole, BroadcastResource, BroadcastSubstrate, BroadcastTransport,
+};
 pub use capability::{CapabilityDescriptor, CapabilityIntersection, CodecInfo, NegotiatedCodecs};
 pub use commands::{
     AttachmentRef, AudioSource, Command, InboundAction, ListenerSink, ListenerTarget,

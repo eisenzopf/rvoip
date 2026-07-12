@@ -13,7 +13,7 @@ keywords.workspace = true
 description = "MOQT/MSF/LOC broadcast adapter for the rvoip media graph"
 
 [dependencies]
-rvoip-core.workspace = true
+rvoip-core-traits.workspace = true
 moq-transport.workspace = true
 moq-native-ietf.workspace = true
 url.workspace = true
