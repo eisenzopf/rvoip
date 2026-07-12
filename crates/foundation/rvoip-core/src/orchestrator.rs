@@ -36,6 +36,11 @@ use crate::media_graph::{
     MediaGraphPolicy, MediaGraphRouteStatus,
 };
 use crate::message::{ContentType, Message, MessageOrigin, MessageRecipients};
+use crate::operational_events::{
+    OperationalEndReason, OperationalEvent, OperationalEventKind, OperationalEventStream,
+    OperationalEventStreamHealth, OperationalFailureReason, OperationalTransferOutcome,
+    OperationalTransferTarget,
+};
 use crate::participant::{Participant, ParticipantKind, ParticipantRole};
 use crate::session::{ConnectionRef, Session, SessionMedium, SessionState};
 use crate::stream::StreamKind;
@@ -54,7 +59,8 @@ use std::sync::Weak;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 use tokio::sync::{
-    broadcast, mpsc, oneshot, Notify, OwnedSemaphorePermit, RwLock as TokioRwLock, Semaphore,
+    broadcast, mpsc, oneshot, Mutex as TokioMutex, Notify, OwnedSemaphorePermit,
+    RwLock as TokioRwLock, Semaphore,
 };
 use tracing::{debug, instrument, warn};
 
@@ -289,6 +295,7 @@ struct ConnectionLifecycleState {
     active: bool,
     retired: bool,
     admission_outcomes_notified: HashSet<(u64, Transport)>,
+    operational_connected_emitted: bool,
 }
 
 #[derive(Clone)]
@@ -447,6 +454,12 @@ impl PreparedOutboundConnection {
                 "outbound preparation owner unavailable",
             ));
         };
+        if let Err(error) = orchestrator.ensure_operational_event_stream_healthy() {
+            self.claim_committing_abort();
+            self.abort_committed_work("operational event stream unavailable")
+                .await;
+            return Err(error);
+        }
         let connection_id = self.cleanup.key.connection_id.clone();
         if !self.cleanup.adapter.is_connection_live(&connection_id) {
             self.claim_committing_abort();
@@ -840,6 +853,14 @@ pub struct Orchestrator {
     adapter_registrations: Mutex<HashSet<Transport>>,
     /// Optional fail-closed policy channel installed before any adapter.
     inbound_admission_gate: OnceLock<InboundAdmissionGate>,
+    /// Optional authoritative call-state stream. A closed receiver degrades
+    /// the process permanently; the compatibility broadcast remains
+    /// observability-only.
+    operational_event_stream: OnceLock<OperationalEventStream>,
+    /// Linearizes lifecycle mutation and authoritative publication across
+    /// adapter event loops and direct terminal fallbacks. No task is spawned
+    /// for this stream; bounded receiver backpressure is applied here.
+    operational_event_order: TokioMutex<()>,
     /// Serializes the brief cross-map connection/lifecycle commit windows.
     /// No guard crosses an await; media and steady-state event paths do not
     /// acquire it.
@@ -1168,6 +1189,8 @@ impl Orchestrator {
             adapters: Arc::new(DashMap::new()),
             adapter_registrations: Mutex::new(HashSet::new()),
             inbound_admission_gate: OnceLock::new(),
+            operational_event_stream: OnceLock::new(),
+            operational_event_order: TokioMutex::new(()),
             connection_registry_lock: Mutex::new(()),
             connection_id_budget: AtomicUsize::new(DEFAULT_CONNECTION_ID_BUDGET),
             connections: Arc::new(DashMap::new()),
@@ -1228,6 +1251,8 @@ impl Orchestrator {
             adapters: Arc::new(DashMap::new()),
             adapter_registrations: Mutex::new(HashSet::new()),
             inbound_admission_gate: OnceLock::new(),
+            operational_event_stream: OnceLock::new(),
+            operational_event_order: TokioMutex::new(()),
             connection_registry_lock: Mutex::new(()),
             connection_id_budget: AtomicUsize::new(DEFAULT_CONNECTION_ID_BUDGET),
             connections: Arc::new(DashMap::new()),
@@ -1269,6 +1294,7 @@ impl Orchestrator {
     /// them into rvoip-core [`Event`]s on the orchestrator's broadcast bus.
     /// Returns [`RvoipError::AdapterAlreadyRegistered`] on collision.
     pub fn register(self: &Arc<Self>, adapter: Arc<dyn ConnectionAdapter>) -> Result<()> {
+        self.ensure_operational_event_stream_healthy()?;
         let transport = adapter.transport();
         let lifecycle_capabilities = adapter.lifecycle_capabilities();
         {
@@ -1718,9 +1744,120 @@ impl Orchestrator {
         Ok(receiver)
     }
 
+    /// Install the single authoritative operational event stream.
+    ///
+    /// Installation is opt-in, may happen only once, and must precede every
+    /// adapter registration. Unlike [`Self::subscribe_events`], this bounded
+    /// receiver is a correctness boundary: core awaits capacity instead of
+    /// dropping events. Losing the receiver permanently degrades this
+    /// Orchestrator and prevents new admission, origination, or non-cleanup
+    /// connection work. Terminal teardown remains available so existing
+    /// routes can converge safely.
+    pub fn install_operational_event_stream(
+        &self,
+        capacity: usize,
+    ) -> Result<mpsc::Receiver<OperationalEvent>> {
+        if capacity == 0 || capacity > Semaphore::MAX_PERMITS {
+            return Err(RvoipError::InvalidState(
+                "operational event stream capacity is invalid",
+            ));
+        }
+        let registrations = self
+            .adapter_registrations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.adapters.is_empty() || !registrations.is_empty() {
+            return Err(RvoipError::InvalidState(
+                "operational event stream must be installed before adapters",
+            ));
+        }
+        let (stream, receiver) = OperationalEventStream::new(capacity);
+        self.operational_event_stream
+            .set(stream)
+            .map_err(|_| RvoipError::InvalidState("operational event stream already installed"))?;
+        Ok(receiver)
+    }
+
+    /// Current authoritative-stream health. The `Degraded` state is sticky.
+    pub fn operational_event_stream_health(&self) -> OperationalEventStreamHealth {
+        self.operational_event_stream
+            .get()
+            .map_or(OperationalEventStreamHealth::NotInstalled, |stream| {
+                stream.health()
+            })
+    }
+
+    /// Whether an installed authoritative receiver has been irreversibly
+    /// lost. `false` also means the opt-in stream was never installed; callers
+    /// that need to distinguish those cases should inspect
+    /// [`Self::operational_event_stream_health`].
+    pub fn operational_event_stream_is_closed(&self) -> bool {
+        self.operational_event_stream_health() == OperationalEventStreamHealth::Degraded
+    }
+
+    fn ensure_operational_event_stream_healthy(&self) -> Result<()> {
+        match self.operational_event_stream_health() {
+            OperationalEventStreamHealth::NotInstalled | OperationalEventStreamHealth::Healthy => {
+                Ok(())
+            }
+            OperationalEventStreamHealth::Degraded => Err(RvoipError::InvalidState(
+                "authoritative operational event stream is degraded",
+            )),
+        }
+    }
+
+    async fn emit_operational(
+        &self,
+        connection_id: ConnectionId,
+        transport: Transport,
+        at: chrono::DateTime<Utc>,
+        kind: OperationalEventKind,
+    ) -> bool {
+        let Some(stream) = self.operational_event_stream.get() else {
+            return true;
+        };
+        stream.send(connection_id, transport, at, kind).await
+    }
+
+    async fn emit_core_connection_failure(
+        &self,
+        connection_id: ConnectionId,
+        transport: Transport,
+        detail: String,
+    ) {
+        let at = Utc::now();
+        let _operational_order = if self.operational_event_stream.get().is_some() {
+            Some(self.operational_event_order.lock().await)
+        } else {
+            None
+        };
+        let _ = self
+            .emit_operational(
+                connection_id.clone(),
+                transport,
+                at,
+                OperationalEventKind::Failed {
+                    reason: OperationalFailureReason::CoreReported,
+                },
+            )
+            .await;
+        self.emit(Event::ConnectionFailed {
+            connection_id,
+            detail,
+            at,
+        });
+    }
+
     /// Look up which adapter owns a given connection. Returns
     /// [`RvoipError::ConnectionNotFound`] if the connection isn't registered.
     fn adapter_for(&self, conn: &ConnectionId) -> Result<Arc<dyn ConnectionAdapter>> {
+        self.ensure_operational_event_stream_healthy()?;
+        self.adapter_for_cleanup(conn)
+    }
+
+    /// Route lookup used only by explicit reject/end cleanup. Cleanup must
+    /// remain possible after the correctness receiver has been lost.
+    fn adapter_for_cleanup(&self, conn: &ConnectionId) -> Result<Arc<dyn ConnectionAdapter>> {
         let entry = self
             .connections
             .get(conn)
@@ -2162,6 +2299,7 @@ impl Orchestrator {
                     active: true,
                     retired: false,
                     admission_outcomes_notified: HashSet::new(),
+                    operational_connected_emitted: false,
                 }))
             })
             .clone();
@@ -2190,6 +2328,7 @@ impl Orchestrator {
                 active: false,
                 retired: true,
                 admission_outcomes_notified: HashSet::new(),
+                operational_connected_emitted: false,
             })),
         );
     }
@@ -2278,6 +2417,7 @@ impl Orchestrator {
                 active: false,
                 retired: true,
                 admission_outcomes_notified: HashSet::new(),
+                operational_connected_emitted: false,
             }));
             self.connection_lifecycles
                 .insert(connection_id.clone(), Arc::clone(&lifecycle));
@@ -2342,6 +2482,7 @@ impl Orchestrator {
             active: true,
             retired: false,
             admission_outcomes_notified: HashSet::new(),
+            operational_connected_emitted: false,
         }));
         self.connection_lifecycles
             .insert(connection_id.clone(), Arc::clone(&state));
@@ -3115,6 +3256,7 @@ impl Orchestrator {
                         active: false,
                         retired: true,
                         admission_outcomes_notified: HashSet::new(),
+                        operational_connected_emitted: false,
                     })),
                 );
             } else {
@@ -4216,6 +4358,9 @@ impl Orchestrator {
     }
 
     fn publish_inbound_if_current(&self, pending: &PendingInboundPublication) -> bool {
+        if self.ensure_operational_event_stream_healthy().is_err() {
+            return false;
+        }
         if !self.adapter_connection_is_live(pending.transport, &pending.connection_id) {
             return false;
         }
@@ -4365,13 +4510,6 @@ impl Orchestrator {
                 lifecycle_generation: claimed.lifecycle.generation,
             },
         );
-        if normalized_lifecycle_was_visible {
-            self.emit(Event::ConnectionFailed {
-                connection_id: connection_id.clone(),
-                detail: "connection authentication policy rejected".into(),
-                at: Utc::now(),
-            });
-        }
         let adapter = self.adapter(transport).ok();
         let cleanup_generation = claimed.lifecycle.generation;
         let adapter_cleanup = async {
@@ -4416,6 +4554,14 @@ impl Orchestrator {
         let core_cleanup = self.finish_connection_teardown(&connection_id, forgotten);
         let (stopped, forgotten) = tokio::join!(adapter_cleanup, core_cleanup);
         debug_assert!(forgotten.was_tracked);
+        if normalized_lifecycle_was_visible {
+            self.emit_core_connection_failure(
+                connection_id.clone(),
+                transport,
+                "connection authentication policy rejected".into(),
+            )
+            .await;
+        }
         if !stopped {
             metrics::counter!(
                 "rvoip_core_inbound_admission_cleanup_total",
@@ -4515,8 +4661,34 @@ impl Orchestrator {
     }
 
     async fn gate_or_publish_inbound(self: &Arc<Self>, pending: PendingInboundPublication) {
+        if self.ensure_operational_event_stream_healthy().is_err() {
+            if let Some(claimed) =
+                self.claim_route_policy_rejection(&pending.connection_id, pending.transport)
+            {
+                self.reject_claimed_unadmitted_connection(
+                    claimed,
+                    RejectReason::ServerError,
+                    "operational_stream_unavailable",
+                )
+                .await;
+            }
+            return;
+        }
         let Some(gate) = self.inbound_admission_gate.get() else {
-            let _ = self.publish_inbound_if_current(&pending);
+            if !self.publish_inbound_if_current(&pending)
+                && self.ensure_operational_event_stream_healthy().is_err()
+            {
+                if let Some(claimed) =
+                    self.claim_route_policy_rejection(&pending.connection_id, pending.transport)
+                {
+                    self.reject_claimed_unadmitted_connection(
+                        claimed,
+                        RejectReason::ServerError,
+                        "operational_stream_unavailable",
+                    )
+                    .await;
+                }
+            }
             return;
         };
 
@@ -4658,6 +4830,7 @@ impl Orchestrator {
         &self,
         connection_id: &ConnectionId,
         transport: Transport,
+        connected_event: bool,
     ) -> OperationalEventDecision {
         let _registry = self
             .connection_registry_lock
@@ -4667,7 +4840,7 @@ impl Orchestrator {
             return OperationalEventDecision::Drop;
         };
         let lifecycle_state = Arc::clone(current.value());
-        let lifecycle = lifecycle_state
+        let mut lifecycle = lifecycle_state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !lifecycle.active || lifecycle.retired {
@@ -4681,7 +4854,18 @@ impl Orchestrator {
             return OperationalEventDecision::Drop;
         }
         match entry.inbound_publication {
-            InboundPublicationState::Published => OperationalEventDecision::Published,
+            InboundPublicationState::Published => {
+                if connected_event && self.operational_event_stream.get().is_some() {
+                    if lifecycle.operational_connected_emitted {
+                        OperationalEventDecision::Drop
+                    } else {
+                        lifecycle.operational_connected_emitted = true;
+                        OperationalEventDecision::Published
+                    }
+                } else {
+                    OperationalEventDecision::Published
+                }
+            }
             InboundPublicationState::Pending(pending_generation)
                 if pending_generation == generation =>
             {
@@ -4733,8 +4917,8 @@ impl Orchestrator {
                 false
             }
             InboundPublicationState::Published => true,
+            InboundPublicationState::Unseen => false,
             InboundPublicationState::NotInbound
-            | InboundPublicationState::Unseen
             | InboundPublicationState::Pending(_)
             | InboundPublicationState::Rejecting(_) => return None,
         };
@@ -5175,6 +5359,20 @@ impl Orchestrator {
     }
 
     async fn handle_adapter_event(self: &Arc<Self>, transport: Transport, event: AdapterEvent) {
+        let needs_authoritative_order = matches!(
+            &event,
+            AdapterEvent::Connected { .. }
+                | AdapterEvent::Ended { .. }
+                | AdapterEvent::Failed { .. }
+                | AdapterEvent::Dtmf { .. }
+                | AdapterEvent::DataMessage { .. }
+        );
+        let _operational_order =
+            if needs_authoritative_order && self.operational_event_stream.get().is_some() {
+                Some(self.operational_event_order.lock().await)
+            } else {
+                None
+            };
         let scoped_connection_id = match &event {
             AdapterEvent::InboundConnection { connection } => Some(&connection.id),
             AdapterEvent::Connected { connection_id }
@@ -5308,7 +5506,11 @@ impl Orchestrator {
                 | AdapterEvent::Message { .. }
                 | AdapterEvent::DataMessage { .. }
                 | AdapterEvent::StepUpResponse { .. } => {
-                    match self.decide_operational_adapter_event(connection_id, transport) {
+                    match self.decide_operational_adapter_event(
+                        connection_id,
+                        transport,
+                        matches!(&event, AdapterEvent::Connected { .. }),
+                    ) {
                         OperationalEventDecision::Published => {}
                         OperationalEventDecision::Drop => return,
                         OperationalEventDecision::Reject(claimed) => {
@@ -5371,10 +5573,19 @@ impl Orchestrator {
                 .await;
             }
             AdapterEvent::Connected { connection_id } => {
-                self.emit(Event::ConnectionConnected {
-                    connection_id,
-                    at: Utc::now(),
-                });
+                let at = Utc::now();
+                let authoritative = self
+                    .emit_operational(
+                        connection_id.clone(),
+                        transport,
+                        at,
+                        OperationalEventKind::Connected,
+                    )
+                    .await;
+                self.emit(Event::ConnectionConnected { connection_id, at });
+                if !authoritative {
+                    return;
+                }
             }
             AdapterEvent::Authenticated {
                 connection_id,
@@ -5424,10 +5635,22 @@ impl Orchestrator {
                     .await;
                 self.resolve_adapter_cleanup_quarantine_from_terminal(&connection_id, transport);
                 if forgotten.was_tracked && forgotten.normalized_lifecycle_was_visible {
+                    let at = Utc::now();
+                    let operational_reason = OperationalEndReason::from(&reason);
+                    let _ = self
+                        .emit_operational(
+                            connection_id.clone(),
+                            transport,
+                            at,
+                            OperationalEventKind::Ended {
+                                reason: operational_reason,
+                            },
+                        )
+                        .await;
                     self.emit(Event::ConnectionEnded {
                         connection_id,
                         reason,
-                        at: Utc::now(),
+                        at,
                     });
                 }
             }
@@ -5443,10 +5666,21 @@ impl Orchestrator {
                     .await;
                 self.resolve_adapter_cleanup_quarantine_from_terminal(&connection_id, transport);
                 if forgotten.was_tracked && forgotten.normalized_lifecycle_was_visible {
+                    let at = Utc::now();
+                    let _ = self
+                        .emit_operational(
+                            connection_id.clone(),
+                            transport,
+                            at,
+                            OperationalEventKind::Failed {
+                                reason: OperationalFailureReason::AdapterReported,
+                            },
+                        )
+                        .await;
                     self.emit(Event::ConnectionFailed {
                         connection_id,
                         detail,
-                        at: Utc::now(),
+                        at,
                     });
                 }
             }
@@ -5455,6 +5689,18 @@ impl Orchestrator {
                 digits,
                 duration_ms,
             } => {
+                let at = Utc::now();
+                let authoritative = self
+                    .emit_operational(
+                        connection_id.clone(),
+                        transport,
+                        at,
+                        OperationalEventKind::Dtmf {
+                            digits: digits.clone(),
+                            duration_ms,
+                        },
+                    )
+                    .await;
                 // `Event::DtmfReceived` carries digits + connection_id
                 // only — duration_ms is dropped at the orchestrator
                 // boundary (it's transport-detail). Consumers that need
@@ -5463,8 +5709,12 @@ impl Orchestrator {
                 self.emit(Event::DtmfReceived {
                     connection_id: connection_id.clone(),
                     digits: digits.clone(),
-                    at: Utc::now(),
+                    at,
                 });
+                drop(_operational_order);
+                if !authoritative {
+                    return;
+                }
                 // Gap plan §4.3 / v1 punch list — cross-bridge DTMF
                 // auto-route. When the connection is part of a
                 // cross-transport bridge, forward the digits to the
@@ -5616,11 +5866,26 @@ impl Orchestrator {
                     );
                     return;
                 }
+                let at = Utc::now();
+                let authoritative = self
+                    .emit_operational(
+                        connection_id.clone(),
+                        transport,
+                        at,
+                        OperationalEventKind::DataMessage {
+                            message: message.clone(),
+                        },
+                    )
+                    .await;
                 self.emit(Event::DataMessageReceived {
                     connection_id: connection_id.clone(),
                     message: message.clone(),
-                    at: Utc::now(),
+                    at,
                 });
+                drop(_operational_order);
+                if !authoritative {
+                    return;
+                }
 
                 if !matches!(message.label.as_str(), "rvoip-chat" | "rvoip-messages") {
                     return;
@@ -5747,7 +6012,11 @@ impl Orchestrator {
         action: InboundAction,
     ) -> Result<()> {
         let transport = self.connection_transport(&connection_id)?;
-        let adapter = self.adapter_for(&connection_id)?;
+        let adapter = if matches!(&action, InboundAction::Reject { .. }) {
+            self.adapter_for_cleanup(&connection_id)?
+        } else {
+            self.adapter_for(&connection_id)?
+        };
         match action {
             // P1.8 — bind the Connection to its target Session before
             // accepting, so the first `AdapterEvent::Connected` arrives
@@ -5779,11 +6048,12 @@ impl Orchestrator {
                     )
                     .await;
                     if rolled_back {
-                        self.emit(Event::ConnectionFailed {
-                            connection_id: connection_id.clone(),
-                            detail: "inbound accept failed".into(),
-                            at: Utc::now(),
-                        });
+                        self.emit_core_connection_failure(
+                            connection_id.clone(),
+                            transport,
+                            "inbound accept failed".into(),
+                        )
+                        .await;
                     }
                     return Err(error);
                 }
@@ -5802,11 +6072,12 @@ impl Orchestrator {
                     )
                     .await;
                     if rolled_back {
-                        self.emit(Event::ConnectionFailed {
-                            connection_id: connection_id.clone(),
-                            detail: "inbound route ended during accept".into(),
-                            at: Utc::now(),
-                        });
+                        self.emit_core_connection_failure(
+                            connection_id.clone(),
+                            transport,
+                            "inbound route ended during accept".into(),
+                        )
+                        .await;
                     }
                     return Err(RvoipError::ConnectionNotFound(connection_id));
                 }
@@ -5846,11 +6117,12 @@ impl Orchestrator {
                     )
                     .await;
                     if rolled_back {
-                        self.emit(Event::ConnectionFailed {
-                            connection_id: connection_id.clone(),
-                            detail: "inbound accept failed".into(),
-                            at: Utc::now(),
-                        });
+                        self.emit_core_connection_failure(
+                            connection_id.clone(),
+                            transport,
+                            "inbound accept failed".into(),
+                        )
+                        .await;
                     }
                     return Err(error);
                 }
@@ -5869,11 +6141,12 @@ impl Orchestrator {
                     )
                     .await;
                     if rolled_back {
-                        self.emit(Event::ConnectionFailed {
-                            connection_id: connection_id.clone(),
-                            detail: "inbound route ended during accept".into(),
-                            at: Utc::now(),
-                        });
+                        self.emit_core_connection_failure(
+                            connection_id.clone(),
+                            transport,
+                            "inbound route ended during accept".into(),
+                        )
+                        .await;
                     }
                     return Err(RvoipError::ConnectionNotFound(connection_id));
                 }
@@ -5904,6 +6177,7 @@ impl Orchestrator {
         &self,
         request: OriginateRequest,
     ) -> Result<ConnectionHandle> {
+        self.ensure_operational_event_stream_healthy()?;
         let transport = self.outbound_transport_for(&request)?;
         let adapter = self.adapter(transport)?;
         if adapter.lifecycle_capabilities().staged_outbound_activation {
@@ -5933,6 +6207,7 @@ impl Orchestrator {
         &self,
         request: OriginateRequest,
     ) -> Result<PreparedOutboundConnection> {
+        self.ensure_operational_event_stream_healthy()?;
         if self.prepared_outbound_draining.load(Ordering::Acquire) {
             return Err(RvoipError::AdmissionRejected(
                 "outbound preparation supervisor is draining",
@@ -6198,11 +6473,12 @@ impl Orchestrator {
             )
             .await;
             if rolled_back {
-                self.emit(Event::ConnectionFailed {
-                    connection_id: connection_id.clone(),
-                    detail: "outbound session ended during lifecycle commit".into(),
-                    at: Utc::now(),
-                });
+                self.emit_core_connection_failure(
+                    connection_id.clone(),
+                    transport,
+                    "outbound session ended during lifecycle commit".into(),
+                )
+                .await;
             }
             return Err(RvoipError::InvalidState(
                 "outbound session ended during lifecycle commit",
@@ -6219,11 +6495,12 @@ impl Orchestrator {
             )
             .await;
             if rolled_back {
-                self.emit(Event::ConnectionFailed {
-                    connection_id: connection_id.clone(),
-                    detail: "outbound activation failed".into(),
-                    at: Utc::now(),
-                });
+                self.emit_core_connection_failure(
+                    connection_id.clone(),
+                    transport,
+                    "outbound activation failed".into(),
+                )
+                .await;
             }
             return Err(error);
         }
@@ -6243,11 +6520,12 @@ impl Orchestrator {
             )
             .await;
             if rolled_back {
-                self.emit(Event::ConnectionFailed {
-                    connection_id: connection_id.clone(),
-                    detail: "outbound route ended during activation".into(),
-                    at: Utc::now(),
-                });
+                self.emit_core_connection_failure(
+                    connection_id.clone(),
+                    transport,
+                    "outbound route ended during activation".into(),
+                )
+                .await;
             }
             return Err(RvoipError::ConnectionNotFound(connection_id));
         }
@@ -6270,7 +6548,7 @@ impl Orchestrator {
         connection_id: ConnectionId,
         reason: EndReason,
     ) -> Result<()> {
-        let adapter = self.adapter_for(&connection_id)?;
+        let adapter = self.adapter_for_cleanup(&connection_id)?;
         adapter.end(connection_id, reason).await
     }
 
@@ -6291,7 +6569,47 @@ impl Orchestrator {
         target: TransferTarget,
     ) -> Result<()> {
         let adapter = self.adapter_for(&connection_id)?;
-        adapter.transfer(connection_id, target).await
+        let transport = self.connection_transport(&connection_id)?;
+        let has_authoritative_stream = self.operational_event_stream.get().is_some();
+        let result = adapter
+            .transfer(connection_id.clone(), target.clone())
+            .await;
+        if has_authoritative_stream {
+            // Never hold the ordering lock across an adapter await: an
+            // adapter may need its terminal event loop to make progress
+            // before the command future resolves.
+            let _operational_order = self.operational_event_order.lock().await;
+            let at = Utc::now();
+            let outcome = if result.is_ok() {
+                OperationalTransferOutcome::Succeeded
+            } else {
+                OperationalTransferOutcome::Failed
+            };
+            let emitted = self
+                .emit_operational(
+                    connection_id.clone(),
+                    transport,
+                    at,
+                    OperationalEventKind::Transfer {
+                        target: OperationalTransferTarget::from(&target),
+                        outcome,
+                    },
+                )
+                .await;
+            if !emitted {
+                return Err(RvoipError::InvalidState(
+                    "authoritative operational event stream is degraded",
+                ));
+            }
+            if result.is_ok() {
+                self.emit(Event::ConnectionTransferred {
+                    connection_id,
+                    target,
+                    at,
+                });
+            }
+        }
+        result
     }
 
     pub async fn send_dtmf(

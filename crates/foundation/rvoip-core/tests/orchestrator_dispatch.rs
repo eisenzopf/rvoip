@@ -19,6 +19,10 @@ use rvoip_core::identity::{
 };
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId, TenantId};
 use rvoip_core::message::Message;
+use rvoip_core::operational_events::{
+    OperationalEventKind, OperationalEventStreamHealth, OperationalFailureReason,
+    OperationalTransferOutcome, OperationalTransferTarget,
+};
 use rvoip_core::orchestrator::Orchestrator;
 use rvoip_core::stream::{MediaStream, QualitySnapshot};
 use rvoip_core::DataMessage;
@@ -58,6 +62,7 @@ struct StubAdapter {
     accept_behavior: AtomicUsize,
     originate_behavior: AtomicUsize,
     activate_behavior: AtomicUsize,
+    transfer_behavior: AtomicUsize,
     next_outbound_id: Mutex<Option<ConnectionId>>,
 }
 
@@ -126,6 +131,7 @@ impl StubAdapter {
             accept_behavior: AtomicUsize::new(COMMAND_SUCCEED),
             originate_behavior: AtomicUsize::new(COMMAND_SUCCEED),
             activate_behavior: AtomicUsize::new(COMMAND_SUCCEED),
+            transfer_behavior: AtomicUsize::new(COMMAND_SUCCEED),
             next_outbound_id: Mutex::new(None),
         });
         (adapter, StubEventSender(tx), counts)
@@ -150,6 +156,10 @@ impl StubAdapter {
 
     fn set_activate_behavior(&self, behavior: usize) {
         self.activate_behavior.store(behavior, Ordering::SeqCst);
+    }
+
+    fn set_transfer_behavior(&self, behavior: usize) {
+        self.transfer_behavior.store(behavior, Ordering::SeqCst);
     }
 
     fn set_next_outbound_id(&self, connection_id: ConnectionId) {
@@ -343,7 +353,11 @@ impl ConnectionAdapter for StubAdapter {
     }
     async fn transfer(&self, _conn: ConnectionId, _target: TransferTarget) -> Result<()> {
         self.counts.transfer.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        if self.transfer_behavior.load(Ordering::SeqCst) == COMMAND_FAIL {
+            Err(RvoipError::InvalidState("stub transfer failure"))
+        } else {
+            Ok(())
+        }
     }
     async fn streams(&self, _conn: ConnectionId) -> Result<Vec<Arc<dyn MediaStream>>> {
         Ok(vec![])
@@ -3521,4 +3535,616 @@ async fn retired_connection_id_budget_saturates_fail_closed() {
             .await
             .is_err()
     );
+}
+
+async fn publish_operational_test_connection(
+    orchestrator: &Arc<Orchestrator>,
+    adapter: &StubAdapter,
+    sender: &StubEventSender,
+    transport: Transport,
+    tenant: &str,
+) -> ConnectionId {
+    let mut public_events = orchestrator.subscribe_events();
+    let connection = fake_inbound_connection_for(transport);
+    let connection_id = connection.id.clone();
+    let principal = authenticated_principal(tenant);
+    adapter.mark_live(connection_id.clone());
+    adapter.set_inbound_context(
+        InboundConnectionContext::new(
+            connection_id.clone(),
+            transport,
+            &principal,
+            Some(InboundRoutingHint::new("operational-test-attachment").unwrap()),
+            InboundSignalingMetadata::default(),
+        )
+        .unwrap(),
+    );
+    sender
+        .send_atomic(OrchestratorAdapterEvent::AuthenticatedInboundConnection {
+            connection,
+            participant_id: "operational-test-participant".into(),
+            principal,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if matches!(
+                public_events.recv().await,
+                Ok(Event::ConnectionPrincipalAuthenticated {
+                    connection_id: observed,
+                    ..
+                }) if observed == connection_id
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("atomic inbound publication completed");
+    connection_id
+}
+
+#[tokio::test]
+async fn operational_stream_installation_is_single_use_and_pre_registration() {
+    let orchestrator = Orchestrator::new(Config::default());
+    assert_eq!(
+        orchestrator.operational_event_stream_health(),
+        OperationalEventStreamHealth::NotInstalled
+    );
+    assert!(matches!(
+        orchestrator.install_operational_event_stream(0),
+        Err(RvoipError::InvalidState(_))
+    ));
+    let receiver = orchestrator.install_operational_event_stream(4).unwrap();
+    assert_eq!(
+        orchestrator.operational_event_stream_health(),
+        OperationalEventStreamHealth::Healthy
+    );
+    assert!(matches!(
+        orchestrator.install_operational_event_stream(4),
+        Err(RvoipError::InvalidState(
+            "operational event stream already installed"
+        ))
+    ));
+    drop(receiver);
+
+    let too_late = Orchestrator::new(Config::default());
+    let (adapter, _, _) = StubAdapter::new();
+    too_late.register(adapter).unwrap();
+    assert!(matches!(
+        too_late.install_operational_event_stream(4),
+        Err(RvoipError::InvalidState(
+            "operational event stream must be installed before adapters"
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn operational_stream_applies_backpressure_without_losing_more_than_1024_events() {
+    const EVENT_COUNT: usize = 1_100;
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut operational = orchestrator.install_operational_event_stream(2).unwrap();
+    let (adapter, sender, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let connection_id = publish_operational_test_connection(
+        &orchestrator,
+        &adapter,
+        &sender,
+        Transport::Sip,
+        "tenant-backpressure",
+    )
+    .await;
+
+    let producer_connection_id = connection_id.clone();
+    let producer = tokio::spawn(async move {
+        for index in 0..EVENT_COUNT {
+            sender
+                .send(AdapterEvent::Dtmf {
+                    connection_id: producer_connection_id.clone(),
+                    digits: index.to_string(),
+                    duration_ms: 80,
+                })
+                .await
+                .unwrap();
+        }
+    });
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for index in 0..EVENT_COUNT {
+            let event = operational.recv().await.expect("stream remains open");
+            assert_eq!(event.sequence, index as u64 + 1);
+            assert_eq!(event.connection_id, connection_id);
+            assert_eq!(event.transport, Transport::Sip);
+            assert!(matches!(
+                event.kind,
+                OperationalEventKind::Dtmf {
+                    ref digits,
+                    duration_ms: 80,
+                } if digits == &index.to_string()
+            ));
+        }
+        producer.await.unwrap();
+    })
+    .await
+    .expect("bounded operational events drained without loss");
+    assert_eq!(
+        orchestrator.operational_event_stream_health(),
+        OperationalEventStreamHealth::Healthy
+    );
+}
+
+#[tokio::test]
+async fn atomic_handoff_does_not_duplicate_operational_connected() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut operational = orchestrator.install_operational_event_stream(4).unwrap();
+    let (adapter, sender, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let connection_id = publish_operational_test_connection(
+        &orchestrator,
+        &adapter,
+        &sender,
+        Transport::Sip,
+        "tenant-atomic",
+    )
+    .await;
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), operational.recv())
+            .await
+            .is_err()
+    );
+    for _ in 0..2 {
+        sender
+            .send(AdapterEvent::Connected {
+                connection_id: connection_id.clone(),
+            })
+            .await
+            .unwrap();
+    }
+    assert!(matches!(
+        operational.recv().await.unwrap().kind,
+        OperationalEventKind::Connected
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), operational.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn operational_stream_orders_dtmf_data_and_transfer_outcomes() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut operational = orchestrator.install_operational_event_stream(8).unwrap();
+    let (adapter, sender, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let connection_id = publish_operational_test_connection(
+        &orchestrator,
+        &adapter,
+        &sender,
+        Transport::Sip,
+        "tenant-payload",
+    )
+    .await;
+    let message = DataMessage::reliable(
+        "bridgefu.context.v1",
+        "application/json",
+        br#"{"correlation_id":"private-value"}"#.as_slice(),
+    );
+    sender
+        .send(AdapterEvent::Dtmf {
+            connection_id: connection_id.clone(),
+            digits: "12#".into(),
+            duration_ms: 120,
+        })
+        .await
+        .unwrap();
+    sender
+        .send(AdapterEvent::DataMessage {
+            connection_id: connection_id.clone(),
+            message: message.clone(),
+        })
+        .await
+        .unwrap();
+
+    let first = operational.recv().await.unwrap();
+    let second = operational.recv().await.unwrap();
+    assert_eq!(second.sequence, first.sequence + 1);
+    assert!(matches!(
+        first.kind,
+        OperationalEventKind::Dtmf {
+            ref digits,
+            duration_ms: 120,
+        } if digits == "12#"
+    ));
+    assert!(matches!(
+        second.kind,
+        OperationalEventKind::DataMessage {
+            message: ref observed,
+        }
+            if observed == &message
+    ));
+
+    let target = TransferTarget::Uri("sip:private-target@example.invalid".into());
+    orchestrator
+        .transfer_connection(connection_id.clone(), target)
+        .await
+        .unwrap();
+    let transferred = operational.recv().await.unwrap();
+    assert!(matches!(
+        transferred.kind,
+        OperationalEventKind::Transfer {
+            target: OperationalTransferTarget::Uri,
+            outcome: OperationalTransferOutcome::Succeeded,
+        }
+    ));
+
+    adapter.set_transfer_behavior(COMMAND_FAIL);
+    assert!(orchestrator
+        .transfer_connection(
+            connection_id,
+            TransferTarget::Uri("sip:another-private-target@example.invalid".into()),
+        )
+        .await
+        .is_err());
+    assert!(matches!(
+        operational.recv().await.unwrap().kind,
+        OperationalEventKind::Transfer {
+            target: OperationalTransferTarget::Uri,
+            outcome: OperationalTransferOutcome::Failed,
+        }
+    ));
+}
+
+#[tokio::test]
+async fn terminal_and_connected_race_never_publishes_connected_after_terminal() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut operational = orchestrator.install_operational_event_stream(4).unwrap();
+    let (adapter, sender, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let connection_id = publish_operational_test_connection(
+        &orchestrator,
+        &adapter,
+        &sender,
+        Transport::Sip,
+        "tenant-race",
+    )
+    .await;
+
+    let connected = sender.send(AdapterEvent::Connected {
+        connection_id: connection_id.clone(),
+    });
+    let terminal = adapter.deliver_terminal(AdapterEvent::Ended {
+        connection_id: connection_id.clone(),
+        reason: EndReason::Normal,
+    });
+    let (connected_result, ()) = tokio::join!(connected, terminal);
+    connected_result.unwrap();
+
+    let mut kinds = vec![operational.recv().await.unwrap().kind];
+    if let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(100), operational.recv()).await
+    {
+        kinds.push(event.kind);
+    }
+    assert!(matches!(
+        kinds.last(),
+        Some(OperationalEventKind::Ended { .. })
+    ));
+    assert!(kinds.len() <= 2);
+    assert!(!kinds.windows(2).any(|window| {
+        matches!(window[0], OperationalEventKind::Ended { .. })
+            && matches!(window[1], OperationalEventKind::Connected)
+    }));
+    assert!(matches!(
+        orchestrator.connection_transport(&connection_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn terminal_core_cleanup_precedes_blocked_operational_publication() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut operational = orchestrator.install_operational_event_stream(1).unwrap();
+    let (adapter, sender, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let connection_id = publish_operational_test_connection(
+        &orchestrator,
+        &adapter,
+        &sender,
+        Transport::Sip,
+        "tenant-terminal-backpressure",
+    )
+    .await;
+    sender
+        .send(AdapterEvent::Dtmf {
+            connection_id: connection_id.clone(),
+            digits: "9".into(),
+            duration_ms: 90,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while operational.len() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first event filled the authoritative queue");
+
+    adapter.mark_ended(&connection_id);
+    let terminal_adapter = adapter.clone();
+    let terminal_id = connection_id.clone();
+    let terminal = tokio::spawn(async move {
+        terminal_adapter
+            .deliver_terminal(AdapterEvent::Ended {
+                connection_id: terminal_id,
+                reason: EndReason::Normal,
+            })
+            .await;
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while orchestrator.connection_transport(&connection_id).is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal core state was removed before publication capacity opened");
+    assert!(!terminal.is_finished());
+
+    assert!(matches!(
+        operational.recv().await.unwrap().kind,
+        OperationalEventKind::Dtmf { .. }
+    ));
+    terminal.await.unwrap();
+    assert!(matches!(
+        operational.recv().await.unwrap().kind,
+        OperationalEventKind::Ended { .. }
+    ));
+}
+
+#[tokio::test]
+async fn receiver_loss_is_sticky_fail_closed_but_terminal_cleanup_converges() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let operational = orchestrator.install_operational_event_stream(4).unwrap();
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(4, Duration::from_secs(1))
+        .unwrap();
+    let (adapter, sender, counts) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+
+    let (existing, principal) =
+        prepare_atomic_inbound(&adapter, "tenant-existing", "existing-private-token");
+    let existing_id = existing.id.clone();
+    announce_atomic_inbound(&sender, existing, principal).await;
+    admissions.recv().await.unwrap().accept().await.unwrap();
+
+    let (pending, pending_principal) =
+        prepare_atomic_inbound(&adapter, "tenant-pending", "pending-private-token");
+    let pending_id = pending.id.clone();
+    announce_atomic_inbound(&sender, pending, pending_principal).await;
+    let pending_admission = admissions.recv().await.unwrap();
+    drop(operational);
+    assert_eq!(
+        orchestrator.operational_event_stream_health(),
+        OperationalEventStreamHealth::Degraded
+    );
+    assert!(orchestrator.operational_event_stream_is_closed());
+    assert!(pending_admission.accept().await.is_err());
+    wait_for_count(&counts.reject, 1).await;
+    assert!(matches!(
+        orchestrator.connection_transport(&pending_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+
+    let originate = orchestrator
+        .originate_connection(OriginateRequest {
+            session_id: SessionId::new(),
+            participant_id: ParticipantId::new(),
+            target: "sip:must-not-originate@example.invalid".into(),
+            direction: Direction::Outbound,
+            capabilities: CapabilityDescriptor::default(),
+            transport: Some(Transport::Sip),
+        })
+        .await;
+    assert!(matches!(
+        originate,
+        Err(RvoipError::InvalidState(
+            "authoritative operational event stream is degraded"
+        ))
+    ));
+
+    let (blocked, blocked_principal) =
+        prepare_atomic_inbound(&adapter, "tenant-blocked", "blocked-private-token");
+    let blocked_id = blocked.id.clone();
+    announce_atomic_inbound(&sender, blocked, blocked_principal).await;
+    wait_for_count(&counts.reject, 2).await;
+    assert!(matches!(
+        orchestrator.connection_transport(&blocked_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), admissions.recv())
+            .await
+            .is_err()
+    );
+
+    adapter.mark_ended(&existing_id);
+    adapter
+        .deliver_terminal(AdapterEvent::Ended {
+            connection_id: existing_id.clone(),
+            reason: EndReason::Normal,
+        })
+        .await;
+    assert!(matches!(
+        orchestrator.connection_transport(&existing_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+    assert_eq!(
+        orchestrator.operational_event_stream_health(),
+        OperationalEventStreamHealth::Degraded
+    );
+}
+
+#[tokio::test]
+async fn operational_events_preserve_transport_and_connection_isolation() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut operational = orchestrator.install_operational_event_stream(8).unwrap();
+    let (sip, sip_sender, _) = StubAdapter::new_for(Transport::Sip);
+    let (webrtc, webrtc_sender, _) = StubAdapter::new_for(Transport::WebRtc);
+    orchestrator.register(sip.clone()).unwrap();
+    orchestrator.register(webrtc.clone()).unwrap();
+    let sip_id = publish_operational_test_connection(
+        &orchestrator,
+        &sip,
+        &sip_sender,
+        Transport::Sip,
+        "tenant-sip",
+    )
+    .await;
+    let webrtc_id = publish_operational_test_connection(
+        &orchestrator,
+        &webrtc,
+        &webrtc_sender,
+        Transport::WebRtc,
+        "tenant-webrtc",
+    )
+    .await;
+
+    let (sip_result, webrtc_result) = tokio::join!(
+        sip_sender.send(AdapterEvent::Dtmf {
+            connection_id: sip_id.clone(),
+            digits: "1".into(),
+            duration_ms: 90,
+        }),
+        webrtc_sender.send(AdapterEvent::Dtmf {
+            connection_id: webrtc_id.clone(),
+            digits: "2".into(),
+            duration_ms: 90,
+        })
+    );
+    sip_result.unwrap();
+    webrtc_result.unwrap();
+
+    let events = [
+        operational.recv().await.unwrap(),
+        operational.recv().await.unwrap(),
+    ];
+    assert!(events
+        .iter()
+        .any(|event| { event.connection_id == sip_id && event.transport == Transport::Sip }));
+    assert!(events
+        .iter()
+        .any(|event| { event.connection_id == webrtc_id && event.transport == Transport::WebRtc }));
+    assert!(events
+        .iter()
+        .all(|event| matches!(event.kind, OperationalEventKind::Dtmf { .. })));
+}
+
+#[tokio::test]
+async fn legacy_broadcast_behavior_is_unchanged_without_operational_stream() {
+    let orchestrator = Orchestrator::new(Config::default());
+    assert_eq!(
+        orchestrator.operational_event_stream_health(),
+        OperationalEventStreamHealth::NotInstalled
+    );
+    let (adapter, sender, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let connection_id = publish_operational_test_connection(
+        &orchestrator,
+        &adapter,
+        &sender,
+        Transport::Sip,
+        "tenant-legacy",
+    )
+    .await;
+    let mut public_events = orchestrator.subscribe_events();
+    for _ in 0..2 {
+        sender
+            .send(AdapterEvent::Connected {
+                connection_id: connection_id.clone(),
+            })
+            .await
+            .unwrap();
+    }
+    for _ in 0..2 {
+        assert!(matches!(
+            public_events.recv().await.unwrap(),
+            Event::ConnectionConnected {
+                connection_id: observed,
+                ..
+            } if observed == connection_id
+        ));
+    }
+}
+
+#[tokio::test]
+async fn adapter_failure_payload_is_not_copied_into_operational_event() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut operational = orchestrator.install_operational_event_stream(2).unwrap();
+    let (adapter, sender, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let connection_id = publish_operational_test_connection(
+        &orchestrator,
+        &adapter,
+        &sender,
+        Transport::Sip,
+        "tenant-failure",
+    )
+    .await;
+    let secret = "authorization-bearer-private-value";
+    adapter.mark_ended(&connection_id);
+    adapter
+        .deliver_terminal(AdapterEvent::Failed {
+            connection_id,
+            detail: secret.into(),
+        })
+        .await;
+    let event = operational.recv().await.unwrap();
+    assert!(matches!(
+        event.kind,
+        OperationalEventKind::Failed {
+            reason: OperationalFailureReason::AdapterReported,
+        }
+    ));
+    assert!(!format!("{event:?}").contains(secret));
+}
+
+#[tokio::test]
+async fn core_lifecycle_failure_is_authoritative_and_sanitized() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut operational = orchestrator.install_operational_event_stream(2).unwrap();
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(2, Duration::from_secs(1))
+        .unwrap();
+    let (adapter, sender, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let (connection, principal) =
+        prepare_atomic_inbound(&adapter, "tenant-core-failure", "private-attachment");
+    let connection_id = connection.id.clone();
+    announce_atomic_inbound(&sender, connection, principal).await;
+    admissions.recv().await.unwrap().accept().await.unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+    adapter.set_accept_behavior(COMMAND_FAIL);
+
+    assert!(orchestrator
+        .route_inbound_connection(
+            connection_id.clone(),
+            InboundAction::Accept {
+                session_id,
+                participant_id: ParticipantId::new(),
+            },
+        )
+        .await
+        .is_err());
+    let event = operational.recv().await.unwrap();
+    assert_eq!(event.connection_id, connection_id);
+    assert!(matches!(
+        event.kind,
+        OperationalEventKind::Failed {
+            reason: OperationalFailureReason::CoreReported,
+        }
+    ));
+    assert!(!format!("{event:?}").contains("inbound accept failed"));
 }

@@ -126,6 +126,7 @@ pub mod ids;
 pub mod inbound_admission;
 pub mod media_graph;
 pub mod message;
+pub mod operational_events;
 pub mod orchestrator;
 pub mod participant;
 pub mod session;
@@ -177,6 +178,10 @@ pub use media_graph::{
     start_media_graph, MediaGraphHandle, MediaGraphPolicy, DEFAULT_MEDIA_GRAPH_MAX_SINKS,
 };
 pub use message::{ContentType, Message, MessageOrigin, MessageRecipients};
+pub use operational_events::{
+    OperationalEndReason, OperationalEvent, OperationalEventKind, OperationalEventStreamHealth,
+    OperationalFailureReason, OperationalTransferOutcome, OperationalTransferTarget,
+};
 pub use orchestrator::{Orchestrator, PreparedOutboundConnection};
 pub use participant::{Participant, ParticipantKind, ParticipantRole};
 pub use rvoip_core_traits::data::{
