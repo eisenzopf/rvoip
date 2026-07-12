@@ -25,6 +25,21 @@ use rvoip_sip_core::{Method, Request, Response};
 use std::net::SocketAddr;
 use tracing::{debug, error, info, warn};
 
+fn safe_operation_failure(operation: &'static str, error_class: &'static str) -> String {
+    format!("operation={operation}; error_class={error_class}")
+}
+
+fn safe_method_operation_failure(
+    operation: &'static str,
+    error_class: &'static str,
+    method: &Method,
+) -> String {
+    format!(
+        "operation={operation}; method={}; error_class={error_class}",
+        crate::transaction::safe_diagnostics::SafeMethod::new(method)
+    )
+}
+
 /// Detect a reliable provisional response per RFC 3262.
 ///
 /// Returns `Some(rseq)` when the response carries both `Require: 100rel`
@@ -263,10 +278,13 @@ impl DialogManager {
                         has_remote_tag=dialog.remote_tag.is_some(),
                         "Confirmed dialog is missing remote tag for request"
                     );
-                    return Err(crate::errors::DialogError::protocol_error(&format!(
-                        "{} request in confirmed dialog missing remote tag",
-                        method
-                    )));
+                    return Err(crate::errors::DialogError::protocol_error(
+                        &safe_method_operation_failure(
+                            "dialog_request",
+                            "missing_remote_tag",
+                            &method,
+                        ),
+                    ));
                 }
 
                 // For early/initial dialogs, remote tag may be None (will be set to None, not empty string)
@@ -503,7 +521,13 @@ impl DialogManager {
                 _ => {
                     // For any other method, require established dialog
                     let remote_tag = remote_tag.ok_or_else(|| {
-                        crate::errors::DialogError::protocol_error(&format!("{} request requires remote tag in established dialog", method))
+                        crate::errors::DialogError::protocol_error(
+                            &safe_method_operation_failure(
+                                "dialog_request",
+                                "missing_remote_tag",
+                                &method,
+                            ),
+                        )
                     })?;
 
                     let contact = if matches!(method, Method::Update | Method::Refer | Method::Subscribe | Method::Notify) {
@@ -534,8 +558,12 @@ impl DialogManager {
                         extras_opt.clone(),
                     )
                 }
-            }.map_err(|e| crate::errors::DialogError::InternalError {
-                message: format!("Failed to build {} request using Phase 3 dialog functions: {}", method, e),
+            }.map_err(|_error| crate::errors::DialogError::InternalError {
+                message: safe_method_operation_failure(
+                    "dialog_request_build",
+                    "builder_error",
+                    &method,
+                ),
                 context: None,
             })?;
 
@@ -675,8 +703,8 @@ impl DialogManager {
         self.transaction_manager
             .send_response(transaction_id, response)
             .await
-            .map_err(|e| crate::errors::DialogError::TransactionError {
-                message: format!("Failed to send response: {}", e),
+            .map_err(|_error| crate::errors::DialogError::TransactionError {
+                message: safe_operation_failure("transaction_response_send", "transaction_error"),
             })?;
 
         if let Some((dialog_id, rseq, stored_response)) = reliable_spawn {
@@ -692,6 +720,75 @@ impl DialogManager {
 
         debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), "Successfully sent response");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod outward_error_redaction_tests {
+    use super::*;
+
+    const LOWER_ERROR_SECRET: &str = "lower-builder-parser-secret";
+    const EXTENSION_METHOD_SECRET: &str = "extension-method-secret";
+
+    #[test]
+    fn constructed_outward_errors_keep_only_operation_class_and_safe_method() {
+        let lower_result: Result<(), &str> = Err(LOWER_ERROR_SECRET);
+        let method = Method::Extension(EXTENSION_METHOD_SECRET.to_string());
+        let error = lower_result
+            .map_err(|_error| crate::errors::DialogError::InternalError {
+                message: safe_method_operation_failure("request_build", "builder_error", &method),
+                context: None,
+            })
+            .unwrap_err();
+        let rendered = format!("{error:?}");
+
+        assert!(rendered.contains("operation=request_build"));
+        assert!(rendered.contains("method=extension"));
+        assert!(rendered.contains("error_class=builder_error"));
+        assert!(!rendered.contains(LOWER_ERROR_SECRET));
+        assert!(!rendered.contains(EXTENSION_METHOD_SECRET));
+    }
+
+    #[test]
+    fn outward_dialog_error_construction_has_no_raw_lower_error_formatting() {
+        let source = include_str!("transaction_integration.rs");
+        let test_marker = "#[cfg(test)]\nmod outward_error_redaction_tests";
+        let test_start = source.find(test_marker).expect("test module marker");
+        let after_test_offset = source[test_start..]
+            .find("\nimpl DialogManager {")
+            .expect("production resumes after test module");
+        let production = format!(
+            "{}{}",
+            &source[..test_start],
+            &source[test_start + after_test_offset..]
+        );
+
+        for forbidden in [
+            "message: format!",
+            "map_err(|e| crate::errors::DialogError",
+            "DialogError::protocol_error(&format!",
+            "DialogError::routing_error(&format!",
+            "DialogError::internal_error(&format!",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "outward DialogError construction contains unsafe form: {forbidden}"
+            );
+        }
+
+        for line in production.lines().filter(|line| line.contains("message:")) {
+            assert!(
+                line.contains("safe_operation_failure")
+                    || line.contains("safe_method_operation_failure"),
+                "outward DialogError message bypasses safe construction: {line}"
+            );
+        }
+
+        assert_eq!(
+            production.matches("e.to_string()").count(),
+            1,
+            "the sole lower error string conversion is the existing internal benign-termination classifier"
+        );
     }
 }
 
@@ -854,13 +951,12 @@ impl DialogManager {
                 invite_builder = invite_builder.with_sdp(sdp_content);
             }
 
-            let mut request =
-                invite_builder
-                    .build()
-                    .map_err(|e| crate::errors::DialogError::InternalError {
-                        message: format!("Failed to build auth-retry INVITE: {}", e),
-                        context: None,
-                    })?;
+            let mut request = invite_builder.build().map_err(|_error| {
+                crate::errors::DialogError::InternalError {
+                    message: safe_operation_failure("auth_retry_invite_build", "builder_error"),
+                    context: None,
+                }
+            })?;
 
             // Re-inject the negotiated policy headers (100rel, session-timer)
             // just like the initial send does.
@@ -1000,13 +1096,15 @@ impl DialogManager {
                 invite_builder = invite_builder.with_sdp(sdp_content);
             }
 
-            let mut request =
-                invite_builder
-                    .build()
-                    .map_err(|e| crate::errors::DialogError::InternalError {
-                        message: format!("Failed to build 422-retry INVITE: {}", e),
-                        context: None,
-                    })?;
+            let mut request = invite_builder.build().map_err(|_error| {
+                crate::errors::DialogError::InternalError {
+                    message: safe_operation_failure(
+                        "session_timer_retry_invite_build",
+                        "builder_error",
+                    ),
+                    context: None,
+                }
+            })?;
 
             // Re-inject policy headers. 100rel follows the global config (the
             // peer's 100rel preference didn't change); session-timer headers
@@ -1150,13 +1248,15 @@ impl DialogManager {
                 invite_builder = invite_builder.header(hdr);
             }
 
-            let mut request =
-                invite_builder
-                    .build()
-                    .map_err(|e| crate::errors::DialogError::InternalError {
-                        message: format!("Failed to build initial-INVITE-with-extras: {}", e),
-                        context: None,
-                    })?;
+            let mut request = invite_builder.build().map_err(|_error| {
+                crate::errors::DialogError::InternalError {
+                    message: safe_operation_failure(
+                        "initial_invite_with_extras_build",
+                        "builder_error",
+                    ),
+                    context: None,
+                }
+            })?;
 
             // Re-inject the negotiated policy headers (100rel, session-timer),
             // mirroring `send_request_in_dialog`'s initial-INVITE arm.
@@ -1277,11 +1377,12 @@ impl DialogManager {
             };
             let tx_id = match tx_result {
                 Ok(id) => id,
-                Err(e) => {
+                Err(_error) => {
                     last_err = Some(crate::errors::DialogError::TransactionError {
-                        message: format!(
-                            "RFC 3263 §4.3 candidate {}/{} ({}): create_*_client_transaction failed: {}",
-                            attempt, total, target.addr, e
+                        message: safe_method_operation_failure(
+                            "candidate_transaction_create",
+                            "transaction_error",
+                            &method,
                         ),
                     });
                     continue;
@@ -1361,16 +1462,21 @@ impl DialogManager {
                             self.unlink_transaction_from_dialog_indexed(&tx_id);
                         }
                         last_err = Some(crate::errors::DialogError::TransactionError {
-                            message: format!(
-                                "RFC 3263 §4.3 candidate {} ({}) transport failure: {}",
-                                attempt, target.addr, e
+                            message: safe_method_operation_failure(
+                                "candidate_request_send",
+                                "transport_error",
+                                &method,
                             ),
                         });
                         continue;
                     }
 
                     return Err(crate::errors::DialogError::TransactionError {
-                        message: format!("Failed to send {}: {}", method, e),
+                        message: safe_method_operation_failure(
+                            "candidate_request_send",
+                            "transaction_error",
+                            &method,
+                        ),
                     });
                 }
             }
@@ -1378,10 +1484,7 @@ impl DialogManager {
 
         Err(
             last_err.unwrap_or_else(|| crate::errors::DialogError::TransactionError {
-                message: format!(
-                    "RFC 3263 §4.3 failover exhausted: all {} candidate(s) failed",
-                    total
-                ),
+                message: safe_method_operation_failure("candidate_failover", "exhausted", &method),
             }),
         )
     }
@@ -1485,8 +1588,8 @@ impl TransactionHelpers for DialogManager {
             .transaction_manager
             .create_ack_for_2xx(original_invite_tx_id, response)
             .await
-            .map_err(|e| crate::errors::DialogError::TransactionError {
-                message: format!("Failed to create ACK for 2xx using transaction-core: {}", e),
+            .map_err(|_error| crate::errors::DialogError::TransactionError {
+                message: safe_operation_failure("ack_for_success_build", "transaction_error"),
             })?;
 
         debug!("Successfully created ACK for 2xx response");
@@ -2191,8 +2294,8 @@ impl DialogManager {
             .transaction_manager
             .create_server_transaction(request, source)
             .await
-            .map_err(|e| crate::errors::DialogError::TransactionError {
-                message: format!("Failed to create server transaction: {}", e),
+            .map_err(|_error| crate::errors::DialogError::TransactionError {
+                message: safe_operation_failure("server_transaction_create", "transaction_error"),
             })?;
 
         let transaction_id = server_transaction.id().clone();
@@ -2232,8 +2335,12 @@ impl DialogManager {
                 .create_non_invite_client_transaction(request, destination)
                 .await
         }
-        .map_err(|e| crate::errors::DialogError::TransactionError {
-            message: format!("Failed to create {} client transaction: {}", method, e),
+        .map_err(|_error| crate::errors::DialogError::TransactionError {
+            message: safe_method_operation_failure(
+                "client_transaction_create",
+                "transaction_error",
+                method,
+            ),
         })?;
 
         debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), method=%crate::transaction::safe_diagnostics::SafeMethod::new(method), "Created client transaction for request");
@@ -2342,8 +2449,8 @@ impl DialogManager {
             .transaction_manager
             .cancel_invite_transaction_with_extras(invite_tx_id, extra_headers)
             .await
-            .map_err(|e| crate::errors::DialogError::TransactionError {
-                message: format!("Failed to cancel INVITE transaction: {}", e),
+            .map_err(|_error| crate::errors::DialogError::TransactionError {
+                message: safe_operation_failure("invite_cancel", "transaction_error"),
             })?;
 
         if let Some(dialog_id) = pre_cancel_dialog_id {
@@ -2469,8 +2576,8 @@ impl DialogManager {
                     Some(route_set)
                 },
             )
-            .map_err(|e| crate::errors::DialogError::InternalError {
-                message: format!("Failed to build PRACK: {}", e),
+            .map_err(|_error| crate::errors::DialogError::InternalError {
+                message: safe_operation_failure("prack_build", "builder_error"),
                 context: None,
             })?;
 
@@ -2494,8 +2601,8 @@ impl DialogManager {
             .transaction_manager
             .create_non_invite_client_transaction(request, destination)
             .await
-            .map_err(|e| crate::errors::DialogError::TransactionError {
-                message: format!("Failed to create PRACK transaction: {}", e),
+            .map_err(|_error| crate::errors::DialogError::TransactionError {
+                message: safe_operation_failure("prack_transaction_create", "transaction_error"),
             })?;
 
         self.link_transaction_to_dialog_indexed(&transaction_id, dialog_id);
@@ -2503,8 +2610,8 @@ impl DialogManager {
         self.transaction_manager
             .send_request(&transaction_id)
             .await
-            .map_err(|e| crate::errors::DialogError::TransactionError {
-                message: format!("Failed to send PRACK: {}", e),
+            .map_err(|_error| crate::errors::DialogError::TransactionError {
+                message: safe_operation_failure("prack_send", "transaction_error"),
             })?;
         self.record_outbound_transport_context(
             &transaction_id,
