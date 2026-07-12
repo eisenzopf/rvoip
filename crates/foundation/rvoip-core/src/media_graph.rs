@@ -1399,7 +1399,8 @@ fn start_media_graph_with_activity_interval(
         // discard media rather than replaying stale RTP to a future attachment.
         let mut source_routing_started = false;
         let mut snapshot_dirty = false;
-        let mut pending_activity_at = None;
+        let mut last_activity_at = None;
+        let mut activity_pending = false;
         let mut snapshot_tick = tokio::time::interval(SNAPSHOT_PUBLISH_INTERVAL);
         snapshot_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut activity_tick = tokio::time::interval(activity_observation_interval);
@@ -1754,10 +1755,10 @@ fn start_media_graph_with_activity_interval(
                         break;
                     };
                     stats.source_frames = stats.source_frames.saturating_add(1);
-                    let observed_at = Utc::now();
-                    pending_activity_at = Some(
-                        pending_activity_at
-                            .map_or(observed_at, |previous: DateTime<Utc>| previous.max(observed_at)),
+                    record_source_activity(
+                        &mut last_activity_at,
+                        &mut activity_pending,
+                        Utc::now(),
                     );
                     snapshot_dirty = true;
                     metrics::counter!("rvoip_media_graph_source_frames_total").increment(1);
@@ -1850,7 +1851,8 @@ fn start_media_graph_with_activity_interval(
                 _ = activity_tick.tick() => {
                     publish_pending_activity(
                         &activity_tx,
-                        &mut pending_activity_at,
+                        &mut activity_pending,
+                        last_activity_at,
                         stats.source_frames,
                     );
                 }
@@ -1861,7 +1863,12 @@ fn start_media_graph_with_activity_interval(
         // graceful graph shutdown happens before the next coalescing tick.
         // Lifecycle ownership is revalidated by the Orchestrator before this
         // retained observation can become an authoritative event.
-        publish_pending_activity(&activity_tx, &mut pending_activity_at, stats.source_frames);
+        publish_pending_activity(
+            &activity_tx,
+            &mut activity_pending,
+            last_activity_at,
+            stats.source_frames,
+        );
         sinks.clear();
         groups.clear();
         aggregate_metrics.set_sink_count(0);
@@ -1896,16 +1903,28 @@ fn start_media_graph_with_activity_interval(
 
 fn publish_pending_activity(
     sender: &watch::Sender<Option<MediaGraphActivityObservation>>,
-    pending_at: &mut Option<DateTime<Utc>>,
+    pending: &mut bool,
+    observed_at: Option<DateTime<Utc>>,
     source_frames: u64,
 ) {
-    let Some(observed_at) = pending_at.take() else {
+    if !std::mem::replace(pending, false) {
         return;
-    };
+    }
+    let observed_at = observed_at.expect("pending media activity has an observation time");
     sender.send_replace(Some(MediaGraphActivityObservation {
         source_frames,
         observed_at,
     }));
+}
+
+fn record_source_activity(
+    last_observed_at: &mut Option<DateTime<Utc>>,
+    pending: &mut bool,
+    observed_at: DateTime<Utc>,
+) {
+    *last_observed_at =
+        Some(last_observed_at.map_or(observed_at, |previous| previous.max(observed_at)));
+    *pending = true;
 }
 
 fn publish_actor_snapshot(
@@ -2241,7 +2260,7 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
-    use chrono::Utc;
+    use chrono::{Duration as ChronoDuration, Utc};
 
     use super::*;
     use crate::ids::StreamId;
@@ -2373,6 +2392,24 @@ mod tests {
                 "media graph activity observation interval is invalid"
             ))
         ));
+    }
+
+    #[test]
+    fn activity_observation_time_does_not_move_backward() {
+        let mut last_observed_at = None;
+        let mut pending = false;
+        let later = Utc::now();
+        record_source_activity(&mut last_observed_at, &mut pending, later);
+        assert!(pending);
+        pending = false;
+
+        record_source_activity(
+            &mut last_observed_at,
+            &mut pending,
+            later - ChronoDuration::seconds(10),
+        );
+        assert!(pending);
+        assert_eq!(last_observed_at, Some(later));
     }
 
     #[tokio::test]
