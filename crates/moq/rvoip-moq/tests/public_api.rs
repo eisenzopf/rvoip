@@ -160,6 +160,7 @@ fn relay_runtime_contract_uses_only_rvoip_owned_models() {
         MoqRelayCertificateBinding, MoqRelayDeploymentMode, MoqRelayListenerKind,
         MoqRelayPublisherBinding, MoqRelayRuntimeLimits, MoqRelayRuntimeSecurity,
         MoqRelayRuntimeTimeouts, MoqRelayServerTlsConfig, MoqRelayTopology, MoqRelayTopologyLimits,
+        MoqRelayUpstreamRoute, MoqRelayUpstreamRoutes,
     };
 
     let security = MoqRelayRuntimeSecurity::PublisherMutualTls {
@@ -205,5 +206,20 @@ fn relay_runtime_contract_uses_only_rvoip_owned_models() {
     .unwrap();
     assert_eq!(topology.coordinated_namespaces(), 0);
     assert_eq!(topology.namespace_subscriptions(), 0);
+    assert_eq!(topology.upstream_routes(), 0);
+    assert_eq!(topology.upstream_route_capacity(), 4_096);
     assert!(!format!("{topology:?}").contains("publisher.internal"));
+
+    let route = MoqRelayUpstreamRoute::new(
+        rvoip_moq::MoqNamespace::new("tenant", "broadcast").unwrap(),
+        Url::parse("moqt://origin.internal:4443").unwrap(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(route.namespace().as_str(), "tenant/broadcast");
+    assert_eq!(route.endpoint().scheme(), "moqt");
+    assert!(route.socket_addr().is_none());
+    let routes = MoqRelayUpstreamRoutes::new([route], 8).unwrap();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes.max_routes(), 8);
 }

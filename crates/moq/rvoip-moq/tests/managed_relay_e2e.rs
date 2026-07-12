@@ -22,11 +22,13 @@ use rvoip_moq::{
     MoqRelayAdmissionSubstrate, MoqRelayClient, MoqRelayConnectionPolicy, MoqRelayDeploymentMode,
     MoqRelayPublisherBinding, MoqRelayRuntime, MoqRelayRuntimeConfig, MoqRelayRuntimeLimits,
     MoqRelayRuntimeSecurity, MoqRelayRuntimeTimeouts, MoqRelayServerTlsConfig,
-    MoqRelaySubstratePolicy, MoqRelayTlsConfig, MoqRelayTopology, MoqResource,
-    MoqRevocationChecker, MoqRevocationError, MoqRevocationStatus, MoqSessionLeaseLimits,
-    MoqSubscriberCredential, MoqSubscriberCredentialError, MoqSubscriberCredentialProvider,
-    MoqSubscriberCredentialRequest, MoqTokenBinding, MsfCatalogState, RvoipMoqRelayAdmission,
-    SecureMoqAuthorizer, MOQT_NEGOTIATED_PROTOCOL,
+    MoqRelaySubstratePolicy, MoqRelayTlsConfig, MoqRelayTopology, MoqRelayTopologyLimits,
+    MoqRelayUpstreamHealth, MoqRelayUpstreamReconnectMode, MoqRelayUpstreamRoute,
+    MoqRelayUpstreamRouteError, MoqRelayUpstreamRoutes, MoqResource, MoqRevocationChecker,
+    MoqRevocationError, MoqRevocationStatus, MoqSessionLeaseLimits, MoqSubscriberCredential,
+    MoqSubscriberCredentialError, MoqSubscriberCredentialProvider, MoqSubscriberCredentialRequest,
+    MoqTokenBinding, MsfCatalogState, RvoipMoqRelayAdmission, SecureMoqAuthorizer,
+    MOQT_NEGOTIATED_PROTOCOL,
 };
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -42,6 +44,9 @@ struct TestPki {
     publisher_certificate: PathBuf,
     publisher_private_key: PathBuf,
     publisher_fingerprint: String,
+    relay_certificate: PathBuf,
+    relay_private_key: PathBuf,
+    relay_fingerprint: String,
 }
 
 impl TestPki {
@@ -49,6 +54,7 @@ impl TestPki {
         static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
         let server = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let publisher = rcgen::generate_simple_self_signed(vec!["publisher.test".into()]).unwrap();
+        let relay = rcgen::generate_simple_self_signed(vec!["relay.test".into()]).unwrap();
         let directory = std::env::temp_dir().join(format!(
             "rvoip-moq-managed-relay-e2e-{}-{}",
             std::process::id(),
@@ -59,6 +65,8 @@ impl TestPki {
         let server_private_key = directory.join("server.key");
         let publisher_certificate = directory.join("publisher.pem");
         let publisher_private_key = directory.join("publisher.key");
+        let relay_certificate = directory.join("relay.pem");
+        let relay_private_key = directory.join("relay.key");
         std::fs::write(&server_certificate, server.cert.pem()).unwrap();
         std::fs::write(&server_private_key, server.signing_key.serialize_pem()).unwrap();
         std::fs::write(&publisher_certificate, publisher.cert.pem()).unwrap();
@@ -67,6 +75,8 @@ impl TestPki {
             publisher.signing_key.serialize_pem(),
         )
         .unwrap();
+        std::fs::write(&relay_certificate, relay.cert.pem()).unwrap();
+        std::fs::write(&relay_private_key, relay.signing_key.serialize_pem()).unwrap();
         Self {
             directory,
             server_certificate,
@@ -74,6 +84,9 @@ impl TestPki {
             publisher_certificate,
             publisher_private_key,
             publisher_fingerprint: lower_hex(&Sha256::digest(publisher.cert.der().as_ref())),
+            relay_certificate,
+            relay_private_key,
+            relay_fingerprint: lower_hex(&Sha256::digest(relay.cert.der().as_ref())),
         }
     }
 
@@ -96,11 +109,42 @@ impl TestPki {
         }
     }
 
+    fn relay_subscriber_server_tls(&self) -> MoqRelayServerTlsConfig {
+        MoqRelayServerTlsConfig {
+            server_certificates: vec![self.server_certificate.clone()],
+            server_private_keys: vec![self.server_private_key.clone()],
+            server_root_certificates: vec![self.server_certificate.clone()],
+            publisher_client_ca_certificates: vec![self.relay_certificate.clone()],
+            ..MoqRelayServerTlsConfig::default()
+        }
+    }
+
+    fn downstream_server_tls(&self) -> MoqRelayServerTlsConfig {
+        MoqRelayServerTlsConfig {
+            server_certificates: vec![self.server_certificate.clone()],
+            server_private_keys: vec![self.server_private_key.clone()],
+            server_root_certificates: vec![self.server_certificate.clone()],
+            outbound_client_certificate: Some(self.relay_certificate.clone()),
+            outbound_client_private_key: Some(self.relay_private_key.clone()),
+            ..MoqRelayServerTlsConfig::default()
+        }
+    }
+
     fn publisher_client_tls(&self) -> MoqRelayTlsConfig {
         MoqRelayTlsConfig {
             root_certificates: vec![self.server_certificate.clone()],
             client_certificate: Some(self.publisher_certificate.clone()),
             client_private_key: Some(self.publisher_private_key.clone()),
+            #[cfg(feature = "insecure-development")]
+            disable_verification: false,
+        }
+    }
+
+    fn relay_client_tls(&self) -> MoqRelayTlsConfig {
+        MoqRelayTlsConfig {
+            root_certificates: vec![self.server_certificate.clone()],
+            client_certificate: Some(self.relay_certificate.clone()),
+            client_private_key: Some(self.relay_private_key.clone()),
             #[cfg(feature = "insecure-development")]
             disable_verification: false,
         }
@@ -464,6 +508,329 @@ async fn assert_managed_relay_path(substrate: MoqRelaySubstratePolicy) {
         .await
         .unwrap();
     publisher_runtime
+        .drain(Duration::from_secs(5))
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn external_mtls_route_crosses_independent_relay_topologies_and_drains() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+    let pki = TestPki::new();
+    let origin_publisher_address = unused_udp_address();
+    let origin_relay_address = unused_udp_address();
+    let restarted_origin_relay_address = unused_udp_address();
+    let downstream_address = unused_udp_address();
+    assert_ne!(origin_publisher_address, origin_relay_address);
+    assert_ne!(origin_relay_address, downstream_address);
+    assert_ne!(origin_relay_address, restarted_origin_relay_address);
+
+    let origin_topology = MoqRelayTopology::new(
+        endpoint(origin_publisher_address),
+        Some(origin_publisher_address),
+        8,
+    )
+    .unwrap();
+    let downstream_topology = MoqRelayTopology::with_limits_and_upstream_routes(
+        endpoint(downstream_address),
+        Some(downstream_address),
+        MoqRelayTopologyLimits {
+            max_namespaces: 8,
+            max_namespace_subscriptions: 8,
+            namespace_update_queue_capacity: 8,
+        },
+        MoqRelayUpstreamRoutes::new(std::iter::empty(), 2).unwrap(),
+    )
+    .unwrap();
+
+    let origin_publisher_runtime = MoqRelayRuntime::start_with_topology(
+        runtime_config(
+            origin_publisher_address,
+            pki.publisher_server_tls(),
+            MoqRelayRuntimeSecurity::PublisherMutualTls {
+                bindings: vec![MoqRelayPublisherBinding {
+                    certificate_sha256: pki.publisher_fingerprint.clone(),
+                    scope: format!("/{TENANT}/{BROADCAST}"),
+                }],
+                max_active_sessions_per_certificate: 4,
+            },
+        ),
+        origin_topology.clone(),
+    )
+    .unwrap();
+    let origin_relay_runtime = MoqRelayRuntime::start_with_topology(
+        runtime_config(
+            origin_relay_address,
+            pki.relay_subscriber_server_tls(),
+            MoqRelayRuntimeSecurity::RelaySubscriberMutualTls {
+                bindings: vec![rvoip_moq::MoqRelayCertificateBinding {
+                    certificate_sha256: pki.relay_fingerprint.clone(),
+                    scope: format!("/{TENANT}/{BROADCAST}"),
+                }],
+                max_active_sessions_per_certificate: 4,
+            },
+        ),
+        origin_topology.clone(),
+    )
+    .unwrap();
+    let mut downstream_config = runtime_config(
+        downstream_address,
+        pki.downstream_server_tls(),
+        MoqRelayRuntimeSecurity::SubscriberRawQuic {
+            admission: subscriber_admission(MoqRelayAdmissionSubstrate::RawQuic),
+        },
+    );
+    downstream_config.deployment = MoqRelayDeploymentMode::Standalone;
+    let downstream_runtime =
+        MoqRelayRuntime::start_with_topology(downstream_config, downstream_topology.clone())
+            .unwrap();
+
+    // Install after the listener is ready. This proves the standalone control
+    // plane does not need to restart the relay to add a newly-created broadcast.
+    let namespace = MoqNamespace::new(TENANT, BROADCAST).unwrap();
+    let route_registration = downstream_runtime
+        .register_upstream_route(
+            MoqRelayUpstreamRoute::new(
+                namespace.clone(),
+                endpoint(origin_relay_address),
+                Some(origin_relay_address),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(downstream_topology.upstream_routes(), 1);
+
+    // The exact same certificate used by the downstream RemoteManager is
+    // subscribe-only at the origin. It must not be usable to publish.
+    let denied_publisher = MoqBroadcastPublisher::new(MoqPublisherConfig {
+        tenant_id: TENANT.to_owned(),
+        broadcast_id: BROADCAST.to_owned(),
+        bitrate: 32_000,
+        language: None,
+        queue_frames: 10,
+    })
+    .unwrap();
+    let relay_identity_client = MoqRelayClient::bind_with_policy(
+        "127.0.0.1:0".parse().unwrap(),
+        pki.relay_client_tls(),
+        MoqRelayConnectionPolicy {
+            attempt_timeout: Duration::from_secs(3),
+            publish_namespace_acceptance_timeout: Duration::from_secs(2),
+            substrate: MoqRelaySubstratePolicy::RawQuic,
+            max_reconnect_attempts: 1,
+            reconnect_initial_backoff: Duration::from_millis(10),
+            reconnect_max_backoff: Duration::from_millis(10),
+            reconnect_deadline: Duration::from_secs(1),
+            jitter_percent: 0,
+        },
+    )
+    .unwrap();
+    let origin_relay_target = Url::parse(&format!(
+        "moqt://localhost:{}/{TENANT}/{BROADCAST}",
+        origin_relay_address.port()
+    ))
+    .unwrap();
+    let denied = tokio::time::timeout(
+        NETWORK_TIMEOUT,
+        denied_publisher.publish_to_relay(&relay_identity_client, &origin_relay_target),
+    )
+    .await
+    .expect("relay-identity publish denial timed out");
+    assert!(denied.is_err());
+    assert_eq!(origin_topology.coordinated_namespaces(), 0);
+    let _ = tokio::time::timeout(NETWORK_TIMEOUT, denied_publisher.close()).await;
+
+    let publisher = MoqBroadcastPublisher::new(MoqPublisherConfig {
+        tenant_id: TENANT.to_owned(),
+        broadcast_id: BROADCAST.to_owned(),
+        bitrate: 32_000,
+        language: Some("en".to_owned()),
+        queue_frames: 10,
+    })
+    .unwrap();
+    let publisher_client = MoqRelayClient::bind_with_policy(
+        "127.0.0.1:0".parse().unwrap(),
+        pki.publisher_client_tls(),
+        MoqRelayConnectionPolicy {
+            attempt_timeout: Duration::from_secs(5),
+            publish_namespace_acceptance_timeout: Duration::from_secs(3),
+            substrate: MoqRelaySubstratePolicy::RawQuic,
+            max_reconnect_attempts: 1,
+            reconnect_initial_backoff: Duration::from_millis(10),
+            reconnect_max_backoff: Duration::from_millis(10),
+            reconnect_deadline: Duration::from_secs(2),
+            jitter_percent: 0,
+        },
+    )
+    .unwrap();
+    let origin_publish_target = Url::parse(&format!(
+        "moqt://localhost:{}/{TENANT}/{BROADCAST}",
+        origin_publisher_address.port()
+    ))
+    .unwrap();
+    let publication = tokio::time::timeout(
+        NETWORK_TIMEOUT,
+        publisher.publish_to_relay(&publisher_client, &origin_publish_target),
+    )
+    .await
+    .expect("origin publisher connection timed out")
+    .expect("origin publisher connection failed");
+
+    let subscriber_target = Url::parse(&format!(
+        "moqt://localhost:{}/{TENANT}/{BROADCAST}",
+        downstream_address.port()
+    ))
+    .unwrap();
+    let mut subscriber_config = MoqCatalogSubscriberConfig::new(subscriber_target, namespace);
+    subscriber_config.substrate = MoqRelaySubstratePolicy::RawQuic;
+    subscriber_config.attempt_timeout = Duration::from_secs(5);
+    subscriber_config.max_reconnect_attempts = 1;
+    subscriber_config.reconnect_initial_backoff = Duration::from_millis(20);
+    subscriber_config.reconnect_max_backoff = Duration::from_millis(20);
+    subscriber_config.reconnect_deadline = Duration::from_secs(5);
+    let reconnect_subscriber_config = subscriber_config.clone();
+    let catalog_subscriber = MoqCatalogSubscriber::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        subscriber_config,
+        MoqCatalogSubscriberTlsConfig {
+            root_certificates: vec![pki.server_certificate.clone()],
+        },
+        Arc::new(FreshCredentials {
+            next: AtomicU64::new(50_000),
+        }),
+    )
+    .unwrap();
+    let catalog = wait_for_live_catalog(&catalog_subscriber).await;
+    assert_eq!(catalog.substrate, Some(BroadcastSubstrate::RawQuic));
+    assert_eq!(
+        catalog
+            .latest
+            .expect("external route catalog missing")
+            .catalog
+            .state(),
+        MsfCatalogState::Live
+    );
+
+    // The origin listener trusts only the relay certificate. A successful
+    // object traversal therefore proves RemoteManager used the runtime's
+    // configured verified roots plus outbound client certificate/key.
+    let active = downstream_runtime.snapshot().await;
+    assert_eq!(active.configured_upstream_routes, 1);
+    assert_eq!(active.max_upstream_routes, 2);
+    assert!(active.upstream_route_resolutions >= 1);
+    assert_eq!(active.upstream_route_misses, 0);
+    assert_eq!(active.upstream_health, MoqRelayUpstreamHealth::Connected);
+    assert_eq!(
+        active.upstream_reconnect_mode,
+        MoqRelayUpstreamReconnectMode::OnDemand
+    );
+    assert_eq!(active.cached_upstream_connections, 1);
+    assert!(active.retained_upstream_connections >= 1);
+    assert!(active.retained_upstream_tracks >= 1);
+
+    catalog_subscriber.close().await.unwrap();
+
+    // Lose the upstream listener while the publisher remains live, then
+    // replace the exact route with a new listener generation. The next
+    // downstream subscribe must leave the closed cached session behind and
+    // reconnect on demand with the same mTLS identity.
+    origin_relay_runtime
+        .drain(Duration::from_secs(5))
+        .await
+        .unwrap();
+    drop(route_registration);
+    let origin_relay_runtime = MoqRelayRuntime::start_with_topology(
+        runtime_config(
+            restarted_origin_relay_address,
+            pki.relay_subscriber_server_tls(),
+            MoqRelayRuntimeSecurity::RelaySubscriberMutualTls {
+                bindings: vec![rvoip_moq::MoqRelayCertificateBinding {
+                    certificate_sha256: pki.relay_fingerprint.clone(),
+                    scope: format!("/{TENANT}/{BROADCAST}"),
+                }],
+                max_active_sessions_per_certificate: 4,
+            },
+        ),
+        origin_topology.clone(),
+    )
+    .unwrap();
+    let route_registration = downstream_runtime
+        .register_upstream_route(
+            MoqRelayUpstreamRoute::new(
+                MoqNamespace::new(TENANT, BROADCAST).unwrap(),
+                endpoint(restarted_origin_relay_address),
+                Some(restarted_origin_relay_address),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let reconnect_subscriber = MoqCatalogSubscriber::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        reconnect_subscriber_config,
+        MoqCatalogSubscriberTlsConfig {
+            root_certificates: vec![pki.server_certificate.clone()],
+        },
+        Arc::new(FreshCredentials {
+            next: AtomicU64::new(60_000),
+        }),
+    )
+    .unwrap();
+    let reconnected = wait_for_live_catalog(&reconnect_subscriber).await;
+    assert_eq!(
+        reconnected
+            .latest
+            .expect("reconnected external route catalog missing")
+            .catalog
+            .state(),
+        MsfCatalogState::Live
+    );
+    reconnect_subscriber.close().await.unwrap();
+    assert!(
+        downstream_runtime
+            .snapshot()
+            .await
+            .upstream_route_resolutions
+            >= 2
+    );
+
+    Arc::clone(&publisher).close().await.unwrap();
+    publication.wait().await.unwrap();
+    assert_eq!(origin_topology.coordinated_namespaces(), 0);
+
+    // Drain owns dynamic-route shutdown even while the caller still holds the
+    // RAII lease, and the closed runtime rejects a new generation.
+    downstream_runtime
+        .drain(Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(downstream_topology.upstream_routes(), 0);
+    assert!(matches!(
+        downstream_runtime.register_upstream_route(
+            MoqRelayUpstreamRoute::new(
+                MoqNamespace::new(TENANT, BROADCAST).unwrap(),
+                endpoint(restarted_origin_relay_address),
+                Some(restarted_origin_relay_address),
+            )
+            .unwrap()
+        ),
+        Err(MoqRelayUpstreamRouteError::Draining)
+    ));
+    let stopped = downstream_runtime.snapshot().await;
+    assert_eq!(stopped.upstream_health, MoqRelayUpstreamHealth::Stopped);
+    assert_eq!(stopped.cached_upstream_connections, 0);
+    assert_eq!(stopped.retained_upstream_connections, 0);
+    assert_eq!(stopped.retained_upstream_tracks, 0);
+    assert_eq!(stopped.supervised_upstream_tasks, 0);
+    drop(route_registration);
+
+    origin_relay_runtime
+        .drain(Duration::from_secs(5))
+        .await
+        .unwrap();
+    origin_publisher_runtime
         .drain(Duration::from_secs(5))
         .await
         .unwrap();

@@ -1,6 +1,6 @@
 //! Managed, production-oriented MOQT relay runtime.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
@@ -23,7 +23,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::{MoqProtocolVersion, MoqRelayAdmissionSubstrate, RvoipMoqRelayAdmission};
+use crate::{MoqNamespace, MoqProtocolVersion, MoqRelayAdmissionSubstrate, RvoipMoqRelayAdmission};
 
 /// How the relay runtime is hosted by its owning application.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -62,6 +62,146 @@ pub struct MoqRelayCertificateBinding {
 
 /// Backward-compatible name for a publisher certificate binding.
 pub type MoqRelayPublisherBinding = MoqRelayCertificateBinding;
+
+/// One exact namespace route to a separately deployed MOQT origin or relay.
+///
+/// The upstream endpoint is authority-only. rvoip appends the exact namespace
+/// path when resolving the route, which also becomes the scope admitted by the
+/// upstream relay's subscribe-only mTLS listener.
+#[derive(Clone, Eq, PartialEq)]
+pub struct MoqRelayUpstreamRoute {
+    namespace: MoqNamespace,
+    endpoint: Url,
+    socket_addr: Option<SocketAddr>,
+}
+
+impl MoqRelayUpstreamRoute {
+    /// Create one credential-free, raw-QUIC upstream route.
+    pub fn new(
+        namespace: MoqNamespace,
+        endpoint: Url,
+        socket_addr: Option<SocketAddr>,
+    ) -> Result<Self, MoqRelayRuntimeError> {
+        validate_authority_endpoint(&endpoint)?;
+        Ok(Self {
+            namespace,
+            endpoint,
+            socket_addr,
+        })
+    }
+
+    pub fn namespace(&self) -> &MoqNamespace {
+        &self.namespace
+    }
+
+    pub fn endpoint(&self) -> &Url {
+        &self.endpoint
+    }
+
+    pub const fn socket_addr(&self) -> Option<SocketAddr> {
+        self.socket_addr
+    }
+}
+
+impl std::fmt::Debug for MoqRelayUpstreamRoute {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MoqRelayUpstreamRoute")
+            .field("namespace", &"<redacted>")
+            .field("endpoint", &"<redacted>")
+            .field("has_socket_addr", &self.socket_addr.is_some())
+            .finish()
+    }
+}
+
+/// A validated and explicitly bounded set of exact upstream routes.
+#[derive(Clone)]
+pub struct MoqRelayUpstreamRoutes {
+    routes: Vec<MoqRelayUpstreamRoute>,
+    max_routes: usize,
+}
+
+impl Default for MoqRelayUpstreamRoutes {
+    fn default() -> Self {
+        Self {
+            routes: Vec::new(),
+            max_routes: 4_096,
+        }
+    }
+}
+
+impl MoqRelayUpstreamRoutes {
+    /// Validate a bounded route set.
+    ///
+    /// Duplicate namespaces are rejected rather than resolved by ordering.
+    /// An empty set is valid and disables external bootstrap routing.
+    pub fn new(
+        routes: impl IntoIterator<Item = MoqRelayUpstreamRoute>,
+        max_routes: usize,
+    ) -> Result<Self, MoqRelayRuntimeError> {
+        if max_routes == 0 {
+            return Err(MoqRelayRuntimeError::InvalidConfig(
+                "upstream route limit must be greater than zero",
+            ));
+        }
+        let routes = routes.into_iter().collect::<Vec<_>>();
+        if routes.len() > max_routes {
+            return Err(MoqRelayRuntimeError::InvalidConfig(
+                "upstream route limit exceeded",
+            ));
+        }
+        let unique = routes
+            .iter()
+            .map(|route| route.namespace.clone())
+            .collect::<HashSet<_>>();
+        if unique.len() != routes.len() {
+            return Err(MoqRelayRuntimeError::InvalidConfig(
+                "upstream routes must have unique exact namespaces",
+            ));
+        }
+        Ok(Self { routes, max_routes })
+    }
+
+    pub fn len(&self) -> usize {
+        self.routes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.routes.is_empty()
+    }
+
+    pub const fn max_routes(&self) -> usize {
+        self.max_routes
+    }
+}
+
+impl std::fmt::Debug for MoqRelayUpstreamRoutes {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MoqRelayUpstreamRoutes")
+            .field("route_count", &self.routes.len())
+            .field("max_routes", &self.max_routes)
+            .finish()
+    }
+}
+
+/// Sanitized runtime route-registration failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum MoqRelayUpstreamRouteError {
+    #[error("MOQT relay runtime is not ready for route registration")]
+    RuntimeNotReady,
+    #[error("MOQT relay runtime has no verified outbound mTLS identity")]
+    OutboundTlsUnavailable,
+    #[error("MOQT upstream route owner is draining")]
+    Draining,
+    #[error("MOQT upstream namespace route is already registered")]
+    AlreadyRegistered,
+    #[error("MOQT upstream route cannot target the local relay endpoint")]
+    LocalLoop,
+    #[error("MOQT upstream route capacity is exhausted")]
+    CapacityExhausted,
+}
 
 /// Production admission posture for one relay listener.
 ///
@@ -386,13 +526,45 @@ impl MoqRelayTopology {
         publisher_socket_addr: Option<SocketAddr>,
         limits: MoqRelayTopologyLimits,
     ) -> Result<Self, MoqRelayRuntimeError> {
+        Self::with_limits_and_upstream_routes(
+            publisher_endpoint,
+            publisher_socket_addr,
+            limits,
+            MoqRelayUpstreamRoutes::default(),
+        )
+    }
+
+    /// Create a topology with exact routes to external origins or relays.
+    ///
+    /// A runtime started with a non-empty route set must configure explicit
+    /// upstream trust roots and an outbound client certificate/key. The
+    /// upstream must bind that certificate to the same exact namespace scope
+    /// on a [`MoqRelayRuntimeSecurity::RelaySubscriberMutualTls`] listener.
+    /// Every active listener sharing this topology must use that outbound mTLS
+    /// posture before a dynamic route can be installed.
+    pub fn with_limits_and_upstream_routes(
+        publisher_endpoint: Url,
+        publisher_socket_addr: Option<SocketAddr>,
+        limits: MoqRelayTopologyLimits,
+        upstream_routes: MoqRelayUpstreamRoutes,
+    ) -> Result<Self, MoqRelayRuntimeError> {
         validate_authority_endpoint(&publisher_endpoint)?;
         let limits = limits.validate()?;
+        if upstream_routes
+            .routes
+            .iter()
+            .any(|route| route.endpoint == publisher_endpoint)
+        {
+            return Err(MoqRelayRuntimeError::InvalidConfig(
+                "upstream route cannot target the local relay endpoint",
+            ));
+        }
         Ok(Self {
-            coordinator: Arc::new(LocalCoordinator::new(
+            coordinator: Arc::new(LocalCoordinator::new_with_upstream_routes(
                 publisher_endpoint,
                 publisher_socket_addr,
                 limits,
+                upstream_routes,
             )),
             locals: Locals::new(),
         })
@@ -407,6 +579,16 @@ impl MoqRelayTopology {
     pub fn namespace_subscriptions(&self) -> usize {
         self.coordinator.snapshot().namespace_subscriptions
     }
+
+    /// Aggregate-safe count of configured external bootstrap routes.
+    pub fn upstream_routes(&self) -> usize {
+        self.coordinator.snapshot().configured_upstream_routes
+    }
+
+    /// Maximum static plus dynamic upstream routes retained by this topology.
+    pub fn upstream_route_capacity(&self) -> usize {
+        self.coordinator.snapshot().max_upstream_routes
+    }
 }
 
 impl std::fmt::Debug for MoqRelayTopology {
@@ -415,6 +597,8 @@ impl std::fmt::Debug for MoqRelayTopology {
             .debug_struct("MoqRelayTopology")
             .field("coordinated_namespaces", &self.coordinated_namespaces())
             .field("namespace_subscriptions", &self.namespace_subscriptions())
+            .field("upstream_routes", &self.upstream_routes())
+            .field("upstream_route_capacity", &self.upstream_route_capacity())
             .finish_non_exhaustive()
     }
 }
@@ -437,6 +621,36 @@ impl MoqRelayRuntimeLifecycle {
     }
 }
 
+/// Aggregate external-upstream health without endpoint or namespace labels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum MoqRelayUpstreamHealth {
+    /// No external routes are configured.
+    Disabled,
+    /// Routes are configured but no upstream connection is currently cached.
+    /// A later subscribe performs a fresh, on-demand connection attempt.
+    Idle,
+    /// At least one verified upstream connection is cached.
+    Connected,
+    /// The owning runtime is draining its upstream connections and tasks.
+    Draining,
+    /// The owning runtime stopped and released upstream state.
+    Stopped,
+    /// The owning runtime failed.
+    Failed,
+}
+
+/// How a managed relay replaces failed upstream sessions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum MoqRelayUpstreamReconnectMode {
+    /// A stale session is evicted and the next subscribe reconnects with the
+    /// runtime's same verified roots and outbound mTLS identity.
+    OnDemand,
+}
+
 /// Aggregate-safe relay diagnostics. No principal, tenant, namespace, URL, or
 /// credential values are included.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -450,6 +664,12 @@ pub struct MoqRelayRuntimeSnapshot {
     pub scope_capacity_buckets: usize,
     pub coordinated_namespaces: usize,
     pub namespace_subscriptions: usize,
+    pub configured_upstream_routes: usize,
+    pub max_upstream_routes: usize,
+    pub upstream_route_resolutions: u64,
+    pub upstream_route_misses: u64,
+    pub upstream_health: MoqRelayUpstreamHealth,
+    pub upstream_reconnect_mode: MoqRelayUpstreamReconnectMode,
     pub cached_upstream_connections: usize,
     pub retained_upstream_connections: usize,
     pub retained_upstream_tracks: usize,
@@ -498,6 +718,8 @@ struct RuntimeInner {
     task: Mutex<Option<JoinHandle<()>>>,
     runtime: tokio::runtime::Handle,
     drop_cleanup: Duration,
+    upstream_route_owner_id: u64,
+    outbound_upstream_tls: bool,
 }
 
 struct RuntimeLifecycle {
@@ -562,6 +784,7 @@ impl MoqRelayRuntime {
         topology: MoqRelayTopology,
     ) -> Result<Self, MoqRelayRuntimeError> {
         validate_config(&config)?;
+        validate_upstream_config(&config, &topology)?;
         if matches!(
             &config.security,
             MoqRelayRuntimeSecurity::PublisherMutualTls { .. }
@@ -574,7 +797,12 @@ impl MoqRelayRuntime {
         }
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| MoqRelayRuntimeError::RuntimeUnavailable)?;
+        let outbound_upstream_tls = has_explicit_upstream_tls(&config.tls);
         let listener = config.security.listener_kind();
+        // moq-rs builds the listener endpoint and RemoteManager client from
+        // this same TLS configuration. Consequently an upstream route that
+        // returns no custom client uses these verified roots and this exact
+        // outbound certificate/key; the network test relies on that path.
         let tls = load_tls(&config)?;
         let (listener_security, admission) = admission_for(&config.security)?;
         let coordinator = topology.coordinator;
@@ -618,17 +846,21 @@ impl MoqRelayRuntime {
             topology.locals,
         )
         .map_err(|_| MoqRelayRuntimeError::StartFailed)?;
+        let upstream_route_owner_id =
+            coordinator.register_upstream_route_owner(outbound_upstream_tls);
         let diagnostics = relay.diagnostics();
         let lifecycle = Arc::new(RuntimeLifecycle::new());
         let shutdown = CancellationToken::new();
         let task_lifecycle = lifecycle.clone();
         let task_shutdown = shutdown.clone();
+        let task_coordinator = coordinator.clone();
         let (start_tx, start_rx) = tokio::sync::oneshot::channel();
         let task = runtime.spawn(async move {
             let _ = start_rx.await;
             let result = AssertUnwindSafe(relay.run_until(task_shutdown.clone()))
                 .catch_unwind()
                 .await;
+            task_coordinator.drain_upstream_route_owner(upstream_route_owner_id);
             match result {
                 Ok(Ok(())) => task_lifecycle.transition(MoqRelayRuntimeLifecycle::Stopped),
                 Ok(Err(_)) | Err(_) => {
@@ -647,6 +879,8 @@ impl MoqRelayRuntime {
             task: Mutex::new(Some(task)),
             runtime,
             drop_cleanup: config.timeouts.drop_cleanup,
+            upstream_route_owner_id,
+            outbound_upstream_tls,
         });
         inner.lifecycle.transition(MoqRelayRuntimeLifecycle::Ready);
         let _ = start_tx.send(());
@@ -661,20 +895,65 @@ impl MoqRelayRuntime {
         MoqProtocolVersion::PINNED
     }
 
+    /// Install one exact upstream route without restarting the relay.
+    ///
+    /// The returned lease removes only this generation of the route when
+    /// dropped. Draining the runtime removes all routes installed by this
+    /// runtime and atomically rejects later registrations.
+    /// All active runtimes sharing the topology must have explicit outbound
+    /// roots and a client identity because each owns an independent
+    /// RemoteManager client.
+    pub fn register_upstream_route(
+        &self,
+        route: MoqRelayUpstreamRoute,
+    ) -> Result<MoqRelayUpstreamRouteRegistration, MoqRelayUpstreamRouteError> {
+        match self.lifecycle() {
+            MoqRelayRuntimeLifecycle::Ready => {}
+            MoqRelayRuntimeLifecycle::Starting => {
+                route_registration_rejected("runtime_not_ready");
+                return Err(MoqRelayUpstreamRouteError::RuntimeNotReady);
+            }
+            MoqRelayRuntimeLifecycle::Draining
+            | MoqRelayRuntimeLifecycle::Stopped
+            | MoqRelayRuntimeLifecycle::Failed => {
+                route_registration_rejected("draining");
+                return Err(MoqRelayUpstreamRouteError::Draining);
+            }
+        }
+        if !self.inner.outbound_upstream_tls {
+            route_registration_rejected("outbound_tls_unavailable");
+            return Err(MoqRelayUpstreamRouteError::OutboundTlsUnavailable);
+        }
+        self.inner
+            .coordinator
+            .register_upstream_route(self.inner.upstream_route_owner_id, route)
+    }
+
     /// Capture bounded aggregate diagnostics from the running relay.
     pub async fn snapshot(&self) -> MoqRelayRuntimeSnapshot {
         let wire = self.inner.diagnostics.snapshot().await;
         let topology = self.inner.coordinator.snapshot();
+        let lifecycle = self.lifecycle();
         MoqRelayRuntimeSnapshot {
             deployment: self.inner.deployment,
             listener: self.inner.listener,
-            lifecycle: self.lifecycle(),
+            lifecycle,
             protocol: MoqProtocolVersion::PINNED,
             active_resource_leases: wire.capacity.active,
             principal_capacity_buckets: wire.capacity.principal_buckets,
             scope_capacity_buckets: wire.capacity.scope_buckets,
             coordinated_namespaces: topology.namespaces,
             namespace_subscriptions: topology.namespace_subscriptions,
+            configured_upstream_routes: topology.configured_upstream_routes,
+            max_upstream_routes: topology.max_upstream_routes,
+            upstream_route_resolutions: topology.upstream_route_resolutions,
+            upstream_route_misses: topology.upstream_route_misses,
+            upstream_health: upstream_health(
+                lifecycle,
+                topology.configured_upstream_routes,
+                wire.remotes.cached_connections,
+            ),
+            upstream_reconnect_mode: MoqRelayUpstreamReconnectMode::OnDemand,
             cached_upstream_connections: wire.remotes.cached_connections,
             retained_upstream_connections: wire.remotes.retained_connections,
             retained_upstream_tracks: wire.remotes.retained_tracks,
@@ -704,6 +983,9 @@ impl MoqRelayRuntime {
             self.inner
                 .lifecycle
                 .transition(MoqRelayRuntimeLifecycle::Draining);
+            self.inner
+                .coordinator
+                .drain_upstream_route_owner(self.inner.upstream_route_owner_id);
             self.inner.shutdown.cancel();
         }
         match tokio::time::timeout(timeout, self.inner.lifecycle.wait_terminal()).await {
@@ -748,6 +1030,8 @@ impl Drop for RuntimeInner {
             self.lifecycle
                 .transition(MoqRelayRuntimeLifecycle::Draining);
         }
+        self.coordinator
+            .drain_upstream_route_owner(self.upstream_route_owner_id);
         self.shutdown.cancel();
         let Some(mut task) = take_task(&self.task) else {
             return;
@@ -776,6 +1060,61 @@ fn lifecycle_label(lifecycle: MoqRelayRuntimeLifecycle) -> &'static str {
         MoqRelayRuntimeLifecycle::Stopped => "stopped",
         MoqRelayRuntimeLifecycle::Failed => "failed",
     }
+}
+
+fn route_registration_rejected(reason: &'static str) {
+    metrics::counter!(
+        "rvoip_moq_relay_upstream_route_registrations_total",
+        "result" => reason
+    )
+    .increment(1);
+}
+
+fn upstream_health(
+    lifecycle: MoqRelayRuntimeLifecycle,
+    configured_routes: usize,
+    cached_connections: usize,
+) -> MoqRelayUpstreamHealth {
+    match lifecycle {
+        MoqRelayRuntimeLifecycle::Draining => MoqRelayUpstreamHealth::Draining,
+        MoqRelayRuntimeLifecycle::Stopped => MoqRelayUpstreamHealth::Stopped,
+        MoqRelayRuntimeLifecycle::Failed => MoqRelayUpstreamHealth::Failed,
+        MoqRelayRuntimeLifecycle::Starting | MoqRelayRuntimeLifecycle::Ready => {
+            if configured_routes == 0 {
+                MoqRelayUpstreamHealth::Disabled
+            } else if cached_connections == 0 {
+                MoqRelayUpstreamHealth::Idle
+            } else {
+                MoqRelayUpstreamHealth::Connected
+            }
+        }
+    }
+}
+
+fn validate_upstream_config(
+    config: &MoqRelayRuntimeConfig,
+    topology: &MoqRelayTopology,
+) -> Result<(), MoqRelayRuntimeError> {
+    if topology.upstream_routes() == 0 {
+        return Ok(());
+    }
+    if config.tls.server_root_certificates.is_empty() {
+        return Err(MoqRelayRuntimeError::InvalidConfig(
+            "external upstream routes require explicit verified server roots",
+        ));
+    }
+    if !has_explicit_upstream_tls(&config.tls) {
+        return Err(MoqRelayRuntimeError::InvalidConfig(
+            "external upstream routes require an outbound mTLS client certificate and key",
+        ));
+    }
+    Ok(())
+}
+
+fn has_explicit_upstream_tls(tls: &MoqRelayServerTlsConfig) -> bool {
+    !tls.server_root_certificates.is_empty()
+        && tls.outbound_client_certificate.is_some()
+        && tls.outbound_client_private_key.is_some()
 }
 
 fn validate_config(config: &MoqRelayRuntimeConfig) -> Result<(), MoqRelayRuntimeError> {
@@ -889,7 +1228,7 @@ fn validate_authority_endpoint(endpoint: &Url) -> Result<(), MoqRelayRuntimeErro
         || !matches!(endpoint.path(), "" | "/")
     {
         return Err(MoqRelayRuntimeError::InvalidConfig(
-            "advertised endpoint must be a credential-free authority-only moqt:// URL",
+            "MOQT endpoint must be a credential-free authority-only moqt:// URL",
         ));
     }
     Ok(())
@@ -979,6 +1318,13 @@ struct LocalOrigin {
     addr: Option<SocketAddr>,
 }
 
+struct LocalUpstreamRoute {
+    registration_id: u64,
+    owner_id: Option<u64>,
+    url: Url,
+    addr: Option<SocketAddr>,
+}
+
 struct LocalNamespaceSubscription {
     scope: Option<String>,
     prefix: TrackNamespace,
@@ -1007,6 +1353,8 @@ enum LocalNamespaceUpdateKind {
 struct LocalCoordinatorState {
     namespaces: HashMap<NamespaceKey, LocalOrigin>,
     namespace_subscriptions: HashMap<u64, LocalNamespaceSubscription>,
+    upstream_routes: HashMap<NamespaceKey, LocalUpstreamRoute>,
+    active_upstream_route_owners: HashMap<u64, bool>,
 }
 
 impl LocalCoordinatorState {
@@ -1039,25 +1387,77 @@ struct LocalCoordinator {
     advertised_socket_addr: Option<SocketAddr>,
     next_registration_id: AtomicU64,
     next_subscription_id: AtomicU64,
+    next_upstream_route_registration_id: AtomicU64,
+    next_upstream_route_owner_id: AtomicU64,
     limits: MoqRelayTopologyLimits,
+    max_upstream_routes: usize,
+    upstream_route_resolutions: AtomicU64,
+    upstream_route_misses: AtomicU64,
 }
 
 impl LocalCoordinator {
+    #[cfg(test)]
     fn new(
         advertised_endpoint: Url,
         advertised_socket_addr: Option<SocketAddr>,
         limits: MoqRelayTopologyLimits,
     ) -> Self {
+        Self::new_with_upstream_routes(
+            advertised_endpoint,
+            advertised_socket_addr,
+            limits,
+            MoqRelayUpstreamRoutes::default(),
+        )
+    }
+
+    fn new_with_upstream_routes(
+        advertised_endpoint: Url,
+        advertised_socket_addr: Option<SocketAddr>,
+        limits: MoqRelayTopologyLimits,
+        upstream_routes: MoqRelayUpstreamRoutes,
+    ) -> Self {
+        let max_upstream_routes = upstream_routes.max_routes;
+        let upstream_routes = upstream_routes
+            .routes
+            .into_iter()
+            .enumerate()
+            .map(|(index, route)| {
+                let (key, url, addr) = local_upstream_route_parts(route);
+                (
+                    key,
+                    LocalUpstreamRoute {
+                        registration_id: index as u64 + 1,
+                        owner_id: None,
+                        url,
+                        addr,
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let next_upstream_route_registration_id = upstream_routes.len() as u64 + 1;
+        if !upstream_routes.is_empty() {
+            metrics::gauge!("rvoip_moq_relay_upstream_routes")
+                .increment(upstream_routes.len() as f64);
+        }
         Self {
             state: Arc::new(Mutex::new(LocalCoordinatorState {
                 namespaces: HashMap::new(),
                 namespace_subscriptions: HashMap::new(),
+                upstream_routes,
+                active_upstream_route_owners: HashMap::new(),
             })),
             advertised_endpoint,
             advertised_socket_addr,
             next_registration_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
+            next_upstream_route_registration_id: AtomicU64::new(
+                next_upstream_route_registration_id,
+            ),
+            next_upstream_route_owner_id: AtomicU64::new(1),
             limits,
+            max_upstream_routes,
+            upstream_route_resolutions: AtomicU64::new(0),
+            upstream_route_misses: AtomicU64::new(0),
         }
     }
 
@@ -1069,14 +1469,218 @@ impl LocalCoordinator {
         LocalCoordinatorSnapshot {
             namespaces: state.namespaces.len(),
             namespace_subscriptions: state.namespace_subscriptions.len(),
+            configured_upstream_routes: state.upstream_routes.len(),
+            max_upstream_routes: self.max_upstream_routes,
+            upstream_route_resolutions: self.upstream_route_resolutions.load(Ordering::Relaxed),
+            upstream_route_misses: self.upstream_route_misses.load(Ordering::Relaxed),
         }
     }
+
+    fn register_upstream_route_owner(&self, outbound_upstream_tls: bool) -> u64 {
+        let owner_id = self
+            .next_upstream_route_owner_id
+            .fetch_add(1, Ordering::Relaxed);
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active_upstream_route_owners
+            .insert(owner_id, outbound_upstream_tls);
+        owner_id
+    }
+
+    fn register_upstream_route(
+        self: &Arc<Self>,
+        owner_id: u64,
+        route: MoqRelayUpstreamRoute,
+    ) -> Result<MoqRelayUpstreamRouteRegistration, MoqRelayUpstreamRouteError> {
+        let registration_id = self
+            .next_upstream_route_registration_id
+            .fetch_add(1, Ordering::Relaxed);
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.active_upstream_route_owners.contains_key(&owner_id) {
+            route_registration_rejected("draining");
+            return Err(MoqRelayUpstreamRouteError::Draining);
+        }
+        if state
+            .active_upstream_route_owners
+            .values()
+            .any(|has_outbound_tls| !has_outbound_tls)
+        {
+            route_registration_rejected("topology_outbound_tls_unavailable");
+            return Err(MoqRelayUpstreamRouteError::OutboundTlsUnavailable);
+        }
+        if route.endpoint == self.advertised_endpoint {
+            route_registration_rejected("local_loop");
+            return Err(MoqRelayUpstreamRouteError::LocalLoop);
+        }
+        let (key, url, addr) = local_upstream_route_parts(route);
+        if state.upstream_routes.contains_key(&key) {
+            route_registration_rejected("already_registered");
+            return Err(MoqRelayUpstreamRouteError::AlreadyRegistered);
+        }
+        if state.upstream_routes.len() >= self.max_upstream_routes {
+            route_registration_rejected("capacity_exhausted");
+            return Err(MoqRelayUpstreamRouteError::CapacityExhausted);
+        }
+        let already_available = state.namespaces.contains_key(&key);
+        state.upstream_routes.insert(
+            key.clone(),
+            LocalUpstreamRoute {
+                registration_id,
+                owner_id: Some(owner_id),
+                url,
+                addr,
+            },
+        );
+        if !already_available {
+            state.notify_namespace_change(
+                key.scope.as_deref(),
+                &key.namespace,
+                LocalNamespaceUpdateKind::Added,
+            );
+        }
+        drop(state);
+        metrics::gauge!("rvoip_moq_relay_upstream_routes").increment(1.0);
+        metrics::counter!(
+            "rvoip_moq_relay_upstream_route_registrations_total",
+            "result" => "registered"
+        )
+        .increment(1);
+        Ok(MoqRelayUpstreamRouteRegistration {
+            coordinator: self.clone(),
+            key,
+            registration_id,
+        })
+    }
+
+    fn remove_upstream_route(&self, key: &NamespaceKey, registration_id: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let remove = state
+            .upstream_routes
+            .get(key)
+            .is_some_and(|route| route.registration_id == registration_id);
+        if remove {
+            state.upstream_routes.remove(key);
+            if !state.namespaces.contains_key(key) {
+                state.notify_namespace_change(
+                    key.scope.as_deref(),
+                    &key.namespace,
+                    LocalNamespaceUpdateKind::Removed,
+                );
+            }
+        }
+        drop(state);
+        if remove {
+            metrics::gauge!("rvoip_moq_relay_upstream_routes").decrement(1.0);
+            metrics::counter!(
+                "rvoip_moq_relay_upstream_route_removals_total",
+                "reason" => "registration_drop"
+            )
+            .increment(1);
+        }
+    }
+
+    fn drain_upstream_route_owner(&self, owner_id: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active_upstream_route_owners.remove(&owner_id);
+        let removed_keys = state
+            .upstream_routes
+            .iter()
+            .filter(|(_, route)| route.owner_id == Some(owner_id))
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in &removed_keys {
+            state.upstream_routes.remove(key);
+            if !state.namespaces.contains_key(key) {
+                state.notify_namespace_change(
+                    key.scope.as_deref(),
+                    &key.namespace,
+                    LocalNamespaceUpdateKind::Removed,
+                );
+            }
+        }
+        let removed = removed_keys.len();
+        drop(state);
+        if removed != 0 {
+            metrics::gauge!("rvoip_moq_relay_upstream_routes").decrement(removed as f64);
+            metrics::counter!(
+                "rvoip_moq_relay_upstream_route_removals_total",
+                "reason" => "runtime_drain"
+            )
+            .increment(removed as u64);
+        }
+    }
+}
+
+impl Drop for LocalCoordinator {
+    fn drop(&mut self) {
+        let routes = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .upstream_routes
+            .len();
+        if routes != 0 {
+            metrics::gauge!("rvoip_moq_relay_upstream_routes").decrement(routes as f64);
+        }
+    }
+}
+
+fn local_upstream_route_parts(
+    route: MoqRelayUpstreamRoute,
+) -> (NamespaceKey, Url, Option<SocketAddr>) {
+    let namespace = TrackNamespace::from_utf8_path(route.namespace.as_str());
+    let namespace_path = namespace.to_utf8_path();
+    let key = NamespaceKey {
+        scope: Some(namespace_path.clone()),
+        namespace,
+    };
+    let mut url = route.endpoint;
+    url.set_path(&namespace_path);
+    (key, url, route.socket_addr)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LocalCoordinatorSnapshot {
     namespaces: usize,
     namespace_subscriptions: usize,
+    configured_upstream_routes: usize,
+    max_upstream_routes: usize,
+    upstream_route_resolutions: u64,
+    upstream_route_misses: u64,
+}
+
+/// RAII lease for one dynamically installed exact upstream route.
+#[must_use = "retain the registration while the upstream route should remain installed"]
+pub struct MoqRelayUpstreamRouteRegistration {
+    coordinator: Arc<LocalCoordinator>,
+    key: NamespaceKey,
+    registration_id: u64,
+}
+
+impl std::fmt::Debug for MoqRelayUpstreamRouteRegistration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MoqRelayUpstreamRouteRegistration")
+            .field("route", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for MoqRelayUpstreamRouteRegistration {
+    fn drop(&mut self) {
+        self.coordinator
+            .remove_upstream_route(&self.key, self.registration_id);
+    }
 }
 
 struct LocalRegistration {
@@ -1097,11 +1701,13 @@ impl Drop for LocalRegistration {
             .is_some_and(|origin| origin.registration_id == self.registration_id)
         {
             state.namespaces.remove(&self.key);
-            state.notify_namespace_change(
-                self.key.scope.as_deref(),
-                &self.key.namespace,
-                LocalNamespaceUpdateKind::Removed,
-            );
+            if !state.upstream_routes.contains_key(&self.key) {
+                state.notify_namespace_change(
+                    self.key.scope.as_deref(),
+                    &self.key.namespace,
+                    LocalNamespaceUpdateKind::Removed,
+                );
+            }
         }
     }
 }
@@ -1190,6 +1796,7 @@ impl Coordinator for LocalCoordinator {
                 resource: "local_namespaces",
             });
         }
+        let already_available = state.upstream_routes.contains_key(&key);
         let mut url = self.advertised_endpoint.clone();
         url.set_path(&namespace_path);
         state.namespaces.insert(
@@ -1200,11 +1807,13 @@ impl Coordinator for LocalCoordinator {
                 addr: self.advertised_socket_addr,
             },
         );
-        state.notify_namespace_change(
-            key.scope.as_deref(),
-            &key.namespace,
-            LocalNamespaceUpdateKind::Added,
-        );
+        if !already_available {
+            state.notify_namespace_change(
+                key.scope.as_deref(),
+                &key.namespace,
+                LocalNamespaceUpdateKind::Added,
+            );
+        }
         drop(state);
         Ok(NamespaceRegistration::new(LocalRegistration {
             state: self.state.clone(),
@@ -1227,11 +1836,13 @@ impl Coordinator for LocalCoordinator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.namespaces.remove(&key).is_some() {
-            state.notify_namespace_change(
-                key.scope.as_deref(),
-                &key.namespace,
-                LocalNamespaceUpdateKind::Removed,
-            );
+            if !state.upstream_routes.contains_key(&key) {
+                state.notify_namespace_change(
+                    key.scope.as_deref(),
+                    &key.namespace,
+                    LocalNamespaceUpdateKind::Removed,
+                );
+            }
         }
         Ok(())
     }
@@ -1245,18 +1856,37 @@ impl Coordinator for LocalCoordinator {
             scope: scope.map(str::to_owned),
             namespace: namespace.clone(),
         };
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let origin = state
-            .namespaces
-            .get(&key)
-            .ok_or(CoordinatorError::NamespaceNotFound)?;
-        Ok((
-            NamespaceOrigin::new(namespace.clone(), origin.url.clone(), origin.addr),
-            None,
-        ))
+        {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(origin) = state.namespaces.get(&key) {
+                return Ok((
+                    NamespaceOrigin::new(namespace.clone(), origin.url.clone(), origin.addr),
+                    None,
+                ));
+            }
+            if let Some(route) = state.upstream_routes.get(&key) {
+                let origin = NamespaceOrigin::new(namespace.clone(), route.url.clone(), route.addr);
+                drop(state);
+                self.upstream_route_resolutions
+                    .fetch_add(1, Ordering::Relaxed);
+                metrics::counter!(
+                    "rvoip_moq_relay_upstream_route_lookups_total",
+                    "result" => "resolved"
+                )
+                .increment(1);
+                return Ok((origin, None));
+            }
+        }
+        self.upstream_route_misses.fetch_add(1, Ordering::Relaxed);
+        metrics::counter!(
+            "rvoip_moq_relay_upstream_route_lookups_total",
+            "result" => "miss"
+        )
+        .increment(1);
+        Err(CoordinatorError::NamespaceNotFound)
     }
 
     async fn subscribe_namespace(
@@ -1299,8 +1929,12 @@ impl Coordinator for LocalCoordinator {
         let mut existing = state
             .namespaces
             .keys()
+            .chain(state.upstream_routes.keys())
             .filter(|key| candidate.matches(key.scope.as_deref(), &key.namespace))
-            .map(|key| NamespaceInfo::new(key.namespace.clone()))
+            .map(|key| key.namespace.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .map(NamespaceInfo::new)
             .collect::<Vec<_>>();
         existing.sort_by_key(|info| info.namespace.to_utf8_path());
         subscription.existing_namespaces = existing;
@@ -1441,6 +2075,124 @@ mod tests {
         ));
         drop(registration);
         assert_eq!(coordinator.snapshot().namespaces, 0);
+    }
+
+    fn upstream_route(tenant: &str, broadcast: &str, port: u16) -> MoqRelayUpstreamRoute {
+        MoqRelayUpstreamRoute::new(
+            MoqNamespace::new(tenant, broadcast).unwrap(),
+            Url::parse(&format!("moqt://upstream.test:{port}")).unwrap(),
+            Some(SocketAddr::from(([127, 0, 0, 1], port))),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn upstream_route_configuration_is_bounded_unique_and_redacted() {
+        let route = upstream_route("tenant", "broadcast", 4443);
+        let debug = format!("{route:?}");
+        assert!(!debug.contains("tenant"));
+        assert!(!debug.contains("upstream.test"));
+        assert!(MoqRelayUpstreamRoute::new(
+            MoqNamespace::new("tenant", "broadcast").unwrap(),
+            Url::parse("moqt://user:secret@upstream.test:4443").unwrap(),
+            None,
+        )
+        .is_err());
+        assert!(MoqRelayUpstreamRoutes::new([route.clone()], 0).is_err());
+        assert!(MoqRelayUpstreamRoutes::new([route.clone(), route.clone()], 2).is_err());
+        assert!(
+            MoqRelayUpstreamRoutes::new([route, upstream_route("tenant", "other", 4444)], 1,)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_routes_are_live_scoped_generation_safe_and_owner_drained() {
+        let coordinator = Arc::new(LocalCoordinator::new_with_upstream_routes(
+            Url::parse("moqt://local.test:443").unwrap(),
+            None,
+            MoqRelayTopologyLimits::default(),
+            MoqRelayUpstreamRoutes::new(std::iter::empty(), 1).unwrap(),
+        ));
+        let namespace = TrackNamespace::from_utf8_path("tenant/broadcast");
+        let prefix = TrackNamespace::from_utf8_path("tenant");
+        let mut discovery = coordinator
+            .subscribe_namespace(Some("/tenant/broadcast"), &prefix)
+            .await
+            .unwrap();
+        assert!(discovery.existing_namespaces.is_empty());
+        let incompatible_owner = coordinator.register_upstream_route_owner(false);
+        let first_owner = coordinator.register_upstream_route_owner(true);
+        assert!(matches!(
+            coordinator
+                .register_upstream_route(first_owner, upstream_route("tenant", "broadcast", 4443)),
+            Err(MoqRelayUpstreamRouteError::OutboundTlsUnavailable)
+        ));
+        coordinator.drain_upstream_route_owner(incompatible_owner);
+        let stale = coordinator
+            .register_upstream_route(first_owner, upstream_route("tenant", "broadcast", 4443))
+            .unwrap();
+        assert!(matches!(
+            discovery.next_update().await.unwrap(),
+            NamespaceUpdate::Added(info) if info.namespace == namespace
+        ));
+        assert_eq!(coordinator.snapshot().configured_upstream_routes, 1);
+        let (resolved, client) = coordinator
+            .lookup(Some("/tenant/broadcast"), &namespace)
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved.url().as_str(),
+            "moqt://upstream.test:4443/tenant/broadcast"
+        );
+        assert!(client.is_none());
+        assert!(coordinator
+            .lookup(Some("/other/broadcast"), &namespace)
+            .await
+            .is_err());
+
+        coordinator.drain_upstream_route_owner(first_owner);
+        assert!(matches!(
+            discovery.next_update().await.unwrap(),
+            NamespaceUpdate::Removed(info) if info.namespace == namespace
+        ));
+        assert_eq!(coordinator.snapshot().configured_upstream_routes, 0);
+        assert!(matches!(
+            coordinator
+                .register_upstream_route(first_owner, upstream_route("tenant", "broadcast", 4443)),
+            Err(MoqRelayUpstreamRouteError::Draining)
+        ));
+
+        let second_owner = coordinator.register_upstream_route_owner(true);
+        let current = coordinator
+            .register_upstream_route(second_owner, upstream_route("tenant", "broadcast", 4443))
+            .unwrap();
+        assert!(matches!(
+            discovery.next_update().await.unwrap(),
+            NamespaceUpdate::Added(info) if info.namespace == namespace
+        ));
+        drop(stale);
+        assert_eq!(coordinator.snapshot().configured_upstream_routes, 1);
+        assert!(coordinator
+            .lookup(Some("/tenant/broadcast"), &namespace)
+            .await
+            .is_ok());
+        assert!(matches!(
+            coordinator
+                .register_upstream_route(second_owner, upstream_route("tenant", "other", 4444)),
+            Err(MoqRelayUpstreamRouteError::CapacityExhausted)
+        ));
+        drop(current);
+        assert!(matches!(
+            discovery.next_update().await.unwrap(),
+            NamespaceUpdate::Removed(info) if info.namespace == namespace
+        ));
+        assert_eq!(coordinator.snapshot().configured_upstream_routes, 0);
+        let snapshot = coordinator.snapshot();
+        assert_eq!(snapshot.upstream_route_resolutions, 2);
+        assert_eq!(snapshot.upstream_route_misses, 1);
+        drop(discovery);
+        assert_eq!(coordinator.snapshot().namespace_subscriptions, 0);
     }
 
     #[tokio::test]
@@ -1665,6 +2417,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn external_routes_require_explicit_outbound_mtls_at_start_and_runtime() {
+        let files = TestFiles::new();
+        let without_outbound_tls = || {
+            let mut tls = files.tls();
+            tls.server_root_certificates.clear();
+            tls.outbound_client_certificate = None;
+            tls.outbound_client_private_key = None;
+            tls
+        };
+        let config = |port, tls| MoqRelayRuntimeConfig {
+            deployment: MoqRelayDeploymentMode::Standalone,
+            bind: "127.0.0.1:0".parse().unwrap(),
+            advertised_endpoint: Url::parse(&format!("moqt://localhost:{port}")).unwrap(),
+            advertised_socket_addr: None,
+            tls,
+            security: MoqRelayRuntimeSecurity::PublisherMutualTls {
+                bindings: vec![MoqRelayCertificateBinding {
+                    certificate_sha256: "ef".repeat(32),
+                    scope: "/tenant/broadcast".to_string(),
+                }],
+                max_active_sessions_per_certificate: 2,
+            },
+            limits: MoqRelayRuntimeLimits::default(),
+            timeouts: MoqRelayRuntimeTimeouts::default(),
+        };
+
+        let dynamic_topology = MoqRelayTopology::with_limits_and_upstream_routes(
+            Url::parse("moqt://localhost:4450").unwrap(),
+            None,
+            MoqRelayTopologyLimits::default(),
+            MoqRelayUpstreamRoutes::new(std::iter::empty(), 1).unwrap(),
+        )
+        .unwrap();
+        let runtime = MoqRelayRuntime::start_with_topology(
+            config(4450, without_outbound_tls()),
+            dynamic_topology,
+        )
+        .unwrap();
+        assert!(matches!(
+            runtime.register_upstream_route(upstream_route("tenant", "broadcast", 5550)),
+            Err(MoqRelayUpstreamRouteError::OutboundTlsUnavailable)
+        ));
+        runtime.drain(Duration::from_secs(2)).await.unwrap();
+
+        let static_topology = MoqRelayTopology::with_limits_and_upstream_routes(
+            Url::parse("moqt://localhost:4451").unwrap(),
+            None,
+            MoqRelayTopologyLimits::default(),
+            MoqRelayUpstreamRoutes::new([upstream_route("tenant", "broadcast", 5551)], 1).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            MoqRelayRuntime::start_with_topology(
+                config(4451, without_outbound_tls()),
+                static_topology
+            ),
+            Err(MoqRelayRuntimeError::InvalidConfig(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn managed_runtime_starts_snapshots_and_drains() {
         let files = TestFiles::new();
         let config = MoqRelayRuntimeConfig {
@@ -1688,6 +2501,7 @@ mod tests {
         assert!(snapshot.ready());
         assert_eq!(snapshot.listener, MoqRelayListenerKind::PublisherMutualTls);
         assert_eq!(snapshot.protocol, MoqProtocolVersion::PINNED);
+        assert_eq!(snapshot.upstream_health, MoqRelayUpstreamHealth::Disabled);
         runtime.drain(Duration::from_secs(2)).await.unwrap();
         assert_eq!(runtime.lifecycle(), MoqRelayRuntimeLifecycle::Stopped);
     }
