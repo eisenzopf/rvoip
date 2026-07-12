@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -25,11 +25,12 @@ use url::Url;
 
 use crate::wire::{
     self, WirePublication, WirePublicationHandle, WireRelayClient, WireRelayPublication,
-    WireTlsMode,
+    WireRelayTermination, WireTlsMode,
 };
 use crate::{
-    LocError, LocOpusPacketizer, MoqCompatibility, MoqError, MoqNamespace, MoqProtocolVersion,
-    MoqRelayFailure, MsfCatalog, AUDIO_TRACK, CATALOG_TRACK, LOC_DRAFT, MOQT_DRAFT, MSF_DRAFT,
+    InMemoryMoqGroupIdAllocator, LocError, LocOpusPacketizer, MoqCompatibility, MoqError,
+    MoqGroupIdAllocator, MoqNamespace, MoqProtocolVersion, MoqRelayFailure, MsfCatalog,
+    AUDIO_TRACK, CATALOG_TRACK, LOC_DRAFT, MOQT_DRAFT, MSF_DRAFT,
 };
 
 #[derive(Clone, Debug)]
@@ -114,8 +115,10 @@ pub struct MoqBroadcastPublisher {
     namespace: MoqNamespace,
     frame_tx: mpsc::Sender<MediaFrame>,
     wire: Arc<WirePublication>,
-    frame_cancel: CancellationToken,
+    frame_graceful_stop: CancellationToken,
+    frame_abort: CancellationToken,
     frame_cleanup: SharedTaskCleanup,
+    _group_id_allocator: Arc<dyn MoqGroupIdAllocator>,
     management: Arc<PublisherManagement>,
     runtime: tokio::runtime::Handle,
 }
@@ -123,11 +126,27 @@ pub struct MoqBroadcastPublisher {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FramePumpExit {
     Stopped,
-    Failed,
+    Aborted,
 }
 
 impl MoqBroadcastPublisher {
     pub fn new(config: MoqPublisherConfig) -> Result<Arc<Self>, MoqError> {
+        static DEFAULT_GROUP_IDS: OnceLock<Arc<InMemoryMoqGroupIdAllocator>> = OnceLock::new();
+        let allocator = Arc::clone(
+            DEFAULT_GROUP_IDS.get_or_init(|| Arc::new(InMemoryMoqGroupIdAllocator::new())),
+        );
+        let allocator: Arc<dyn MoqGroupIdAllocator> = allocator;
+        Self::new_with_group_id_allocator(config, allocator)
+    }
+
+    /// Construct a publisher with an application-owned Group ID allocator.
+    ///
+    /// Clustered and restartable origins must inject an allocator whose
+    /// reservations are persisted atomically before they are returned.
+    pub fn new_with_group_id_allocator(
+        config: MoqPublisherConfig,
+        group_id_allocator: Arc<dyn MoqGroupIdAllocator>,
+    ) -> Result<Arc<Self>, MoqError> {
         let namespace = config.try_namespace()?;
         MoqCompatibility::PINNED.require(MoqProtocolVersion::PINNED)?;
         let catalog = MsfCatalog::opus_audio(
@@ -139,58 +158,82 @@ impl MoqBroadcastPublisher {
         let catalog_payload = catalog.to_json_bytes()?;
         let runtime =
             tokio::runtime::Handle::try_current().map_err(|_| MoqError::RuntimeUnavailable)?;
-        let (wire, mut audio) = WirePublication::new(&namespace, catalog_payload)?;
+        let live_catalog_group =
+            group_id_allocator.reserve_next_group(&namespace, CATALOG_TRACK)?;
+        let (wire, mut catalog, audio) = WirePublication::new(&namespace)?;
+        catalog.write_live(live_catalog_group, catalog_payload)?;
         let wire = Arc::new(wire);
 
         let (frame_tx, mut frame_rx) = mpsc::channel::<MediaFrame>(config.queue_frames.max(1));
-        let frame_cancel = CancellationToken::new();
+        let frame_graceful_stop = CancellationToken::new();
+        let frame_abort = CancellationToken::new();
         let frame_cleanup = SharedTaskCleanup::new(runtime.clone());
-        let task_cancel = frame_cancel.clone();
+        let task_graceful_stop = frame_graceful_stop.clone();
+        let task_abort = frame_abort.clone();
         let management = Arc::new(PublisherManagement::new());
         let task_management = Arc::clone(&management);
         let task_wire = Arc::clone(&wire);
+        let task_allocator = Arc::clone(&group_id_allocator);
+        let task_namespace = namespace.clone();
         let task = runtime.spawn(async move {
             let pump = AssertUnwindSafe(async move {
                 let mut packetizer = LocOpusPacketizer::new();
-                loop {
+                let mut audio = audio;
+                let outcome: Result<FramePumpExit, MoqError> = loop {
                     let frame = tokio::select! {
-                        () = task_cancel.cancelled() => break FramePumpExit::Stopped,
+                        biased;
+                        () = task_abort.cancelled() => break Ok(FramePumpExit::Aborted),
+                        () = task_graceful_stop.cancelled() => {
+                            frame_rx.close();
+                            loop {
+                                let frame = tokio::select! {
+                                    biased;
+                                    () = task_abort.cancelled() => None,
+                                    frame = frame_rx.recv() => frame,
+                                };
+                                let Some(frame) = frame else {
+                                    break;
+                                };
+                                publish_audio_frame(
+                                    &mut packetizer,
+                                    &mut audio,
+                                    task_allocator.as_ref(),
+                                    &task_namespace,
+                                    frame,
+                                )?;
+                            }
+                            if task_abort.is_cancelled() {
+                                break Ok(FramePumpExit::Aborted);
+                            }
+                            audio.finish()?;
+                            let terminal = MsfCatalog::permanently_completed(unix_time_millis());
+                            let terminal_group = task_allocator
+                                .reserve_next_group(&task_namespace, CATALOG_TRACK)?;
+                            catalog.write_terminal(terminal_group, terminal.to_json_bytes()?)?;
+                            catalog.finish()?;
+                            break Ok(FramePumpExit::Stopped);
+                        },
                         frame = frame_rx.recv() => match frame {
                             Some(frame) => frame,
-                            None => break FramePumpExit::Stopped,
+                            None => break Ok(FramePumpExit::Aborted),
                         },
                     };
-                    let packetized = match packetizer.packetize(&frame) {
-                        Ok(packetized) => packetized,
-                        Err(error) => {
-                            metrics::counter!(
-                                "rvoip_moq_invalid_frames_total",
-                                "reason" => loc_error_label(&error)
-                            )
-                            .increment(1);
-                            tracing::warn!(%error, "dropping frame outside the MOQT LOC profile");
-                            continue;
-                        }
-                    };
-                    if let Some(discontinuity) = packetized.discontinuity {
-                        metrics::counter!("rvoip_moq_timestamp_discontinuities_total").increment(1);
-                        tracing::warn!(
-                            expected_rtp_timestamp = discontinuity.expected_rtp_timestamp,
-                            actual_rtp_timestamp = discontinuity.actual_rtp_timestamp,
-                            loc_timestamp = packetized.object.timestamp,
-                            "publishing the first valid frame after an RTP timestamp discontinuity"
-                        );
-                    }
-                    if let Err(error) = audio.write(packetized.object) {
-                        tracing::debug!(%error, "MOQT audio track closed");
-                        break FramePumpExit::Failed;
-                    }
-                    metrics::counter!("rvoip_moq_objects_total", "track" => "audio").increment(1);
-                }
+                    publish_audio_frame(
+                        &mut packetizer,
+                        &mut audio,
+                        task_allocator.as_ref(),
+                        &task_namespace,
+                        frame,
+                    )?;
+                };
+                outcome
             })
             .catch_unwind()
             .await;
-            if !matches!(pump, Ok(FramePumpExit::Stopped)) {
+            if !matches!(
+                pump,
+                Ok(Ok(FramePumpExit::Stopped | FramePumpExit::Aborted))
+            ) {
                 fail_local_publication(task_management, task_wire).await;
             }
         });
@@ -201,8 +244,10 @@ impl MoqBroadcastPublisher {
             namespace,
             frame_tx,
             wire,
-            frame_cancel,
+            frame_graceful_stop,
+            frame_abort,
             frame_cleanup,
+            _group_id_allocator: group_id_allocator,
             management,
             runtime,
         }))
@@ -237,9 +282,11 @@ impl MoqBroadcastPublisher {
     ) -> Result<MoqRelayPublication, MoqError> {
         let status = Arc::new(RelayStatus::new());
         let cancel = CancellationToken::new();
+        let drain = CancellationToken::new();
         let control = Arc::new(RelayControl::new(
             Arc::clone(&status),
             cancel.clone(),
+            drain.clone(),
             self.runtime.clone(),
         ));
         if let Err(error) = self.management.register(&control) {
@@ -306,6 +353,7 @@ impl MoqBroadcastPublisher {
         let policy = client.policy.clone();
         let relay = relay.clone();
         let supervisor_cancel = cancel.clone();
+        let supervisor_drain = drain.clone();
         let panic_status = Arc::clone(&supervisor_status);
         let task = tokio::spawn(async move {
             let outcome = AssertUnwindSafe(supervise_relay(
@@ -315,6 +363,7 @@ impl MoqBroadcastPublisher {
                 relay,
                 policy,
                 supervisor_cancel,
+                supervisor_drain,
                 supervisor_status,
             ))
             .catch_unwind()
@@ -353,7 +402,9 @@ impl MoqBroadcastPublisher {
 impl Drop for MoqBroadcastPublisher {
     fn drop(&mut self) {
         self.management.begin_draining();
-        self.frame_cancel.cancel();
+        // Drop is a hard stop: do not emit a permanently-completed catalog
+        // because queued audio and relay delivery were not drained.
+        self.frame_abort.cancel();
         self.wire.close();
         for control in self.management.active_relays() {
             control.start_cleanup_reaper();
@@ -670,12 +721,16 @@ impl MoqRelayPublication {
                 .status
                 .transition(BroadcastLifecycleState::Draining, None, None);
         }
-        self.control.cancel.cancel();
-        if self.control.wait_until(deadline).await {
-            true
-        } else {
-            self.control.abort_and_reap().await;
-            false
+        // A per-relay drain must traverse the same publication FIN and peer
+        // acknowledgment barrier as publisher-wide drain. The hard-cancel
+        // token is reserved for abort, failure, and dropped-handle cleanup.
+        self.control.drain.cancel();
+        match self.control.wait_until(deadline).await {
+            TaskWaitOutcome::Completed => true,
+            TaskWaitOutcome::Failed | TaskWaitOutcome::TimedOut => {
+                self.control.abort_and_reap().await;
+                false
+            }
         }
     }
 }
@@ -694,7 +749,8 @@ trait RelayConnection: Send {
     fn substrate(&self) -> BroadcastSubstrate;
     fn negotiated_protocol(&self) -> &str;
     fn peer_identity(&self) -> MoqRelayPeerIdentity;
-    async fn terminated(&mut self) -> MoqRelayFailure;
+    async fn terminated(&mut self) -> WireRelayTermination;
+    async fn graceful_finish(&mut self) -> WireRelayTermination;
     async fn close(&mut self);
 }
 
@@ -724,7 +780,11 @@ impl RelayConnection for WireRelayPublication {
         self.peer_identity.clone()
     }
 
-    async fn terminated(&mut self) -> MoqRelayFailure {
+    async fn terminated(&mut self) -> WireRelayTermination {
+        WireRelayPublication::terminated(self).await
+    }
+
+    async fn graceful_finish(&mut self) -> WireRelayTermination {
         WireRelayPublication::terminated(self).await
     }
 
@@ -881,6 +941,13 @@ impl RelayStatus {
 enum TaskCleanupResult {
     Completed,
     TaskFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TaskWaitOutcome {
+    Completed,
+    Failed,
+    TimedOut,
 }
 
 #[derive(Clone)]
@@ -1064,6 +1131,7 @@ impl SharedTaskCleanupInner {
 struct RelayControl {
     status: Arc<RelayStatus>,
     cancel: CancellationToken,
+    drain: CancellationToken,
     cleanup: SharedTaskCleanup,
     drop_reaper_started: AtomicBool,
 }
@@ -1072,11 +1140,13 @@ impl RelayControl {
     fn new(
         status: Arc<RelayStatus>,
         cancel: CancellationToken,
+        drain: CancellationToken,
         runtime: tokio::runtime::Handle,
     ) -> Self {
         Self {
             status,
             cancel,
+            drain,
             cleanup: SharedTaskCleanup::new(runtime),
             drop_reaper_started: AtomicBool::new(false),
         }
@@ -1090,41 +1160,37 @@ impl RelayControl {
         self.cleanup.complete_without_task();
     }
 
-    async fn wait_until(&self, deadline: DateTime<Utc>) -> bool {
+    async fn wait_until(&self, deadline: DateTime<Utc>) -> TaskWaitOutcome {
         let Some(remaining) = remaining_until(deadline) else {
-            return false;
+            return TaskWaitOutcome::TimedOut;
         };
         self.cleanup.request(false);
-        let status = Arc::clone(&self.status);
-        let cleanup = self.cleanup.clone();
-        tokio::time::timeout(remaining, async move {
-            tokio::select! {
-                _ = status.wait_terminal() => {}
-                result = cleanup.wait() => {
-                    if result == TaskCleanupResult::TaskFailed
-                        || !terminal_lifecycle(status.snapshot().lifecycle)
-                    {
-                        status.transition(
-                            BroadcastLifecycleState::Failed,
-                            Some(MoqRelayFailure::TaskFailed),
-                            None,
-                        );
-                    }
+        match tokio::time::timeout(remaining, self.cleanup.wait()).await {
+            Ok(TaskCleanupResult::Completed) => match self.status.snapshot().lifecycle {
+                BroadcastLifecycleState::Closed if !self.cancel.is_cancelled() => {
+                    TaskWaitOutcome::Completed
                 }
-            }
-            let result = cleanup.wait().await;
-            if result == TaskCleanupResult::TaskFailed
-                && !terminal_lifecycle(status.snapshot().lifecycle)
-            {
-                status.transition(
+                BroadcastLifecycleState::Closed => TaskWaitOutcome::Failed,
+                BroadcastLifecycleState::Failed => TaskWaitOutcome::Failed,
+                _ => {
+                    self.status.transition(
+                        BroadcastLifecycleState::Failed,
+                        Some(MoqRelayFailure::TaskFailed),
+                        None,
+                    );
+                    TaskWaitOutcome::Failed
+                }
+            },
+            Ok(TaskCleanupResult::TaskFailed) => {
+                self.status.transition(
                     BroadcastLifecycleState::Failed,
                     Some(MoqRelayFailure::TaskFailed),
                     None,
                 );
+                TaskWaitOutcome::Failed
             }
-        })
-        .await
-        .is_ok()
+            Err(_) => TaskWaitOutcome::TimedOut,
+        }
     }
 
     async fn abort_and_reap(&self) {
@@ -1178,7 +1244,11 @@ impl PublisherManagement {
     }
 
     fn set_local(&self, state: BroadcastLifecycleState) {
-        *self.local.lock().expect("MOQT lifecycle lock poisoned") = BroadcastLifecycleDescriptor {
+        let mut local = self.local.lock().expect("MOQT lifecycle lock poisoned");
+        if terminal_lifecycle(local.state) {
+            return;
+        }
+        *local = BroadcastLifecycleDescriptor {
             state,
             since: Some(Utc::now()),
         };
@@ -1190,9 +1260,18 @@ impl PublisherManagement {
     }
 
     fn begin_draining(&self) {
-        let _relays = self.relays.lock().expect("MOQT relay registry poisoned");
+        let relays = self.relays.lock().expect("MOQT relay registry poisoned");
         self.admitting.store(false, Ordering::Release);
-        self.set_local(BroadcastLifecycleState::Draining);
+        let relay_failed = relays
+            .iter()
+            .filter_map(Weak::upgrade)
+            .any(|relay| relay.status.snapshot().lifecycle == BroadcastLifecycleState::Failed);
+        drop(relays);
+        self.set_local(if relay_failed {
+            BroadcastLifecycleState::Failed
+        } else {
+            BroadcastLifecycleState::Draining
+        });
     }
 
     fn register(&self, control: &Arc<RelayControl>) -> Result<(), MoqError> {
@@ -1348,17 +1427,30 @@ async fn supervise_relay(
     relay: Url,
     policy: MoqRelayConnectionPolicy,
     cancel: CancellationToken,
+    drain: CancellationToken,
     status: Arc<RelayStatus>,
 ) {
     loop {
-        let failure = tokio::select! {
+        let termination = tokio::select! {
             () = cancel.cancelled() => {
                 connection.close().await;
                 status.transition(BroadcastLifecycleState::Closed, None, None);
                 return;
             }
-            failure = connection.terminated() => failure,
+            termination = connection.terminated() => termination,
+            () = drain.cancelled() => connection.graceful_finish().await,
         };
+        let failure = match termination {
+            WireRelayTermination::Completed => {
+                status.transition(BroadcastLifecycleState::Closed, None, None);
+                return;
+            }
+            WireRelayTermination::Failed(failure) => failure,
+        };
+        if status.snapshot().lifecycle == BroadcastLifecycleState::Draining {
+            status.transition(BroadcastLifecycleState::Failed, Some(failure), None);
+            return;
+        }
         metrics::counter!(
             "rvoip_moq_relay_failures_total",
             "reason" => failure.metric_label()
@@ -1513,7 +1605,7 @@ async fn fail_local_publication(management: Arc<PublisherManagement>, wire: Arc<
     wire.close();
     let deadline = Utc::now() + chrono::Duration::seconds(5);
     for control in controls {
-        if !control.wait_until(deadline).await {
+        if control.wait_until(deadline).await != TaskWaitOutcome::Completed {
             control.abort_and_reap().await;
         }
     }
@@ -1526,20 +1618,22 @@ fn remaining_until(deadline: DateTime<Utc>) -> Option<Duration> {
         .filter(|duration| !duration.is_zero())
 }
 
-async fn finish_shared_cleanup_until(cleanup: &SharedTaskCleanup, deadline: DateTime<Utc>) -> bool {
+async fn finish_shared_cleanup_until(
+    cleanup: &SharedTaskCleanup,
+    deadline: DateTime<Utc>,
+) -> TaskWaitOutcome {
     cleanup.request(false);
     let Some(remaining) = remaining_until(deadline) else {
         let _ = cleanup.finish(true).await;
-        return false;
+        return TaskWaitOutcome::TimedOut;
     };
-    if tokio::time::timeout(remaining, cleanup.wait())
-        .await
-        .is_err()
-    {
-        let _ = cleanup.finish(true).await;
-        false
-    } else {
-        true
+    match tokio::time::timeout(remaining, cleanup.wait()).await {
+        Ok(TaskCleanupResult::Completed) => TaskWaitOutcome::Completed,
+        Ok(TaskCleanupResult::TaskFailed) => TaskWaitOutcome::Failed,
+        Err(_) => {
+            let _ = cleanup.finish(true).await;
+            TaskWaitOutcome::TimedOut
+        }
     }
 }
 
@@ -1710,36 +1804,60 @@ impl BroadcastPublisher for MoqBroadcastPublisher {
     ) -> RvoipResult<BroadcastDrainDescriptor> {
         let started_at = Utc::now();
         self.management.begin_draining();
+        // Close media admission and finish the local track/cache before
+        // disconnecting relays, so the terminal catalog can be observed.
+        self.frame_graceful_stop.cancel();
+        let mut deadline_exceeded = started_at > request.deadline;
+        let mut failed = self.management.lifecycle().state == BroadcastLifecycleState::Failed;
+        match finish_shared_cleanup_until(&self.frame_cleanup, request.deadline).await {
+            TaskWaitOutcome::Completed => {}
+            TaskWaitOutcome::Failed => {
+                failed = true;
+                self.management.set_local(BroadcastLifecycleState::Failed);
+            }
+            TaskWaitOutcome::TimedOut => {
+                deadline_exceeded = true;
+                self.frame_abort.cancel();
+            }
+        }
+        failed |= self.management.lifecycle().state == BroadcastLifecycleState::Failed;
+        // Ending the catalog track and then the namespace makes the complete
+        // publication visible to relay serving tasks before they are drained.
+        self.wire.close();
+
         let controls = self.management.active_relays();
         for control in &controls {
             if !terminal_lifecycle(control.status.snapshot().lifecycle) {
                 control
                     .status
                     .transition(BroadcastLifecycleState::Draining, None, None);
+                control.drain.cancel();
             }
-            control.cancel.cancel();
         }
 
-        let mut deadline_exceeded = started_at > request.deadline;
         for control in &controls {
-            if !control.wait_until(request.deadline).await {
-                deadline_exceeded = true;
-                control.abort_and_reap().await;
+            match control.wait_until(request.deadline).await {
+                TaskWaitOutcome::Completed => {}
+                TaskWaitOutcome::Failed => {
+                    failed = true;
+                    control.abort_and_reap().await;
+                }
+                TaskWaitOutcome::TimedOut => {
+                    deadline_exceeded = true;
+                    control.abort_and_reap().await;
+                }
             }
         }
-        self.frame_cancel.cancel();
-        if !finish_shared_cleanup_until(&self.frame_cleanup, request.deadline).await {
-            deadline_exceeded = true;
-        }
-        self.wire.close();
         self.management.set_local(BroadcastLifecycleState::Closed);
+        failed |= self.management.lifecycle().state == BroadcastLifecycleState::Failed;
+        let drain_incomplete = deadline_exceeded || failed;
         metrics::counter!(
             "rvoip_moq_drains_total",
-            "result" => if deadline_exceeded { "deadline-exceeded" } else { "drained" }
+            "result" => if failed { "failed" } else if deadline_exceeded { "deadline-exceeded" } else { "drained" }
         )
         .increment(1);
         Ok(BroadcastDrainDescriptor {
-            state: if deadline_exceeded {
+            state: if drain_incomplete {
                 BroadcastDrainState::DeadlineExceeded
             } else {
                 BroadcastDrainState::Drained
@@ -1754,25 +1872,83 @@ impl BroadcastPublisher for MoqBroadcastPublisher {
 
     async fn close(self: Arc<Self>) -> RvoipResult<()> {
         self.management.begin_draining();
+        self.frame_graceful_stop.cancel();
+        let cleanup_deadline = Utc::now() + chrono::Duration::seconds(5);
+        let mut failed = self.management.lifecycle().state == BroadcastLifecycleState::Failed;
+        match finish_shared_cleanup_until(&self.frame_cleanup, cleanup_deadline).await {
+            TaskWaitOutcome::Completed => {}
+            TaskWaitOutcome::Failed => {
+                failed = true;
+                self.management.set_local(BroadcastLifecycleState::Failed);
+            }
+            TaskWaitOutcome::TimedOut => {
+                failed = true;
+                self.frame_abort.cancel();
+            }
+        }
+        failed |= self.management.lifecycle().state == BroadcastLifecycleState::Failed;
+        self.wire.close();
+
         for control in self.management.active_relays() {
             if !terminal_lifecycle(control.status.snapshot().lifecycle) {
                 control
                     .status
                     .transition(BroadcastLifecycleState::Draining, None, None);
+                control.drain.cancel();
             }
-            control.cancel.cancel();
             let cleanup_deadline = Utc::now() + chrono::Duration::seconds(5);
-            if !control.wait_until(cleanup_deadline).await {
-                control.abort_and_reap().await;
+            match control.wait_until(cleanup_deadline).await {
+                TaskWaitOutcome::Completed => {}
+                TaskWaitOutcome::Failed | TaskWaitOutcome::TimedOut => {
+                    failed = true;
+                    control.abort_and_reap().await;
+                }
             }
         }
-        self.frame_cancel.cancel();
-        let cleanup_deadline = Utc::now() + chrono::Duration::seconds(5);
-        let _ = finish_shared_cleanup_until(&self.frame_cleanup, cleanup_deadline).await;
-        self.wire.close();
         self.management.set_local(BroadcastLifecycleState::Closed);
-        Ok(())
+        failed |= self.management.lifecycle().state == BroadcastLifecycleState::Failed;
+        if failed {
+            Err(MoqError::PublicationFailed.into())
+        } else {
+            Ok(())
+        }
     }
+}
+
+fn publish_audio_frame(
+    packetizer: &mut LocOpusPacketizer,
+    audio: &mut wire::WireAudioWriter,
+    group_id_allocator: &dyn MoqGroupIdAllocator,
+    namespace: &MoqNamespace,
+    frame: MediaFrame,
+) -> Result<(), MoqError> {
+    let mut packetized = match packetizer.packetize(&frame) {
+        Ok(packetized) => packetized,
+        Err(error) => {
+            metrics::counter!(
+                "rvoip_moq_invalid_frames_total",
+                "reason" => loc_error_label(&error)
+            )
+            .increment(1);
+            tracing::warn!(%error, "dropping frame outside the MOQT LOC profile");
+            return Ok(());
+        }
+    };
+    if let Some(discontinuity) = packetized.discontinuity {
+        metrics::counter!("rvoip_moq_timestamp_discontinuities_total").increment(1);
+        tracing::warn!(
+            expected_rtp_timestamp = discontinuity.expected_rtp_timestamp,
+            actual_rtp_timestamp = discontinuity.actual_rtp_timestamp,
+            loc_timestamp = packetized.object.timestamp,
+            "publishing the first valid frame after an RTP timestamp discontinuity"
+        );
+    }
+    // Reserve before touching the wire. Even a failed write consumes the ID,
+    // preventing reuse after restart.
+    packetized.object.group_id = group_id_allocator.reserve_next_group(namespace, AUDIO_TRACK)?;
+    audio.write(packetized.object)?;
+    metrics::counter!("rvoip_moq_objects_total", "track" => "audio").increment(1);
+    Ok(())
 }
 
 fn loc_error_label(error: &LocError) -> &'static str {
@@ -1799,6 +1975,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::future::pending;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
 
     use bytes::Bytes;
     use chrono::Utc;
@@ -1806,6 +1983,17 @@ mod tests {
     use rvoip_core_traits::ids::StreamId;
     use rvoip_core_traits::stream::StreamKind;
     use tokio::sync::{oneshot, Notify};
+
+    #[cfg(feature = "insecure-development")]
+    use moq_native_ietf::quic;
+    #[cfg(feature = "insecure-development")]
+    use moq_transport::coding::{TrackName, TrackNamespace, Value};
+    #[cfg(feature = "insecure-development")]
+    use moq_transport::serve::{
+        ServeError, SubgroupsReader, Track, TrackReader, TrackReaderMode, Tracks,
+    };
+    #[cfg(feature = "insecure-development")]
+    use moq_transport::session::{Publisher, SessionTarget, Subscribe, Subscriber, Transport};
 
     use super::*;
 
@@ -1817,6 +2005,736 @@ mod tests {
             language: Some("en".into()),
             queue_frames: 10,
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingGroupIdAllocator {
+        inner: InMemoryMoqGroupIdAllocator,
+        reservations: StdMutex<Vec<(String, u64)>>,
+    }
+
+    impl RecordingGroupIdAllocator {
+        fn reservations_for(&self, track: &str) -> Vec<u64> {
+            self.reservations
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|(reserved_track, group_id)| {
+                    (reserved_track == track).then_some(*group_id)
+                })
+                .collect()
+        }
+    }
+
+    impl MoqGroupIdAllocator for RecordingGroupIdAllocator {
+        fn reserve_next_group(
+            &self,
+            namespace: &MoqNamespace,
+            track: &str,
+        ) -> Result<u64, crate::MoqGroupIdAllocationError> {
+            let group_id = self.inner.reserve_next_group(namespace, track)?;
+            self.reservations
+                .lock()
+                .unwrap()
+                .push((track.to_owned(), group_id));
+            Ok(group_id)
+        }
+
+        fn recover_above(
+            &self,
+            namespace: &MoqNamespace,
+            track: &str,
+            previous_group_id: u64,
+        ) -> Result<(), crate::MoqGroupIdAllocationError> {
+            self.inner
+                .recover_above(namespace, track, previous_group_id)
+        }
+    }
+
+    #[derive(Default)]
+    struct TerminalCatalogFailureAllocator {
+        inner: InMemoryMoqGroupIdAllocator,
+        catalog_reservations: AtomicUsize,
+    }
+
+    impl MoqGroupIdAllocator for TerminalCatalogFailureAllocator {
+        fn reserve_next_group(
+            &self,
+            namespace: &MoqNamespace,
+            track: &str,
+        ) -> Result<u64, crate::MoqGroupIdAllocationError> {
+            if track == CATALOG_TRACK
+                && self.catalog_reservations.fetch_add(1, Ordering::AcqRel) == 1
+            {
+                return Err(crate::MoqGroupIdAllocationError::Unavailable);
+            }
+            self.inner.reserve_next_group(namespace, track)
+        }
+
+        fn recover_above(
+            &self,
+            namespace: &MoqNamespace,
+            track: &str,
+            previous_group_id: u64,
+        ) -> Result<(), crate::MoqGroupIdAllocationError> {
+            self.inner
+                .recover_above(namespace, track, previous_group_id)
+        }
+    }
+
+    fn opus_frame(timestamp_rtp: u32) -> MediaFrame {
+        MediaFrame {
+            stream_id: StreamId::new(),
+            kind: StreamKind::Audio,
+            payload: Bytes::from_static(&[0x78, 0x00]),
+            timestamp_rtp,
+            captured_at: Utc::now(),
+            payload_type: Some(111),
+        }
+    }
+
+    #[cfg(feature = "insecure-development")]
+    const MINI_RELAY_TIMEOUT: Duration = Duration::from_secs(10);
+
+    #[cfg(feature = "insecure-development")]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum MiniRelayStep {
+        LiveCatalog,
+        Audio,
+        AudioEnded,
+        TerminalCatalog,
+        CatalogEnded,
+        NamespaceCompleted,
+    }
+
+    #[cfg(feature = "insecure-development")]
+    struct MiniRelayPki {
+        directory: PathBuf,
+        certificate: PathBuf,
+        private_key: PathBuf,
+    }
+
+    #[cfg(feature = "insecure-development")]
+    impl MiniRelayPki {
+        fn new() -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let directory = std::env::temp_dir().join(format!(
+                "rvoip-moq-mini-relay-{}-{nonce}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&directory).unwrap();
+            let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+            let certificate = directory.join("identity.pem");
+            let private_key = directory.join("identity.key");
+            std::fs::write(&certificate, generated.cert.pem()).unwrap();
+            std::fs::write(&private_key, generated.signing_key.serialize_pem()).unwrap();
+            Self {
+                directory,
+                certificate,
+                private_key,
+            }
+        }
+    }
+
+    #[cfg(feature = "insecure-development")]
+    impl Drop for MiniRelayPki {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[cfg(feature = "insecure-development")]
+    async fn subgroup_reader(track: &TrackReader) -> SubgroupsReader {
+        match tokio::time::timeout(MINI_RELAY_TIMEOUT, track.mode())
+            .await
+            .expect("track mode timed out")
+            .expect("track mode failed")
+        {
+            TrackReaderMode::Subgroups(reader) => reader,
+            _ => panic!("MSF/LOC tracks must use subgroup streams"),
+        }
+    }
+
+    #[cfg(feature = "insecure-development")]
+    async fn read_catalog_group(
+        groups: &mut SubgroupsReader,
+        context: &'static str,
+    ) -> (u64, Bytes) {
+        let mut subgroup = tokio::time::timeout(MINI_RELAY_TIMEOUT, groups.next())
+            .await
+            .unwrap_or_else(|_| panic!("{context} subgroup timed out"))
+            .unwrap_or_else(|error| panic!("{context} subgroup failed: {error}"))
+            .unwrap_or_else(|| panic!("{context} ended before the expected object"));
+        assert_eq!(subgroup.subgroup_id, 0);
+        assert!(subgroup.first_object);
+        assert!(subgroup.end_of_group);
+        let mut object = subgroup
+            .next()
+            .await
+            .expect("catalog object failed")
+            .expect("catalog subgroup was empty");
+        assert_eq!(object.object_id, 0);
+        assert!(object.extension_headers.is_empty());
+        let payload = object.read_all().await.expect("catalog payload failed");
+        assert!(subgroup
+            .next()
+            .await
+            .expect("catalog subgroup FIN failed")
+            .is_none());
+        (subgroup.group_id, payload)
+    }
+
+    #[cfg(feature = "insecure-development")]
+    async fn read_audio_group(groups: &mut SubgroupsReader) -> u64 {
+        let mut subgroup = tokio::time::timeout(MINI_RELAY_TIMEOUT, groups.next())
+            .await
+            .expect("audio subgroup timed out")
+            .expect("audio subgroup failed")
+            .expect("audio track ended before the expected object");
+        assert_eq!(subgroup.subgroup_id, 0);
+        assert!(subgroup.first_object);
+        assert!(subgroup.end_of_group);
+        let mut object = subgroup
+            .next()
+            .await
+            .expect("audio object failed")
+            .expect("audio subgroup was empty");
+        assert_eq!(object.object_id, 0);
+        assert_eq!(
+            object
+                .extension_headers
+                .get(crate::LOC_TIMESTAMP_PROPERTY)
+                .expect("LOC timestamp missing")
+                .value,
+            Value::IntValue(960)
+        );
+        assert_eq!(
+            object
+                .extension_headers
+                .get(crate::LOC_TIMESCALE_PROPERTY)
+                .expect("LOC timescale missing")
+                .value,
+            Value::IntValue(48_000)
+        );
+        assert_eq!(
+            object.read_all().await.unwrap(),
+            Bytes::from_static(&[0x78, 0x00])
+        );
+        assert!(subgroup
+            .next()
+            .await
+            .expect("audio subgroup FIN failed")
+            .is_none());
+        subgroup.group_id
+    }
+
+    #[cfg(feature = "insecure-development")]
+    async fn wait_for_clean_subscription_end(subscription: &Subscribe, context: &'static str) {
+        let result = tokio::time::timeout(MINI_RELAY_TIMEOUT, subscription.closed())
+            .await
+            .unwrap_or_else(|_| panic!("{context} timed out"));
+        assert!(
+            matches!(result, Ok(()) | Err(ServeError::Done)),
+            "{context} failed: {result:?}"
+        );
+    }
+
+    #[cfg(feature = "insecure-development")]
+    fn assert_live_catalog(payload: &[u8]) {
+        let catalog: serde_json::Value = serde_json::from_slice(payload).unwrap();
+        assert_eq!(catalog["version"], crate::MSF_CATALOG_VERSION);
+        assert!(catalog.get("isComplete").is_none());
+        assert_eq!(catalog["tracks"].as_array().unwrap().len(), 1);
+        assert_eq!(catalog["tracks"][0]["name"], AUDIO_TRACK);
+    }
+
+    #[cfg(feature = "insecure-development")]
+    fn assert_terminal_catalog(payload: &[u8]) {
+        let catalog: serde_json::Value = serde_json::from_slice(payload).unwrap();
+        assert_eq!(catalog["version"], crate::MSF_CATALOG_VERSION);
+        assert_eq!(catalog["isComplete"], true);
+        assert!(catalog["tracks"].as_array().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "insecure-development")]
+    async fn assert_two_hop_mini_relay(
+        relay_substrate: MoqRelaySubstratePolicy,
+        native_substrate: quic::SubstratePolicy,
+        expected_transport: Transport,
+    ) {
+        let pki = MiniRelayPki::new();
+        let tls = moq_native_ietf::tls::Args {
+            cert: vec![pki.certificate.clone()],
+            key: vec![pki.private_key.clone()],
+            disable_verify: true,
+            ..Default::default()
+        }
+        .load()
+        .unwrap();
+        let endpoint = quic::Endpoint::new(
+            quic::Config::new("127.0.0.1:0".parse().unwrap(), None, tls)
+                .unwrap()
+                .with_stateless_retry(false),
+        )
+        .unwrap();
+        let quic::Endpoint {
+            client: downstream_client,
+            server,
+            ..
+        } = endpoint;
+        let mut server = server.expect("mini relay must expose a server");
+        let server_address = server.local_addr().unwrap();
+        let target: SessionTarget = format!("moqt://localhost:{}/relay", server_address.port())
+            .parse()
+            .unwrap();
+        let relay_url = Url::parse(&target.to_string()).unwrap();
+        let wire_namespace = TrackNamespace::from_utf8_path("tenant-a/broadcast-1");
+        let relay_wire_namespace = wire_namespace.clone();
+        let relay_terminal_observed = Arc::new(AtomicBool::new(false));
+        let relay_terminal_observer = Arc::clone(&relay_terminal_observed);
+        let (origin_cached, origin_cached_rx) = oneshot::channel();
+        let (origin_namespace_fin, origin_namespace_fin_rx) = oneshot::channel();
+        let (release_origin_ack, release_origin_ack_rx) = oneshot::channel();
+
+        let relay = tokio::spawn(async move {
+            let origin_connection =
+                tokio::time::timeout(MINI_RELAY_TIMEOUT, server.accept_connection())
+                    .await
+                    .expect("origin connection timed out")
+                    .expect("mini relay stopped accepting the origin");
+            assert_eq!(origin_connection.negotiated.substrate, expected_transport);
+            let (origin_session, mut origin_subscriber) =
+                Subscriber::accept(origin_connection.session, origin_connection.negotiated)
+                    .await
+                    .unwrap();
+            let origin_session = tokio::spawn(origin_session.run());
+            let mut origin_namespace =
+                tokio::time::timeout(MINI_RELAY_TIMEOUT, origin_subscriber.published_namespace())
+                    .await
+                    .expect("origin namespace timed out")
+                    .expect("origin session ended before PUBLISH_NAMESPACE");
+            assert_eq!(origin_namespace.namespace, relay_wire_namespace);
+            origin_namespace.ok().unwrap();
+
+            let (mut relay_tracks_writer, relay_tracks_request, mut relay_tracks_reader) =
+                Tracks::new(origin_namespace.namespace.clone()).produce();
+            let relay_catalog_writer = relay_tracks_writer
+                .create(TrackName::from(CATALOG_TRACK))
+                .expect("failed to create relay catalog cache");
+            let relay_catalog_reader = relay_tracks_reader
+                .get_track_reader(&origin_namespace.namespace, TrackName::from(CATALOG_TRACK))
+                .expect("relay catalog cache missing");
+            let catalog_subscription = origin_subscriber
+                .subscribe_open(relay_catalog_writer)
+                .await
+                .expect("origin catalog SUBSCRIBE failed");
+            let mut relay_catalog = subgroup_reader(&relay_catalog_reader).await;
+            let (live_group, live_payload) =
+                read_catalog_group(&mut relay_catalog, "relay live catalog").await;
+            assert_live_catalog(&live_payload);
+            let mut observations = vec![MiniRelayStep::LiveCatalog];
+
+            let relay_audio_writer = relay_tracks_writer
+                .create(TrackName::from(AUDIO_TRACK))
+                .expect("failed to create relay audio cache");
+            let relay_audio_reader = relay_tracks_reader
+                .get_track_reader(&origin_namespace.namespace, TrackName::from(AUDIO_TRACK))
+                .expect("relay audio cache missing");
+            let audio_subscription = origin_subscriber
+                .subscribe_open(relay_audio_writer)
+                .await
+                .expect("origin audio SUBSCRIBE failed");
+            origin_cached
+                .send(())
+                .expect("downstream test stopped before relay cache became live");
+
+            let downstream_connection =
+                tokio::time::timeout(MINI_RELAY_TIMEOUT, server.accept_connection())
+                    .await
+                    .expect("downstream connection timed out")
+                    .expect("mini relay stopped accepting the downstream client");
+            assert_eq!(
+                downstream_connection.negotiated.substrate,
+                expected_transport
+            );
+            let (downstream_session, mut downstream_publisher) = Publisher::accept(
+                downstream_connection.session,
+                downstream_connection.negotiated,
+            )
+            .await
+            .unwrap();
+            let downstream_session = tokio::spawn(downstream_session.run());
+            let downstream_publish = tokio::spawn(async move {
+                downstream_publisher
+                    .publish_namespace(relay_tracks_reader)
+                    .await
+            });
+
+            let mut relay_audio = subgroup_reader(&relay_audio_reader).await;
+            let _audio_group = read_audio_group(&mut relay_audio).await;
+            observations.push(MiniRelayStep::Audio);
+            wait_for_clean_subscription_end(&audio_subscription, "origin audio completion").await;
+            observations.push(MiniRelayStep::AudioEnded);
+            let (terminal_group, terminal_payload) =
+                read_catalog_group(&mut relay_catalog, "relay terminal catalog").await;
+            assert!(terminal_group > live_group);
+            assert_terminal_catalog(&terminal_payload);
+            relay_terminal_observer.store(true, Ordering::Release);
+            observations.push(MiniRelayStep::TerminalCatalog);
+            wait_for_clean_subscription_end(&catalog_subscription, "origin catalog completion")
+                .await;
+            observations.push(MiniRelayStep::CatalogEnded);
+            tokio::time::timeout(MINI_RELAY_TIMEOUT, origin_namespace.closed())
+                .await
+                .expect("origin namespace completion timed out")
+                .expect("origin namespace failed");
+            origin_namespace_fin
+                .send(())
+                .expect("test stopped before observing the origin namespace FIN");
+            release_origin_ack_rx
+                .await
+                .expect("test stopped before releasing the origin namespace acknowledgment");
+            observations.push(MiniRelayStep::NamespaceCompleted);
+
+            // The acknowledged namespace handle is the draft-19 flush
+            // barrier. Only release it after both subscribed tracks have
+            // completed, then release the cache producers so the downstream
+            // PUBLISH_NAMESPACE can finish in the same order.
+            drop(origin_namespace);
+            drop(relay_tracks_request);
+            drop(relay_tracks_writer);
+            tokio::time::timeout(MINI_RELAY_TIMEOUT, downstream_publish)
+                .await
+                .expect("downstream PUBLISH_NAMESPACE completion timed out")
+                .expect("downstream PUBLISH_NAMESPACE task failed")
+                .expect("downstream PUBLISH_NAMESPACE failed");
+
+            origin_session.abort();
+            downstream_session.abort();
+            let _ = origin_session.await;
+            let _ = downstream_session.await;
+            observations
+        });
+
+        let policy = MoqRelayConnectionPolicy {
+            attempt_timeout: Duration::from_secs(5),
+            publish_namespace_acceptance_timeout: Duration::from_secs(3),
+            substrate: relay_substrate,
+            max_reconnect_attempts: 1,
+            reconnect_initial_backoff: Duration::from_millis(10),
+            reconnect_max_backoff: Duration::from_millis(10),
+            reconnect_deadline: Duration::from_secs(1),
+            jitter_percent: 0,
+        };
+        let client = MoqRelayClient::bind_development_with_policy(
+            "127.0.0.1:0".parse().unwrap(),
+            MoqRelayTlsConfig {
+                disable_verification: true,
+                ..Default::default()
+            },
+            MoqRelayDevelopmentMode::Insecure,
+            policy,
+        )
+        .unwrap();
+        let publisher = MoqBroadcastPublisher::new(config()).unwrap();
+        let relay_publication = Arc::new(
+            publisher
+                .publish_to_relay(&client, &relay_url)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            relay_publication.substrate,
+            match expected_transport {
+                Transport::RawQuic => BroadcastSubstrate::RawQuic,
+                Transport::WebTransport => BroadcastSubstrate::WebTransport,
+            }
+        );
+        origin_cached_rx
+            .await
+            .expect("mini relay ended before caching the live catalog");
+
+        let downstream_connection = tokio::time::timeout(
+            MINI_RELAY_TIMEOUT,
+            downstream_client.connect_target(&target, native_substrate, Some(server_address)),
+        )
+        .await
+        .expect("downstream transport connection timed out")
+        .expect("downstream transport connection failed");
+        assert_eq!(
+            downstream_connection.negotiated.substrate,
+            expected_transport
+        );
+        let (downstream_session, mut downstream_subscriber) = Subscriber::connect(
+            downstream_connection.session,
+            downstream_connection.negotiated,
+        )
+        .await
+        .unwrap();
+        let downstream_session = tokio::spawn(downstream_session.run());
+        let mut downstream_namespace = tokio::time::timeout(
+            MINI_RELAY_TIMEOUT,
+            downstream_subscriber.published_namespace(),
+        )
+        .await
+        .expect("downstream namespace timed out")
+        .expect("downstream session ended before PUBLISH_NAMESPACE");
+        assert_eq!(downstream_namespace.namespace, wire_namespace);
+        downstream_namespace.ok().unwrap();
+
+        let (downstream_catalog_writer, downstream_catalog_reader) = Track::new(
+            downstream_namespace.namespace.clone(),
+            TrackName::from(CATALOG_TRACK),
+        )
+        .produce();
+        let catalog_subscription = downstream_subscriber
+            .subscribe_open(downstream_catalog_writer)
+            .await
+            .expect("downstream catalog SUBSCRIBE failed");
+        let mut downstream_catalog = subgroup_reader(&downstream_catalog_reader).await;
+        let (live_group, live_payload) =
+            read_catalog_group(&mut downstream_catalog, "downstream live catalog").await;
+        assert_live_catalog(&live_payload);
+        let mut downstream_observations = vec![MiniRelayStep::LiveCatalog];
+
+        let (downstream_audio_writer, downstream_audio_reader) = Track::new(
+            downstream_namespace.namespace.clone(),
+            TrackName::from(AUDIO_TRACK),
+        )
+        .produce();
+        let audio_subscription = downstream_subscriber
+            .subscribe_open(downstream_audio_writer)
+            .await
+            .expect("downstream audio SUBSCRIBE failed");
+
+        publisher.frames_out().send(opus_frame(960)).await.unwrap();
+        let mut downstream_audio = subgroup_reader(&downstream_audio_reader).await;
+        let _audio_group = read_audio_group(&mut downstream_audio).await;
+        downstream_observations.push(MiniRelayStep::Audio);
+
+        let drain_relay = Arc::clone(&relay_publication);
+        let (relay_drain_polled, relay_drain_polled_rx) = oneshot::channel();
+        let mut relay_drain = tokio::spawn(async move {
+            let drain = drain_relay.drain(Utc::now() + chrono::Duration::seconds(8));
+            tokio::pin!(drain);
+            match futures::poll!(drain.as_mut()) {
+                std::task::Poll::Ready(result) => {
+                    let _ = relay_drain_polled.send(false);
+                    result
+                }
+                std::task::Poll::Pending => {
+                    let _ = relay_drain_polled.send(true);
+                    drain.await
+                }
+            }
+        });
+        assert!(
+            relay_drain_polled_rx
+                .await
+                .expect("per-relay drain task ended before reporting its first poll"),
+            "per-relay drain completed on its first poll while the source remained live"
+        );
+        let drain_publisher = Arc::clone(&publisher);
+        let drain = tokio::spawn(async move {
+            drain_publisher
+                .drain(BroadcastDrainRequest {
+                    reason: rvoip_core_traits::broadcast::BroadcastDrainReason::Shutdown,
+                    deadline: Utc::now() + chrono::Duration::seconds(8),
+                })
+                .await
+        });
+        wait_for_clean_subscription_end(&audio_subscription, "downstream audio completion").await;
+        downstream_observations.push(MiniRelayStep::AudioEnded);
+        let (terminal_group, terminal_payload) =
+            read_catalog_group(&mut downstream_catalog, "downstream terminal catalog").await;
+        assert!(terminal_group > live_group);
+        assert_terminal_catalog(&terminal_payload);
+        downstream_observations.push(MiniRelayStep::TerminalCatalog);
+        wait_for_clean_subscription_end(&catalog_subscription, "downstream catalog completion")
+            .await;
+        downstream_observations.push(MiniRelayStep::CatalogEnded);
+        tokio::time::timeout(MINI_RELAY_TIMEOUT, origin_namespace_fin_rx)
+            .await
+            .expect("relay did not observe the origin namespace FIN")
+            .expect("relay stopped before observing the origin namespace FIN");
+        assert!(relay_terminal_observed.load(Ordering::Acquire));
+        tokio::select! {
+            biased;
+            completed = &mut relay_drain => {
+                panic!("per-relay drain completed before peer acknowledgment: {completed:?}");
+            }
+            () = tokio::task::yield_now() => {}
+        }
+        assert!(
+            !relay_drain.is_finished(),
+            "per-relay drain completed before the peer acknowledgment barrier was released"
+        );
+        release_origin_ack
+            .send(())
+            .expect("relay stopped before the origin namespace acknowledgment was released");
+        tokio::time::timeout(MINI_RELAY_TIMEOUT, downstream_namespace.closed())
+            .await
+            .expect("downstream namespace completion timed out")
+            .expect("downstream namespace failed");
+        downstream_observations.push(MiniRelayStep::NamespaceCompleted);
+        drop(downstream_namespace);
+
+        let relay_observations = tokio::time::timeout(MINI_RELAY_TIMEOUT, relay)
+            .await
+            .expect("mini relay task timed out")
+            .expect("mini relay task failed");
+        let drained = tokio::time::timeout(MINI_RELAY_TIMEOUT, drain)
+            .await
+            .expect("publisher drain timed out")
+            .expect("publisher drain task failed")
+            .expect("publisher drain failed");
+        assert_eq!(drained.state, BroadcastDrainState::Drained);
+        assert_eq!(publisher.lifecycle().state, BroadcastLifecycleState::Closed);
+        let relay_drained = tokio::time::timeout(MINI_RELAY_TIMEOUT, relay_drain)
+            .await
+            .expect("per-relay drain timed out")
+            .expect("per-relay drain task failed");
+        assert!(relay_drained);
+        assert!(
+            relay_terminal_observed.load(Ordering::Acquire),
+            "per-relay drain completed before the relay observed the terminal catalog"
+        );
+        assert!(!relay_publication.control.cancel.is_cancelled());
+        relay_publication.wait().await.unwrap();
+        downstream_session.abort();
+        let _ = downstream_session.await;
+
+        let expected = vec![
+            MiniRelayStep::LiveCatalog,
+            MiniRelayStep::Audio,
+            MiniRelayStep::AudioEnded,
+            MiniRelayStep::TerminalCatalog,
+            MiniRelayStep::CatalogEnded,
+            MiniRelayStep::NamespaceCompleted,
+        ];
+        assert_eq!(relay_observations, expected);
+        assert_eq!(downstream_observations, expected);
+    }
+
+    #[cfg(feature = "insecure-development")]
+    #[tokio::test]
+    async fn raw_quic_and_webtransport_per_relay_drain_waits_for_terminal_delivery() {
+        assert_two_hop_mini_relay(
+            MoqRelaySubstratePolicy::RawQuic,
+            quic::SubstratePolicy::RawQuic,
+            Transport::RawQuic,
+        )
+        .await;
+        assert_two_hop_mini_relay(
+            MoqRelaySubstratePolicy::WebTransport,
+            quic::SubstratePolicy::WebTransport,
+            Transport::WebTransport,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn graceful_restart_persists_monotonic_groups_and_emits_terminal_catalogs() {
+        let allocator = Arc::new(RecordingGroupIdAllocator::default());
+
+        let first = MoqBroadcastPublisher::new_with_group_id_allocator(
+            config(),
+            Arc::clone(&allocator) as Arc<dyn MoqGroupIdAllocator>,
+        )
+        .unwrap();
+        let first_wire = Arc::clone(&first.wire);
+        first.frames_out().send(opus_frame(0)).await.unwrap();
+        Arc::clone(&first).close().await.unwrap();
+        assert!(first_wire.is_cleanly_completed_for_test());
+
+        let second = MoqBroadcastPublisher::new_with_group_id_allocator(
+            config(),
+            Arc::clone(&allocator) as Arc<dyn MoqGroupIdAllocator>,
+        )
+        .unwrap();
+        let second_wire = Arc::clone(&second.wire);
+        second.frames_out().send(opus_frame(960)).await.unwrap();
+        Arc::clone(&second).close().await.unwrap();
+        assert!(second_wire.is_cleanly_completed_for_test());
+
+        assert_eq!(allocator.reservations_for(AUDIO_TRACK), vec![0, 1]);
+        assert_eq!(allocator.reservations_for(CATALOG_TRACK), vec![0, 1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn hard_wire_failure_consumes_audio_group_without_claiming_completion() {
+        let allocator = Arc::new(RecordingGroupIdAllocator::default());
+        let publisher = MoqBroadcastPublisher::new_with_group_id_allocator(
+            config(),
+            Arc::clone(&allocator) as Arc<dyn MoqGroupIdAllocator>,
+        )
+        .unwrap();
+        publisher.wire.fail_writes_for_test();
+        publisher.frames_out().send(opus_frame(0)).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while publisher.lifecycle().state != BroadcastLifecycleState::Failed {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("wire failure must become terminal");
+
+        assert_eq!(allocator.reservations_for(AUDIO_TRACK), vec![0]);
+        assert_eq!(allocator.reservations_for(CATALOG_TRACK), vec![0]);
+        assert!(!publisher.wire.is_cleanly_completed_for_test());
+        assert!(Arc::clone(&publisher).close().await.is_err());
+        assert_eq!(publisher.lifecycle().state, BroadcastLifecycleState::Failed);
+        assert!(!publisher.wire.is_cleanly_completed_for_test());
+    }
+
+    #[tokio::test]
+    async fn terminal_catalog_allocation_failure_makes_drain_and_close_nonclean() {
+        let allocator = Arc::new(TerminalCatalogFailureAllocator::default());
+        let publisher = MoqBroadcastPublisher::new_with_group_id_allocator(
+            config(),
+            allocator as Arc<dyn MoqGroupIdAllocator>,
+        )
+        .unwrap();
+        publisher.frames_out().send(opus_frame(0)).await.unwrap();
+
+        let drained = Arc::clone(&publisher)
+            .drain(BroadcastDrainRequest {
+                reason: rvoip_core_traits::broadcast::BroadcastDrainReason::Shutdown,
+                deadline: Utc::now() + chrono::Duration::seconds(1),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(drained.state, BroadcastDrainState::DeadlineExceeded);
+        assert_eq!(publisher.lifecycle().state, BroadcastLifecycleState::Failed);
+        assert!(!publisher.wire.is_cleanly_completed_for_test());
+        assert!(Arc::clone(&publisher).close().await.is_err());
+        assert_eq!(publisher.lifecycle().state, BroadcastLifecycleState::Failed);
+    }
+
+    #[tokio::test]
+    async fn audio_wire_failure_racing_drain_never_reports_clean_completion() {
+        let publisher = MoqBroadcastPublisher::new(config()).unwrap();
+        publisher.wire.fail_writes_for_test();
+        publisher.frames_out().send(opus_frame(0)).await.unwrap();
+
+        let drained = Arc::clone(&publisher)
+            .drain(BroadcastDrainRequest {
+                reason: rvoip_core_traits::broadcast::BroadcastDrainReason::Shutdown,
+                deadline: Utc::now() + chrono::Duration::seconds(1),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(drained.state, BroadcastDrainState::DeadlineExceeded);
+        assert_eq!(publisher.lifecycle().state, BroadcastLifecycleState::Failed);
+        assert!(!publisher.wire.is_cleanly_completed_for_test());
+        assert!(Arc::clone(&publisher).close().await.is_err());
+        assert_eq!(publisher.lifecycle().state, BroadcastLifecycleState::Failed);
     }
 
     fn verified_test_peer_identity() -> MoqRelayPeerIdentity {
@@ -1875,13 +2793,17 @@ mod tests {
             verified_test_peer_identity()
         }
 
-        async fn terminated(&mut self) -> MoqRelayFailure {
+        async fn terminated(&mut self) -> WireRelayTermination {
             let _ = self
                 .panic_gate
                 .take()
                 .expect("panic gate already consumed")
                 .await;
             panic!("injected relay task panic");
+        }
+
+        async fn graceful_finish(&mut self) -> WireRelayTermination {
+            self.terminated().await
         }
 
         async fn close(&mut self) {}
@@ -1913,8 +2835,13 @@ mod tests {
             verified_test_peer_identity()
         }
 
-        async fn terminated(&mut self) -> MoqRelayFailure {
+        async fn terminated(&mut self) -> WireRelayTermination {
             pending().await
+        }
+
+        async fn graceful_finish(&mut self) -> WireRelayTermination {
+            self.close().await;
+            WireRelayTermination::Completed
         }
 
         async fn close(&mut self) {
@@ -1949,11 +2876,18 @@ mod tests {
             verified_test_peer_identity_for(&self.id)
         }
 
-        async fn terminated(&mut self) -> MoqRelayFailure {
+        async fn terminated(&mut self) -> WireRelayTermination {
             match self.termination.take() {
-                Some(receiver) => receiver.await.unwrap_or(MoqRelayFailure::TaskFailed),
+                Some(receiver) => WireRelayTermination::Failed(
+                    receiver.await.unwrap_or(MoqRelayFailure::TaskFailed),
+                ),
                 None => pending().await,
             }
+        }
+
+        async fn graceful_finish(&mut self) -> WireRelayTermination {
+            self.closed.store(true, Ordering::Release);
+            WireRelayTermination::Completed
         }
 
         async fn close(&mut self) {
@@ -2133,7 +3067,8 @@ mod tests {
         let snapshot = control.status.snapshot();
         assert_eq!(snapshot.lifecycle, BroadcastLifecycleState::Failed);
         assert_eq!(control.cleanup.wait().await, TaskCleanupResult::Completed);
-        publisher.close().await.unwrap();
+        assert!(Arc::clone(&publisher).close().await.is_err());
+        assert_eq!(publisher.lifecycle().state, BroadcastLifecycleState::Failed);
         (error, snapshot)
     }
 
@@ -2383,7 +3318,8 @@ mod tests {
             BroadcastHealthStatus::Unhealthy
         );
         assert_eq!(connector.attempts.load(Ordering::Acquire), 3);
-        publisher.close().await.unwrap();
+        assert!(Arc::clone(&publisher).close().await.is_err());
+        assert_eq!(publisher.lifecycle().state, BroadcastLifecycleState::Failed);
     }
 
     #[tokio::test]
@@ -2410,7 +3346,8 @@ mod tests {
             error,
             MoqError::RelayFailure(MoqRelayFailure::TaskFailed)
         ));
-        publisher.close().await.unwrap();
+        assert!(Arc::clone(&publisher).close().await.is_err());
+        assert_eq!(publisher.lifecycle().state, BroadcastLifecycleState::Failed);
     }
 
     #[tokio::test]
@@ -2433,7 +3370,16 @@ mod tests {
             Err(MoqError::RelayFailure(MoqRelayFailure::TaskFailed))
         ));
         assert!(publication.moq_health().issues.is_empty());
-        publisher.close().await.unwrap();
+        let drained = Arc::clone(&publisher)
+            .drain(BroadcastDrainRequest {
+                reason: rvoip_core_traits::broadcast::BroadcastDrainReason::Shutdown,
+                deadline: Utc::now() + chrono::Duration::seconds(1),
+            })
+            .await
+            .unwrap();
+        assert_eq!(drained.state, BroadcastDrainState::DeadlineExceeded);
+        assert!(Arc::clone(&publisher).close().await.is_err());
+        assert_eq!(publisher.lifecycle().state, BroadcastLifecycleState::Failed);
     }
 
     #[tokio::test]
@@ -2525,6 +3471,7 @@ mod tests {
             publisher.publish_to_relay(&client, &relay_url()).await,
             Err(MoqError::Closed)
         ));
+        assert!(publisher.frames_out().send(opus_frame(0)).await.is_err());
     }
 
     #[tokio::test]
@@ -2563,6 +3510,36 @@ mod tests {
             TaskCleanupResult::Completed
         );
         publisher.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hard_cancel_cannot_satisfy_a_graceful_per_relay_drain() {
+        let closed = Arc::new(AtomicBool::new(false));
+        let connector = Arc::new(MockConnector::new([MockPlan::Ready(MockConnection {
+            id: "hard-cancel".into(),
+            termination: None,
+            closed: Arc::clone(&closed),
+        })]));
+        let client = test_client(connector, test_policy());
+        let publisher = MoqBroadcastPublisher::new(config()).unwrap();
+        let publication = publisher
+            .publish_to_relay(&client, &relay_url())
+            .await
+            .unwrap();
+
+        publication.control.cancel.cancel();
+        let graceful = publication
+            .drain(Utc::now() + chrono::Duration::seconds(1))
+            .await;
+
+        assert!(!graceful);
+        assert!(publication.control.cancel.is_cancelled());
+        assert!(closed.load(Ordering::Acquire));
+        assert_eq!(
+            publication.control.cleanup.wait().await,
+            TaskCleanupResult::Completed
+        );
+        assert!(publisher.close().await.is_err());
     }
 
     #[tokio::test]
@@ -2638,7 +3615,7 @@ mod tests {
         assert_eq!(control.cleanup.wait().await, TaskCleanupResult::Completed);
         assert_eq!(control.cleanup.start_count(), 1);
         assert!(closed.load(Ordering::Acquire));
-        publisher.close().await.unwrap();
+        assert!(publisher.close().await.is_err());
     }
 
     #[tokio::test]
@@ -2713,7 +3690,8 @@ mod tests {
             publication.lifecycle().state,
             BroadcastLifecycleState::Closed
         );
-        publisher.close().await.unwrap();
+        assert!(Arc::clone(&publisher).close().await.is_err());
+        assert_eq!(publisher.lifecycle().state, BroadcastLifecycleState::Failed);
     }
 
     #[test]

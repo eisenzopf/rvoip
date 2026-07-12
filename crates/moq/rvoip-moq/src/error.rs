@@ -1,6 +1,8 @@
 use rvoip_core_traits::error::RvoipError;
 
-use crate::{LocError, MoqCompatibilityError, MoqNamespaceError, MsfCatalogError};
+use crate::{
+    LocError, MoqCompatibilityError, MoqGroupIdAllocationError, MoqNamespaceError, MsfCatalogError,
+};
 
 /// Bounded, non-sensitive relay failure categories.
 ///
@@ -68,8 +70,12 @@ pub enum MoqError {
     Loc(#[from] LocError),
     #[error(transparent)]
     CatalogModel(#[from] MsfCatalogError),
+    #[error(transparent)]
+    GroupIdAllocation(#[from] MoqGroupIdAllocationError),
     #[error("MOQT tracks are closed")]
     Closed,
+    #[error("MOQT publication failed during shutdown")]
+    PublicationFailed,
     #[error("invalid canonical MOQT relay target")]
     InvalidRelayTarget,
     #[error(

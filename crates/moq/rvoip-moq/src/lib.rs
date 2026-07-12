@@ -8,6 +8,7 @@ mod authorization;
 mod catalog;
 mod compatibility;
 mod error;
+mod group;
 mod loc;
 mod namespace;
 mod publisher;
@@ -19,13 +20,14 @@ pub use authorization::{
     MoqAuthorizer, MoqPeerIdentity, MoqResource, MoqRevocationChecker, MoqRevocationError,
     MoqRevocationStatus, SecureMoqAuthorizer,
 };
-pub use catalog::{MsfCatalog, MsfCatalogError, MsfTrack, MSF_CATALOG_VERSION};
+pub use catalog::{MsfCatalog, MsfCatalogError, MsfCatalogState, MsfTrack, MSF_CATALOG_VERSION};
 pub use compatibility::{
     MoqCompatibility, MoqCompatibilityError, MoqProtocolVersion, LOC_DRAFT, LOC_DRAFT_NUMBER,
     MOQT_DRAFT, MOQT_DRAFT_NUMBER, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT, MSF_DRAFT_NUMBER,
     TARGET_MOQT_DRAFT,
 };
 pub use error::{MoqError, MoqRelayFailure};
+pub use group::{InMemoryMoqGroupIdAllocator, MoqGroupIdAllocationError, MoqGroupIdAllocator};
 pub use loc::{
     validate_opus_20ms_mono, LocAudioObject, LocError, LocOpusPacketizer, LocPacketizedFrame,
     LocProperty, LocTimestampDiscontinuity, LOC_TIMESCALE_PROPERTY, LOC_TIMESTAMP_PROPERTY,

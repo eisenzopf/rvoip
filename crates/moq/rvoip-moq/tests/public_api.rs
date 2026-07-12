@@ -1,10 +1,13 @@
+use std::sync::Arc;
+
 use rvoip_core_traits::broadcast::{
     BroadcastProtocolFamily, BroadcastPublisher, BroadcastResource,
 };
 use rvoip_moq::{
-    LocOpusPacketizer, MoqBroadcastPublisher, MoqCompatibility, MoqNamespace, MoqProtocolVersion,
-    MoqPublisherConfig, MoqRelayConnectionPolicy, MoqRelayPeerIdentity, MoqRelaySubstratePolicy,
-    MoqRelayTlsConfig, MsfCatalog, LOC_DRAFT, MOQT_DRAFT, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT,
+    InMemoryMoqGroupIdAllocator, LocOpusPacketizer, MoqBroadcastPublisher, MoqCompatibility,
+    MoqGroupIdAllocator, MoqNamespace, MoqProtocolVersion, MoqPublisherConfig,
+    MoqRelayConnectionPolicy, MoqRelayPeerIdentity, MoqRelaySubstratePolicy, MoqRelayTlsConfig,
+    MsfCatalog, MsfCatalogState, LOC_DRAFT, MOQT_DRAFT, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT,
 };
 
 #[tokio::test]
@@ -12,6 +15,13 @@ async fn application_contract_uses_only_rvoip_owned_models() {
     let namespace = MoqNamespace::new("tenant", "broadcast").unwrap();
     let catalog = MsfCatalog::opus_audio(&namespace, 24_000, Some("en".into()), 0).unwrap();
     catalog.validate().unwrap();
+    assert_eq!(catalog.state(), MsfCatalogState::Live);
+    let terminal_catalog = MsfCatalog::permanently_completed(1);
+    terminal_catalog.validate().unwrap();
+    assert_eq!(
+        terminal_catalog.state(),
+        MsfCatalogState::PermanentlyCompleted
+    );
     let _packetizer = LocOpusPacketizer::new();
     assert_eq!(
         MoqCompatibility::PINNED
@@ -20,13 +30,17 @@ async fn application_contract_uses_only_rvoip_owned_models() {
         MoqProtocolVersion::PINNED
     );
 
-    let publisher = MoqBroadcastPublisher::new(MoqPublisherConfig {
-        tenant_id: "tenant".into(),
-        broadcast_id: "broadcast".into(),
-        bitrate: 24_000,
-        language: Some("en".into()),
-        queue_frames: 10,
-    })
+    let allocator: Arc<dyn MoqGroupIdAllocator> = Arc::new(InMemoryMoqGroupIdAllocator::new());
+    let publisher = MoqBroadcastPublisher::new_with_group_id_allocator(
+        MoqPublisherConfig {
+            tenant_id: "tenant".into(),
+            broadcast_id: "broadcast".into(),
+            bitrate: 24_000,
+            language: Some("en".into()),
+            queue_frames: 10,
+        },
+        allocator,
+    )
     .unwrap();
     let protocol = publisher.protocol();
     assert_eq!(protocol.family, BroadcastProtocolFamily::Moqt);

@@ -7,16 +7,15 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(test)]
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use moq_transport::coding::{TrackName, TrackNamespace};
 use moq_transport::data::ExtensionHeaders;
 use moq_transport::serve::{
-    Datagram, DatagramsWriter, Tracks, TracksReader, TracksRequest, TracksWriter,
+    Subgroup, SubgroupsWriter, Tracks, TracksReader, TracksRequest, TracksWriter,
 };
 use moq_transport::session::{PublishNamespaceAcceptanceError, SessionTarget, Transport};
 use rvoip_core_traits::broadcast::BroadcastSubstrate;
@@ -31,6 +30,7 @@ use crate::{
 pub(crate) struct WirePublication {
     tracks_reader: TracksReader,
     control: Mutex<Option<WireControl>>,
+    lifecycle: Arc<WireLifecycle>,
     #[cfg(test)]
     fail_writes: Arc<AtomicBool>,
 }
@@ -46,19 +46,58 @@ struct WireControl {
 }
 
 pub(crate) struct WireAudioWriter {
-    audio: DatagramsWriter,
-    // Retain the writer so the independent catalog remains available to late
-    // subscribers for the lifetime of the audio publication.
-    _catalog: DatagramsWriter,
+    audio: Option<SubgroupsWriter>,
+    lifecycle: Arc<WireLifecycle>,
     #[cfg(test)]
     fail_writes: Arc<AtomicBool>,
+}
+
+pub(crate) struct WireCatalogWriter {
+    catalog: Option<SubgroupsWriter>,
+    lifecycle: Arc<WireLifecycle>,
+    #[cfg(test)]
+    fail_writes: Arc<AtomicBool>,
+}
+
+const WIRE_CREATED: u8 = 0;
+const WIRE_LIVE_CATALOG: u8 = 1;
+const WIRE_AUDIO_ENDED: u8 = 2;
+const WIRE_TERMINAL_CATALOG: u8 = 3;
+const WIRE_CATALOG_ENDED: u8 = 4;
+const WIRE_HARD_CLOSED: u8 = 5;
+
+struct WireLifecycle {
+    state: AtomicU8,
+}
+
+impl WireLifecycle {
+    fn transition(&self, expected: u8, next: u8) -> Result<(), MoqError> {
+        self.state
+            .compare_exchange(expected, next, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| MoqError::Wire("invalid MOQT publication write ordering".to_owned()))
+    }
+
+    fn hard_close(&self) {
+        let mut current = self.state.load(Ordering::Acquire);
+        while current != WIRE_CATALOG_ENDED && current != WIRE_HARD_CLOSED {
+            match self.state.compare_exchange_weak(
+                current,
+                WIRE_HARD_CLOSED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    }
 }
 
 impl WirePublication {
     pub(crate) fn new(
         namespace: &MoqNamespace,
-        catalog_payload: Vec<u8>,
-    ) -> Result<(Self, WireAudioWriter), MoqError> {
+    ) -> Result<(Self, WireCatalogWriter, WireAudioWriter), MoqError> {
         let wire_namespace = TrackNamespace::from_utf8_path(namespace.as_str());
         let (mut tracks_writer, tracks_request, tracks_reader) =
             Tracks::new(wire_namespace).produce();
@@ -67,24 +106,18 @@ impl WirePublication {
             .create(TrackName::from(AUDIO_TRACK))
             .ok_or(MoqError::Closed)?;
         let audio = audio_track
-            .datagrams()
+            .subgroups()
             .map_err(|error| MoqError::Wire(error.to_string()))?;
 
         let catalog_track = tracks_writer
             .create(TrackName::from(CATALOG_TRACK))
             .ok_or(MoqError::Closed)?;
-        let mut catalog = catalog_track
-            .datagrams()
+        let catalog = catalog_track
+            .subgroups()
             .map_err(|error| MoqError::Wire(error.to_string()))?;
-        catalog
-            .write(Datagram {
-                group_id: 0,
-                object_id: 0,
-                priority: 0,
-                payload: catalog_payload.into(),
-                extension_headers: ExtensionHeaders::new(),
-            })
-            .map_err(|error| MoqError::Wire(error.to_string()))?;
+        let lifecycle = Arc::new(WireLifecycle {
+            state: AtomicU8::new(WIRE_CREATED),
+        });
         #[cfg(test)]
         let fail_writes = Arc::new(AtomicBool::new(false));
 
@@ -95,12 +128,19 @@ impl WirePublication {
                     _tracks_writer: tracks_writer,
                     _tracks_request: tracks_request,
                 })),
+                lifecycle: Arc::clone(&lifecycle),
+                #[cfg(test)]
+                fail_writes: Arc::clone(&fail_writes),
+            },
+            WireCatalogWriter {
+                catalog: Some(catalog),
+                lifecycle: Arc::clone(&lifecycle),
                 #[cfg(test)]
                 fail_writes: Arc::clone(&fail_writes),
             },
             WireAudioWriter {
-                audio,
-                _catalog: catalog,
+                audio: Some(audio),
+                lifecycle,
                 #[cfg(test)]
                 fail_writes,
             },
@@ -108,6 +148,7 @@ impl WirePublication {
     }
 
     pub(crate) fn close(&self) {
+        self.lifecycle.hard_close();
         self.control
             .lock()
             .expect("MOQT wire control poisoned")
@@ -136,6 +177,16 @@ impl WirePublication {
             .expect("MOQT wire control poisoned")
             .is_none()
     }
+
+    #[cfg(test)]
+    pub(crate) fn is_cleanly_completed_for_test(&self) -> bool {
+        self.lifecycle.state.load(Ordering::Acquire) == WIRE_CATALOG_ENDED
+    }
+
+    #[cfg(test)]
+    fn tracks_for_test(&self) -> TracksReader {
+        self.tracks()
+    }
 }
 
 impl WireAudioWriter {
@@ -148,16 +199,103 @@ impl WireAudioWriter {
         for property in object.properties() {
             extension_headers.set_intvalue(property.id, property.value);
         }
-        self.audio
-            .write(Datagram {
-                group_id: object.group_id,
-                object_id: object.object_id,
-                priority: 0,
-                payload: object.payload,
-                extension_headers,
-            })
-            .map_err(|error| MoqError::Wire(error.to_string()))
+        if object.object_id != 0 {
+            return Err(MoqError::Wire(
+                "canonical LOC publication requires Object ID 0".to_owned(),
+            ));
+        }
+        if self.lifecycle.state.load(Ordering::Acquire) != WIRE_LIVE_CATALOG {
+            return Err(MoqError::Wire(
+                "audio cannot be published before the live catalog".to_owned(),
+            ));
+        }
+        write_stream_object(
+            self.audio.as_mut().ok_or(MoqError::Closed)?,
+            object.group_id,
+            object.payload,
+            extension_headers,
+        )
     }
+
+    pub(crate) fn finish(mut self) -> Result<(), MoqError> {
+        drop(self.audio.take());
+        self.lifecycle
+            .transition(WIRE_LIVE_CATALOG, WIRE_AUDIO_ENDED)
+    }
+}
+
+impl WireCatalogWriter {
+    pub(crate) fn write_live(&mut self, group_id: u64, payload: Vec<u8>) -> Result<(), MoqError> {
+        #[cfg(test)]
+        if self.fail_writes.load(Ordering::Acquire) {
+            return Err(MoqError::Closed);
+        }
+        if self.lifecycle.state.load(Ordering::Acquire) != WIRE_CREATED {
+            return Err(MoqError::Wire(
+                "live catalog must be the first publication object".to_owned(),
+            ));
+        }
+        write_stream_object(
+            self.catalog.as_mut().ok_or(MoqError::Closed)?,
+            group_id,
+            payload.into(),
+            ExtensionHeaders::new(),
+        )?;
+        self.lifecycle.transition(WIRE_CREATED, WIRE_LIVE_CATALOG)
+    }
+
+    pub(crate) fn write_terminal(
+        &mut self,
+        group_id: u64,
+        payload: Vec<u8>,
+    ) -> Result<(), MoqError> {
+        #[cfg(test)]
+        if self.fail_writes.load(Ordering::Acquire) {
+            return Err(MoqError::Closed);
+        }
+        if self.lifecycle.state.load(Ordering::Acquire) != WIRE_AUDIO_ENDED {
+            return Err(MoqError::Wire(
+                "terminal catalog requires the audio track to end first".to_owned(),
+            ));
+        }
+        write_stream_object(
+            self.catalog.as_mut().ok_or(MoqError::Closed)?,
+            group_id,
+            payload.into(),
+            ExtensionHeaders::new(),
+        )?;
+        self.lifecycle
+            .transition(WIRE_AUDIO_ENDED, WIRE_TERMINAL_CATALOG)
+    }
+
+    pub(crate) fn finish(mut self) -> Result<(), MoqError> {
+        drop(self.catalog.take());
+        self.lifecycle
+            .transition(WIRE_TERMINAL_CATALOG, WIRE_CATALOG_ENDED)
+    }
+}
+
+fn write_stream_object(
+    track: &mut SubgroupsWriter,
+    group_id: u64,
+    payload: bytes::Bytes,
+    extension_headers: ExtensionHeaders,
+) -> Result<(), MoqError> {
+    let subgroup = Subgroup::new(group_id, 0, 0)
+        .with_first_object(true)
+        .with_end_of_group(true);
+    let mut stream = track
+        .create(subgroup)
+        .map_err(|error| MoqError::Wire(error.to_string()))?;
+    let mut object = stream
+        .create(payload.len(), Some(extension_headers))
+        .map_err(|error| MoqError::Wire(error.to_string()))?;
+    object
+        .write(payload)
+        .map_err(|error| MoqError::Wire(error.to_string()))?;
+    drop(object);
+    drop(stream);
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -265,31 +403,37 @@ pub(crate) struct WireRelayPublication {
     pub(crate) substrate: BroadcastSubstrate,
     pub(crate) negotiated_protocol: String,
     pub(crate) peer_identity: MoqRelayPeerIdentity,
-    session_task: Option<JoinHandle<MoqRelayFailure>>,
-    publish_task: Option<JoinHandle<MoqRelayFailure>>,
+    session_task: Option<JoinHandle<WireRelayTermination>>,
+    publish_task: Option<JoinHandle<WireRelayTermination>>,
     runtime: tokio::runtime::Handle,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WireRelayTermination {
+    Completed,
+    Failed(MoqRelayFailure),
+}
+
 struct PendingSessionTask {
-    task: Option<JoinHandle<MoqRelayFailure>>,
+    task: Option<JoinHandle<WireRelayTermination>>,
     runtime: tokio::runtime::Handle,
 }
 
 impl PendingSessionTask {
-    fn new(task: JoinHandle<MoqRelayFailure>, runtime: tokio::runtime::Handle) -> Self {
+    fn new(task: JoinHandle<WireRelayTermination>, runtime: tokio::runtime::Handle) -> Self {
         Self {
             task: Some(task),
             runtime,
         }
     }
 
-    fn task_mut(&mut self) -> &mut JoinHandle<MoqRelayFailure> {
+    fn task_mut(&mut self) -> &mut JoinHandle<WireRelayTermination> {
         self.task
             .as_mut()
             .expect("pending MOQT session task already consumed")
     }
 
-    fn take(&mut self) -> JoinHandle<MoqRelayFailure> {
+    fn take(&mut self) -> JoinHandle<WireRelayTermination> {
         self.task
             .take()
             .expect("pending MOQT session task already consumed")
@@ -340,10 +484,10 @@ impl Drop for WireRelayPublication {
 }
 
 impl WireRelayPublication {
-    pub(crate) async fn terminated(&mut self) -> MoqRelayFailure {
+    pub(crate) async fn terminated(&mut self) -> WireRelayTermination {
         enum Completed {
-            Session(Result<MoqRelayFailure, tokio::task::JoinError>),
-            Publication(Result<MoqRelayFailure, tokio::task::JoinError>),
+            Session(Result<WireRelayTermination, tokio::task::JoinError>),
+            Publication(Result<WireRelayTermination, tokio::task::JoinError>),
         }
         let completed = {
             let session = self
@@ -363,12 +507,12 @@ impl WireRelayPublication {
             Completed::Session(result) => {
                 self.session_task.take();
                 abort_and_join_wire_task(&mut self.publish_task).await;
-                result.unwrap_or(MoqRelayFailure::TaskFailed)
+                result.unwrap_or(WireRelayTermination::Failed(MoqRelayFailure::TaskFailed))
             }
             Completed::Publication(result) => {
                 self.publish_task.take();
                 abort_and_join_wire_task(&mut self.session_task).await;
-                result.unwrap_or(MoqRelayFailure::TaskFailed)
+                result.unwrap_or(WireRelayTermination::Failed(MoqRelayFailure::TaskFailed))
             }
         }
     }
@@ -383,7 +527,7 @@ impl WireRelayPublication {
     }
 }
 
-async fn abort_and_join_wire_task(task: &mut Option<JoinHandle<MoqRelayFailure>>) {
+async fn abort_and_join_wire_task(task: &mut Option<JoinHandle<WireRelayTermination>>) {
     if let Some(task) = task.take() {
         task.abort();
         let _ = task.await;
@@ -428,7 +572,7 @@ pub(crate) async fn publish_to_relay(
             .map_err(|_| MoqError::RelayFailure(MoqRelayFailure::ConnectFailed))?;
     let session_task = tokio::spawn(async move {
         let _ = session.run().await;
-        MoqRelayFailure::SessionEnded
+        WireRelayTermination::Failed(MoqRelayFailure::SessionEnded)
     });
     let mut pending_session = PendingSessionTask::new(session_task, runtime.clone());
     let tracks = publication.tracks_reader.clone();
@@ -461,13 +605,18 @@ pub(crate) async fn publish_to_relay(
         let failure = pending_session
             .take()
             .await
-            .unwrap_or(MoqRelayFailure::TaskFailed);
+            .unwrap_or(WireRelayTermination::Failed(MoqRelayFailure::TaskFailed));
         drop(publish);
-        return Err(MoqError::RelayFailure(failure));
+        return Err(MoqError::RelayFailure(match failure {
+            WireRelayTermination::Completed => MoqRelayFailure::PublicationEnded,
+            WireRelayTermination::Failed(failure) => failure,
+        }));
     }
     let publish_task = tokio::spawn(async move {
-        let _ = publish.serve(tracks).await;
-        MoqRelayFailure::PublicationEnded
+        match publish.serve(tracks).await {
+            Ok(()) => WireRelayTermination::Completed,
+            Err(_) => WireRelayTermination::Failed(MoqRelayFailure::PublicationEnded),
+        }
     });
     Ok(WireRelayPublication {
         connection_id,
@@ -791,7 +940,7 @@ mod tests {
         let task = tokio::spawn(async move {
             let _drop_signal = DropSignal(Some(dropped_tx));
             let _ = started_tx.send(());
-            std::future::pending::<MoqRelayFailure>().await
+            std::future::pending::<WireRelayTermination>().await
         });
         started_rx.await.unwrap();
 
@@ -805,19 +954,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maps_rvoip_loc_properties_to_the_expected_wire_ids() {
+    async fn msf_and_loc_objects_use_one_first_object_end_of_group_stream_each() {
         let namespace = MoqNamespace::new("tenant", "broadcast").unwrap();
-        let (publication, mut audio_writer) =
-            WirePublication::new(&namespace, br#"{"version":"draft-01"}"#.to_vec()).unwrap();
+        let (publication, mut catalog_writer, mut audio_writer) =
+            WirePublication::new(&namespace).unwrap();
         let wire_namespace = publication.tracks_reader.info.namespace.clone();
-        let mut tracks = publication.tracks();
-        let audio = tracks
+        let mut tracks = publication.tracks_for_test();
+        let audio_track = tracks
             .get_track_reader(&wire_namespace, TrackName::from(AUDIO_TRACK))
             .unwrap();
-        let mut audio = match audio.mode().await.unwrap() {
-            TrackReaderMode::Datagrams(reader) => reader,
-            _ => panic!("audio track must use datagrams"),
+        let catalog_track = tracks
+            .get_track_reader(&wire_namespace, TrackName::from(CATALOG_TRACK))
+            .unwrap();
+
+        let live_catalog = br#"{"version":"draft-01","tracks":[{}]}"#.to_vec();
+        catalog_writer.write_live(7, live_catalog.clone()).unwrap();
+        let mut catalog = match catalog_track.mode().await.unwrap() {
+            TrackReaderMode::Subgroups(reader) => reader,
+            _ => panic!("catalog track must use subgroup streams"),
         };
+        let mut live_stream = catalog.next().await.unwrap().unwrap();
+        assert_eq!((live_stream.group_id, live_stream.subgroup_id), (7, 0));
+        assert!(live_stream.first_object);
+        assert!(live_stream.end_of_group);
+        let mut live_object = live_stream.next().await.unwrap().unwrap();
+        assert_eq!(live_object.object_id, 0);
+        assert_eq!(live_object.read_all().await.unwrap(), live_catalog);
+        assert!(live_object.extension_headers.is_empty());
+        assert!(live_stream.next().await.unwrap().is_none());
 
         audio_writer
             .write(LocAudioObject {
@@ -828,8 +992,16 @@ mod tests {
                 payload: Bytes::from_static(&[0x78, 0x00]),
             })
             .unwrap();
-        let object = audio.read().await.unwrap().unwrap();
-        assert_eq!((object.group_id, object.object_id), (4, 0));
+        let mut audio = match audio_track.mode().await.unwrap() {
+            TrackReaderMode::Subgroups(reader) => reader,
+            _ => panic!("audio track must use subgroup streams"),
+        };
+        let mut audio_stream = audio.next().await.unwrap().unwrap();
+        assert_eq!((audio_stream.group_id, audio_stream.subgroup_id), (4, 0));
+        assert!(audio_stream.first_object);
+        assert!(audio_stream.end_of_group);
+        let mut object = audio_stream.next().await.unwrap().unwrap();
+        assert_eq!(object.object_id, 0);
         assert_eq!(
             object
                 .extension_headers
@@ -848,6 +1020,83 @@ mod tests {
         );
         // The obsolete LOC timestamp property ID must not be emitted.
         assert!(!object.extension_headers.has(0x06));
+        assert_eq!(
+            object.read_all().await.unwrap(),
+            Bytes::from_static(&[0x78, 0x00])
+        );
+        assert!(audio_stream.next().await.unwrap().is_none());
+
+        audio_writer.finish().unwrap();
+        tokio::time::timeout(Duration::from_millis(100), audio_track.closed())
+            .await
+            .expect("audio track must end before terminal catalog")
+            .unwrap();
+
+        let terminal_catalog = br#"{"version":"draft-01","isComplete":true,"tracks":[]}"#.to_vec();
+        catalog_writer
+            .write_terminal(8, terminal_catalog.clone())
+            .unwrap();
+        let mut terminal_stream = catalog.next().await.unwrap().unwrap();
+        assert_eq!(
+            (terminal_stream.group_id, terminal_stream.subgroup_id),
+            (8, 0)
+        );
+        assert!(terminal_stream.first_object);
+        assert!(terminal_stream.end_of_group);
+        let mut terminal_object = terminal_stream.next().await.unwrap().unwrap();
+        assert_eq!(terminal_object.object_id, 0);
+        assert_eq!(terminal_object.read_all().await.unwrap(), terminal_catalog);
+        assert!(terminal_stream.next().await.unwrap().is_none());
+
+        catalog_writer.finish().unwrap();
+        tokio::time::timeout(Duration::from_millis(100), catalog_track.closed())
+            .await
+            .expect("catalog track must end after its terminal update")
+            .unwrap();
+        assert!(publication.is_cleanly_completed_for_test());
+    }
+
+    #[test]
+    fn wire_writers_reject_out_of_order_terminal_completion() {
+        let namespace = MoqNamespace::new("tenant", "broadcast").unwrap();
+        let (_publication, mut catalog, mut audio) = WirePublication::new(&namespace).unwrap();
+
+        assert!(audio
+            .write(LocAudioObject {
+                group_id: 0,
+                object_id: 0,
+                timestamp: 0,
+                timescale: 48_000,
+                payload: Bytes::from_static(&[0x78, 0x00]),
+            })
+            .is_err());
+        catalog.write_live(0, b"live".to_vec()).unwrap();
+        assert!(catalog.write_terminal(1, b"terminal".to_vec()).is_err());
+        audio.finish().unwrap();
+        catalog.write_terminal(1, b"terminal".to_vec()).unwrap();
+        catalog.finish().unwrap();
+    }
+
+    #[test]
+    fn maximum_group_id_is_safe_at_the_wire_publication_boundary() {
+        let namespace = MoqNamespace::new("tenant", "maximum-group").unwrap();
+        let (publication, mut catalog, mut audio) = WirePublication::new(&namespace).unwrap();
+        catalog.write_live(0, b"live".to_vec()).unwrap();
+        audio
+            .write(LocAudioObject {
+                group_id: u64::MAX,
+                object_id: 0,
+                timestamp: 0,
+                timescale: 48_000,
+                payload: Bytes::from_static(&[0x78, 0x00]),
+            })
+            .unwrap();
+        audio.finish().unwrap();
+        catalog
+            .write_terminal(u64::MAX, b"terminal".to_vec())
+            .unwrap();
+        catalog.finish().unwrap();
+        assert!(publication.is_cleanly_completed_for_test());
     }
 
     #[cfg(feature = "insecure-development")]

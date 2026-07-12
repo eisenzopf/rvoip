@@ -45,6 +45,15 @@ pub struct MsfTrack {
     lang: Option<String>,
 }
 
+/// The two catalog shapes allowed by the Bridgefu MSF-01 profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MsfCatalogState {
+    /// A live catalog omits `isComplete` and advertises exactly one audio track.
+    Live,
+    /// A permanently completed catalog sets `isComplete` to true and has no tracks.
+    PermanentlyCompleted,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MsfCatalogWire {
@@ -136,6 +145,16 @@ impl MsfCatalog {
         Ok(catalog)
     }
 
+    /// Construct the final MSF-01 catalog update for a cleanly ended publication.
+    pub fn permanently_completed(generated_at: i64) -> Self {
+        Self {
+            version: MSF_CATALOG_VERSION.to_owned(),
+            generated_at,
+            is_complete: Some(true),
+            tracks: Vec::new(),
+        }
+    }
+
     pub fn version(&self) -> &str {
         &self.version
     }
@@ -152,34 +171,46 @@ impl MsfCatalog {
         &self.tracks
     }
 
-    /// Validate the Bridgefu 1.0 canonical live-audio MSF profile.
+    pub const fn state(&self) -> MsfCatalogState {
+        match self.is_complete {
+            None => MsfCatalogState::Live,
+            Some(true) => MsfCatalogState::PermanentlyCompleted,
+            // Invalid catalogs cannot be constructed through public APIs or
+            // deserialized, but retain a deterministic value for this total
+            // accessor if the invariant is violated inside this module.
+            Some(false) => MsfCatalogState::Live,
+        }
+    }
+
+    /// Validate one of the two canonical Bridgefu 1.0 catalog states.
     pub fn validate(&self) -> Result<(), MsfCatalogError> {
         if self.version != MSF_CATALOG_VERSION {
             return Err(MsfCatalogError::UnsupportedVersion {
                 offered: self.version.clone(),
             });
         }
-        if self.tracks.is_empty() {
-            return Err(MsfCatalogError::MissingTracks);
+        match (self.is_complete, self.tracks.len()) {
+            (None, 1) => self.tracks[0].validate(),
+            (None, 0) => Err(MsfCatalogError::MissingTracks),
+            (None, actual) => Err(MsfCatalogError::UnexpectedTrackCount { actual }),
+            (Some(false), _) => Err(MsfCatalogError::ExplicitIncompleteForbidden),
+            (Some(true), 0) => Ok(()),
+            (Some(true), actual) => Err(MsfCatalogError::CompletedCatalogHasTracks { actual }),
         }
-        if self.tracks.len() != 1 {
-            return Err(MsfCatalogError::UnexpectedTrackCount {
-                actual: self.tracks.len(),
-            });
-        }
-        self.tracks[0].validate()
     }
 
     /// Validate the canonical profile and bind its track to the expected
     /// publication namespace.
     pub fn validate_for(&self, namespace: &MoqNamespace) -> Result<(), MsfCatalogError> {
         self.validate()?;
-        let actual = &self.tracks[0].namespace;
-        if actual != namespace {
-            return Err(MsfCatalogError::NamespaceMismatch {
-                expected: namespace.to_string(),
-                actual: actual.to_string(),
-            });
+        if let Some(track) = self.tracks.first() {
+            let actual = &track.namespace;
+            if actual != namespace {
+                return Err(MsfCatalogError::NamespaceMismatch {
+                    expected: namespace.to_string(),
+                    actual: actual.to_string(),
+                });
+            }
         }
         Ok(())
     }
@@ -446,10 +477,14 @@ pub enum MsfCatalogError {
     InvalidLanguage { value: String },
     #[error("unsupported MSF catalog version {offered:?}; expected draft-01")]
     UnsupportedVersion { offered: String },
-    #[error("MSF catalog must contain at least one track")]
+    #[error("live MSF catalog must contain its audio track")]
     MissingTracks,
     #[error("canonical MSF audio catalog must contain exactly one track, got {actual}")]
     UnexpectedTrackCount { actual: usize },
+    #[error("live MSF catalogs must omit isComplete instead of setting it to false")]
+    ExplicitIncompleteForbidden,
+    #[error("permanently completed MSF catalog must contain no tracks, got {actual}")]
+    CompletedCatalogHasTracks { actual: usize },
     #[error("canonical MSF audio track must be live")]
     TrackMustBeLive,
     #[error("canonical MSF field {field} must be {expected:?}, got {actual:?}")]
@@ -500,6 +535,64 @@ mod tests {
         let decoded: MsfCatalog = serde_json::from_value(json).unwrap();
         assert_eq!(decoded, catalog);
         assert_eq!(decoded.tracks()[0].namespace(), &namespace);
+        assert_eq!(decoded.state(), MsfCatalogState::Live);
+    }
+
+    #[test]
+    fn emits_the_only_valid_permanently_completed_catalog_shape() {
+        let completed = MsfCatalog::permanently_completed(5678);
+        let json = serde_json::to_value(&completed).unwrap();
+
+        assert_eq!(completed.state(), MsfCatalogState::PermanentlyCompleted);
+        assert_eq!(json["version"], "draft-01");
+        assert_eq!(json["generatedAt"], 5678);
+        assert_eq!(json["isComplete"], true);
+        assert_eq!(json["tracks"], json!([]));
+        completed.validate().unwrap();
+        completed
+            .validate_for(&MoqNamespace::new("tenant", "broadcast").unwrap())
+            .unwrap();
+        assert_eq!(
+            serde_json::from_value::<MsfCatalog>(json).unwrap(),
+            completed
+        );
+    }
+
+    #[test]
+    fn rejects_every_false_or_mixed_catalog_completion_shape() {
+        let live_track = json!({
+            "namespace": "tenant/broadcast",
+            "name": "audio/main",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "audio",
+            "codec": "opus",
+            "timescale": 48000,
+            "bitrate": 24000,
+            "samplerate": 48000,
+            "channelConfig": "mono"
+        });
+        for invalid in [
+            json!({
+                "version": "draft-01",
+                "generatedAt": 1,
+                "isComplete": false,
+                "tracks": [live_track.clone()]
+            }),
+            json!({
+                "version": "draft-01",
+                "generatedAt": 1,
+                "isComplete": true,
+                "tracks": [live_track.clone()]
+            }),
+            json!({
+                "version": "draft-01",
+                "generatedAt": 1,
+                "tracks": []
+            }),
+        ] {
+            assert!(serde_json::from_value::<MsfCatalog>(invalid).is_err());
+        }
     }
 
     #[test]
