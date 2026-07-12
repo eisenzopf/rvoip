@@ -22,7 +22,8 @@ pub use authorization::{
 pub use catalog::{MsfCatalog, MsfCatalogError, MsfTrack, MSF_CATALOG_VERSION};
 pub use compatibility::{
     MoqCompatibility, MoqCompatibilityError, MoqProtocolVersion, LOC_DRAFT, LOC_DRAFT_NUMBER,
-    MOQT_DRAFT, MOQT_DRAFT_NUMBER, MSF_DRAFT, MSF_DRAFT_NUMBER, TARGET_MOQT_DRAFT,
+    MOQT_DRAFT, MOQT_DRAFT_NUMBER, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT, MSF_DRAFT_NUMBER,
+    TARGET_MOQT_DRAFT,
 };
 pub use error::{MoqError, MoqRelayFailure};
 pub use loc::{
@@ -35,7 +36,8 @@ pub use namespace::{MoqNamespace, MoqNamespaceError, NamespaceComponent};
 pub use publisher::MoqRelayDevelopmentMode;
 pub use publisher::{
     MoqBroadcastPublisher, MoqPublisherConfig, MoqRelayClient, MoqRelayConnectionPolicy,
-    MoqRelayHealthIssue, MoqRelayHealthSnapshot, MoqRelayPublication, MoqRelayTlsConfig,
+    MoqRelayHealthIssue, MoqRelayHealthSnapshot, MoqRelayPublication, MoqRelaySubstratePolicy,
+    MoqRelayTlsConfig,
 };
 pub use replay::{
     BoundedMemoryMoqReplayStore, MoqReplayError, MoqSessionId, MoqTokenBinding,

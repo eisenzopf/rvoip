@@ -12,7 +12,8 @@ use rvoip_core_traits::broadcast::{
     BroadcastDescriptor, BroadcastDrainDescriptor, BroadcastDrainRequest, BroadcastDrainState,
     BroadcastEndpoint, BroadcastHealthDescriptor, BroadcastHealthIssue, BroadcastHealthStatus,
     BroadcastLifecycleDescriptor, BroadcastLifecycleState, BroadcastProtocolDescriptor,
-    BroadcastProtocolFamily, BroadcastPublisher, BroadcastResource, BroadcastTransport,
+    BroadcastProtocolFamily, BroadcastPublisher, BroadcastRelayHop, BroadcastRelayRole,
+    BroadcastResource, BroadcastSubstrate, BroadcastTransport,
 };
 use rvoip_core_traits::capability::CodecInfo;
 use rvoip_core_traits::error::Result as RvoipResult;
@@ -38,6 +39,21 @@ pub struct MoqPublisherConfig {
     pub bitrate: u32,
     pub language: Option<String>,
     pub queue_frames: usize,
+}
+
+/// Substrate selection applied independently from the canonical `moqt://`
+/// relay target.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum MoqRelaySubstratePolicy {
+    /// Offer both supported substrates and retain what the peer negotiates.
+    Auto,
+    /// Require native MOQT over QUIC.
+    #[default]
+    RawQuic,
+    /// Require MOQT over WebTransport.
+    WebTransport,
 }
 
 impl MoqPublisherConfig {
@@ -172,21 +188,11 @@ impl MoqBroadcastPublisher {
         MoqProtocolVersion::PINNED
     }
 
-    /// MOQT-specific aggregate health. A configured live relay remains
-    /// degraded until the wire engine exposes protocol acceptance.
+    /// MOQT-specific aggregate health.
     pub fn moq_health(&self) -> MoqRelayHealthSnapshot {
-        let has_live_relay = self
-            .management
-            .active_relays()
-            .into_iter()
-            .any(|relay| !terminal_lifecycle(relay.status.snapshot().lifecycle));
         MoqRelayHealthSnapshot {
             common: self.management.health(),
-            issues: if has_live_relay {
-                vec![MoqRelayHealthIssue::ProtocolAcceptanceUnobservable]
-            } else {
-                Vec::new()
-            },
+            issues: Vec::new(),
         }
     }
 
@@ -215,7 +221,8 @@ impl MoqBroadcastPublisher {
             &publication,
             relay,
             client.policy.attempt_timeout,
-            client.policy.transport_stability_grace,
+            client.policy.substrate,
+            client.policy.publish_namespace_acceptance_timeout,
             &cancel,
         )
         .await
@@ -223,12 +230,12 @@ impl MoqBroadcastPublisher {
             Ok(connection) => connection,
             Err(error) => {
                 if matches!(error, MoqError::Closed) {
-                    status.transition(BroadcastLifecycleState::Closed, None, None, None);
+                    status.transition(BroadcastLifecycleState::Closed, None, None);
                     control.complete_without_task();
                     return Err(error);
                 }
                 let failure = relay_failure(&error);
-                status.transition(BroadcastLifecycleState::Failed, Some(failure), None, None);
+                status.transition(BroadcastLifecycleState::Failed, Some(failure), None);
                 metrics::counter!(
                     "rvoip_moq_relay_connect_attempts_total",
                     "result" => failure.metric_label()
@@ -240,17 +247,17 @@ impl MoqBroadcastPublisher {
         };
         if cancel.is_cancelled() {
             connection.close().await;
-            status.transition(BroadcastLifecycleState::Closed, None, None, None);
+            status.transition(BroadcastLifecycleState::Closed, None, None);
             control.complete_without_task();
             return Err(MoqError::Closed);
         }
-        let connection_id = connection.connection_id().to_owned();
-        let relay_path = connection.relay_path();
+        let diagnostics = RelayDiagnostics::from_connection(connection.as_ref());
+        let connection_id = diagnostics.connection_id.clone();
+        let relay_path = diagnostics.relay_path;
         status.transition(
-            BroadcastLifecycleState::Degraded,
+            BroadcastLifecycleState::Ready,
             None,
-            Some(connection_id.clone()),
-            Some(relay_path),
+            Some(diagnostics.clone()),
         );
         metrics::counter!(
             "rvoip_moq_relay_publications_total",
@@ -259,7 +266,7 @@ impl MoqBroadcastPublisher {
         .increment(1);
         metrics::counter!(
             "rvoip_moq_protocol_acceptance_total",
-            "result" => "unobservable"
+            "result" => "accepted"
         )
         .increment(1);
         let supervisor_status = Arc::clone(&status);
@@ -285,7 +292,6 @@ impl MoqBroadcastPublisher {
                     BroadcastLifecycleState::Failed,
                     Some(MoqRelayFailure::TaskFailed),
                     None,
-                    None,
                 );
             }
         });
@@ -303,6 +309,9 @@ impl MoqBroadcastPublisher {
         Ok(MoqRelayPublication {
             connection_id,
             relay_path,
+            endpoint_uri: diagnostics.endpoint_uri,
+            substrate: diagnostics.substrate,
+            negotiated_protocol: diagnostics.negotiated_protocol,
             control,
         })
     }
@@ -325,10 +334,11 @@ impl Drop for MoqBroadcastPublisher {
 #[derive(Clone, Debug)]
 pub struct MoqRelayConnectionPolicy {
     pub attempt_timeout: Duration,
-    /// Time both transport tasks must remain live before returning a handle.
-    /// This is not protocol acceptance: the pinned fork does not expose the
-    /// peer's REQUEST_OK yet, so the handle remains degraded.
-    pub transport_stability_grace: Duration,
+    /// Maximum time to wait for the relay's explicit `REQUEST_OK` response to
+    /// `PUBLISH_NAMESPACE` after transport and session setup complete.
+    pub publish_namespace_acceptance_timeout: Duration,
+    /// Substrate selection independent from the canonical relay target URI.
+    pub substrate: MoqRelaySubstratePolicy,
     pub max_reconnect_attempts: u32,
     pub reconnect_initial_backoff: Duration,
     pub reconnect_max_backoff: Duration,
@@ -340,7 +350,8 @@ impl Default for MoqRelayConnectionPolicy {
     fn default() -> Self {
         Self {
             attempt_timeout: Duration::from_secs(10),
-            transport_stability_grace: Duration::from_millis(250),
+            publish_namespace_acceptance_timeout: Duration::from_secs(5),
+            substrate: MoqRelaySubstratePolicy::RawQuic,
             max_reconnect_attempts: 5,
             reconnect_initial_backoff: Duration::from_millis(100),
             reconnect_max_backoff: Duration::from_secs(5),
@@ -357,11 +368,11 @@ impl MoqRelayConnectionPolicy {
                 "relay attempt_timeout must be greater than zero",
             ));
         }
-        if self.transport_stability_grace.is_zero()
-            || self.transport_stability_grace >= self.attempt_timeout
+        if self.publish_namespace_acceptance_timeout.is_zero()
+            || self.publish_namespace_acceptance_timeout >= self.attempt_timeout
         {
             return Err(MoqError::InvalidConfig(
-                "relay transport_stability_grace must be non-zero and shorter than attempt_timeout",
+                "relay publish_namespace_acceptance_timeout must be non-zero and shorter than attempt_timeout",
             ));
         }
         if self.max_reconnect_attempts == 0 || self.reconnect_deadline.is_zero() {
@@ -427,7 +438,8 @@ pub enum MoqRelayDevelopmentMode {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum MoqRelayHealthIssue {
-    /// The pinned wire engine does not expose PUBLISH_NAMESPACE REQUEST_OK.
+    /// Compatibility value retained for readers of pre-acceptance diagnostics.
+    /// Current publications never emit it because `REQUEST_OK` is observable.
     ProtocolAcceptanceUnobservable,
 }
 
@@ -517,9 +529,16 @@ impl MoqRelayClient {
 /// [`Self::drain`] when the caller must observe completion or its deadline.
 #[must_use = "retain the handle or call drain to observe relay cleanup"]
 pub struct MoqRelayPublication {
-    /// Connection ID that completed the initial transport-stability condition.
+    /// Connection ID whose `PUBLISH_NAMESPACE` received `REQUEST_OK`.
     pub connection_id: String,
+    /// Compatibility substrate label for the initial accepted connection.
     pub relay_path: &'static str,
+    /// Canonical network `moqt://` endpoint used by the initial connection.
+    pub endpoint_uri: String,
+    /// Substrate actually negotiated by the initial connection.
+    pub substrate: BroadcastSubstrate,
+    /// MOQT protocol identifier actually negotiated by the initial connection.
+    pub negotiated_protocol: String,
     control: Arc<RelayControl>,
 }
 
@@ -532,18 +551,11 @@ impl MoqRelayPublication {
         self.control.status.health()
     }
 
-    /// MOQT-specific health. Until REQUEST_OK is observable, every live relay
-    /// publication reports `protocol_acceptance_unobservable` and cannot be
-    /// considered protocol-ready.
+    /// MOQT-specific health.
     pub fn moq_health(&self) -> MoqRelayHealthSnapshot {
-        let lifecycle = self.control.status.snapshot().lifecycle;
         MoqRelayHealthSnapshot {
             common: self.health(),
-            issues: if terminal_lifecycle(lifecycle) {
-                Vec::new()
-            } else {
-                vec![MoqRelayHealthIssue::ProtocolAcceptanceUnobservable]
-            },
+            issues: Vec::new(),
         }
     }
 
@@ -551,14 +563,49 @@ impl MoqRelayPublication {
         self.control.status.snapshot().failure
     }
 
-    /// Most recent transport-stable connection ID, including a reconnect.
+    /// Most recent protocol-accepted connection ID, including a reconnect.
     pub fn current_connection_id(&self) -> Option<String> {
-        self.control.status.snapshot().connection_id
+        self.control
+            .status
+            .snapshot()
+            .diagnostics
+            .map(|diagnostics| diagnostics.connection_id)
     }
 
-    /// Substrate used by the most recent transport-stable connection.
+    /// Compatibility substrate label for the most recent accepted connection.
     pub fn current_relay_path(&self) -> Option<&'static str> {
-        self.control.status.snapshot().relay_path
+        self.control
+            .status
+            .snapshot()
+            .diagnostics
+            .map(|diagnostics| diagnostics.relay_path)
+    }
+
+    /// Canonical network endpoint used by the most recent accepted connection.
+    pub fn current_endpoint_uri(&self) -> Option<String> {
+        self.control
+            .status
+            .snapshot()
+            .diagnostics
+            .map(|diagnostics| diagnostics.endpoint_uri)
+    }
+
+    /// Substrate used by the most recent accepted connection.
+    pub fn current_substrate(&self) -> Option<BroadcastSubstrate> {
+        self.control
+            .status
+            .snapshot()
+            .diagnostics
+            .map(|diagnostics| diagnostics.substrate)
+    }
+
+    /// MOQT protocol identifier negotiated by the most recent accepted connection.
+    pub fn current_negotiated_protocol(&self) -> Option<String> {
+        self.control
+            .status
+            .snapshot()
+            .diagnostics
+            .map(|diagnostics| diagnostics.negotiated_protocol)
     }
 
     /// Wait for terminal closure and surface terminal relay failures.
@@ -577,7 +624,7 @@ impl MoqRelayPublication {
         if !terminal_lifecycle(self.control.status.snapshot().lifecycle) {
             self.control
                 .status
-                .transition(BroadcastLifecycleState::Draining, None, None, None);
+                .transition(BroadcastLifecycleState::Draining, None, None);
         }
         self.control.cancel.cancel();
         if self.control.wait_until(deadline).await {
@@ -599,6 +646,9 @@ impl Drop for MoqRelayPublication {
 trait RelayConnection: Send {
     fn connection_id(&self) -> &str;
     fn relay_path(&self) -> &'static str;
+    fn endpoint_uri(&self) -> &str;
+    fn substrate(&self) -> BroadcastSubstrate;
+    fn negotiated_protocol(&self) -> &str;
     async fn terminated(&mut self) -> MoqRelayFailure;
     async fn close(&mut self);
 }
@@ -611,6 +661,18 @@ impl RelayConnection for WireRelayPublication {
 
     fn relay_path(&self) -> &'static str {
         self.relay_path
+    }
+
+    fn endpoint_uri(&self) -> &str {
+        &self.endpoint_uri
+    }
+
+    fn substrate(&self) -> BroadcastSubstrate {
+        self.substrate
+    }
+
+    fn negotiated_protocol(&self) -> &str {
+        &self.negotiated_protocol
     }
 
     async fn terminated(&mut self) -> MoqRelayFailure {
@@ -628,7 +690,8 @@ trait RelayConnector: Send + Sync {
         &self,
         publication: &WirePublicationHandle,
         relay: &Url,
-        transport_stability_grace: Duration,
+        substrate: MoqRelaySubstratePolicy,
+        acceptance_timeout: Duration,
     ) -> Result<Box<dyn RelayConnection>, MoqError>;
 }
 
@@ -638,11 +701,33 @@ impl RelayConnector for WireRelayClient {
         &self,
         publication: &WirePublicationHandle,
         relay: &Url,
-        transport_stability_grace: Duration,
+        substrate: MoqRelaySubstratePolicy,
+        acceptance_timeout: Duration,
     ) -> Result<Box<dyn RelayConnection>, MoqError> {
         Ok(Box::new(
-            wire::publish_to_relay(publication, self, relay, transport_stability_grace).await?,
+            wire::publish_to_relay(publication, self, relay, substrate, acceptance_timeout).await?,
         ))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RelayDiagnostics {
+    connection_id: String,
+    relay_path: &'static str,
+    endpoint_uri: String,
+    substrate: BroadcastSubstrate,
+    negotiated_protocol: String,
+}
+
+impl RelayDiagnostics {
+    fn from_connection(connection: &dyn RelayConnection) -> Self {
+        Self {
+            connection_id: connection.connection_id().to_owned(),
+            relay_path: connection.relay_path(),
+            endpoint_uri: connection.endpoint_uri().to_owned(),
+            substrate: connection.substrate(),
+            negotiated_protocol: connection.negotiated_protocol().to_owned(),
+        }
     }
 }
 
@@ -651,8 +736,7 @@ struct RelaySnapshot {
     lifecycle: BroadcastLifecycleState,
     since: DateTime<Utc>,
     failure: Option<MoqRelayFailure>,
-    connection_id: Option<String>,
-    relay_path: Option<&'static str>,
+    diagnostics: Option<RelayDiagnostics>,
 }
 
 struct RelayStatus {
@@ -665,8 +749,7 @@ impl RelayStatus {
             lifecycle: BroadcastLifecycleState::Starting,
             since: Utc::now(),
             failure: None,
-            connection_id: None,
-            relay_path: None,
+            diagnostics: None,
         });
         Self { snapshot }
     }
@@ -691,8 +774,7 @@ impl RelayStatus {
         &self,
         lifecycle: BroadcastLifecycleState,
         failure: Option<MoqRelayFailure>,
-        connection_id: Option<String>,
-        relay_path: Option<&'static str>,
+        diagnostics: Option<RelayDiagnostics>,
     ) {
         let previous = self.snapshot();
         if terminal_lifecycle(previous.lifecycle)
@@ -701,13 +783,17 @@ impl RelayStatus {
         {
             return;
         }
-        let transport_stable = lifecycle == BroadcastLifecycleState::Degraded
-            && connection_id.is_some()
-            && relay_path.is_some();
+        let lifecycle = if lifecycle == BroadcastLifecycleState::Ready && diagnostics.is_none() {
+            tracing::error!("refusing to mark an MOQT relay ready without accepted diagnostics");
+            BroadcastLifecycleState::Degraded
+        } else {
+            lifecycle
+        };
+        let protocol_ready = lifecycle == BroadcastLifecycleState::Ready && diagnostics.is_some();
         let snapshot = RelaySnapshot {
             lifecycle,
             since: Utc::now(),
-            failure: if transport_stable
+            failure: if protocol_ready
                 || matches!(
                     lifecycle,
                     BroadcastLifecycleState::Ready | BroadcastLifecycleState::Closed
@@ -716,8 +802,7 @@ impl RelayStatus {
             } else {
                 failure.or(previous.failure)
             },
-            connection_id: connection_id.or(previous.connection_id),
-            relay_path: relay_path.or(previous.relay_path),
+            diagnostics: diagnostics.or(previous.diagnostics),
         };
         self.snapshot.send_replace(snapshot);
         metrics::counter!(
@@ -972,7 +1057,6 @@ impl RelayControl {
                             BroadcastLifecycleState::Failed,
                             Some(MoqRelayFailure::TaskFailed),
                             None,
-                            None,
                         );
                     }
                 }
@@ -984,7 +1068,6 @@ impl RelayControl {
                 status.transition(
                     BroadcastLifecycleState::Failed,
                     Some(MoqRelayFailure::TaskFailed),
-                    None,
                     None,
                 );
             }
@@ -998,7 +1081,6 @@ impl RelayControl {
             self.status.transition(
                 BroadcastLifecycleState::Failed,
                 Some(MoqRelayFailure::TaskFailed),
-                None,
                 None,
             );
         }
@@ -1103,6 +1185,14 @@ impl PublisherManagement {
     fn health(&self) -> BroadcastHealthDescriptor {
         health_for_lifecycle(self.lifecycle().state)
     }
+
+    fn accepted_relay_diagnostics(&self) -> Option<RelayDiagnostics> {
+        self.active_relays()
+            .into_iter()
+            .map(|relay| relay.status.snapshot())
+            .find(|snapshot| snapshot.lifecycle == BroadcastLifecycleState::Ready)
+            .and_then(|snapshot| snapshot.diagnostics)
+    }
 }
 
 fn aggregate_relay_lifecycle(
@@ -1184,14 +1274,15 @@ async fn connect_once(
     publication: &WirePublicationHandle,
     relay: &Url,
     attempt_timeout: Duration,
-    transport_stability_grace: Duration,
+    substrate: MoqRelaySubstratePolicy,
+    acceptance_timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<Box<dyn RelayConnection>, MoqError> {
     tokio::select! {
         () = cancel.cancelled() => Err(MoqError::Closed),
         result = tokio::time::timeout(
             attempt_timeout,
-            connector.connect(publication, relay, transport_stability_grace),
+            connector.connect(publication, relay, substrate, acceptance_timeout),
         ) => match result {
             Ok(result) => result,
             Err(_) => Err(MoqError::RelayFailure(MoqRelayFailure::ConnectTimeout)),
@@ -1212,7 +1303,7 @@ async fn supervise_relay(
         let failure = tokio::select! {
             () = cancel.cancelled() => {
                 connection.close().await;
-                status.transition(BroadcastLifecycleState::Closed, None, None, None);
+                status.transition(BroadcastLifecycleState::Closed, None, None);
                 return;
             }
             failure = connection.terminated() => failure,
@@ -1222,18 +1313,12 @@ async fn supervise_relay(
             "reason" => failure.metric_label()
         )
         .increment(1);
-        status.transition(
-            BroadcastLifecycleState::Reconnecting,
-            Some(failure),
-            None,
-            None,
-        );
+        status.transition(BroadcastLifecycleState::Reconnecting, Some(failure), None);
 
         let Some(reconnect_deadline) = Instant::now().checked_add(policy.reconnect_deadline) else {
             status.transition(
                 BroadcastLifecycleState::Failed,
                 Some(MoqRelayFailure::ReconnectExhausted),
-                None,
                 None,
             );
             return;
@@ -1247,7 +1332,7 @@ async fn supervise_relay(
             }
             tokio::select! {
                 () = cancel.cancelled() => {
-                    status.transition(BroadcastLifecycleState::Closed, None, None, None);
+                    status.transition(BroadcastLifecycleState::Closed, None, None);
                     return;
                 }
                 () = tokio::time::sleep(delay) => {}
@@ -1257,12 +1342,16 @@ async fn supervise_relay(
                 break;
             }
             let attempt_timeout = policy.attempt_timeout.min(remaining);
+            if attempt_timeout <= policy.publish_namespace_acceptance_timeout {
+                break;
+            }
             match connect_once(
                 connector.as_ref(),
                 &publication,
                 &relay,
                 attempt_timeout,
-                policy.transport_stability_grace,
+                policy.substrate,
+                policy.publish_namespace_acceptance_timeout,
                 &cancel,
             )
             .await
@@ -1270,19 +1359,19 @@ async fn supervise_relay(
                 Ok(next) => {
                     metrics::counter!(
                         "rvoip_moq_reconnect_attempts_total",
-                        "result" => "transport-stable"
+                        "result" => "accepted"
                     )
                     .increment(1);
                     metrics::counter!(
                         "rvoip_moq_protocol_acceptance_total",
-                        "result" => "unobservable"
+                        "result" => "accepted"
                     )
                     .increment(1);
                     reconnected = Some(next);
                     break;
                 }
                 Err(MoqError::Closed) => {
-                    status.transition(BroadcastLifecycleState::Closed, None, None, None);
+                    status.transition(BroadcastLifecycleState::Closed, None, None);
                     return;
                 }
                 Err(error) => {
@@ -1300,16 +1389,14 @@ async fn supervise_relay(
                 BroadcastLifecycleState::Failed,
                 Some(MoqRelayFailure::ReconnectExhausted),
                 None,
-                None,
             );
             return;
         };
         connection = next;
         status.transition(
-            BroadcastLifecycleState::Degraded,
+            BroadcastLifecycleState::Ready,
             None,
-            Some(connection.connection_id().to_owned()),
-            Some(connection.relay_path()),
+            Some(RelayDiagnostics::from_connection(connection.as_ref())),
         );
     }
 }
@@ -1353,6 +1440,14 @@ fn jitter_sample() -> u64 {
 fn relay_failure(error: &MoqError) -> MoqRelayFailure {
     match error {
         MoqError::RelayFailure(failure) => *failure,
+        MoqError::PublishNamespaceRejected { .. } => MoqRelayFailure::PublishNamespaceRejected,
+        MoqError::PublishNamespaceAcceptanceTimedOut { .. } => {
+            MoqRelayFailure::PublishNamespaceAcceptanceTimedOut
+        }
+        MoqError::PublishNamespaceResponseStreamClosed => {
+            MoqRelayFailure::PublishNamespaceResponseStreamClosed
+        }
+        MoqError::NegotiatedProtocolMismatch { .. } => MoqRelayFailure::NegotiatedProtocolMismatch,
         _ => MoqRelayFailure::ConnectFailed,
     }
 }
@@ -1408,13 +1503,11 @@ fn spawn_relay_cleanup_reaper(cleanup: SharedTaskCleanup, status: Arc<RelayStatu
                 BroadcastLifecycleState::Failed,
                 Some(MoqRelayFailure::TaskFailed),
                 None,
-                None,
             ),
             Err(_) => {
                 status.transition(
                     BroadcastLifecycleState::Failed,
                     Some(MoqRelayFailure::TaskFailed),
-                    None,
                     None,
                 );
                 let _ = cleanup.finish(true).await;
@@ -1515,24 +1608,35 @@ impl BroadcastPublisher for MoqBroadcastPublisher {
     }
 
     fn endpoint(&self) -> BroadcastEndpoint {
+        let diagnostics = self.management.accepted_relay_diagnostics();
+        let uri = diagnostics
+            .as_ref()
+            .map(|diagnostics| diagnostics.endpoint_uri.clone());
+        let relay_path = diagnostics
+            .map(|diagnostics| {
+                vec![BroadcastRelayHop {
+                    role: BroadcastRelayRole::Relay,
+                    uri: diagnostics.endpoint_uri,
+                }]
+            })
+            .unwrap_or_default();
         BroadcastEndpoint {
-            uri: None,
+            uri,
             resource: BroadcastResource::Moqt {
                 namespace: self.namespace.to_string(),
                 audio_track: AUDIO_TRACK.into(),
                 catalog_track: Some(CATALOG_TRACK.into()),
                 events_track: None,
             },
-            relay_path: Vec::new(),
+            relay_path,
         }
     }
 
     fn protocol(&self) -> BroadcastProtocolDescriptor {
+        let diagnostics = self.management.accepted_relay_diagnostics();
         BroadcastProtocolDescriptor {
             family: BroadcastProtocolFamily::Moqt,
-            // The publisher can be attached to either raw QUIC or
-            // WebTransport; a concrete relay publication reports the path.
-            substrate: None,
+            substrate: diagnostics.map(|diagnostics| diagnostics.substrate),
             transport_version: MOQT_DRAFT.into(),
             media_format_version: Some(MSF_DRAFT.into()),
             object_format_version: Some(LOC_DRAFT.into()),
@@ -1559,7 +1663,7 @@ impl BroadcastPublisher for MoqBroadcastPublisher {
             if !terminal_lifecycle(control.status.snapshot().lifecycle) {
                 control
                     .status
-                    .transition(BroadcastLifecycleState::Draining, None, None, None);
+                    .transition(BroadcastLifecycleState::Draining, None, None);
             }
             control.cancel.cancel();
         }
@@ -1602,7 +1706,7 @@ impl BroadcastPublisher for MoqBroadcastPublisher {
             if !terminal_lifecycle(control.status.snapshot().lifecycle) {
                 control
                     .status
-                    .transition(BroadcastLifecycleState::Draining, None, None, None);
+                    .transition(BroadcastLifecycleState::Draining, None, None);
             }
             control.cancel.cancel();
             let cleanup_deadline = Utc::now() + chrono::Duration::seconds(5);
@@ -1688,6 +1792,18 @@ mod tests {
             "raw-quic"
         }
 
+        fn endpoint_uri(&self) -> &str {
+            "moqt://relay.invalid/"
+        }
+
+        fn substrate(&self) -> BroadcastSubstrate {
+            BroadcastSubstrate::RawQuic
+        }
+
+        fn negotiated_protocol(&self) -> &str {
+            "moqt-19"
+        }
+
         async fn terminated(&mut self) -> MoqRelayFailure {
             let _ = self
                 .panic_gate
@@ -1710,6 +1826,18 @@ mod tests {
             "raw-quic"
         }
 
+        fn endpoint_uri(&self) -> &str {
+            "moqt://relay.invalid/"
+        }
+
+        fn substrate(&self) -> BroadcastSubstrate {
+            BroadcastSubstrate::RawQuic
+        }
+
+        fn negotiated_protocol(&self) -> &str {
+            "moqt-19"
+        }
+
         async fn terminated(&mut self) -> MoqRelayFailure {
             pending().await
         }
@@ -1728,6 +1856,18 @@ mod tests {
 
         fn relay_path(&self) -> &'static str {
             "raw-quic"
+        }
+
+        fn endpoint_uri(&self) -> &str {
+            "moqt://relay.invalid/"
+        }
+
+        fn substrate(&self) -> BroadcastSubstrate {
+            BroadcastSubstrate::RawQuic
+        }
+
+        fn negotiated_protocol(&self) -> &str {
+            "moqt-19"
         }
 
         async fn terminated(&mut self) -> MoqRelayFailure {
@@ -1769,7 +1909,8 @@ mod tests {
             &self,
             _publication: &WirePublicationHandle,
             _relay: &Url,
-            _transport_stability_grace: Duration,
+            _substrate: MoqRelaySubstratePolicy,
+            _acceptance_timeout: Duration,
         ) -> Result<Box<dyn RelayConnection>, MoqError> {
             self.attempts.fetch_add(1, Ordering::AcqRel);
             match self
@@ -1796,13 +1937,20 @@ mod tests {
         entered: Arc<Notify>,
     }
 
+    struct ErrorGatedConnector {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+        error: Mutex<Option<MoqError>>,
+    }
+
     #[async_trait]
     impl RelayConnector for GatedConnector {
         async fn connect(
             &self,
             _publication: &WirePublicationHandle,
             _relay: &Url,
-            _transport_stability_grace: Duration,
+            _substrate: MoqRelaySubstratePolicy,
+            _acceptance_timeout: Duration,
         ) -> Result<Box<dyn RelayConnection>, MoqError> {
             self.ready.notified().await;
             Ok(Box::new(MockConnection {
@@ -1819,17 +1967,39 @@ mod tests {
             &self,
             _publication: &WirePublicationHandle,
             _relay: &Url,
-            _transport_stability_grace: Duration,
+            _substrate: MoqRelaySubstratePolicy,
+            _acceptance_timeout: Duration,
         ) -> Result<Box<dyn RelayConnection>, MoqError> {
             self.entered.notify_one();
             pending().await
         }
     }
 
+    #[async_trait]
+    impl RelayConnector for ErrorGatedConnector {
+        async fn connect(
+            &self,
+            _publication: &WirePublicationHandle,
+            _relay: &Url,
+            _substrate: MoqRelaySubstratePolicy,
+            _acceptance_timeout: Duration,
+        ) -> Result<Box<dyn RelayConnection>, MoqError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Err(self
+                .error
+                .lock()
+                .expect("gated error poisoned")
+                .take()
+                .expect("gated error already consumed"))
+        }
+    }
+
     fn test_policy() -> MoqRelayConnectionPolicy {
         MoqRelayConnectionPolicy {
             attempt_timeout: Duration::from_secs(1),
-            transport_stability_grace: Duration::from_nanos(1),
+            publish_namespace_acceptance_timeout: Duration::from_millis(100),
+            substrate: MoqRelaySubstratePolicy::RawQuic,
             max_reconnect_attempts: 2,
             reconnect_initial_backoff: Duration::ZERO,
             reconnect_max_backoff: Duration::ZERO,
@@ -1848,6 +2018,44 @@ mod tests {
 
     fn relay_url() -> Url {
         Url::parse("moqt://relay.invalid:443").unwrap()
+    }
+
+    async fn gated_connect_error(error: MoqError) -> (MoqError, RelaySnapshot) {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let client = Arc::new(test_client(
+            Arc::new(ErrorGatedConnector {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                error: Mutex::new(Some(error)),
+            }),
+            test_policy(),
+        ));
+        let publisher = MoqBroadcastPublisher::new(config()).unwrap();
+        let publish_publisher = Arc::clone(&publisher);
+        let publish = tokio::spawn(async move {
+            publish_publisher
+                .publish_to_relay(&client, &relay_url())
+                .await
+        });
+
+        entered.notified().await;
+        let control = publisher
+            .management
+            .active_relays()
+            .into_iter()
+            .next()
+            .expect("pending publication must register relay lifecycle");
+        release.notify_one();
+        let error = match publish.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("gated connector error unexpectedly produced a publication"),
+        };
+        let snapshot = control.status.snapshot();
+        assert_eq!(snapshot.lifecycle, BroadcastLifecycleState::Failed);
+        assert_eq!(control.cleanup.wait().await, TaskCleanupResult::Completed);
+        publisher.close().await.unwrap();
+        (error, snapshot)
     }
 
     #[tokio::test]
@@ -1884,7 +2092,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transport_stability_never_claims_protocol_readiness() {
+    async fn explicit_acceptance_transitions_to_ready_with_negotiated_diagnostics() {
         let ready = Arc::new(Notify::new());
         let closed = Arc::new(AtomicBool::new(false));
         let client = Arc::new(test_client(
@@ -1913,22 +2121,90 @@ mod tests {
         let publication = task.await.unwrap().unwrap();
         assert_eq!(
             publication.lifecycle().state,
-            BroadcastLifecycleState::Degraded
+            BroadcastLifecycleState::Ready
         );
-        assert_eq!(publication.health().status, BroadcastHealthStatus::Degraded);
+        assert_eq!(publication.health().status, BroadcastHealthStatus::Healthy);
+        assert!(publication.moq_health().issues.is_empty());
+        assert!(publisher.moq_health().issues.is_empty());
+        assert_eq!(publication.endpoint_uri, "moqt://relay.invalid/");
+        assert_eq!(publication.substrate, BroadcastSubstrate::RawQuic);
+        assert_eq!(publication.negotiated_protocol, "moqt-19");
         assert_eq!(
-            publication.moq_health().issues,
-            vec![MoqRelayHealthIssue::ProtocolAcceptanceUnobservable]
+            publication.current_endpoint_uri().as_deref(),
+            Some("moqt://relay.invalid/")
         );
         assert_eq!(
-            publisher.moq_health().issues,
-            vec![MoqRelayHealthIssue::ProtocolAcceptanceUnobservable]
+            publication.current_negotiated_protocol().as_deref(),
+            Some("moqt-19")
+        );
+        assert_eq!(
+            publisher.endpoint().uri.as_deref(),
+            Some("moqt://relay.invalid/")
+        );
+        assert_eq!(
+            publisher.protocol().substrate,
+            Some(BroadcastSubstrate::RawQuic)
         );
         publication
             .drain(Utc::now() + chrono::Duration::seconds(1))
             .await;
         assert!(closed.load(Ordering::Acquire));
         publisher.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn namespace_rejection_is_typed_and_marks_the_lifecycle_failed() {
+        let (error, snapshot) = gated_connect_error(MoqError::PublishNamespaceRejected {
+            error_code: 0x1,
+            retry_interval: 250,
+            reason: "denied".into(),
+        })
+        .await;
+
+        assert!(matches!(
+            error,
+            MoqError::PublishNamespaceRejected {
+                error_code: 0x1,
+                retry_interval: 250,
+                reason,
+            } if reason == "denied"
+        ));
+        assert_eq!(
+            snapshot.failure,
+            Some(MoqRelayFailure::PublishNamespaceRejected)
+        );
+    }
+
+    #[tokio::test]
+    async fn silent_namespace_acceptance_is_a_typed_timeout_and_failed_lifecycle() {
+        let timeout = Duration::from_millis(25);
+        let (error, snapshot) =
+            gated_connect_error(MoqError::PublishNamespaceAcceptanceTimedOut { timeout }).await;
+
+        assert!(matches!(
+            error,
+            MoqError::PublishNamespaceAcceptanceTimedOut { timeout: actual }
+                if actual == timeout
+        ));
+        assert_eq!(
+            snapshot.failure,
+            Some(MoqRelayFailure::PublishNamespaceAcceptanceTimedOut)
+        );
+    }
+
+    #[tokio::test]
+    async fn response_stream_disconnect_is_typed_and_marks_the_lifecycle_failed() {
+        let (error, snapshot) =
+            gated_connect_error(MoqError::PublishNamespaceResponseStreamClosed).await;
+
+        assert!(matches!(
+            error,
+            MoqError::PublishNamespaceResponseStreamClosed
+        ));
+        assert_eq!(
+            snapshot.failure,
+            Some(MoqRelayFailure::PublishNamespaceResponseStreamClosed)
+        );
     }
 
     #[tokio::test]
@@ -2094,7 +2370,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             publication.lifecycle().state,
-            BroadcastLifecycleState::Degraded
+            BroadcastLifecycleState::Ready
         );
         assert_eq!(publication.current_relay_path(), Some("raw-quic"));
 
@@ -2370,10 +2646,39 @@ mod tests {
     }
 
     #[test]
-    fn relay_lifecycle_never_claims_healthy_without_protocol_acceptance() {
+    fn acceptance_deadline_must_precede_the_outer_attempt_deadline() {
+        let mut policy = test_policy();
+        policy.publish_namespace_acceptance_timeout = policy.attempt_timeout;
+        assert!(matches!(policy.validate(), Err(MoqError::InvalidConfig(_))));
+
+        policy.publish_namespace_acceptance_timeout = Duration::ZERO;
+        assert!(matches!(policy.validate(), Err(MoqError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn relay_lifecycle_requires_accepted_diagnostics_before_ready() {
         let status = RelayStatus::new();
         assert_eq!(status.lifecycle().state, BroadcastLifecycleState::Starting);
         assert_eq!(status.health().status, BroadcastHealthStatus::Degraded);
+
+        status.transition(BroadcastLifecycleState::Ready, None, None);
+        assert_eq!(status.lifecycle().state, BroadcastLifecycleState::Degraded);
+        assert_eq!(status.health().status, BroadcastHealthStatus::Degraded);
+
+        let accepted = RelayStatus::new();
+        accepted.transition(
+            BroadcastLifecycleState::Ready,
+            None,
+            Some(RelayDiagnostics {
+                connection_id: "accepted".into(),
+                relay_path: "raw-quic",
+                endpoint_uri: "moqt://relay.invalid/".into(),
+                substrate: BroadcastSubstrate::RawQuic,
+                negotiated_protocol: "moqt-19".into(),
+            }),
+        );
+        assert_eq!(accepted.lifecycle().state, BroadcastLifecycleState::Ready);
+        assert_eq!(accepted.health().status, BroadcastHealthStatus::Healthy);
 
         for (state, expected_health) in [
             (
@@ -2393,21 +2698,20 @@ mod tests {
                 BroadcastHealthStatus::Closed,
             ),
         ] {
-            status.transition(state, None, None, None);
+            status.transition(state, None, None);
             assert_eq!(status.lifecycle().state, state);
             assert_eq!(status.health().status, expected_health);
         }
 
         // Terminal state is immutable even if a late reconnect completion races
         // with cancellation.
-        status.transition(BroadcastLifecycleState::Degraded, None, None, None);
+        status.transition(BroadcastLifecycleState::Degraded, None, None);
         assert_eq!(status.lifecycle().state, BroadcastLifecycleState::Closed);
 
         let failed = RelayStatus::new();
         failed.transition(
             BroadcastLifecycleState::Failed,
             Some(MoqRelayFailure::ReconnectExhausted),
-            None,
             None,
         );
         assert_eq!(failed.health().status, BroadcastHealthStatus::Unhealthy);
@@ -2420,8 +2724,7 @@ mod tests {
             lifecycle,
             since: base + chrono::Duration::seconds(offset),
             failure: None,
-            connection_id: None,
-            relay_path: None,
+            diagnostics: None,
         };
         let mixed = aggregate_relay_lifecycle(
             &[

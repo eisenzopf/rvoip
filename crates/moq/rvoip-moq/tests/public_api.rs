@@ -3,7 +3,8 @@ use rvoip_core_traits::broadcast::{
 };
 use rvoip_moq::{
     LocOpusPacketizer, MoqBroadcastPublisher, MoqCompatibility, MoqNamespace, MoqProtocolVersion,
-    MoqPublisherConfig, MsfCatalog, LOC_DRAFT, MOQT_DRAFT, MSF_DRAFT,
+    MoqPublisherConfig, MoqRelayConnectionPolicy, MoqRelaySubstratePolicy, MsfCatalog, LOC_DRAFT,
+    MOQT_DRAFT, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT,
 };
 
 #[tokio::test]
@@ -32,6 +33,11 @@ async fn application_contract_uses_only_rvoip_owned_models() {
     assert_eq!(protocol.transport_version, MOQT_DRAFT);
     assert_eq!(protocol.media_format_version.as_deref(), Some(MSF_DRAFT));
     assert_eq!(protocol.object_format_version.as_deref(), Some(LOC_DRAFT));
+    assert_eq!(MOQT_NEGOTIATED_PROTOCOL, "moqt-19");
+    assert_eq!(
+        MoqRelayConnectionPolicy::default().substrate,
+        MoqRelaySubstratePolicy::RawQuic
+    );
     assert!(matches!(
         publisher.endpoint().resource,
         BroadcastResource::Moqt { .. }

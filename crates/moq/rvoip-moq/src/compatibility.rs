@@ -8,6 +8,8 @@ pub const MSF_DRAFT_NUMBER: u16 = 1;
 pub const LOC_DRAFT_NUMBER: u16 = 3;
 
 pub const MOQT_DRAFT: &str = "draft-ietf-moq-transport-19";
+/// ALPN or WebTransport protocol identifier negotiated for draft-19.
+pub const MOQT_NEGOTIATED_PROTOCOL: &str = "moqt-19";
 /// Compatibility alias retained for callers which previously distinguished
 /// the runtime draft from the target draft. They are now intentionally equal.
 pub const TARGET_MOQT_DRAFT: &str = MOQT_DRAFT;

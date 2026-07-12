@@ -13,6 +13,10 @@ use crate::{LocError, MoqCompatibilityError, MoqNamespaceError, MsfCatalogError}
 pub enum MoqRelayFailure {
     ConnectFailed,
     ConnectTimeout,
+    PublishNamespaceRejected,
+    PublishNamespaceAcceptanceTimedOut,
+    PublishNamespaceResponseStreamClosed,
+    NegotiatedProtocolMismatch,
     SessionEnded,
     PublicationEnded,
     ReconnectExhausted,
@@ -24,6 +28,12 @@ impl MoqRelayFailure {
         match self {
             Self::ConnectFailed => "connect-failed",
             Self::ConnectTimeout => "connect-timeout",
+            Self::PublishNamespaceRejected => "publish-namespace-rejected",
+            Self::PublishNamespaceAcceptanceTimedOut => "publish-namespace-acceptance-timed-out",
+            Self::PublishNamespaceResponseStreamClosed => {
+                "publish-namespace-response-stream-closed"
+            }
+            Self::NegotiatedProtocolMismatch => "negotiated-protocol-mismatch",
             Self::SessionEnded => "session-ended",
             Self::PublicationEnded => "publication-ended",
             Self::ReconnectExhausted => "reconnect-exhausted",
@@ -58,6 +68,25 @@ pub enum MoqError {
     CatalogModel(#[from] MsfCatalogError),
     #[error("MOQT tracks are closed")]
     Closed,
+    #[error("invalid canonical MOQT relay target")]
+    InvalidRelayTarget,
+    #[error(
+        "MOQT PUBLISH_NAMESPACE was rejected (code {error_code}, retry interval {retry_interval})"
+    )]
+    PublishNamespaceRejected {
+        error_code: u64,
+        retry_interval: u64,
+        reason: String,
+    },
+    #[error("MOQT PUBLISH_NAMESPACE acceptance timed out after {timeout:?}")]
+    PublishNamespaceAcceptanceTimedOut { timeout: std::time::Duration },
+    #[error("MOQT PUBLISH_NAMESPACE response stream closed before acceptance")]
+    PublishNamespaceResponseStreamClosed,
+    #[error("relay negotiated unsupported MOQT protocol {negotiated:?}; expected {expected:?}")]
+    NegotiatedProtocolMismatch {
+        expected: &'static str,
+        negotiated: String,
+    },
     #[error("MOQT wire error: {0}")]
     Wire(String),
     #[error("MSF catalog encoding failed: {0}")]

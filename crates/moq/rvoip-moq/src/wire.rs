@@ -17,10 +17,15 @@ use moq_transport::data::ExtensionHeaders;
 use moq_transport::serve::{
     Datagram, DatagramsWriter, Tracks, TracksReader, TracksRequest, TracksWriter,
 };
+use moq_transport::session::{PublishNamespaceAcceptanceError, SessionTarget, Transport};
+use rvoip_core_traits::broadcast::BroadcastSubstrate;
 use tokio::task::JoinHandle;
 use url::Url;
 
-use crate::{LocAudioObject, MoqError, MoqNamespace, MoqRelayFailure, AUDIO_TRACK, CATALOG_TRACK};
+use crate::{
+    LocAudioObject, MoqError, MoqNamespace, MoqRelayFailure, MoqRelaySubstratePolicy, AUDIO_TRACK,
+    CATALOG_TRACK, MOQT_NEGOTIATED_PROTOCOL,
+};
 
 pub(crate) struct WirePublication {
     tracks_reader: TracksReader,
@@ -308,9 +313,57 @@ impl WireRelayClient {
 pub(crate) struct WireRelayPublication {
     pub(crate) connection_id: String,
     pub(crate) relay_path: &'static str,
+    pub(crate) endpoint_uri: String,
+    pub(crate) substrate: BroadcastSubstrate,
+    pub(crate) negotiated_protocol: String,
     session_task: Option<JoinHandle<MoqRelayFailure>>,
     publish_task: Option<JoinHandle<MoqRelayFailure>>,
     runtime: tokio::runtime::Handle,
+}
+
+struct PendingSessionTask {
+    task: Option<JoinHandle<MoqRelayFailure>>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl PendingSessionTask {
+    fn new(task: JoinHandle<MoqRelayFailure>, runtime: tokio::runtime::Handle) -> Self {
+        Self {
+            task: Some(task),
+            runtime,
+        }
+    }
+
+    fn task_mut(&mut self) -> &mut JoinHandle<MoqRelayFailure> {
+        self.task
+            .as_mut()
+            .expect("pending MOQT session task already consumed")
+    }
+
+    fn take(&mut self) -> JoinHandle<MoqRelayFailure> {
+        self.task
+            .take()
+            .expect("pending MOQT session task already consumed")
+    }
+
+    async fn abort_and_join(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for PendingSessionTask {
+    fn drop(&mut self) {
+        let Some(task) = self.task.take() else {
+            return;
+        };
+        task.abort();
+        let _cleanup = self.runtime.spawn(async move {
+            let _ = task.await;
+        });
+    }
 }
 
 impl Drop for WireRelayPublication {
@@ -392,58 +445,255 @@ pub(crate) async fn publish_to_relay(
     publication: &WirePublicationHandle,
     client: &WireRelayClient,
     relay: &Url,
-    transport_stability_grace: Duration,
+    substrate_policy: MoqRelaySubstratePolicy,
+    acceptance_timeout: Duration,
 ) -> Result<WireRelayPublication, MoqError> {
     let runtime =
         tokio::runtime::Handle::try_current().map_err(|_| MoqError::RuntimeUnavailable)?;
-    let (wire, connection_id, transport) = client
+    let (target, substrate_policy) = canonical_session_target(relay, substrate_policy)?;
+    let endpoint_uri = target.network_url().to_string();
+    let substrate_policy = native_substrate_policy(substrate_policy);
+    let connection = client
         .client
-        .connect(relay, None)
+        .connect_target(&target, substrate_policy, None)
         .await
         .map_err(|_| MoqError::RelayFailure(MoqRelayFailure::ConnectFailed))?;
-    let relay_path = match transport {
-        moq_transport::session::Transport::RawQuic => "raw-quic",
-        moq_transport::session::Transport::WebTransport => "webtransport",
+    let negotiated = connection.negotiated;
+    if negotiated.protocol != MOQT_NEGOTIATED_PROTOCOL {
+        return Err(MoqError::NegotiatedProtocolMismatch {
+            expected: MOQT_NEGOTIATED_PROTOCOL,
+            negotiated: negotiated.protocol.to_owned(),
+        });
+    }
+    let (relay_path, substrate) = match negotiated.substrate {
+        Transport::RawQuic => ("raw-quic", BroadcastSubstrate::RawQuic),
+        Transport::WebTransport => ("webtransport", BroadcastSubstrate::WebTransport),
     };
-    let (session, mut publisher) = moq_transport::session::Publisher::connect(wire, transport)
-        .await
-        .map_err(|_| MoqError::RelayFailure(MoqRelayFailure::ConnectFailed))?;
+    let negotiated_protocol = negotiated.protocol.to_owned();
+    let connection_id = connection.connection_id;
+    let (session, mut publisher) =
+        moq_transport::session::Publisher::connect(connection.session, negotiated)
+            .await
+            .map_err(|_| MoqError::RelayFailure(MoqRelayFailure::ConnectFailed))?;
     let session_task = tokio::spawn(async move {
         let _ = session.run().await;
         MoqRelayFailure::SessionEnded
     });
+    let mut pending_session = PendingSessionTask::new(session_task, runtime.clone());
     let tracks = publication.tracks_reader.clone();
+    let publish = match publisher
+        .publish_namespace_open(tracks.info.namespace.clone())
+        .await
+    {
+        Ok(publish) => publish,
+        Err(_) => {
+            pending_session.abort_and_join().await;
+            return Err(MoqError::RelayFailure(MoqRelayFailure::PublicationEnded));
+        }
+    };
+    let accepted = tokio::select! {
+        biased;
+        result = publish.accepted_with_timeout(acceptance_timeout) => result,
+        result = pending_session.task_mut() => {
+            let _ = result;
+            drop(pending_session.take());
+            drop(publish);
+            return Err(MoqError::RelayFailure(MoqRelayFailure::SessionEnded));
+        }
+    };
+    if let Err(error) = accepted {
+        drop(publish);
+        pending_session.abort_and_join().await;
+        return Err(map_publish_namespace_acceptance_error(error));
+    }
+    if pending_session.task_mut().is_finished() {
+        let failure = pending_session
+            .take()
+            .await
+            .unwrap_or(MoqRelayFailure::TaskFailed);
+        drop(publish);
+        return Err(MoqError::RelayFailure(failure));
+    }
     let publish_task = tokio::spawn(async move {
-        let _ = publisher.publish_namespace(tracks).await;
+        let _ = publish.serve(tracks).await;
         MoqRelayFailure::PublicationEnded
     });
-    let mut publication = WireRelayPublication {
+    Ok(WireRelayPublication {
         connection_id,
         relay_path,
-        session_task: Some(session_task),
+        endpoint_uri,
+        substrate,
+        negotiated_protocol,
+        session_task: Some(pending_session.take()),
         publish_task: Some(publish_task),
         runtime,
-    };
+    })
+}
 
-    // The pinned fork does not yet expose REQUEST_OK separately from the
-    // long-running publish_namespace future. Treat a session plus publication
-    // that both remain live for this explicit grace interval as transport
-    // stable. This is not protocol readiness because REQUEST_OK remains
-    // unobservable. An early completion is surfaced as failure.
-    tokio::select! {
-        failure = publication.terminated() => Err(MoqError::RelayFailure(failure)),
-        () = tokio::time::sleep(transport_stability_grace) => Ok(publication),
+fn canonical_session_target(
+    relay: &Url,
+    substrate_policy: MoqRelaySubstratePolicy,
+) -> Result<(SessionTarget, MoqRelaySubstratePolicy), MoqError> {
+    match relay.scheme() {
+        "moqt" => Ok((
+            SessionTarget::try_from_url(relay.clone()).map_err(|_| MoqError::InvalidRelayTarget)?,
+            substrate_policy,
+        )),
+        "https" => {
+            tracing::warn!(
+                "https:// MOQT relay inputs are deprecated; use a canonical moqt:// target and an explicit WebTransport policy"
+            );
+            Ok((
+                SessionTarget::from_webtransport_url(relay)
+                    .map_err(|_| MoqError::InvalidRelayTarget)?,
+                MoqRelaySubstratePolicy::WebTransport,
+            ))
+        }
+        _ => Err(MoqError::InvalidRelayTarget),
+    }
+}
+
+fn native_substrate_policy(
+    substrate_policy: MoqRelaySubstratePolicy,
+) -> moq_native_ietf::quic::SubstratePolicy {
+    match substrate_policy {
+        MoqRelaySubstratePolicy::Auto => moq_native_ietf::quic::SubstratePolicy::Auto,
+        MoqRelaySubstratePolicy::RawQuic => moq_native_ietf::quic::SubstratePolicy::RawQuic,
+        MoqRelaySubstratePolicy::WebTransport => {
+            moq_native_ietf::quic::SubstratePolicy::WebTransport
+        }
+    }
+}
+
+fn map_publish_namespace_acceptance_error(error: PublishNamespaceAcceptanceError) -> MoqError {
+    match error {
+        PublishNamespaceAcceptanceError::Rejected(rejection) => {
+            MoqError::PublishNamespaceRejected {
+                error_code: rejection.error_code,
+                retry_interval: rejection.retry_interval,
+                reason: rejection.reason.0,
+            }
+        }
+        PublishNamespaceAcceptanceError::TimedOut { timeout } => {
+            MoqError::PublishNamespaceAcceptanceTimedOut { timeout }
+        }
+        PublishNamespaceAcceptanceError::ResponseStreamClosed => {
+            MoqError::PublishNamespaceResponseStreamClosed
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
+    use moq_transport::coding::ReasonPhrase;
     use moq_transport::coding::Value;
     use moq_transport::serve::TrackReaderMode;
+    use moq_transport::session::PublishNamespaceRejection;
 
     use super::*;
     use crate::{LOC_TIMESCALE_PROPERTY, LOC_TIMESTAMP_PROPERTY};
+
+    #[test]
+    fn canonical_target_keeps_substrate_policy_separate() {
+        let relay = Url::parse("moqt://Relay.Example:4443/live?q=1").unwrap();
+        let (target, policy) =
+            canonical_session_target(&relay, MoqRelaySubstratePolicy::Auto).unwrap();
+        assert_eq!(target.to_string(), "moqt://relay.example:4443/live?q=1");
+        assert_eq!(policy, MoqRelaySubstratePolicy::Auto);
+        assert!(matches!(
+            native_substrate_policy(policy),
+            moq_native_ietf::quic::SubstratePolicy::Auto
+        ));
+    }
+
+    #[test]
+    fn legacy_https_target_is_canonicalized_and_forces_webtransport() {
+        let relay = Url::parse("https://Relay.Example:4443/live?q=1").unwrap();
+        let (target, policy) =
+            canonical_session_target(&relay, MoqRelaySubstratePolicy::RawQuic).unwrap();
+        assert_eq!(target.to_string(), "moqt://relay.example:4443/live?q=1");
+        assert_eq!(policy, MoqRelaySubstratePolicy::WebTransport);
+        assert!(matches!(
+            canonical_session_target(
+                &Url::parse("wss://relay.example/live").unwrap(),
+                MoqRelaySubstratePolicy::Auto,
+            ),
+            Err(MoqError::InvalidRelayTarget)
+        ));
+    }
+
+    #[test]
+    fn namespace_rejection_retains_bounded_wire_details_in_rvoip_types() {
+        let error = map_publish_namespace_acceptance_error(
+            PublishNamespaceAcceptanceError::Rejected(PublishNamespaceRejection {
+                error_code: 0x1,
+                retry_interval: 250,
+                reason: ReasonPhrase("denied".into()),
+                redirect: None,
+            }),
+        );
+        assert!(matches!(
+            error,
+            MoqError::PublishNamespaceRejected {
+                error_code: 0x1,
+                retry_interval: 250,
+                reason,
+            } if reason == "denied"
+        ));
+    }
+
+    #[test]
+    fn namespace_silence_maps_to_a_typed_acceptance_timeout() {
+        let timeout = Duration::from_millis(25);
+        assert!(matches!(
+            map_publish_namespace_acceptance_error(
+                PublishNamespaceAcceptanceError::TimedOut { timeout }
+            ),
+            MoqError::PublishNamespaceAcceptanceTimedOut { timeout: actual }
+                if actual == timeout
+        ));
+    }
+
+    #[test]
+    fn namespace_response_disconnect_maps_to_a_distinct_error() {
+        assert!(matches!(
+            map_publish_namespace_acceptance_error(
+                PublishNamespaceAcceptanceError::ResponseStreamClosed
+            ),
+            MoqError::PublishNamespaceResponseStreamClosed
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_acceptance_aborts_and_reaps_the_pending_session_task() {
+        struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(signal) = self.0.take() {
+                    let _ = signal.send(());
+                }
+            }
+        }
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _drop_signal = DropSignal(Some(dropped_tx));
+            let _ = started_tx.send(());
+            std::future::pending::<MoqRelayFailure>().await
+        });
+        started_rx.await.unwrap();
+
+        let pending = PendingSessionTask::new(task, tokio::runtime::Handle::current());
+        drop(pending);
+
+        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("dropping a pending connection must abort its session task")
+            .expect("session task drop signal must remain connected");
+    }
 
     #[tokio::test]
     async fn maps_rvoip_loc_properties_to_the_expected_wire_ids() {
