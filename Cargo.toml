@@ -298,6 +298,7 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 # feature isn't selected.
 chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
 sha2 = "0.10"
+zeroize = "1.9"
 hmac = "0.12"
 aes = "0.8"
 md-5 = "0.10"

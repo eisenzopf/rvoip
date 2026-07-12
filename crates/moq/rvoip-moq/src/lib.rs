@@ -6,6 +6,7 @@
 
 mod authorization;
 mod catalog;
+mod catalog_subscriber;
 mod compatibility;
 mod error;
 mod group;
@@ -24,6 +25,15 @@ pub use authorization::{
     MoqRevocationStatus, SecureMoqAuthorizer,
 };
 pub use catalog::{MsfCatalog, MsfCatalogError, MsfCatalogState, MsfTrack, MSF_CATALOG_VERSION};
+pub use catalog_subscriber::{
+    MoqCatalogApplyOutcome, MoqCatalogObject, MoqCatalogStateMachine, MoqCatalogSubscriberConfig,
+    MoqCatalogSubscriberConfigError, MoqCatalogSubscriberFailure, MoqCatalogSubscriberLifecycle,
+    MoqCatalogSubscriptionSnapshot, MoqCatalogUpdate, MoqCatalogValidationError,
+    MoqSubscriberCredential, MoqSubscriberCredentialError, MoqSubscriberCredentialProvider,
+    MoqSubscriberCredentialRequest, DEFAULT_MAX_CATALOG_BYTES, MAX_CATALOG_ATTEMPT_TIMEOUT,
+    MAX_CATALOG_BYTES, MAX_CATALOG_RECONNECT_ATTEMPTS, MAX_CATALOG_RECONNECT_BACKOFF,
+    MAX_CATALOG_RECONNECT_DEADLINE, MAX_MOQ_SUBSCRIBER_CREDENTIAL_BYTES,
+};
 pub use compatibility::{
     MoqCompatibility, MoqCompatibilityError, MoqProtocolVersion, LOC_DRAFT, LOC_DRAFT_NUMBER,
     MOQT_DRAFT, MOQT_DRAFT_NUMBER, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT, MSF_DRAFT_NUMBER,

@@ -39,6 +39,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 sha2.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true

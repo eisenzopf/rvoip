@@ -1,14 +1,33 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use chrono::Utc;
 use rvoip_core_traits::broadcast::{
     BroadcastProtocolFamily, BroadcastPublisher, BroadcastResource,
 };
 use rvoip_moq::{
-    InMemoryMoqGroupIdAllocator, LocOpusPacketizer, MoqBroadcastPublisher, MoqCompatibility,
-    MoqGroupIdAllocator, MoqNamespace, MoqProtocolVersion, MoqPublisherConfig,
-    MoqRelayConnectionPolicy, MoqRelayPeerIdentity, MoqRelaySubstratePolicy, MoqRelayTlsConfig,
-    MsfCatalog, MsfCatalogState, LOC_DRAFT, MOQT_DRAFT, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT,
+    InMemoryMoqGroupIdAllocator, LocOpusPacketizer, MoqBroadcastPublisher, MoqCatalogApplyOutcome,
+    MoqCatalogObject, MoqCatalogStateMachine, MoqCatalogSubscriberConfig,
+    MoqCatalogSubscriberLifecycle, MoqCompatibility, MoqGroupIdAllocator, MoqNamespace,
+    MoqProtocolVersion, MoqPublisherConfig, MoqRelayConnectionPolicy, MoqRelayPeerIdentity,
+    MoqRelaySubstratePolicy, MoqRelayTlsConfig, MoqSubscriberCredential,
+    MoqSubscriberCredentialError, MoqSubscriberCredentialProvider, MoqSubscriberCredentialRequest,
+    MsfCatalog, MsfCatalogState, CATALOG_TRACK, LOC_DRAFT, MOQT_DRAFT, MOQT_NEGOTIATED_PROTOCOL,
+    MSF_DRAFT,
 };
+use url::Url;
+
+struct TestCredentialProvider;
+
+#[async_trait]
+impl MoqSubscriberCredentialProvider for TestCredentialProvider {
+    async fn issue(
+        &self,
+        _request: MoqSubscriberCredentialRequest,
+    ) -> Result<MoqSubscriberCredential, MoqSubscriberCredentialError> {
+        MoqSubscriberCredential::new(b"single-use-test-token".to_vec())
+    }
+}
 
 #[tokio::test]
 async fn application_contract_uses_only_rvoip_owned_models() {
@@ -22,6 +41,42 @@ async fn application_contract_uses_only_rvoip_owned_models() {
         terminal_catalog.state(),
         MsfCatalogState::PermanentlyCompleted
     );
+
+    let subscriber_config = MoqCatalogSubscriberConfig::new(
+        Url::parse("moqt://relay.example/tenant/broadcast").unwrap(),
+        namespace.clone(),
+    );
+    subscriber_config.validate().unwrap();
+    let credential_request = subscriber_config.credential_request(0).unwrap();
+    let credential = TestCredentialProvider
+        .issue(credential_request)
+        .await
+        .unwrap();
+    assert_eq!(credential.len(), b"single-use-test-token".len());
+    assert!(!format!("{credential:?}").contains("single-use-test-token"));
+
+    let catalog_payload = catalog.to_json_bytes().unwrap();
+    let mut subscriber_state = MoqCatalogStateMachine::new(&subscriber_config).unwrap();
+    let outcome = subscriber_state
+        .apply(MoqCatalogObject {
+            namespace: namespace.as_str(),
+            track: CATALOG_TRACK,
+            group_id: 7,
+            subgroup_id: 0,
+            object_id: 0,
+            first_object: true,
+            end_of_group: true,
+            extension_header_count: 0,
+            declared_payload_len: catalog_payload.len() as u64,
+            payload: &catalog_payload,
+            received_at: Utc::now(),
+        })
+        .unwrap();
+    assert!(matches!(outcome, MoqCatalogApplyOutcome::Update(_)));
+    assert_eq!(subscriber_state.update_count(), 1);
+    assert!(!MoqCatalogSubscriberLifecycle::Live.is_terminal());
+    assert!(MoqCatalogSubscriberLifecycle::PermanentlyCompleted.is_terminal());
+
     let _packetizer = LocOpusPacketizer::new();
     assert_eq!(
         MoqCompatibility::PINNED
