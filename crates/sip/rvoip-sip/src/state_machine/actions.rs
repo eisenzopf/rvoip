@@ -449,7 +449,10 @@ pub(crate) async fn execute_action(
                 .remote_uri
                 .as_deref()
                 .ok_or_else(|| "remote_uri not set for session".to_string())?;
-            info!("Creating dialog from {} to {}", from, to);
+            info!(
+                "Preparing dialog: {:?}",
+                InviteEndpointDiagnostics::new(Some(from), Some(to), session.local_sdp.is_some())
+            );
             // Don't create dialog here - it will be created when we send INVITE
             // Just log that we're preparing to create a dialog
             info!("Dialog will be created when INVITE is sent");
@@ -2968,6 +2971,7 @@ mod invite_option_diagnostic_tests {
     fn invite_option_source_has_no_value_bearing_error_or_log_templates() {
         let source = include_str!("actions.rs");
         for forbidden in [
+            ["Creating dialog from ", "{} to {}"].concat(),
             ["Sending INVITE from ", "{} to {}"].concat(),
             ["SendINVITEWithOptions dispatched for session {}: ", "to={}"].concat(),
             ["pai_uri (", "{}) is not a valid URI"].concat(),

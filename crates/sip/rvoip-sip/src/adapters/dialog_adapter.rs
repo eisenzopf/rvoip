@@ -79,13 +79,48 @@ pub(crate) enum RegisterAttemptOutcome {
     },
 }
 
-fn redacted_invite_options_dispatch_error<E>(_source: E) -> SessionError {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InviteDispatchFailure {
+    Initial,
+    InitialWithExtraHeaders,
+    InitialWithOptions,
+    AuthRetry,
+    SessionTimerRetry,
+    LegacyUpdateReinvite,
+    ReinviteWithOptions,
+    ReinviteInDialog,
+}
+
+impl InviteDispatchFailure {
+    fn diagnostic(self) -> &'static str {
+        match self {
+            Self::Initial => "Failed to make call (class=invite-dispatch)",
+            Self::InitialWithExtraHeaders => {
+                "Failed to make call with extra headers (class=invite-dispatch)"
+            }
+            Self::InitialWithOptions => {
+                "Failed to send INVITE with options (class=dialog-dispatch)"
+            }
+            Self::AuthRetry => "resend_invite_with_auth failed (class=invite-auth-retry)",
+            Self::SessionTimerRetry => {
+                "resend_invite_with_session_timer_override failed (class=invite-timer-retry)"
+            }
+            Self::LegacyUpdateReinvite => {
+                "Failed to send legacy UPDATE re-INVITE (class=invite-dispatch)"
+            }
+            Self::ReinviteWithOptions => {
+                "Failed to send re-INVITE with options (class=invite-dispatch)"
+            }
+            Self::ReinviteInDialog => "Failed to send in-dialog re-INVITE (class=invite-dispatch)",
+        }
+    }
+}
+
+fn redacted_invite_dispatch_error<E>(failure: InviteDispatchFailure, _source: E) -> SessionError {
     // Dialog-layer failures can retain a parser or validation source
     // containing caller-owned URI/header/auth material. Preserve only the
     // operation and fixed failure class at this public wrapper.
-    SessionError::DialogError(
-        "Failed to send INVITE with options (class=dialog-dispatch)".to_string(),
-    )
+    SessionError::DialogError(failure.diagnostic().to_string())
 }
 
 /// Minimal dialog adapter - just translates between dialog-core and state machine
@@ -854,8 +889,11 @@ impl DialogAdapter {
                     },
                 )
                 .await
-                .map_err(|e| {
-                    SessionError::DialogError(format!("Failed to send re-INVITE: {}", e))
+                .map_err(|error| {
+                    redacted_invite_dispatch_error(
+                        InviteDispatchFailure::LegacyUpdateReinvite,
+                        error,
+                    )
                 })?;
 
             tracing::info!("Sent re-INVITE for session {}", session_id.0);
@@ -969,11 +1007,8 @@ impl DialogAdapter {
                 contact_override,
             )
             .await
-            .map_err(|e| {
-                SessionError::DialogError(format!(
-                    "resend_invite_with_auth failed for session {}: {}",
-                    session_id.0, e
-                ))
+            .map_err(|error| {
+                redacted_invite_dispatch_error(InviteDispatchFailure::AuthRetry, error)
             })?;
         Ok(())
     }
@@ -1013,11 +1048,8 @@ impl DialogAdapter {
         self.dialog_api
             .send_invite_with_session_timer_override(&dialog_id, sdp, session_secs, min_se)
             .await
-            .map_err(|e| {
-                SessionError::DialogError(format!(
-                    "resend_invite_with_session_timer_override failed for session {}: {}",
-                    session_id.0, e
-                ))
+            .map_err(|error| {
+                redacted_invite_dispatch_error(InviteDispatchFailure::SessionTimerRetry, error)
             })?;
         Ok(())
     }
@@ -1087,7 +1119,9 @@ impl DialogAdapter {
             .dialog_api
             .make_call_for_session(&session_id.0, from, to, sdp, Some(call_id.clone()))
             .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to make call: {}", e)))?;
+            .map_err(|error| {
+                redacted_invite_dispatch_error(InviteDispatchFailure::Initial, error)
+            })?;
 
         let dialog_id = call_handle.call_id().clone();
 
@@ -1219,8 +1253,11 @@ impl DialogAdapter {
                 headers,
             )
             .await
-            .map_err(|e| {
-                SessionError::DialogError(format!("Failed to make call with extra headers: {}", e))
+            .map_err(|error| {
+                redacted_invite_dispatch_error(
+                    InviteDispatchFailure::InitialWithExtraHeaders,
+                    error,
+                )
             })?;
 
         let dialog_id = call_handle.call_id().clone();
@@ -1287,7 +1324,9 @@ impl DialogAdapter {
             .dialog_api
             .send_invite_with_options_for_session(&session_id.0, opts)
             .await
-            .map_err(redacted_invite_options_dispatch_error)?;
+            .map_err(|error| {
+                redacted_invite_dispatch_error(InviteDispatchFailure::InitialWithOptions, error)
+            })?;
 
         let dialog_id = call_handle.call_id().clone();
         self.session_to_dialog
@@ -1627,7 +1666,9 @@ impl DialogAdapter {
         self.dialog_api
             .send_reinvite_with_options(&dialog_id, opts)
             .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to send re-INVITE: {}", e)))?;
+            .map_err(|error| {
+                redacted_invite_dispatch_error(InviteDispatchFailure::ReinviteWithOptions, error)
+            })?;
         Ok(())
     }
 
@@ -2178,7 +2219,9 @@ impl DialogAdapter {
         self.dialog_api
             .send_request_in_dialog(&dialog_id, Method::Invite, Some(bytes::Bytes::from(sdp)))
             .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to send re-INVITE: {}", e)))?;
+            .map_err(|error| {
+                redacted_invite_dispatch_error(InviteDispatchFailure::ReinviteInDialog, error)
+            })?;
 
         Ok(())
     }
@@ -2813,19 +2856,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn invite_options_dispatch_error_does_not_relay_lower_source() {
+    fn invite_dispatch_errors_do_not_relay_lower_sources() {
         const SECRET: &str = "lower-dialog-option-secret-canary";
-        let error = redacted_invite_options_dispatch_error(format!(
-            "invalid From sip:{SECRET}@from.invalid; Authorization: Bearer {SECRET}; X-App: {SECRET}"
-        ));
-        let display = error.to_string();
-        let debug = format!("{error:?}");
-        for rendered in [&display, &debug] {
-            assert!(!rendered.contains(SECRET), "source leaked: {rendered}");
-            assert!(!rendered.contains("Authorization"));
-            assert!(!rendered.contains("X-App"));
+        for failure in [
+            InviteDispatchFailure::Initial,
+            InviteDispatchFailure::InitialWithExtraHeaders,
+            InviteDispatchFailure::InitialWithOptions,
+            InviteDispatchFailure::AuthRetry,
+            InviteDispatchFailure::SessionTimerRetry,
+            InviteDispatchFailure::LegacyUpdateReinvite,
+            InviteDispatchFailure::ReinviteWithOptions,
+            InviteDispatchFailure::ReinviteInDialog,
+        ] {
+            let error = redacted_invite_dispatch_error(
+                failure,
+                format!(
+                    "invalid From sip:{SECRET}@from.invalid; target=sip:{SECRET}@target.invalid; Authorization: Bearer {SECRET}; X-App: {SECRET}"
+                ),
+            );
+            let display = error.to_string();
+            let debug = format!("{error:?}");
+            for rendered in [&display, &debug] {
+                assert!(!rendered.contains(SECRET), "source leaked: {rendered}");
+                assert!(!rendered.contains("sip:"));
+                assert!(!rendered.contains("Authorization"));
+                assert!(!rendered.contains("X-App"));
+            }
+            assert!(display.contains("class="));
+            assert!(display.contains(failure.diagnostic()));
         }
-        assert!(display.contains("class=dialog-dispatch"));
+    }
+
+    #[test]
+    fn invite_wrapper_source_has_no_lower_error_relay_templates() {
+        let source = include_str!("dialog_adapter.rs");
+        for forbidden in [
+            ["Failed to make call", ": {}"].concat(),
+            ["Failed to make call with extra headers", ": {}"].concat(),
+            ["Failed to send INVITE with options", ": {}"].concat(),
+            ["resend_invite_with_auth failed for session {}", ": {}"].concat(),
+            [
+                "resend_invite_with_session_timer_override failed for session {}",
+                ": {}",
+            ]
+            .concat(),
+            ["Failed to send re-INVITE", ": {}"].concat(),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "lower error relay template returned: {forbidden}"
+            );
+        }
     }
 
     // ---- NAT-aware Contact rewrite (Sprint 1.A3) -------------------
