@@ -16,6 +16,24 @@ half of G3 (deferred, needs workspace dep additions).
 
 ### Added
 
+#### Fail-closed inbound signaling admission
+
+- `WebRtcServerBuilder::with_inbound_admission_confirmation(timeout)` and
+  `WebRtcAdapter::new_with_inbound_admission_confirmation(...)` opt into a
+  bounded protocol hold: WHIP and new inbound WebSocket offers do not expose
+  an SDP answer until the orchestrator's inbound admission gate commits the
+  exact lifecycle generation.
+- Secure mode requires a complete, active, non-anonymous principal and a
+  principal-bound routing hint. Missing gates, rejected or stale decisions,
+  local teardown, and timeouts erase the provisional route and return one
+  credential-free signaling failure. Secure WebSocket attachment hints are
+  moved into the first inbound lifecycle and cannot be reused on the socket.
+- WHEP remains outbound and bypasses inbound admission confirmation. Direct
+  adapters and servers retain their historical behavior unless secure mode is
+  explicitly enabled.
+- New real WHIP/WS adversarial coverage in
+  `tests/inbound_admission_confirmation.rs`.
+
 #### G1 — Data channel options API + typed wrapper
 
 - `DataChannelOptions` (`src/peer/data_channel.rs`) — typed RFC 8832 §5.1

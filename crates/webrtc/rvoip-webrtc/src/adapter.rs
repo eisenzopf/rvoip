@@ -20,7 +20,9 @@ use rvoip_core::adapter::{
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::error::{Result as RvoipResult, RvoipError};
-use rvoip_core::identity::{AuthenticatedPrincipal, IdentityAssurance, PrincipalOwnershipKey};
+use rvoip_core::identity::{
+    AuthenticatedPrincipal, AuthenticationMethod, IdentityAssurance, PrincipalOwnershipKey,
+};
 use rvoip_core::ids::{ConnectionId, StreamId};
 use rvoip_core::message::{ContentType, Message};
 use rvoip_core::stream::MediaStream;
@@ -45,6 +47,13 @@ const DATA_CHANNEL_SCAN_INTERVAL: Duration = Duration::from_millis(25);
 const DATA_CHANNEL_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 const INBOUND_EVENT_DELIVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const OUTBOUND_EVENT_STAGE_CAPACITY: usize = 64;
+
+/// Upper bound for the optional core admission-confirmation wait.
+///
+/// A bounded timeout keeps a missing admission gate or stalled policy worker
+/// from retaining a provisional peer indefinitely. Deployments normally use
+/// a value at or below their call-setup deadline.
+pub const MAX_INBOUND_ADMISSION_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Background reaper poll interval.
 const REAPER_TICK: Duration = Duration::from_secs(30);
@@ -110,6 +119,11 @@ pub struct Route {
     /// crossed the core publication boundary. Pre-publication peer failures
     /// are cleaned locally and are never emitted as unknown terminal events.
     core_published: Arc<AtomicBool>,
+    /// True once a secure inbound lifecycle has been handed to core. Unlike
+    /// `core_published`, this may be true while policy admission is pending;
+    /// it makes a concurrent local failure visible to core so a queued
+    /// lifecycle cannot later become an orphan.
+    core_handoff_started: Arc<AtomicBool>,
     /// Signaling identity that owns this network-visible route. Keeping the
     /// authorization record on the route makes ownership transport-neutral:
     /// WHIP, WHEP, WS and WSS all consult the same boundary.
@@ -117,12 +131,126 @@ pub struct Route {
     /// Single-use inbound routing context. Cloned `Route` handles share this
     /// slot; terminal route removal drops an untaken value.
     inbound_context: Arc<SyncMutex<Option<InboundConnectionContext>>>,
+    /// Present only for secure inbound routes. The waiter is created before
+    /// the authenticated inbound event can be published.
+    inbound_admission_waiter: Option<Arc<InboundAdmissionWaiter>>,
 }
 
 impl Route {
     fn cancel_tasks(&self) {
+        if let Some(waiter) = &self.inbound_admission_waiter {
+            waiter.cancel();
+        }
         self.cancel.notify_waiters();
         let _ = self.data_cancel.send(true);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InboundAdmissionOutcome {
+    Pending,
+    Accepted,
+    Rejected,
+    Cancelled,
+}
+
+#[derive(Debug)]
+struct InboundAdmissionWaiterState {
+    generation: Option<u64>,
+    accepted: Option<bool>,
+    cancelled: bool,
+}
+
+/// Synchronous adapter-side endpoint for the core admission callback.
+///
+/// The mutex covers only three scalar fields and a nonblocking watch update;
+/// the core event loop never waits on signaling, peer I/O, or an async lock.
+struct InboundAdmissionWaiter {
+    state: StdMutex<InboundAdmissionWaiterState>,
+    updates: watch::Sender<InboundAdmissionOutcome>,
+}
+
+impl InboundAdmissionWaiter {
+    fn new() -> Arc<Self> {
+        let (updates, _) = watch::channel(InboundAdmissionOutcome::Pending);
+        Arc::new(Self {
+            state: StdMutex::new(InboundAdmissionWaiterState {
+                generation: None,
+                accepted: None,
+                cancelled: false,
+            }),
+            updates,
+        })
+    }
+
+    fn resolve(&self, lifecycle_generation: u64, accepted: bool, on_first_accept: impl FnOnce()) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.cancelled {
+            return;
+        }
+        match (state.generation, state.accepted) {
+            (None, None) => {
+                state.generation = Some(lifecycle_generation);
+                state.accepted = Some(accepted);
+                if accepted {
+                    on_first_accept();
+                }
+                self.updates.send_replace(if accepted {
+                    InboundAdmissionOutcome::Accepted
+                } else {
+                    InboundAdmissionOutcome::Rejected
+                });
+            }
+            (Some(generation), Some(previous))
+                if generation == lifecycle_generation && previous == accepted =>
+            {
+                // Exact duplicate: idempotent by contract.
+            }
+            _ => {
+                // A stale generation or contradictory duplicate must never
+                // mutate the outcome of the current route.
+            }
+        }
+    }
+
+    fn cancel(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.cancelled {
+            return;
+        }
+        state.cancelled = true;
+        self.updates
+            .send_replace(InboundAdmissionOutcome::Cancelled);
+    }
+
+    fn is_accepted_and_live(&self) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        !state.cancelled && state.accepted == Some(true)
+    }
+
+    async fn wait(&self, timeout: Duration) -> InboundAdmissionOutcome {
+        let mut updates = self.updates.subscribe();
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let outcome = *updates.borrow_and_update();
+            if outcome != InboundAdmissionOutcome::Pending {
+                return outcome;
+            }
+            match tokio::time::timeout_at(deadline, updates.changed()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => return InboundAdmissionOutcome::Cancelled,
+                Err(_) => return InboundAdmissionOutcome::Pending,
+            }
+        }
     }
 }
 
@@ -253,10 +381,30 @@ pub struct WebRtcAdapter {
     /// [`WebRtcAdapter::set_fingerprint_policy`]; `None` means "use only
     /// the static `WebRtcConfig::pinned_fingerprints` list".
     fingerprint_policy: SyncRwLock<Option<Arc<dyn FingerprintPolicyHook>>>,
+    /// Opt-in fail-closed wait for the orchestrator's durable inbound policy
+    /// decision. `None` preserves the historical direct-adapter behavior.
+    inbound_admission_confirmation_timeout: Option<Duration>,
 }
 
 impl WebRtcAdapter {
     pub fn new(config: WebRtcConfig) -> Arc<Self> {
+        Self::new_inner(config, None)
+    }
+
+    /// Construct an adapter that withholds inbound protocol success until the
+    /// orchestrator confirms durable admission.
+    pub fn new_with_inbound_admission_confirmation(
+        config: WebRtcConfig,
+        timeout: Duration,
+    ) -> Result<Arc<Self>> {
+        Self::validate_inbound_admission_confirmation_timeout(timeout)?;
+        Ok(Self::new_inner(config, Some(timeout)))
+    }
+
+    fn new_inner(
+        config: WebRtcConfig,
+        inbound_admission_confirmation_timeout: Option<Duration>,
+    ) -> Arc<Self> {
         let (events_tx, events_rx) = mpsc::channel(ADAPTER_EVENT_CAP);
         let reaper_cancel = Arc::new(Notify::new());
         let metrics_reaped = Arc::new(AtomicU64::new(0));
@@ -276,6 +424,7 @@ impl WebRtcAdapter {
             metrics_data_dropped: Arc::new(AtomicU64::new(0)),
             live_sessions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             fingerprint_policy: SyncRwLock::new(None),
+            inbound_admission_confirmation_timeout,
         });
 
         // Spawn session reaper (idempotent: TTL=0 disables in-loop work).
@@ -315,6 +464,21 @@ impl WebRtcAdapter {
         );
 
         adapter
+    }
+
+    fn validate_inbound_admission_confirmation_timeout(timeout: Duration) -> Result<()> {
+        if timeout.is_zero() || timeout > MAX_INBOUND_ADMISSION_CONFIRMATION_TIMEOUT {
+            return Err(WebRtcError::InvalidArgument(
+                "inbound admission confirmation timeout must be nonzero and at most 30 seconds"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Configured secure inbound-admission timeout, or `None` in legacy mode.
+    pub fn inbound_admission_confirmation_timeout(&self) -> Option<Duration> {
+        self.inbound_admission_confirmation_timeout
     }
 
     fn spawn_quality_emitter(
@@ -1401,6 +1565,7 @@ impl WebRtcAdapter {
                 route.cancel_tasks();
                 Self::release_session_slot_from(&live_sessions_fail);
                 if outbound_stages_fail.contains_key(&conn_fail)
+                    || route.core_handoff_started.load(Ordering::Acquire)
                     || route.core_published.load(Ordering::Acquire)
                 {
                     Self::deliver_or_stage_terminal_event(
@@ -1544,12 +1709,75 @@ impl WebRtcAdapter {
         })
     }
 
+    fn validate_secure_inbound_request(
+        &self,
+        authorization: Option<&RouteAuthorization>,
+        routing_hint: Option<&InboundRoutingHint>,
+    ) -> Result<()> {
+        if self.inbound_admission_confirmation_timeout.is_none() {
+            return Ok(());
+        }
+        let valid = authorization
+            .and_then(|authorization| authorization.principal.as_ref())
+            .is_some_and(|principal| {
+                !principal.subject.trim().is_empty()
+                    && principal.subject != "anonymous"
+                    && principal
+                        .tenant
+                        .as_deref()
+                        .is_some_and(|tenant| !tenant.trim().is_empty())
+                    && principal
+                        .issuer
+                        .as_deref()
+                        .is_some_and(|issuer| !issuer.trim().is_empty())
+                    && principal.method != AuthenticationMethod::Anonymous
+                    && !matches!(principal.assurance, IdentityAssurance::Anonymous)
+                    && !principal.is_expired()
+                    && routing_hint.is_some()
+            });
+        if !valid {
+            return Err(WebRtcError::InboundAdmissionRejected);
+        }
+        Ok(())
+    }
+
+    async fn remove_unconfirmed_inbound_route(
+        &self,
+        connection_id: &ConnectionId,
+        notify_core: bool,
+    ) {
+        let Some((_, route)) = self.routes.remove(connection_id) else {
+            return;
+        };
+        route.cancel_tasks();
+        self.release_session_slot();
+        if notify_core && route.core_handoff_started.load(Ordering::Acquire) {
+            Self::deliver_terminal_event(
+                &self.lifecycle,
+                &self.events_tx,
+                AdapterEvent::Failed {
+                    connection_id: connection_id.clone(),
+                    detail: "inbound signaling admission did not complete".into(),
+                },
+                "inbound-admission-timeout",
+            )
+            .await;
+        }
+        if tokio::time::timeout(DATA_CHANNEL_OPERATION_TIMEOUT, route.peer.close())
+            .await
+            .is_err()
+        {
+            warn!(connection_id = %connection_id, "WebRTC provisional peer close timed out");
+        }
+    }
+
     async fn apply_remote_offer_inner(
         &self,
         offer_sdp: &str,
         authorization: Option<RouteAuthorization>,
         routing_hint: Option<InboundRoutingHint>,
     ) -> Result<ConnectionId> {
+        self.validate_secure_inbound_request(authorization.as_ref(), routing_hint.as_ref())?;
         let slot = self.reserve_session_slot()?;
         self.metrics_inbound.fetch_add(1, Ordering::Relaxed);
         let conn_id = ConnectionId::new();
@@ -1576,6 +1804,9 @@ impl WebRtcAdapter {
             }
             None => None,
         };
+        let inbound_admission_waiter = self
+            .inbound_admission_confirmation_timeout
+            .map(|_| InboundAdmissionWaiter::new());
         let route = Route {
             peer: Arc::clone(&peer),
             streams: Arc::new(DashMap::new()),
@@ -1592,8 +1823,10 @@ impl WebRtcAdapter {
             cancel: Arc::clone(&cancel),
             failed_at: Arc::new(SyncMutex::new(None)),
             core_published: Arc::new(AtomicBool::new(false)),
+            core_handoff_started: Arc::new(AtomicBool::new(false)),
             authorization: authorization.clone(),
             inbound_context: Arc::new(SyncMutex::new(inbound_context)),
+            inbound_admission_waiter: inbound_admission_waiter.clone(),
         };
 
         // Don't seed media stream here — the track-attacher (spawned in
@@ -1609,6 +1842,12 @@ impl WebRtcAdapter {
         let connection =
             self.build_connection(conn_id.clone(), Direction::Inbound, negotiated, handle);
         let participant_id = connection.participant_id.clone();
+        if inbound_admission_waiter.is_some() {
+            let Some(route) = self.routes.get(&conn_id) else {
+                return Err(WebRtcError::InboundAdmissionRejected);
+            };
+            route.core_handoff_started.store(true, Ordering::Release);
+        }
         let delivered = if let Some(principal) = authorization.and_then(|value| value.principal) {
             self.send_inbound_event(OrchestratorAdapterEvent::AuthenticatedInboundConnection {
                 connection,
@@ -1623,28 +1862,61 @@ impl WebRtcAdapter {
             .await
         };
         if !delivered {
-            if let Some((_, route)) = self.routes.remove(&conn_id) {
-                route.cancel_tasks();
-                let _ = route.peer.close().await;
-                self.release_session_slot();
-            }
-            return Err(WebRtcError::Signaling(
-                "authenticated inbound event delivery failed".into(),
-            ));
+            self.remove_unconfirmed_inbound_route(&conn_id, true).await;
+            return Err(WebRtcError::InboundAdmissionRejected);
         }
 
-        let Some(route) = self.routes.get(&conn_id) else {
-            return Err(WebRtcError::Signaling(
-                "WebRTC route ended during inbound publication".into(),
-            ));
-        };
-        route.core_published.store(true, Ordering::Release);
+        if let (Some(timeout), Some(waiter)) = (
+            self.inbound_admission_confirmation_timeout,
+            inbound_admission_waiter,
+        ) {
+            match waiter.wait(timeout).await {
+                InboundAdmissionOutcome::Accepted => {
+                    let ready = self.routes.get(&conn_id).is_some_and(|route| {
+                        route
+                            .inbound_admission_waiter
+                            .as_ref()
+                            .is_some_and(|registered| Arc::ptr_eq(registered, &waiter))
+                            && route.core_published.load(Ordering::Acquire)
+                            && waiter.is_accepted_and_live()
+                    });
+                    if !ready {
+                        self.remove_unconfirmed_inbound_route(&conn_id, true).await;
+                        return Err(WebRtcError::InboundAdmissionRejected);
+                    }
+                }
+                InboundAdmissionOutcome::Pending => {
+                    waiter.cancel();
+                    self.remove_unconfirmed_inbound_route(&conn_id, true).await;
+                    return Err(WebRtcError::InboundAdmissionRejected);
+                }
+                InboundAdmissionOutcome::Rejected | InboundAdmissionOutcome::Cancelled => {
+                    self.remove_unconfirmed_inbound_route(&conn_id, false).await;
+                    return Err(WebRtcError::InboundAdmissionRejected);
+                }
+            }
+        } else {
+            let Some(route) = self.routes.get(&conn_id) else {
+                return Err(WebRtcError::Signaling(
+                    "WebRTC route ended during inbound publication".into(),
+                ));
+            };
+            route.core_published.store(true, Ordering::Release);
+        }
 
         Ok(conn_id)
     }
 
     pub fn local_sdp(&self, conn: &ConnectionId) -> Result<String> {
-        self.route(conn)?
+        let route = self.route(conn)?;
+        if route
+            .inbound_admission_waiter
+            .as_ref()
+            .is_some_and(|waiter| !waiter.is_accepted_and_live())
+        {
+            return Err(WebRtcError::InboundAdmissionRejected);
+        }
+        route
             .local_sdp
             .clone()
             .ok_or_else(|| WebRtcError::Sdp("no local SDP".into()))
@@ -1832,6 +2104,27 @@ impl ConnectionAdapter for WebRtcAdapter {
         }
     }
 
+    fn supports_inbound_admission_confirmation(&self) -> bool {
+        self.inbound_admission_confirmation_timeout.is_some()
+    }
+
+    fn notify_inbound_admission_outcome(
+        &self,
+        connection_id: &ConnectionId,
+        lifecycle_generation: u64,
+        accepted: bool,
+    ) {
+        let Some(route) = self.routes.get(connection_id) else {
+            return;
+        };
+        let Some(waiter) = route.inbound_admission_waiter.as_ref() else {
+            return;
+        };
+        waiter.resolve(lifecycle_generation, accepted, || {
+            route.core_published.store(true, Ordering::Release);
+        });
+    }
+
     fn install_lifecycle_sink(&self, sink: Arc<dyn AdapterLifecycleSink>) -> RvoipResult<()> {
         self.lifecycle
             .install(sink)
@@ -1918,8 +2211,10 @@ impl ConnectionAdapter for WebRtcAdapter {
             cancel: Arc::clone(&cancel),
             failed_at: Arc::new(SyncMutex::new(None)),
             core_published: Arc::new(AtomicBool::new(false)),
+            core_handoff_started: Arc::new(AtomicBool::new(false)),
             authorization: None,
             inbound_context: Arc::new(SyncMutex::new(None)),
+            inbound_admission_waiter: None,
         };
 
         // Same rationale as `apply_remote_offer`: lazy seeding in `accept()`.
@@ -2464,6 +2759,97 @@ mod inbound_hardening_tests {
             opened_at: Utc::now(),
             closed_at: None,
         }
+    }
+
+    #[tokio::test]
+    async fn admission_waiter_is_generation_aware_idempotent_and_fail_closed() {
+        let waiter = InboundAdmissionWaiter::new();
+        waiter.resolve(7, false, || panic!("reject callback cannot accept"));
+        waiter.resolve(7, false, || panic!("duplicate reject cannot accept"));
+        waiter.resolve(7, true, || {
+            panic!("contradictory duplicate must be ignored")
+        });
+        waiter.resolve(8, true, || panic!("stale generation must be ignored"));
+        assert_eq!(
+            waiter.wait(Duration::from_millis(10)).await,
+            InboundAdmissionOutcome::Rejected
+        );
+
+        let accepted = InboundAdmissionWaiter::new();
+        let published = AtomicBool::new(false);
+        accepted.resolve(3, true, || published.store(true, Ordering::Release));
+        assert!(published.load(Ordering::Acquire));
+        accepted.cancel();
+        assert_eq!(
+            accepted.wait(Duration::from_millis(10)).await,
+            InboundAdmissionOutcome::Cancelled,
+            "local teardown overrides an unread accepted update"
+        );
+    }
+
+    #[tokio::test]
+    async fn secure_admission_is_explicit_and_timeout_bounded() {
+        let legacy = WebRtcAdapter::new(WebRtcConfig::loopback());
+        assert!(!legacy.supports_inbound_admission_confirmation());
+        assert_eq!(legacy.inbound_admission_confirmation_timeout(), None);
+
+        let secure = WebRtcAdapter::new_with_inbound_admission_confirmation(
+            WebRtcConfig::loopback(),
+            Duration::from_secs(2),
+        )
+        .expect("valid secure adapter");
+        assert!(secure.supports_inbound_admission_confirmation());
+        assert_eq!(
+            secure.inbound_admission_confirmation_timeout(),
+            Some(Duration::from_secs(2))
+        );
+
+        assert!(matches!(
+            WebRtcAdapter::new_with_inbound_admission_confirmation(
+                WebRtcConfig::loopback(),
+                Duration::ZERO
+            ),
+            Err(WebRtcError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            WebRtcAdapter::new_with_inbound_admission_confirmation(
+                WebRtcConfig::loopback(),
+                MAX_INBOUND_ADMISSION_CONFIRMATION_TIMEOUT + Duration::from_millis(1)
+            ),
+            Err(WebRtcError::InvalidArgument(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn secure_request_rejects_anonymous_identity_only_tenantless_and_missing_hint() {
+        let secure = WebRtcAdapter::new_with_inbound_admission_confirmation(
+            WebRtcConfig::loopback(),
+            Duration::from_secs(1),
+        )
+        .expect("secure adapter");
+        let hint = InboundRoutingHint::new("attachment").unwrap();
+        assert!(matches!(
+            secure.validate_secure_inbound_request(None, Some(&hint)),
+            Err(WebRtcError::InboundAdmissionRejected)
+        ));
+        let identity_only = RouteAuthorization::legacy_subject("legacy-user");
+        assert!(matches!(
+            secure.validate_secure_inbound_request(Some(&identity_only), Some(&hint)),
+            Err(WebRtcError::InboundAdmissionRejected)
+        ));
+        let tenantless = RouteAuthorization::principal(principal(None, None));
+        assert!(matches!(
+            secure.validate_secure_inbound_request(Some(&tenantless), Some(&hint)),
+            Err(WebRtcError::InboundAdmissionRejected)
+        ));
+        let complete = RouteAuthorization::principal(principal(Some("tenant-a"), None));
+        assert!(matches!(
+            secure.validate_secure_inbound_request(Some(&complete), None),
+            Err(WebRtcError::InboundAdmissionRejected)
+        ));
+        secure
+            .validate_secure_inbound_request(Some(&complete), Some(&hint))
+            .expect("complete principal and hint");
     }
 
     #[test]

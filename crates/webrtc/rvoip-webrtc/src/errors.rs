@@ -52,6 +52,11 @@ pub enum WebRtcError {
     #[error("invalid state: {0}")]
     InvalidState(&'static str),
 
+    /// Fixed, credential-free failure returned by secure inbound signaling
+    /// for every missing, rejected, expired, or raced admission outcome.
+    #[error("inbound signaling was not admitted")]
+    InboundAdmissionRejected,
+
     #[error("DTLS fingerprint not in pinned list")]
     FingerprintNotPinned,
 }

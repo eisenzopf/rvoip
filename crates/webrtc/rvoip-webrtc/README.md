@@ -58,6 +58,37 @@ orchestrator.register(server.adapter() as Arc<dyn ConnectionAdapter>)?;
 // orchestrator.route_inbound_connection(..., InboundAction::Accept { ... })
 ```
 
+For attachment-token or other durable routing policies, enable fail-closed
+protocol admission before listeners start and install the orchestrator's
+single-consumer gate before registering the adapter:
+
+```rust
+use std::time::Duration;
+
+let orchestrator = Orchestrator::new(Config::default());
+let mut admissions = orchestrator.install_inbound_admission_gate(
+    256,
+    Duration::from_secs(5),
+)?;
+let server = WebRtcServerBuilder::new(WebRtcConfig::default())
+    .with_inbound_admission_confirmation(Duration::from_secs(5))
+    .with_whip_auth(my_auth_hook.clone())
+    .with_ws_auth(my_auth_hook)
+    .with_whip("0.0.0.0:8080")
+    .with_ws("0.0.0.0:8081")
+    .build()
+    .await?;
+orchestrator.register(server.adapter() as Arc<dyn ConnectionAdapter>)?;
+
+// A bounded policy task consumes `admissions` and calls `accept()` only
+// after durable authorization; every other path rejects or drops the ticket.
+```
+
+Secure mode requires authentication hooks to return a complete active
+principal (issuer, tenant, subject, and non-anonymous assurance) plus an
+inbound routing hint. WHIP uses its path tag as the hint; WebSocket hooks set
+`AuthContext::session_hint`. WHEP is outbound and is not held by this gate.
+
 Quick start:
 
 ```bash
@@ -132,7 +163,7 @@ Capability tests and non-claim gap tests (trickle ICE, simulcast, TURN config, W
 
 | Type | Methods |
 |------|---------|
-| `WebRtcServerBuilder` | `new`, `with_whip`, `with_ws`, `build` |
+| `WebRtcServerBuilder` | `new`, `with_whip`, `with_ws`, `with_inbound_admission_confirmation`, `build` |
 | `WebRtcServer` | `adapter`, `whip_addr`, `ws_addr`, `shutdown` |
 
 ## Limitations

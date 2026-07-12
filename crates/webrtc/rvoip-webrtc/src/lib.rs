@@ -32,7 +32,10 @@ pub mod server;
 #[cfg(feature = "client")]
 pub mod client;
 
-pub use adapter::{WebRtcAdapter, WebRtcMetrics, WebRtcTransportHandle, ADAPTER_EVENT_CAP};
+pub use adapter::{
+    WebRtcAdapter, WebRtcMetrics, WebRtcTransportHandle, ADAPTER_EVENT_CAP,
+    MAX_INBOUND_ADMISSION_CONFIRMATION_TIMEOUT,
+};
 pub use config::{IceServerConfig, OpusSettings, WebRtcConfig};
 pub use errors::{Result, WebRtcError};
 pub use media::WebRtcStatsSnapshot;

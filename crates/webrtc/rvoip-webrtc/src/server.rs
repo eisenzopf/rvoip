@@ -31,6 +31,7 @@ use crate::errors::{Result, WebRtcError};
 /// Builder for [`WebRtcServer`].
 pub struct WebRtcServerBuilder {
     config: WebRtcConfig,
+    inbound_admission_confirmation_timeout: Option<Duration>,
     #[cfg(feature = "signaling-whip")]
     whip_bind: Option<String>,
     #[cfg(all(feature = "signaling-whip", feature = "tls-rustls"))]
@@ -51,6 +52,7 @@ impl WebRtcServerBuilder {
     pub fn new(config: WebRtcConfig) -> Self {
         Self {
             config,
+            inbound_admission_confirmation_timeout: None,
             #[cfg(feature = "signaling-whip")]
             whip_bind: None,
             #[cfg(all(feature = "signaling-whip", feature = "tls-rustls"))]
@@ -64,6 +66,18 @@ impl WebRtcServerBuilder {
             #[cfg(feature = "signaling-ws")]
             ws_auth: None,
         }
+    }
+
+    /// Opt in to fail-closed inbound signaling admission.
+    ///
+    /// The adapter is configured before any listener is bound or spawned.
+    /// WHIP and new inbound WebSocket offers then withhold their protocol
+    /// success response until an orchestrator admission gate confirms the
+    /// exact connection lifecycle. A zero timeout, or one above 30 seconds,
+    /// makes [`Self::build`] fail before listeners start.
+    pub fn with_inbound_admission_confirmation(mut self, timeout: Duration) -> Self {
+        self.inbound_admission_confirmation_timeout = Some(timeout);
+        self
     }
 
     /// Register a [`WhipAuthHook`](crate::signaling::auth::WhipAuthHook) for the
@@ -112,7 +126,12 @@ impl WebRtcServerBuilder {
 
     /// Spawn listeners and return a running [`WebRtcServer`].
     pub async fn build(self) -> Result<WebRtcServer> {
-        let adapter = WebRtcAdapter::new(self.config);
+        let adapter = match self.inbound_admission_confirmation_timeout {
+            Some(timeout) => {
+                WebRtcAdapter::new_with_inbound_admission_confirmation(self.config, timeout)?
+            }
+            None => WebRtcAdapter::new(self.config),
+        };
         let mut tasks = Vec::new();
         let shutdown = Arc::new(Notify::new());
 

@@ -417,6 +417,9 @@ fn route_error_response(state: &WhipState, error: WebRtcError) -> Response {
         WebRtcError::ConnectionNotFound => StatusCode::NOT_FOUND.into_response(),
         WebRtcError::Forbidden(detail) => (StatusCode::FORBIDDEN, detail).into_response(),
         WebRtcError::Unauthorized(detail) => (StatusCode::UNAUTHORIZED, detail).into_response(),
+        WebRtcError::InboundAdmissionRejected => {
+            (StatusCode::FORBIDDEN, "inbound signaling was not admitted").into_response()
+        }
         other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()).into_response(),
     }
 }
@@ -680,6 +683,26 @@ async fn whep_post(
                     .end(conn_id, rvoip_core::adapter::EndReason::Normal)
                     .await;
                 return route_error_response(&state, error);
+            }
+            // WHEP creates an outbound adapter route directly rather than
+            // through `Orchestrator::originate_connection`. Commit its
+            // dormant lifecycle stage before exposing the Location id, just
+            // as the orchestrator would after durable connection ownership.
+            if state
+                .adapter
+                .activate_outbound(conn_id.clone())
+                .await
+                .is_err()
+            {
+                let _ = state
+                    .adapter
+                    .end(conn_id, rvoip_core::adapter::EndReason::Normal)
+                    .await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "outbound signaling activation failed",
+                )
+                    .into_response();
             }
             match state.adapter.local_sdp(&conn_id) {
                 Ok(sdp) => {
