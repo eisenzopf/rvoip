@@ -2,7 +2,7 @@ use rvoip_core_traits::error::RvoipError;
 
 use crate::{
     LocError, MoqCatalogSubscriberConfigError, MoqCatalogSubscriberFailure, MoqCompatibilityError,
-    MoqGroupIdAllocationError, MoqNamespaceError, MsfCatalogError,
+    MoqGroupIdAllocationError, MoqNamespaceError, MoqSanitizedEventsConfigError, MsfCatalogError,
 };
 
 /// Bounded, non-sensitive relay failure categories.
@@ -58,6 +58,7 @@ impl std::fmt::Display for MoqRelayFailure {
 /// Wire-engine errors are rendered into the `Wire` variant so `moq-rs` types
 /// never become part of rvoip-moq's public API.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum MoqError {
     #[error("invalid MOQT publisher configuration: {0}")]
     InvalidConfig(&'static str),
@@ -77,6 +78,20 @@ pub enum MoqError {
     CatalogModel(#[from] MsfCatalogError),
     #[error(transparent)]
     GroupIdAllocation(#[from] MoqGroupIdAllocationError),
+    #[error(transparent)]
+    SanitizedEventsConfig(#[from] MoqSanitizedEventsConfigError),
+    #[error("sanitized MOQT events are disabled for this publisher")]
+    SanitizedEventsDisabled,
+    #[error("sanitized MOQT event queue is full")]
+    SanitizedEventQueueFull,
+    #[error("sanitized MOQT event sequence {actual} exceeds JSON-safe maximum {maximum}")]
+    SanitizedEventSequenceOutOfRange { maximum: u64, actual: u64 },
+    #[error("sanitized MOQT event sequence must increase monotonically")]
+    SanitizedEventSequenceNotMonotonic,
+    #[error("sanitized MOQT event-timeline encoding failed: {0}")]
+    SanitizedEventEncoding(serde_json::Error),
+    #[error("sanitized MOQT event object is {actual} bytes; maximum is {maximum}")]
+    SanitizedEventPayloadTooLarge { maximum: usize, actual: usize },
     #[error("MOQT tracks are closed")]
     Closed,
     #[error("MOQT publication failed during shutdown")]

@@ -6,14 +6,15 @@
 //! without importing either transport crate.
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::mpsc;
 
 use crate::capability::CodecInfo;
-use crate::error::Result;
+use crate::error::{Result, RvoipError};
 use crate::stream::MediaFrame;
 
 /// Broadcast protocol family exposed by a publisher.
@@ -37,6 +38,110 @@ pub struct BroadcastDescriptor {
     pub audio_track: String,
     pub catalog_track: Option<String>,
     pub protocol_version: String,
+}
+
+/// Largest integer represented exactly by interoperable JSON number parsers.
+pub const MAX_BROADCAST_EVENT_JSON_INTEGER: u64 = (1_u64 << 53) - 1;
+
+/// Fixed, transport-neutral lifecycle events allowed on sanitized broadcasts.
+///
+/// There is deliberately no custom/string variant, so call identifiers,
+/// provider metadata, SIP headers, and application context cannot enter this
+/// contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum BroadcastSanitizedEventKind {
+    CallConnecting,
+    CallConnected,
+    CallHeld,
+    CallResumed,
+    TransferStarted,
+    TransferCompleted,
+    TransferFailed,
+    CallEnding,
+    CallEnded,
+}
+
+/// One fixed-model sanitized event indexed by Unix wallclock milliseconds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BroadcastSanitizedEvent {
+    kind: BroadcastSanitizedEventKind,
+    occurred_at_unix_millis: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BroadcastSanitizedEventWire {
+    kind: BroadcastSanitizedEventKind,
+    occurred_at_unix_millis: u64,
+}
+
+impl<'de> Deserialize<'de> for BroadcastSanitizedEvent {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = BroadcastSanitizedEventWire::deserialize(deserializer)?;
+        Self::at_unix_millis(wire.kind, wire.occurred_at_unix_millis)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl BroadcastSanitizedEvent {
+    /// Construct an event only when its wallclock value is exactly safe in
+    /// JSON implementations that represent numbers as IEEE-754 doubles.
+    pub fn at_unix_millis(
+        kind: BroadcastSanitizedEventKind,
+        occurred_at_unix_millis: u64,
+    ) -> std::result::Result<Self, BroadcastSanitizedEventError> {
+        if occurred_at_unix_millis > MAX_BROADCAST_EVENT_JSON_INTEGER {
+            return Err(BroadcastSanitizedEventError::TimestampOutOfRange {
+                maximum: MAX_BROADCAST_EVENT_JSON_INTEGER,
+                actual: occurred_at_unix_millis,
+            });
+        }
+        Ok(Self {
+            kind,
+            occurred_at_unix_millis,
+        })
+    }
+
+    pub fn now(
+        kind: BroadcastSanitizedEventKind,
+    ) -> std::result::Result<Self, BroadcastSanitizedEventError> {
+        let occurred_at_unix_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        Self::at_unix_millis(kind, occurred_at_unix_millis)
+    }
+
+    pub const fn kind(&self) -> BroadcastSanitizedEventKind {
+        self.kind
+    }
+
+    pub const fn occurred_at_unix_millis(&self) -> u64 {
+        self.occurred_at_unix_millis
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum BroadcastSanitizedEventError {
+    #[error("sanitized broadcast event timestamp {actual} exceeds JSON-safe maximum {maximum}")]
+    TimestampOutOfRange { maximum: u64, actual: u64 },
+}
+
+/// Bounded fixed-model event capability exposed by a publisher.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BroadcastSanitizedEventCapability {
+    pub queue_capacity: u32,
+    pub history_capacity: u32,
 }
 
 /// Transport-specific resource addressed by a broadcast endpoint.
@@ -313,6 +418,19 @@ pub trait BroadcastPublisher: Send + Sync {
     fn codec(&self) -> CodecInfo;
     fn frames_out(&self) -> mpsc::Sender<MediaFrame>;
 
+    /// Optional fixed-model event capability. Legacy and media-only
+    /// publishers return `None`.
+    fn sanitized_event_capability(&self) -> Option<BroadcastSanitizedEventCapability> {
+        None
+    }
+
+    /// Nonblocking admission of one fixed-model sanitized event.
+    fn try_publish_sanitized_event(&self, _event: BroadcastSanitizedEvent) -> Result<()> {
+        Err(RvoipError::NotImplemented(
+            "sanitized broadcast event publication",
+        ))
+    }
+
     /// Subscriber-facing endpoint. Defaults to the legacy descriptor fields.
     fn endpoint(&self) -> BroadcastEndpoint {
         self.descriptor().endpoint()
@@ -420,6 +538,17 @@ mod tests {
         assert_eq!(publisher.protocol().family, BroadcastProtocolFamily::Uctp);
         assert_eq!(publisher.lifecycle().state, BroadcastLifecycleState::Ready);
         assert_eq!(publisher.health().status, BroadcastHealthStatus::Healthy);
+        assert_eq!(publisher.sanitized_event_capability(), None);
+        assert!(matches!(
+            publisher.try_publish_sanitized_event(
+                BroadcastSanitizedEvent::at_unix_millis(
+                    BroadcastSanitizedEventKind::CallConnected,
+                    1_000,
+                )
+                .unwrap(),
+            ),
+            Err(RvoipError::NotImplemented(_))
+        ));
 
         let drained = Arc::clone(&publisher)
             .drain(BroadcastDrainRequest {
@@ -450,5 +579,47 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn sanitized_event_model_is_fixed_and_json_safe() {
+        let event = BroadcastSanitizedEvent::at_unix_millis(
+            BroadcastSanitizedEventKind::CallConnected,
+            MAX_BROADCAST_EVENT_JSON_INTEGER,
+        )
+        .unwrap();
+        assert_eq!(
+            event.occurred_at_unix_millis(),
+            MAX_BROADCAST_EVENT_JSON_INTEGER
+        );
+        assert!(matches!(
+            BroadcastSanitizedEvent::at_unix_millis(
+                BroadcastSanitizedEventKind::CallConnected,
+                MAX_BROADCAST_EVENT_JSON_INTEGER + 1,
+            ),
+            Err(BroadcastSanitizedEventError::TimestampOutOfRange { .. })
+        ));
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "kind": "call-connected",
+                "occurredAtUnixMillis": MAX_BROADCAST_EVENT_JSON_INTEGER,
+            })
+        );
+        assert!(
+            serde_json::from_value::<BroadcastSanitizedEvent>(serde_json::json!({
+                "kind": "call-connected",
+                "occurredAtUnixMillis": MAX_BROADCAST_EVENT_JSON_INTEGER + 1,
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<BroadcastSanitizedEvent>(serde_json::json!({
+                "kind": "call-connected",
+                "occurredAtUnixMillis": 1_000,
+                "metadata": "forbidden",
+            }))
+            .is_err()
+        );
     }
 }

@@ -11,6 +11,7 @@ mod catalog_subscriber_wire;
 mod catalog_subscription;
 mod compatibility;
 mod error;
+mod events;
 mod group;
 mod loc;
 mod namespace;
@@ -46,6 +47,11 @@ pub use compatibility::{
     TARGET_MOQT_DRAFT,
 };
 pub use error::{MoqError, MoqRelayFailure};
+pub use events::{
+    MoqSanitizedEventsConfig, MoqSanitizedEventsConfigError, MAX_SANITIZED_EVENT_HISTORY_EVENTS,
+    MAX_SANITIZED_EVENT_PAYLOAD_BYTES, MAX_SANITIZED_EVENT_QUEUE_EVENTS,
+    SANITIZED_EVENTS_EVENT_TYPE,
+};
 pub use group::{InMemoryMoqGroupIdAllocator, MoqGroupIdAllocationError, MoqGroupIdAllocator};
 pub use loc::{
     validate_opus_20ms_mono, LocAudioObject, LocError, LocOpusPacketizer, LocPacketizedFrame,
@@ -75,6 +81,12 @@ pub use replay::{
     BoundedMemoryMoqReplayStore, MoqReplayError, MoqSessionId, MoqTokenBinding,
     MoqTokenReplayStore, MAX_MOQ_SESSION_ID_BYTES,
 };
+pub use rvoip_core_traits::broadcast::{
+    BroadcastSanitizedEvent as MoqSanitizedEvent,
+    BroadcastSanitizedEventError as MoqSanitizedEventError,
+    BroadcastSanitizedEventKind as MoqSanitizedEventKind,
+    MAX_BROADCAST_EVENT_JSON_INTEGER as MAX_SANITIZED_EVENT_JSON_INTEGER,
+};
 pub use session_lease::{
     BoundedMemoryMoqSessionLeaseStore, MoqSessionLease, MoqSessionLeaseBinding,
     MoqSessionLeaseClose, MoqSessionLeaseError, MoqSessionLeaseLimits, MoqSessionLeaseSnapshot,
@@ -86,3 +98,6 @@ pub const AUDIO_TRACK: &str = "audio/main";
 
 /// MSF catalog track for the canonical audio publication.
 pub const CATALOG_TRACK: &str = "catalog";
+
+/// Optional sanitized MSF event-timeline track.
+pub const EVENTS_TRACK: &str = "events";

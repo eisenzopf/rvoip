@@ -701,6 +701,18 @@ mod tests {
             .unwrap()
     }
 
+    fn live_with_sanitized_events(generated_at: i64) -> Vec<u8> {
+        MsfCatalog::opus_audio_with_sanitized_events(
+            &namespace(),
+            24_000,
+            Some("en".into()),
+            generated_at,
+        )
+        .unwrap()
+        .to_json_bytes()
+        .unwrap()
+    }
+
     fn completed(generated_at: i64) -> Vec<u8> {
         MsfCatalog::permanently_completed(generated_at)
             .to_json_bytes()
@@ -869,6 +881,22 @@ mod tests {
         assert_eq!(
             second.catalog.state(),
             MsfCatalogState::PermanentlyCompleted
+        );
+    }
+
+    #[test]
+    fn validator_accepts_the_explicit_sanitized_event_catalog_profile() {
+        let live = live_with_sanitized_events(10);
+        let mut validator = MoqCatalogStateMachine::new(&config()).unwrap();
+        let MoqCatalogApplyOutcome::Update(update) = validator.apply(envelope(&live, 4)).unwrap()
+        else {
+            panic!("sanitized event catalog must update state")
+        };
+        assert_eq!(update.catalog.tracks().len(), 2);
+        assert_eq!(update.catalog.tracks()[1].name(), crate::EVENTS_TRACK);
+        assert_eq!(
+            update.catalog.tracks()[1].event_type(),
+            Some(crate::SANITIZED_EVENTS_EVENT_TYPE)
         );
     }
 

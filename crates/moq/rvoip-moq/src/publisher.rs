@@ -13,7 +13,7 @@ use rvoip_core_traits::broadcast::{
     BroadcastEndpoint, BroadcastHealthDescriptor, BroadcastHealthIssue, BroadcastHealthStatus,
     BroadcastLifecycleDescriptor, BroadcastLifecycleState, BroadcastProtocolDescriptor,
     BroadcastProtocolFamily, BroadcastPublisher, BroadcastRelayHop, BroadcastRelayRole,
-    BroadcastResource, BroadcastSubstrate, BroadcastTransport,
+    BroadcastResource, BroadcastSanitizedEventCapability, BroadcastSubstrate, BroadcastTransport,
 };
 use rvoip_core_traits::capability::CodecInfo;
 use rvoip_core_traits::error::Result as RvoipResult;
@@ -23,14 +23,16 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use crate::events::{sequence_for_group_id, MoqSanitizedEventTimeline};
 use crate::wire::{
     self, WirePublication, WirePublicationHandle, WireRelayClient, WireRelayPublication,
     WireRelayTermination, WireTlsMode,
 };
 use crate::{
     InMemoryMoqGroupIdAllocator, LocError, LocOpusPacketizer, MoqCompatibility, MoqError,
-    MoqGroupIdAllocator, MoqNamespace, MoqProtocolVersion, MoqRelayFailure, MsfCatalog,
-    AUDIO_TRACK, CATALOG_TRACK, LOC_DRAFT, MOQT_DRAFT, MSF_DRAFT,
+    MoqGroupIdAllocator, MoqNamespace, MoqProtocolVersion, MoqRelayFailure, MoqSanitizedEvent,
+    MoqSanitizedEventsConfig, MsfCatalog, AUDIO_TRACK, CATALOG_TRACK, EVENTS_TRACK, LOC_DRAFT,
+    MOQT_DRAFT, MSF_DRAFT,
 };
 
 #[derive(Clone, Debug)]
@@ -114,6 +116,9 @@ pub struct MoqBroadcastPublisher {
     config: MoqPublisherConfig,
     namespace: MoqNamespace,
     frame_tx: mpsc::Sender<MediaFrame>,
+    event_tx: Option<mpsc::Sender<MoqSanitizedEvent>>,
+    events_config: Option<MoqSanitizedEventsConfig>,
+    event_admission_open: Mutex<bool>,
     wire: Arc<WirePublication>,
     frame_graceful_stop: CancellationToken,
     frame_abort: CancellationToken,
@@ -129,14 +134,31 @@ enum FramePumpExit {
     Aborted,
 }
 
+enum PublisherInput {
+    Frame(MediaFrame),
+    Event(MoqSanitizedEvent),
+    EventsClosed,
+}
+
+fn default_group_id_allocator() -> Arc<dyn MoqGroupIdAllocator> {
+    static DEFAULT_GROUP_IDS: OnceLock<Arc<InMemoryMoqGroupIdAllocator>> = OnceLock::new();
+    let allocator =
+        Arc::clone(DEFAULT_GROUP_IDS.get_or_init(|| Arc::new(InMemoryMoqGroupIdAllocator::new())));
+    allocator
+}
+
 impl MoqBroadcastPublisher {
     pub fn new(config: MoqPublisherConfig) -> Result<Arc<Self>, MoqError> {
-        static DEFAULT_GROUP_IDS: OnceLock<Arc<InMemoryMoqGroupIdAllocator>> = OnceLock::new();
-        let allocator = Arc::clone(
-            DEFAULT_GROUP_IDS.get_or_init(|| Arc::new(InMemoryMoqGroupIdAllocator::new())),
-        );
-        let allocator: Arc<dyn MoqGroupIdAllocator> = allocator;
-        Self::new_with_group_id_allocator(config, allocator)
+        Self::new_profile(config, default_group_id_allocator(), None)
+    }
+
+    /// Construct a publisher whose sanitized event-timeline track is
+    /// explicitly enabled with bounded queue and history limits.
+    pub fn new_with_sanitized_events(
+        config: MoqPublisherConfig,
+        events: MoqSanitizedEventsConfig,
+    ) -> Result<Arc<Self>, MoqError> {
+        Self::new_profile(config, default_group_id_allocator(), Some(events))
     }
 
     /// Construct a publisher with an application-owned Group ID allocator.
@@ -147,24 +169,65 @@ impl MoqBroadcastPublisher {
         config: MoqPublisherConfig,
         group_id_allocator: Arc<dyn MoqGroupIdAllocator>,
     ) -> Result<Arc<Self>, MoqError> {
+        Self::new_profile(config, group_id_allocator, None)
+    }
+
+    /// Construct an event-enabled publisher with an application-owned Group
+    /// ID allocator suitable for clustered or restartable origins.
+    pub fn new_with_group_id_allocator_and_sanitized_events(
+        config: MoqPublisherConfig,
+        events: MoqSanitizedEventsConfig,
+        group_id_allocator: Arc<dyn MoqGroupIdAllocator>,
+    ) -> Result<Arc<Self>, MoqError> {
+        Self::new_profile(config, group_id_allocator, Some(events))
+    }
+
+    fn new_profile(
+        config: MoqPublisherConfig,
+        group_id_allocator: Arc<dyn MoqGroupIdAllocator>,
+        events_config: Option<MoqSanitizedEventsConfig>,
+    ) -> Result<Arc<Self>, MoqError> {
         let namespace = config.try_namespace()?;
         MoqCompatibility::PINNED.require(MoqProtocolVersion::PINNED)?;
-        let catalog = MsfCatalog::opus_audio(
-            &namespace,
-            config.bitrate,
-            config.language.clone(),
-            unix_time_millis(),
-        )?;
+        let catalog = if events_config.is_some() {
+            MsfCatalog::opus_audio_with_sanitized_events(
+                &namespace,
+                config.bitrate,
+                config.language.clone(),
+                unix_time_millis(),
+            )?
+        } else {
+            MsfCatalog::opus_audio(
+                &namespace,
+                config.bitrate,
+                config.language.clone(),
+                unix_time_millis(),
+            )?
+        };
         let catalog_payload = catalog.to_json_bytes()?;
         let runtime =
             tokio::runtime::Handle::try_current().map_err(|_| MoqError::RuntimeUnavailable)?;
         let live_catalog_group =
             group_id_allocator.reserve_next_group(&namespace, CATALOG_TRACK)?;
-        let (wire, mut catalog, audio) = WirePublication::new(&namespace)?;
+        let (wire, mut catalog, audio, events) = if events_config.is_some() {
+            let (wire, catalog, audio, events) =
+                WirePublication::new_with_sanitized_events(&namespace)?;
+            (wire, catalog, audio, Some(events))
+        } else {
+            let (wire, catalog, audio) = WirePublication::new(&namespace)?;
+            (wire, catalog, audio, None)
+        };
         catalog.write_live(live_catalog_group, catalog_payload)?;
         let wire = Arc::new(wire);
 
         let (frame_tx, mut frame_rx) = mpsc::channel::<MediaFrame>(config.queue_frames.max(1));
+        let (event_tx, mut event_rx) = match events_config {
+            Some(events) => {
+                let (tx, rx) = mpsc::channel(events.queue_events());
+                (Some(tx), Some(rx))
+            }
+            None => (None, None),
+        };
         let frame_graceful_stop = CancellationToken::new();
         let frame_abort = CancellationToken::new();
         let frame_cleanup = SharedTaskCleanup::new(runtime.clone());
@@ -179,12 +242,17 @@ impl MoqBroadcastPublisher {
             let pump = AssertUnwindSafe(async move {
                 let mut packetizer = LocOpusPacketizer::new();
                 let mut audio = audio;
+                let mut events = events;
+                let mut timeline = events_config.map(MoqSanitizedEventTimeline::new);
                 let outcome: Result<FramePumpExit, MoqError> = loop {
-                    let frame = tokio::select! {
+                    let input = tokio::select! {
                         biased;
                         () = task_abort.cancelled() => break Ok(FramePumpExit::Aborted),
                         () = task_graceful_stop.cancelled() => {
                             frame_rx.close();
+                            if let Some(event_rx) = event_rx.as_mut() {
+                                event_rx.close();
+                            }
                             loop {
                                 let frame = tokio::select! {
                                     biased;
@@ -205,6 +273,35 @@ impl MoqBroadcastPublisher {
                             if task_abort.is_cancelled() {
                                 break Ok(FramePumpExit::Aborted);
                             }
+                            if let Some(event_rx) = event_rx.as_mut() {
+                                loop {
+                                    let event = tokio::select! {
+                                        biased;
+                                        () = task_abort.cancelled() => None,
+                                        event = event_rx.recv() => event,
+                                    };
+                                    let Some(event) = event else {
+                                        break;
+                                    };
+                                    publish_sanitized_event(
+                                        timeline.as_mut().ok_or_else(|| MoqError::Wire(
+                                            "enabled event track is missing its timeline".to_owned(),
+                                        ))?,
+                                        events.as_mut().ok_or_else(|| MoqError::Wire(
+                                            "enabled event track is missing its writer".to_owned(),
+                                        ))?,
+                                        task_allocator.as_ref(),
+                                        &task_namespace,
+                                        event,
+                                    )?;
+                                }
+                            }
+                            if task_abort.is_cancelled() {
+                                break Ok(FramePumpExit::Aborted);
+                            }
+                            if let Some(events) = events.take() {
+                                events.finish()?;
+                            }
                             audio.finish()?;
                             let terminal = MsfCatalog::permanently_completed(unix_time_millis());
                             let terminal_group = task_allocator
@@ -214,17 +311,41 @@ impl MoqBroadcastPublisher {
                             break Ok(FramePumpExit::Stopped);
                         },
                         frame = frame_rx.recv() => match frame {
-                            Some(frame) => frame,
+                            Some(frame) => PublisherInput::Frame(frame),
                             None => break Ok(FramePumpExit::Aborted),
                         },
+                        event = async {
+                            event_rx
+                                .as_mut()
+                                .expect("event receive branch requires an enabled receiver")
+                                .recv()
+                                .await
+                        }, if event_rx.is_some() => match event {
+                            Some(event) => PublisherInput::Event(event),
+                            None => PublisherInput::EventsClosed,
+                        },
                     };
-                    publish_audio_frame(
-                        &mut packetizer,
-                        &mut audio,
-                        task_allocator.as_ref(),
-                        &task_namespace,
-                        frame,
-                    )?;
+                    match input {
+                        PublisherInput::Frame(frame) => publish_audio_frame(
+                            &mut packetizer,
+                            &mut audio,
+                            task_allocator.as_ref(),
+                            &task_namespace,
+                            frame,
+                        )?,
+                        PublisherInput::Event(event) => publish_sanitized_event(
+                            timeline.as_mut().ok_or_else(|| MoqError::Wire(
+                                "enabled event track is missing its timeline".to_owned(),
+                            ))?,
+                            events.as_mut().ok_or_else(|| MoqError::Wire(
+                                "enabled event track is missing its writer".to_owned(),
+                            ))?,
+                            task_allocator.as_ref(),
+                            &task_namespace,
+                            event,
+                        )?,
+                        PublisherInput::EventsClosed => event_rx = None,
+                    }
                 };
                 outcome
             })
@@ -243,6 +364,9 @@ impl MoqBroadcastPublisher {
             config,
             namespace,
             frame_tx,
+            event_tx,
+            events_config,
+            event_admission_open: Mutex::new(events_config.is_some()),
             wire,
             frame_graceful_stop,
             frame_abort,
@@ -259,6 +383,40 @@ impl MoqBroadcastPublisher {
 
     pub fn config(&self) -> &MoqPublisherConfig {
         &self.config
+    }
+
+    /// Whether the application explicitly enabled the sanitized event track.
+    pub fn sanitized_events_enabled(&self) -> bool {
+        self.event_tx.is_some()
+    }
+
+    /// Nonblocking admission to the bounded sanitized event queue.
+    ///
+    /// This API accepts only the fixed [`MoqSanitizedEvent`] model; arbitrary
+    /// call context cannot be attached to the event-timeline track.
+    pub fn try_publish_sanitized_event(&self, event: MoqSanitizedEvent) -> Result<(), MoqError> {
+        let sender = self
+            .event_tx
+            .as_ref()
+            .ok_or(MoqError::SanitizedEventsDisabled)?;
+        let admission_open = self
+            .event_admission_open
+            .lock()
+            .expect("MOQT event admission state poisoned");
+        if !*admission_open {
+            return Err(MoqError::Closed);
+        }
+        sender.try_send(event).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => MoqError::SanitizedEventQueueFull,
+            mpsc::error::TrySendError::Closed(_) => MoqError::Closed,
+        })
+    }
+
+    fn close_event_admission(&self) {
+        *self
+            .event_admission_open
+            .lock()
+            .expect("MOQT event admission state poisoned") = false;
     }
 
     pub const fn protocol_version(&self) -> MoqProtocolVersion {
@@ -401,9 +559,10 @@ impl MoqBroadcastPublisher {
 
 impl Drop for MoqBroadcastPublisher {
     fn drop(&mut self) {
+        self.close_event_admission();
         self.management.begin_draining();
         // Drop is a hard stop: do not emit a permanently-completed catalog
-        // because queued audio and relay delivery were not drained.
+        // because queued media/events and relay delivery were not drained.
         self.frame_abort.cancel();
         self.wire.close();
         for control in self.management.active_relays() {
@@ -1753,6 +1912,18 @@ impl BroadcastPublisher for MoqBroadcastPublisher {
         self.frame_tx.clone()
     }
 
+    fn sanitized_event_capability(&self) -> Option<BroadcastSanitizedEventCapability> {
+        self.events_config
+            .map(|config| BroadcastSanitizedEventCapability {
+                queue_capacity: config.queue_events().try_into().unwrap_or(u32::MAX),
+                history_capacity: config.history_events().try_into().unwrap_or(u32::MAX),
+            })
+    }
+
+    fn try_publish_sanitized_event(&self, event: MoqSanitizedEvent) -> RvoipResult<()> {
+        MoqBroadcastPublisher::try_publish_sanitized_event(self, event).map_err(Into::into)
+    }
+
     fn endpoint(&self) -> BroadcastEndpoint {
         let diagnostics = self.management.accepted_relay_diagnostics();
         let uri = diagnostics
@@ -1772,7 +1943,9 @@ impl BroadcastPublisher for MoqBroadcastPublisher {
                 namespace: self.namespace.to_string(),
                 audio_track: AUDIO_TRACK.into(),
                 catalog_track: Some(CATALOG_TRACK.into()),
-                events_track: None,
+                events_track: self
+                    .sanitized_events_enabled()
+                    .then(|| EVENTS_TRACK.to_owned()),
             },
             relay_path,
         }
@@ -1803,6 +1976,7 @@ impl BroadcastPublisher for MoqBroadcastPublisher {
         request: BroadcastDrainRequest,
     ) -> RvoipResult<BroadcastDrainDescriptor> {
         let started_at = Utc::now();
+        self.close_event_admission();
         self.management.begin_draining();
         // Close media admission and finish the local track/cache before
         // disconnecting relays, so the terminal catalog can be observed.
@@ -1871,6 +2045,7 @@ impl BroadcastPublisher for MoqBroadcastPublisher {
     }
 
     async fn close(self: Arc<Self>) -> RvoipResult<()> {
+        self.close_event_admission();
         self.management.begin_draining();
         self.frame_graceful_stop.cancel();
         let cleanup_deadline = Utc::now() + chrono::Duration::seconds(5);
@@ -1951,6 +2126,22 @@ fn publish_audio_frame(
     Ok(())
 }
 
+fn publish_sanitized_event(
+    timeline: &mut MoqSanitizedEventTimeline,
+    events: &mut wire::WireEventsWriter,
+    group_id_allocator: &dyn MoqGroupIdAllocator,
+    namespace: &MoqNamespace,
+    event: MoqSanitizedEvent,
+) -> Result<(), MoqError> {
+    // Reserve before touching the wire. Even a failed write consumes the ID,
+    // preventing reuse after restart.
+    let group_id = group_id_allocator.reserve_next_group(namespace, EVENTS_TRACK)?;
+    let payload = timeline.push(event, sequence_for_group_id(group_id)?)?;
+    events.write(group_id, payload)?;
+    metrics::counter!("rvoip_moq_objects_total", "track" => "events").increment(1);
+    Ok(())
+}
+
 fn loc_error_label(error: &LocError) -> &'static str {
     match error {
         LocError::NotAudio => "not_audio",
@@ -1979,6 +2170,7 @@ mod tests {
 
     use bytes::Bytes;
     use chrono::Utc;
+    use moq_transport::serve::{TrackReader, TrackReaderMode};
     use rvoip_core_traits::broadcast::BroadcastPublisher;
     use rvoip_core_traits::ids::StreamId;
     use rvoip_core_traits::stream::StreamKind;
@@ -1989,9 +2181,7 @@ mod tests {
     #[cfg(feature = "insecure-development")]
     use moq_transport::coding::{TrackName, TrackNamespace, Value};
     #[cfg(feature = "insecure-development")]
-    use moq_transport::serve::{
-        ServeError, SubgroupsReader, Track, TrackReader, TrackReaderMode, Tracks,
-    };
+    use moq_transport::serve::{ServeError, SubgroupsReader, Track, Tracks};
     #[cfg(feature = "insecure-development")]
     use moq_transport::session::{Publisher, SessionTarget, Subscribe, Subscriber, Transport};
 
@@ -2022,6 +2212,15 @@ mod tests {
                 .filter_map(|(reserved_track, group_id)| {
                     (reserved_track == track).then_some(*group_id)
                 })
+                .collect()
+        }
+
+        fn reserved_tracks(&self) -> Vec<String> {
+            self.reservations
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(track, _)| track.clone())
                 .collect()
         }
     }
@@ -2091,6 +2290,34 @@ mod tests {
             captured_at: Utc::now(),
             payload_type: Some(111),
         }
+    }
+
+    async fn read_event_group(track: &TrackReader) -> (u64, serde_json::Value) {
+        let mut groups = match tokio::time::timeout(Duration::from_secs(1), track.mode())
+            .await
+            .expect("event track mode timed out")
+            .expect("event track mode failed")
+        {
+            TrackReaderMode::Subgroups(reader) => reader,
+            _ => panic!("event track must use subgroup streams"),
+        };
+        let mut subgroup = tokio::time::timeout(Duration::from_secs(1), groups.next())
+            .await
+            .expect("event subgroup timed out")
+            .expect("event subgroup failed")
+            .expect("event track ended before its object");
+        assert_eq!(subgroup.subgroup_id, 0);
+        assert!(subgroup.first_object);
+        assert!(subgroup.end_of_group);
+        let mut object = subgroup.next().await.unwrap().unwrap();
+        assert_eq!(object.object_id, 0);
+        assert!(object.extension_headers.is_empty());
+        let payload = object.read_all().await.unwrap();
+        assert!(subgroup.next().await.unwrap().is_none());
+        (
+            subgroup.group_id,
+            serde_json::from_slice(&payload).expect("event timeline is not JSON"),
+        )
     }
 
     #[cfg(feature = "insecure-development")]
@@ -2662,6 +2889,218 @@ mod tests {
 
         assert_eq!(allocator.reservations_for(AUDIO_TRACK), vec![0, 1]);
         assert_eq!(allocator.reservations_for(CATALOG_TRACK), vec![0, 1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn sanitized_events_are_absent_and_rejected_by_default() {
+        let publisher = MoqBroadcastPublisher::new(config()).unwrap();
+        assert!(!publisher.sanitized_events_enabled());
+        assert!(matches!(
+            publisher.endpoint().resource,
+            BroadcastResource::Moqt {
+                events_track: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            publisher.try_publish_sanitized_event(
+                MoqSanitizedEvent::at_unix_millis(
+                    crate::MoqSanitizedEventKind::CallConnected,
+                    1_000,
+                )
+                .unwrap()
+            ),
+            Err(MoqError::SanitizedEventsDisabled)
+        ));
+        publisher.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicit_sanitized_events_publish_on_their_own_monotonic_track() {
+        let allocator = Arc::new(RecordingGroupIdAllocator::default());
+        let publisher = MoqBroadcastPublisher::new_with_group_id_allocator_and_sanitized_events(
+            config(),
+            MoqSanitizedEventsConfig::new(2, 2).unwrap(),
+            Arc::clone(&allocator) as Arc<dyn MoqGroupIdAllocator>,
+        )
+        .unwrap();
+        let wire = Arc::clone(&publisher.wire);
+
+        assert!(publisher.sanitized_events_enabled());
+        assert!(matches!(
+            publisher.endpoint().resource,
+            BroadcastResource::Moqt {
+                events_track: Some(ref track),
+                ..
+            } if track == EVENTS_TRACK
+        ));
+        publisher
+            .try_publish_sanitized_event(
+                MoqSanitizedEvent::at_unix_millis(
+                    crate::MoqSanitizedEventKind::CallConnected,
+                    1_000,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        Arc::clone(&publisher).close().await.unwrap();
+
+        assert_eq!(allocator.reservations_for(EVENTS_TRACK), vec![0]);
+        assert_eq!(allocator.reservations_for(CATALOG_TRACK), vec![0, 1]);
+        assert!(wire.is_cleanly_completed_for_test());
+    }
+
+    #[tokio::test]
+    async fn sanitized_event_restart_uses_persisted_group_sequence_and_resets_history() {
+        let allocator = Arc::new(RecordingGroupIdAllocator::default());
+
+        let first = MoqBroadcastPublisher::new_with_group_id_allocator_and_sanitized_events(
+            config(),
+            MoqSanitizedEventsConfig::new(2, 2).unwrap(),
+            Arc::clone(&allocator) as Arc<dyn MoqGroupIdAllocator>,
+        )
+        .unwrap();
+        let first_track = first.wire.event_track_for_test().unwrap();
+        first
+            .try_publish_sanitized_event(
+                MoqSanitizedEvent::at_unix_millis(
+                    crate::MoqSanitizedEventKind::CallConnecting,
+                    1_000,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let (first_group, first_payload) = read_event_group(&first_track).await;
+        Arc::clone(&first).close().await.unwrap();
+
+        let second = MoqBroadcastPublisher::new_with_group_id_allocator_and_sanitized_events(
+            config(),
+            MoqSanitizedEventsConfig::new(2, 2).unwrap(),
+            Arc::clone(&allocator) as Arc<dyn MoqGroupIdAllocator>,
+        )
+        .unwrap();
+        let second_track = second.wire.event_track_for_test().unwrap();
+        second
+            .try_publish_sanitized_event(
+                MoqSanitizedEvent::at_unix_millis(
+                    crate::MoqSanitizedEventKind::CallConnected,
+                    2_000,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let (second_group, second_payload) = read_event_group(&second_track).await;
+        Arc::clone(&second).close().await.unwrap();
+
+        assert_eq!((first_group, second_group), (0, 1));
+        assert_eq!(first_payload.as_array().unwrap().len(), 1);
+        assert_eq!(second_payload.as_array().unwrap().len(), 1);
+        assert_eq!(first_payload[0]["data"]["sequence"], first_group + 1);
+        assert_eq!(second_payload[0]["data"]["sequence"], second_group + 1);
+        assert_eq!(allocator.reservations_for(EVENTS_TRACK), vec![0, 1]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sanitized_event_admission_never_exceeds_its_configured_queue() {
+        let publisher = MoqBroadcastPublisher::new_with_sanitized_events(
+            config(),
+            MoqSanitizedEventsConfig::new(1, 1).unwrap(),
+        )
+        .unwrap();
+        publisher
+            .try_publish_sanitized_event(
+                MoqSanitizedEvent::at_unix_millis(
+                    crate::MoqSanitizedEventKind::CallConnecting,
+                    1_000,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(matches!(
+            publisher.try_publish_sanitized_event(
+                MoqSanitizedEvent::at_unix_millis(
+                    crate::MoqSanitizedEventKind::CallConnected,
+                    2_000,
+                )
+                .unwrap()
+            ),
+            Err(MoqError::SanitizedEventQueueFull)
+        ));
+        publisher.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_drain_closes_sanitized_event_admission_before_lifecycle_transition() {
+        let publisher = MoqBroadcastPublisher::new_with_sanitized_events(
+            config(),
+            MoqSanitizedEventsConfig::new(2, 2).unwrap(),
+        )
+        .unwrap();
+        let draining_publisher = Arc::clone(&publisher);
+        let drain = tokio::spawn(async move {
+            draining_publisher
+                .drain(BroadcastDrainRequest {
+                    reason: rvoip_core_traits::broadcast::BroadcastDrainReason::Shutdown,
+                    deadline: Utc::now() + chrono::Duration::seconds(1),
+                })
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !matches!(
+                publisher.lifecycle().state,
+                BroadcastLifecycleState::Draining | BroadcastLifecycleState::Closed
+            ) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drain did not begin");
+        assert!(matches!(
+            publisher.try_publish_sanitized_event(
+                MoqSanitizedEvent::at_unix_millis(crate::MoqSanitizedEventKind::CallEnding, 2_000,)
+                    .unwrap(),
+            ),
+            Err(MoqError::Closed)
+        ));
+        assert!(drain.await.unwrap().is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ready_audio_is_published_before_ready_sanitized_events() {
+        let allocator = Arc::new(RecordingGroupIdAllocator::default());
+        let publisher = MoqBroadcastPublisher::new_with_group_id_allocator_and_sanitized_events(
+            config(),
+            MoqSanitizedEventsConfig::new(1, 1).unwrap(),
+            Arc::clone(&allocator) as Arc<dyn MoqGroupIdAllocator>,
+        )
+        .unwrap();
+
+        // A current-thread runtime cannot poll the spawned pump until this
+        // task yields, so both steady-state receive branches are ready at the
+        // same instant.
+        publisher.frames_out().try_send(opus_frame(0)).unwrap();
+        publisher
+            .try_publish_sanitized_event(
+                MoqSanitizedEvent::at_unix_millis(
+                    crate::MoqSanitizedEventKind::CallConnected,
+                    1_000,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            allocator.reserved_tracks(),
+            vec![
+                CATALOG_TRACK.to_owned(),
+                AUDIO_TRACK.to_owned(),
+                EVENTS_TRACK.to_owned(),
+            ],
+            "biased steady-state selection must preserve real-time audio priority"
+        );
+        publisher.close().await.unwrap();
     }
 
     #[tokio::test]

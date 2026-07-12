@@ -144,7 +144,9 @@ pub use broadcast::{
     BroadcastDrainState, BroadcastEndpoint, BroadcastHealthDescriptor, BroadcastHealthIssue,
     BroadcastHealthStatus, BroadcastLifecycleDescriptor, BroadcastLifecycleState,
     BroadcastProtocolDescriptor, BroadcastProtocolFamily, BroadcastPublisher, BroadcastRelayHop,
-    BroadcastRelayRole, BroadcastResource, BroadcastSubstrate, BroadcastTransport,
+    BroadcastRelayRole, BroadcastResource, BroadcastSanitizedEvent,
+    BroadcastSanitizedEventCapability, BroadcastSanitizedEventError, BroadcastSanitizedEventKind,
+    BroadcastSubstrate, BroadcastTransport, MAX_BROADCAST_EVENT_JSON_INTEGER,
 };
 pub use capability::{CapabilityDescriptor, CapabilityIntersection, CodecInfo, NegotiatedCodecs};
 pub use commands::{

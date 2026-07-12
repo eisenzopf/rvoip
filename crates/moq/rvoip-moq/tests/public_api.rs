@@ -11,9 +11,10 @@ use rvoip_moq::{
     MoqCatalogSubscriberLifecycle, MoqCatalogSubscriberTlsConfig, MoqCompatibility,
     MoqEndOfGroupEvidence, MoqGroupIdAllocator, MoqNamespace, MoqProtocolVersion,
     MoqPublisherConfig, MoqRelayConnectionPolicy, MoqRelayPeerIdentity, MoqRelaySubstratePolicy,
-    MoqRelayTlsConfig, MoqSubscriberCredential, MoqSubscriberCredentialError,
-    MoqSubscriberCredentialProvider, MoqSubscriberCredentialRequest, MsfCatalog, MsfCatalogState,
-    CATALOG_TRACK, LOC_DRAFT, MOQT_DRAFT, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT,
+    MoqRelayTlsConfig, MoqSanitizedEvent, MoqSanitizedEventKind, MoqSanitizedEventsConfig,
+    MoqSubscriberCredential, MoqSubscriberCredentialError, MoqSubscriberCredentialProvider,
+    MoqSubscriberCredentialRequest, MsfCatalog, MsfCatalogState, CATALOG_TRACK, EVENTS_TRACK,
+    LOC_DRAFT, MOQT_DRAFT, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT,
 };
 use url::Url;
 
@@ -93,7 +94,7 @@ async fn application_contract_uses_only_rvoip_owned_models() {
     );
 
     let allocator: Arc<dyn MoqGroupIdAllocator> = Arc::new(InMemoryMoqGroupIdAllocator::new());
-    let publisher = MoqBroadcastPublisher::new_with_group_id_allocator(
+    let publisher = MoqBroadcastPublisher::new_with_group_id_allocator_and_sanitized_events(
         MoqPublisherConfig {
             tenant_id: "tenant".into(),
             broadcast_id: "broadcast".into(),
@@ -101,6 +102,7 @@ async fn application_contract_uses_only_rvoip_owned_models() {
             language: Some("en".into()),
             queue_frames: 10,
         },
+        MoqSanitizedEventsConfig::new(8, 8).unwrap(),
         allocator,
     )
     .unwrap();
@@ -132,8 +134,22 @@ async fn application_contract_uses_only_rvoip_owned_models() {
     );
     assert!(matches!(
         publisher.endpoint().resource,
-        BroadcastResource::Moqt { .. }
+        BroadcastResource::Moqt {
+            events_track: Some(ref track),
+            ..
+        } if track == EVENTS_TRACK
     ));
+    let transport_neutral: Arc<dyn BroadcastPublisher> = publisher.clone();
+    let event_capability = transport_neutral
+        .sanitized_event_capability()
+        .expect("event-enabled MOQT publisher must expose its capability");
+    assert_eq!(event_capability.queue_capacity, 8);
+    assert_eq!(event_capability.history_capacity, 8);
+    transport_neutral
+        .try_publish_sanitized_event(
+            MoqSanitizedEvent::at_unix_millis(MoqSanitizedEventKind::CallConnected, 1_000).unwrap(),
+        )
+        .unwrap();
     publisher.close().await.unwrap();
 }
 

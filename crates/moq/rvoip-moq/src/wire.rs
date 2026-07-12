@@ -6,14 +6,14 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use moq_transport::coding::{TrackName, TrackNamespace};
 use moq_transport::data::ExtensionHeaders;
+#[cfg(test)]
+use moq_transport::serve::TrackReader;
 use moq_transport::serve::{
     Subgroup, SubgroupsWriter, Tracks, TracksReader, TracksRequest, TracksWriter,
 };
@@ -24,7 +24,7 @@ use url::Url;
 
 use crate::{
     LocAudioObject, MoqError, MoqNamespace, MoqRelayFailure, MoqRelayPeerIdentity,
-    MoqRelaySubstratePolicy, AUDIO_TRACK, CATALOG_TRACK, MOQT_NEGOTIATED_PROTOCOL,
+    MoqRelaySubstratePolicy, AUDIO_TRACK, CATALOG_TRACK, EVENTS_TRACK, MOQT_NEGOTIATED_PROTOCOL,
 };
 
 pub(crate) struct WirePublication {
@@ -59,6 +59,13 @@ pub(crate) struct WireCatalogWriter {
     fail_writes: Arc<AtomicBool>,
 }
 
+pub(crate) struct WireEventsWriter {
+    events: Option<SubgroupsWriter>,
+    lifecycle: Arc<WireLifecycle>,
+    #[cfg(test)]
+    fail_writes: Arc<AtomicBool>,
+}
+
 const WIRE_CREATED: u8 = 0;
 const WIRE_LIVE_CATALOG: u8 = 1;
 const WIRE_AUDIO_ENDED: u8 = 2;
@@ -68,6 +75,7 @@ const WIRE_HARD_CLOSED: u8 = 5;
 
 struct WireLifecycle {
     state: AtomicU8,
+    events_finished: AtomicBool,
 }
 
 impl WireLifecycle {
@@ -98,6 +106,35 @@ impl WirePublication {
     pub(crate) fn new(
         namespace: &MoqNamespace,
     ) -> Result<(Self, WireCatalogWriter, WireAudioWriter), MoqError> {
+        let (publication, catalog, audio, events) = Self::new_profile(namespace, false)?;
+        debug_assert!(events.is_none());
+        Ok((publication, catalog, audio))
+    }
+
+    pub(crate) fn new_with_sanitized_events(
+        namespace: &MoqNamespace,
+    ) -> Result<(Self, WireCatalogWriter, WireAudioWriter, WireEventsWriter), MoqError> {
+        let (publication, catalog, audio, events) = Self::new_profile(namespace, true)?;
+        Ok((
+            publication,
+            catalog,
+            audio,
+            events.expect("enabled event track must return its writer"),
+        ))
+    }
+
+    fn new_profile(
+        namespace: &MoqNamespace,
+        sanitized_events: bool,
+    ) -> Result<
+        (
+            Self,
+            WireCatalogWriter,
+            WireAudioWriter,
+            Option<WireEventsWriter>,
+        ),
+        MoqError,
+    > {
         let wire_namespace = TrackNamespace::from_utf8_path(namespace.as_str());
         let (mut tracks_writer, tracks_request, tracks_reader) =
             Tracks::new(wire_namespace).produce();
@@ -115,8 +152,21 @@ impl WirePublication {
         let catalog = catalog_track
             .subgroups()
             .map_err(|error| MoqError::Wire(error.to_string()))?;
+        let events = if sanitized_events {
+            let events_track = tracks_writer
+                .create(TrackName::from(EVENTS_TRACK))
+                .ok_or(MoqError::Closed)?;
+            Some(
+                events_track
+                    .subgroups()
+                    .map_err(|error| MoqError::Wire(error.to_string()))?,
+            )
+        } else {
+            None
+        };
         let lifecycle = Arc::new(WireLifecycle {
             state: AtomicU8::new(WIRE_CREATED),
+            events_finished: AtomicBool::new(!sanitized_events),
         });
         #[cfg(test)]
         let fail_writes = Arc::new(AtomicBool::new(false));
@@ -140,10 +190,16 @@ impl WirePublication {
             },
             WireAudioWriter {
                 audio: Some(audio),
+                lifecycle: Arc::clone(&lifecycle),
+                #[cfg(test)]
+                fail_writes: Arc::clone(&fail_writes),
+            },
+            events.map(|events| WireEventsWriter {
+                events: Some(events),
                 lifecycle,
                 #[cfg(test)]
                 fail_writes,
-            },
+            }),
         ))
     }
 
@@ -187,6 +243,13 @@ impl WirePublication {
     fn tracks_for_test(&self) -> TracksReader {
         self.tracks()
     }
+
+    #[cfg(test)]
+    pub(crate) fn event_track_for_test(&self) -> Option<TrackReader> {
+        let mut tracks = self.tracks();
+        let namespace = tracks.info.namespace.clone();
+        tracks.get_track_reader(&namespace, TrackName::from(EVENTS_TRACK))
+    }
 }
 
 impl WireAudioWriter {
@@ -218,9 +281,51 @@ impl WireAudioWriter {
     }
 
     pub(crate) fn finish(mut self) -> Result<(), MoqError> {
+        if !self.lifecycle.events_finished.load(Ordering::Acquire) {
+            return Err(MoqError::Wire(
+                "event track must end before the audio track".to_owned(),
+            ));
+        }
         drop(self.audio.take());
         self.lifecycle
             .transition(WIRE_LIVE_CATALOG, WIRE_AUDIO_ENDED)
+    }
+}
+
+impl WireEventsWriter {
+    pub(crate) fn write(&mut self, group_id: u64, payload: Vec<u8>) -> Result<(), MoqError> {
+        #[cfg(test)]
+        if self.fail_writes.load(Ordering::Acquire) {
+            return Err(MoqError::Closed);
+        }
+        if self.lifecycle.state.load(Ordering::Acquire) != WIRE_LIVE_CATALOG {
+            return Err(MoqError::Wire(
+                "events cannot be published before the live catalog".to_owned(),
+            ));
+        }
+        if self.lifecycle.events_finished.load(Ordering::Acquire) {
+            return Err(MoqError::Closed);
+        }
+        write_stream_object(
+            self.events.as_mut().ok_or(MoqError::Closed)?,
+            group_id,
+            payload.into(),
+            ExtensionHeaders::new(),
+        )
+    }
+
+    pub(crate) fn finish(mut self) -> Result<(), MoqError> {
+        if self.lifecycle.state.load(Ordering::Acquire) != WIRE_LIVE_CATALOG {
+            return Err(MoqError::Wire(
+                "event track can only end after the live catalog".to_owned(),
+            ));
+        }
+        self.lifecycle
+            .events_finished
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| MoqError::Closed)?;
+        drop(self.events.take());
+        Ok(())
     }
 }
 
@@ -988,6 +1093,60 @@ mod tests {
             .await
             .expect("dropping a pending connection must abort its session task")
             .expect("session task drop signal must remain connected");
+    }
+
+    #[test]
+    fn default_wire_publication_does_not_create_an_events_track() {
+        let namespace = MoqNamespace::new("tenant", "broadcast").unwrap();
+        let (publication, _catalog, _audio) = WirePublication::new(&namespace).unwrap();
+        let wire_namespace = publication.tracks_reader.info.namespace.clone();
+        let mut tracks = publication.tracks_for_test();
+
+        assert!(tracks
+            .get_track_reader(&wire_namespace, TrackName::from(EVENTS_TRACK))
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn opt_in_events_use_independent_object_zero_groups_and_end_before_catalog() {
+        let namespace = MoqNamespace::new("tenant", "broadcast").unwrap();
+        let (publication, mut catalog_writer, audio_writer, mut events_writer) =
+            WirePublication::new_with_sanitized_events(&namespace).unwrap();
+        let wire_namespace = publication.tracks_reader.info.namespace.clone();
+        let mut tracks = publication.tracks_for_test();
+        let events_track = tracks
+            .get_track_reader(&wire_namespace, TrackName::from(EVENTS_TRACK))
+            .expect("explicit opt-in must create the event track");
+
+        catalog_writer.write_live(7, b"live".to_vec()).unwrap();
+        let payload = br#"[{"t":1000,"data":{"version":"io.rvoip.sanitized-call-events.v1","sequence":1,"kind":"call-connected"}}]"#.to_vec();
+        events_writer.write(11, payload.clone()).unwrap();
+
+        let mut events = match events_track.mode().await.unwrap() {
+            TrackReaderMode::Subgroups(reader) => reader,
+            _ => panic!("event track must use subgroup streams"),
+        };
+        let mut group = events.next().await.unwrap().unwrap();
+        assert_eq!((group.group_id, group.subgroup_id), (11, 0));
+        assert!(group.first_object);
+        assert!(group.end_of_group);
+        let mut object = group.next().await.unwrap().unwrap();
+        assert_eq!(object.object_id, 0);
+        assert!(object.extension_headers.is_empty());
+        assert_eq!(object.read_all().await.unwrap(), payload);
+        assert!(group.next().await.unwrap().is_none());
+
+        events_writer.finish().unwrap();
+        tokio::time::timeout(Duration::from_millis(100), events_track.closed())
+            .await
+            .expect("event track must close before audio completion")
+            .unwrap();
+        audio_writer.finish().unwrap();
+        catalog_writer
+            .write_terminal(12, b"terminal".to_vec())
+            .unwrap();
+        catalog_writer.finish().unwrap();
+        assert!(publication.is_cleanly_completed_for_test());
     }
 
     #[tokio::test]
