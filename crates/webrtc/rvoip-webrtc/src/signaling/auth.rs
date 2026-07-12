@@ -9,17 +9,20 @@
 //! Per RFC 9725 §4.1 production WHIP servers MUST accept
 //! `Authorization: Bearer ...`. The `WhipAuthHook` trait surfaces that
 //! header (plus the request method, path, and peer address) to the
-//! deployment's policy code; the hook returns an [`AuthContext`] echoed
-//! onto the route, or an [`AuthRejection`] mapped to a 401/403/429.
+//! deployment's policy code; the hook returns an [`AuthContext`] converted
+//! into adapter-owned route authorization (retaining the complete principal),
+//! or an [`AuthRejection`] mapped to a 401/403/429.
 
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
 use rvoip_auth_core::{AuthenticatedPrincipal, BearerAuthError, BearerValidator};
 
-/// Authentication context attached to a request after a successful
-/// authenticate hook. Echoed onto the route for downstream consumers
-/// (orchestrator, identity verification, audit log).
+use crate::adapter::RouteAuthorization;
+
+/// Authentication context attached to a request after a successful hook.
+/// Its complete principal is retained on the adapter route for ownership,
+/// orchestration, identity verification, and audit events.
 #[derive(Clone, Debug)]
 pub struct AuthContext {
     /// Opaque tenant / user identifier — meaning is deployment-defined.
@@ -45,6 +48,18 @@ impl AuthContext {
 
     pub fn has_scope(&self, scope: &str) -> bool {
         self.scopes.iter().any(|s| s == scope)
+    }
+
+    /// Convert request authentication into the adapter-owned route boundary.
+    /// Complete principals use issuer + tenant + subject; legacy hooks retain
+    /// their historical subject semantics, while anonymous mode remains
+    /// compatible with authentication-disabled deployments.
+    pub(crate) fn route_authorization(&self) -> RouteAuthorization {
+        match self.principal.clone() {
+            Some(principal) => RouteAuthorization::principal(principal),
+            None if self.subject == "anonymous" => RouteAuthorization::anonymous(),
+            None => RouteAuthorization::legacy_subject(self.subject.clone()),
+        }
     }
 }
 

@@ -77,3 +77,27 @@ rvoip currently patches `rtc` to exact fork revision
 after the SCTP handshake and preserves received DCEP partial-reliability
 metadata. A current-version port is kept on the `eisenzopf/rtc` fork for owner
 review. It must not be submitted upstream without explicit approval.
+
+## Signaling authentication and lifecycle
+
+WebRTC signaling now authenticates WS/WSS before the HTTP 101 response and
+uses the same issuer + tenant + subject ownership check for WHIP, WHEP, WS,
+and WSS mutations. Outbound routes that will be exposed through authenticated
+signaling must call `WebRtcAdapter::bind_authenticated_principal` first.
+Route cleanup removes ownership and background ICE/keepalive tasks atomically.
+
+SIP applications can construct `SipListenerAuthPolicy` with Digest/Bearer,
+explicit trusted-CIDR principals, and/or verified mTLS fingerprint mappings,
+then use `UnifiedCoordinator::new_with_listener_auth` or
+`SipAdapter::from_config_with_listener_auth`. TLS/WSS listeners configure
+`TlsServerClientAuthConfig::optional` or `required` with an explicit client CA.
+The default remains disabled for compatibility. Enabled policies run at the
+transaction boundary before dialog or application dispatch; ACK, CANCEL, and
+retransmissions must match the accepted INVITE's transport binding.
+
+UCTP production defaults now require command scopes, retain full principals,
+bound replies and Connection resources to their authenticated owner, enforce
+bounded replay/capacity state, and couple signaling/media tasks to one peer
+supervisor. `UctpCoordinatorCaps::legacy_permissive` is only for trusted
+development compatibility. QUIC, WebTransport, and WebSocket share the same
+caps and configurable authentication deadline.

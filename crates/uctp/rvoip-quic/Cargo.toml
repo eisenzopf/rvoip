@@ -18,6 +18,7 @@ rvoip-uctp.workspace = true
 rvoip-auth-core.workspace = true
 
 tokio = { workspace = true }
+tokio-util.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 dashmap.workspace = true

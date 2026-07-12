@@ -45,14 +45,22 @@ half of G3 (deferred, needs workspace dep additions).
   `WebRtcConfig::ice_servers` on every CREATED response.
 - WHIP `PATCH application/sdp` (ICE restart) enforces `If-Match: "<etag>"`
   per RFC 9725 §4.4.1 — 428 when missing, 412 on mismatch.
-- WebSocket server: `serve_listener_with_auth(...)` runs the hook
-  during the upgrade; on rejection emits a Close frame with codes
-  4401 / 4403 / 4429 mapping `AuthRejection`. Tokens accepted via
-  `Sec-WebSocket-Protocol: token.<value>` or `?access_token=<value>`.
+- WebSocket server: `serve_listener_with_auth(...)` and the WSS equivalent
+  complete the async hook before HTTP 101. Rejections remain HTTP 401, 403,
+  or 429 responses with `WWW-Authenticate` / `Retry-After` where applicable.
+  Tokens are accepted via `Sec-WebSocket-Protocol: token.<value>` or
+  `?access_token=<value>`.
+- WHIP, WHEP, WS, and WSS now share adapter-owned route authorization keyed
+  by issuer + tenant + subject (`PrincipalOwnershipKey`). Complete principals
+  are retained on routes, emitted through `PrincipalAuthenticated`, and
+  removed atomically with route cleanup. Authenticated outbound WS/WSS routes
+  can be bound before exposure with `bind_authenticated_principal(...)`.
 - `WebRtcServerBuilder::with_whip_auth(...)` / `with_ws_auth(...)`.
-- New `WebRtcError` variants: `InvalidArgument`, `Unauthorized`,
+- New `WebRtcError` variants: `InvalidArgument`, `Unauthorized`, `Forbidden`,
   `PreconditionFailed`, `InvalidState`, `FingerprintNotPinned`.
-- New tests: `tests/whip_auth.rs` (8 tests) and `tests/ws_auth.rs` (4 tests).
+- New tests: `tests/whip_auth.rs`, `tests/ws_auth.rs`,
+  `tests/signaling_ownership.rs`, and WSS pre-upgrade coverage in
+  `tests/tls_termination.rs`.
 
 #### G4 — Outbound + candidate-pair stats
 

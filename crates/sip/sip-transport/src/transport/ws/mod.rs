@@ -22,7 +22,7 @@ use tokio_tungstenite::tungstenite;
 use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "wss")]
-pub use crate::transport::tls::TlsClientConfig;
+pub use crate::transport::tls::{TlsClientConfig, TlsServerClientAuthConfig};
 #[cfg(feature = "wss")]
 use tokio_rustls::TlsConnector;
 
@@ -93,6 +93,30 @@ impl WebSocketTransport {
         channel_capacity: Option<usize>,
         client_tls: Option<TlsClientConfig>,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_tls_configs(
+            addr,
+            secure,
+            cert_path,
+            key_path,
+            channel_capacity,
+            client_tls,
+            TlsServerClientAuthConfig::default(),
+        )
+        .await
+    }
+
+    /// Creates a WebSocket transport with independent outbound WSS client
+    /// configuration and inbound WSS client-certificate authentication.
+    #[cfg(feature = "wss")]
+    pub async fn bind_with_tls_configs(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        channel_capacity: Option<usize>,
+        client_tls: Option<TlsClientConfig>,
+        server_client_auth: TlsServerClientAuthConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         let tls_connector = match (secure, client_tls) {
             (true, Some(cfg)) => {
                 let client_config = crate::transport::tls::build_client_config(&cfg)?;
@@ -107,6 +131,7 @@ impl WebSocketTransport {
             key_path,
             channel_capacity,
             tls_connector,
+            server_client_auth,
         )
         .await
     }
@@ -122,13 +147,21 @@ impl WebSocketTransport {
         key_path: Option<&str>,
         channel_capacity: Option<usize>,
         tls_connector: Option<TlsConnector>,
+        server_client_auth: TlsServerClientAuthConfig,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         // Create the event channel
         let capacity = channel_capacity.unwrap_or(DEFAULT_CHANNEL_CAPACITY);
         let (events_tx, events_rx) = mpsc::channel(capacity);
 
         // Create the WebSocket listener
-        let listener = WebSocketListener::bind(addr, secure, cert_path, key_path).await?;
+        let listener = WebSocketListener::bind_with_client_auth(
+            addr,
+            secure,
+            cert_path,
+            key_path,
+            server_client_auth,
+        )
+        .await?;
         let local_addr = listener.local_addr()?;
 
         info!(
@@ -351,6 +384,7 @@ impl WebSocketTransport {
                             },
                             raw_bytes: Some(raw_bytes),
                             timing: None,
+                            connection_metadata: connection.connection_metadata().cloned(),
                         };
 
                         if let Err(e) = inner.events_tx.send(event).await {

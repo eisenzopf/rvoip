@@ -2383,6 +2383,7 @@ impl<H: CallHandler> CallbackPeer<H> {
                 // surface routes the existing variants today; consumers
                 // can also pattern-match on the detailed variant via
                 // `handler.on_event(...)`.
+                | Event::IncomingCallAuthenticated { .. }
                 | Event::CallProgressDetailed(_)
                 | Event::CallEstablishedDetailed(_)
                 | Event::CallFailedDetailed(_) => {}

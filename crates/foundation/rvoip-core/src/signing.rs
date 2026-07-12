@@ -125,26 +125,63 @@ pub fn parse_signature_input(input: &str) -> SignatureSpec {
     spec
 }
 
+/// Default maximum number of replay keys retained by one cache.
+///
+/// UCTP coordinators own one cache per peer, so this is deliberately much
+/// smaller than a process-global token replay store while still covering a
+/// five-minute window at ordinary signaling rates.
+pub const DEFAULT_REPLAY_CACHE_MAX_ENTRIES: usize = 4_096;
+
+/// Default maximum encoded length of one replay key. Count and per-key limits
+/// together provide a hard upper bound on retained key bytes.
+pub const DEFAULT_REPLAY_CACHE_MAX_KEY_BYTES: usize = 128;
+
 /// Replay-protection cache. Per CONVERSATION_PROTOCOL.md §5.5, the
 /// server caches envelope IDs for ~5 minutes and rejects duplicates.
-/// Simple bounded queue + Mutex; production impl can swap for an LRU
-/// or a Bloom filter if memory becomes a constraint.
+/// The queue is bounded by entry count and key length; when capacity is
+/// reached the oldest entry is evicted before a new key is inserted.
 pub struct ReplayCache {
     seen: Mutex<VecDeque<(String, Instant)>>,
     ttl: Duration,
+    max_entries: usize,
+    max_key_bytes: usize,
 }
 
 impl ReplayCache {
     pub fn new(ttl: Duration) -> Self {
+        Self::with_limits(
+            ttl,
+            DEFAULT_REPLAY_CACHE_MAX_ENTRIES,
+            DEFAULT_REPLAY_CACHE_MAX_KEY_BYTES,
+        )
+    }
+
+    /// Construct a cache with a caller-selected entry bound and the default
+    /// per-key byte limit.
+    pub fn with_capacity(ttl: Duration, max_entries: usize) -> Self {
+        Self::with_limits(ttl, max_entries, DEFAULT_REPLAY_CACHE_MAX_KEY_BYTES)
+    }
+
+    /// Construct a cache with explicit entry and key-size bounds. Zero limits
+    /// are clamped to one so the cache always has well-defined behavior.
+    pub fn with_limits(ttl: Duration, max_entries: usize, max_key_bytes: usize) -> Self {
         Self {
             seen: Mutex::new(VecDeque::new()),
             ttl,
+            max_entries: max_entries.max(1),
+            max_key_bytes: max_key_bytes.max(1),
         }
     }
 
     /// Record + check in one shot. Returns `Err` when `envelope_id`
     /// has been seen within `ttl`.
     pub fn check_and_record(&self, envelope_id: &str) -> std::result::Result<(), &'static str> {
+        if envelope_id.is_empty() {
+            return Err("replay key is empty");
+        }
+        if envelope_id.len() > self.max_key_bytes {
+            return Err("replay key exceeds maximum length");
+        }
         let now = Instant::now();
         let mut g = self.seen.lock().expect("replay cache lock poisoned");
         // Evict expired.
@@ -158,8 +195,37 @@ impl ReplayCache {
         if g.iter().any(|(id, _)| id == envelope_id) {
             return Err("replay detected");
         }
+        while g.len() >= self.max_entries {
+            g.pop_front();
+        }
         g.push_back((envelope_id.to_string(), now));
         Ok(())
+    }
+
+    /// Current retained entry count. Expired entries are swept by the next
+    /// [`Self::check_and_record`] call.
+    pub fn len(&self) -> usize {
+        self.seen.lock().expect("replay cache lock poisoned").len()
+    }
+
+    /// Whether the queue currently retains no keys.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Sum of retained key bytes, excluding fixed queue/String overhead.
+    pub fn retained_key_bytes(&self) -> usize {
+        self.seen
+            .lock()
+            .expect("replay cache lock poisoned")
+            .iter()
+            .map(|(key, _)| key.len())
+            .sum()
+    }
+
+    /// Configured `(entry_count, key_bytes)` limits.
+    pub const fn limits(&self) -> (usize, usize) {
+        (self.max_entries, self.max_key_bytes)
     }
 }
 
@@ -343,6 +409,29 @@ mod tests {
         assert!(c.check_and_record("b").is_err(), "duplicate b rejected");
         assert!(c.check_and_record("a").is_err(), "duplicate a rejected");
         c.check_and_record("d").unwrap();
+    }
+
+    #[test]
+    fn replay_cache_evicts_oldest_entry_at_capacity() {
+        let c = ReplayCache::with_limits(Duration::from_secs(60), 3, 16);
+        for id in ["env_1", "env_2", "env_3", "env_4"] {
+            c.check_and_record(id).unwrap();
+        }
+        assert_eq!(c.len(), 3);
+        assert!(c.check_and_record("env_4").is_err(), "newest key retained");
+        c.check_and_record("env_1")
+            .expect("oldest key must have been evicted");
+        assert_eq!(c.len(), 3);
+        assert!(c.retained_key_bytes() <= 3 * 16);
+    }
+
+    #[test]
+    fn replay_cache_rejects_oversized_keys_without_retaining_them() {
+        let c = ReplayCache::with_limits(Duration::from_secs(60), 2, 8);
+        assert!(c.check_and_record("env_12345").is_err());
+        assert!(c.check_and_record("").is_err());
+        assert!(c.is_empty());
+        assert_eq!(c.limits(), (2, 8));
     }
 
     #[test]

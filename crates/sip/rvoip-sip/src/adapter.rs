@@ -86,6 +86,16 @@ impl SipAdapter {
         Self::new(coordinator).await
     }
 
+    /// Build a coordinator whose SIP listener enforces the supplied policy,
+    /// then wrap it as a core adapter.
+    pub async fn from_config_with_listener_auth(
+        config: ApiConfig,
+        policy: crate::auth::SipListenerAuthPolicy,
+    ) -> crate::errors::Result<Arc<Self>> {
+        let coordinator = UnifiedCoordinator::new_with_listener_auth(config, policy).await?;
+        Self::new(coordinator).await
+    }
+
     /// Borrow the underlying coordinator (for code that needs both surfaces
     /// during the carve transition — e.g. server::*  helpers).
     pub fn coordinator(&self) -> &Arc<UnifiedCoordinator> {
@@ -181,6 +191,14 @@ impl SipAdapter {
                 let conn_id = self.ensure_mapped(call_id);
                 let connection = self.build_connection(conn_id, Direction::Inbound).await;
                 self.try_send(AdapterEvent::InboundConnection { connection });
+            }
+            ApiEvent::IncomingCallAuthenticated { call_id, principal } => {
+                let conn_id = self.ensure_mapped(call_id);
+                self.try_send(AdapterEvent::PrincipalAuthenticated {
+                    connection_id: conn_id,
+                    participant_id: principal.subject.clone(),
+                    principal,
+                });
             }
             ApiEvent::CallAnswered { call_id, .. } => {
                 let conn_id = self.ensure_mapped(call_id);

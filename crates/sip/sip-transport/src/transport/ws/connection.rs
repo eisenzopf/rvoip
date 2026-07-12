@@ -14,6 +14,7 @@ use tracing::{debug, trace, warn};
 use super::SipWsStream;
 
 use crate::error::{Error, Result};
+use crate::transport::TransportConnectionMetadata;
 use rvoip_sip_core::{parse_message, Message};
 
 // SIP WebSocket subprotocol names as per RFC 7118. `SIP_WS_SUBPROTOCOL`
@@ -41,6 +42,9 @@ pub struct WebSocketConnection {
     secure: bool,
     /// The selected subprotocol (sip or sips)
     subprotocol: String,
+    /// Verified TLS client identity retained for every message on an inbound
+    /// WSS connection.
+    connection_metadata: Option<TransportConnectionMetadata>,
 }
 
 impl WebSocketConnection {
@@ -52,12 +56,26 @@ impl WebSocketConnection {
         secure: bool,
         subprotocol: String,
     ) -> Self {
+        Self::from_writer_with_metadata(ws_writer, peer_addr, secure, subprotocol, None)
+    }
+
+    /// Creates a WebSocket connection with verified transport metadata from
+    /// the completed inbound WSS handshake.
+    #[cfg(feature = "ws")]
+    pub(crate) fn from_writer_with_metadata(
+        ws_writer: SplitSink<WebSocketStream<SipWsStream>, WsMessage>,
+        peer_addr: SocketAddr,
+        secure: bool,
+        subprotocol: String,
+        connection_metadata: Option<TransportConnectionMetadata>,
+    ) -> Self {
         Self {
             ws_writer: Mutex::new(ws_writer),
             peer_addr,
             closed: AtomicBool::new(false),
             secure,
             subprotocol,
+            connection_metadata,
         }
     }
 
@@ -83,6 +101,12 @@ impl WebSocketConnection {
     /// Returns the selected subprotocol
     pub fn subprotocol(&self) -> &str {
         &self.subprotocol
+    }
+
+    /// Verified connection identity, if this is an inbound mutually
+    /// authenticated WSS connection.
+    pub fn connection_metadata(&self) -> Option<&TransportConnectionMetadata> {
+        self.connection_metadata.as_ref()
     }
 
     /// Sends a SIP message over the WebSocket connection
@@ -288,6 +312,7 @@ impl WebSocketConnection {
             closed: AtomicBool::new(false),
             secure,
             subprotocol,
+            connection_metadata: None,
         }
     }
 

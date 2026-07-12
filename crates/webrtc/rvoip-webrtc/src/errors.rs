@@ -43,6 +43,9 @@ pub enum WebRtcError {
     #[error("unauthorized: {0}")]
     Unauthorized(String),
 
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
     #[error("precondition failed: {0}")]
     PreconditionFailed(String),
 

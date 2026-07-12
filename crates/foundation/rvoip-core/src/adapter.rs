@@ -7,13 +7,80 @@ use crate::ids::ConnectionId;
 use crate::message::Message;
 use crate::stream::MediaStream;
 use crate::DataMessage;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 
 pub use rvoip_core_traits::adapter::{
     AdapterEvent, AdapterKind, ConnectionHandle, EndReason, OriginateRequest, PlaybackHandle,
     RejectReason, SignatureHeaders, TransferTarget,
 };
+
+/// Direct fallback for terminal adapter events when the adapter's bounded
+/// event queue is saturated or closed.
+///
+/// The Orchestrator implementation invalidates/removes the connection before
+/// awaiting the remaining media cleanup. Adapters invoke this only after
+/// removing their own route and stream state; the peer task retains its
+/// bounded admission permit until cleanup converges.
+#[async_trait::async_trait]
+pub trait AdapterLifecycleSink: Send + Sync {
+    async fn deliver_terminal(&self, event: AdapterEvent);
+}
+
+/// Shareable, late-bound lifecycle sink used by adapters whose server loops
+/// start before the adapter is registered with an Orchestrator.
+#[derive(Clone, Default)]
+pub struct AdapterLifecycleSinkSlot {
+    inner: Arc<OnceLock<Arc<dyn AdapterLifecycleSink>>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerminalDelivery {
+    Queued,
+    Fallback,
+    Undeliverable,
+}
+
+impl AdapterLifecycleSinkSlot {
+    pub fn install(
+        &self,
+        sink: Arc<dyn AdapterLifecycleSink>,
+    ) -> std::result::Result<(), Arc<dyn AdapterLifecycleSink>> {
+        self.inner.set(sink)
+    }
+
+    /// Deliver a terminal event through the installed fallback. Returns
+    /// `false` when the adapter has not been registered with an Orchestrator.
+    pub async fn deliver_terminal(&self, event: AdapterEvent) -> bool {
+        let Some(sink) = self.inner.get().cloned() else {
+            return false;
+        };
+        sink.deliver_terminal(event).await;
+        true
+    }
+
+    /// Prefer the adapter's normal bounded event queue so terminal events
+    /// retain FIFO ordering. If that queue is full or closed, invoke the
+    /// direct lifecycle sink instead of waiting indefinitely or allocating an
+    /// unbounded overflow queue.
+    pub async fn queue_or_deliver_terminal(
+        &self,
+        events: &mpsc::Sender<AdapterEvent>,
+        event: AdapterEvent,
+    ) -> TerminalDelivery {
+        match events.try_send(event) {
+            Ok(()) => TerminalDelivery::Queued,
+            Err(mpsc::error::TrySendError::Full(event))
+            | Err(mpsc::error::TrySendError::Closed(event)) => {
+                if self.deliver_terminal(event).await {
+                    TerminalDelivery::Fallback
+                } else {
+                    TerminalDelivery::Undeliverable
+                }
+            }
+        }
+    }
+}
 
 /// The cross-transport adapter contract. Every transport-specific crate
 /// (rvoip-sip, rvoip-webrtc, rvoip-quic, rvoip-webtransport, rvoip-websocket)
@@ -22,6 +89,20 @@ pub use rvoip_core_traits::adapter::{
 pub trait ConnectionAdapter: Send + Sync {
     fn transport(&self) -> Transport;
     fn kind(&self) -> AdapterKind;
+
+    /// Install the Orchestrator's terminal-event fallback. The default is a
+    /// no-op for adapters that cannot overrun their lifecycle event path.
+    fn install_lifecycle_sink(&self, _sink: Arc<dyn AdapterLifecycleSink>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Whether the adapter still owns a live route for `conn`. The
+    /// Orchestrator consults this before accepting queued inbound/principal
+    /// events, preventing an event that was queued before abrupt teardown
+    /// from resurrecting a cleaned connection.
+    fn is_connection_live(&self, _conn: &ConnectionId) -> bool {
+        true
+    }
 
     async fn originate(&self, request: OriginateRequest) -> Result<ConnectionHandle>;
     async fn accept(&self, conn: ConnectionId) -> Result<()>;
@@ -132,4 +213,127 @@ pub trait ConnectionAdapter: Send + Sync {
         conn: ConnectionId,
         signature: SignatureHeaders,
     ) -> Result<IdentityAssurance>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct RecordingSink {
+        delivered: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl AdapterLifecycleSink for RecordingSink {
+        async fn deliver_terminal(&self, event: AdapterEvent) {
+            assert!(matches!(event, AdapterEvent::Ended { .. }));
+            self.delivered.store(true, Ordering::Release);
+        }
+    }
+
+    fn terminal_event() -> AdapterEvent {
+        AdapterEvent::Ended {
+            connection_id: ConnectionId::new(),
+            reason: EndReason::Normal,
+        }
+    }
+
+    #[tokio::test]
+    async fn saturated_event_queue_uses_direct_terminal_fallback() {
+        let (events_tx, _events_rx) = mpsc::channel(1);
+        events_tx
+            .try_send(AdapterEvent::Native {
+                kind: "occupied",
+                detail: "queue full".into(),
+            })
+            .expect("fill event queue");
+
+        let sink = Arc::new(RecordingSink {
+            delivered: AtomicBool::new(false),
+        });
+        let slot = AdapterLifecycleSinkSlot::default();
+        assert!(slot.install(sink.clone()).is_ok());
+
+        assert_eq!(
+            slot.queue_or_deliver_terminal(&events_tx, terminal_event())
+                .await,
+            TerminalDelivery::Fallback
+        );
+        assert!(sink.delivered.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn closed_event_queue_uses_direct_terminal_fallback() {
+        let (events_tx, events_rx) = mpsc::channel(1);
+        drop(events_rx);
+        let sink = Arc::new(RecordingSink {
+            delivered: AtomicBool::new(false),
+        });
+        let slot = AdapterLifecycleSinkSlot::default();
+        assert!(slot.install(sink.clone()).is_ok());
+
+        assert_eq!(
+            slot.queue_or_deliver_terminal(&events_tx, terminal_event())
+                .await,
+            TerminalDelivery::Fallback
+        );
+        assert!(sink.delivered.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn available_event_queue_preserves_normal_terminal_ordering() {
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+        let sink = Arc::new(RecordingSink {
+            delivered: AtomicBool::new(false),
+        });
+        let slot = AdapterLifecycleSinkSlot::default();
+        assert!(slot.install(sink.clone()).is_ok());
+
+        assert_eq!(
+            slot.queue_or_deliver_terminal(&events_tx, terminal_event())
+                .await,
+            TerminalDelivery::Queued
+        );
+        assert!(!sink.delivered.load(Ordering::Acquire));
+        assert!(matches!(
+            events_rx.try_recv().expect("queued terminal event"),
+            AdapterEvent::Ended { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn unregistered_saturated_queue_reports_undeliverable_terminal() {
+        let (events_tx, _events_rx) = mpsc::channel(1);
+        events_tx
+            .try_send(AdapterEvent::Native {
+                kind: "occupied",
+                detail: "queue full".into(),
+            })
+            .expect("fill event queue");
+
+        assert_eq!(
+            AdapterLifecycleSinkSlot::default()
+                .queue_or_deliver_terminal(&events_tx, terminal_event())
+                .await,
+            TerminalDelivery::Undeliverable
+        );
+    }
+
+    #[tokio::test]
+    async fn second_sink_install_is_rejected_and_first_sink_is_retained() {
+        let first = Arc::new(RecordingSink {
+            delivered: AtomicBool::new(false),
+        });
+        let second = Arc::new(RecordingSink {
+            delivered: AtomicBool::new(false),
+        });
+        let slot = AdapterLifecycleSinkSlot::default();
+        assert!(slot.install(first.clone()).is_ok());
+        assert!(slot.install(second.clone()).is_err());
+
+        assert!(slot.deliver_terminal(terminal_event()).await);
+        assert!(first.delivered.load(Ordering::Acquire));
+        assert!(!second.delivered.load(Ordering::Acquire));
+    }
 }

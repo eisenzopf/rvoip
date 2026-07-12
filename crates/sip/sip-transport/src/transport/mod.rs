@@ -57,6 +57,31 @@ pub struct TransportReceiveTiming {
     pub transaction_manager_received_at: Option<Instant>,
 }
 
+/// Identity of a TLS peer whose certificate chain was accepted by rustls.
+///
+/// This value is only constructed on inbound TLS/WSS server connections
+/// after `WebPkiClientVerifier` succeeds. It intentionally exposes a stable
+/// certificate fingerprint rather than retaining the potentially large DER
+/// chain or parsing application-specific subject names at the transport
+/// boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsPeerIdentity {
+    /// Lowercase hexadecimal SHA-256 digest of the presented leaf
+    /// certificate's DER encoding.
+    pub leaf_certificate_sha256: String,
+    /// Number of certificates presented by the peer, including the leaf.
+    pub presented_chain_len: usize,
+}
+
+/// Connection-scoped metadata attached to every SIP message received on the
+/// corresponding transport connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportConnectionMetadata {
+    /// Verified mutual-TLS client identity. Present only when a TLS or WSS
+    /// client supplied a chain accepted by the configured client verifier.
+    pub tls_peer_identity: TlsPeerIdentity,
+}
+
 /// Events emitted by a transport
 #[derive(Debug, Clone)]
 pub enum TransportEvent {
@@ -86,6 +111,10 @@ pub enum TransportEvent {
         raw_bytes: Option<Bytes>,
         /// Optional receive timing diagnostics for UDP fast-path analysis.
         timing: Option<TransportReceiveTiming>,
+        /// Verified connection identity, when the inbound TLS/WSS peer
+        /// presented a client certificate. Plain transports and compatible
+        /// server-only TLS without client authentication leave this `None`.
+        connection_metadata: Option<TransportConnectionMetadata>,
     },
 
     /// Error occurred in the transport

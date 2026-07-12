@@ -192,7 +192,9 @@ impl AuthenticatedPrincipal {
     }
 
     pub fn has_scope(&self, scope: &str) -> bool {
-        self.scopes.iter().any(|candidate| candidate == scope)
+        self.scopes
+            .iter()
+            .any(|candidate| candidate == scope || candidate == "*")
     }
 
     pub fn require_scope(&self, scope: &str) -> Result<(), BearerAuthError> {

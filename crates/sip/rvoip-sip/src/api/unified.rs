@@ -3600,7 +3600,17 @@ impl UnifiedCoordinator {
     /// # }
     /// ```
     pub async fn new(config: Config) -> Result<Arc<Self>> {
+        Self::new_with_listener_auth(config, crate::auth::SipListenerAuthPolicy::disabled()).await
+    }
+
+    /// Create a coordinator with listener authentication installed before the
+    /// transaction receive loop starts.
+    pub async fn new_with_listener_auth(
+        config: Config,
+        listener_auth_policy: crate::auth::SipListenerAuthPolicy,
+    ) -> Result<Arc<Self>> {
         config.validate()?;
+        listener_auth_policy.validate()?;
         rvoip_sip_transport::diagnostics::set_enabled(config.sip_udp_diagnostics);
         rvoip_sip_dialog::diagnostics::set_enabled(config.sip_udp_diagnostics);
         rvoip_sip_dialog::diagnostics::set_transaction_timing_enabled(
@@ -3659,6 +3669,7 @@ impl UnifiedCoordinator {
             &config,
             global_coordinator.clone(),
             sip_trace_owner_id.clone(),
+            listener_auth_policy,
         )
         .await?;
 
@@ -5649,6 +5660,7 @@ impl UnifiedCoordinator {
         config: &Config,
         global_coordinator: Arc<GlobalEventCoordinator>,
         sip_trace_owner_id: Option<String>,
+        listener_auth_policy: crate::auth::SipListenerAuthPolicy,
     ) -> Result<Arc<rvoip_sip_dialog::api::unified::UnifiedDialogApi>> {
         use rvoip_sip_dialog::api::unified::UnifiedDialogApi;
         use rvoip_sip_dialog::config::DialogManagerConfig;
@@ -5802,13 +5814,14 @@ impl UnifiedCoordinator {
 
         // Create transaction manager using transport manager
         let (transaction_manager, event_rx) =
-            TransactionManager::with_transport_manager_and_index_capacity_and_dispatch(
+            TransactionManager::with_transport_manager_and_index_capacity_and_dispatch_and_authorizer(
                 transport_manager,
                 transport_event_rx,
                 Some(config.transaction_event_channel_capacity),
                 Some(config.transaction_index_capacity_hint()),
                 config.sip_transaction_dispatch_workers,
                 config.sip_transaction_dispatch_queue_capacity,
+                listener_auth_policy.into_authorizer(),
             )
             .await
             .map_err(|e| {

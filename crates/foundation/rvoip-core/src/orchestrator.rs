@@ -11,8 +11,8 @@
 //! (CARVE_PLAN §3) land in subsequent steps.
 
 use crate::adapter::{
-    AdapterEvent, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest, PlaybackHandle,
-    TransferTarget,
+    AdapterEvent, AdapterLifecycleSink, ConnectionAdapter, ConnectionHandle, EndReason,
+    OriginateRequest, PlaybackHandle, TransferTarget,
 };
 use crate::bridge::{codec_to_pt, frame_pump, BridgeManager, CrossBridgeHandle};
 use crate::capability::{CapabilityDescriptor, CapabilityIntersection};
@@ -45,6 +45,7 @@ use rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent;
 use rvoip_media_core::codec::transcoding::Transcoder;
 use rvoip_media_core::processing::format::FormatConverter;
 use std::collections::HashMap;
+use std::sync::Weak;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use tokio::sync::{broadcast, mpsc, RwLock as TokioRwLock, Semaphore};
 use tracing::{debug, instrument, warn};
@@ -161,6 +162,41 @@ struct ConnectionLifecycleTicket {
     connection_id: ConnectionId,
     generation: u64,
     state: Arc<Mutex<ConnectionLifecycleState>>,
+}
+
+/// Breaks the Orchestrator↔adapter ownership cycle while still providing a
+/// direct cleanup path when an adapter's bounded event queue cannot accept a
+/// terminal event.
+struct OrchestratorLifecycleSink {
+    orchestrator: Weak<Orchestrator>,
+    transport: Transport,
+}
+
+#[async_trait::async_trait]
+impl AdapterLifecycleSink for OrchestratorLifecycleSink {
+    async fn deliver_terminal(&self, event: AdapterEvent) {
+        let Some(orchestrator) = self.orchestrator.upgrade() else {
+            return;
+        };
+        match &event {
+            AdapterEvent::Ended { .. } | AdapterEvent::Failed { .. } => {}
+            _ => {
+                metrics::counter!(
+                    "rvoip_core_adapter_lifecycle_fallback_rejected_total",
+                    "transport" => format!("{:?}", self.transport)
+                )
+                .increment(1);
+                warn!(
+                    ?self.transport,
+                    "adapter lifecycle fallback rejected a non-terminal event"
+                );
+                return;
+            }
+        }
+
+        let transport = self.transport;
+        orchestrator.handle_adapter_event(transport, event).await;
+    }
 }
 
 /// RAII reservation for both connection slots in a pending bridge. The
@@ -612,6 +648,10 @@ impl Orchestrator {
         if self.adapters.contains_key(&transport) {
             return Err(RvoipError::AdapterAlreadyRegistered(transport));
         }
+        adapter.install_lifecycle_sink(Arc::new(OrchestratorLifecycleSink {
+            orchestrator: Arc::downgrade(self),
+            transport,
+        }))?;
         let mut events = adapter.subscribe_events();
         self.adapters.insert(transport, adapter);
 
@@ -684,6 +724,12 @@ impl Orchestrator {
                 principal: None,
             });
         self.activate_connection_lifecycle(conn);
+    }
+
+    fn adapter_connection_is_live(&self, transport: Transport, conn: &ConnectionId) -> bool {
+        self.adapters
+            .get(&transport)
+            .is_some_and(|adapter| adapter.is_connection_live(conn))
     }
 
     fn track_connection_principal(
@@ -1180,12 +1226,18 @@ impl Orchestrator {
         }
     }
 
-    async fn forget_connection(&self, conn: &ConnectionId) {
+    fn begin_connection_teardown(&self, conn: &ConnectionId) -> bool {
         // Invalidate setup tickets before removing any owner registry. A setup
         // already in flight can finish its slow work, but its final commit is
         // now guaranteed to fail rather than resurrecting stale state.
         self.invalidate_connection_lifecycle(conn);
-        self.connections.remove(conn);
+        let was_tracked = self.connections.remove(conn).is_some();
+        self.drop_connection_subscriptions(conn);
+        was_tracked
+    }
+
+    async fn forget_connection(&self, conn: &ConnectionId) -> bool {
+        let was_tracked = self.begin_connection_teardown(conn);
 
         // Tear down bridge routes before shutting down the source graph.
         if let Some(bridge_id) = self
@@ -1212,26 +1264,8 @@ impl Orchestrator {
         // Must run before subscription cleanup so the Session lookup
         // sees a stable connection set.
         self.detach_connection_from_session(conn);
-        // Eagerly clean up any subscriptions that name this Connection
-        // (either as publisher or subscriber). Idempotent — see
-        // `SessionSubscriptions::drop_connection` for the contract.
-        self.subscriptions.drop_connection(conn);
-        // Mirror the cleanup into the publisher registry so a publisher
-        // that hangs up doesn't leave stale `(sid, strm_id) -> connid`
-        // and `(sid, participant) -> [strm_id]` rows that a subsequent
-        // `from_participant` subscribe would resolve to a dead Connection.
-        // Skip if the registry was never lazily initialized.
-        if let Some(reg) = self.publisher_registry.get() {
-            reg.drop_publisher(conn);
-        }
-        // MP3c subscriber-stream map: drop rows that name this
-        // Connection as subscriber OR publisher so the per-subscription
-        // MediaStream goes out of scope along with the substrate-level
-        // Connection. Without this, the per-publisher MediaStreams keep
-        // a strong reference to the dead Connection's quinn handle.
-        self.subscriber_streams
-            .retain(|(_, sub, pubr, _), _| sub != conn && pubr != conn);
         self.connection_lifecycles.remove(conn);
+        was_tracked
     }
 
     // --- Conversation / Session / Participant lifecycle (P1) -----------
@@ -2030,6 +2064,19 @@ impl Orchestrator {
         table.subscribers_for(publisher, strm_id)
     }
 
+    /// Drop every subscription, publisher row, and subscriber-side media
+    /// stream that names `conn`. This narrower synchronous cleanup hook is
+    /// used by authenticated transport coordinators during abrupt teardown,
+    /// before their asynchronous terminal adapter event is delivered.
+    pub fn drop_connection_subscriptions(&self, conn: &ConnectionId) {
+        self.subscriptions.drop_connection(conn);
+        if let Some(registry) = self.publisher_registry.get() {
+            registry.drop_publisher(conn);
+        }
+        self.subscriber_streams
+            .retain(|(_, subscriber, publisher, _), _| subscriber != conn && publisher != conn);
+    }
+
     /// Drop the entire subscription table for a Session. Called on
     /// `session.ended`. Idempotent.
     pub fn drop_session_subscriptions(&self, sid: &SessionId) {
@@ -2212,6 +2259,34 @@ impl Orchestrator {
     }
 
     async fn handle_adapter_event(&self, transport: Transport, event: AdapterEvent) {
+        let scoped_connection_id = match &event {
+            AdapterEvent::InboundConnection { connection } => Some(&connection.id),
+            AdapterEvent::Connected { connection_id }
+            | AdapterEvent::Authenticated { connection_id, .. }
+            | AdapterEvent::PrincipalAuthenticated { connection_id, .. }
+            | AdapterEvent::Dtmf { connection_id, .. }
+            | AdapterEvent::Quality { connection_id, .. }
+            | AdapterEvent::Message { connection_id, .. }
+            | AdapterEvent::DataMessage { connection_id, .. }
+            | AdapterEvent::StepUpResponse { connection_id, .. } => Some(connection_id),
+            // Terminal events arrive after the adapter removes its route.
+            // Native events are not connection-scoped.
+            AdapterEvent::Ended { .. }
+            | AdapterEvent::Failed { .. }
+            | AdapterEvent::Native { .. } => None,
+            _ => None,
+        };
+        if let Some(connection_id) = scoped_connection_id {
+            if !self.adapter_connection_is_live(transport, connection_id) {
+                debug!(
+                    ?transport,
+                    ?connection_id,
+                    "ignoring stale adapter event for a route that has ended"
+                );
+                return;
+            }
+        }
+
         match event {
             AdapterEvent::InboundConnection { connection } => {
                 self.track_connection(&connection.id, transport);
@@ -2267,23 +2342,25 @@ impl Orchestrator {
                 connection_id,
                 reason,
             } => {
-                self.forget_connection(&connection_id).await;
-                self.emit(Event::ConnectionEnded {
-                    connection_id,
-                    reason,
-                    at: Utc::now(),
-                });
+                if self.forget_connection(&connection_id).await {
+                    self.emit(Event::ConnectionEnded {
+                        connection_id,
+                        reason,
+                        at: Utc::now(),
+                    });
+                }
             }
             AdapterEvent::Failed {
                 connection_id,
                 detail,
             } => {
-                self.forget_connection(&connection_id).await;
-                self.emit(Event::ConnectionFailed {
-                    connection_id,
-                    detail,
-                    at: Utc::now(),
-                });
+                if self.forget_connection(&connection_id).await {
+                    self.emit(Event::ConnectionFailed {
+                        connection_id,
+                        detail,
+                        at: Utc::now(),
+                    });
+                }
             }
             AdapterEvent::Dtmf {
                 connection_id,

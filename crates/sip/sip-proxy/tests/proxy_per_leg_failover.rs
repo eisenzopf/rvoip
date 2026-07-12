@@ -125,6 +125,7 @@ impl Harness {
             transport_type: TransportType::Udp,
             raw_bytes: None,
             timing: None,
+            connection_metadata: None,
         };
         self.tx.send(event).await.expect("inject");
     }

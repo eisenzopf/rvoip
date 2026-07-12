@@ -21,6 +21,13 @@ mod tests {
     use crate::transaction::TransactionKey;
     use crate::transaction::TransactionManager;
     use crate::transaction::TransactionState;
+    use crate::transaction::{
+        SipRequestAuthorization, SipRequestIngressAuthorizer, SipRequestIngressContext,
+        SipRequestRejection,
+    };
+    use rvoip_core_traits::identity::{
+        AuthenticatedPrincipal, AuthenticationMethod, CredentialKind, IdentityAssurance,
+    };
     use rvoip_sip_core::builder::SimpleRequestBuilder;
     use rvoip_sip_core::prelude::*;
     use rvoip_sip_core::types::status::StatusCode;
@@ -192,13 +199,18 @@ mod tests {
     }
 
     fn dispatch_event(message: Message) -> TransportEvent {
+        dispatch_event_from(message, "127.0.0.1:5060".parse().unwrap())
+    }
+
+    fn dispatch_event_from(message: Message, source: SocketAddr) -> TransportEvent {
         TransportEvent::MessageReceived {
             message,
-            source: "127.0.0.1:5060".parse().unwrap(),
+            source,
             destination: "127.0.0.1:5061".parse().unwrap(),
             transport_type: TransportType::Udp,
             raw_bytes: None,
             timing: None,
+            connection_metadata: None,
         }
     }
 
@@ -216,6 +228,314 @@ mod tests {
             queued_at: None,
             worker_id: 0,
         })
+    }
+
+    fn authenticated_test_principal(subject: &str) -> AuthenticatedPrincipal {
+        AuthenticatedPrincipal {
+            subject: subject.to_string(),
+            tenant: Some("tenant-a".to_string()),
+            scopes: vec!["sip:call".to_string()],
+            issuer: Some("test-listener".to_string()),
+            expires_at: None,
+            method: AuthenticationMethod::SipDigest,
+            assurance: IdentityAssurance::Identified {
+                credential_kind: CredentialKind::SipDigest,
+            },
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountingIngressAuthorizer {
+        calls: AtomicUsize,
+        authorization: SipRequestAuthorization,
+    }
+
+    impl CountingIngressAuthorizer {
+        fn authorized(principal: AuthenticatedPrincipal) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                authorization: SipRequestAuthorization::Authorized { principal },
+            }
+        }
+
+        fn rejected() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                authorization: SipRequestAuthorization::Rejected(
+                    SipRequestRejection::new(StatusCode::Unauthorized).with_header(
+                        TypedHeader::Other(
+                            HeaderName::WwwAuthenticate,
+                            HeaderValue::Raw(br#"Digest realm="listener", nonce="test""#.to_vec()),
+                        ),
+                    ),
+                ),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SipRequestIngressAuthorizer for CountingIngressAuthorizer {
+        async fn authorize(
+            &self,
+            _request: &Request,
+            _context: &SipRequestIngressContext,
+        ) -> SipRequestAuthorization {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.authorization.clone()
+        }
+    }
+
+    async fn drain_for_request_event(
+        event_rx: &mut mpsc::Receiver<TransactionEvent>,
+        deadline: Duration,
+    ) -> Option<TransactionEvent> {
+        let end = tokio::time::Instant::now() + deadline;
+        loop {
+            let remaining = end.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            match tokio::time::timeout(remaining, event_rx.recv()).await {
+                Ok(Some(event @ TransactionEvent::InviteRequest { .. }))
+                | Ok(Some(event @ TransactionEvent::NonInviteRequest { .. }))
+                | Ok(Some(event @ TransactionEvent::CancelRequest { .. }))
+                | Ok(Some(event @ TransactionEvent::AckRequest { .. })) => return Some(event),
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => return None,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ingress_authorization_rejects_before_tu_and_reuses_transaction_on_retransmit(
+    ) -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (mut manager, mut event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(32)).await?;
+        let authorizer = Arc::new(CountingIngressAuthorizer::rejected());
+        manager.set_request_ingress_authorizer(Some(authorizer.clone()));
+
+        let invite = create_test_invite().map_err(|error| Error::Other(error.to_string()))?;
+        let event = dispatch_event(Message::Request(invite));
+        manager.handle_transport_event(event.clone()).await?;
+
+        assert!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(50))
+                .await
+                .is_none(),
+            "an unauthorized INVITE must never reach the transaction user"
+        );
+        assert_eq!(authorizer.calls(), 1);
+        let first_messages = transport.get_sent_messages().await;
+        assert!(first_messages.iter().any(|(message, _)| {
+            matches!(message, Message::Response(response) if response.status() == StatusCode::Unauthorized)
+        }));
+
+        manager.handle_transport_event(event).await?;
+        assert_eq!(
+            authorizer.calls(),
+            1,
+            "a retransmission must reuse the original transaction authorization decision"
+        );
+        assert!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(50))
+                .await
+                .is_none(),
+            "an unauthorized retransmission must not escape to the transaction user"
+        );
+        let second_messages = transport.get_sent_messages().await;
+        assert!(second_messages.len() > first_messages.len());
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ingress_authorization_retains_principal_for_authorized_invite() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (mut manager, mut event_rx) =
+            TransactionManager::new(transport, transport_rx, Some(32)).await?;
+        let principal = authenticated_test_principal("alice");
+        let authorizer = Arc::new(CountingIngressAuthorizer::authorized(principal.clone()));
+        manager.set_request_ingress_authorizer(Some(authorizer));
+
+        let invite = create_test_invite().map_err(|error| Error::Other(error.to_string()))?;
+        let key = TransactionKey::from_request(&invite)
+            .ok_or_else(|| Error::Other("INVITE transaction key missing".to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event(Message::Request(invite)))
+            .await?;
+
+        assert!(matches!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+            Some(TransactionEvent::InviteRequest { .. })
+        ));
+        let retained = manager
+            .take_inbound_principal(&key)
+            .expect("authorized principal must be retained until dialog ingress consumes it");
+        assert_eq!(retained.ownership_key(), principal.ownership_key());
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ingress_authorization_binds_replays_and_cancel_to_transport_peer() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (mut manager, mut event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(32)).await?;
+        let authorizer = Arc::new(CountingIngressAuthorizer::authorized(
+            authenticated_test_principal("alice"),
+        ));
+        manager.set_request_ingress_authorizer(Some(authorizer.clone()));
+
+        let source_a: SocketAddr = "192.0.2.10:5060".parse().unwrap();
+        let source_b: SocketAddr = "192.0.2.11:5060".parse().unwrap();
+        let invite = create_test_invite().map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event_from(
+                Message::Request(invite.clone()),
+                source_a,
+            ))
+            .await?;
+        assert!(matches!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+            Some(TransactionEvent::InviteRequest { .. })
+        ));
+
+        manager
+            .handle_transport_event(dispatch_event_from(
+                Message::Request(invite.clone()),
+                source_b,
+            ))
+            .await?;
+        assert!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(50))
+                .await
+                .is_none(),
+            "a replay from a different source must not reach the transaction user"
+        );
+        assert_eq!(authorizer.calls(), 1);
+
+        let cancel = crate::transaction::method::cancel::create_cancel_request(
+            &invite,
+            &transport.local_addr().unwrap(),
+        )?;
+        let cancel_key = TransactionKey::from_request(&cancel)
+            .ok_or_else(|| Error::Other("CANCEL transaction key missing".to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event_from(
+                Message::Request(cancel.clone()),
+                source_b,
+            ))
+            .await?;
+        assert!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(50))
+                .await
+                .is_none(),
+            "a CANCEL from a different source must not reach the transaction user"
+        );
+        assert!(
+            !manager.server_transactions.contains_key(&cancel_key),
+            "an unauthorized CANCEL must not poison the legitimate transaction key"
+        );
+        assert!(transport.get_sent_messages().await.iter().any(
+            |(message, destination)| {
+                *destination == source_b
+                    && matches!(message, Message::Response(response) if response.status() == StatusCode::CallOrTransactionDoesNotExist)
+            }
+        ));
+
+        manager
+            .handle_transport_event(dispatch_event_from(Message::Request(cancel), source_a))
+            .await?;
+        assert!(matches!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+            Some(TransactionEvent::CancelRequest { source, .. }) if source == source_a
+        ));
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ingress_authorization_binds_non_2xx_ack_to_transport_peer() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (mut manager, mut event_rx) =
+            TransactionManager::new(transport, transport_rx, Some(32)).await?;
+        manager.set_request_ingress_authorizer(Some(Arc::new(
+            CountingIngressAuthorizer::authorized(authenticated_test_principal("alice")),
+        )));
+
+        let source_a: SocketAddr = "192.0.2.20:5060".parse().unwrap();
+        let source_b: SocketAddr = "192.0.2.21:5060".parse().unwrap();
+        let invite = create_test_invite().map_err(|error| Error::Other(error.to_string()))?;
+        let invite_key = TransactionKey::from_request(&invite)
+            .ok_or_else(|| Error::Other("INVITE transaction key missing".to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event_from(
+                Message::Request(invite.clone()),
+                source_a,
+            ))
+            .await?;
+        assert!(matches!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+            Some(TransactionEvent::InviteRequest { .. })
+        ));
+
+        let failure = create_test_response(&invite, StatusCode::BusyHere, Some("Busy Here"));
+        manager.send_response(&invite_key, failure.clone()).await?;
+        let invite_transaction = manager
+            .server_transactions
+            .get(&invite_key)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| Error::Other("INVITE transaction missing".to_string()))?;
+        assert!(
+            manager
+                .wait_for_transaction_state(
+                    &invite_key,
+                    TransactionState::Completed,
+                    Duration::from_millis(250),
+                )
+                .await?,
+            "the error response must advance the INVITE transaction to Completed"
+        );
+
+        let ack =
+            crate::transaction::method::ack::create_ack_for_error_response(&invite, &failure)?;
+        manager
+            .handle_transport_event(dispatch_event_from(Message::Request(ack.clone()), source_b))
+            .await?;
+        assert_eq!(
+            invite_transaction.state(),
+            TransactionState::Completed,
+            "an ACK from a different source must not advance the INVITE transaction"
+        );
+
+        manager
+            .handle_transport_event(dispatch_event_from(Message::Request(ack), source_a))
+            .await?;
+        assert!(
+            manager
+                .wait_for_transaction_state(
+                    &invite_key,
+                    TransactionState::Confirmed,
+                    Duration::from_millis(250),
+                )
+                .await?,
+            "the ACK from the authorized source must confirm the INVITE transaction"
+        );
+
+        manager.shutdown().await;
+        Ok(())
     }
 
     #[test]
@@ -912,6 +1232,7 @@ mod tests {
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
                 timing: None,
+                connection_metadata: None,
             })
             .await
             .unwrap();
@@ -1254,6 +1575,7 @@ mod tests {
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
                 timing: None,
+                connection_metadata: None,
             })
             .await
             .unwrap();
@@ -1281,6 +1603,7 @@ mod tests {
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
                 timing: None,
+                connection_metadata: None,
             })
             .await
             .unwrap();
@@ -1410,6 +1733,7 @@ mod tests {
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
                 timing: None,
+                connection_metadata: None,
             })
             .await
             .unwrap();
@@ -1645,6 +1969,7 @@ mod tests {
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
                 timing: None,
+                connection_metadata: None,
             })
             .await
             .unwrap();
@@ -2284,6 +2609,7 @@ mod tests {
                 transport_type: TransportType::Udp,
                 raw_bytes: Some(raw_bytes),
                 timing: None,
+                connection_metadata: None,
             })
             .await?;
 
@@ -2351,6 +2677,7 @@ mod tests {
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
                 timing: None,
+                connection_metadata: None,
             })
             .await
             .unwrap();

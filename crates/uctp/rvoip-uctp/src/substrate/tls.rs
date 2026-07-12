@@ -47,6 +47,7 @@ pub fn dangerous_no_verify() -> rustls::ClientConfig {
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
     use rustls::{DigitallySignedStruct, SignatureScheme};
+    use std::sync::Arc;
 
     #[derive(Debug)]
     struct NoVerify;

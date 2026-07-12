@@ -366,6 +366,7 @@ rvoip-media-core.workspace = true
 rvoip-sip-core.workspace = true
 rvoip-rtp-core.workspace = true
 rvoip-core-traits.workspace = true
+ipnet = "2.12"
 # RFC 4568 SDES — base64 encoding of `a=crypto: inline:` master keys.
 base64 = "0.22"
 rvoip-auth-core.workspace = true

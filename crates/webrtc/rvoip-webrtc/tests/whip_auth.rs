@@ -9,7 +9,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_core::adapter::ConnectionAdapter;
 use rvoip_webrtc::config::IceServerConfig;
 use rvoip_webrtc::signaling::auth::{AnonymousAuth, BearerStaticTokenAuth};
 use rvoip_webrtc::signaling::whip;

@@ -186,6 +186,10 @@ name = "ws_auth"
 required-features = ["signaling-ws"]
 
 [[test]]
+name = "signaling_ownership"
+required-features = ["signaling-whip", "signaling-ws"]
+
+[[test]]
 name = "server_graceful_shutdown"
 required-features = ["signaling-whip"]
 

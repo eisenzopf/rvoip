@@ -28,11 +28,53 @@ use common::drive_auth_handshake;
 async fn default_subscription_handler_rejects_with_501() {
     let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
-    let (events_tx, _events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
 
     let _coord = UctpCoordinator::start("quic", in_rx, out_tx, events_tx, bearer_stub());
 
     drive_auth_handshake(&in_tx, &mut out_rx).await;
+    let _ = events_rx.recv().await;
+
+    in_tx
+        .send(
+            UctpEnvelope::new(
+                MessageType::SessionInvite,
+                serde_json::json!({
+                    "from": "part_alice",
+                    "to": ["part_bob"],
+                    "medium": "voice",
+                    "intent": "synchronous-engagement",
+                    "capabilities_offer": {}
+                }),
+            )
+            .with_sid("sess_x"),
+        )
+        .await
+        .unwrap();
+    let _ = events_rx.recv().await;
+    in_tx
+        .send(
+            UctpEnvelope::new(
+                MessageType::ConnectionOffer,
+                serde_json::json!({
+                    "by_participant": "part_alice",
+                    "substrate": "quic",
+                    "capabilities": {},
+                    "streams_offered": [{
+                        "id": "strm_z",
+                        "kind": "audio",
+                        "direction": "sendrecv",
+                        "codec_preferences": ["opus"]
+                    }],
+                    "substrate_setup": null
+                }),
+            )
+            .with_sid("sess_x")
+            .with_connid("conn_y"),
+        )
+        .await
+        .unwrap();
+    let _ = events_rx.recv().await;
 
     let env = UctpEnvelope {
         v: 1,

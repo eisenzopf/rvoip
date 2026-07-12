@@ -92,6 +92,34 @@ pub trait Transport: Send + Sync + fmt::Debug {
 - **TLS** (`TlsTransport`): Secure TCP with encryption and certificate validation
 - **WebSocket** (`WebSocketTransport`): Full-duplex communication over HTTP
 
+### Inbound TLS client authentication
+
+SIP TLS and WSS listeners use a server-side client-authentication policy that
+is independent from outbound `TlsClientConfig`:
+
+```rust,no_run
+use rvoip_sip_transport::transport::tls::{
+    TlsServerClientAuthConfig, TlsTransport,
+};
+
+let client_auth = TlsServerClientAuthConfig::required("client-ca.pem");
+let (transport, events) = TlsTransport::bind_server_only_with_client_auth(
+    "0.0.0.0:5061".parse()?,
+    "server-cert.pem".as_ref(),
+    "server-key.pem".as_ref(),
+    None,
+    client_auth,
+).await?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`Disabled` is the default and preserves server-only TLS compatibility.
+`Optional` verifies a certificate when supplied but permits anonymous clients;
+`Required` rejects clients that do not present a trusted certificate. Accepted
+client certificates are exposed as a verified SHA-256 leaf fingerprint in
+`TransportEvent::MessageReceived::connection_metadata`. WSS exposes the same
+policy through `WebSocketTransport::bind_with_tls_configs`.
+
 ### Event System
 
 The transport layer emits events through the `TransportEvent` enum:

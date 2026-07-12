@@ -162,6 +162,35 @@ impl ConnectionMachine {
         self.streams.get(&local_id)
     }
 
+    /// Snapshot every negotiated stream ID, including streams that have not
+    /// reached `connection.ready` yet. Used by coordinator teardown to remove
+    /// publisher registrations deterministically.
+    pub fn stream_ids(&self) -> Vec<String> {
+        let mut ids = self
+            .streams
+            .values()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        ids.extend(
+            self.pending_streams
+                .iter()
+                .map(|stream| stream.strm_id.clone()),
+        );
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    /// Number of stream handles already allocated on this Connection.
+    ///
+    /// A new `connection.offer` replaces any not-yet-announced pending offer,
+    /// but it must not reset the resource budget consumed by streams that were
+    /// already announced. The coordinator uses this count to enforce the
+    /// per-Connection cap cumulatively across re-offers.
+    pub fn opened_stream_count(&self) -> usize {
+        self.streams.len()
+    }
+
     /// Apply an input. Returns the new state or an illegal-transition error.
     pub fn apply(&mut self, input: ConnectionInput) -> Result<UctpConnectionState, UctpError> {
         let next = match (self.state, input) {

@@ -99,4 +99,20 @@ impl BearerValidator for StubBearerValidator {
         }));
         Ok(IdentityAssurance::Pseudonymous { ephemeral_key })
     }
+
+    async fn validate_principal(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+        let assurance = self.validate(token).await?;
+        let mut principal = AuthenticatedPrincipal::from_assurance_with_method(
+            assurance,
+            AuthenticationMethod::Bearer,
+        );
+        // The stub is explicitly a local-development validator. Giving it a
+        // wildcard keeps secure protocol defaults usable in examples without
+        // weakening any real JWT/JWKS/introspection validator.
+        principal.scopes = vec!["*".into()];
+        ensure_principal_active(principal)
+    }
 }

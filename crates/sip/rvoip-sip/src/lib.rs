@@ -552,8 +552,9 @@ pub use auth::{
     DigestSecret, DigestSecretProvider, JwksJwtValidator, JwtValidator,
     OAuth2IntrospectionValidator, PasswordVerifier, SipAuthChallenge, SipAuthContext,
     SipAuthDecision, SipAuthPolicy, SipAuthScheme, SipAuthService, SipAuthSource, SipClientAuth,
-    SipDigestAuthService, SipIncomingAuthenticator, SipTransportSecurityContext,
-    TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
+    SipDigestAuthService, SipIncomingAuthenticator, SipListenerAuthPolicy,
+    SipPrincipalAuthDecision, SipTransportSecurityContext, TokenRevocationChecker,
+    TokenRevocationContext, TokenRevocationStatus,
 };
 pub use rvoip_media_core::performance::pool::PoolConfig as MediaPoolConfig;
 pub use rvoip_media_core::types::AudioFrame;

@@ -18,6 +18,7 @@ use rvoip_core::ids::StreamId;
 use rvoip_core::stream::{MediaFrame, MediaStream, QualitySnapshot, StreamKind};
 use rvoip_uctp::substrate::datagram::{pack, pack_rtp, unpack_rtp, MediaDatagram};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace_span, warn};
 
 const FRAME_CAP: usize = 1024;
@@ -32,6 +33,8 @@ pub struct WebTransportDatagramMediaStream {
     out_tx: mpsc::Sender<MediaFrame>,
     inbound_tx: mpsc::Sender<MediaFrame>,
     quality: parking_lot::RwLock<QualitySnapshot>,
+    cancel: CancellationToken,
+    outbound_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl WebTransportDatagramMediaStream {
@@ -43,17 +46,49 @@ impl WebTransportDatagramMediaStream {
         stream_local_id: u16,
         session: web_transport_quinn::Session,
     ) -> Arc<Self> {
+        Self::start_with_cancel(
+            id,
+            kind,
+            codec,
+            direction,
+            stream_local_id,
+            session,
+            CancellationToken::new(),
+        )
+    }
+
+    /// Construct a stream whose background media pump is coupled to the
+    /// owning WebTransport peer session.
+    pub fn start_with_cancel(
+        id: StreamId,
+        kind: StreamKind,
+        codec: CodecInfo,
+        direction: Direction,
+        stream_local_id: u16,
+        session: web_transport_quinn::Session,
+        peer_cancel: CancellationToken,
+    ) -> Arc<Self> {
         let (in_tx, in_rx) = mpsc::channel::<MediaFrame>(FRAME_CAP);
         let (out_tx, mut out_rx) = mpsc::channel::<MediaFrame>(FRAME_CAP);
 
+        let stream_cancel = peer_cancel.child_token();
+        let pump_cancel = stream_cancel.clone();
+        let session_cancel = peer_cancel.clone();
         let session_for_pump = session.clone();
         let stream_id_for_pump = id.clone();
         let default_payload_type = rvoip_core::bridge::codec_to_pt(&codec.name).unwrap_or(111);
         let ssrc = stable_ssrc(&id);
-        tokio::spawn(async move {
+        let outbound_task = tokio::spawn(async move {
             let mut seq: u32 = 0;
             let mut rtp_seq: u16 = 0;
-            while let Some(frame) = out_rx.recv().await {
+            loop {
+                let frame = tokio::select! {
+                    _ = pump_cancel.cancelled() => break,
+                    frame = out_rx.recv() => match frame {
+                        Some(frame) => frame,
+                        None => break,
+                    },
+                };
                 let _span = trace_span!(
                     "uctp.stream.frame",
                     stream_local_id,
@@ -98,6 +133,17 @@ impl WebTransportDatagramMediaStream {
                     )
                     .increment(1);
                     debug!(error = %e, stream = %stream_id_for_pump, "rvoip-webtransport: send_datagram failed");
+                    if matches!(
+                        e,
+                        web_transport_quinn::SessionError::ConnectionError(_)
+                            | web_transport_quinn::SessionError::WebTransportError(_)
+                            | web_transport_quinn::SessionError::SendDatagramError(
+                                quinn::SendDatagramError::ConnectionLost(_)
+                            )
+                    ) {
+                        session_cancel.cancel();
+                        break;
+                    }
                     continue;
                 }
                 metrics::counter!(
@@ -122,6 +168,8 @@ impl WebTransportDatagramMediaStream {
             out_tx,
             inbound_tx: in_tx,
             quality: parking_lot::RwLock::new(QualitySnapshot::default()),
+            cancel: stream_cancel,
+            outbound_task: StdMutex::new(Some(outbound_task)),
         })
     }
 
@@ -135,6 +183,10 @@ impl WebTransportDatagramMediaStream {
 
     pub fn update_quality(&self, q: QualitySnapshot) {
         *self.quality.write() = q;
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.cancel.is_cancelled()
     }
 }
 
@@ -179,6 +231,15 @@ impl MediaStream for WebTransportDatagramMediaStream {
     }
 
     async fn close(self: Arc<Self>) -> RvoipResult<()> {
+        self.cancel.cancel();
+        let task = self
+            .outbound_task
+            .lock()
+            .map_err(|_| RvoipError::InvalidState("WebTransport media task lock is poisoned"))?
+            .take();
+        if let Some(task) = task {
+            let _ = task.await;
+        }
         Ok(())
     }
 }
@@ -204,9 +265,29 @@ pub fn spawn_datagram_reader(
     router: Arc<parking_lot::RwLock<Vec<Arc<WebTransportDatagramMediaStream>>>>,
     fanout: Option<FanoutContext>,
 ) {
+    std::mem::drop(spawn_datagram_reader_with_cancel(
+        session,
+        router,
+        fanout,
+        CancellationToken::new(),
+    ));
+}
+
+/// Spawn the per-peer WebTransport datagram reader with explicit lifecycle
+/// coupling.
+pub fn spawn_datagram_reader_with_cancel(
+    session: web_transport_quinn::Session,
+    router: Arc<parking_lot::RwLock<Vec<Arc<WebTransportDatagramMediaStream>>>>,
+    fanout: Option<FanoutContext>,
+    peer_cancel: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            match session.read_datagram().await {
+            let received = tokio::select! {
+                _ = peer_cancel.cancelled() => return,
+                received = session.read_datagram() => received,
+            };
+            match received {
                 Ok(bytes) => {
                     let datagram = match rvoip_uctp::substrate::datagram::unpack(&bytes) {
                         Ok(d) => d,
@@ -225,11 +306,19 @@ pub fn spawn_datagram_reader(
                         let guard = router.read();
                         guard
                             .iter()
-                            .find(|s| s.stream_local_id() == datagram.stream_local_id)
+                            .find(|s| {
+                                !s.is_closed() && s.stream_local_id() == datagram.stream_local_id
+                            })
                             .cloned()
                     };
+                    if datagram.seq & 0xff == 0 {
+                        router.write().retain(|stream| !stream.is_closed());
+                    }
                     match target {
                         Some(stream) => {
+                            if stream.is_closed() {
+                                continue;
+                            }
                             // Tight scope for the non-Send span guard;
                             // it must drop before the fanout await.
                             let rtp = match unpack_rtp(datagram.payload) {
@@ -309,11 +398,12 @@ pub fn spawn_datagram_reader(
                 }
                 Err(e) => {
                     warn!(error = %e, "rvoip-webtransport: datagram reader exiting");
+                    peer_cancel.cancel();
                     return;
                 }
             }
         }
-    });
+    })
 }
 
 fn stable_ssrc(stream_id: &StreamId) -> u32 {
@@ -346,6 +436,8 @@ mod receiver_ownership_tests {
             out_tx,
             inbound_tx,
             quality: parking_lot::RwLock::new(QualitySnapshot::default()),
+            cancel: CancellationToken::new(),
+            outbound_task: StdMutex::new(None),
         };
 
         assert!(stream.try_frames_in().is_ok());

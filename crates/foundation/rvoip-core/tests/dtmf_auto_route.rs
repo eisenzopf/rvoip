@@ -42,13 +42,14 @@ struct DtmfRecord {
 struct StreamHandle {
     id: StreamId,
     codec: CodecInfo,
+    _in_tx: mpsc::Sender<MediaFrame>,
     in_rx: StdMutex<Option<mpsc::Receiver<MediaFrame>>>,
     out_tx: mpsc::Sender<MediaFrame>,
 }
 
 impl StreamHandle {
     fn new(codec_name: &str) -> Arc<Self> {
-        let (_in_tx, in_rx) = mpsc::channel::<MediaFrame>(64);
+        let (in_tx, in_rx) = mpsc::channel::<MediaFrame>(64);
         let (out_tx, _out_rx) = mpsc::channel::<MediaFrame>(64);
         Arc::new(Self {
             id: StreamId::new(),
@@ -58,6 +59,7 @@ impl StreamHandle {
                 channels: 1,
                 fmtp: None,
             },
+            _in_tx: in_tx,
             in_rx: StdMutex::new(Some(in_rx)),
             out_tx,
         })

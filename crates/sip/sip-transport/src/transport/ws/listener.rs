@@ -3,7 +3,6 @@ use futures_util::StreamExt;
 #[cfg(feature = "ws")]
 use http::HeaderValue;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 #[cfg(feature = "ws")]
@@ -13,13 +12,13 @@ use tokio_tungstenite::{tungstenite, WebSocketStream};
 use tracing::{debug, error, info};
 
 #[cfg(feature = "wss")]
-use tokio_rustls::rustls::ServerConfig;
-#[cfg(feature = "wss")]
 use tokio_rustls::TlsAcceptor;
 
 use super::connection::WebSocketConnection;
 use super::{SipWsStream, SIP_WSS_SUBPROTOCOL, SIP_WS_SUBPROTOCOL};
 use crate::error::{Error, Result};
+#[cfg(feature = "wss")]
+use crate::transport::tls::TlsServerClientAuthConfig;
 
 /// WebSocket listener for accepting SIP WebSocket connections
 pub struct WebSocketListener {
@@ -55,14 +54,96 @@ impl WebSocketListener {
         cert_path: Option<&str>,
         key_path: Option<&str>,
     ) -> Result<Self> {
+        #[cfg(feature = "wss")]
+        {
+            return Self::bind_with_client_auth(
+                addr,
+                secure,
+                cert_path,
+                key_path,
+                TlsServerClientAuthConfig::default(),
+            )
+            .await;
+        }
+        #[cfg(not(feature = "wss"))]
+        {
+            Self::bind_inner(addr, secure, cert_path, key_path).await
+        }
+    }
+
+    /// Bind a WebSocket listener with an explicit inbound WSS
+    /// client-certificate policy. Plain WS ignores this configuration.
+    #[cfg(feature = "wss")]
+    pub async fn bind_with_client_auth(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        client_auth: TlsServerClientAuthConfig,
+    ) -> Result<Self> {
+        Self::bind_inner_with_client_auth(addr, secure, cert_path, key_path, client_auth).await
+    }
+
+    #[cfg(feature = "wss")]
+    async fn bind_inner_with_client_auth(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        client_auth: TlsServerClientAuthConfig,
+    ) -> Result<Self> {
+        Self::bind_inner_impl(addr, secure, cert_path, key_path, Some(client_auth)).await
+    }
+
+    #[cfg(not(feature = "wss"))]
+    async fn bind_inner(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+    ) -> Result<Self> {
+        Self::bind_inner_impl(addr, secure, cert_path, key_path).await
+    }
+
+    #[cfg(feature = "wss")]
+    async fn bind_inner_impl(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        client_auth: Option<TlsServerClientAuthConfig>,
+    ) -> Result<Self> {
+        let client_auth = client_auth.unwrap_or_default();
+        Self::bind_configured(addr, secure, cert_path, key_path, &client_auth).await
+    }
+
+    #[cfg(not(feature = "wss"))]
+    async fn bind_inner_impl(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+    ) -> Result<Self> {
+        Self::bind_configured(addr, secure, cert_path, key_path).await
+    }
+
+    #[cfg(feature = "wss")]
+    async fn bind_configured(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        client_auth: &TlsServerClientAuthConfig,
+    ) -> Result<Self> {
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|e| Error::BindFailed(addr, e))?;
 
         info!(
-            "WebSocket listener bound to {} ({})",
-            listener.local_addr().unwrap(),
-            if secure { "wss" } else { "ws" }
+            local_addr = %listener.local_addr().unwrap(),
+            transport = if secure { "wss" } else { "ws" },
+            client_auth_mode = ?client_auth.mode,
+            "WebSocket listener bound"
         );
 
         // Build the TLS acceptor up-front when the listener is secure.
@@ -79,12 +160,12 @@ impl WebSocketListener {
                     ))
                 }
             };
-            let certs = crate::transport::tls::load_certs(Path::new(cert_p))?;
-            let key = crate::transport::tls::load_private_key(Path::new(key_p))?;
-            let server_config = ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(certs, key)
-                .map_err(|e| Error::TlsHandshakeFailed(format!("WSS server config: {}", e)))?;
+            let server_config = crate::transport::tls::build_server_config(
+                std::path::Path::new(cert_p),
+                std::path::Path::new(key_p),
+                client_auth,
+                "WSS",
+            )?;
             Some(TlsAcceptor::from(Arc::new(server_config)))
         } else {
             None
@@ -97,6 +178,29 @@ impl WebSocketListener {
             key_path: key_path.map(String::from),
             #[cfg(feature = "wss")]
             tls_acceptor,
+        })
+    }
+
+    #[cfg(not(feature = "wss"))]
+    async fn bind_configured(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+    ) -> Result<Self> {
+        let listener = TcpListener::bind(addr)
+            .await
+            .map_err(|e| Error::BindFailed(addr, e))?;
+        info!(
+            local_addr = %listener.local_addr().unwrap(),
+            transport = if secure { "wss" } else { "ws" },
+            "WebSocket listener bound"
+        );
+        Ok(Self {
+            listener,
+            secure,
+            cert_path: cert_path.map(String::from),
+            key_path: key_path.map(String::from),
         })
     }
 
@@ -130,7 +234,7 @@ impl WebSocketListener {
         // (the client-side `MaybeTlsStream::Rustls` variant doesn't
         // cover the server direction). Plain WS skips the handshake and
         // wraps the raw TCP stream as `SipWsStream::Plain`.
-        let maybe_tls_stream: SipWsStream = if self.secure {
+        let (maybe_tls_stream, connection_metadata): (SipWsStream, _) = if self.secure {
             #[cfg(feature = "wss")]
             {
                 let acceptor = self.tls_acceptor.as_ref().ok_or_else(|| {
@@ -142,7 +246,10 @@ impl WebSocketListener {
                     error!("WSS TLS handshake with {} failed: {}", peer_addr, e);
                     Error::TlsHandshakeFailed(format!("WSS handshake from {}: {}", peer_addr, e))
                 })?;
-                SipWsStream::ServerTls(tls_stream)
+                let metadata = crate::transport::tls::verified_peer_metadata(
+                    tls_stream.get_ref().1.peer_certificates(),
+                );
+                (SipWsStream::ServerTls(tls_stream), metadata)
             }
             #[cfg(not(feature = "wss"))]
             {
@@ -151,7 +258,7 @@ impl WebSocketListener {
                 ));
             }
         } else {
-            SipWsStream::Plain(stream)
+            (SipWsStream::Plain(stream), None)
         };
 
         // Custom callback for WebSocket handshake to handle subprotocol negotiation
@@ -191,7 +298,7 @@ impl WebSocketListener {
                 }
             }
 
-            Ok((response, selected_protocol))
+            (response, selected_protocol)
         };
 
         // Perform WebSocket handshake
@@ -219,8 +326,13 @@ impl WebSocketListener {
         let (ws_writer, ws_reader) = ws_stream.split();
 
         // Create a WebSocket connection
-        let connection =
-            WebSocketConnection::from_writer(ws_writer, peer_addr, self.secure, subprotocol);
+        let connection = WebSocketConnection::from_writer_with_metadata(
+            ws_writer,
+            peer_addr,
+            self.secure,
+            subprotocol,
+            connection_metadata,
+        );
 
         Ok((connection, ws_reader))
     }
@@ -229,22 +341,29 @@ impl WebSocketListener {
     #[cfg(feature = "ws")]
     async fn accept_async_with_subprotocol<F>(
         stream: SipWsStream,
-        _callback: F,
+        callback: F,
     ) -> std::result::Result<(WebSocketStream<SipWsStream>, String), tungstenite::Error>
     where
-        F: FnOnce(
-            &Request,
-            Response,
-        ) -> std::result::Result<(Response, String), tungstenite::Error>,
+        F: FnOnce(&Request, Response) -> (Response, String) + Unpin,
     {
-        // This is a simplified implementation that doesn't actually use the callback yet
-        // In a full implementation, we'd modify tokio-tungstenite to support returning additional data
-
-        let ws_stream = tokio_tungstenite::accept_async(stream).await?;
-
-        // For now, we'll just return an empty string for the subprotocol
-        // In a real implementation, we'd extract this from the handshake
-        Ok((ws_stream, String::new()))
+        let selected_protocol = Arc::new(std::sync::Mutex::new(String::new()));
+        let selected_for_callback = Arc::clone(&selected_protocol);
+        let ws_stream = tokio_tungstenite::accept_hdr_async(
+            stream,
+            move |request: &Request, response: Response| {
+                let (response, selected) = callback(request, response);
+                *selected_for_callback
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = selected;
+                Ok(response)
+            },
+        )
+        .await?;
+        let selected = selected_protocol
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        Ok((ws_stream, selected))
     }
 
     /// Returns whether this is a secure WebSocket listener

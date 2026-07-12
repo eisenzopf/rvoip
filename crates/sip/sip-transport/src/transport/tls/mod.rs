@@ -9,11 +9,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
 use rvoip_sip_core::types::uri::Host;
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_rustls::rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, ServerName},
+    server::WebPkiClientVerifier,
     ClientConfig, RootCertStore, ServerConfig,
 };
 // `dev-insecure-tls` is the only path that implements `ServerCertVerifier`;
@@ -29,7 +31,9 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::error::{Error, Result};
-use crate::transport::{Transport, TransportEvent, TransportType};
+use crate::transport::{
+    TlsPeerIdentity, Transport, TransportConnectionMetadata, TransportEvent, TransportType,
+};
 
 /// Builder-friendly TLS client configuration. Mirrors the knobs we
 /// expect to expose through `session-core::Config` once Step 1C wires
@@ -51,6 +55,56 @@ pub struct TlsClientConfig {
     /// Optional PEM-encoded PKCS#8 private key for
     /// [`TlsClientConfig::client_cert_path`].
     pub client_key_path: Option<PathBuf>,
+}
+
+/// Inbound TLS client-certificate policy for SIP TLS and SIP WSS listeners.
+///
+/// This is intentionally separate from [`TlsClientConfig`], which controls
+/// outbound server verification and the certificate this endpoint presents
+/// when acting as a client.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TlsClientAuthMode {
+    /// Preserve the historical server-only TLS behavior: do not request a
+    /// client certificate.
+    #[default]
+    Disabled,
+    /// Request and verify a client certificate when one is presented, while
+    /// allowing clients that present no certificate.
+    Optional,
+    /// Require every client to present a certificate chaining to the
+    /// configured trust anchors.
+    Required,
+}
+
+/// Configuration for inbound TLS/WSS client-certificate authentication.
+#[derive(Debug, Clone, Default)]
+pub struct TlsServerClientAuthConfig {
+    /// Whether client certificates are disabled, optional, or required.
+    pub mode: TlsClientAuthMode,
+    /// PEM bundle containing trust anchors for client certificates. Required
+    /// for [`TlsClientAuthMode::Optional`] and
+    /// [`TlsClientAuthMode::Required`]. System roots are deliberately not
+    /// loaded for inbound client authentication.
+    pub client_ca_path: Option<PathBuf>,
+}
+
+impl TlsServerClientAuthConfig {
+    /// Require a client certificate chaining to `client_ca_path`.
+    pub fn required(client_ca_path: impl Into<PathBuf>) -> Self {
+        Self {
+            mode: TlsClientAuthMode::Required,
+            client_ca_path: Some(client_ca_path.into()),
+        }
+    }
+
+    /// Verify a client certificate when presented, but allow anonymous TLS
+    /// clients as well.
+    pub fn optional(client_ca_path: impl Into<PathBuf>) -> Self {
+        Self {
+            mode: TlsClientAuthMode::Optional,
+            client_ca_path: Some(client_ca_path.into()),
+        }
+    }
 }
 
 /// TLS socket role for a SIP transport instance.
@@ -146,12 +200,34 @@ impl TlsTransport {
         event_tx: Option<mpsc::Sender<TransportEvent>>,
         client_cfg: TlsClientConfig,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
-        Self::bind_with_role_and_client_config(
+        Self::bind_with_configs(
             local_addr,
             cert_path,
             key_path,
             event_tx,
             client_cfg,
+            TlsServerClientAuthConfig::default(),
+        )
+        .await
+    }
+
+    /// Bind a bidirectional TLS transport with independent outbound-client
+    /// and inbound-client-certificate policies.
+    pub async fn bind_with_configs(
+        local_addr: SocketAddr,
+        cert_path: &Path,
+        key_path: &Path,
+        event_tx: Option<mpsc::Sender<TransportEvent>>,
+        client_cfg: TlsClientConfig,
+        server_client_auth: TlsServerClientAuthConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_role_and_configs(
+            local_addr,
+            cert_path,
+            key_path,
+            event_tx,
+            client_cfg,
+            server_client_auth,
             TlsRole::ClientAndServer,
         )
         .await
@@ -167,32 +243,50 @@ impl TlsTransport {
         event_tx: Option<mpsc::Sender<TransportEvent>>,
         client_cfg: TlsClientConfig,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
-        Self::bind_with_role_and_client_config(
+        Self::bind_with_role_and_configs(
             local_addr,
             cert_path,
             key_path,
             event_tx,
             client_cfg,
+            TlsServerClientAuthConfig::default(),
             TlsRole::ServerOnly,
         )
         .await
     }
 
-    async fn bind_with_role_and_client_config(
+    /// Bind a server-only TLS listener with explicit inbound
+    /// client-certificate authentication.
+    pub async fn bind_server_only_with_client_auth(
+        local_addr: SocketAddr,
+        cert_path: &Path,
+        key_path: &Path,
+        event_tx: Option<mpsc::Sender<TransportEvent>>,
+        server_client_auth: TlsServerClientAuthConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_role_and_configs(
+            local_addr,
+            cert_path,
+            key_path,
+            event_tx,
+            TlsClientConfig::default(),
+            server_client_auth,
+            TlsRole::ServerOnly,
+        )
+        .await
+    }
+
+    async fn bind_with_role_and_configs(
         local_addr: SocketAddr,
         cert_path: &Path,
         key_path: &Path,
         event_tx: Option<mpsc::Sender<TransportEvent>>,
         client_cfg: TlsClientConfig,
+        server_client_auth: TlsServerClientAuthConfig,
         role: TlsRole,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         // Server-side config (for incoming TLS connections).
-        let cert = load_certs(cert_path)?;
-        let key = load_private_key(key_path)?;
-        let server_config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(cert, key)
-            .map_err(|e| Error::TlsHandshakeFailed(format!("TLS server config: {}", e)))?;
+        let server_config = build_server_config(cert_path, key_path, &server_client_auth, "TLS")?;
         let acceptor = TlsAcceptor::from(Arc::new(server_config));
 
         // Client-side config (for outgoing TLS dials).
@@ -212,7 +306,11 @@ impl TlsTransport {
             .await
             .map_err(|e| Error::BindFailed(local_addr, e))?;
         let actual_addr = listener.local_addr().map_err(Error::LocalAddrFailed)?;
-        info!("TLS transport listening on {}", actual_addr);
+        info!(
+            %actual_addr,
+            client_auth_mode = ?server_client_auth.mode,
+            "TLS transport listening"
+        );
 
         let transport = Self {
             role,
@@ -301,12 +399,16 @@ impl TlsTransport {
                         match acceptor.accept(stream).await {
                             Ok(tls_stream) => {
                                 debug!("TLS handshake with {} successful", remote_addr);
+                                let connection_metadata = verified_peer_metadata(
+                                    tls_stream.get_ref().1.peer_certificates(),
+                                );
                                 Self::handle_connection(
                                     tls_stream,
                                     remote_addr,
                                     local_addr,
                                     connections,
                                     event_tx,
+                                    connection_metadata,
                                 )
                                 .await;
                             }
@@ -341,6 +443,7 @@ impl TlsTransport {
         local_addr: SocketAddr,
         connections: Arc<tokio::sync::Mutex<Vec<(SocketAddr, mpsc::Sender<Bytes>)>>>,
         event_tx: mpsc::Sender<TransportEvent>,
+        connection_metadata: Option<TransportConnectionMetadata>,
     ) where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
@@ -411,6 +514,7 @@ impl TlsTransport {
                                         transport_type: TransportType::Tls,
                                         raw_bytes: Some(raw_bytes),
                                         timing: None,
+                                        connection_metadata: connection_metadata.clone(),
                                     })
                                     .await;
                             }
@@ -573,8 +677,15 @@ impl TlsTransport {
         // connections; it registers the connection in the registry as
         // its first action so a subsequent `send_to_addr` finds it.
         tokio::spawn(async move {
-            Self::handle_connection(tls_stream, remote_addr, local_addr, connections, event_tx)
-                .await;
+            Self::handle_connection(
+                tls_stream,
+                remote_addr,
+                local_addr,
+                connections,
+                event_tx,
+                None,
+            )
+            .await;
         });
 
         // Wait briefly for the spawned task to register the connection
@@ -720,6 +831,88 @@ fn try_consume_keepalive_frame(buffer: &mut BytesMut) -> Option<KeepAliveFrame> 
         return Some(KeepAliveFrame::Pong);
     }
     None
+}
+
+/// Build the inbound rustls server configuration shared by SIP TLS and WSS.
+pub(crate) fn build_server_config(
+    cert_path: &Path,
+    key_path: &Path,
+    client_auth: &TlsServerClientAuthConfig,
+    transport_label: &str,
+) -> Result<ServerConfig> {
+    let certs = load_certs(cert_path)?;
+    let key = load_private_key(key_path)?;
+    let builder = ServerConfig::builder();
+    let builder = match client_auth.mode {
+        TlsClientAuthMode::Disabled => builder.with_no_client_auth(),
+        TlsClientAuthMode::Optional | TlsClientAuthMode::Required => {
+            let ca_path = client_auth.client_ca_path.as_ref().ok_or_else(|| {
+                Error::InvalidState(format!(
+                    "{} client authentication requires client_ca_path",
+                    transport_label
+                ))
+            })?;
+            let mut roots = RootCertStore::empty();
+            for cert in load_certs(ca_path)? {
+                roots.add(cert).map_err(|error| {
+                    Error::TlsHandshakeFailed(format!(
+                        "{} client CA {} is invalid: {}",
+                        transport_label,
+                        ca_path.display(),
+                        error
+                    ))
+                })?;
+            }
+            if roots.is_empty() {
+                return Err(Error::InvalidState(format!(
+                    "{} client CA bundle {} contains no certificates",
+                    transport_label,
+                    ca_path.display()
+                )));
+            }
+            let verifier = WebPkiClientVerifier::builder(Arc::new(roots));
+            let verifier = if client_auth.mode == TlsClientAuthMode::Optional {
+                verifier.allow_unauthenticated().build()
+            } else {
+                verifier.build()
+            }
+            .map_err(|error| {
+                Error::TlsHandshakeFailed(format!(
+                    "{} client certificate verifier: {}",
+                    transport_label, error
+                ))
+            })?;
+            builder.with_client_cert_verifier(verifier)
+        }
+    };
+    builder.with_single_cert(certs, key).map_err(|error| {
+        Error::TlsHandshakeFailed(format!(
+            "{} server certificate/key config: {}",
+            transport_label, error
+        ))
+    })
+}
+
+/// Convert the successfully verified peer certificate chain retained by
+/// rustls into bounded transport metadata. `None` means the optional verifier
+/// admitted an unauthenticated client or client authentication was disabled.
+pub(crate) fn verified_peer_metadata(
+    peer_certificates: Option<&[CertificateDer<'static>]>,
+) -> Option<TransportConnectionMetadata> {
+    let certificates = peer_certificates?;
+    let leaf = certificates.first()?;
+    let digest = Sha256::digest(leaf.as_ref());
+    let mut fingerprint = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut fingerprint, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Some(TransportConnectionMetadata {
+        tls_peer_identity: TlsPeerIdentity {
+            leaf_certificate_sha256: fingerprint,
+            presented_chain_len: certificates.len(),
+        },
+    })
 }
 
 /// Build a rustls `ClientConfig` honouring the supplied

@@ -33,8 +33,6 @@ use rvoip_sip_transport::{Transport, TransportEvent};
 #[cfg(all(feature = "wss", feature = "dev-insecure-tls"))]
 use std::io::Write;
 #[cfg(all(feature = "wss", feature = "dev-insecure-tls"))]
-use std::sync::Arc;
-#[cfg(all(feature = "wss", feature = "dev-insecure-tls"))]
 use tempfile::tempdir;
 
 fn loopback_addr(port: u16) -> SocketAddr {
@@ -163,7 +161,7 @@ async fn wss_server_accepts_tls_handshake_and_negotiates_sip_subprotocol() {
 
     // Server-side: WSS bind. The bind() path builds the TlsAcceptor up
     // front so per-accept handshakes don't re-parse cert material.
-    let (server_transport, mut server_rx) = WebSocketTransport::bind(
+    let (server_transport, server_rx) = WebSocketTransport::bind(
         loopback_addr(0),
         true,
         Some(cert_path.to_str().unwrap()),
@@ -268,7 +266,6 @@ async fn wss_server_accepts_tls_handshake_and_negotiates_sip_subprotocol() {
     // Close cleanly so the server-side read loop logs at debug, not
     // ERROR. tokio-tungstenite's `close` sends a Close frame and waits
     // for the peer's response.
-    use futures_util::SinkExt;
     let _ = ws_stream.close(None).await;
 
     let _ = server_transport;

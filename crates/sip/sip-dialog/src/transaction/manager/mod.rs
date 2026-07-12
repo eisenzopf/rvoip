@@ -181,6 +181,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, trace, warn};
 
+use rvoip_core_traits::identity::AuthenticatedPrincipal;
 use rvoip_infra_common::events::cross_crate::SipTransportContext;
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::{Host, TypedHeader};
@@ -211,8 +212,9 @@ use crate::transaction::transport::{
 };
 use crate::transaction::utils::transaction_key_from_message;
 use crate::transaction::{
-    InternalTransactionCommand, Transaction, TransactionEvent, TransactionKey, TransactionKind,
-    TransactionState, DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
+    InternalTransactionCommand, SipRequestIngressAuthorizer, SipRequestIngressContext, Transaction,
+    TransactionEvent, TransactionKey, TransactionKind, TransactionState,
+    DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
 };
 
 // Type aliases without Sync requirement. `BoxedTransaction` and
@@ -253,6 +255,43 @@ pub struct TransactionManagerRetentionCounts {
     pub pending_inbound_bytes: usize,
     pub pending_inbound_transport: usize,
     pub pending_inbound_timing: usize,
+    pub pending_inbound_principals: usize,
+}
+
+#[derive(Clone)]
+struct InboundPrincipalBinding {
+    principal: AuthenticatedPrincipal,
+    source: SocketAddr,
+    transport_type: rvoip_sip_transport::transport::TransportType,
+    tls_leaf_sha256: Option<String>,
+}
+
+impl InboundPrincipalBinding {
+    fn new(principal: AuthenticatedPrincipal, context: &SipRequestIngressContext) -> Self {
+        Self {
+            principal,
+            source: context.source,
+            transport_type: context.transport_type,
+            tls_leaf_sha256: context.connection_metadata.as_ref().map(|metadata| {
+                metadata
+                    .tls_peer_identity
+                    .leaf_certificate_sha256
+                    .to_ascii_lowercase()
+            }),
+        }
+    }
+
+    fn matches(&self, context: &SipRequestIngressContext) -> bool {
+        self.source == context.source
+            && self.transport_type == context.transport_type
+            && self.tls_leaf_sha256
+                == context.connection_metadata.as_ref().map(|metadata| {
+                    metadata
+                        .tls_peer_identity
+                        .leaf_certificate_sha256
+                        .to_ascii_lowercase()
+                })
+    }
 }
 
 #[derive(Clone)]
@@ -272,6 +311,7 @@ pub const MAX_TRANSACTION_DISPATCH_WORKERS: usize = 64;
 const INVITE_2XX_RESPONSE_CACHE_TTL: Duration = Duration::from_secs(90);
 const INVITE_2XX_ACKED_RESPONSE_RETENTION: Duration = Duration::from_secs(2);
 const PENDING_INBOUND_BYTES_TTL: Duration = Duration::from_secs(30);
+const PENDING_INBOUND_PRINCIPAL_TTL: Duration = Duration::from_secs(90);
 const INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK: usize = 2048;
 const MIN_INVITE_2XX_RESPONSE_CACHE_CAPACITY: usize = 65_536;
 const TERMINATED_CLEANUP_BATCH_MAX: usize = 1024;
@@ -451,6 +491,13 @@ pub struct TransactionManager {
     /// when transport diagnostics are enabled and consumed by dialog-core
     /// instrumentation when it emits higher-level events or BYE responses.
     pub(crate) pending_inbound_timing: Arc<DashMap<TransactionKey, TransportReceiveTiming>>,
+    /// Optional listener policy evaluated for every new request transaction
+    /// before the transaction user sees it. `None` preserves the historical
+    /// unauthenticated-listener behavior.
+    request_ingress_authorizer: Option<Arc<dyn SipRequestIngressAuthorizer>>,
+    /// Successful ingress identities awaiting dialog/session consumption.
+    pending_inbound_principals: Arc<DashMap<TransactionKey, InboundPrincipalBinding>>,
+    pending_inbound_principal_inserted_at: Arc<DashMap<TransactionKey, Instant>>,
     transaction_dispatch_workers: usize,
     transaction_dispatch_queue_capacity: usize,
     transaction_command_channel_capacity: usize,
@@ -953,6 +1000,24 @@ impl TransactionManager {
         };
     }
 
+    /// Install a listener-level authorizer before accepting requests.
+    ///
+    /// The default is `None`, preserving server-only SIP behavior. Production
+    /// callers should install the policy before exposing the transport
+    /// listener; constructor variants that accept an authorizer avoid a boot
+    /// race entirely.
+    pub fn set_request_ingress_authorizer(
+        &mut self,
+        authorizer: Option<Arc<dyn SipRequestIngressAuthorizer>>,
+    ) {
+        self.request_ingress_authorizer = authorizer;
+    }
+
+    /// Return the currently installed listener authorizer.
+    pub fn request_ingress_authorizer(&self) -> Option<Arc<dyn SipRequestIngressAuthorizer>> {
+        self.request_ingress_authorizer.clone()
+    }
+
     /// Set the maximum number of consecutive priority-lane ACK/BYE events a
     /// transaction dispatch worker may process before giving one ready normal
     /// item a turn. Values below `1` are clamped to `1`.
@@ -1014,6 +1079,7 @@ impl TransactionManager {
             pending_inbound_bytes: self.pending_inbound_bytes.len(),
             pending_inbound_transport: self.pending_inbound_transport.len(),
             pending_inbound_timing: self.pending_inbound_timing.len(),
+            pending_inbound_principals: self.pending_inbound_principals.len(),
         }
     }
 
@@ -1123,6 +1189,49 @@ impl TransactionManager {
     /// Peek at receive timing diagnostics without removing the cache entry.
     pub fn peek_inbound_timing(&self, key: &TransactionKey) -> Option<TransportReceiveTiming> {
         self.pending_inbound_timing.get(key).map(|r| *r.value())
+    }
+
+    /// Consume the authenticated principal attached to a new inbound
+    /// transaction. Dialog/session ingress uses this once when promoting an
+    /// INVITE into an application call.
+    pub fn take_inbound_principal(&self, key: &TransactionKey) -> Option<AuthenticatedPrincipal> {
+        self.pending_inbound_principal_inserted_at.remove(key);
+        self.pending_inbound_principals
+            .remove(key)
+            .map(|(_, binding)| binding.principal)
+    }
+
+    /// Clone the principal retained for an inbound transaction without
+    /// consuming its ACK/CANCEL authorization binding.
+    pub fn peek_inbound_principal(&self, key: &TransactionKey) -> Option<AuthenticatedPrincipal> {
+        self.pending_inbound_principals
+            .get(key)
+            .map(|entry| entry.value().principal.clone())
+    }
+
+    pub(crate) fn inbound_principal_for_context(
+        &self,
+        key: &TransactionKey,
+        context: &SipRequestIngressContext,
+    ) -> Option<AuthenticatedPrincipal> {
+        self.pending_inbound_principals.get(key).and_then(|entry| {
+            entry
+                .value()
+                .matches(context)
+                .then(|| entry.value().principal.clone())
+        })
+    }
+
+    pub(crate) fn retain_inbound_principal(
+        &self,
+        key: TransactionKey,
+        principal: AuthenticatedPrincipal,
+        context: &SipRequestIngressContext,
+    ) {
+        self.pending_inbound_principal_inserted_at
+            .insert(key.clone(), Instant::now());
+        self.pending_inbound_principals
+            .insert(key, InboundPrincipalBinding::new(principal, context));
     }
 
     /// Install a forwarder for transport-side events (pong received,
@@ -1248,6 +1357,11 @@ impl TransactionManager {
             pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            request_ingress_authorizer: None,
+            pending_inbound_principals: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_principal_inserted_at: Arc::new(dashmap::DashMap::with_capacity(
+                index_capacity,
+            )),
             transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
             transaction_dispatch_queue_capacity: events_capacity,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
@@ -1386,6 +1500,11 @@ impl TransactionManager {
             pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            request_ingress_authorizer: None,
+            pending_inbound_principals: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_principal_inserted_at: Arc::new(dashmap::DashMap::with_capacity(
+                index_capacity,
+            )),
             transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
             transaction_dispatch_queue_capacity: events_capacity,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
@@ -1526,6 +1645,29 @@ impl TransactionManager {
         dispatch_workers: Option<usize>,
         dispatch_queue_capacity: Option<usize>,
     ) -> Result<(Self, mpsc::Receiver<TransactionEvent>)> {
+        Self::with_transport_manager_and_index_capacity_and_dispatch_and_authorizer(
+            transport_manager,
+            transport_rx,
+            capacity,
+            index_capacity,
+            dispatch_workers,
+            dispatch_queue_capacity,
+            None,
+        )
+        .await
+    }
+
+    /// Creates a transaction manager with listener authorization installed
+    /// before its receive loop starts.
+    pub async fn with_transport_manager_and_index_capacity_and_dispatch_and_authorizer(
+        transport_manager: crate::transaction::transport::TransportManager,
+        transport_rx: mpsc::Receiver<TransportEvent>,
+        capacity: Option<usize>,
+        index_capacity: Option<usize>,
+        dispatch_workers: Option<usize>,
+        dispatch_queue_capacity: Option<usize>,
+        request_ingress_authorizer: Option<Arc<dyn SipRequestIngressAuthorizer>>,
+    ) -> Result<(Self, mpsc::Receiver<TransactionEvent>)> {
         // Wrap the manager's per-flavour registry behind a
         // `MultiplexedTransport` so outbound requests get URI-aware
         // transport selection (RFC 3261 §18.1.1, §26.2). When the
@@ -1605,6 +1747,11 @@ impl TransactionManager {
             pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            request_ingress_authorizer,
+            pending_inbound_principals: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_principal_inserted_at: Arc::new(dashmap::DashMap::with_capacity(
+                index_capacity,
+            )),
             transaction_dispatch_workers,
             transaction_dispatch_queue_capacity,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
@@ -1720,6 +1867,11 @@ impl TransactionManager {
             pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            request_ingress_authorizer: None,
+            pending_inbound_principals: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_principal_inserted_at: Arc::new(dashmap::DashMap::with_capacity(
+                index_capacity,
+            )),
             transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
             transaction_dispatch_queue_capacity: 100,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
@@ -1808,6 +1960,11 @@ impl TransactionManager {
             pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            request_ingress_authorizer: None,
+            pending_inbound_principals: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_principal_inserted_at: Arc::new(dashmap::DashMap::with_capacity(
+                index_capacity,
+            )),
             transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
             transaction_dispatch_queue_capacity: 10,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
@@ -2705,6 +2862,8 @@ impl TransactionManager {
         self.pending_inbound_inserted_at.clear();
         self.pending_inbound_transport.clear();
         self.pending_inbound_timing.clear();
+        self.pending_inbound_principals.clear();
+        self.pending_inbound_principal_inserted_at.clear();
 
         // Step 5: Emit TransactionEvent::ShutdownComplete
         // Broadcast to all event subscribers
@@ -3584,6 +3743,28 @@ impl TransactionManager {
         request: Request,
         remote_addr: SocketAddr,
     ) -> Result<Arc<dyn ServerTransaction>> {
+        self.create_server_transaction_inner(request, remote_addr, true)
+            .await
+    }
+
+    /// Transaction-ingress variant used while listener authorization is still
+    /// pending. CANCEL publication is deferred until the authorization gate
+    /// succeeds, preventing rejected requests from reaching the TU.
+    pub(crate) async fn create_server_transaction_deferred_events(
+        &self,
+        request: Request,
+        remote_addr: SocketAddr,
+    ) -> Result<Arc<dyn ServerTransaction>> {
+        self.create_server_transaction_inner(request, remote_addr, false)
+            .await
+    }
+
+    async fn create_server_transaction_inner(
+        &self,
+        request: Request,
+        remote_addr: SocketAddr,
+        publish_cancel_event: bool,
+    ) -> Result<Arc<dyn ServerTransaction>> {
         // Extract branch parameter from the top Via header
         let branch = match request.first_via() {
             Some(via) => match via.branch() {
@@ -3636,17 +3817,12 @@ impl TransactionManager {
                     warn!(method = %request.method(), error = %e, "Creating transaction for CANCEL with possible validation issues");
                 }
 
-                // For CANCEL, the matching INVITE has the same transaction
-                // key with method rewritten to INVITE. Keep this indexed
-                // instead of scanning all active transactions.
                 let invite_tx_id = key.with_method(Method::Invite);
                 cancel_target_invite_tx_id = if self.client_transactions.contains_key(&invite_tx_id)
                     || self.server_transactions.contains_key(&invite_tx_id)
                 {
-                    debug!(method=%request.method(), "Found matching INVITE transaction for CANCEL");
                     Some(invite_tx_id)
                 } else {
-                    debug!(method=%request.method(), "No matching INVITE transaction found for CANCEL");
                     None
                 };
 
@@ -3726,7 +3902,7 @@ impl TransactionManager {
             return Err(e);
         }
 
-        if request.method() == Method::Cancel {
+        if publish_cancel_event && request.method() == Method::Cancel {
             let transaction_id = transaction.id().clone();
             let event = match cancel_target_invite_tx_id {
                 Some(invite_tx_id) => TransactionEvent::CancelRequest {
@@ -3741,9 +3917,8 @@ impl TransactionManager {
                     source: remote_addr,
                 },
             };
-
-            if let Err(e) = self.events_tx.send(event).await {
-                warn!(id=%transaction_id, error=%e, "Failed to publish CANCEL transaction event");
+            if let Err(error) = self.events_tx.send(event).await {
+                warn!(id=%transaction_id, %error, "Failed to publish CANCEL transaction event");
                 let _ = self.terminate_transaction(&transaction_id).await;
             }
         }
@@ -3975,6 +4150,7 @@ impl TransactionManager {
         self.compact_invite_2xx_response_due_queue();
         self.prune_closed_event_subscribers_now();
         self.prune_stale_pending_inbound_bytes();
+        self.prune_stale_pending_inbound_principals();
     }
 
     fn prune_closed_event_subscribers_now(&self) {
@@ -4021,6 +4197,33 @@ impl TransactionManager {
                 self.pending_inbound_transport.remove(&key);
                 self.pending_inbound_timing.remove(&key);
             }
+        }
+    }
+
+    fn prune_stale_pending_inbound_principals(&self) {
+        if self.pending_inbound_principals.is_empty() {
+            return;
+        }
+
+        let now = Instant::now();
+        let stale_keys: Vec<TransactionKey> = self
+            .pending_inbound_principals
+            .iter()
+            .filter(|entry| {
+                self.pending_inbound_principal_inserted_at
+                    .get(entry.key())
+                    .map(|inserted_at| {
+                        now.saturating_duration_since(*inserted_at.value())
+                            >= PENDING_INBOUND_PRINCIPAL_TTL
+                    })
+                    .unwrap_or(true)
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in stale_keys {
+            self.pending_inbound_principals.remove(&key);
+            self.pending_inbound_principal_inserted_at.remove(&key);
         }
     }
 

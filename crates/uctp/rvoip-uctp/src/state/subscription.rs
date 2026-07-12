@@ -93,6 +93,79 @@ pub trait SubscriptionHandler: Send + Sync {
     /// it emits `stream.closed` for one of its own streams. Default
     /// no-op.
     fn unregister_publisher(&self, _sid: &SessionId, _strm_id: &str) {}
+
+    /// Drop every publisher/subscriber resource owned by a Connection.
+    /// Called on explicit end, transport loss, expiry, and coordinator drain.
+    fn unregister_connection(&self, _sid: &SessionId, _connid: &ConnectionId) {}
+}
+
+/// Peer-local namespace wrapper for a shared production handler. Wire Session
+/// and Connection IDs are supplied by the remote peer, so they must not be
+/// used as process-global registry keys without an authenticated peer scope.
+pub struct NamespacedSubscriptionHandler {
+    namespace: String,
+    inner: Arc<dyn SubscriptionHandler>,
+}
+
+impl NamespacedSubscriptionHandler {
+    pub fn new(namespace: impl Into<String>, inner: Arc<dyn SubscriptionHandler>) -> Arc<Self> {
+        Arc::new(Self {
+            namespace: namespace.into(),
+            inner,
+        })
+    }
+
+    fn session(&self, sid: &SessionId) -> SessionId {
+        SessionId::from_string(format!("{}:{}", self.namespace, sid))
+    }
+
+    fn connection(&self, connid: &ConnectionId) -> ConnectionId {
+        ConnectionId::from_string(format!("{}:{}", self.namespace, connid))
+    }
+}
+
+impl SubscriptionHandler for NamespacedSubscriptionHandler {
+    fn subscribe(
+        &self,
+        sid: &SessionId,
+        subscriber: &ConnectionId,
+        request: &StreamSubscribe,
+    ) -> SubscriptionOutcome {
+        self.inner
+            .subscribe(&self.session(sid), &self.connection(subscriber), request)
+    }
+
+    fn unsubscribe(
+        &self,
+        sid: &SessionId,
+        subscriber: &ConnectionId,
+        request: &StreamUnsubscribe,
+    ) -> SubscriptionOutcome {
+        self.inner
+            .unsubscribe(&self.session(sid), &self.connection(subscriber), request)
+    }
+
+    fn register_publisher(&self, info: PublisherInfo<'_>) {
+        let sid = self.session(info.sid);
+        let connection = self.connection(info.connection);
+        self.inner.register_publisher(PublisherInfo {
+            sid: &sid,
+            strm_id: info.strm_id,
+            connection: &connection,
+            participant: info.participant,
+            kind: info.kind,
+            codec: info.codec,
+        });
+    }
+
+    fn unregister_publisher(&self, sid: &SessionId, strm_id: &str) {
+        self.inner.unregister_publisher(&self.session(sid), strm_id);
+    }
+
+    fn unregister_connection(&self, sid: &SessionId, connid: &ConnectionId) {
+        self.inner
+            .unregister_connection(&self.session(sid), &self.connection(connid));
+    }
 }
 
 /// Bundle passed to [`SubscriptionHandler::register_publisher`]. Carries
@@ -146,4 +219,20 @@ impl SubscriptionHandler for RejectingHandler {
 /// Convenience: wrap the default rejecting handler in an `Arc`.
 pub fn rejecting_handler() -> Arc<dyn SubscriptionHandler> {
     Arc::new(RejectingHandler)
+}
+
+#[cfg(test)]
+mod namespace_tests {
+    use super::*;
+
+    #[test]
+    fn identical_wire_ids_from_two_peers_map_to_distinct_registry_ids() {
+        let peer_a = NamespacedSubscriptionHandler::new("peer-a", rejecting_handler());
+        let peer_b = NamespacedSubscriptionHandler::new("peer-b", rejecting_handler());
+        let sid = SessionId::from_string("shared-sid");
+        let connid = ConnectionId::from_string("shared-connid");
+
+        assert_ne!(peer_a.session(&sid), peer_b.session(&sid));
+        assert_ne!(peer_a.connection(&connid), peer_b.connection(&connid));
+    }
 }

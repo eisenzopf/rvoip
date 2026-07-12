@@ -171,6 +171,7 @@ impl TcpTransport {
                             transport_type: TransportType::Tcp,
                             raw_bytes: Some(raw_bytes),
                             timing: None,
+                            connection_metadata: None,
                         };
 
                         if let Err(e) = events_tx.send(event).await {

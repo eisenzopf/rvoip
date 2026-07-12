@@ -86,6 +86,10 @@ async fn ws_adapter_emits_inbound_connection_on_session_invite() {
         .expect("auth.session timeout")
         .expect("inbound closed");
     assert_eq!(session_reply.msg_type, MessageType::AuthSession);
+    let authenticated_participant = session_reply
+        .decode_payload::<auth::AuthSession>()
+        .expect("decode auth.session")
+        .participant_id;
 
     let payload = SessionInvite {
         from: "part_alice".into(),
@@ -125,7 +129,10 @@ async fn ws_adapter_emits_inbound_connection_on_session_invite() {
         AdapterEvent::InboundConnection { connection } => {
             assert_eq!(connection.transport, Transport::WebSocket);
             assert_eq!(connection.session_id.as_str(), "sess_ws_adapter_test");
-            assert_eq!(connection.participant_id.as_str(), "part_alice");
+            assert_eq!(
+                connection.participant_id.as_str(),
+                authenticated_participant.as_str()
+            );
             connection.id
         }
         other => panic!("expected InboundConnection, got {:?}", other),

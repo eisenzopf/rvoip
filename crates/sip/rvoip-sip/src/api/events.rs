@@ -210,6 +210,16 @@ pub enum Event {
         sdp: Option<String>,
     },
 
+    /// Listener authentication completed for an inbound call.
+    ///
+    /// This follows [`Event::IncomingCall`] and carries no credential material.
+    IncomingCallAuthenticated {
+        /// Session identifier assigned to the authenticated INVITE.
+        call_id: CallId,
+        /// Complete canonical principal retained from listener enforcement.
+        principal: rvoip_core_traits::identity::AuthenticatedPrincipal,
+    },
+
     /// Call was answered (200 OK received for outgoing call)
     CallAnswered {
         /// Session identifier for the answered call.
@@ -682,6 +692,7 @@ impl Event {
     pub fn call_id(&self) -> Option<&CallId> {
         match self {
             Event::IncomingCall { call_id, .. }
+            | Event::IncomingCallAuthenticated { call_id, .. }
             | Event::CallAnswered { call_id, .. }
             | Event::CallProgress { call_id, .. }
             | Event::CallEnded { call_id, .. }
@@ -745,6 +756,7 @@ impl Event {
         matches!(
             self,
             Event::IncomingCall { .. }
+                | Event::IncomingCallAuthenticated { .. }
                 | Event::CallAnswered { .. }
                 | Event::CallProgress { .. }
                 | Event::CallEnded { .. }

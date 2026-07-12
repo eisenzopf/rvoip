@@ -36,7 +36,9 @@ pub mod substrate;
 
 pub use crate::envelope::UctpEnvelope;
 pub use crate::errors::{Result, SubstrateError, UctpError};
-pub use crate::ids::{ConnectionId, EnvelopeId, SessionId};
+pub use crate::ids::{
+    validate_envelope_id, ConnectionId, EnvelopeId, SessionId, MAX_ENVELOPE_ID_BYTES,
+};
 pub use crate::state::{
     default_v0_descriptor, UctpConnectionState, UctpCoordinator, UctpSessionEvent,
     UctpSessionState, ENVELOPE_CHANNEL_CAP, SIGNALING_SEND_TIMEOUT,

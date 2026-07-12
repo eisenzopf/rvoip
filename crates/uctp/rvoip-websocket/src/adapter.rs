@@ -15,8 +15,8 @@ use chrono::Utc;
 use dashmap::DashMap;
 use rvoip_auth_core::BearerValidator;
 use rvoip_core::adapter::{
-    AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest,
-    RejectReason, SignatureHeaders, TransferTarget,
+    AdapterEvent, AdapterKind, AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter,
+    ConnectionHandle, EndReason, OriginateRequest, RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
@@ -149,6 +149,7 @@ pub struct UctpWsAdapter {
     #[allow(dead_code)]
     by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
     routes: Arc<DashMap<ConnectionId, Route>>,
+    lifecycle_sink: AdapterLifecycleSinkSlot,
     _server: Arc<UctpWsServer>,
     events_rx: StdMutex<Option<mpsc::Receiver<AdapterEvent>>>,
     local_addr: SocketAddr,
@@ -163,11 +164,13 @@ impl UctpWsAdapter {
         let by_connection: Arc<DashMap<ConnectionId, String>> = Arc::new(DashMap::new());
         let by_uctp_sid: Arc<DashMap<String, ConnectionId>> = Arc::new(DashMap::new());
         let routes: Arc<DashMap<ConnectionId, Route>> = Arc::new(DashMap::new());
+        let lifecycle_sink = AdapterLifecycleSinkSlot::default();
 
         let server = UctpWsServer::start(
             config.listener,
             config.bearer_validator,
             events_tx,
+            lifecycle_sink.clone(),
             Arc::clone(&by_connection),
             Arc::clone(&by_uctp_sid),
             Arc::clone(&routes),
@@ -182,6 +185,7 @@ impl UctpWsAdapter {
             by_connection,
             by_uctp_sid,
             routes,
+            lifecycle_sink,
             _server: server,
             events_rx: StdMutex::new(Some(events_rx)),
             local_addr,
@@ -246,6 +250,16 @@ impl ConnectionAdapter for UctpWsAdapter {
 
     fn kind(&self) -> AdapterKind {
         AdapterKind::Substrate
+    }
+
+    fn install_lifecycle_sink(&self, sink: Arc<dyn AdapterLifecycleSink>) -> RvoipResult<()> {
+        self.lifecycle_sink.install(sink).map_err(|_| {
+            RvoipError::InvalidState("UCTP WebSocket lifecycle sink already installed")
+        })
+    }
+
+    fn is_connection_live(&self, conn: &ConnectionId) -> bool {
+        self.routes.contains_key(conn)
     }
 
     async fn originate(&self, request: OriginateRequest) -> RvoipResult<ConnectionHandle> {

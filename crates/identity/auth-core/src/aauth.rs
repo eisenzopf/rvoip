@@ -172,7 +172,7 @@ impl AAuthValidator {
             other => {
                 return Err(BearerAuthError::Invalid(format!(
                     "AAuth subject token must validate to UserAuthorized; got {}",
-                    discriminant_label(&other)
+                    discriminant_label(other)
                 )));
             }
         };

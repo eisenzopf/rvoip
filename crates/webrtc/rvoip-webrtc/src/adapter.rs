@@ -17,7 +17,7 @@ use rvoip_core::adapter::{
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::error::{Result as RvoipResult, RvoipError};
-use rvoip_core::identity::IdentityAssurance;
+use rvoip_core::identity::{AuthenticatedPrincipal, IdentityAssurance, PrincipalOwnershipKey};
 use rvoip_core::ids::{ConnectionId, StreamId};
 use rvoip_core::message::{ContentType, Message};
 use rvoip_core::stream::MediaStream;
@@ -101,12 +101,74 @@ pub struct Route {
     pub cancel: Arc<Notify>,
     /// Set by the fail watcher when the underlying PC enters `Failed`/`Closed`.
     pub failed_at: Arc<SyncMutex<Option<Instant>>>,
+    /// Signaling identity that owns this network-visible route. Keeping the
+    /// authorization record on the route makes ownership transport-neutral:
+    /// WHIP, WHEP, WS and WSS all consult the same boundary.
+    authorization: Option<RouteAuthorization>,
 }
 
 impl Route {
     fn cancel_tasks(&self) {
         self.cancel.notify_waiters();
         let _ = self.data_cancel.send(true);
+    }
+}
+
+/// Adapter-owned authorization key for network signaling routes.
+///
+/// Complete principals are compared with [`PrincipalOwnershipKey`]. Legacy
+/// hooks which predate `AuthenticatedPrincipal` retain subject isolation, and
+/// the anonymous variant preserves the crate's authentication-disabled mode.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RouteOwnerKey {
+    #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
+    Anonymous,
+    #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
+    LegacySubject(String),
+    Principal(PrincipalOwnershipKey),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RouteAuthorization {
+    owner: RouteOwnerKey,
+    principal: Option<AuthenticatedPrincipal>,
+}
+
+impl RouteAuthorization {
+    #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
+    pub(crate) fn anonymous() -> Self {
+        Self {
+            owner: RouteOwnerKey::Anonymous,
+            principal: None,
+        }
+    }
+
+    #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
+    pub(crate) fn legacy_subject(subject: impl Into<String>) -> Self {
+        Self {
+            owner: RouteOwnerKey::LegacySubject(subject.into()),
+            principal: None,
+        }
+    }
+
+    pub(crate) fn principal(principal: AuthenticatedPrincipal) -> Self {
+        Self {
+            owner: RouteOwnerKey::Principal(principal.ownership_key()),
+            principal: Some(principal),
+        }
+    }
+
+    fn ensure_active(&self) -> Result<()> {
+        if self
+            .principal
+            .as_ref()
+            .is_some_and(AuthenticatedPrincipal::is_expired)
+        {
+            return Err(WebRtcError::Unauthorized(
+                "authenticated principal has expired".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -967,6 +1029,96 @@ impl WebRtcAdapter {
             .ok_or(WebRtcError::ConnectionNotFound)
     }
 
+    /// Return the complete principal retained for a network signaling route.
+    /// Anonymous and legacy subject-only hooks intentionally return `None`.
+    pub fn authenticated_principal(
+        &self,
+        conn: &ConnectionId,
+    ) -> Result<Option<AuthenticatedPrincipal>> {
+        Ok(self
+            .route(conn)?
+            .authorization
+            .and_then(|authorization| authorization.principal))
+    }
+
+    /// Enforce the adapter-owned authorization boundary shared by every
+    /// network signaling surface. Unowned routes remain accessible only to
+    /// anonymous signaling, preserving source compatibility when auth is
+    /// disabled; authenticated callers must use a route explicitly bound to
+    /// their full ownership key.
+    #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
+    pub(crate) fn authorize_network_route(
+        &self,
+        conn: &ConnectionId,
+        authorization: &RouteAuthorization,
+    ) -> Result<()> {
+        authorization.ensure_active()?;
+        let route = self.route(conn)?;
+        match route.authorization.as_ref() {
+            Some(expected) if expected.owner == authorization.owner => Ok(()),
+            None if authorization.owner == RouteOwnerKey::Anonymous => Ok(()),
+            Some(_) | None => Err(WebRtcError::Forbidden(
+                "connection belongs to another principal".into(),
+            )),
+        }
+    }
+
+    /// Bind an already-created route (notably a WHEP/originate route) before
+    /// its connection id is exposed to the network.
+    pub(crate) fn assign_route_authorization(
+        &self,
+        conn: &ConnectionId,
+        authorization: RouteAuthorization,
+        participant_id: String,
+    ) -> Result<()> {
+        authorization.ensure_active()?;
+        let principal = authorization.principal.clone();
+        let mut route = self
+            .routes
+            .get_mut(conn)
+            .ok_or(WebRtcError::ConnectionNotFound)?;
+        let assigned = match route.authorization.as_ref() {
+            None => {
+                route.authorization = Some(authorization);
+                true
+            }
+            Some(existing) if existing.owner == authorization.owner => false,
+            Some(_) => {
+                return Err(WebRtcError::Forbidden(
+                    "connection already belongs to another principal".into(),
+                ))
+            }
+        };
+        drop(route);
+        if assigned {
+            if let Some(principal) = principal {
+                self.try_send(AdapterEvent::PrincipalAuthenticated {
+                    connection_id: conn.clone(),
+                    participant_id,
+                    principal,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Bind a principal to an outbound route before exposing its connection
+    /// id to authenticated WS/WSS signaling. WHEP performs this binding
+    /// automatically; generic outbound signaling can use this method with the
+    /// participant id returned by [`ConnectionAdapter::originate`].
+    pub fn bind_authenticated_principal(
+        &self,
+        conn: &ConnectionId,
+        participant_id: impl Into<String>,
+        principal: AuthenticatedPrincipal,
+    ) -> Result<()> {
+        self.assign_route_authorization(
+            conn,
+            RouteAuthorization::principal(principal),
+            participant_id.into(),
+        )
+    }
+
     /// D2 — update the stored remote SDP for an existing route (e.g. after
     /// `apply_remote_answer` lands the offerer's answer). No-op when the
     /// route has already been reaped.
@@ -1139,6 +1291,25 @@ impl WebRtcAdapter {
     /// Handle an inbound SDP offer — creates answerer PC and emits `InboundConnection`.
     #[instrument(skip(self, offer_sdp), fields(sdp_bytes = offer_sdp.len()))]
     pub async fn apply_remote_offer(&self, offer_sdp: &str) -> Result<ConnectionId> {
+        self.apply_remote_offer_inner(offer_sdp, None).await
+    }
+
+    #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
+    pub(crate) async fn apply_remote_offer_authorized(
+        &self,
+        offer_sdp: &str,
+        authorization: RouteAuthorization,
+    ) -> Result<ConnectionId> {
+        authorization.ensure_active()?;
+        self.apply_remote_offer_inner(offer_sdp, Some(authorization))
+            .await
+    }
+
+    async fn apply_remote_offer_inner(
+        &self,
+        offer_sdp: &str,
+        authorization: Option<RouteAuthorization>,
+    ) -> Result<ConnectionId> {
         let slot = self.reserve_session_slot()?;
         self.metrics_inbound.fetch_add(1, Ordering::Relaxed);
         let conn_id = ConnectionId::new();
@@ -1170,6 +1341,7 @@ impl WebRtcAdapter {
             held: false,
             cancel: Arc::clone(&cancel),
             failed_at: Arc::new(SyncMutex::new(None)),
+            authorization: authorization.clone(),
         };
 
         // Don't seed media stream here — the track-attacher (spawned in
@@ -1184,7 +1356,15 @@ impl WebRtcAdapter {
         let handle = self.make_transport_handle(conn_id.clone(), cancel, data_cancel);
         let connection =
             self.build_connection(conn_id.clone(), Direction::Inbound, negotiated, handle);
+        let participant_id = connection.participant_id.clone();
         self.try_send(AdapterEvent::InboundConnection { connection });
+        if let Some(principal) = authorization.and_then(|value| value.principal) {
+            self.try_send(AdapterEvent::PrincipalAuthenticated {
+                connection_id: conn_id.clone(),
+                participant_id: participant_id.to_string(),
+                principal,
+            });
+        }
 
         Ok(conn_id)
     }
@@ -1219,6 +1399,17 @@ impl WebRtcAdapter {
         Ok(())
     }
 
+    #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
+    pub(crate) async fn accept_remote_answer_authorized(
+        &self,
+        conn: ConnectionId,
+        answer_sdp: &str,
+        authorization: &RouteAuthorization,
+    ) -> Result<()> {
+        self.authorize_network_route(&conn, authorization)?;
+        self.accept_remote_answer(conn, answer_sdp).await
+    }
+
     /// WHIP ICE restart: apply a new offer on an inbound (answerer) connection.
     pub async fn apply_ice_restart_offer(
         &self,
@@ -1242,6 +1433,17 @@ impl WebRtcAdapter {
             route_mut.remote_sdp = Some(offer_sdp.to_owned());
         }
         Ok(answer)
+    }
+
+    #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
+    pub(crate) async fn apply_ice_restart_offer_authorized(
+        &self,
+        conn: ConnectionId,
+        offer_sdp: &str,
+        authorization: &RouteAuthorization,
+    ) -> Result<String> {
+        self.authorize_network_route(&conn, authorization)?;
+        self.apply_ice_restart_offer(conn, offer_sdp).await
     }
 
     /// Apply a trickle ICE candidate (JSON `RTCIceCandidateInit` shape) to the
@@ -1268,6 +1470,30 @@ impl WebRtcAdapter {
             return Ok(());
         }
         route.peer.add_remote_ice_candidate(candidate).await
+    }
+
+    #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
+    pub(crate) async fn apply_trickle_candidate_authorized(
+        &self,
+        conn: &ConnectionId,
+        candidate: webrtc::peer_connection::RTCIceCandidateInit,
+        authorization: &RouteAuthorization,
+    ) -> Result<()> {
+        self.authorize_network_route(conn, authorization)?;
+        self.apply_trickle_candidate(conn, candidate).await
+    }
+
+    #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
+    pub(crate) async fn end_authorized(
+        &self,
+        conn: ConnectionId,
+        reason: EndReason,
+        authorization: &RouteAuthorization,
+    ) -> Result<()> {
+        self.authorize_network_route(&conn, authorization)?;
+        ConnectionAdapter::end(self, conn, reason)
+            .await
+            .map_err(WebRtcError::from)
     }
 
     /// Re-create a local SDP after a transceiver direction change (hold/resume).
@@ -1392,6 +1618,7 @@ impl ConnectionAdapter for WebRtcAdapter {
             held: false,
             cancel: Arc::clone(&cancel),
             failed_at: Arc::new(SyncMutex::new(None)),
+            authorization: None,
         };
 
         // Same rationale as `apply_remote_offer`: lazy seeding in `accept()`.

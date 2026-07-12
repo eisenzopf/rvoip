@@ -5,6 +5,7 @@
 //! error directing callers to enable the feature.
 
 use crate::errors::{Result, UctpWsError};
+#[cfg(not(feature = "media-webrtc"))]
 use rvoip_uctp::payloads::connection::{IceCandidateInit, WebRtcSubstrateSetup};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -331,23 +332,19 @@ mod bridge {
 #[cfg(feature = "media-webrtc")]
 pub use bridge::WebRtcMediaBridge;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "media-webrtc")))]
 mod tests {
     use super::*;
 
     #[test]
     fn bridge_role_construction() {
-        #[cfg(not(feature = "media-webrtc"))]
-        {
-            assert_eq!(WebRtcMediaBridge::new_offerer().role(), BridgeRole::Offerer);
-            assert_eq!(
-                WebRtcMediaBridge::new_answerer().role(),
-                BridgeRole::Answerer
-            );
-        }
+        assert_eq!(WebRtcMediaBridge::new_offerer().role(), BridgeRole::Offerer);
+        assert_eq!(
+            WebRtcMediaBridge::new_answerer().role(),
+            BridgeRole::Answerer
+        );
     }
 
-    #[cfg(not(feature = "media-webrtc"))]
     #[tokio::test]
     async fn stub_methods_return_documented_error() {
         let bridge = WebRtcMediaBridge::new_offerer();

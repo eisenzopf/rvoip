@@ -87,6 +87,7 @@ use rvoip_sip_core::prelude::*;
 use self::error::Result;
 
 // Core submodules
+mod authorization;
 pub mod common_logic;
 pub mod error;
 pub mod event;
@@ -124,6 +125,10 @@ pub use state::*;
 pub const DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY: usize = 32;
 
 // Re-export manager
+pub use authorization::{
+    SipRequestAuthorization, SipRequestIngressAuthorizer, SipRequestIngressContext,
+    SipRequestRejection,
+};
 pub use manager::{TransactionManager, MAX_TRANSACTION_DISPATCH_WORKERS};
 
 /// Defines the core traits, types, and machinery for SIP transactions.

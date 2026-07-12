@@ -67,7 +67,10 @@ pub fn generate_ephemeral(
 
 /// Compute a TURN REST credential: `base64(HMAC-SHA256(secret, username))`.
 pub fn compute_credential(secret: &[u8], username: &str) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
+    let mut mac = match HmacSha256::new_from_slice(secret) {
+        Ok(mac) => mac,
+        Err(_) => unreachable!("HMAC-SHA256 accepts keys of any length"),
+    };
     mac.update(username.as_bytes());
     let tag = mac.finalize().into_bytes();
     base64::engine::general_purpose::STANDARD.encode(tag)

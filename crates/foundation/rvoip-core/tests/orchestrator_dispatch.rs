@@ -3,8 +3,8 @@
 
 use chrono::Utc;
 use rvoip_core::adapter::{
-    AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest,
-    RejectReason, SignatureHeaders, TransferTarget,
+    AdapterEvent, AdapterKind, AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter,
+    ConnectionHandle, EndReason, OriginateRequest, RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::commands::InboundAction;
@@ -13,12 +13,13 @@ use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, 
 use rvoip_core::error::{Result, RvoipError};
 use rvoip_core::events::Event;
 use rvoip_core::identity::IdentityAssurance;
-use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId};
+use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
 use rvoip_core::message::Message;
 use rvoip_core::orchestrator::Orchestrator;
 use rvoip_core::stream::MediaStream;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::{collections::HashSet, time::Duration};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Default)]
@@ -35,6 +36,8 @@ struct CallCounts {
 struct StubAdapter {
     counts: Arc<CallCounts>,
     inbound: Mutex<Option<mpsc::Receiver<AdapterEvent>>>,
+    live: Mutex<HashSet<ConnectionId>>,
+    lifecycle: AdapterLifecycleSinkSlot,
 }
 
 impl StubAdapter {
@@ -44,8 +47,22 @@ impl StubAdapter {
         let adapter = Arc::new(Self {
             counts: counts.clone(),
             inbound: Mutex::new(Some(rx)),
+            live: Mutex::new(HashSet::new()),
+            lifecycle: AdapterLifecycleSinkSlot::default(),
         });
         (adapter, tx, counts)
+    }
+
+    fn mark_live(&self, connection_id: ConnectionId) {
+        self.live.lock().unwrap().insert(connection_id);
+    }
+
+    fn mark_ended(&self, connection_id: &ConnectionId) {
+        self.live.lock().unwrap().remove(connection_id);
+    }
+
+    async fn deliver_terminal(&self, event: AdapterEvent) {
+        assert!(self.lifecycle.deliver_terminal(event).await);
     }
 }
 
@@ -56,6 +73,14 @@ impl ConnectionAdapter for StubAdapter {
     }
     fn kind(&self) -> AdapterKind {
         AdapterKind::Interop
+    }
+    fn install_lifecycle_sink(&self, sink: Arc<dyn AdapterLifecycleSink>) -> Result<()> {
+        self.lifecycle
+            .install(sink)
+            .map_err(|_| RvoipError::InvalidState("stub lifecycle sink already installed"))
+    }
+    fn is_connection_live(&self, conn: &ConnectionId) -> bool {
+        self.live.lock().unwrap().contains(conn)
     }
     async fn originate(&self, request: OriginateRequest) -> Result<ConnectionHandle> {
         let conn = Connection {
@@ -158,7 +183,8 @@ fn fake_inbound_connection() -> Connection {
 async fn register_then_dispatch_routes_through_adapter() {
     let orch = Orchestrator::new(Config::default());
     let (adapter, adapter_tx, counts) = StubAdapter::new();
-    orch.register(adapter).expect("first register succeeds");
+    orch.register(adapter.clone())
+        .expect("first register succeeds");
 
     // Subscribe before pushing the inbound event.
     let mut events = orch.subscribe_events();
@@ -167,6 +193,7 @@ async fn register_then_dispatch_routes_through_adapter() {
     // it into Event::ConnectionInbound and track the connection.
     let conn = fake_inbound_connection();
     let conn_id = conn.id.clone();
+    adapter.mark_live(conn_id.clone());
     adapter_tx
         .send(AdapterEvent::InboundConnection { connection: conn })
         .await
@@ -249,4 +276,187 @@ async fn duplicate_register_rejects() {
     orch.register(adapter1).unwrap();
     let err = orch.register(adapter2).unwrap_err();
     matches!(err, RvoipError::AdapterAlreadyRegistered(Transport::Sip));
+}
+
+#[tokio::test]
+async fn same_adapter_cannot_replace_lifecycle_owner() {
+    let first = Orchestrator::new(Config::default());
+    let second = Orchestrator::new(Config::default());
+    let (adapter, adapter_tx, _) = StubAdapter::new();
+    first.register(adapter.clone()).expect("first registration");
+    assert!(matches!(
+        second.register(adapter.clone()),
+        Err(RvoipError::InvalidState(_))
+    ));
+
+    let mut first_events = first.subscribe_events();
+    let conn = fake_inbound_connection();
+    let conn_id = conn.id.clone();
+    adapter.mark_live(conn_id.clone());
+    adapter_tx
+        .send(AdapterEvent::InboundConnection { connection: conn })
+        .await
+        .expect("send inbound event");
+    let _ = tokio::time::timeout(Duration::from_secs(1), first_events.recv())
+        .await
+        .expect("first owner receives inbound event")
+        .expect("event stream open");
+    adapter.mark_ended(&conn_id);
+    adapter
+        .deliver_terminal(AdapterEvent::Ended {
+            connection_id: conn_id.clone(),
+            reason: EndReason::Normal,
+        })
+        .await;
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), first_events.recv())
+            .await
+            .expect("first owner receives terminal event")
+            .expect("event stream open"),
+        Event::ConnectionEnded { connection_id, .. } if connection_id == conn_id
+    ));
+    assert!(matches!(
+        first.connection_transport(&conn_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn direct_terminal_fallback_cleans_routes_and_emits_once() {
+    let orch = Orchestrator::new(Config::default());
+    let (adapter, adapter_tx, _) = StubAdapter::new();
+    orch.register(adapter.clone()).expect("register adapter");
+    let mut events = orch.subscribe_events();
+
+    let conn = fake_inbound_connection();
+    let conn_id = conn.id.clone();
+    adapter.mark_live(conn_id.clone());
+    adapter_tx
+        .send(AdapterEvent::InboundConnection { connection: conn })
+        .await
+        .expect("send inbound event");
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("inbound event timeout")
+            .expect("event stream open"),
+        Event::ConnectionInbound { .. }
+    ));
+
+    let session_id = SessionId::new();
+    let publisher = ConnectionId::new();
+    let stream_id = StreamId::new();
+    orch.add_subscription(
+        session_id.clone(),
+        conn_id.clone(),
+        publisher.clone(),
+        stream_id.clone(),
+    );
+    assert_eq!(
+        orch.subscribers_for(&session_id, &publisher, &stream_id),
+        vec![conn_id.clone()]
+    );
+
+    // Transport-owned state is removed before the direct lifecycle callback.
+    adapter.mark_ended(&conn_id);
+    adapter
+        .deliver_terminal(AdapterEvent::Ended {
+            connection_id: conn_id.clone(),
+            reason: EndReason::Normal,
+        })
+        .await;
+
+    assert!(matches!(
+        orch.connection_transport(&conn_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+    assert!(orch
+        .subscribers_for(&session_id, &publisher, &stream_id)
+        .is_empty());
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("terminal event timeout")
+            .expect("event stream open"),
+        Event::ConnectionEnded { connection_id, .. } if connection_id == conn_id
+    ));
+
+    // A duplicate transport terminal is idempotent and emits no second event.
+    adapter
+        .deliver_terminal(AdapterEvent::Ended {
+            connection_id: conn_id,
+            reason: EndReason::Normal,
+        })
+        .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), events.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn queued_nonterminal_events_cannot_resurrect_an_ended_route() {
+    let orch = Orchestrator::new(Config::default());
+    let (adapter, adapter_tx, _) = StubAdapter::new();
+    orch.register(adapter.clone()).expect("register adapter");
+    let mut events = orch.subscribe_events();
+
+    let conn = fake_inbound_connection();
+    let conn_id = conn.id.clone();
+    adapter.mark_live(conn_id.clone());
+    adapter_tx
+        .send(AdapterEvent::InboundConnection { connection: conn })
+        .await
+        .expect("send inbound event");
+    let _ = tokio::time::timeout(Duration::from_secs(1), events.recv())
+        .await
+        .expect("inbound event timeout")
+        .expect("event stream open");
+
+    adapter.mark_ended(&conn_id);
+    adapter_tx
+        .send(AdapterEvent::Connected {
+            connection_id: conn_id.clone(),
+        })
+        .await
+        .expect("queue stale connected event");
+    adapter_tx
+        .send(AdapterEvent::Dtmf {
+            connection_id: conn_id.clone(),
+            digits: "1".into(),
+            duration_ms: 100,
+        })
+        .await
+        .expect("queue stale DTMF event");
+    adapter
+        .deliver_terminal(AdapterEvent::Ended {
+            connection_id: conn_id.clone(),
+            reason: EndReason::Normal,
+        })
+        .await;
+
+    assert!(matches!(
+        orch.connection_transport(&conn_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+    let mut terminal_count = 0;
+    let mut stale_count = 0;
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(100), events.recv()).await
+    {
+        match event {
+            Event::ConnectionEnded { connection_id, .. } if connection_id == conn_id => {
+                terminal_count += 1;
+            }
+            Event::ConnectionConnected { connection_id, .. }
+            | Event::DtmfReceived { connection_id, .. }
+                if connection_id == conn_id =>
+            {
+                stale_count += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(terminal_count, 1);
+    assert_eq!(stale_count, 0);
 }

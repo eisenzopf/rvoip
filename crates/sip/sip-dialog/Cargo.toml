@@ -28,6 +28,7 @@ rvoip-sip-core.workspace = true
 # crate and re-add only the features they need.
 rvoip-sip-transport = { workspace = true, features = ["dns"] }
 rvoip-infra-common.workspace = true
+rvoip-core-traits.workspace = true
 # transaction-core has been merged into this crate
 
 # External dependencies from workspace

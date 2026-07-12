@@ -271,12 +271,49 @@ impl SubscriptionHandler for OrchestratorSubscriptionHandler {
     }
 
     fn unregister_publisher(&self, sid: &SessionId, strm_id: &str) {
-        // PublisherRegistry has no single-strm_id removal yet (drop_publisher
-        // and drop_session are the available primitives — both broader).
-        // Future MP3+ may want a fine-grained removal; for now we leave
-        // single-stream entries until the publisher's connection ends or
-        // the session ends, at which point the broader cleanup hooks
-        // fire from `Orchestrator::forget_connection`.
-        let _ = (sid, strm_id);
+        self.publishers.remove_stream(sid, strm_id);
+    }
+
+    fn unregister_connection(&self, _sid: &SessionId, connid: &ConnectionId) {
+        self.orch.drop_connection_subscriptions(connid);
+        self.publishers.drop_publisher(connid);
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use rvoip_core::Config;
+
+    #[test]
+    fn unregister_connection_clears_publishers_and_subscription_rows() {
+        let orchestrator = Orchestrator::new(Config::default());
+        let publishers = Arc::new(PublisherRegistry::new());
+        let handler = OrchestratorSubscriptionHandler::new(
+            Arc::clone(&orchestrator),
+            Arc::clone(&publishers),
+        );
+        let sid = SessionId::from_string("session-cleanup");
+        let publisher = ConnectionId::from_string("publisher-cleanup");
+        let subscriber = ConnectionId::from_string("subscriber-cleanup");
+        let stream = StreamId::from_string("stream-cleanup");
+        publishers.register(
+            sid.clone(),
+            stream.to_string(),
+            PublisherEntry {
+                connection: publisher.clone(),
+                participant: "alice".to_string(),
+                kind: "audio".to_string(),
+                codec: None,
+            },
+        );
+        orchestrator.add_subscription(sid.clone(), subscriber, publisher.clone(), stream.clone());
+
+        handler.unregister_connection(&sid, &publisher);
+
+        assert!(publishers.entry(&sid, stream.as_str()).is_none());
+        assert!(orchestrator
+            .subscribers_for(&sid, &publisher, &stream)
+            .is_empty());
     }
 }

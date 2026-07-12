@@ -563,6 +563,7 @@ async fn process_udp_datagram(
                 transport_type: TransportType::Udp,
                 raw_bytes: Some(datagram.packet),
                 timing: datagram.timing,
+                connection_metadata: None,
             }
         }
         Err(e) => {

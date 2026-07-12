@@ -340,6 +340,19 @@ The serialized base therefore includes the full set of envelope fields: `v`, `ty
 
 Whether a given envelope type requires a signature is policy: by default no envelopes do, but a deployment MAY configure the verifier to require signatures on (for example) every envelope whose `sid` references a Session at `user-authorized` assurance.
 
+#### 5.5.2 rvoip secure coordinator profile
+
+Production rvoip coordinators apply the same security gate to commands and correlated replies before either reaches an application waiter: protocol version, bounded identifier validation, configured RFC 9421 verification, authenticated-principal expiry, command scope, replay protection, then Session/Connection ownership. A reply with a mismatched type, `sid`, or `connid` cannot consume another route's waiter.
+
+- Envelope and correlation IDs are limited to 128 bytes of URI-unreserved ASCII. `env_<uuid>` is canonical, but bounded ULIDs and application-defined IDs remain valid.
+- Replay caches default to five minutes and are bounded. Pre-authentication `auth.hello`/`auth.response` use a separate eight-entry cache; security-cleared authenticated traffic uses the normal bounded cache.
+- Default scopes are `uctp:session` for call/Connection control, `uctp:data` for DTMF and `message.send`, and `uctp:subscribe` for subscribe/unsubscribe. The explicit `legacy_permissive` coordinator profile disables these checks for trusted development only.
+- Payload identity fields such as `session.invite.from` and `connection.offer.by_participant` are assertions, not authority. The coordinator derives and canonicalizes ownership from the retained `AuthenticatedPrincipal`.
+- Secure defaults cap one peer at 32 Sessions, 64 Connections, and 16 cumulative opened Streams per Connection. Reoffers cannot reset the Stream budget.
+- A substrate peer must authenticate within 10 seconds. Principal expiry, signaling EOF, coordinator backpressure cancellation, or any peer-pump exit drains the coordinator and cancels sibling signaling/media tasks. QUIC and WebTransport media readers and writers share that lifecycle.
+
+Raw QUIC, WebTransport, and WebSocket use this same coordinator profile. Deployments that change a limit or scope policy should expose the effective values in diagnostics.
+
 ### 5.6 IdentityAssurance gradient
 
 Every authenticated Connection has an `IdentityAssurance` value, returned in `auth.session.payload.assurance`. The gradient is:

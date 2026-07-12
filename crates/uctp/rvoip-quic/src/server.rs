@@ -10,7 +10,7 @@ use chrono::Utc;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use rvoip_auth_core::BearerValidator;
-use rvoip_core::adapter::{AdapterEvent, EndReason};
+use rvoip_core::adapter::{AdapterEvent, AdapterLifecycleSinkSlot, EndReason, TerminalDelivery};
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
@@ -34,6 +34,7 @@ use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::state::{UctpCoordinator, UctpSessionEvent, ENVELOPE_CHANNEL_CAP};
 use rvoip_uctp::substrate::{envelope_reader, envelope_writer};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 pub struct UctpQuicServer {}
@@ -46,6 +47,7 @@ impl UctpQuicServer {
         mut accept_rx: mpsc::Receiver<quinn::Connection>,
         bearer: Arc<dyn BearerValidator>,
         events_tx: mpsc::Sender<AdapterEvent>,
+        lifecycle_sink: AdapterLifecycleSinkSlot,
         by_connection: Arc<DashMap<ConnectionId, String>>,
         by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
         routes: Arc<DashMap<ConnectionId, Route>>,
@@ -77,6 +79,7 @@ impl UctpQuicServer {
                 };
                 let bearer = bearer.clone();
                 let events_tx = events_tx.clone();
+                let lifecycle_sink = lifecycle_sink.clone();
                 let by_connection = Arc::clone(&by_connection);
                 let by_uctp_sid = Arc::clone(&by_uctp_sid);
                 let routes = Arc::clone(&routes);
@@ -92,6 +95,7 @@ impl UctpQuicServer {
                         conn,
                         bearer,
                         events_tx,
+                        lifecycle_sink,
                         by_connection,
                         by_uctp_sid,
                         routes,
@@ -145,6 +149,7 @@ async fn spawn_peer_session(
     conn: quinn::Connection,
     bearer: Arc<dyn BearerValidator>,
     events_tx: mpsc::Sender<AdapterEvent>,
+    lifecycle_sink: AdapterLifecycleSinkSlot,
     by_connection: Arc<DashMap<ConnectionId, String>>,
     by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
     routes: Arc<DashMap<ConnectionId, Route>>,
@@ -154,15 +159,26 @@ async fn spawn_peer_session(
     coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
     sig9421: Option<rvoip_uctp::state::Sig9421Config>,
 ) {
+    // Wire Session IDs are peer-controlled and need only be unique within one
+    // authenticated substrate peer. Never resolve them through the adapter-
+    // global map, where another tenant could choose the same value.
+    let _adapter_global_sid_index = by_uctp_sid;
+    let by_uctp_sid: Arc<DashMap<String, ConnectionId>> = Arc::new(DashMap::new());
     let peer_addr = conn.remote_address();
     info!(%peer_addr, "rvoip-quic: new connection");
 
     // The bidi stream the peer opens for signaling. The first accept_bi
     // is the signaling stream.
-    let (send, recv) = match conn.accept_bi().await {
-        Ok(s) => s,
-        Err(e) => {
+    let authentication_deadline = coordinator_caps.authentication_deadline;
+    let (send, recv) = match tokio::time::timeout(authentication_deadline, conn.accept_bi()).await {
+        Ok(Ok(streams)) => streams,
+        Ok(Err(e)) => {
             warn!(error = %e, "rvoip-quic: accept_bi failed");
+            return;
+        }
+        Err(_) => {
+            warn!(%peer_addr, "rvoip-quic: signaling stream setup timed out");
+            conn.close(quinn::VarInt::from_u32(0x102), b"signaling setup timeout");
             return;
         }
     };
@@ -188,6 +204,8 @@ async fn spawn_peer_session(
         parking_lot::RwLock<Vec<Arc<crate::media_stream::QuicDatagramMediaStream>>>,
     > = Arc::new(parking_lot::RwLock::new(Vec::new()));
     let reader_spawned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let media_cancel = CancellationToken::new();
+    let media_reader = Arc::new(parking_lot::Mutex::new(None));
 
     // Clone the outbound sender BEFORE handing it to the coordinator so
     // the event translator can stash it under each new ConnectionId for
@@ -201,6 +219,12 @@ async fn spawn_peer_session(
     // keeps the v0 503-reject behavior.
     let subscription_handler =
         subscription_handler.unwrap_or_else(|| rvoip_uctp::state::rejecting_handler());
+    let subscription_handler: Arc<dyn rvoip_uctp::state::SubscriptionHandler> =
+        rvoip_uctp::state::NamespacedSubscriptionHandler::new(
+            ConnectionId::new().to_string(),
+            subscription_handler,
+        );
+    let drain_grace = coordinator_caps.signaling_send_timeout;
     let coord = if let Some(sig9421) = sig9421 {
         UctpCoordinator::start_full_with_sig9421(
             "quic",
@@ -231,6 +255,8 @@ async fn spawn_peer_session(
     // typed responses (`renegotiate_media`, future correlated
     // ops). Cloned into every `Route` built below.
     let pending = coord.pending();
+    let auth_guard =
+        rvoip_uctp::state::spawn_auth_lifecycle_guard(Arc::clone(&coord), authentication_deadline);
 
     // Inbound substrate → coordinator pump.
     let in_tx_for_pump = in_tx.clone();
@@ -249,6 +275,10 @@ async fn spawn_peer_session(
             }
         }
     });
+    // The pump owns the sole ingress sender. Dropping this local copy ensures
+    // EOF on the substrate closes the coordinator input instead of leaving a
+    // hidden sender alive for the remainder of the peer task.
+    drop(in_tx);
 
     // Outbound coordinator → substrate pump.
     let outbound_pump = tokio::spawn(async move {
@@ -270,6 +300,8 @@ async fn spawn_peer_session(
         let route_out_tx = route_out_tx.clone();
         let streams_router = Arc::clone(&streams_router);
         let reader_spawned = Arc::clone(&reader_spawned);
+        let media_cancel = media_cancel.clone();
+        let media_reader = Arc::clone(&media_reader);
         let coord_for_translator = Arc::clone(&coord);
         tokio::spawn(async move {
             // Per-peer auth state. Set by `UctpSessionEvent::Authenticated`
@@ -321,13 +353,15 @@ async fn spawn_peer_session(
                         // codec; a future codec-renegotiation pass replaces
                         // this stream when the peer's `connection.offer`
                         // arrives.
-                        let stream = QuicDatagramMediaStream::start(
+                        let route_cancel = media_cancel.child_token();
+                        let stream = QuicDatagramMediaStream::start_with_cancel(
                             StreamId::new(),
                             StreamKind::Audio,
                             default_audio_codec(),
                             Direction::Inbound,
                             1,
                             conn_for_translator.clone(),
+                            route_cancel.clone(),
                         );
                         // Register with the per-peer datagram-reader router
                         // BEFORE inserting into the connection-level map,
@@ -346,11 +380,13 @@ async fn spawn_peer_session(
                                     publisher_connid: id.clone(),
                                 }
                             });
-                            crate::media_stream::spawn_datagram_reader(
+                            let reader = crate::media_stream::spawn_datagram_reader_with_cancel(
                                 conn_for_translator.clone(),
                                 Arc::clone(&streams_router),
                                 fanout,
+                                media_cancel.clone(),
                             );
+                            *media_reader.lock() = Some(reader);
                         }
                         let stream_dyn: Arc<dyn MediaStream> = stream.clone();
                         connection
@@ -377,14 +413,19 @@ async fn spawn_peer_session(
                                 // streams.
                                 next_local_id: Arc::new(std::sync::atomic::AtomicU16::new(2)),
                                 streams_router: Arc::clone(&streams_router),
+                                route_cancel,
                             },
                         );
                         // Send InboundConnection first so consumers
                         // creating a session see the Connection before
                         // the auth follow-up arrives.
-                        let _ = events_tx
-                            .send(AdapterEvent::InboundConnection { connection })
-                            .await;
+                        if !rvoip_uctp::state::try_deliver_adapter_event(
+                            &events_tx,
+                            AdapterEvent::InboundConnection { connection },
+                            "quic",
+                        ) {
+                            break;
+                        }
                         // Pair with a typed Authenticated event if we
                         // captured auth state earlier. A peer that
                         // somehow reached InboundInvite without auth
@@ -407,7 +448,11 @@ async fn spawn_peer_session(
                                     assurance,
                                 },
                             };
-                            let _ = events_tx.send(event).await;
+                            if !rvoip_uctp::state::try_deliver_adapter_event(
+                                &events_tx, event, "quic",
+                            ) {
+                                break;
+                            }
                         }
                         // Already sent both — skip the trailing send.
                         None
@@ -432,11 +477,60 @@ async fn spawn_peer_session(
                             })
                         }),
                     UctpSessionEvent::ConnectionEnded { connid, reason, .. } => {
-                        match wire_to_core.remove(&connid) {
-                            Some(connection_id) => Some(AdapterEvent::Ended {
-                                connection_id,
-                                reason: EndReason::Failed { detail: reason },
-                            }),
+                        match wire_to_core.get(&connid).cloned() {
+                            Some(connection_id) => {
+                                let has_sibling = wire_to_core
+                                    .iter()
+                                    .any(|(wire, core)| wire != &connid && core == &connection_id);
+                                if has_sibling {
+                                    wire_to_core.remove(&connid);
+                                    Some(AdapterEvent::Native {
+                                        kind: "uctp.connection_ended",
+                                        detail: format!("connid={connid} reason={reason}"),
+                                    })
+                                } else {
+                                    let terminal = AdapterEvent::Ended {
+                                        connection_id: connection_id.clone(),
+                                        reason: EndReason::Failed { detail: reason },
+                                    };
+                                    if events_tx.try_send(terminal).is_err() {
+                                        warn!(%connid, "terminal adapter event backpressured; preserving route for peer cleanup");
+                                        break;
+                                    }
+                                    wire_to_core.remove(&connid);
+                                    let sid = by_connection
+                                        .get(&connection_id)
+                                        .map(|entry| entry.clone());
+                                    by_connection.remove(&connection_id);
+                                    if let Some(sid) = sid {
+                                        if by_uctp_sid
+                                            .get(&sid)
+                                            .is_some_and(|mapped| *mapped == connection_id)
+                                        {
+                                            by_uctp_sid.remove(&sid);
+                                        }
+                                    }
+                                    if let Some((_, route)) = routes.remove(&connection_id) {
+                                        route.route_cancel.cancel();
+                                        let streams = route
+                                            .streams
+                                            .iter()
+                                            .map(|entry| entry.value().clone())
+                                            .collect::<Vec<_>>();
+                                        let stream_ids = streams
+                                            .iter()
+                                            .map(|stream| stream.id())
+                                            .collect::<std::collections::HashSet<_>>();
+                                        streams_router
+                                            .write()
+                                            .retain(|stream| !stream_ids.contains(&stream.id()));
+                                        for stream in streams {
+                                            let _ = stream.close().await;
+                                        }
+                                    }
+                                    None
+                                }
+                            }
                             None => Some(AdapterEvent::Native {
                                 kind: "uctp.connection_ended_orphan",
                                 detail: connid.to_string(),
@@ -444,19 +538,42 @@ async fn spawn_peer_session(
                         }
                     }
                     UctpSessionEvent::SessionEnded { sid, reason } => {
-                        match by_uctp_sid.remove(sid.as_str()) {
-                            Some((_, connection_id)) => {
-                                wire_to_core.retain(|_, core| core != &connection_id);
-                                by_connection.remove(&connection_id);
-                                routes.remove(&connection_id);
-                                Some(AdapterEvent::Ended {
-                                    connection_id,
+                        match by_uctp_sid.get(sid.as_str()).map(|entry| entry.clone()) {
+                            Some(connection_id) => {
+                                let terminal = AdapterEvent::Ended {
+                                    connection_id: connection_id.clone(),
                                     reason: if reason == "cancelled" {
                                         EndReason::Cancelled
                                     } else {
                                         EndReason::Normal
                                     },
-                                })
+                                };
+                                if events_tx.try_send(terminal).is_err() {
+                                    warn!(%sid, "terminal adapter event backpressured; preserving route for peer cleanup");
+                                    break;
+                                }
+                                wire_to_core.retain(|_, core| core != &connection_id);
+                                by_connection.remove(&connection_id);
+                                by_uctp_sid.remove(sid.as_str());
+                                if let Some((_, route)) = routes.remove(&connection_id) {
+                                    route.route_cancel.cancel();
+                                    let streams = route
+                                        .streams
+                                        .iter()
+                                        .map(|entry| entry.value().clone())
+                                        .collect::<Vec<_>>();
+                                    let stream_ids = streams
+                                        .iter()
+                                        .map(|stream| stream.id())
+                                        .collect::<std::collections::HashSet<_>>();
+                                    streams_router
+                                        .write()
+                                        .retain(|stream| !stream_ids.contains(&stream.id()));
+                                    for stream in streams {
+                                        let _ = stream.close().await;
+                                    }
+                                }
+                                None
                             }
                             None => Some(AdapterEvent::Native {
                                 kind: "uctp.session_ended_orphan",
@@ -578,7 +695,9 @@ async fn spawn_peer_session(
                     }),
                 };
                 if let Some(ev) = adapter_event {
-                    let _ = events_tx.send(ev).await;
+                    if !rvoip_uctp::state::try_deliver_adapter_event(&events_tx, ev, "quic") {
+                        break;
+                    }
                 }
             }
         })
@@ -589,10 +708,74 @@ async fn spawn_peer_session(
     // comparison.
     let stats_pump =
         rvoip_uctp::substrate::spawn_stats_sampler(conn.clone(), "quic", quinn_stats_interval);
+    let media_guard_token = media_cancel.clone();
+    let media_guard = tokio::spawn(async move {
+        media_guard_token.cancelled().await;
+    });
 
-    let _ = inbound_pump.await;
-    let _ = outbound_pump.await;
-    let _ = event_pump.await;
+    let _ = rvoip_uctp::state::supervise_peer_tasks_with_media_cancel(
+        Arc::clone(&coord),
+        vec![
+            inbound_pump,
+            outbound_pump,
+            event_pump,
+            auth_guard,
+            media_guard,
+        ],
+        drain_grace,
+        media_cancel.clone(),
+    )
+    .await;
+    media_cancel.cancel();
+    conn.close(quinn::VarInt::from_u32(0), b"UCTP peer session ended");
+    let media_reader_task = media_reader.lock().take();
+    if let Some(mut task) = media_reader_task {
+        if tokio::time::timeout(drain_grace, &mut task).await.is_err() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+    let media_streams = streams_router.write().drain(..).collect::<Vec<_>>();
+    for stream in media_streams {
+        let _ = stream.close().await;
+    }
+    let stale_routes = routes
+        .iter()
+        .filter(|entry| entry.value().out_tx.same_channel(&route_out_tx))
+        .map(|entry| (entry.key().clone(), entry.value().sid.clone()))
+        .collect::<Vec<_>>();
+    for (connection_id, sid) in stale_routes {
+        let terminal = AdapterEvent::Ended {
+            connection_id: connection_id.clone(),
+            reason: EndReason::Failed {
+                detail: "quic transport closed".into(),
+            },
+        };
+        routes.remove(&connection_id);
+        by_connection.remove(&connection_id);
+        if by_uctp_sid
+            .get(&sid)
+            .is_some_and(|mapped| *mapped == connection_id)
+        {
+            by_uctp_sid.remove(&sid);
+        }
+        let delivery = lifecycle_sink
+            .queue_or_deliver_terminal(&events_tx, terminal)
+            .await;
+        metrics::counter!(
+            "uctp_terminal_delivery_total",
+            "transport" => "quic",
+            "outcome" => match delivery {
+                TerminalDelivery::Queued => "queued",
+                TerminalDelivery::Fallback => "fallback",
+                TerminalDelivery::Undeliverable => "undeliverable",
+            }
+        )
+        .increment(1);
+        if delivery == TerminalDelivery::Undeliverable {
+            warn!(%connection_id, "terminal event undeliverable before adapter registration");
+        }
+    }
     stats_pump.abort();
 
     info!(%peer_addr, "rvoip-quic: connection closed");

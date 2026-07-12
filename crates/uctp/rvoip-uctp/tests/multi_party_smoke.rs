@@ -153,6 +153,28 @@ async fn next_envelope_of(
     None
 }
 
+async fn establish_subscriber_connection(
+    in_tx: &mpsc::Sender<UctpEnvelope>,
+    out_rx: &mut mpsc::Receiver<UctpEnvelope>,
+    sid: &str,
+    connid: &str,
+) {
+    in_tx
+        .send(offer_env(sid, connid, &format!("strm_fixture_{connid}")))
+        .await
+        .expect("send subscriber connection offer");
+    in_tx
+        .send(ready_env(sid, connid))
+        .await
+        .expect("send subscriber connection ready");
+
+    let opened = next_envelope_of(out_rx, MessageType::StreamOpened)
+        .await
+        .expect("expected subscriber stream.opened envelope");
+    assert_eq!(opened.sid.as_deref(), Some(sid));
+    assert_eq!(opened.connid.as_deref(), Some(connid));
+}
+
 #[tokio::test]
 async fn connection_ready_emits_stream_opened_and_registers_publisher() {
     let orch = Orchestrator::new(Config::default());
@@ -220,6 +242,7 @@ async fn connection_ready_emits_stream_opened_and_registers_publisher() {
 
     // 4. A subscriber sending stream.subscribe by strm_id should now
     //    succeed without any test pre-population.
+    establish_subscriber_connection(&in_tx, &mut out_rx, "sess_a", "conn_subscriber").await;
     in_tx
         .send(subscribe_env("sess_a", "conn_subscriber", "strm_audio_1"))
         .await

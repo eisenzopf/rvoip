@@ -32,6 +32,7 @@ anyhow.workspace = true
 bytes.workspace = true
 tracing.workspace = true
 socket2.workspace = true
+sha2.workspace = true
 
 # TLS support
 tokio-rustls = { workspace = true, optional = true }

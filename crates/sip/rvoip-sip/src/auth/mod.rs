@@ -213,6 +213,10 @@
 //! }
 //! ```
 
+mod listener;
+
+pub use listener::SipListenerAuthPolicy;
+
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
@@ -221,7 +225,9 @@ use std::time::{Duration, Instant, SystemTime};
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
-use rvoip_core_traits::identity::IdentityAssurance;
+use rvoip_core_traits::identity::{
+    AuthenticatedPrincipal, AuthenticationMethod, CredentialKind, IdentityAssurance,
+};
 
 use crate::errors::{Result, SessionError};
 use crate::types::Credentials;
@@ -299,6 +305,25 @@ pub enum SipAuthDecision {
     /// The inbound request should be challenged or rejected.
     Rejected {
         /// Challenge header values in priority order.
+        challenges: Vec<SipAuthChallenge>,
+    },
+}
+
+/// Listener-oriented authentication result retaining the complete canonical
+/// principal alongside the compatibility [`AuthIdentity`] view.
+#[derive(Debug, Clone)]
+pub enum SipPrincipalAuthDecision {
+    /// The request authenticated successfully.
+    Authorized {
+        /// Compatibility SIP identity view used by existing applications.
+        identity: AuthIdentity,
+        /// Complete canonical principal returned by the validator or derived
+        /// from the accepted SIP Digest identity.
+        principal: AuthenticatedPrincipal,
+    },
+    /// The request did not carry acceptable credentials.
+    Rejected {
+        /// Authentication challenges suitable for the response.
         challenges: Vec<SipAuthChallenge>,
     },
 }
@@ -1310,6 +1335,80 @@ impl SipAuthService {
         transport: &SipTransportSecurityContext,
         context: &SipAuthContext,
     ) -> Result<SipAuthDecision> {
+        let mut principal = None;
+        self.authenticate_authorization_with_context_and_transport_internal(
+            authorization,
+            method,
+            request_uri,
+            body,
+            source,
+            transport,
+            context,
+            &mut principal,
+        )
+        .await
+    }
+
+    /// Validate listener credentials while retaining the provider's complete
+    /// canonical principal. Digest identities are promoted into a canonical
+    /// SIP-Digest principal; Bearer validators retain issuer, tenant, expiry,
+    /// method, assurance, and scopes from `validate_principal`.
+    pub async fn authenticate_principal_with_context_and_transport(
+        &self,
+        authorization: Option<&str>,
+        method: &str,
+        request_uri: &str,
+        body: Option<&[u8]>,
+        source: SipAuthSource,
+        transport: &SipTransportSecurityContext,
+        context: &SipAuthContext,
+    ) -> Result<SipPrincipalAuthDecision> {
+        let mut principal = None;
+        let decision = self
+            .authenticate_authorization_with_context_and_transport_internal(
+                authorization,
+                method,
+                request_uri,
+                body,
+                source,
+                transport,
+                context,
+                &mut principal,
+            )
+            .await?;
+
+        match decision {
+            SipAuthDecision::Authorized(identity) => {
+                let principal = principal
+                    .or_else(|| principal_from_sip_auth_identity(&identity))
+                    .ok_or_else(|| {
+                        SessionError::AuthError(format!(
+                            "listener authentication scheme {:?} cannot produce a canonical principal",
+                            identity.scheme
+                        ))
+                    })?;
+                Ok(SipPrincipalAuthDecision::Authorized {
+                    identity,
+                    principal,
+                })
+            }
+            SipAuthDecision::Rejected { challenges } => {
+                Ok(SipPrincipalAuthDecision::Rejected { challenges })
+            }
+        }
+    }
+
+    async fn authenticate_authorization_with_context_and_transport_internal(
+        &self,
+        authorization: Option<&str>,
+        method: &str,
+        request_uri: &str,
+        body: Option<&[u8]>,
+        source: SipAuthSource,
+        transport: &SipTransportSecurityContext,
+        context: &SipAuthContext,
+        principal_out: &mut Option<AuthenticatedPrincipal>,
+    ) -> Result<SipAuthDecision> {
         let attempt = auth_attempt_scheme(authorization);
         let rate_key = self.rate_limit_key(attempt, authorization, method, context);
 
@@ -1407,7 +1506,13 @@ impl SipAuthService {
                                 Some(AuthFailureReason::PolicyRejected),
                             ))
                         } else {
-                            self.authenticate_bearer_with_reason(trimmed, source).await
+                            match self.authenticate_bearer_with_reason(trimmed, source).await {
+                                Ok((decision, reason, principal)) => {
+                                    *principal_out = principal;
+                                    Ok((decision, reason))
+                                }
+                                Err(error) => Err(error),
+                            }
                         }
                     }
                     AuthAttemptScheme::Basic => {
@@ -1848,29 +1953,41 @@ impl SipAuthService {
         &self,
         authorization: &str,
         source: SipAuthSource,
-    ) -> Result<(SipAuthDecision, Option<AuthFailureReason>)> {
+    ) -> Result<(
+        SipAuthDecision,
+        Option<AuthFailureReason>,
+        Option<AuthenticatedPrincipal>,
+    )> {
         let Some(validator) = &self.bearer else {
             return Ok((
                 self.rejected_async(source).await?,
                 Some(AuthFailureReason::UnsupportedScheme),
+                None,
             ));
         };
         let token = authorization
             .split_once(char::is_whitespace)
             .map(|(_, value)| value.trim())
             .unwrap_or_default();
-        match validator.validate(token).await {
-            Ok(assurance) => Ok((
-                SipAuthDecision::Authorized(identity_from_bearer_assurance(
-                    assurance,
+        match validator.validate_principal(token).await {
+            Ok(principal) if principal.is_expired() => Ok((
+                self.rejected_async(source).await?,
+                Some(AuthFailureReason::InvalidCredential),
+                None,
+            )),
+            Ok(principal) => Ok((
+                SipAuthDecision::Authorized(identity_from_bearer_principal(
+                    &principal,
                     self.bearer_realm.clone(),
                     source,
                 )),
                 None,
+                Some(principal),
             )),
             Err(BearerAuthError::Empty) | Err(BearerAuthError::Invalid(_)) => Ok((
                 self.rejected_async(source).await?,
                 Some(AuthFailureReason::InvalidCredential),
+                None,
             )),
             Err(BearerAuthError::Unavailable(err)) => Err(SessionError::AuthError(format!(
                 "Bearer validator unavailable: {err}"
@@ -2478,6 +2595,45 @@ fn identity_from_bearer_assurance(
             source,
         },
     }
+}
+
+fn identity_from_bearer_principal(
+    principal: &AuthenticatedPrincipal,
+    realm: Option<String>,
+    source: SipAuthSource,
+) -> AuthIdentity {
+    AuthIdentity {
+        scheme: SipAuthScheme::Bearer,
+        username: None,
+        subject: Some(principal.subject.clone()),
+        realm,
+        scopes: principal.scopes.clone(),
+        source,
+    }
+}
+
+fn principal_from_sip_auth_identity(identity: &AuthIdentity) -> Option<AuthenticatedPrincipal> {
+    if identity.scheme != SipAuthScheme::Digest {
+        return None;
+    }
+    let subject = identity
+        .username
+        .clone()
+        .or_else(|| identity.subject.clone())?;
+    Some(AuthenticatedPrincipal {
+        subject,
+        tenant: None,
+        scopes: identity.scopes.clone(),
+        issuer: identity
+            .realm
+            .as_ref()
+            .map(|realm| format!("sip-digest:{realm}")),
+        expires_at: None,
+        method: AuthenticationMethod::SipDigest,
+        assurance: IdentityAssurance::Identified {
+            credential_kind: CredentialKind::SipDigest,
+        },
+    })
 }
 
 fn auth_attempt_scheme(authorization: Option<&str>) -> AuthAttemptScheme {

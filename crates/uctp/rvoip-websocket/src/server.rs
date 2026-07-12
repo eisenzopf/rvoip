@@ -7,7 +7,7 @@ use chrono::Utc;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use rvoip_auth_core::BearerValidator;
-use rvoip_core::adapter::{AdapterEvent, EndReason};
+use rvoip_core::adapter::{AdapterEvent, AdapterLifecycleSinkSlot, EndReason, TerminalDelivery};
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId};
@@ -27,10 +27,11 @@ impl UctpWsServer {
         listener: TcpListener,
         bearer: Arc<dyn BearerValidator>,
         events_tx: mpsc::Sender<AdapterEvent>,
+        lifecycle_sink: AdapterLifecycleSinkSlot,
         by_connection: Arc<DashMap<ConnectionId, String>>,
         by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
         routes: Arc<DashMap<ConnectionId, Route>>,
-        _max_concurrent: usize,
+        max_concurrent: usize,
         coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
         sig9421: Option<rvoip_uctp::state::Sig9421Config>,
         #[cfg(feature = "wss")] tls: Option<Arc<rustls::ServerConfig>>,
@@ -39,6 +40,7 @@ impl UctpWsServer {
         let tls_acceptor = tls.map(tokio_rustls::TlsAcceptor::from);
 
         tokio::spawn(async move {
+            let connection_slots = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
             loop {
                 let (tcp, peer_addr) = match listener.accept().await {
                     Ok(v) => v,
@@ -47,8 +49,22 @@ impl UctpWsServer {
                         continue;
                     }
                 };
+                let permit = match Arc::clone(&connection_slots).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        metrics::counter!(
+                            "uctp_connections_rejected_total",
+                            "transport" => "websocket",
+                            "reason" => "capacity"
+                        )
+                        .increment(1);
+                        drop(tcp);
+                        continue;
+                    }
+                };
                 let bearer = bearer.clone();
                 let events_tx = events_tx.clone();
+                let lifecycle_sink = lifecycle_sink.clone();
                 let by_connection = Arc::clone(&by_connection);
                 let by_uctp_sid = Arc::clone(&by_uctp_sid);
                 let routes = Arc::clone(&routes);
@@ -57,28 +73,51 @@ impl UctpWsServer {
                 #[cfg(feature = "wss")]
                 let tls_acceptor = tls_acceptor.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
+                    let authentication_deadline = caps.authentication_deadline;
                     #[cfg(feature = "wss")]
                     {
                         if let Some(acceptor) = tls_acceptor {
-                            let tls_stream = match acceptor.accept(tcp).await {
-                                Ok(s) => s,
-                                Err(e) => {
+                            let tls_stream = match tokio::time::timeout(
+                                authentication_deadline,
+                                acceptor.accept(tcp),
+                            )
+                            .await
+                            {
+                                Ok(Ok(stream)) => stream,
+                                Ok(Err(e)) => {
                                     warn!(error = %e, %peer_addr, "rvoip-websocket: TLS handshake failed");
                                     return;
                                 }
+                                Err(_) => {
+                                    warn!(%peer_addr, "rvoip-websocket: TLS handshake timed out");
+                                    return;
+                                }
                             };
-                            let ws = match tokio_tungstenite::accept_async(tls_stream).await {
-                                Ok(ws) => ws,
-                                Err(e) => {
+                            let ws = match tokio::time::timeout(
+                                authentication_deadline,
+                                tokio_tungstenite::accept_async(tls_stream),
+                            )
+                            .await
+                            {
+                                Ok(Ok(ws)) => ws,
+                                Ok(Err(e)) => {
                                     warn!(error = %e, %peer_addr, "rvoip-websocket: handshake failed (wss)");
+                                    return;
+                                }
+                                Err(_) => {
+                                    warn!(%peer_addr, "rvoip-websocket: WSS upgrade timed out");
                                     return;
                                 }
                             };
                             info!(%peer_addr, "rvoip-websocket: peer connected over TLS");
+                            metrics::gauge!("uctp_active_connections", "transport" => "websocket")
+                                .increment(1.0);
                             spawn_peer_session(
                                 ws,
                                 bearer,
                                 events_tx,
+                                lifecycle_sink,
                                 by_connection,
                                 by_uctp_sid,
                                 routes,
@@ -87,22 +126,36 @@ impl UctpWsServer {
                             )
                             .await;
                             info!(%peer_addr, "rvoip-websocket: peer disconnected (wss)");
+                            metrics::gauge!("uctp_active_connections", "transport" => "websocket")
+                                .decrement(1.0);
                             return;
                         }
                     }
 
-                    let ws = match tokio_tungstenite::accept_async(tcp).await {
-                        Ok(ws) => ws,
-                        Err(e) => {
+                    let ws = match tokio::time::timeout(
+                        authentication_deadline,
+                        tokio_tungstenite::accept_async(tcp),
+                    )
+                    .await
+                    {
+                        Ok(Ok(ws)) => ws,
+                        Ok(Err(e)) => {
                             warn!(error = %e, %peer_addr, "rvoip-websocket: handshake failed");
+                            return;
+                        }
+                        Err(_) => {
+                            warn!(%peer_addr, "rvoip-websocket: WebSocket upgrade timed out");
                             return;
                         }
                     };
                     info!(%peer_addr, "rvoip-websocket: peer connected");
+                    metrics::gauge!("uctp_active_connections", "transport" => "websocket")
+                        .increment(1.0);
                     spawn_peer_session(
                         ws,
                         bearer,
                         events_tx,
+                        lifecycle_sink,
                         by_connection,
                         by_uctp_sid,
                         routes,
@@ -111,6 +164,8 @@ impl UctpWsServer {
                     )
                     .await;
                     info!(%peer_addr, "rvoip-websocket: peer disconnected");
+                    metrics::gauge!("uctp_active_connections", "transport" => "websocket")
+                        .decrement(1.0);
                 });
             }
         });
@@ -146,6 +201,7 @@ async fn spawn_peer_session<S>(
     ws: tokio_tungstenite::WebSocketStream<S>,
     bearer: Arc<dyn BearerValidator>,
     events_tx: mpsc::Sender<AdapterEvent>,
+    lifecycle_sink: AdapterLifecycleSinkSlot,
     by_connection: Arc<DashMap<ConnectionId, String>>,
     by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
     routes: Arc<DashMap<ConnectionId, Route>>,
@@ -154,6 +210,10 @@ async fn spawn_peer_session<S>(
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    // Keep peer-supplied Session IDs in this authenticated peer's namespace.
+    let _adapter_global_sid_index = by_uctp_sid;
+    let by_uctp_sid: Arc<DashMap<String, ConnectionId>> = Arc::new(DashMap::new());
+    let authentication_deadline = coordinator_caps.authentication_deadline;
     let (mut sink, mut stream) = ws.split();
 
     let (in_tx, in_rx) = mpsc::channel::<UctpEnvelope>(ENVELOPE_CHANNEL_CAP);
@@ -163,6 +223,12 @@ async fn spawn_peer_session<S>(
 
     let route_out_tx = out_tx.clone();
 
+    let drain_grace = coordinator_caps.signaling_send_timeout;
+    let subscription_handler: Arc<dyn rvoip_uctp::state::SubscriptionHandler> =
+        rvoip_uctp::state::NamespacedSubscriptionHandler::new(
+            ConnectionId::new().to_string(),
+            rvoip_uctp::state::rejecting_handler(),
+        );
     let coord = if let Some(sig9421) = sig9421 {
         UctpCoordinator::start_full_with_sig9421(
             "websocket",
@@ -173,7 +239,7 @@ async fn spawn_peer_session<S>(
             sig9421.verifier,
             sig9421.policy,
             Arc::new(rvoip_uctp::state::default_v0_descriptor()),
-            rvoip_uctp::state::rejecting_handler(),
+            subscription_handler.clone(),
             coordinator_caps,
         )
     } else {
@@ -184,7 +250,7 @@ async fn spawn_peer_session<S>(
             coord_events_tx,
             bearer,
             Arc::new(rvoip_uctp::state::default_v0_descriptor()),
-            rvoip_uctp::state::rejecting_handler(),
+            subscription_handler,
             coordinator_caps,
         )
     };
@@ -192,6 +258,8 @@ async fn spawn_peer_session<S>(
     // `Pending` correlator so per-Route adapter code can await
     // typed responses.
     let pending = coord.pending();
+    let auth_guard =
+        rvoip_uctp::state::spawn_auth_lifecycle_guard(Arc::clone(&coord), authentication_deadline);
 
     // Inbound: WS text frames → coordinator.
     //
@@ -250,6 +318,7 @@ async fn spawn_peer_session<S>(
             }
         }
     });
+    drop(in_tx);
 
     // Outbound: coordinator → WS text frames.
     //
@@ -384,9 +453,13 @@ async fn spawn_peer_session<S>(
                             id.to_string(),
                         );
 
-                        let _ = events_tx
-                            .send(AdapterEvent::InboundConnection { connection })
-                            .await;
+                        if !rvoip_uctp::state::try_deliver_adapter_event(
+                            &events_tx,
+                            AdapterEvent::InboundConnection { connection },
+                            "websocket",
+                        ) {
+                            break;
+                        }
                         if let Some((identity_id, participant_id, assurance, principal)) =
                             latest_auth.clone()
                         {
@@ -403,7 +476,13 @@ async fn spawn_peer_session<S>(
                                     assurance,
                                 },
                             };
-                            let _ = events_tx.send(event).await;
+                            if !rvoip_uctp::state::try_deliver_adapter_event(
+                                &events_tx,
+                                event,
+                                "websocket",
+                            ) {
+                                break;
+                            }
                         }
                         None
                     }
@@ -427,11 +506,55 @@ async fn spawn_peer_session<S>(
                             })
                         }),
                     UctpSessionEvent::ConnectionEnded { connid, reason, .. } => {
-                        match wire_to_core.remove(&connid) {
-                            Some(connection_id) => Some(AdapterEvent::Ended {
-                                connection_id,
-                                reason: EndReason::Failed { detail: reason },
-                            }),
+                        match wire_to_core.get(&connid).cloned() {
+                            Some(connection_id) => {
+                                let has_sibling = wire_to_core
+                                    .iter()
+                                    .any(|(wire, core)| wire != &connid && core == &connection_id);
+                                if has_sibling {
+                                    wire_to_core.remove(&connid);
+                                    Some(AdapterEvent::Native {
+                                        kind: "uctp.connection_ended",
+                                        detail: format!("connid={connid} reason={reason}"),
+                                    })
+                                } else {
+                                    let terminal = AdapterEvent::Ended {
+                                        connection_id: connection_id.clone(),
+                                        reason: EndReason::Failed { detail: reason },
+                                    };
+                                    if events_tx.try_send(terminal).is_err() {
+                                        warn!(%connid, "terminal adapter event backpressured; preserving route for peer cleanup");
+                                        break;
+                                    }
+                                    wire_to_core.remove(&connid);
+                                    let sid = by_connection
+                                        .get(&connection_id)
+                                        .map(|entry| entry.clone());
+                                    by_connection.remove(&connection_id);
+                                    if let Some(sid) = sid {
+                                        if by_uctp_sid
+                                            .get(&sid)
+                                            .is_some_and(|mapped| *mapped == connection_id)
+                                        {
+                                            by_uctp_sid.remove(&sid);
+                                        }
+                                    }
+                                    #[cfg(feature = "media-webrtc")]
+                                    {
+                                        let removed = routes.remove(&connection_id);
+                                        let bridge = removed.and_then(|(_, route)| {
+                                            let guard = route.bridge.lock();
+                                            guard.clone()
+                                        });
+                                        if let Some(bridge) = bridge {
+                                            let _ = bridge.close().await;
+                                        }
+                                    }
+                                    #[cfg(not(feature = "media-webrtc"))]
+                                    routes.remove(&connection_id);
+                                    None
+                                }
+                            }
                             None => Some(AdapterEvent::Native {
                                 kind: "uctp.connection_ended_orphan",
                                 detail: connid.to_string(),
@@ -439,10 +562,23 @@ async fn spawn_peer_session<S>(
                         }
                     }
                     UctpSessionEvent::SessionEnded { sid, reason } => {
-                        match by_uctp_sid.remove(sid.as_str()) {
-                            Some((_, connection_id)) => {
+                        match by_uctp_sid.get(sid.as_str()).map(|entry| entry.clone()) {
+                            Some(connection_id) => {
+                                let terminal = AdapterEvent::Ended {
+                                    connection_id: connection_id.clone(),
+                                    reason: if reason == "cancelled" {
+                                        EndReason::Cancelled
+                                    } else {
+                                        EndReason::Normal
+                                    },
+                                };
+                                if events_tx.try_send(terminal).is_err() {
+                                    warn!(%sid, "terminal adapter event backpressured; preserving route for peer cleanup");
+                                    break;
+                                }
                                 wire_to_core.retain(|_, core| core != &connection_id);
                                 by_connection.remove(&connection_id);
+                                by_uctp_sid.remove(sid.as_str());
                                 // Close + drop the per-Connection bridge
                                 // before dropping the Route. Removing the
                                 // Route drops the bridge Arc, but proactive
@@ -466,14 +602,7 @@ async fn spawn_peer_session<S>(
                                 {
                                     routes.remove(&connection_id);
                                 }
-                                Some(AdapterEvent::Ended {
-                                    connection_id,
-                                    reason: if reason == "cancelled" {
-                                        EndReason::Cancelled
-                                    } else {
-                                        EndReason::Normal
-                                    },
-                                })
+                                None
                             }
                             None => Some(AdapterEvent::Native {
                                 kind: "uctp.session_ended_orphan",
@@ -585,15 +714,75 @@ async fn spawn_peer_session<S>(
                     }),
                 };
                 if let Some(ev) = adapter_event {
-                    let _ = events_tx.send(ev).await;
+                    if !rvoip_uctp::state::try_deliver_adapter_event(&events_tx, ev, "websocket") {
+                        break;
+                    }
                 }
             }
         })
     };
 
-    let _ = inbound_pump.await;
-    let _ = outbound_pump.await;
-    let _ = event_pump.await;
+    let _ = rvoip_uctp::state::supervise_peer_tasks(
+        Arc::clone(&coord),
+        vec![inbound_pump, outbound_pump, event_pump, auth_guard],
+        drain_grace,
+    )
+    .await;
+    let stale_routes = routes
+        .iter()
+        .filter(|entry| entry.value().out_tx.same_channel(&route_out_tx))
+        .map(|entry| (entry.key().clone(), entry.value().sid.clone()))
+        .collect::<Vec<_>>();
+    for (connection_id, sid) in stale_routes {
+        let terminal = AdapterEvent::Ended {
+            connection_id: connection_id.clone(),
+            reason: EndReason::Failed {
+                detail: "websocket transport closed".into(),
+            },
+        };
+        #[cfg(feature = "media-webrtc")]
+        let bridge = {
+            let removed = routes.remove(&connection_id);
+            removed.and_then(|(_, route)| {
+                let guard = route.bridge.lock();
+                guard.clone()
+            })
+        };
+        #[cfg(not(feature = "media-webrtc"))]
+        routes.remove(&connection_id);
+        by_connection.remove(&connection_id);
+        if by_uctp_sid
+            .get(&sid)
+            .is_some_and(|mapped| *mapped == connection_id)
+        {
+            by_uctp_sid.remove(&sid);
+        }
+        let delivery = lifecycle_sink
+            .queue_or_deliver_terminal(&events_tx, terminal)
+            .await;
+        metrics::counter!(
+            "uctp_terminal_delivery_total",
+            "transport" => "websocket",
+            "outcome" => match delivery {
+                TerminalDelivery::Queued => "queued",
+                TerminalDelivery::Fallback => "fallback",
+                TerminalDelivery::Undeliverable => "undeliverable",
+            }
+        )
+        .increment(1);
+        if delivery == TerminalDelivery::Undeliverable {
+            warn!(%connection_id, "terminal event undeliverable before adapter registration");
+        }
+        #[cfg(feature = "media-webrtc")]
+        if let Some(bridge) = bridge {
+            if tokio::time::timeout(drain_grace, bridge.close())
+                .await
+                .is_err()
+            {
+                warn!(%connection_id, "timed out closing WebRTC media bridge during peer drain");
+            }
+        }
+    }
 }
 
 /// Spawn the per-Connection WebRTC answerer-bridge setup task.

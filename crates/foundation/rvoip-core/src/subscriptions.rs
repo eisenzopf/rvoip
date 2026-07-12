@@ -61,16 +61,9 @@ impl SessionSubscriptions {
         } else {
             false
         };
-        // Garbage-collect empty subscriber sets so the table doesn't
-        // grow unboundedly across long-lived sessions with churn.
-        if removed {
-            if let Some(entry) = self.inner.get(&key) {
-                if entry.is_empty() {
-                    drop(entry);
-                    self.inner.remove(&key);
-                }
-            }
-        }
+        // Keep empty rows until Session teardown. A check-then-remove here
+        // can delete a subscriber concurrently inserted into the same Arc.
+        // Stream/session caps bound these rows for the Session lifetime.
         removed
     }
 
@@ -104,15 +97,11 @@ impl SessionSubscriptions {
                 self.inner.remove(&key);
                 continue;
             }
-            let collapsed = if let Some(set) = self.inner.get(&key) {
+            if let Some(set) = self.inner.get(&key) {
                 set.remove(connid);
-                set.is_empty()
-            } else {
-                false
-            };
-            if collapsed {
-                self.inner.remove(&key);
             }
+            // Empty subscriber rows are reclaimed by `drop_session`; removing
+            // them here races a concurrent subscription to the same row.
         }
     }
 
@@ -166,13 +155,13 @@ impl SubscriptionRegistry {
         // while mutating individual SessionSubscriptions.
         let sids: Vec<SessionId> = self.sessions.iter().map(|e| e.key().clone()).collect();
         for sid in sids {
-            if let Some(table) = self.sessions.get(&sid) {
-                let table = Arc::clone(table.value());
-                drop(self.sessions.get(&sid));
+            if let Some(table_ref) = self.sessions.get(&sid) {
+                let table = Arc::clone(table_ref.value());
+                drop(table_ref);
                 table.drop_connection(connid);
-                if table.is_empty() {
-                    self.sessions.remove(&sid);
-                }
+                // Do not remove the outer row here: a concurrent `for_session`
+                // can add to this same table after the empty check and before
+                // removal. Session teardown owns outer-row GC.
             }
         }
     }
@@ -275,6 +264,26 @@ impl PublisherRegistry {
             .unwrap_or_default()
     }
 
+    /// Remove exactly one published stream and its participant-index row.
+    /// Idempotent: unknown streams are a no-op.
+    pub fn remove_stream(&self, sid: &SessionId, strm_id: &str) {
+        let key = (sid.clone(), strm_id.to_string());
+        let Some((_, removed)) = self.inner.remove(&key) else {
+            return;
+        };
+        let participant_key = (sid.clone(), removed.participant);
+        if let Some(mut streams) = self.by_participant.get_mut(&participant_key) {
+            streams.retain(|stream| stream != strm_id);
+        }
+        let empty = self
+            .by_participant
+            .get(&participant_key)
+            .is_some_and(|streams| streams.is_empty());
+        if empty {
+            self.by_participant.remove(&participant_key);
+        }
+    }
+
     /// Drop every registration that names `connid` as publisher (i.e.,
     /// the connection ended). Called by
     /// `crate::Orchestrator::forget_connection`.
@@ -315,5 +324,69 @@ impl PublisherRegistry {
     pub fn drop_session(&self, sid: &SessionId) {
         self.inner.retain(|(s, _), _| s != sid);
         self.by_participant.retain(|(s, _), _| s != sid);
+    }
+}
+
+#[cfg(test)]
+mod publisher_registry_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn remove_stream_updates_primary_and_participant_indexes() {
+        let registry = PublisherRegistry::new();
+        let sid = SessionId::new();
+        let connection = ConnectionId::new();
+        for stream in ["audio-main", "audio-backup"] {
+            registry.register(
+                sid.clone(),
+                stream.to_string(),
+                PublisherEntry {
+                    connection: connection.clone(),
+                    participant: "alice".to_string(),
+                    kind: "audio".to_string(),
+                    codec: None,
+                },
+            );
+        }
+
+        registry.remove_stream(&sid, "audio-main");
+        assert!(registry.entry(&sid, "audio-main").is_none());
+        assert_eq!(
+            registry.streams_for_participant(&sid, "alice"),
+            vec!["audio-backup".to_string()]
+        );
+
+        registry.remove_stream(&sid, "audio-backup");
+        assert!(registry.streams_for_participant(&sid, "alice").is_empty());
+        registry.remove_stream(&sid, "audio-backup");
+    }
+
+    #[test]
+    fn subscription_drop_connection_releases_map_guard_without_outer_row_race() {
+        let registry = Arc::new(SubscriptionRegistry::new());
+        let sid = SessionId::new();
+        let publisher = ConnectionId::new();
+        let subscriber = ConnectionId::new();
+        registry
+            .for_session(&sid)
+            .add(publisher, StreamId::new(), subscriber.clone());
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let registry_for_thread = Arc::clone(&registry);
+        std::thread::spawn(move || {
+            registry_for_thread.drop_connection(&subscriber);
+            let _ = done_tx.send(());
+        });
+
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("drop_connection must not self-deadlock while removing an empty session");
+        let table = registry.for_session(&sid);
+        assert!(table
+            .rows()
+            .iter()
+            .all(|(_, _, subscribers)| subscribers.is_empty()));
+        registry.drop_session(&sid);
+        assert!(registry.for_session(&sid).is_empty());
     }
 }

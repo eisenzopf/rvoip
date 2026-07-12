@@ -344,8 +344,6 @@ pub struct SessionCrossCrateEventHandler {
 }
 
 #[allow(dead_code)]
-#[allow(dead_code)]
-#[allow(dead_code)]
 impl SessionCrossCrateEventHandler {
     async fn handle_dialog_to_session_event(&self, event: &DialogToSessionEvent) -> Result<()> {
         match event {
@@ -1698,6 +1696,17 @@ impl SessionCrossCrateEventHandler {
         }
 
         let session_id = SessionId(session_id_str);
+        let authenticated_principal = transaction_id
+            .parse::<rvoip_sip_dialog::transaction::TransactionKey>()
+            .ok()
+            .and_then(|transaction_id| {
+                self.dialog_adapter
+                    .dialog_api
+                    .dialog_manager()
+                    .core()
+                    .transaction_manager()
+                    .peek_inbound_principal(&transaction_id)
+            });
         let setup_guard = cleanup_diag::stage_guard(CleanupStage::IncomingCallSetup, &session_id.0);
 
         let admission_guard = match self.acquire_server_call_admission().await {
@@ -1928,6 +1937,15 @@ impl SessionCrossCrateEventHandler {
                     sdp: session_remote_sdp,
                 },
             );
+            if let Some(principal) = authenticated_principal {
+                publish_api_event(
+                    &self.app_event_publisher,
+                    crate::api::events::Event::IncomingCallAuthenticated {
+                        call_id: session_id.clone(),
+                        principal,
+                    },
+                );
+            }
 
             if let Some(ref tx) = self.incoming_call_tx {
                 let call_info = crate::types::IncomingCallInfo {
@@ -2246,6 +2264,17 @@ impl SessionCrossCrateEventHandler {
 
         // Use the session ID provided by dialog-core
         let session_id = SessionId(session_id_str);
+        let authenticated_principal = transaction_id
+            .parse::<rvoip_sip_dialog::transaction::TransactionKey>()
+            .ok()
+            .and_then(|transaction_id| {
+                self.dialog_adapter
+                    .dialog_api
+                    .dialog_manager()
+                    .core()
+                    .transaction_manager()
+                    .peek_inbound_principal(&transaction_id)
+            });
 
         // Create session in store - this is the ONLY place we create sessions outside state machine
         self.state_machine
@@ -2396,6 +2425,14 @@ impl SessionCrossCrateEventHandler {
                     to: to.clone(),
                     sdp: session_remote_sdp,
                 });
+            if let Some(principal) = authenticated_principal {
+                self.app_event_publisher.publish(
+                    crate::api::events::Event::IncomingCallAuthenticated {
+                        call_id: session_id.clone(),
+                        principal,
+                    },
+                );
+            }
 
             // Legacy incoming call notification (keep for compatibility)
             if let Some(ref tx) = self.incoming_call_tx {

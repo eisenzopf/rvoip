@@ -45,7 +45,7 @@ use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 use webrtc::peer_connection::RTCIceCandidateInit;
 
-use crate::adapter::WebRtcAdapter;
+use crate::adapter::{RouteAuthorization, WebRtcAdapter};
 use crate::errors::{Result, WebRtcError};
 use crate::signaling::auth::{
     extract_bearer, AnonymousAuth, AuthContext, AuthRejection, WhipAuthHook,
@@ -63,9 +63,6 @@ pub struct WhipState {
     /// Pluggable Bearer-token enforcement (RFC 9725 §4.1). Default
     /// [`AnonymousAuth`] accepts everything — back-compat with pre-G2.
     auth: Arc<dyn WhipAuthHook>,
-    /// Connection ownership established by the authenticated POST. PATCH and
-    /// DELETE must present the same principal subject.
-    owners: Arc<DashMap<ConnectionId, String>>,
 }
 
 impl WhipState {
@@ -74,7 +71,6 @@ impl WhipState {
             adapter,
             rate: Arc::new(DashMap::new()),
             auth: Arc::new(AnonymousAuth),
-            owners: Arc::new(DashMap::new()),
         }
     }
 
@@ -415,19 +411,13 @@ async fn check_auth(
     }
 }
 
-fn check_owner(
-    state: &WhipState,
-    id: &ConnectionId,
-    auth: &AuthContext,
-) -> std::result::Result<(), Response> {
-    match state.owners.get(id) {
-        Some(owner) if owner.value() == &auth.subject => Ok(()),
-        Some(_) => Err((
-            StatusCode::FORBIDDEN,
-            "connection belongs to another principal",
-        )
-            .into_response()),
-        None => Err(StatusCode::NOT_FOUND.into_response()),
+fn route_error_response(state: &WhipState, error: WebRtcError) -> Response {
+    state.adapter.note_signaling_error();
+    match error {
+        WebRtcError::ConnectionNotFound => StatusCode::NOT_FOUND.into_response(),
+        WebRtcError::Forbidden(detail) => (StatusCode::FORBIDDEN, detail).into_response(),
+        WebRtcError::Unauthorized(detail) => (StatusCode::UNAUTHORIZED, detail).into_response(),
+        other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()).into_response(),
     }
 }
 
@@ -487,25 +477,30 @@ async fn whip_post(
         return (StatusCode::BAD_REQUEST, "empty WHIP offer body").into_response();
     }
 
-    let conn_id = match state.adapter.apply_remote_offer(&body).await {
+    let conn_id = match state
+        .adapter
+        .apply_remote_offer_authorized(&body, auth.route_authorization())
+        .await
+    {
         Ok(id) => id,
         Err(e) => {
-            state.adapter.note_signaling_error();
-            let status =
-                if matches!(e, WebRtcError::Adapter(_)) && e.to_string().contains("cap reached") {
-                    StatusCode::SERVICE_UNAVAILABLE
-                } else {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                };
-            return (status, e.to_string()).into_response();
+            if matches!(e, WebRtcError::Adapter(_)) && e.to_string().contains("cap reached") {
+                state.adapter.note_signaling_error();
+                return (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response();
+            }
+            return route_error_response(&state, e);
         }
     };
     let answer = match state.adapter.local_sdp(&conn_id) {
         Ok(s) => s,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => {
+            let _ = state
+                .adapter
+                .end(conn_id, rvoip_core::adapter::EndReason::Normal)
+                .await;
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
     };
-
-    state.owners.insert(conn_id.clone(), auth.subject);
 
     let headers = build_session_headers(&state.adapter, &conn_id);
     (StatusCode::CREATED, headers, answer).into_response()
@@ -534,15 +529,13 @@ async fn whip_patch(
     }
     let content_type = content_type_of(&headers);
     let id = ConnectionId::from_string(conn_id);
-    if let Err(response) = check_owner(&state, &id, &auth) {
-        return response;
-    }
+    let authorization = auth.route_authorization();
 
     if content_type == CT_TRICKLE {
         if body.trim().is_empty() {
             return (StatusCode::BAD_REQUEST, "empty WHIP trickle body").into_response();
         }
-        return match apply_sdpfrag(&state.adapter, &id, &body).await {
+        return match apply_sdpfrag(&state.adapter, &id, &body, &authorization).await {
             Ok(count) => {
                 if count == 0 {
                     (StatusCode::BAD_REQUEST, "no candidates in sdpfrag").into_response()
@@ -550,11 +543,7 @@ async fn whip_patch(
                     StatusCode::NO_CONTENT.into_response()
                 }
             }
-            Err(WebRtcError::ConnectionNotFound) => StatusCode::NOT_FOUND.into_response(),
-            Err(e) => {
-                state.adapter.note_signaling_error();
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-            }
+            Err(e) => route_error_response(&state, e),
         };
     }
 
@@ -585,13 +574,13 @@ async fn whip_patch(
     if body.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "empty WHIP ICE restart offer body").into_response();
     }
-    match state.adapter.apply_ice_restart_offer(id, &body).await {
+    match state
+        .adapter
+        .apply_ice_restart_offer_authorized(id, &body, &authorization)
+        .await
+    {
         Ok(sdp) => (StatusCode::OK, [("content-type", CT_SDP)], sdp).into_response(),
-        Err(WebRtcError::ConnectionNotFound) => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => {
-            state.adapter.note_signaling_error();
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-        }
+        Err(e) => route_error_response(&state, e),
     }
 }
 
@@ -602,7 +591,11 @@ async fn apply_sdpfrag(
     adapter: &Arc<WebRtcAdapter>,
     conn_id: &ConnectionId,
     body: &str,
+    authorization: &RouteAuthorization,
 ) -> Result<usize> {
+    // Authorize even a syntactically empty fragment so callers cannot use
+    // PATCH response differences to probe another principal's route.
+    adapter.authorize_network_route(conn_id, authorization)?;
     let mut current_mid: Option<String> = None;
     let mut mline_index: u16 = 0;
     let mut applied = 0usize;
@@ -627,7 +620,9 @@ async fn apply_sdpfrag(
                 username_fragment: None,
                 url: None,
             };
-            adapter.apply_trickle_candidate(conn_id, init).await?;
+            adapter
+                .apply_trickle_candidate_authorized(conn_id, init, authorization)
+                .await?;
             applied += 1;
         }
     }
@@ -662,7 +657,18 @@ async fn whep_post(
     {
         Ok(handle) => {
             let conn_id = handle.connection.id.clone();
-            state.owners.insert(conn_id.clone(), auth.subject);
+            let participant_id = handle.connection.participant_id.to_string();
+            if let Err(error) = state.adapter.assign_route_authorization(
+                &conn_id,
+                auth.route_authorization(),
+                participant_id,
+            ) {
+                let _ = state
+                    .adapter
+                    .end(conn_id, rvoip_core::adapter::EndReason::Normal)
+                    .await;
+                return route_error_response(&state, error);
+            }
             match state.adapter.local_sdp(&conn_id) {
                 Ok(sdp) => {
                     let mut headers = build_session_headers(&state.adapter, &conn_id);
@@ -671,7 +677,13 @@ async fn whep_post(
                     }
                     (StatusCode::CREATED, headers, sdp).into_response()
                 }
-                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+                Err(e) => {
+                    let _ = state
+                        .adapter
+                        .end(conn_id, rvoip_core::adapter::EndReason::Normal)
+                        .await;
+                    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+                }
             }
         }
         Err(e) => {
@@ -706,16 +718,13 @@ async fn whep_patch(
         return (StatusCode::BAD_REQUEST, "empty WHEP answer body").into_response();
     }
     let id = ConnectionId::from_string(conn_id);
-    if let Err(response) = check_owner(&state, &id, &auth) {
-        return response;
-    }
-    match state.adapter.accept_remote_answer(id, &body).await {
+    match state
+        .adapter
+        .accept_remote_answer_authorized(id, &body, &auth.route_authorization())
+        .await
+    {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(WebRtcError::ConnectionNotFound) => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => {
-            state.adapter.note_signaling_error();
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-        }
+        Err(e) => route_error_response(&state, e),
     }
 }
 
@@ -738,15 +747,18 @@ async fn whip_delete(
         Err(resp) => return resp,
     };
     let id = ConnectionId::from_string(conn_id);
-    if let Err(response) = check_owner(&state, &id, &auth) {
-        return response;
-    }
-    let _ = state
+    match state
         .adapter
-        .end(id.clone(), rvoip_core::adapter::EndReason::Normal)
-        .await;
-    state.owners.remove(&id);
-    StatusCode::OK.into_response()
+        .end_authorized(
+            id,
+            rvoip_core::adapter::EndReason::Normal,
+            &auth.route_authorization(),
+        )
+        .await
+    {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(error) => route_error_response(&state, error),
+    }
 }
 
 async fn whep_delete(
@@ -768,13 +780,16 @@ async fn whep_delete(
         Err(resp) => return resp,
     };
     let id = ConnectionId::from_string(conn_id);
-    if let Err(response) = check_owner(&state, &id, &auth) {
-        return response;
-    }
-    let _ = state
+    match state
         .adapter
-        .end(id.clone(), rvoip_core::adapter::EndReason::Normal)
-        .await;
-    state.owners.remove(&id);
-    StatusCode::OK.into_response()
+        .end_authorized(
+            id,
+            rvoip_core::adapter::EndReason::Normal,
+            &auth.route_authorization(),
+        )
+        .await
+    {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(error) => route_error_response(&state, error),
+    }
 }

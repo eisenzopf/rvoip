@@ -3,10 +3,10 @@
 //!
 //! Two assertions:
 //!
-//! 1. **Matched-waiter delivery.** A waiter registers on `Pending`,
-//!    then an envelope arrives whose `in_reply_to` matches the
-//!    waiter's id. The gate delivers it; the waiter resolves with
-//!    the envelope; no handler-side side effect fires.
+//! 1. **Authenticated matched-waiter delivery.** A waiter registers on
+//!    `Pending`, then an authenticated envelope arrives whose
+//!    `in_reply_to` matches the waiter's id. The gate delivers it only after
+//!    the normal security checks.
 //!
 //! 2. **No-match fallthrough.** An envelope with `in_reply_to` set
 //!    to an id NOT registered on `Pending` falls through to the
@@ -76,6 +76,7 @@ fn unsolicited_connection_update(in_reply_to: &str) -> UctpEnvelope {
 #[tokio::test]
 async fn matched_in_reply_to_routes_to_pending_waiter_and_skips_handler() {
     let (coord, in_tx, mut out_rx) = build_coordinator();
+    common::drive_auth_handshake(&in_tx, &mut out_rx).await;
     let pending = coord.pending();
 
     // Register a waiter for envelope id `env_my_request`.
@@ -88,16 +89,6 @@ async fn matched_in_reply_to_routes_to_pending_waiter_and_skips_handler() {
     // Tiny yield so wait_for registers before we deliver.
     tokio::time::sleep(Duration::from_millis(10)).await;
 
-    // Drive auth handshake so the connection.update envelope isn't
-    // rejected by the require_authenticated gate (the gate runs
-    // AFTER the deliver-pending gate, but we want to be sure: even
-    // for an unauthed peer, the deliver gate should fire because it
-    // sits earlier in dispatch_inner).
-    //
-    // For this test we don't run the handshake — the deliver gate
-    // is *earlier* than require_authenticated, so a reply to a
-    // registered waiter must short-circuit dispatch regardless of
-    // auth state. That's the whole point of the gate.
     let reply_env = unsolicited_connection_update("env_my_request");
     let reply_env_id = reply_env.id.clone();
     in_tx.send(reply_env).await.unwrap();
@@ -119,6 +110,42 @@ async fn matched_in_reply_to_routes_to_pending_waiter_and_skips_handler() {
         no_out.is_err(),
         "delivered reply must NOT trigger the regular handler; got {:?}",
         no_out.ok().flatten().map(|e| e.msg_type)
+    );
+}
+
+#[tokio::test]
+async fn unauthenticated_correlated_reply_is_rejected_before_delivery() {
+    let (coord, in_tx, mut out_rx) = build_coordinator();
+    let pending = coord.pending();
+    let waiter = {
+        let pending = Arc::clone(&pending);
+        tokio::spawn(async move {
+            pending
+                .wait_for(
+                    EnvelopeId::from_string("env_protected_request"),
+                    Duration::from_millis(250),
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    in_tx
+        .send(unsolicited_connection_update("env_protected_request"))
+        .await
+        .unwrap();
+
+    let error = tokio::time::timeout(Duration::from_secs(1), out_rx.recv())
+        .await
+        .expect("security rejection")
+        .expect("output channel open");
+    assert_eq!(error.msg_type, MessageType::Error);
+    let payload: rvoip_uctp::payloads::control::Error = error.decode_payload().unwrap();
+    assert_eq!(payload.code, 401);
+
+    assert!(
+        waiter.await.unwrap().is_err(),
+        "the rejected reply must not consume or resolve the waiter"
     );
 }
 
