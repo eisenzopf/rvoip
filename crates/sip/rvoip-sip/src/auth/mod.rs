@@ -1011,6 +1011,7 @@ pub struct SipAuthService {
     bearer: Option<Arc<dyn BearerValidator>>,
     bearer_realm: Option<String>,
     bearer_scope: Option<String>,
+    required_bearer_scope: Option<String>,
     basic: Option<BasicAuthStore>,
     aka: Option<Arc<dyn AkaVectorProvider>>,
     allow_bearer_over_cleartext: bool,
@@ -1032,6 +1033,7 @@ impl SipAuthService {
             bearer: None,
             bearer_realm: None,
             bearer_scope: None,
+            required_bearer_scope: None,
             basic: None,
             aka: None,
             allow_bearer_over_cleartext: false,
@@ -1149,6 +1151,17 @@ impl SipAuthService {
     /// Set Bearer challenge scope.
     pub fn with_bearer_scope(mut self, scope: impl Into<String>) -> Self {
         self.bearer_scope = Some(scope.into());
+        self
+    }
+
+    /// Require one application scope on every accepted Bearer principal.
+    ///
+    /// [`Self::with_bearer_scope`] only advertises a requested OAuth scope in
+    /// the SIP challenge for compatibility. This method is the enforceable
+    /// listener policy boundary and rejects otherwise valid credentials that
+    /// lack the configured scope (or wildcard scope).
+    pub fn with_required_bearer_scope(mut self, scope: impl Into<String>) -> Self {
+        self.required_bearer_scope = Some(scope.into());
         self
     }
 
@@ -1975,6 +1988,18 @@ impl SipAuthService {
                 Some(AuthFailureReason::InvalidCredential),
                 None,
             )),
+            Ok(principal)
+                if self
+                    .required_bearer_scope
+                    .as_deref()
+                    .is_some_and(|scope| !principal.has_scope(scope)) =>
+            {
+                Ok((
+                    self.rejected_async(source).await?,
+                    Some(AuthFailureReason::PolicyRejected),
+                    None,
+                ))
+            }
             Ok(principal) => Ok((
                 SipAuthDecision::Authorized(identity_from_bearer_principal(
                     &principal,
@@ -2239,6 +2264,7 @@ impl std::fmt::Debug for SipAuthService {
             .field("bearer", &self.bearer.is_some())
             .field("bearer_realm", &self.bearer_realm)
             .field("bearer_scope", &self.bearer_scope)
+            .field("required_bearer_scope", &self.required_bearer_scope)
             .field("basic", &self.basic.as_ref().map(|b| &b.realm))
             .field("aka", &self.aka.is_some())
             .field(
@@ -3477,6 +3503,33 @@ mod tests {
 
     struct UnavailableBearer;
 
+    struct ScopedBearer(Vec<String>);
+
+    #[async_trait::async_trait]
+    impl BearerValidator for ScopedBearer {
+        async fn validate(
+            &self,
+            _token: &str,
+        ) -> std::result::Result<IdentityAssurance, BearerAuthError> {
+            Ok(IdentityAssurance::Anonymous)
+        }
+
+        async fn validate_principal(
+            &self,
+            _token: &str,
+        ) -> std::result::Result<AuthenticatedPrincipal, BearerAuthError> {
+            Ok(AuthenticatedPrincipal {
+                subject: "scoped-test".into(),
+                tenant: Some("tenant-a".into()),
+                scopes: self.0.clone(),
+                issuer: Some("test".into()),
+                expires_at: None,
+                method: AuthenticationMethod::Bearer,
+                assurance: IdentityAssurance::Anonymous,
+            })
+        }
+    }
+
     #[async_trait::async_trait]
     impl BearerValidator for UnavailableBearer {
         async fn validate(
@@ -4009,6 +4062,37 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn sip_auth_service_enforces_required_bearer_scope() {
+        for (scopes, authorized) in [
+            (vec!["sip:connect".to_string()], true),
+            (vec!["*".to_string()], true),
+            (vec!["calls:read".to_string()], false),
+            (Vec::new(), false),
+        ] {
+            let service = SipAuthService::new()
+                .with_bearer_validator("bridgefu", Arc::new(ScopedBearer(scopes)))
+                .with_bearer_scope("sip:connect")
+                .with_required_bearer_scope("sip:connect")
+                .allow_bearer_over_cleartext(true);
+            let decision = service
+                .authenticate_authorization(
+                    Some("Bearer token"),
+                    "INVITE",
+                    "sip:attachment@example.test",
+                    None,
+                    SipAuthSource::Origin,
+                    false,
+                )
+                .await
+                .expect("required scope policy");
+            assert_eq!(
+                matches!(decision, SipAuthDecision::Authorized(_)),
+                authorized
+            );
+        }
     }
 
     #[tokio::test]
