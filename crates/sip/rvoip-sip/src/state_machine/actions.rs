@@ -1,5 +1,6 @@
 use crate::adapters::dialog_adapter::RegisterAttemptOutcome;
 use crate::state_table::types::{EventType, SessionId};
+use std::fmt;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -34,6 +35,54 @@ enum RegisterActionMode {
     Register,
     RegisterWithAuth,
     Unregister,
+}
+
+/// Redacted validation error for SIP-owned INVITE option materialization.
+///
+/// Neither `Display` nor derived `Debug` retains the rejected value or the
+/// parser's source error. Diagnostics expose only a fixed field label, whether
+/// the field was present, its byte length, and a validation class.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InviteOptionsMaterializationError {
+    InvalidPAssertedIdentityUri { bytes: usize },
+    InvalidOutboundProxyUri { bytes: usize },
+}
+
+impl fmt::Display for InviteOptionsMaterializationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (field, bytes) = match self {
+            Self::InvalidPAssertedIdentityUri { bytes } => ("p_asserted_identity", bytes),
+            Self::InvalidOutboundProxyUri { bytes } => ("outbound_proxy", bytes),
+        };
+        write!(
+            formatter,
+            "INVITE option validation failed (field={field}, present=true, bytes={bytes}, class=invalid-uri)"
+        )
+    }
+}
+
+impl std::error::Error for InviteOptionsMaterializationError {}
+
+/// Value-free endpoint metadata used by outbound INVITE log records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InviteEndpointDiagnostics {
+    from_present: bool,
+    from_bytes: usize,
+    target_present: bool,
+    target_bytes: usize,
+    sdp_present: bool,
+}
+
+impl InviteEndpointDiagnostics {
+    fn new(from: Option<&str>, target: Option<&str>, sdp_present: bool) -> Self {
+        Self {
+            from_present: from.is_some(),
+            from_bytes: from.map_or(0, str::len),
+            target_present: target.is_some(),
+            target_bytes: target.map_or(0, str::len),
+            sdp_present,
+        }
+    }
 }
 
 async fn execute_register_action(
@@ -309,7 +358,7 @@ fn materialize_invite_options(
     sdp_for_wire: Option<String>,
 ) -> Result<
     (rvoip_sip_dialog::api::unified::InviteRequestOptions, bool),
-    Box<dyn std::error::Error + Send + Sync>,
+    InviteOptionsMaterializationError,
 > {
     use crate::api::send::ProxyOverride;
     use rvoip_sip_core::types::TypedHeader;
@@ -326,12 +375,12 @@ fn materialize_invite_options(
                 0,
                 TypedHeader::PAssertedIdentity(PAssertedIdentity::with_uri(uri)),
             ),
-            Err(e) => {
-                return Err(format!(
-                    "INVITE options: pai_uri ({}) is not a valid URI: {}",
-                    pai, e
+            Err(_) => {
+                return Err(
+                    InviteOptionsMaterializationError::InvalidPAssertedIdentityUri {
+                        bytes: pai.len(),
+                    },
                 )
-                .into())
             }
         }
     }
@@ -345,12 +394,10 @@ fn materialize_invite_options(
         use rvoip_sip_core::types::{route::Route, uri::Uri};
         match Uri::from_str(&uri_str) {
             Ok(uri) => extras.insert(0, TypedHeader::Route(Route::with_uri(uri))),
-            Err(e) => {
-                return Err(format!(
-                    "INVITE options: outbound_proxy override ({}) is not a valid URI: {}",
-                    uri_str, e
-                )
-                .into())
+            Err(_) => {
+                return Err(InviteOptionsMaterializationError::InvalidOutboundProxyUri {
+                    bytes: uri_str.len(),
+                })
             }
         }
     }
@@ -583,10 +630,8 @@ pub(crate) async fn execute_action(
                 .clone()
                 .ok_or_else(|| "remote_uri not set for session".to_string())?;
             info!(
-                "Sending INVITE from {} to {} with SDP: {}",
-                from,
-                to,
-                session.local_sdp.is_some()
+                "Sending INVITE: {:?}",
+                InviteEndpointDiagnostics::new(Some(&from), Some(&to), session.local_sdp.is_some())
             );
 
             // Build any extra typed headers that travel with the very first
@@ -609,15 +654,16 @@ pub(crate) async fn execute_action(
                             uri,
                         )));
                     }
-                    Err(e) => {
+                    Err(_) => {
                         // Reject upstream rather than silently dropping — the
                         // app set a malformed PAI and would otherwise wonder
                         // why the carrier rejects with 403.
-                        return Err(format!(
-                            "SessionState.pai_uri ({}) is not a valid URI: {}",
-                            pai, e
-                        )
-                        .into());
+                        return Err(
+                            InviteOptionsMaterializationError::InvalidPAssertedIdentityUri {
+                                bytes: pai.len(),
+                            }
+                            .into(),
+                        );
                     }
                 }
             }
@@ -2687,8 +2733,13 @@ pub(crate) async fn execute_action(
                     started.elapsed(),
                 );
                 debug!(
-                    "SendINVITEWithOptions dispatched for session {}: to={}",
-                    session.session_id, snapshot.to
+                    "SendINVITEWithOptions dispatched for session {}: {:?}",
+                    session.session_id,
+                    InviteEndpointDiagnostics::new(
+                        snapshot.from.as_deref(),
+                        Some(&snapshot.to),
+                        snapshot.sdp.is_some()
+                    )
                 );
             }
         }
@@ -2852,4 +2903,142 @@ fn publish_transfer_event(dialog_adapter: &Arc<DialogAdapter>, api_event: Event)
             tracing::warn!("Failed to publish Transfer* event: {}", e);
         }
     });
+}
+
+#[cfg(test)]
+mod invite_option_diagnostic_tests {
+    use super::*;
+    use crate::api::send::outbound_call::{OutboundCallOptionsSnapshot, ProxyOverride};
+    use crate::auth::SipClientAuth;
+    use crate::types::Credentials;
+    use rvoip_sip_core::types::{headers::HeaderValue, HeaderName, TypedHeader};
+
+    const SECRET: &str = "invite-option-secret-canary";
+
+    fn secret_snapshot() -> OutboundCallOptionsSnapshot {
+        OutboundCallOptionsSnapshot {
+            from: Some(format!("sip:{SECRET}@from.invalid")),
+            to: format!("sip:{SECRET}@target.invalid"),
+            credentials: Some(Credentials::new(SECRET, SECRET)),
+            auth: Some(SipClientAuth::bearer_token(SECRET)),
+            contact_uri: Some(format!("sip:{SECRET}@contact.invalid")),
+            subject: Some(SECRET.to_string()),
+            from_display: Some(SECRET.to_string()),
+            precomputed_auth: Some(format!("Bearer {SECRET}")),
+            extra_headers: vec![TypedHeader::Other(
+                HeaderName::Other("X-Application-Context".to_string()),
+                HeaderValue::Raw(SECRET.as_bytes().to_vec()),
+            )],
+            ..OutboundCallOptionsSnapshot::default()
+        }
+    }
+
+    fn assert_redacted(error: InviteOptionsMaterializationError) {
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        for rendered in [&display, &debug] {
+            assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
+            assert!(!rendered.contains("sip:"), "URI leaked: {rendered}");
+            assert!(
+                !rendered.contains("Bearer"),
+                "credential leaked: {rendered}"
+            );
+        }
+        assert!(display.contains("present="));
+        assert!(display.contains("class="));
+        assert!(display.contains("bytes="));
+    }
+
+    #[test]
+    fn invite_endpoint_log_metadata_never_formats_values() {
+        let from = format!("sip:{SECRET}@from.invalid");
+        let target = format!("sip:{SECRET}@target.invalid");
+        let rendered = format!(
+            "{:?}",
+            InviteEndpointDiagnostics::new(Some(&from), Some(&target), true)
+        );
+        assert!(!rendered.contains(SECRET));
+        assert!(!rendered.contains("sip:"));
+        assert!(rendered.contains(&format!("from_bytes: {}", from.len())));
+        assert!(rendered.contains(&format!("target_bytes: {}", target.len())));
+        assert!(rendered.contains("sdp_present: true"));
+    }
+
+    #[test]
+    fn invite_option_source_has_no_value_bearing_error_or_log_templates() {
+        let source = include_str!("actions.rs");
+        for forbidden in [
+            ["Sending INVITE from ", "{} to {}"].concat(),
+            ["SendINVITEWithOptions dispatched for session {}: ", "to={}"].concat(),
+            ["pai_uri (", "{}) is not a valid URI"].concat(),
+            ["outbound_proxy override (", "{}) is not a valid URI"].concat(),
+            ["SessionState.pai_uri (", "{}) is not a valid URI"].concat(),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "value-bearing diagnostic template returned: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn pai_materialization_error_exposes_only_safe_extent_and_class() {
+        let error = materialize_invite_options(
+            &secret_snapshot(),
+            Some(&format!("sip:{SECRET}\r\nX-Injected: yes")),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            InviteOptionsMaterializationError::InvalidPAssertedIdentityUri { .. }
+        ));
+        assert_redacted(error);
+    }
+
+    #[test]
+    fn proxy_materialization_error_exposes_only_safe_extent_and_class() {
+        let mut proxy = secret_snapshot();
+        proxy.outbound_proxy_override =
+            ProxyOverride::Use(format!("sip:{SECRET}\r\nX-Injected: yes"));
+        let error = materialize_invite_options(&proxy, None, None).unwrap_err();
+        assert!(matches!(
+            error,
+            InviteOptionsMaterializationError::InvalidOutboundProxyUri { .. }
+        ));
+        assert_redacted(error);
+    }
+
+    #[test]
+    fn successful_materialization_preserves_legacy_values_and_header_order() {
+        let mut snapshot = secret_snapshot();
+        // A missing From is intentionally left for the existing dialog path;
+        // this diagnostic closure must not introduce new admission behavior.
+        snapshot.from = None;
+        snapshot.outbound_proxy_override =
+            ProxyOverride::Use("sip:proxy.example.com;lr".to_string());
+
+        let (options, suppress_global_proxy) = materialize_invite_options(
+            &snapshot,
+            Some("sip:identity@example.com"),
+            Some("v=0\r\n".to_string()),
+        )
+        .expect("valid options");
+
+        assert!(options.from_uri.is_empty());
+        assert_eq!(options.to_uri, format!("sip:{SECRET}@target.invalid"));
+        assert_eq!(options.sdp.as_deref(), Some("v=0\r\n"));
+        assert!(suppress_global_proxy);
+        assert_eq!(options.extra_headers.len(), 4);
+        assert_eq!(options.extra_headers[0].name(), HeaderName::Route);
+        assert_eq!(
+            options.extra_headers[1].name(),
+            HeaderName::PAssertedIdentity
+        );
+        assert_eq!(
+            options.extra_headers[2].name(),
+            HeaderName::Other("X-Application-Context".to_string())
+        );
+        assert_eq!(options.extra_headers[3].name(), HeaderName::Subject);
+    }
 }

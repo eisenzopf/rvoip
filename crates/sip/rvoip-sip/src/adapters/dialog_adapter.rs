@@ -79,6 +79,15 @@ pub(crate) enum RegisterAttemptOutcome {
     },
 }
 
+fn redacted_invite_options_dispatch_error<E>(_source: E) -> SessionError {
+    // Dialog-layer failures can retain a parser or validation source
+    // containing caller-owned URI/header/auth material. Preserve only the
+    // operation and fixed failure class at this public wrapper.
+    SessionError::DialogError(
+        "Failed to send INVITE with options (class=dialog-dispatch)".to_string(),
+    )
+}
+
 /// Minimal dialog adapter - just translates between dialog-core and state machine
 pub struct DialogAdapter {
     /// Dialog-core unified API
@@ -1278,9 +1287,7 @@ impl DialogAdapter {
             .dialog_api
             .send_invite_with_options_for_session(&session_id.0, opts)
             .await
-            .map_err(|e| {
-                SessionError::DialogError(format!("Failed to send INVITE with options: {}", e))
-            })?;
+            .map_err(redacted_invite_options_dispatch_error)?;
 
         let dialog_id = call_handle.call_id().clone();
         self.session_to_dialog
@@ -2804,6 +2811,22 @@ impl Clone for DialogAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invite_options_dispatch_error_does_not_relay_lower_source() {
+        const SECRET: &str = "lower-dialog-option-secret-canary";
+        let error = redacted_invite_options_dispatch_error(format!(
+            "invalid From sip:{SECRET}@from.invalid; Authorization: Bearer {SECRET}; X-App: {SECRET}"
+        ));
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        for rendered in [&display, &debug] {
+            assert!(!rendered.contains(SECRET), "source leaked: {rendered}");
+            assert!(!rendered.contains("Authorization"));
+            assert!(!rendered.contains("X-App"));
+        }
+        assert!(display.contains("class=dialog-dispatch"));
+    }
 
     // ---- NAT-aware Contact rewrite (Sprint 1.A3) -------------------
 
