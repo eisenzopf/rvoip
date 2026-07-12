@@ -136,3 +136,34 @@ async fn application_contract_uses_only_rvoip_owned_models() {
     ));
     publisher.close().await.unwrap();
 }
+
+#[cfg(feature = "relay-runtime")]
+#[test]
+fn relay_runtime_contract_uses_only_rvoip_owned_models() {
+    use rvoip_moq::{
+        MoqRelayDeploymentMode, MoqRelayListenerKind, MoqRelayPublisherBinding,
+        MoqRelayRuntimeLimits, MoqRelayRuntimeSecurity, MoqRelayRuntimeTimeouts,
+        MoqRelayServerTlsConfig,
+    };
+
+    let security = MoqRelayRuntimeSecurity::PublisherMutualTls {
+        bindings: vec![MoqRelayPublisherBinding {
+            certificate_sha256: "ab".repeat(32),
+            scope: "/tenant/broadcast".to_string(),
+        }],
+        max_active_sessions_per_certificate: 8,
+    };
+    assert_eq!(
+        security.listener_kind(),
+        MoqRelayListenerKind::PublisherMutualTls
+    );
+    assert_eq!(
+        MoqRelayDeploymentMode::default(),
+        MoqRelayDeploymentMode::Embedded
+    );
+    assert!(MoqRelayRuntimeLimits::default().max_active_sessions > 0);
+    assert!(!MoqRelayRuntimeTimeouts::default().drop_cleanup.is_zero());
+    assert!(MoqRelayServerTlsConfig::default()
+        .server_certificates
+        .is_empty());
+}

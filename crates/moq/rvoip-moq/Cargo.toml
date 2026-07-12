@@ -18,6 +18,7 @@ default = []
 # certificate-verification-disabled relay client construction for local tests.
 insecure-development = []
 relay-admission = ["dep:moq-relay-ietf"]
+relay-runtime = ["relay-admission", "moq-relay-ietf/relay-runtime"]
 
 [dependencies]
 rvoip-core-traits.workspace = true

@@ -17,6 +17,8 @@ mod namespace;
 mod publisher;
 #[cfg(feature = "relay-admission")]
 mod relay_admission;
+#[cfg(feature = "relay-runtime")]
+mod relay_runtime;
 mod replay;
 mod session_lease;
 mod wire;
@@ -61,6 +63,13 @@ pub use publisher::{
 #[cfg(feature = "relay-admission")]
 pub use relay_admission::{
     MoqRelayAdmissionConfig, MoqRelayAdmissionSubstrate, RvoipMoqRelayAdmission,
+};
+#[cfg(feature = "relay-runtime")]
+pub use relay_runtime::{
+    MoqRelayDeploymentMode, MoqRelayListenerKind, MoqRelayPublisherBinding, MoqRelayResourceLimits,
+    MoqRelayRuntime, MoqRelayRuntimeConfig, MoqRelayRuntimeError, MoqRelayRuntimeLifecycle,
+    MoqRelayRuntimeLimits, MoqRelayRuntimeSecurity, MoqRelayRuntimeSnapshot,
+    MoqRelayRuntimeTimeouts, MoqRelayServerTlsConfig,
 };
 pub use replay::{
     BoundedMemoryMoqReplayStore, MoqReplayError, MoqSessionId, MoqTokenBinding,
