@@ -12,7 +12,10 @@ mod group;
 mod loc;
 mod namespace;
 mod publisher;
+#[cfg(feature = "relay-admission")]
+mod relay_admission;
 mod replay;
+mod session_lease;
 mod wire;
 
 pub use authorization::{
@@ -41,9 +44,16 @@ pub use publisher::{
     MoqRelayHealthIssue, MoqRelayHealthSnapshot, MoqRelayPeerIdentity, MoqRelayPublication,
     MoqRelaySubstratePolicy, MoqRelayTlsConfig,
 };
+#[cfg(feature = "relay-admission")]
+pub use relay_admission::{MoqRelayAdmissionConfig, RvoipMoqRelayAdmission};
 pub use replay::{
     BoundedMemoryMoqReplayStore, MoqReplayError, MoqSessionId, MoqTokenBinding,
     MoqTokenReplayStore, MAX_MOQ_SESSION_ID_BYTES,
+};
+pub use session_lease::{
+    BoundedMemoryMoqSessionLeaseStore, MoqSessionLease, MoqSessionLeaseBinding,
+    MoqSessionLeaseClose, MoqSessionLeaseError, MoqSessionLeaseLimits, MoqSessionLeaseSnapshot,
+    MoqSessionLeaseStore,
 };
 
 /// Canonical audio track used by the Bridgefu 1.0 broadcast profile.

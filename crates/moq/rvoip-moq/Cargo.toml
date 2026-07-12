@@ -17,11 +17,14 @@ default = []
 # Never enable in production artifacts. This exposes server-auth-only and
 # certificate-verification-disabled relay client construction for local tests.
 insecure-development = []
+relay-admission = ["dep:moq-relay-ietf"]
 
 [dependencies]
 rvoip-core-traits.workspace = true
+rvoip-auth-core.workspace = true
 moq-transport.workspace = true
 moq-native-ietf.workspace = true
+moq-relay-ietf = { workspace = true, optional = true, default-features = false }
 url.workspace = true
 
 async-trait.workspace = true
@@ -35,6 +38,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 metrics.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
