@@ -227,6 +227,16 @@ impl HeaderName {
             HeaderName::Identity => "Identity",
         }
     }
+
+    /// Whether this name carries origin-server or proxy credentials.
+    ///
+    /// `HeaderName::Other` remains public for parser and extension-header
+    /// compatibility, so security-sensitive callers must compare its wire
+    /// spelling case-insensitively as well as matching the typed variants.
+    pub fn is_authorization_credentials(&self) -> bool {
+        self.as_str().eq_ignore_ascii_case("Authorization")
+            || self.as_str().eq_ignore_ascii_case("Proxy-Authorization")
+    }
 }
 
 impl fmt::Display for HeaderName {
@@ -390,5 +400,18 @@ mod tests {
 
         // Unsupported has no compact form — bare "u" must not land there.
         assert_ne!(HeaderName::from_str("u").unwrap(), HeaderName::Unsupported);
+    }
+
+    #[test]
+    fn authorization_credentials_recognize_typed_and_other_case_aliases() {
+        for name in [
+            HeaderName::Authorization,
+            HeaderName::ProxyAuthorization,
+            HeaderName::Other("AUTHORIZATION".into()),
+            HeaderName::Other("proxy-Authorization".into()),
+        ] {
+            assert!(name.is_authorization_credentials());
+        }
+        assert!(!HeaderName::Other("X-Authorization-Context".into()).is_authorization_credentials());
     }
 }

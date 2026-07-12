@@ -32,7 +32,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::error::{Error, Result};
 use crate::transport::{
-    TlsPeerIdentity, Transport, TransportConnectionMetadata, TransportEvent, TransportType,
+    validate_typed_outbound_message, TlsPeerIdentity, Transport, TransportConnectionMetadata,
+    TransportEvent, TransportType,
 };
 
 /// Builder-friendly TLS client configuration. Mirrors the knobs we
@@ -721,6 +722,7 @@ impl Transport for TlsTransport {
         message: rvoip_sip_core::Message,
         destination: SocketAddr,
     ) -> Result<()> {
+        validate_typed_outbound_message(&message)?;
         // `Message::to_bytes` produces wire-format SIP (header CRLFs +
         // trailing CRLF separator + body) — required by RFC 3261 §7.2.
         // `to_string()` is for display/debug only and omits the final
@@ -791,6 +793,41 @@ impl Transport for TlsTransport {
         // their request; we route by destination IP. Auto-dial when no
         // pooled connection exists (modulo ServerOnly role).
         self.send_to_addr(bytes, destination, None).await
+    }
+}
+
+#[cfg(test)]
+mod auth_boundary_tests {
+    use super::*;
+    use rvoip_sip_core::builder::SimpleRequestBuilder;
+    use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
+    use rvoip_sip_core::{Message, Method};
+
+    #[tokio::test]
+    async fn typed_tls_send_rejects_auth_before_connect() {
+        let (transport, _rx) = TlsTransport::client_only(
+            "127.0.0.1:0".parse().unwrap(),
+            None,
+            TlsClientConfig::default(),
+        )
+        .await
+        .unwrap();
+        let destination = "127.0.0.1:9".parse().unwrap();
+        let mut request = SimpleRequestBuilder::new(Method::Options, "sips:example.com")
+            .unwrap()
+            .build();
+        request.headers.push(TypedHeader::Other(
+            HeaderName::Other("proxy-Authorization".into()),
+            HeaderValue::Raw(b"Digest safe\r\nX-Injected: tls".to_vec()),
+        ));
+
+        let error = transport
+            .send_message(Message::Request(request), destination)
+            .await
+            .expect_err("typed TLS send must reject credential injection");
+        assert!(matches!(error, Error::ProtocolError(_)));
+        assert!(!error.to_string().contains("X-Injected"));
+        transport.close().await.unwrap();
     }
 }
 

@@ -96,7 +96,7 @@ use crate::parser::headers::session_expires::parse_session_expires;
 /// assert!(header_str.contains("Call-ID"));
 /// assert!(header_str.contains("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@example.com"));
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum TypedHeader {
     // Core Headers (Examples)
     Via(Via),                     // Use types::Via
@@ -177,6 +177,31 @@ pub enum TypedHeader {
 
     /// Represents an unknown or unparsed header.
     Other(HeaderName, HeaderValue),
+}
+
+impl fmt::Debug for TypedHeader {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Authorization(value) => {
+                formatter.debug_tuple("Authorization").field(value).finish()
+            }
+            Self::ProxyAuthorization(value) => formatter
+                .debug_tuple("ProxyAuthorization")
+                .field(value)
+                .finish(),
+            Self::Other(name, _) if name.is_authorization_credentials() => formatter
+                .debug_tuple("Other")
+                .field(name)
+                .field(&"[redacted]")
+                .finish(),
+            // Preserve diagnostic visibility for unrelated headers. Debug
+            // formatting is intentionally not the wire contract; Display is.
+            other => formatter
+                .debug_tuple("TypedHeader")
+                .field(&format_args!("{other}"))
+                .finish(),
+        }
+    }
 }
 
 impl TypedHeader {
@@ -1601,5 +1626,32 @@ mod tests {
 
         // Check that the name is correct
         assert_eq!(header.name(), HeaderName::CallId);
+    }
+
+    #[test]
+    fn raw_authorization_debug_is_redacted_without_changing_wire_bytes() {
+        const SECRET: &str = "Bearer raw-debug-secret";
+        for name in [
+            HeaderName::Authorization,
+            HeaderName::ProxyAuthorization,
+            HeaderName::Other("AUTHORIZATION".into()),
+            HeaderName::Other("proxy-Authorization".into()),
+        ] {
+            let header = TypedHeader::Other(name, HeaderValue::Raw(SECRET.as_bytes().to_vec()));
+            let debug = format!("{header:?}");
+            assert!(!debug.contains(SECRET));
+            assert!(debug.contains("[redacted]"));
+            assert!(header.to_string().contains(SECRET));
+        }
+    }
+
+    #[test]
+    fn unrelated_raw_header_debug_keeps_its_value() {
+        const VALUE: &str = "ordinary-debug-value";
+        let header = TypedHeader::Other(
+            HeaderName::Other("X-Diagnostic".into()),
+            HeaderValue::Raw(VALUE.as_bytes().to_vec()),
+        );
+        assert!(format!("{header:?}").contains(VALUE));
     }
 }

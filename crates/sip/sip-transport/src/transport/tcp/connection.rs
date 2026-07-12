@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use crate::transport::validate_typed_outbound_message;
 use bytes::{Buf, BufMut, BytesMut};
 use rvoip_sip_core::{parse_message, Message};
 use std::io;
@@ -102,6 +103,7 @@ impl TcpConnection {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
+        validate_typed_outbound_message(message)?;
 
         let message_bytes = message.to_bytes();
         let mut writer = self.write_half.lock().await;

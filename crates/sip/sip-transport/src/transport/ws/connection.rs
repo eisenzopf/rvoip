@@ -14,7 +14,7 @@ use tracing::{debug, trace, warn};
 use super::SipWsStream;
 
 use crate::error::{Error, Result};
-use crate::transport::TransportConnectionMetadata;
+use crate::transport::{validate_typed_outbound_message, TransportConnectionMetadata};
 use rvoip_sip_core::{parse_message, Message};
 
 // SIP WebSocket subprotocol names as per RFC 7118. `SIP_WS_SUBPROTOCOL`
@@ -115,6 +115,7 @@ impl WebSocketConnection {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
+        validate_typed_outbound_message(message)?;
 
         // Convert SIP message to bytes
         let message_bytes = message.to_bytes();

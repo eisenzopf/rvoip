@@ -7,7 +7,7 @@ pub use listener::TcpListener;
 pub use pool::{ConnectionPool, PoolConfig};
 
 use crate::error::{Error, Result};
-use crate::transport::{Transport, TransportEvent, TransportType};
+use crate::transport::{validate_typed_outbound_message, Transport, TransportEvent, TransportType};
 use bytes::Bytes;
 use rvoip_sip_core::Message;
 use std::fmt;
@@ -269,6 +269,7 @@ impl Transport for TcpTransport {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
+        validate_typed_outbound_message(&message)?;
 
         debug!(
             "Sending {} message to {}",
@@ -364,6 +365,7 @@ impl fmt::Debug for TcpTransport {
 mod tests {
     use super::*;
     use rvoip_sip_core::builder::SimpleRequestBuilder;
+    use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
     use rvoip_sip_core::Method;
     use tokio::time::Duration;
 
@@ -384,6 +386,30 @@ mod tests {
 
         transport.close().await.unwrap();
         assert!(transport.is_closed());
+    }
+
+    #[tokio::test]
+    async fn typed_tcp_send_rejects_auth_before_opening_a_connection() {
+        let (transport, _rx) = TcpTransport::bind("127.0.0.1:0".parse().unwrap(), Some(10), None)
+            .await
+            .unwrap();
+        let destination = "127.0.0.1:9".parse().unwrap();
+        let mut request = SimpleRequestBuilder::new(Method::Options, "sip:example.com")
+            .unwrap()
+            .build();
+        request.headers.push(TypedHeader::Other(
+            HeaderName::Other("AUTHORIZATION".into()),
+            HeaderValue::Raw(b"Bearer safe\r\nX-Injected: tcp".to_vec()),
+        ));
+
+        let error = transport
+            .send_message(Message::Request(request), destination)
+            .await
+            .expect_err("typed TCP send must reject credential injection");
+        assert!(matches!(error, Error::ProtocolError(_)));
+        assert!(!transport.has_connection_to(destination));
+        assert!(!error.to_string().contains("X-Injected"));
+        transport.close().await.unwrap();
     }
 
     #[tokio::test]

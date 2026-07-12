@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::factory::{TransportFactory, TransportFactoryConfig, TransportType};
-use crate::transport::{Transport, TransportEvent};
+use crate::transport::{validate_typed_outbound_message, Transport, TransportEvent};
 use rvoip_sip_core::Message;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -177,6 +177,7 @@ impl TransportManager {
 
     /// Sends a SIP message to the specified destination
     pub async fn send_message(&self, message: Message, destination: SocketAddr) -> Result<()> {
+        validate_typed_outbound_message(&message)?;
         // Get a transport for this destination
         let transport = self.get_transport_for_addr(&destination).await?;
 
@@ -203,7 +204,15 @@ mod tests {
     use super::*;
     use crate::bind_udp;
     use rvoip_sip_core::builder::SimpleRequestBuilder;
-    use rvoip_sip_core::Method;
+    use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
+    use rvoip_sip_core::{Method, Response, StatusCode};
+
+    fn malicious_authorization_header(name: HeaderName) -> TypedHeader {
+        TypedHeader::Other(
+            name,
+            HeaderValue::Raw(b"Bearer safe\r\nX-Injected: manager".to_vec()),
+        )
+    }
 
     #[tokio::test]
     async fn test_transport_manager_create() {
@@ -306,5 +315,32 @@ mod tests {
 
         // Clean up
         manager.close_all().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn typed_manager_rejects_request_and_response_auth_before_route_lookup() {
+        let (manager, _rx) = TransportManager::with_defaults().await.unwrap();
+        let destination: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let mut request = SimpleRequestBuilder::new(Method::Options, "sip:example.com")
+            .unwrap()
+            .build();
+        request
+            .headers
+            .push(malicious_authorization_header(HeaderName::Authorization));
+        let mut response = Response::new(StatusCode::Ok);
+        response
+            .headers
+            .push(malicious_authorization_header(HeaderName::Other(
+                "PROXY-authorization".into(),
+            )));
+
+        for message in [Message::Request(request), Message::Response(response)] {
+            let error = manager
+                .send_message(message, destination)
+                .await
+                .expect_err("credential injection must fail before transport lookup");
+            assert!(matches!(error, Error::ProtocolError(_)));
+            assert!(!error.to_string().contains("X-Injected"));
+        }
     }
 }

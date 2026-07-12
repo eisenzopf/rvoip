@@ -784,7 +784,6 @@ impl DialogManager {
         contact_override: Option<String>,
     ) -> DialogResult<TransactionKey> {
         use crate::transaction::client::builders::InviteBuilder;
-        use rvoip_sip_core::types::header::HeaderName;
         use rvoip_sip_core::types::TypedHeader;
 
         debug!("Resending INVITE with auth for dialog {}", dialog_id);
@@ -878,12 +877,14 @@ impl DialogManager {
             // Attach the digest authorization header. Use TypedHeader::Other
             // with Raw bytes so we don't have to round-trip through a typed
             // Authorization parser — the server only needs to read the string.
-            let header_name = match auth_header_name {
-                name if name.eq_ignore_ascii_case("Proxy-Authorization") => {
-                    HeaderName::ProxyAuthorization
-                }
-                _ => HeaderName::Authorization,
-            };
+            let header_name = rvoip_sip_core::validation::authorization_header_name(
+                auth_header_name,
+            )
+            .map_err(|_| {
+                crate::errors::DialogError::protocol_error(
+                    "unsupported INVITE authorization header name",
+                )
+            })?;
             let authorization = rvoip_sip_core::validation::validated_authorization_header(
                 header_name,
                 auth_header_value,

@@ -2,7 +2,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use bytes::Bytes;
 use rvoip_sip_core::Message;
 
@@ -15,6 +15,19 @@ pub use tcp::TcpTransport;
 pub use tls::TlsTransport;
 pub use udp::{UdpParseConfig, UdpParseDispatch, UdpSocketOptions, UdpTransport};
 pub use ws::WebSocketTransport;
+
+/// Enforce credential-header wire safety at a typed transport boundary.
+///
+/// Raw/verbatim send APIs deliberately do not call this helper: they are the
+/// explicit escape hatch for already-serialized proxy traffic. Errors contain
+/// no credential value.
+pub(crate) fn validate_typed_outbound_message(message: &Message) -> Result<()> {
+    rvoip_sip_core::validation::validate_outbound_authorization_headers(message).map_err(|_| {
+        Error::ProtocolError(
+            "outbound SIP authorization header failed wire-safety validation".to_string(),
+        )
+    })
+}
 
 /// Represents the transport type/protocol
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

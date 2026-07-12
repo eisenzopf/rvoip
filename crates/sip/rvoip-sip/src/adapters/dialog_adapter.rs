@@ -2944,6 +2944,32 @@ mod tests {
             ));
         }
     }
+
+    #[test]
+    fn auth_retry_policy_accepts_case_aliases_and_rejects_unknown_names() {
+        let value = "Digest username=\"alice\", response=\"safe\"".to_string();
+        for name in ["authorization", "PROXY-authorization"] {
+            apply_outbound_extras_policy_with_auth(
+                rvoip_sip_core::types::Method::Invite,
+                Vec::new(),
+                None,
+                name,
+                value.clone(),
+            )
+            .expect("case-insensitive credential header name");
+        }
+        for name in ["", "Proxy-Authenticate", "Authorization ", "X-Auth"] {
+            let error = apply_outbound_extras_policy_with_auth(
+                rvoip_sip_core::types::Method::Invite,
+                Vec::new(),
+                None,
+                name,
+                value.clone(),
+            )
+            .expect_err("unknown credential header names must fail closed");
+            assert!(error.to_string().contains("unsupported"));
+        }
+    }
 }
 
 /// Rewrite the host (and port) portion of a SIP URI in a `Contact:`
@@ -3139,10 +3165,12 @@ pub(crate) fn apply_outbound_extras_policy_with_auth(
     auth_header_value: String,
 ) -> Result<Vec<rvoip_sip_core::types::TypedHeader>> {
     let mut validated = apply_outbound_extras_policy(method, extras, outbound_proxy_uri)?;
-    let header_name = match auth_header_name {
-        "Proxy-Authorization" => rvoip_sip_core::types::header::HeaderName::ProxyAuthorization,
-        _ => rvoip_sip_core::types::header::HeaderName::Authorization,
-    };
+    let header_name = rvoip_sip_core::validation::authorization_header_name(auth_header_name)
+        .map_err(|_| {
+            crate::errors::SessionError::AuthError(
+                "unsupported outbound SIP authorization header name".to_string(),
+            )
+        })?;
     let authorization =
         rvoip_sip_core::validation::validated_authorization_header(header_name, auth_header_value)
             .map_err(|_| {

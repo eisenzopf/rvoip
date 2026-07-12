@@ -19,7 +19,10 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::diagnostics;
 use crate::error::{Error, Result};
-use crate::transport::{Transport, TransportEvent, TransportReceiveTiming, TransportType};
+use crate::transport::{
+    validate_typed_outbound_message, Transport, TransportEvent, TransportReceiveTiming,
+    TransportType,
+};
 use rvoip_sip_core::Message;
 
 // Default channel capacity
@@ -625,6 +628,7 @@ impl Transport for UdpTransport {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
+        validate_typed_outbound_message(&message)?;
 
         // Convert message to bytes
         let bytes = message.to_bytes();
@@ -750,6 +754,9 @@ impl fmt::Debug for UdpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rvoip_sip_core::builder::SimpleRequestBuilder;
+    use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
+    use rvoip_sip_core::{Method, Response, StatusCode};
 
     #[tokio::test]
     async fn bind_uses_default_mtu_threshold() {
@@ -821,5 +828,65 @@ mod tests {
                 first
             );
         }
+    }
+
+    #[tokio::test]
+    async fn typed_send_rejects_auth_injection_but_raw_send_remains_verbatim() {
+        let capture = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("capture bind");
+        let destination = capture.local_addr().expect("capture address");
+        let (transport, _events) = UdpTransport::bind("127.0.0.1:0".parse().unwrap(), None)
+            .await
+            .expect("transport bind");
+        let malicious = |name| {
+            TypedHeader::Other(
+                name,
+                HeaderValue::Raw(b"Bearer safe\r\nX-Injected: udp".to_vec()),
+            )
+        };
+
+        let mut request = SimpleRequestBuilder::new(Method::Options, "sip:example.com")
+            .unwrap()
+            .build();
+        request.headers.push(malicious(HeaderName::Authorization));
+        let mut response = Response::new(StatusCode::Ok);
+        response
+            .headers
+            .push(malicious(HeaderName::Other("PROXY-authorization".into())));
+
+        for message in [Message::Request(request), Message::Response(response)] {
+            let error = transport
+                .send_message(message, destination)
+                .await
+                .expect_err("typed UDP send must reject credential injection");
+            assert!(matches!(error, Error::ProtocolError(_)));
+            assert!(!error.to_string().contains("X-Injected"));
+        }
+        let mut buffer = [0u8; 256];
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                capture.recv_from(&mut buffer),
+            )
+            .await
+            .is_err(),
+            "rejected typed messages must emit no datagram",
+        );
+
+        let raw = Bytes::from_static(b"Authorization: raw\r\nX-Verbatim: retained\r\n");
+        transport
+            .send_message_raw(raw.clone(), destination)
+            .await
+            .expect("explicit raw send remains available");
+        let (received, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            capture.recv_from(&mut buffer),
+        )
+        .await
+        .expect("raw datagram timeout")
+        .expect("raw datagram receive");
+        assert_eq!(&buffer[..received], raw.as_ref());
+        transport.close().await.ok();
     }
 }

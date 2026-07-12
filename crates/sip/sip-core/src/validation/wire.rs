@@ -5,6 +5,7 @@
 
 use crate::types::{
     headers::{HeaderName, HeaderValue, TypedHeader},
+    sip_message::Message,
     sip_request::Request,
     sip_response::Response,
     Method,
@@ -31,9 +32,21 @@ fn header_count(headers: &[TypedHeader], name: HeaderName) -> usize {
     headers.iter().filter(|h| h.name() == name).count()
 }
 
-fn is_authorization_header_name(name: &HeaderName) -> bool {
-    name.as_str().eq_ignore_ascii_case("Authorization")
-        || name.as_str().eq_ignore_ascii_case("Proxy-Authorization")
+/// Parse the only two credential-bearing SIP header names.
+///
+/// This deliberately does not trim or coerce unknown input: accidentally
+/// placing proxy credentials in an origin-server `Authorization` header is a
+/// security boundary, not a compatibility fallback.
+pub fn authorization_header_name(name: &str) -> Result<HeaderName> {
+    if name.eq_ignore_ascii_case("Authorization") {
+        Ok(HeaderName::Authorization)
+    } else if name.eq_ignore_ascii_case("Proxy-Authorization") {
+        Ok(HeaderName::ProxyAuthorization)
+    } else {
+        Err(validation_error(
+            "unsupported SIP authorization header name",
+        ))
+    }
 }
 
 /// Validate one outbound `Authorization` or `Proxy-Authorization` value.
@@ -81,7 +94,7 @@ pub fn validated_authorization_header(
     name: HeaderName,
     value: impl Into<String>,
 ) -> Result<TypedHeader> {
-    if !is_authorization_header_name(&name) {
+    if !name.is_authorization_credentials() {
         return Err(validation_error(
             "validated SIP authorization value used with a non-authorization header",
         ));
@@ -103,7 +116,7 @@ fn validate_authorization_headers(headers: &[TypedHeader]) -> Result<()> {
             TypedHeader::ProxyAuthorization(value) => {
                 validate_authorization_header_value(&value.to_string())?;
             }
-            TypedHeader::Other(name, value) if is_authorization_header_name(name) => match value {
+            TypedHeader::Other(name, value) if name.is_authorization_credentials() => match value {
                 HeaderValue::Raw(bytes) => {
                     let value = std::str::from_utf8(bytes).map_err(|_| {
                         validation_error("SIP authorization header value is not valid UTF-8")
@@ -126,6 +139,19 @@ fn validate_authorization_headers(headers: &[TypedHeader]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Validate credential-bearing headers on either outbound SIP message shape.
+///
+/// This is intentionally narrower than [`validate_wire_request`] and
+/// [`validate_wire_response`]. Typed transports call it at their final public
+/// boundary so direct transport users receive the same protection as the
+/// dialog/transaction stack without paying for parse/serialize round trips.
+pub fn validate_outbound_authorization_headers(message: &Message) -> Result<()> {
+    match message {
+        Message::Request(request) => validate_authorization_headers(&request.headers),
+        Message::Response(response) => validate_authorization_headers(&response.headers),
+    }
 }
 
 fn content_length_value(headers: &[TypedHeader]) -> Result<Option<u32>> {
@@ -261,6 +287,8 @@ pub fn validate_wire_request(request: &Request) -> Result<()> {
 pub fn validate_wire_response(response: &Response) -> Result<()> {
     let headers = &response.headers;
 
+    validate_authorization_headers(headers)?;
+
     for (name, label) in [
         (HeaderName::Via, "Via"),
         (HeaderName::From, "From"),
@@ -369,6 +397,21 @@ mod tests {
     }
 
     #[test]
+    fn authorization_name_dispatch_is_case_insensitive_and_rejects_unknown_names() {
+        assert_eq!(
+            authorization_header_name("aUtHoRiZaTiOn").unwrap(),
+            HeaderName::Authorization
+        );
+        assert_eq!(
+            authorization_header_name("PROXY-authorization").unwrap(),
+            HeaderName::ProxyAuthorization
+        );
+        for invalid in ["", "Proxy-Authenticate", "Authorization ", "X-Auth"] {
+            assert!(authorization_header_name(invalid).is_err());
+        }
+    }
+
+    #[test]
     fn wire_validation_rejects_raw_authorization_line_smuggling() {
         for name in [
             HeaderName::Authorization,
@@ -382,6 +425,63 @@ mod tests {
                 HeaderValue::Raw(b"Bearer safe\r\nX-Injected: yes".to_vec()),
             ));
             let error = validate_wire_request(&request).unwrap_err();
+            assert!(error.to_string().contains("control character"));
+            assert!(!error.to_string().contains("X-Injected"));
+        }
+    }
+
+    #[test]
+    fn request_response_and_message_debug_redact_raw_authorization_aliases() {
+        const SECRET: &str = "Bearer enclosing-debug-secret";
+        let aliases = [
+            HeaderName::Authorization,
+            HeaderName::ProxyAuthorization,
+            HeaderName::Other("AUTHORIZATION".to_string()),
+            HeaderName::Other("proxy-Authorization".to_string()),
+        ];
+
+        for name in aliases {
+            let header = TypedHeader::Other(name, HeaderValue::Raw(SECRET.as_bytes().to_vec()));
+            let mut request = valid_request();
+            request.headers.push(header.clone());
+            let mut response = Response::new(StatusCode::Ok);
+            response.headers.push(header);
+
+            for debug in [
+                format!("{request:?}"),
+                format!("{response:?}"),
+                format!("{:?}", Message::Request(request.clone())),
+                format!("{:?}", Message::Response(response.clone())),
+            ] {
+                assert!(!debug.contains(SECRET));
+                assert!(debug.contains("[redacted]"));
+            }
+            assert!(request.to_string().contains(SECRET));
+            assert!(response.to_string().contains(SECRET));
+        }
+    }
+
+    #[test]
+    fn outbound_auth_validation_covers_requests_and_responses() {
+        for message in [
+            {
+                let mut request = valid_request();
+                request.headers.push(TypedHeader::Other(
+                    HeaderName::Authorization,
+                    HeaderValue::Raw(b"Bearer safe\r\nX-Injected: request".to_vec()),
+                ));
+                Message::Request(request)
+            },
+            {
+                let mut response = Response::new(StatusCode::Ok);
+                response.headers.push(TypedHeader::Other(
+                    HeaderName::Other("PROXY-authorization".into()),
+                    HeaderValue::Raw(b"Digest safe\r\nX-Injected: response".to_vec()),
+                ));
+                Message::Response(response)
+            },
+        ] {
+            let error = validate_outbound_authorization_headers(&message).unwrap_err();
             assert!(error.to_string().contains("control character"));
             assert!(!error.to_string().contains("X-Injected"));
         }

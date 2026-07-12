@@ -7,7 +7,7 @@ pub use listener::WebSocketListener;
 pub(crate) use stream::SipWsStream;
 
 use crate::error::{Error, Result};
-use crate::transport::{Transport, TransportEvent, TransportType};
+use crate::transport::{validate_typed_outbound_message, Transport, TransportEvent, TransportType};
 use futures_util::StreamExt;
 use rvoip_sip_core::Message;
 use std::collections::HashMap;
@@ -613,6 +613,7 @@ impl Transport for WebSocketTransport {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
+        validate_typed_outbound_message(&message)?;
 
         debug!(
             "Sending {} message to {}",
@@ -715,6 +716,7 @@ impl fmt::Debug for WebSocketTransport {
 mod tests {
     use super::*;
     use rvoip_sip_core::builder::SimpleRequestBuilder;
+    use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
     use rvoip_sip_core::Method;
     use tokio::time::Duration;
 
@@ -734,6 +736,31 @@ mod tests {
         } else {
             assert!(result.is_err());
         }
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn typed_ws_and_wss_boundary_rejects_auth_before_connect() {
+        let (transport, _rx) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+        let destination = "127.0.0.1:9".parse().unwrap();
+        let mut request = SimpleRequestBuilder::new(Method::Options, "sip:example.com")
+            .unwrap()
+            .build();
+        request.headers.push(TypedHeader::Other(
+            HeaderName::ProxyAuthorization,
+            HeaderValue::Raw(b"Digest safe\r\nX-Injected: websocket".to_vec()),
+        ));
+
+        let error = transport
+            .send_message(Message::Request(request), destination)
+            .await
+            .expect_err("typed WS/WSS send must reject credential injection");
+        assert!(matches!(error, Error::ProtocolError(_)));
+        assert!(!error.to_string().contains("X-Injected"));
+        transport.close().await.unwrap();
     }
 
     /// Phase 4 wired real cert/key loading into the WSS bind path, so
