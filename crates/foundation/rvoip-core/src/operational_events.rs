@@ -9,10 +9,10 @@
 //! event, so bounded backpressure is propagated to adapter ingestion without
 //! an overflow queue or detached forwarding task.
 //!
-//! The pre-existing per-adapter normalization task created by
-//! [`crate::Orchestrator::register`] remains process-lived until that
-//! adapter's receiver closes. This module adds no forwarding task; explicit
-//! adapter-task ownership and shutdown remain a separate lifecycle seam.
+//! The per-adapter normalization task created by
+//! [`crate::Orchestrator::register`] is retained by the Orchestrator and can
+//! be joined through [`crate::Orchestrator::drain_connection_lifecycle_tasks`].
+//! This module adds no separate forwarding task.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -208,9 +208,15 @@ pub(crate) struct OperationalEventStream {
     degraded: AtomicBool,
 }
 
-struct OperationalSendGuard<'a> {
+pub(crate) struct OperationalSendGuard<'a> {
     stream: &'a OperationalEventStream,
     armed: bool,
+}
+
+impl OperationalSendGuard<'_> {
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
 }
 
 impl Drop for OperationalSendGuard<'_> {
@@ -245,6 +251,20 @@ impl OperationalEventStream {
         }
     }
 
+    /// Arm a cancellation boundary before core starts mutating lifecycle
+    /// state whose authoritative outcome must subsequently be published.
+    ///
+    /// Callers disarm only after publication (or after proving that no
+    /// authoritative event was owed). Dropping an armed guard permanently
+    /// degrades the stream so cancellation cannot erase a lifecycle outcome
+    /// while leaving the process apparently healthy.
+    pub(crate) fn delivery_guard(&self) -> OperationalSendGuard<'_> {
+        OperationalSendGuard {
+            stream: self,
+            armed: true,
+        }
+    }
+
     pub(crate) async fn send(
         &self,
         connection_id: ConnectionId,
@@ -259,10 +279,7 @@ impl OperationalEventStream {
         // capacity, an authoritative event may have been accepted by core but
         // not delivered. Make that loss observable and fail closed instead of
         // continuing with a falsely healthy stream.
-        let mut cancellation_guard = OperationalSendGuard {
-            stream: self,
-            armed: true,
-        };
+        let mut cancellation_guard = self.delivery_guard();
         // Reserve bounded capacity before assigning the global sequence. A
         // cancelled waiter therefore cannot create a visible sequence gap.
         let permit = match self.sender.reserve().await {
@@ -288,7 +305,7 @@ impl OperationalEventStream {
             at,
             kind,
         });
-        cancellation_guard.armed = false;
+        cancellation_guard.disarm();
         true
     }
 
@@ -367,6 +384,27 @@ mod tests {
         assert!(!blocked.is_finished());
         blocked.abort();
         assert!(blocked.await.unwrap_err().is_cancelled());
+        assert_eq!(stream.health(), OperationalEventStreamHealth::Degraded);
+    }
+
+    #[tokio::test]
+    async fn cancelled_lifecycle_after_mutation_before_send_marks_stream_degraded() {
+        let (stream, _receiver) = OperationalEventStream::new(1);
+        let stream = std::sync::Arc::new(stream);
+        let (armed, armed_rx) = tokio::sync::oneshot::channel();
+        let (_release, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let guarded_stream = std::sync::Arc::clone(&stream);
+        let lifecycle = tokio::spawn(async move {
+            let _delivery = guarded_stream.delivery_guard();
+            let _ = armed.send(());
+            // Deterministic stand-in for owned media/session teardown after
+            // the connection registry has already been retired but before
+            // the authoritative terminal send starts.
+            let _ = release_rx.await;
+        });
+        armed_rx.await.unwrap();
+        lifecycle.abort();
+        assert!(lifecycle.await.unwrap_err().is_cancelled());
         assert_eq!(stream.health(), OperationalEventStreamHealth::Degraded);
     }
 }

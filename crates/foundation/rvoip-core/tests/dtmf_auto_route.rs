@@ -30,7 +30,7 @@ use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
 use rvoip_core::message::Message;
 use rvoip_core::stream::{MediaFrame, MediaStream, QualitySnapshot, StreamKind};
 use rvoip_core::{Config, Orchestrator, RvoipError};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Barrier};
 
 #[derive(Default)]
 struct DtmfRecord {
@@ -102,6 +102,7 @@ struct RecordingAdapter {
     transport: Transport,
     streams: dashmap::DashMap<ConnectionId, Arc<StreamHandle>>,
     dtmf: Arc<DtmfRecord>,
+    dtmf_barriers: StdMutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
     events_tx: mpsc::Sender<AdapterEvent>,
     events_rx: StdMutex<Option<mpsc::Receiver<AdapterEvent>>>,
 }
@@ -114,10 +115,18 @@ impl RecordingAdapter {
             transport,
             streams: dashmap::DashMap::new(),
             dtmf: Arc::clone(&dtmf),
+            dtmf_barriers: StdMutex::new(None),
             events_tx,
             events_rx: StdMutex::new(Some(events_rx)),
         });
         (adapter, dtmf)
+    }
+
+    fn install_dtmf_barriers(&self) -> (Arc<Barrier>, Arc<Barrier>) {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        *self.dtmf_barriers.lock().unwrap() = Some((Arc::clone(&entered), Arc::clone(&release)));
+        (entered, release)
     }
 
     async fn announce(&self, id: ConnectionId, stream: Arc<StreamHandle>, session: SessionId) {
@@ -207,6 +216,11 @@ impl ConnectionAdapter for RecordingAdapter {
         self.dtmf
             .last_duration_ms
             .store(duration_ms as usize, Ordering::SeqCst);
+        let barriers = self.dtmf_barriers.lock().unwrap().take();
+        if let Some((entered, release)) = barriers {
+            entered.wait().await;
+            release.wait().await;
+        }
         Ok(())
     }
     async fn renegotiate_media(
@@ -324,6 +338,61 @@ async fn dtmf_auto_forwards_across_cross_transport_bridge() {
         Some("5".to_string())
     );
     assert_eq!(sip_dtmf.last_duration_ms.load(Ordering::SeqCst), 160);
+}
+
+#[tokio::test]
+async fn lifecycle_drain_aborts_and_joins_blocked_dtmf_forward() {
+    let (uctp_adapter, _uctp_dtmf) = RecordingAdapter::new(Transport::Quic);
+    let (sip_adapter, sip_dtmf) = RecordingAdapter::new(Transport::Sip);
+    let (dtmf_entered, _dtmf_release) = sip_adapter.install_dtmf_barriers();
+
+    let orchestrator = Orchestrator::new(Config::default());
+    orchestrator
+        .register(uctp_adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register uctp");
+    orchestrator
+        .register(sip_adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register sip");
+
+    let session = SessionId::new();
+    let uctp_conn = ConnectionId::new();
+    let sip_conn = ConnectionId::new();
+    uctp_adapter
+        .announce(
+            uctp_conn.clone(),
+            StreamHandle::new("opus"),
+            session.clone(),
+        )
+        .await;
+    sip_adapter
+        .announce(sip_conn.clone(), StreamHandle::new("g.711-mu"), session)
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    orchestrator
+        .bridge_connections(uctp_conn.clone(), sip_conn)
+        .await
+        .expect("bridge");
+
+    uctp_adapter
+        .events_tx
+        .send(AdapterEvent::Dtmf {
+            connection_id: uctp_conn,
+            digits: "8".into(),
+            duration_ms: 120,
+        })
+        .await
+        .unwrap();
+    dtmf_entered.wait().await;
+    assert_eq!(sip_dtmf.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(orchestrator.connection_lifecycle_task_count(), 3);
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        orchestrator.drain_connection_lifecycle_tasks(),
+    )
+    .await
+    .expect("blocked DTMF forward and adapter normalizers were joined");
+    assert_eq!(orchestrator.connection_lifecycle_task_count(), 0);
 }
 
 #[tokio::test]

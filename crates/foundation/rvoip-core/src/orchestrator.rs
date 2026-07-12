@@ -54,6 +54,7 @@ use rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent;
 use rvoip_media_core::codec::transcoding::Transcoder;
 use rvoip_media_core::processing::format::FormatConverter;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Weak;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -316,6 +317,7 @@ struct PreparedOutboundShared {
     published: AtomicBool,
     cleanup_started: AtomicBool,
     cleanup_complete: Notify,
+    abort_detail: Mutex<Option<&'static str>>,
     binding: Mutex<Option<ConnectionSessionBinding>>,
     permit: Mutex<Option<OwnedSemaphorePermit>>,
 }
@@ -327,9 +329,38 @@ impl PreparedOutboundShared {
             published: AtomicBool::new(false),
             cleanup_started: AtomicBool::new(false),
             cleanup_complete: Notify::new(),
+            abort_detail: Mutex::new(None),
             binding: Mutex::new(None),
             permit: Mutex::new(Some(permit)),
         }
+    }
+
+    fn claim_abort(&self, current: u8, detail: &'static str) -> bool {
+        let mut abort_detail = self
+            .abort_detail
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self
+            .decision
+            .compare_exchange(
+                current,
+                PREPARED_OUTBOUND_ABORTING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        *abort_detail = Some(detail);
+        true
+    }
+
+    fn abort_detail(&self) -> &'static str {
+        self.abort_detail
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or("outbound preparation aborted")
     }
 
     fn release_capacity(&self) {
@@ -359,15 +390,9 @@ enum PreparedOutboundSupervisorCommand {
         registration: PreparedOutboundRegistration,
         completion: oneshot::Sender<()>,
     },
-    Resolve {
+    Complete {
         key: PreparedOutboundKey,
-        completion: oneshot::Sender<()>,
-    },
-    Abort {
-        cleanup: PreparedOutboundCleanup,
-        forgotten: Option<ForgottenConnection>,
-        detail: &'static str,
-        completion: Option<oneshot::Sender<()>>,
+        completion: oneshot::Sender<bool>,
     },
     Drain {
         completion: oneshot::Sender<()>,
@@ -377,6 +402,83 @@ enum PreparedOutboundSupervisorCommand {
 struct PreparedOutboundSupervisor {
     capacity: usize,
     sender: OnceLock<mpsc::Sender<PreparedOutboundSupervisorCommand>>,
+    state_changed: Arc<Notify>,
+}
+
+struct ConnectionLifecycleTaskSupervisor {
+    capacity: usize,
+    draining: AtomicBool,
+    tasks: Mutex<tokio::task::JoinSet<()>>,
+    drain_lock: TokioMutex<()>,
+}
+
+impl ConnectionLifecycleTaskSupervisor {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            draining: AtomicBool::new(false),
+            tasks: Mutex::new(tokio::task::JoinSet::new()),
+            drain_lock: TokioMutex::new(()),
+        }
+    }
+
+    fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) -> bool {
+        let mut tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while let Some(result) = tasks.try_join_next() {
+            if let Err(error) = result {
+                warn!(%error, "connection lifecycle task failed");
+            }
+        }
+        if self.draining.load(Ordering::Acquire) {
+            return false;
+        }
+        if tasks.len() >= self.capacity {
+            metrics::counter!(
+                "rvoip_core_connection_lifecycle_task_rejections_total",
+                "reason" => "capacity"
+            )
+            .increment(1);
+            return false;
+        }
+        tasks.spawn(task);
+        true
+    }
+
+    fn task_count(&self) -> usize {
+        let mut tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while let Some(result) = tasks.try_join_next() {
+            if let Err(error) = result {
+                warn!(%error, "connection lifecycle task failed");
+            }
+        }
+        tasks.len()
+    }
+
+    async fn drain(&self) {
+        let _drain = self.drain_lock.lock().await;
+        let mut tasks = {
+            let mut owned = self
+                .tasks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.draining.store(true, Ordering::Release);
+            std::mem::take(&mut *owned)
+        };
+        tasks.abort_all();
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result {
+                if !error.is_cancelled() {
+                    warn!(%error, "connection lifecycle task failed during drain");
+                }
+            }
+        }
+    }
 }
 
 impl PreparedOutboundSupervisor {
@@ -384,6 +486,7 @@ impl PreparedOutboundSupervisor {
         Self {
             capacity: capacity.max(1),
             sender: OnceLock::new(),
+            state_changed: Arc::new(Notify::new()),
         }
     }
 }
@@ -399,6 +502,7 @@ impl PreparedOutboundSupervisor {
 pub struct PreparedOutboundConnection {
     orchestrator: Weak<Orchestrator>,
     supervisor: mpsc::Sender<PreparedOutboundSupervisorCommand>,
+    supervisor_state_changed: Arc<Notify>,
     cleanup: PreparedOutboundCleanup,
     handle: Option<ConnectionHandle>,
     session_id: SessionId,
@@ -432,39 +536,22 @@ impl PreparedOutboundConnection {
                 RvoipError::AdmissionRejected("outbound preparation is no longer pending")
             })?;
 
-        let (resolved, resolution) = oneshot::channel();
-        let resolve = PreparedOutboundSupervisorCommand::Resolve {
-            key: self.cleanup.key.clone(),
-            completion: resolved,
-        };
-        if self.supervisor.send(resolve).await.is_err() || resolution.await.is_err() {
-            self.claim_committing_abort();
-            self.abort_committed_work("outbound preparation supervisor unavailable")
-                .await;
-            return Err(RvoipError::InvalidState(
-                "outbound preparation supervisor unavailable",
-            ));
-        }
-
         let Some(orchestrator) = self.orchestrator.upgrade() else {
-            self.claim_committing_abort();
-            self.abort_committed_work("outbound preparation owner unavailable")
-                .await;
+            self.claim_committing_abort("outbound preparation owner unavailable");
+            self.abort_committed_work().await;
             return Err(RvoipError::InvalidState(
                 "outbound preparation owner unavailable",
             ));
         };
         if let Err(error) = orchestrator.ensure_operational_event_stream_healthy() {
-            self.claim_committing_abort();
-            self.abort_committed_work("operational event stream unavailable")
-                .await;
+            self.claim_committing_abort("operational event stream unavailable");
+            self.abort_committed_work().await;
             return Err(error);
         }
         let connection_id = self.cleanup.key.connection_id.clone();
         if !self.cleanup.adapter.is_connection_live(&connection_id) {
-            self.claim_committing_abort();
-            self.abort_committed_work("outbound route ended before durable commit")
-                .await;
+            self.claim_committing_abort("outbound route ended before durable commit");
+            self.abort_committed_work().await;
             return Err(RvoipError::ConnectionNotFound(connection_id));
         }
 
@@ -476,9 +563,8 @@ impl PreparedOutboundConnection {
         ) {
             Ok(binding) => binding,
             Err(error) => {
-                self.claim_committing_abort();
-                self.abort_committed_work("outbound durable lifecycle commit failed")
-                    .await;
+                self.claim_committing_abort("outbound durable lifecycle commit failed");
+                self.abort_committed_work().await;
                 return Err(error);
             }
         };
@@ -491,22 +577,31 @@ impl PreparedOutboundConnection {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(binding);
 
         if orchestrator.session_of(&connection_id).as_ref() != Some(&self.session_id) {
-            self.claim_committing_abort();
-            self.abort_committed_work("outbound session ended during durable commit")
-                .await;
+            self.claim_committing_abort("outbound session ended during durable commit");
+            self.abort_committed_work().await;
             return Err(RvoipError::InvalidState(
                 "outbound session ended during durable commit",
             ));
         }
-        if let Err(error) = self
-            .cleanup
-            .adapter
-            .activate_outbound(connection_id.clone())
-            .await
-        {
-            self.claim_committing_abort();
-            self.abort_committed_work("outbound activation failed")
-                .await;
+        let activation_adapter = Arc::clone(&self.cleanup.adapter);
+        let activation_connection_id = connection_id.clone();
+        let activation = async move {
+            activation_adapter
+                .activate_outbound(activation_connection_id)
+                .await
+        };
+        tokio::pin!(activation);
+        let activation_result = tokio::select! {
+            result = &mut activation => result,
+            _ = self.wait_for_abort() => {
+                return Err(RvoipError::AdmissionRejected(
+                    "outbound preparation aborted during activation",
+                ));
+            }
+        };
+        if let Err(error) = activation_result {
+            self.claim_committing_abort("outbound activation failed");
+            self.abort_committed_work().await;
             return Err(error);
         }
         if !self.cleanup.adapter.is_connection_live(&connection_id)
@@ -515,25 +610,47 @@ impl PreparedOutboundConnection {
                 .is_err()
             || orchestrator.session_of(&connection_id).as_ref() != Some(&self.session_id)
         {
-            self.claim_committing_abort();
-            self.abort_committed_work("outbound route ended during activation")
-                .await;
+            self.claim_committing_abort("outbound route ended during activation");
+            self.abort_committed_work().await;
             return Err(RvoipError::ConnectionNotFound(connection_id));
         }
 
+        // Activation may await adapter I/O while the authoritative receiver
+        // is concurrently lost. Do not let a route become committed after
+        // that correctness boundary has degraded.
+        if let Err(error) = orchestrator.ensure_operational_event_stream_healthy() {
+            self.claim_committing_abort("operational event stream lost during activation");
+            self.abort_committed_work().await;
+            return Err(error);
+        }
+
+        let Some(handle) = self.handle.take() else {
+            self.claim_committing_abort("prepared outbound handle is unavailable");
+            self.abort_committed_work().await;
+            return Err(RvoipError::InvalidState(
+                "prepared outbound handle is unavailable",
+            ));
+        };
+
+        let (completed, completion) = oneshot::channel();
+        let complete = PreparedOutboundSupervisorCommand::Complete {
+            key: self.cleanup.key.clone(),
+            completion: completed,
+        };
+        if self.supervisor.send(complete).await.is_err() || !completion.await.unwrap_or(false) {
+            self.claim_committing_abort("outbound preparation supervisor unavailable");
+            self.abort_committed_work().await;
+            return Err(RvoipError::InvalidState(
+                "outbound preparation supervisor unavailable",
+            ));
+        }
         self.cleanup
             .shared
             .binding
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
-        self.cleanup
-            .shared
-            .decision
-            .store(PREPARED_OUTBOUND_COMMITTED, Ordering::Release);
-        self.handle.take().ok_or(RvoipError::InvalidState(
-            "prepared outbound handle is unavailable",
-        ))
+        Ok(handle)
     }
 
     /// Explicitly abort this provisional route and wait for bounded cleanup.
@@ -545,17 +662,10 @@ impl PreparedOutboundConnection {
                     if self
                         .cleanup
                         .shared
-                        .decision
-                        .compare_exchange(
-                            current,
-                            PREPARED_OUTBOUND_ABORTING,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        )
-                        .is_ok()
+                        .claim_abort(current, "outbound preparation explicitly aborted")
                     {
-                        self.abort_committed_work("outbound preparation explicitly aborted")
-                            .await;
+                        self.supervisor_state_changed.notify_one();
+                        self.abort_committed_work().await;
                         return Ok(());
                     }
                 }
@@ -578,13 +688,14 @@ impl PreparedOutboundConnection {
         }
     }
 
-    fn claim_committing_abort(&self) {
-        let _ = self.cleanup.shared.decision.compare_exchange(
-            PREPARED_OUTBOUND_COMMITTING,
-            PREPARED_OUTBOUND_ABORTING,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+    fn claim_committing_abort(&self, detail: &'static str) {
+        if self
+            .cleanup
+            .shared
+            .claim_abort(PREPARED_OUTBOUND_COMMITTING, detail)
+        {
+            self.supervisor_state_changed.notify_one();
+        }
     }
 
     async fn wait_for_abort(&self) {
@@ -597,120 +708,32 @@ impl PreparedOutboundConnection {
         }
     }
 
-    async fn abort_committed_work(&mut self, detail: &'static str) {
-        let forgotten = self
-            .orchestrator
-            .upgrade()
-            .and_then(|orchestrator| orchestrator.retire_prepared_outbound_core(&self.cleanup));
-        let (completion, completed) = oneshot::channel();
-        let command = PreparedOutboundSupervisorCommand::Abort {
-            cleanup: self.cleanup.clone(),
-            forgotten,
-            detail,
-            completion: Some(completion),
-        };
-        if let Err(error) = self.supervisor.send(command).await {
-            let PreparedOutboundSupervisorCommand::Abort {
-                cleanup,
-                forgotten,
-                detail,
-                ..
-            } = error.0
-            else {
-                unreachable!("only abort commands are sent from this path");
-            };
-            if let Some(orchestrator) = self.orchestrator.upgrade() {
-                let forgotten =
-                    forgotten.or_else(|| orchestrator.retire_prepared_outbound_core(&cleanup));
-                if let Some(forgotten) = forgotten {
-                    let was_visible = forgotten.normalized_lifecycle_was_visible;
-                    orchestrator
-                        .finish_connection_teardown(&cleanup.key.connection_id, forgotten)
-                        .await;
-                    if was_visible && cleanup.shared.published.load(Ordering::Acquire) {
-                        orchestrator.emit(Event::ConnectionFailed {
-                            connection_id: cleanup.key.connection_id.clone(),
-                            detail: detail.into(),
-                            at: Utc::now(),
-                        });
-                    }
-                }
-                orchestrator
-                    .cleanup_failed_adapter_route(
-                        Arc::clone(&cleanup.adapter),
-                        cleanup.transport,
-                        &cleanup.key.connection_id,
-                        detail,
-                    )
-                    .await;
-            } else if cleanup
-                .adapter
-                .is_connection_live(&cleanup.key.connection_id)
-            {
-                let _ = tokio::time::timeout(
-                    INBOUND_ADMISSION_ADAPTER_CLEANUP_TIMEOUT,
-                    cleanup.adapter.end(
-                        cleanup.key.connection_id.clone(),
-                        EndReason::Failed {
-                            detail: detail.into(),
-                        },
-                    ),
-                )
-                .await;
-            }
-            cleanup
-                .shared
-                .decision
-                .store(PREPARED_OUTBOUND_ABORTED, Ordering::Release);
-            cleanup.shared.release_capacity();
-            cleanup.shared.cleanup_complete.notify_waiters();
-            return;
-        }
-        let _ = completed.await;
+    async fn abort_committed_work(&mut self) {
+        self.supervisor_state_changed.notify_one();
+        self.wait_for_abort().await;
     }
 }
 
 impl Drop for PreparedOutboundConnection {
     fn drop(&mut self) {
         let mut current = self.cleanup.shared.decision.load(Ordering::Acquire);
-        loop {
-            match current {
-                PREPARED_OUTBOUND_PENDING | PREPARED_OUTBOUND_COMMITTING => {
-                    match self.cleanup.shared.decision.compare_exchange(
-                        current,
-                        PREPARED_OUTBOUND_ABORTING,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    ) {
-                        Ok(_) => break,
-                        Err(observed) => current = observed,
-                    }
-                }
-                _ => return,
-            }
-        }
-        let forgotten = self
-            .orchestrator
-            .upgrade()
-            .and_then(|orchestrator| orchestrator.retire_prepared_outbound_core(&self.cleanup));
-        let command = PreparedOutboundSupervisorCommand::Abort {
-            cleanup: self.cleanup.clone(),
-            forgotten,
-            detail: "outbound preparation ticket dropped",
-            completion: None,
-        };
-        if self.supervisor.try_send(command).is_err() {
-            metrics::counter!(
-                "rvoip_core_prepared_outbound_cleanup_enqueue_failures_total",
-                "transport" => format!("{:?}", self.cleanup.transport)
-            )
-            .increment(1);
-            self.cleanup
+        while matches!(
+            current,
+            PREPARED_OUTBOUND_PENDING | PREPARED_OUTBOUND_COMMITTING
+        ) {
+            if self
+                .cleanup
                 .shared
-                .decision
-                .store(PREPARED_OUTBOUND_ABORTED, Ordering::Release);
-            self.cleanup.shared.release_capacity();
-            self.cleanup.shared.cleanup_complete.notify_waiters();
+                .claim_abort(current, "outbound preparation ticket dropped")
+            {
+                // The supervisor retains the registration through COMMITTING,
+                // so cancellation needs no fallible command enqueue. This
+                // notification is only a wake-up; the retained registration
+                // remains the cleanup authority even if notifications merge.
+                self.supervisor_state_changed.notify_one();
+                return;
+            }
+            current = self.cleanup.shared.decision.load(Ordering::Acquire);
         }
     }
 }
@@ -844,6 +867,9 @@ pub struct Orchestrator {
     prepared_outbound_supervisor: PreparedOutboundSupervisor,
     prepared_outbound_draining: AtomicBool,
     prepared_outbound_drained: AtomicBool,
+    /// Owns adapter normalizers and asynchronous connection side effects so
+    /// shutdown can abort and join them deterministically.
+    connection_lifecycle_tasks: ConnectionLifecycleTaskSupervisor,
     /// Safe self-reference used by opaque tickets without requiring every
     /// existing command method to change its `&self` receiver to `&Arc<Self>`.
     self_weak: OnceLock<Weak<Orchestrator>>,
@@ -1185,6 +1211,9 @@ impl Orchestrator {
             prepared_outbound_supervisor: PreparedOutboundSupervisor::new(setup_capacity),
             prepared_outbound_draining: AtomicBool::new(false),
             prepared_outbound_drained: AtomicBool::new(false),
+            connection_lifecycle_tasks: ConnectionLifecycleTaskSupervisor::new(
+                setup_capacity.saturating_mul(4).max(64),
+            ),
             self_weak: OnceLock::new(),
             adapters: Arc::new(DashMap::new()),
             adapter_registrations: Mutex::new(HashSet::new()),
@@ -1247,6 +1276,9 @@ impl Orchestrator {
             prepared_outbound_supervisor: PreparedOutboundSupervisor::new(setup_capacity),
             prepared_outbound_draining: AtomicBool::new(false),
             prepared_outbound_drained: AtomicBool::new(false),
+            connection_lifecycle_tasks: ConnectionLifecycleTaskSupervisor::new(
+                setup_capacity.saturating_mul(4).max(64),
+            ),
             self_weak: OnceLock::new(),
             adapters: Arc::new(DashMap::new()),
             adapter_registrations: Mutex::new(HashSet::new()),
@@ -1295,6 +1327,15 @@ impl Orchestrator {
     /// Returns [`RvoipError::AdapterAlreadyRegistered`] on collision.
     pub fn register(self: &Arc<Self>, adapter: Arc<dyn ConnectionAdapter>) -> Result<()> {
         self.ensure_operational_event_stream_healthy()?;
+        if self
+            .connection_lifecycle_tasks
+            .draining
+            .load(Ordering::Acquire)
+        {
+            return Err(RvoipError::InvalidState(
+                "connection lifecycle supervisor is draining",
+            ));
+        }
         let transport = adapter.transport();
         let lifecycle_capabilities = adapter.lifecycle_capabilities();
         {
@@ -1330,24 +1371,47 @@ impl Orchestrator {
         // The Orchestrator consumes the adapter's atomic lifecycle stream.
         // Public direct subscribers retain the pre-atomic normalized sequence.
         let mut events = adapter.subscribe_orchestrator_events();
-        {
-            let mut registrations = self
-                .adapter_registrations
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.adapters.insert(transport, adapter);
-            registrations.remove(&transport);
-        }
+        self.adapters.insert(transport, adapter);
 
-        // Spawn the per-adapter event-normalize loop. Each AdapterEvent is
-        // translated into one or more rvoip-core Events and republished.
-        let me = Arc::clone(self);
-        tokio::spawn(async move {
+        // Retain the per-adapter event-normalize loop under the lifecycle
+        // supervisor. A Weak owner avoids a task/Orchestrator reference cycle
+        // when callers drop an Orchestrator without an explicit drain.
+        let owner = Arc::downgrade(self);
+        let spawned = self.connection_lifecycle_tasks.spawn(async move {
             while let Some(event) = events.recv().await {
-                me.handle_orchestrator_adapter_event(transport, event).await;
+                let Some(orchestrator) = owner.upgrade() else {
+                    break;
+                };
+                orchestrator
+                    .handle_orchestrator_adapter_event(transport, event)
+                    .await;
             }
             debug!(?transport, "adapter event stream ended");
         });
+        if !spawned {
+            self.adapters.remove(&transport);
+            self.adapter_registrations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&transport);
+            return if self
+                .connection_lifecycle_tasks
+                .draining
+                .load(Ordering::Acquire)
+            {
+                Err(RvoipError::InvalidState(
+                    "connection lifecycle supervisor is draining",
+                ))
+            } else {
+                Err(RvoipError::AdmissionRejected(
+                    "connection lifecycle task capacity is full",
+                ))
+            };
+        }
+        self.adapter_registrations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&transport);
         Ok(())
     }
 
@@ -1368,10 +1432,10 @@ impl Orchestrator {
         self.prepared_outbound_supervisor
             .sender
             .get_or_init(|| {
-                // At most one Register and one terminal decision can be
-                // queued per admitted ticket. The semaphore therefore makes
-                // this channel bound sufficient even if every ticket is
-                // dropped in the same scheduler turn.
+                // Register and final-commit acknowledgements are the only
+                // per-ticket commands. Abort is an infallible shared-state
+                // transition plus a coalescing Notify, so cancellation never
+                // depends on queue capacity.
                 let queue_capacity = self
                     .prepared_outbound_supervisor
                     .capacity
@@ -1383,7 +1447,12 @@ impl Orchestrator {
                     .get()
                     .cloned()
                     .expect("orchestrator self reference is initialized");
-                tokio::spawn(Self::run_prepared_outbound_supervisor(owner, receiver));
+                let state_changed = Arc::clone(&self.prepared_outbound_supervisor.state_changed);
+                tokio::spawn(Self::run_prepared_outbound_supervisor(
+                    owner,
+                    receiver,
+                    state_changed,
+                ));
                 sender
             })
             .clone()
@@ -1413,9 +1482,28 @@ impl Orchestrator {
             .store(true, Ordering::Release);
     }
 
+    /// Stop adapter event normalization and asynchronous connection side
+    /// effects, then join every retained task.
+    ///
+    /// This is a terminal shutdown operation: adapter registration and new
+    /// connection-side background work are rejected after it begins. Drain
+    /// prepared outbound connections first so their cleanup events can still
+    /// be normalized before calling this method.
+    pub async fn drain_connection_lifecycle_tasks(&self) {
+        self.connection_lifecycle_tasks.drain().await;
+    }
+
+    /// Number of retained adapter-normalizer and connection-side-effect
+    /// tasks. Completed tasks are reaped before the value is returned.
+    #[must_use]
+    pub fn connection_lifecycle_task_count(&self) -> usize {
+        self.connection_lifecycle_tasks.task_count()
+    }
+
     async fn run_prepared_outbound_supervisor(
         owner: Weak<Orchestrator>,
         mut receiver: mpsc::Receiver<PreparedOutboundSupervisorCommand>,
+        state_changed: Arc<Notify>,
     ) {
         let mut registrations = HashMap::<PreparedOutboundKey, PreparedOutboundRegistration>::new();
         let mut cleanups = tokio::task::JoinSet::new();
@@ -1424,6 +1512,12 @@ impl Orchestrator {
         'supervisor: loop {
             let next_deadline = registrations
                 .values()
+                .filter(|registration| {
+                    matches!(
+                        registration.cleanup.shared.decision.load(Ordering::Acquire),
+                        PREPARED_OUTBOUND_PENDING | PREPARED_OUTBOUND_COMMITTING
+                    )
+                })
                 .map(|registration| registration.deadline)
                 .min()
                 .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400));
@@ -1437,27 +1531,40 @@ impl Orchestrator {
                             registrations.insert(registration.cleanup.key.clone(), registration);
                             let _ = completion.send(());
                         }
-                        PreparedOutboundSupervisorCommand::Resolve { key, completion } => {
-                            if let Some(registration) = registrations.remove(&key) {
+                        PreparedOutboundSupervisorCommand::Complete { key, completion } => {
+                            let operational_healthy = owner
+                                .upgrade()
+                                .is_some_and(|orchestrator| {
+                                    orchestrator.ensure_operational_event_stream_healthy().is_ok()
+                                });
+                            let committed = operational_healthy && registrations.get(&key).is_some_and(|registration| {
+                                registration
+                                    .cleanup
+                                    .shared
+                                    .decision
+                                    .compare_exchange(
+                                        PREPARED_OUTBOUND_COMMITTING,
+                                        PREPARED_OUTBOUND_COMMITTED,
+                                        Ordering::AcqRel,
+                                        Ordering::Acquire,
+                                    )
+                                    .is_ok()
+                            });
+                            if !operational_healthy {
+                                if let Some(registration) = registrations.get(&key) {
+                                    registration.cleanup.shared.claim_abort(
+                                        PREPARED_OUTBOUND_COMMITTING,
+                                        "operational event stream lost before final commit",
+                                    );
+                                }
+                            }
+                            if committed {
+                                let registration = registrations
+                                    .remove(&key)
+                                    .expect("committed registration remains supervisor-owned");
                                 registration.cleanup.shared.release_capacity();
                             }
-                            let _ = completion.send(());
-                        }
-                        PreparedOutboundSupervisorCommand::Abort {
-                            cleanup,
-                            forgotten,
-                            detail,
-                            completion,
-                        } => {
-                            registrations.remove(&cleanup.key);
-                            Self::spawn_prepared_outbound_cleanup(
-                                &mut cleanups,
-                                owner.clone(),
-                                cleanup,
-                                forgotten,
-                                detail,
-                                completion,
-                            );
+                            let _ = completion.send(committed);
                         }
                         PreparedOutboundSupervisorCommand::Drain { completion } => {
                             drain_completion = Some(completion);
@@ -1474,74 +1581,65 @@ impl Orchestrator {
                         })
                         .collect::<Vec<_>>();
                     for key in expired {
-                        let Some(registration) = registrations.remove(&key) else {
+                        let Some(registration) = registrations.get(&key) else {
                             continue;
                         };
-                        let cleanup = registration.cleanup;
-                        if cleanup
+                        let current = registration
+                            .cleanup
                             .shared
                             .decision
-                            .compare_exchange(
-                                PREPARED_OUTBOUND_PENDING,
-                                PREPARED_OUTBOUND_ABORTING,
-                                Ordering::AcqRel,
-                                Ordering::Acquire,
-                            )
-                            .is_err()
-                        {
-                            continue;
+                            .load(Ordering::Acquire);
+                        if matches!(
+                            current,
+                            PREPARED_OUTBOUND_PENDING | PREPARED_OUTBOUND_COMMITTING
+                        ) {
+                            registration
+                                .cleanup
+                                .shared
+                                .claim_abort(current, "outbound preparation timed out");
                         }
-                        let forgotten = owner
-                            .upgrade()
-                            .and_then(|orchestrator| orchestrator.retire_prepared_outbound_core(&cleanup));
-                        Self::spawn_prepared_outbound_cleanup(
-                            &mut cleanups,
-                            owner.clone(),
-                            cleanup,
-                            forgotten,
-                            "outbound preparation timed out",
-                            None,
-                        );
                     }
                 }
+                _ = state_changed.notified() => {}
                 Some(result) = cleanups.join_next(), if !cleanups.is_empty() => {
                     if let Err(error) = result {
                         warn!(%error, "prepared outbound cleanup task failed");
                     }
                 }
             }
-        }
-
-        // Receiver loss or Orchestrator shutdown aborts every still-pending
-        // provisional route. Cleanup children remain owned by this JoinSet
-        // and are drained before the supervisor exits.
-        for (_, registration) in registrations {
-            let cleanup = registration.cleanup;
-            if cleanup
-                .shared
-                .decision
-                .compare_exchange(
-                    PREPARED_OUTBOUND_PENDING,
-                    PREPARED_OUTBOUND_ABORTING,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_err()
-            {
-                continue;
-            }
-            let forgotten = owner
-                .upgrade()
-                .and_then(|orchestrator| orchestrator.retire_prepared_outbound_core(&cleanup));
-            Self::spawn_prepared_outbound_cleanup(
+            Self::spawn_aborting_prepared_outbound_cleanups(
+                &mut registrations,
                 &mut cleanups,
                 owner.clone(),
-                cleanup,
-                forgotten,
-                "outbound preparation supervisor closed",
-                None,
             );
         }
+
+        // Receiver loss, explicit drain, or Orchestrator shutdown aborts
+        // every route that has not won its final commit acknowledgement.
+        // COMMITTING registrations deliberately remain here while adapter
+        // activation awaits, so drain can still fence and compensate them.
+        for registration in registrations.values() {
+            let cleanup = &registration.cleanup;
+            let mut current = cleanup.shared.decision.load(Ordering::Acquire);
+            while matches!(
+                current,
+                PREPARED_OUTBOUND_PENDING | PREPARED_OUTBOUND_COMMITTING
+            ) {
+                if cleanup
+                    .shared
+                    .claim_abort(current, "outbound preparation supervisor closed")
+                {
+                    break;
+                }
+                current = cleanup.shared.decision.load(Ordering::Acquire);
+            }
+        }
+        Self::spawn_aborting_prepared_outbound_cleanups(
+            &mut registrations,
+            &mut cleanups,
+            owner.clone(),
+        );
+        debug_assert!(registrations.is_empty());
         while let Some(result) = cleanups.join_next().await {
             if let Err(error) = result {
                 warn!(%error, "prepared outbound cleanup task failed during drain");
@@ -1552,13 +1650,38 @@ impl Orchestrator {
         }
     }
 
+    fn spawn_aborting_prepared_outbound_cleanups(
+        registrations: &mut HashMap<PreparedOutboundKey, PreparedOutboundRegistration>,
+        cleanups: &mut tokio::task::JoinSet<()>,
+        owner: Weak<Orchestrator>,
+    ) {
+        let aborting = registrations
+            .iter()
+            .filter_map(|(key, registration)| {
+                (registration.cleanup.shared.decision.load(Ordering::Acquire)
+                    == PREPARED_OUTBOUND_ABORTING)
+                    .then_some(key.clone())
+            })
+            .collect::<Vec<_>>();
+        for key in aborting {
+            let Some(registration) = registrations.remove(&key) else {
+                continue;
+            };
+            let detail = registration.cleanup.shared.abort_detail();
+            Self::spawn_prepared_outbound_cleanup(
+                cleanups,
+                owner.clone(),
+                registration.cleanup,
+                detail,
+            );
+        }
+    }
+
     fn spawn_prepared_outbound_cleanup(
         cleanups: &mut tokio::task::JoinSet<()>,
         owner: Weak<Orchestrator>,
         cleanup: PreparedOutboundCleanup,
-        forgotten: Option<ForgottenConnection>,
         detail: &'static str,
-        completion: Option<oneshot::Sender<()>>,
     ) {
         if cleanup.shared.cleanup_started.swap(true, Ordering::AcqRel) {
             cleanups.spawn(async move {
@@ -1570,62 +1693,91 @@ impl Orchestrator {
                     }
                     notified.await;
                 }
-                if let Some(completion) = completion {
-                    let _ = completion.send(());
-                }
             });
             return;
         }
-        cleanups.spawn(async move {
-            if let Some(orchestrator) = owner.upgrade() {
-                let forgotten =
-                    forgotten.or_else(|| orchestrator.retire_prepared_outbound_core(&cleanup));
-                if let Some(forgotten) = forgotten {
-                    let was_visible = forgotten.normalized_lifecycle_was_visible;
-                    orchestrator
-                        .finish_connection_teardown(&cleanup.key.connection_id, forgotten)
-                        .await;
-                    if was_visible && cleanup.shared.published.load(Ordering::Acquire) {
-                        orchestrator.emit(Event::ConnectionFailed {
-                            connection_id: cleanup.key.connection_id.clone(),
-                            detail: detail.into(),
-                            at: Utc::now(),
-                        });
-                    }
-                }
+        cleanups.spawn(Self::execute_prepared_outbound_cleanup(
+            owner, cleanup, detail,
+        ));
+    }
+
+    async fn execute_prepared_outbound_cleanup(
+        owner: Weak<Orchestrator>,
+        cleanup: PreparedOutboundCleanup,
+        detail: &'static str,
+    ) {
+        if let Some(orchestrator) = owner.upgrade() {
+            let forgotten = orchestrator.retire_prepared_outbound_core(&cleanup);
+            if let Some(forgotten) = forgotten {
+                let was_visible = forgotten.normalized_lifecycle_was_visible;
                 orchestrator
-                    .cleanup_failed_adapter_route(
-                        Arc::clone(&cleanup.adapter),
-                        cleanup.transport,
-                        &cleanup.key.connection_id,
-                        detail,
-                    )
+                    .finish_connection_teardown(&cleanup.key.connection_id, forgotten)
                     .await;
-            } else if cleanup
-                .adapter
-                .is_connection_live(&cleanup.key.connection_id)
-            {
-                let _ = tokio::time::timeout(
-                    INBOUND_ADMISSION_ADAPTER_CLEANUP_TIMEOUT,
-                    cleanup.adapter.end(
-                        cleanup.key.connection_id.clone(),
-                        EndReason::Failed {
-                            detail: detail.into(),
-                        },
-                    ),
+                if was_visible && cleanup.shared.published.load(Ordering::Acquire) {
+                    orchestrator
+                        .emit_core_connection_failure(
+                            cleanup.key.connection_id.clone(),
+                            cleanup.transport,
+                            detail.into(),
+                        )
+                        .await;
+                }
+            }
+            orchestrator
+                .cleanup_failed_adapter_route(
+                    Arc::clone(&cleanup.adapter),
+                    cleanup.transport,
+                    &cleanup.key.connection_id,
+                    detail,
                 )
                 .await;
+        } else if cleanup
+            .adapter
+            .is_connection_live(&cleanup.key.connection_id)
+        {
+            let _ = tokio::time::timeout(
+                INBOUND_ADMISSION_ADAPTER_CLEANUP_TIMEOUT,
+                cleanup.adapter.end(
+                    cleanup.key.connection_id.clone(),
+                    EndReason::Failed {
+                        detail: detail.into(),
+                    },
+                ),
+            )
+            .await;
+        }
+        cleanup
+            .shared
+            .decision
+            .store(PREPARED_OUTBOUND_ABORTED, Ordering::Release);
+        cleanup.shared.release_capacity();
+        cleanup.shared.cleanup_complete.notify_waiters();
+    }
+
+    async fn abort_unregistered_prepared_outbound(
+        &self,
+        cleanup: PreparedOutboundCleanup,
+        detail: &'static str,
+    ) {
+        cleanup
+            .shared
+            .claim_abort(PREPARED_OUTBOUND_PENDING, detail);
+        if !cleanup.shared.cleanup_started.swap(true, Ordering::AcqRel) {
+            let owner = self
+                .self_weak
+                .get()
+                .cloned()
+                .expect("orchestrator self reference is initialized");
+            Self::execute_prepared_outbound_cleanup(owner, cleanup, detail).await;
+            return;
+        }
+        loop {
+            let notified = cleanup.shared.cleanup_complete.notified();
+            if cleanup.shared.decision.load(Ordering::Acquire) == PREPARED_OUTBOUND_ABORTED {
+                return;
             }
-            cleanup
-                .shared
-                .decision
-                .store(PREPARED_OUTBOUND_ABORTED, Ordering::Release);
-            cleanup.shared.release_capacity();
-            cleanup.shared.cleanup_complete.notify_waiters();
-            if let Some(completion) = completion {
-                let _ = completion.send(());
-            }
-        });
+            notified.await;
+        }
     }
 
     fn retire_prepared_outbound_core(
@@ -1825,6 +1977,10 @@ impl Orchestrator {
         transport: Transport,
         detail: String,
     ) {
+        let mut delivery_guard = self
+            .operational_event_stream
+            .get()
+            .map(OperationalEventStream::delivery_guard);
         let at = Utc::now();
         let _operational_order = if self.operational_event_stream.get().is_some() {
             Some(self.operational_event_order.lock().await)
@@ -1846,6 +2002,9 @@ impl Orchestrator {
             detail,
             at,
         });
+        if let Some(guard) = delivery_guard.as_mut() {
+            guard.disarm();
+        }
     }
 
     /// Look up which adapter owns a given connection. Returns
@@ -5630,6 +5789,14 @@ impl Orchestrator {
                 if self.connection_owned_by_other_transport(&connection_id, transport) {
                     return;
                 }
+                // Retiring the core route precedes media/session teardown and
+                // authoritative publication. Cancellation anywhere in that
+                // window must make the stream visibly unusable rather than
+                // silently erase the terminal outcome.
+                let mut delivery_guard = self
+                    .operational_event_stream
+                    .get()
+                    .map(OperationalEventStream::delivery_guard);
                 let forgotten = self
                     .forget_inbound_connection(&connection_id, transport)
                     .await;
@@ -5653,6 +5820,9 @@ impl Orchestrator {
                         at,
                     });
                 }
+                if let Some(guard) = delivery_guard.as_mut() {
+                    guard.disarm();
+                }
             }
             AdapterEvent::Failed {
                 connection_id,
@@ -5661,6 +5831,10 @@ impl Orchestrator {
                 if self.connection_owned_by_other_transport(&connection_id, transport) {
                     return;
                 }
+                let mut delivery_guard = self
+                    .operational_event_stream
+                    .get()
+                    .map(OperationalEventStream::delivery_guard);
                 let forgotten = self
                     .forget_inbound_connection(&connection_id, transport)
                     .await;
@@ -5682,6 +5856,9 @@ impl Orchestrator {
                         detail,
                         at,
                     });
+                }
+                if let Some(guard) = delivery_guard.as_mut() {
+                    guard.disarm();
                 }
             }
             AdapterEvent::Dtmf {
@@ -5724,8 +5901,9 @@ impl Orchestrator {
                 // `dtmf.send`, the SIP-side adapter synthesizes RFC
                 // 4733 packets onto outbound RTP.
                 //
-                // `handle_adapter_event` is synchronous; spawn a task
-                // so the forward doesn't block adapter-event ingest.
+                // The forward does not block adapter-event ingest, but it is
+                // retained under the Orchestrator lifecycle so shutdown can
+                // abort/join it instead of leaving a detached side effect.
                 if let Some(peer) = self.bridge_peer_of(&connection_id) {
                     metrics::counter!("uctp_bridge_dtmf_forwarded_total").increment(1);
                     let peer_for_task = peer.clone();
@@ -5734,7 +5912,7 @@ impl Orchestrator {
                     match adapter {
                         Ok(adapter) => {
                             let src = connection_id.clone();
-                            tokio::spawn(async move {
+                            let spawned = self.connection_lifecycle_tasks.spawn(async move {
                                 match adapter
                                     .send_dtmf(peer_for_task.clone(), &digits_for_task, duration_ms)
                                     .await
@@ -5757,6 +5935,29 @@ impl Orchestrator {
                                     }
                                 }
                             });
+                            if !spawned {
+                                let rejection = if self
+                                    .connection_lifecycle_tasks
+                                    .draining
+                                    .load(Ordering::Acquire)
+                                {
+                                    "draining"
+                                } else {
+                                    "capacity"
+                                };
+                                metrics::counter!(
+                                    "rvoip_core_connection_side_effects_rejected_total",
+                                    "kind" => "dtmf",
+                                    "reason" => rejection
+                                )
+                                .increment(1);
+                                warn!(
+                                    ?connection_id,
+                                    ?peer,
+                                    reason = rejection,
+                                    "orchestrator: DTMF forward rejected by lifecycle supervisor"
+                                );
+                            }
                         }
                         Err(e) => {
                             warn!(
@@ -6304,55 +6505,35 @@ impl Orchestrator {
             registration,
             completion: registered,
         };
-        if supervisor.send(register).await.is_err()
-            || registration_complete.await.is_err()
-            || self.prepared_outbound_draining.load(Ordering::Acquire)
-        {
-            if cleanup
-                .shared
-                .decision
-                .compare_exchange(
-                    PREPARED_OUTBOUND_PENDING,
-                    PREPARED_OUTBOUND_ABORTING,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                cleanup
-                    .shared
-                    .cleanup_started
-                    .store(true, Ordering::Release);
-                let forgotten = self.retire_prepared_outbound_core(&cleanup);
-                if let Some(forgotten) = forgotten {
-                    self.finish_connection_teardown(&connection_id, forgotten)
-                        .await;
-                }
-                self.cleanup_failed_adapter_route(
-                    Arc::clone(&cleanup.adapter),
-                    transport,
-                    &connection_id,
-                    "outbound preparation supervisor unavailable",
-                )
-                .await;
-                cleanup
-                    .shared
-                    .decision
-                    .store(PREPARED_OUTBOUND_ABORTED, Ordering::Release);
-                cleanup.shared.release_capacity();
-                cleanup.shared.cleanup_complete.notify_waiters();
-            } else {
-                loop {
-                    let notified = cleanup.shared.cleanup_complete.notified();
-                    if cleanup.shared.decision.load(Ordering::Acquire) == PREPARED_OUTBOUND_ABORTED
-                    {
-                        break;
-                    }
-                    notified.await;
-                }
-            }
+        // Registration is deliberately non-awaiting: cancellation cannot
+        // strand an adapter route before the supervisor owns it. The channel
+        // is sized from the same setup semaphore, so saturation is an
+        // explicit fail-closed admission result with caller-owned cleanup.
+        if supervisor.try_send(register).is_err() || registration_complete.await.is_err() {
+            self.abort_unregistered_prepared_outbound(
+                cleanup,
+                "outbound preparation supervisor unavailable",
+            )
+            .await;
             return Err(RvoipError::InvalidState(
                 "outbound preparation supervisor unavailable",
+            ));
+        }
+        if self.prepared_outbound_draining.load(Ordering::Acquire) {
+            cleanup.shared.claim_abort(
+                PREPARED_OUTBOUND_PENDING,
+                "outbound preparation supervisor is draining",
+            );
+            self.prepared_outbound_supervisor.state_changed.notify_one();
+            loop {
+                let notified = cleanup.shared.cleanup_complete.notified();
+                if cleanup.shared.decision.load(Ordering::Acquire) == PREPARED_OUTBOUND_ABORTED {
+                    break;
+                }
+                notified.await;
+            }
+            return Err(RvoipError::AdmissionRejected(
+                "outbound preparation supervisor is draining",
             ));
         }
         Ok(PreparedOutboundConnection {
@@ -6362,6 +6543,7 @@ impl Orchestrator {
                 .cloned()
                 .expect("orchestrator self reference is initialized"),
             supervisor,
+            supervisor_state_changed: Arc::clone(&self.prepared_outbound_supervisor.state_changed),
             cleanup,
             handle: Some(handle),
             session_id,

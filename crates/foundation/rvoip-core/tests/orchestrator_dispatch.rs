@@ -26,7 +26,7 @@ use rvoip_core::operational_events::{
 use rvoip_core::orchestrator::Orchestrator;
 use rvoip_core::stream::{MediaStream, QualitySnapshot};
 use rvoip_core::DataMessage;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{
     collections::{HashMap, HashSet},
@@ -50,6 +50,7 @@ struct CallCounts {
 struct StubAdapter {
     transport: Transport,
     counts: Arc<CallCounts>,
+    events: mpsc::Sender<OrchestratorAdapterEvent>,
     inbound: Mutex<Option<mpsc::Receiver<OrchestratorAdapterEvent>>>,
     live: Mutex<HashSet<ConnectionId>>,
     inbound_contexts: Mutex<HashMap<ConnectionId, InboundConnectionContext>>,
@@ -62,6 +63,8 @@ struct StubAdapter {
     accept_behavior: AtomicUsize,
     originate_behavior: AtomicUsize,
     activate_behavior: AtomicUsize,
+    activate_emits_connected: AtomicBool,
+    activate_barriers: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
     transfer_behavior: AtomicUsize,
     next_outbound_id: Mutex<Option<ConnectionId>>,
 }
@@ -119,6 +122,7 @@ impl StubAdapter {
         let adapter = Arc::new(Self {
             transport,
             counts: counts.clone(),
+            events: tx.clone(),
             inbound: Mutex::new(Some(rx)),
             live: Mutex::new(HashSet::new()),
             inbound_contexts: Mutex::new(HashMap::new()),
@@ -131,6 +135,8 @@ impl StubAdapter {
             accept_behavior: AtomicUsize::new(COMMAND_SUCCEED),
             originate_behavior: AtomicUsize::new(COMMAND_SUCCEED),
             activate_behavior: AtomicUsize::new(COMMAND_SUCCEED),
+            activate_emits_connected: AtomicBool::new(false),
+            activate_barriers: Mutex::new(None),
             transfer_behavior: AtomicUsize::new(COMMAND_SUCCEED),
             next_outbound_id: Mutex::new(None),
         });
@@ -156,6 +162,18 @@ impl StubAdapter {
 
     fn set_activate_behavior(&self, behavior: usize) {
         self.activate_behavior.store(behavior, Ordering::SeqCst);
+    }
+
+    fn set_activate_emits_connected(&self) {
+        self.activate_emits_connected.store(true, Ordering::SeqCst);
+    }
+
+    fn install_activate_barriers(&self) -> (Arc<Barrier>, Arc<Barrier>) {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        *self.activate_barriers.lock().unwrap() =
+            Some((Arc::clone(&entered), Arc::clone(&release)));
+        (entered, release)
     }
 
     fn set_transfer_behavior(&self, behavior: usize) {
@@ -279,6 +297,22 @@ impl ConnectionAdapter for StubAdapter {
     }
     async fn activate_outbound(&self, conn: ConnectionId) -> Result<()> {
         self.counts.activate.fetch_add(1, Ordering::SeqCst);
+        if self.activate_emits_connected.load(Ordering::SeqCst) {
+            self.events
+                .send(
+                    AdapterEvent::Connected {
+                        connection_id: conn.clone(),
+                    }
+                    .into(),
+                )
+                .await
+                .map_err(|_| RvoipError::InvalidState("stub event stream unavailable"))?;
+        }
+        let barriers = self.activate_barriers.lock().unwrap().take();
+        if let Some((entered, release)) = barriers {
+            entered.wait().await;
+            release.wait().await;
+        }
         match self.activate_behavior.load(Ordering::SeqCst) {
             COMMAND_SUCCEED => Ok(()),
             COMMAND_FAIL => Err(RvoipError::InvalidState("stub activation failure")),
@@ -1201,6 +1235,38 @@ async fn duplicate_register_rejects() {
 }
 
 #[tokio::test]
+async fn adapter_normalizer_is_owned_joined_and_rejected_after_lifecycle_drain() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let (adapter, sender, _) = StubAdapter::new();
+    orchestrator.register(adapter).unwrap();
+    assert_eq!(orchestrator.connection_lifecycle_task_count(), 1);
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        orchestrator.drain_connection_lifecycle_tasks(),
+    )
+    .await
+    .expect("adapter normalizer drain completed");
+    assert_eq!(orchestrator.connection_lifecycle_task_count(), 0);
+    assert!(sender
+        .send(AdapterEvent::Dtmf {
+            connection_id: ConnectionId::new(),
+            digits: "1".into(),
+            duration_ms: 100,
+        })
+        .await
+        .is_err());
+
+    let (after_drain, _, _) = StubAdapter::new_for(Transport::WebRtc);
+    assert!(matches!(
+        orchestrator.register(after_drain),
+        Err(RvoipError::InvalidState(
+            "connection lifecycle supervisor is draining"
+        ))
+    ));
+}
+
+#[tokio::test]
 async fn same_adapter_cannot_replace_lifecycle_owner() {
     let first = Orchestrator::new(Config::default());
     let second = Orchestrator::new(Config::default());
@@ -1581,6 +1647,37 @@ async fn prepared_outbound_timeout_makes_stale_commit_fail_closed() {
 }
 
 #[tokio::test]
+async fn prepared_outbound_timeout_aborts_supervisor_owned_activation() {
+    let mut config = Config::default();
+    config.outbound_preparation_timeout = Duration::from_millis(25);
+    let orchestrator = Orchestrator::new(config);
+    let (adapter, _, counts) = StubAdapter::new();
+    adapter.set_activate_behavior(COMMAND_HANG);
+    orchestrator.register(adapter).unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+    let prepared = orchestrator
+        .prepare_outbound_connection(outbound_request(session_id))
+        .await
+        .unwrap();
+    let connection_id = prepared.connection_id().clone();
+
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), prepared.commit())
+            .await
+            .expect("supervisor timed out the activation"),
+        Err(RvoipError::AdmissionRejected(
+            "outbound preparation aborted during activation"
+        ))
+    ));
+    assert_eq!(counts.activate.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.end.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        orchestrator.connection_transport(&connection_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+}
+
+#[tokio::test]
 async fn prepared_outbound_session_end_during_pause_compensates_route() {
     let orchestrator = Orchestrator::new(Config::default());
     let (adapter, _, counts) = StubAdapter::new();
@@ -1638,6 +1735,165 @@ async fn cancelling_commit_during_activation_retires_exact_route() {
     let session = session.read().unwrap();
     assert_eq!(session.state, rvoip_core::session::SessionState::Initiating);
     assert!(!session.connections.contains_key(&connection_id));
+}
+
+#[tokio::test]
+async fn prepared_activation_failure_after_connected_emits_authoritative_failure_once() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut operational = orchestrator.install_operational_event_stream(4).unwrap();
+    let (adapter, _, counts) = StubAdapter::new();
+    adapter.set_activate_emits_connected();
+    adapter.set_activate_behavior(COMMAND_FAIL);
+    let (activation_entered, activation_release) = adapter.install_activate_barriers();
+    orchestrator.register(adapter).unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+    let prepared = orchestrator
+        .prepare_outbound_connection(outbound_request(session_id))
+        .await
+        .unwrap();
+    let connection_id = prepared.connection_id().clone();
+
+    let commit = tokio::spawn(prepared.commit());
+    activation_entered.wait().await;
+    let connected = operational.recv().await.unwrap();
+    assert_eq!(connected.connection_id, connection_id);
+    assert!(matches!(connected.kind, OperationalEventKind::Connected));
+    activation_release.wait().await;
+    assert!(matches!(
+        commit.await.unwrap(),
+        Err(RvoipError::InvalidState("stub activation failure"))
+    ));
+    wait_for_count(&counts.end, 1).await;
+
+    let failed = operational.recv().await.unwrap();
+    assert_eq!(failed.connection_id, connection_id);
+    assert!(matches!(
+        failed.kind,
+        OperationalEventKind::Failed {
+            reason: OperationalFailureReason::CoreReported
+        }
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), operational.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn cancelling_prepared_commit_after_connected_emits_authoritative_failure_once() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut operational = orchestrator.install_operational_event_stream(4).unwrap();
+    let (adapter, _, counts) = StubAdapter::new();
+    adapter.set_activate_emits_connected();
+    let (activation_entered, _activation_release) = adapter.install_activate_barriers();
+    orchestrator.register(adapter).unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+    let prepared = orchestrator
+        .prepare_outbound_connection(outbound_request(session_id))
+        .await
+        .unwrap();
+    let connection_id = prepared.connection_id().clone();
+
+    let commit = tokio::spawn(prepared.commit());
+    activation_entered.wait().await;
+    let connected = operational.recv().await.unwrap();
+    assert_eq!(connected.connection_id, connection_id);
+    assert!(matches!(connected.kind, OperationalEventKind::Connected));
+    commit.abort();
+    assert!(commit.await.unwrap_err().is_cancelled());
+    wait_for_count(&counts.end, 1).await;
+
+    let failed = operational.recv().await.unwrap();
+    assert_eq!(failed.connection_id, connection_id);
+    assert!(matches!(
+        failed.kind,
+        OperationalEventKind::Failed {
+            reason: OperationalFailureReason::CoreReported
+        }
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), operational.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn drain_aborts_and_awaits_supervisor_owned_committing_ticket() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let (adapter, _, counts) = StubAdapter::new();
+    let (activation_entered, _activation_release) = adapter.install_activate_barriers();
+    orchestrator.register(adapter).unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+    let prepared = orchestrator
+        .prepare_outbound_connection(outbound_request(session_id))
+        .await
+        .unwrap();
+    let connection_id = prepared.connection_id().clone();
+
+    let commit = tokio::spawn(prepared.commit());
+    activation_entered.wait().await;
+    let draining = {
+        let orchestrator = Arc::clone(&orchestrator);
+        tokio::spawn(async move {
+            orchestrator.drain_prepared_outbound_connections().await;
+        })
+    };
+    wait_for_count(&counts.end, 1).await;
+    tokio::time::timeout(Duration::from_secs(1), draining)
+        .await
+        .expect("drain awaited committing-route cleanup")
+        .unwrap();
+    assert!(matches!(
+        orchestrator.connection_transport(&connection_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), commit)
+            .await
+            .expect("drain cancelled the in-flight activation future")
+            .unwrap(),
+        Err(RvoipError::AdmissionRejected(
+            "outbound preparation aborted during activation"
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn receiver_loss_during_activation_prevents_final_commit_and_compensates() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let operational = orchestrator.install_operational_event_stream(4).unwrap();
+    let (adapter, _, counts) = StubAdapter::new();
+    let (activation_entered, activation_release) = adapter.install_activate_barriers();
+    orchestrator.register(adapter).unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+    let prepared = orchestrator
+        .prepare_outbound_connection(outbound_request(session_id))
+        .await
+        .unwrap();
+    let connection_id = prepared.connection_id().clone();
+
+    let commit = tokio::spawn(prepared.commit());
+    activation_entered.wait().await;
+    drop(operational);
+    assert_eq!(
+        orchestrator.operational_event_stream_health(),
+        OperationalEventStreamHealth::Degraded
+    );
+    activation_release.wait().await;
+    assert!(matches!(
+        commit.await.unwrap(),
+        Err(RvoipError::InvalidState(
+            "authoritative operational event stream is degraded"
+        ))
+    ));
+    wait_for_count(&counts.end, 1).await;
+    assert!(matches!(
+        orchestrator.connection_transport(&connection_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
 }
 
 #[tokio::test]

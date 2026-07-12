@@ -40,13 +40,15 @@ pub struct Config {
     /// realistic mobile network jitter without holding admission for
     /// pathologically dead peers.
     pub bridge_stream_deadline: Duration,
-    /// Maximum time an outbound route may remain prepared but uncommitted.
+    /// Maximum time an outbound route may remain prepared or activating
+    /// without winning its final commit acknowledgement.
     ///
     /// A prepared route is deliberately invisible to Sessions and event
     /// consumers while an application durably records its Connection ID.
     /// Core aborts and closes the provisional adapter route when this
-    /// deadline expires. A finite default prevents abandoned durable-bind
-    /// attempts from retaining adapter or admission capacity indefinitely.
+    /// deadline expires. The same deadline fences a hung staged activation.
+    /// A finite default prevents abandoned durable-bind attempts or adapter
+    /// activation futures from retaining route capacity indefinitely.
     pub outbound_preparation_timeout: Duration,
     /// P6 — `Event::CapacityReport` emit cadence. None disables the
     /// scheduler entirely.
