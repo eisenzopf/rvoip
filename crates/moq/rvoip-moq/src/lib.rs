@@ -45,7 +45,9 @@ pub use publisher::{
     MoqRelaySubstratePolicy, MoqRelayTlsConfig,
 };
 #[cfg(feature = "relay-admission")]
-pub use relay_admission::{MoqRelayAdmissionConfig, RvoipMoqRelayAdmission};
+pub use relay_admission::{
+    MoqRelayAdmissionConfig, MoqRelayAdmissionSubstrate, RvoipMoqRelayAdmission,
+};
 pub use replay::{
     BoundedMemoryMoqReplayStore, MoqReplayError, MoqSessionId, MoqTokenBinding,
     MoqTokenReplayStore, MAX_MOQ_SESSION_ID_BYTES,

@@ -23,20 +23,58 @@ use crate::{
 
 const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Public-listener transport accepted by an rvoip MOQT subscriber admission
+/// policy.
+///
+/// A policy accepts exactly one substrate. Run separate listeners when native
+/// raw-QUIC clients and browser WebTransport clients must both be supported.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MoqRelayAdmissionSubstrate {
+    /// Browser-compatible WebTransport listener.
+    #[default]
+    WebTransport,
+    /// Native draft-19 MOQT-over-QUIC listener.
+    RawQuic,
+}
+
+impl MoqRelayAdmissionSubstrate {
+    fn accepts(self, substrate: Transport) -> bool {
+        matches!(
+            (self, substrate),
+            (Self::WebTransport, Transport::WebTransport) | (Self::RawQuic, Transport::RawQuic)
+        )
+    }
+}
+
 /// Internal I/O bound for validation, revocation, and durable lease actions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MoqRelayAdmissionConfig {
+    /// Maximum duration of one external validation or lease-store operation.
     pub operation_timeout: Duration,
+    /// Exact public-listener transport accepted by this policy.
+    pub subscriber_substrate: MoqRelayAdmissionSubstrate,
 }
 
 impl MoqRelayAdmissionConfig {
+    /// Creates a WebTransport subscriber policy configuration.
     pub fn new(operation_timeout: Duration) -> Result<Self, MoqSessionLeaseError> {
+        Self::for_substrate(operation_timeout, MoqRelayAdmissionSubstrate::WebTransport)
+    }
+
+    /// Creates a subscriber policy configuration for one exact substrate.
+    pub fn for_substrate(
+        operation_timeout: Duration,
+        subscriber_substrate: MoqRelayAdmissionSubstrate,
+    ) -> Result<Self, MoqSessionLeaseError> {
         if operation_timeout.is_zero() {
             return Err(MoqSessionLeaseError::InvalidConfig(
                 "relay admission operation timeout must be greater than zero",
             ));
         }
-        Ok(Self { operation_timeout })
+        Ok(Self {
+            operation_timeout,
+            subscriber_substrate,
+        })
     }
 }
 
@@ -44,6 +82,7 @@ impl Default for MoqRelayAdmissionConfig {
     fn default() -> Self {
         Self {
             operation_timeout: DEFAULT_OPERATION_TIMEOUT,
+            subscriber_substrate: MoqRelayAdmissionSubstrate::WebTransport,
         }
     }
 }
@@ -86,7 +125,10 @@ impl RvoipMoqRelayAdmission {
         leases: Arc<dyn MoqSessionLeaseStore>,
         config: MoqRelayAdmissionConfig,
     ) -> Result<Self, MoqSessionLeaseError> {
-        let config = MoqRelayAdmissionConfig::new(config.operation_timeout)?;
+        let config = MoqRelayAdmissionConfig::for_substrate(
+            config.operation_timeout,
+            config.subscriber_substrate,
+        )?;
         Ok(Self {
             validator,
             authorizer,
@@ -104,7 +146,7 @@ impl RvoipMoqRelayAdmission {
         request: AdmissionRequest<'_>,
     ) -> Result<PreparedAdmission, AdmissionError> {
         if request.negotiated_protocol != MOQT_NEGOTIATED_PROTOCOL
-            || request.substrate != Transport::WebTransport
+            || !self.config.subscriber_substrate.accepts(request.substrate)
             || request.peer_identity.presented_certificate().is_some()
         {
             return Err(AdmissionError::PolicyDenied);
@@ -399,9 +441,9 @@ fn prepare_validated(
     }
     let expires_at = principal.expires_at.ok_or(AdmissionError::PolicyDenied)?;
     let token_id = validated.token_id.ok_or(AdmissionError::PolicyDenied)?;
-    // This public WebTransport policy is receive-only and bound to one exact
-    // broadcast. Wildcard, publisher, and relay scopes are deliberately not
-    // substitutes; those ingress roles use a separate mTLS policy.
+    // This public token-subscriber policy is receive-only and bound to one
+    // exact broadcast. Wildcard, publisher, and relay scopes are deliberately
+    // not substitutes; those ingress roles use a separate mTLS policy.
     let canonical_scope = exact_subscriber_scope(&principal, &namespace)?;
     let session_id =
         MoqSessionId::new(relay_session_id).map_err(|_| AdmissionError::PolicyDenied)?;

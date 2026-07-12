@@ -18,11 +18,11 @@ use rvoip_core_traits::{AuthenticatedPrincipal, AuthenticationMethod};
 use rvoip_moq::{
     BoundedMemoryMoqReplayStore, BoundedMemoryMoqSessionLeaseStore, MoqAction,
     MoqAuthorizationError, MoqAuthorizationGrant, MoqAuthorizationRequest, MoqAuthorizer,
-    MoqPeerIdentity, MoqRelayAdmissionConfig, MoqResource, MoqRevocationChecker,
-    MoqRevocationError, MoqRevocationStatus, MoqSessionLease, MoqSessionLeaseBinding,
-    MoqSessionLeaseClose, MoqSessionLeaseError, MoqSessionLeaseLimits, MoqSessionLeaseSnapshot,
-    MoqSessionLeaseStore, MoqTokenBinding, MoqTokenReplayStore, RvoipMoqRelayAdmission,
-    SecureMoqAuthorizer, MOQT_NEGOTIATED_PROTOCOL,
+    MoqPeerIdentity, MoqRelayAdmissionConfig, MoqRelayAdmissionSubstrate, MoqResource,
+    MoqRevocationChecker, MoqRevocationError, MoqRevocationStatus, MoqSessionLease,
+    MoqSessionLeaseBinding, MoqSessionLeaseClose, MoqSessionLeaseError, MoqSessionLeaseLimits,
+    MoqSessionLeaseSnapshot, MoqSessionLeaseStore, MoqTokenBinding, MoqTokenReplayStore,
+    RvoipMoqRelayAdmission, SecureMoqAuthorizer, MOQT_NEGOTIATED_PROTOCOL,
 };
 
 #[derive(Clone)]
@@ -141,6 +141,24 @@ fn harness(
     tenant_limit: usize,
     operation_timeout: StdDuration,
 ) -> Harness {
+    harness_for_substrate(
+        principal,
+        include_token_id,
+        validator_delay,
+        tenant_limit,
+        operation_timeout,
+        MoqRelayAdmissionSubstrate::WebTransport,
+    )
+}
+
+fn harness_for_substrate(
+    principal: AuthenticatedPrincipal,
+    include_token_id: bool,
+    validator_delay: StdDuration,
+    tenant_limit: usize,
+    operation_timeout: StdDuration,
+    substrate: MoqRelayAdmissionSubstrate,
+) -> Harness {
     let revocation = Arc::new(ToggleRevocation::default());
     let replay = Arc::new(BoundedMemoryMoqReplayStore::new(64).expect("valid replay capacity"));
     let authorizer = Arc::new(SecureMoqAuthorizer::new(replay.clone(), revocation.clone()));
@@ -159,7 +177,8 @@ fn harness(
         validator,
         authorizer,
         leases.clone(),
-        MoqRelayAdmissionConfig::new(operation_timeout).expect("valid timeout"),
+        MoqRelayAdmissionConfig::for_substrate(operation_timeout, substrate)
+            .expect("valid timeout and substrate"),
     )
     .expect("valid policy");
     Harness {
@@ -167,6 +186,102 @@ fn harness(
         revocation,
         leases,
     }
+}
+
+#[tokio::test]
+async fn raw_quic_subscriber_uses_the_same_secure_lifecycle_and_rejects_webtransport() {
+    let expiry = Utc::now() + Duration::minutes(2);
+    let harness = harness_for_substrate(
+        principal(
+            "tenant-a",
+            &["broadcast:subscribe:broadcast-a"],
+            Some(expiry),
+        ),
+        true,
+        StdDuration::ZERO,
+        4,
+        StdDuration::from_secs(1),
+        MoqRelayAdmissionSubstrate::RawQuic,
+    );
+    assert_eq!(
+        harness.policy.config().subscriber_substrate,
+        MoqRelayAdmissionSubstrate::RawQuic
+    );
+
+    let fixture = RequestFixture::new(
+        "raw-session",
+        "moqt://relay.test/tenant-a/broadcast-a",
+        Some("raw-token"),
+    );
+    assert_eq!(
+        require_denied(&harness.policy, &fixture, Transport::WebTransport).await,
+        AdmissionError::PolicyDenied
+    );
+
+    let mut admitted = harness
+        .policy
+        .admit_session(fixture.request(Transport::RawQuic))
+        .await
+        .expect("raw-QUIC token subscriber must be admitted");
+    assert!(admitted.decision().claims.subscribe);
+    assert!(!admitted.decision().claims.publish);
+    assert_eq!(
+        admitted.decision().claims.scope.as_deref(),
+        Some("broadcast:subscribe:broadcast-a")
+    );
+    admitted
+        .revalidate(unix_now())
+        .await
+        .expect("active raw-QUIC lease must revalidate");
+    harness.revocation.revoked.store(true, Ordering::SeqCst);
+    assert_eq!(
+        admitted.revalidate(unix_now()).await,
+        Err(AdmissionError::PolicyDenied)
+    );
+    harness.revocation.revoked.store(false, Ordering::SeqCst);
+    let close = AdmissionCloseContext {
+        reason: AdmissionCloseReason::PeerClosed,
+        ended_at_unix_seconds: unix_now(),
+    };
+    admitted
+        .close(close)
+        .await
+        .expect("first raw-QUIC close must succeed");
+    admitted
+        .close(close)
+        .await
+        .expect("raw-QUIC close retry must be idempotent");
+    assert_eq!(
+        harness
+            .leases
+            .snapshot(Utc::now())
+            .await
+            .unwrap()
+            .active_sessions,
+        0
+    );
+
+    let escalated = harness_for_substrate(
+        principal(
+            "tenant-a",
+            &["broadcast:subscribe:broadcast-a", "broadcast:publish"],
+            Some(expiry),
+        ),
+        true,
+        StdDuration::ZERO,
+        4,
+        StdDuration::from_secs(1),
+        MoqRelayAdmissionSubstrate::RawQuic,
+    );
+    let escalated_fixture = RequestFixture::new(
+        "raw-escalated",
+        "moqt://relay.test/tenant-a/broadcast-a",
+        Some("raw-escalated-token"),
+    );
+    assert_eq!(
+        require_denied(&escalated.policy, &escalated_fixture, Transport::RawQuic).await,
+        AdmissionError::PolicyDenied
+    );
 }
 
 async fn require_denied(
@@ -182,6 +297,25 @@ async fn require_denied(
 
 fn unix_now() -> u64 {
     u64::try_from(Utc::now().timestamp()).expect("test time follows Unix epoch")
+}
+
+#[test]
+fn admission_configuration_defaults_to_webtransport_and_rejects_zero_timeout() {
+    assert_eq!(
+        MoqRelayAdmissionConfig::default().subscriber_substrate,
+        MoqRelayAdmissionSubstrate::WebTransport
+    );
+    assert_eq!(
+        MoqRelayAdmissionConfig::new(StdDuration::from_secs(1))
+            .unwrap()
+            .subscriber_substrate,
+        MoqRelayAdmissionSubstrate::WebTransport
+    );
+    assert!(MoqRelayAdmissionConfig::for_substrate(
+        StdDuration::ZERO,
+        MoqRelayAdmissionSubstrate::RawQuic
+    )
+    .is_err());
 }
 
 #[tokio::test]
