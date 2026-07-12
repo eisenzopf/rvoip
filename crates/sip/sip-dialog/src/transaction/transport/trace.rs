@@ -90,6 +90,12 @@ impl SipTraceRuntime {
         let redactor_changed_message = rendered != raw;
         let original_len = raw.len();
         let (raw_message, truncated) = format_sip_trace_message(&rendered, &formatting_config);
+        // Derive every separately indexed trace surface from the already
+        // redacted diagnostic representation. Re-reading the original Message
+        // here would bypass a custom start-line or Call-ID decision even when
+        // `raw_message` itself is safe.
+        let start_line = format_sip_trace_start_line(trace_start_line(&raw_message), &self.config);
+        let sip_call_id = trace_call_id(&raw_message);
         let event = SipTraceEvent {
             owner_id: self.owner_id.clone(),
             direction,
@@ -97,8 +103,8 @@ impl SipTraceRuntime {
             local_addr: local_addr.to_string(),
             remote_addr: remote_addr.to_string(),
             timestamp_unix_millis: timestamp_unix_millis(),
-            start_line: format_sip_trace_start_line(&start_line(message), &self.config),
-            sip_call_id: message.call_id().map(|call_id| call_id.value().to_string()),
+            start_line,
+            sip_call_id,
             session_id: None,
             raw_message,
             original_len,
@@ -158,19 +164,31 @@ fn timestamp_unix_millis() -> u64 {
         .unwrap_or_default()
 }
 
-fn start_line(message: &Message) -> String {
-    match message {
-        Message::Request(request) => {
-            format!("{} {} SIP/2.0", request.method(), request.uri())
+fn trace_start_line(rendered: &str) -> &str {
+    rendered
+        .split_once('\n')
+        .map_or(rendered, |(start_line, _)| start_line)
+        .trim_end_matches('\r')
+}
+
+fn trace_call_id(rendered: &str) -> Option<String> {
+    for line in rendered.lines().skip(1) {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
         }
-        Message::Response(response) => {
-            format!(
-                "SIP/2.0 {} {}",
-                response.status_code(),
-                response.reason_phrase()
-            )
+        if matches!(line.as_bytes().first(), Some(b' ' | b'\t')) {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("call-id") || name.trim().eq_ignore_ascii_case("i") {
+            let value = value.trim();
+            return (!value.is_empty()).then(|| value.to_string());
         }
     }
+    None
 }
 
 #[cfg(test)]
@@ -184,7 +202,8 @@ mod tests {
     };
     use rvoip_sip_core::builder::SimpleRequestBuilder;
     use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
-    use rvoip_sip_core::{Message, Method};
+    use rvoip_sip_core::types::CallId;
+    use rvoip_sip_core::{Message, Method, Response, StatusCode};
     use rvoip_sip_transport::transport::TransportType;
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -226,6 +245,31 @@ mod tests {
         assert!(trace
             .raw_message
             .contains("REGISTER sip:example.com SIP/2.0"));
+        assert!(!trace.redacted);
+    }
+
+    #[tokio::test]
+    async fn explicit_lower_development_override_preserves_response_reason() {
+        let response = Response::new(StatusCode::BusyHere)
+            .with_reason("visible-development-reason")
+            .with_header(TypedHeader::CallId(CallId::new(
+                "development-response-call",
+            )));
+        let trace = publish_message(
+            Message::Response(response),
+            SipTraceConfig::enabled().verbatim_for_development(),
+            None,
+        )
+        .await;
+
+        assert_eq!(trace.start_line, "SIP/2.0 486 visible-development-reason");
+        assert!(trace
+            .raw_message
+            .starts_with("SIP/2.0 486 visible-development-reason\n"));
+        assert_eq!(
+            trace.sip_call_id.as_deref(),
+            Some("development-response-call")
+        );
         assert!(!trace.redacted);
     }
 
@@ -461,6 +505,83 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn lower_safe_runtime_retains_response_status_but_not_reason_in_any_event_surface() {
+        let response = Response::new(StatusCode::BusyHere)
+            .with_reason("private-upstream-response-reason")
+            .with_header(TypedHeader::CallId(CallId::new("response-call")));
+        let trace =
+            publish_message(Message::Response(response), SipTraceConfig::enabled(), None).await;
+
+        assert_eq!(trace.start_line, "SIP/2.0 486 <redacted-reason>");
+        assert!(trace
+            .raw_message
+            .starts_with("SIP/2.0 486 <redacted-reason>\n"));
+        assert_eq!(trace.sip_call_id.as_deref(), Some("response-call"));
+
+        let serialized = serde_json::to_string(&trace).unwrap();
+        let debug = format!("{trace:?}");
+        for surface in [&trace.raw_message, &trace.start_line, &serialized, &debug] {
+            assert!(!surface.contains("private-upstream-response-reason"));
+            assert!(surface.contains("486"));
+        }
+
+        let custom_response = Response::new(StatusCode::BusyHere)
+            .with_reason("custom-policy-original-reason")
+            .with_header(TypedHeader::CallId(CallId::new("custom-response-call")));
+        let identity_redactor: TraceRedactorFn = Arc::new(str::to_string);
+        let custom_trace = publish_message(
+            Message::Response(custom_response),
+            SipTraceConfig::enabled(),
+            Some(identity_redactor),
+        )
+        .await;
+        assert_eq!(custom_trace.start_line, "SIP/2.0 486 <redacted-reason>");
+        assert!(custom_trace
+            .raw_message
+            .starts_with("SIP/2.0 486 <redacted-reason>\n"));
+        assert!(!format!("{custom_trace:?}").contains("custom-policy-original-reason"));
+    }
+
+    #[tokio::test]
+    async fn custom_call_id_decision_controls_separate_serialized_and_debug_event_field() {
+        let private_call_id = "private-event-call-id";
+        let redactor: TraceRedactorFn = Arc::new(move |raw| {
+            raw.replace(
+                &format!("Call-ID: {private_call_id}"),
+                "Call-ID: <call-id-redacted>",
+            )
+        });
+        let trace = publish_message(
+            trace_message_with_call_id(private_call_id),
+            SipTraceConfig::enabled(),
+            Some(redactor),
+        )
+        .await;
+
+        assert_eq!(trace.sip_call_id.as_deref(), Some("<call-id-redacted>"));
+        assert!(trace.raw_message.contains("Call-ID: <call-id-redacted>"));
+        let serialized = serde_json::to_string(&trace).unwrap();
+        let debug = format!("{trace:?}");
+        assert!(!serialized.contains(private_call_id));
+        assert!(!debug.contains(private_call_id));
+
+        let drop_redactor: TraceRedactorFn =
+            Arc::new(move |raw| raw.replace(&format!("Call-ID: {private_call_id}\r\n"), ""));
+        let dropped = publish_message(
+            trace_message_with_call_id(private_call_id),
+            SipTraceConfig::enabled(),
+            Some(drop_redactor),
+        )
+        .await;
+        assert_eq!(dropped.sip_call_id, None);
+        assert!(!dropped.raw_message.contains(private_call_id));
+        assert!(!serde_json::to_string(&dropped)
+            .unwrap()
+            .contains(private_call_id));
+        assert!(!format!("{dropped:?}").contains(private_call_id));
+    }
+
     async fn publish_trace(
         direction: SipTraceDirection,
     ) -> rvoip_infra_common::events::cross_crate::SipTraceEvent {
@@ -501,13 +622,56 @@ mod tests {
         trace.clone()
     }
 
+    async fn publish_message(
+        message: Message,
+        config: SipTraceConfig,
+        redactor: Option<TraceRedactorFn>,
+    ) -> rvoip_infra_common::events::cross_crate::SipTraceEvent {
+        let coordinator = Arc::new(
+            GlobalEventCoordinator::new(EventCoordinatorConfig::monolithic())
+                .await
+                .unwrap(),
+        );
+        let mut receiver = coordinator.subscribe("transport_to_session").await.unwrap();
+        let runtime = SipTraceRuntime::new_with_redactor(
+            "surface-owner".into(),
+            config,
+            coordinator,
+            redactor,
+        )
+        .unwrap();
+        runtime.publish(
+            SipTraceDirection::Inbound,
+            TransportType::Tcp,
+            "127.0.0.1:5060".parse::<SocketAddr>().unwrap(),
+            "127.0.0.1:5080".parse::<SocketAddr>().unwrap(),
+            &message,
+        );
+        let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let event = event
+            .as_any()
+            .downcast_ref::<RvoipCrossCrateEvent>()
+            .unwrap();
+        let RvoipCrossCrateEvent::TransportToSession(trace) = event else {
+            panic!("expected transport_to_session trace event");
+        };
+        trace.clone()
+    }
+
     fn trace_message() -> Message {
+        trace_message_with_call_id("trace-call")
+    }
+
+    fn trace_message_with_call_id(call_id: &str) -> Message {
         Message::Request(
             SimpleRequestBuilder::new(Method::Register, "sip:example.com")
                 .unwrap()
                 .from("alice", "sip:alice@example.com", Some("tag-a"))
                 .to("alice", "sip:alice@example.com", None)
-                .call_id("trace-call")
+                .call_id(call_id)
                 .cseq(1)
                 .build(),
         )

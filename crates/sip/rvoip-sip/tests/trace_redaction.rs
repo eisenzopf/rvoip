@@ -220,6 +220,80 @@ fn folded_sensitive_headers_inherit_redaction_for_crlf_and_lf() {
     }
 }
 
+#[test]
+fn production_policy_fails_closed_for_response_reasons_and_malformed_headers() {
+    let raw = concat!(
+        "SIP/2.0 503 private-provider-reason\r\n",
+        "\torphan-fold-secret\r\n",
+        "colonless-header-secret\r\n",
+        "Call-ID: operational-response-call\r\n",
+        "\r\n",
+    );
+
+    let scrubbed = apply_message_redactor(&DefaultTraceRedactor, raw);
+
+    assert!(
+        scrubbed.starts_with("SIP/2.0 503 <redacted-reason>\r\n"),
+        "unexpected response trace rendering: {scrubbed:?}"
+    );
+    assert!(scrubbed.contains("\t<redacted>\r\n<redacted>\r\n"));
+    assert!(scrubbed.contains("Call-ID: operational-response-call"));
+    for secret in [
+        "private-provider-reason",
+        "orphan-fold-secret",
+        "colonless-header-secret",
+    ] {
+        assert!(
+            !scrubbed.contains(secret),
+            "malformed trace leaked {secret}"
+        );
+    }
+
+    assert_eq!(
+        apply_message_redactor(&PassthroughRedactor, raw),
+        raw,
+        "the explicit development override remains fully verbatim"
+    );
+}
+
+#[derive(Debug)]
+struct CallIdPolicy {
+    drop: bool,
+}
+
+impl TraceRedactor for CallIdPolicy {
+    fn redact(&self, header: &HeaderName, _value: &str) -> RedactionDecision {
+        if *header == HeaderName::CallId {
+            if self.drop {
+                RedactionDecision::Drop
+            } else {
+                RedactionDecision::Redact("<call-id-redacted>".into())
+            }
+        } else {
+            RedactionDecision::Keep
+        }
+    }
+}
+
+#[test]
+fn selective_call_id_redact_and_drop_are_visible_in_the_rendered_policy_result() {
+    let raw = concat!(
+        "OPTIONS sip:bob@example.test SIP/2.0\r\n",
+        "Call-ID: private-call-id\r\n",
+        "Content-Length: 0\r\n",
+        "\r\n",
+    );
+
+    let redacted = apply_message_redactor(&CallIdPolicy { drop: false }, raw);
+    assert!(redacted.contains("Call-ID: <call-id-redacted>"));
+    assert!(!redacted.contains("private-call-id"));
+
+    let dropped = apply_message_redactor(&CallIdPolicy { drop: true }, raw);
+    assert!(!dropped.contains("Call-ID:"));
+    assert!(!dropped.contains("private-call-id"));
+    assert!(dropped.contains("Content-Length: 0"));
+}
+
 #[derive(Debug)]
 struct FoldPolicy;
 

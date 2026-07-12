@@ -707,7 +707,8 @@ pub struct EndpointSipTrace {
     pub timestamp_unix_millis: u64,
     /// SIP start line.
     pub start_line: String,
-    /// Wire-level SIP `Call-ID` header value when present.
+    /// Trace-policy result for the SIP `Call-ID` header when present. This is
+    /// the original only when the active policy keeps or passes it through.
     pub sip_call_id: Option<String>,
     /// Endpoint call/session id after mapping, when known.
     pub session_id: Option<EndpointCallId>,

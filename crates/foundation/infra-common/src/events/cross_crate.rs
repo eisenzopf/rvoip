@@ -366,7 +366,8 @@ pub struct SipTraceEvent {
     pub timestamp_unix_millis: u64,
     /// SIP start line, for example `INVITE sip:bob@example.com SIP/2.0`.
     pub start_line: String,
-    /// Wire-level SIP `Call-ID` header value when present.
+    /// Trace-policy result for the SIP `Call-ID` header when present. This is
+    /// the original only when the active policy keeps or passes it through.
     pub sip_call_id: Option<String>,
     /// Session-core session id after mapping, when known.
     pub session_id: Option<String>,
@@ -418,6 +419,9 @@ pub const SIP_TRACE_MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// Fixed replacement for a request target in safe trace output.
 pub const SIP_TRACE_REDACTED_REQUEST_URI: &str = "<redacted-request-uri>";
 
+/// Fixed replacement for an untrusted SIP response reason phrase.
+pub const SIP_TRACE_REDACTED_RESPONSE_REASON: &str = "<redacted-reason>";
+
 /// Fixed replacement for a non-allowlisted SIP header value.
 pub const SIP_TRACE_REDACTED_HEADER_VALUE: &str = "<redacted>";
 
@@ -447,9 +451,9 @@ pub fn format_sip_trace_message(raw: &str, config: &SipTraceConfig) -> (String, 
 /// Apply the configured trace policy to a separately retained SIP start line.
 ///
 /// Request methods and the SIP version remain visible, while the complete
-/// Request-URI is replaced. Response status lines contain no Request-URI and
-/// pass through unchanged. Verbatim request targets require sensitive
-/// redaction to be explicitly disabled.
+/// Request-URI is replaced. Response versions and status codes remain visible,
+/// while the arbitrary reason phrase is replaced. Verbatim start lines require
+/// sensitive redaction to be explicitly disabled.
 pub fn format_sip_trace_start_line(start_line: &str, config: &SipTraceConfig) -> String {
     if config.redact_sensitive_headers {
         redact_sip_trace_start_line(start_line)
@@ -458,31 +462,61 @@ pub fn format_sip_trace_start_line(start_line: &str, config: &SipTraceConfig) ->
     }
 }
 
-/// Replace the complete Request-URI in a rendered SIP start line.
+/// Replace untrusted fields in a rendered SIP start line.
 ///
-/// Malformed non-response start lines fail closed to a fixed marker so parser
-/// errors cannot reflect attacker-controlled text into diagnostics.
+/// The complete Request-URI and response reason phrase are replaced while the
+/// method/version or version/status remain available for diagnostics. Both
+/// malformed request and malformed response lines fail closed to a fixed
+/// marker so parser errors cannot reflect attacker-controlled text.
 pub fn redact_sip_trace_start_line(start_line: &str) -> String {
     if start_line.bytes().any(|byte| matches!(byte, b'\r' | b'\n')) {
         return "<redacted start line>".to_string();
     }
-    let mut fields = start_line.split_ascii_whitespace();
-    let first = fields.next();
-    if first.is_some_and(|version| version.eq_ignore_ascii_case("SIP/2.0")) {
-        return start_line.to_string();
-    }
-    let second = fields.next();
-    let third = fields.next();
-    let extra = fields.next();
 
-    match (first, second, third, extra) {
-        (Some(method), Some(_request_uri), Some(version), None)
-            if version.eq_ignore_ascii_case("SIP/2.0") =>
+    if let Some(after_version) = strip_ascii_case_prefix(start_line, "SIP/2.0 ") {
+        let Some((status, _reason)) = after_version.split_once(' ') else {
+            return "<redacted start line>".to_string();
+        };
+        if status.len() == 3
+            && status.bytes().all(|byte| byte.is_ascii_digit())
+            && status
+                .parse::<u16>()
+                .is_ok_and(|status| (100..=699).contains(&status))
         {
-            format!("{method} {SIP_TRACE_REDACTED_REQUEST_URI} {version}")
+            return format!("SIP/2.0 {status} {SIP_TRACE_REDACTED_RESPONSE_REASON}");
         }
-        _ => "<redacted start line>".to_string(),
+        return "<redacted start line>".to_string();
     }
+
+    let mut fields = start_line.split(' ');
+    let (Some(method), Some(request_uri), Some(version), None) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return "<redacted start line>".to_string();
+    };
+    if is_sip_token(method) && !request_uri.is_empty() && version.eq_ignore_ascii_case("SIP/2.0") {
+        format!("{method} {SIP_TRACE_REDACTED_REQUEST_URI} SIP/2.0")
+    } else {
+        "<redacted start line>".to_string()
+    }
+}
+
+fn strip_ascii_case_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        .map(|_| &value[prefix.len()..])
+}
+
+fn is_sip_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'-' | b'.' | b'!' | b'%' | b'*' | b'_' | b'+' | b'`' | b'\'' | b'~'
+                )
+        })
 }
 
 /// Produce a safe diagnostic rendering of a SIP message.
@@ -2210,7 +2244,7 @@ mod tests {
         }
         assert_eq!(
             redact_sip_trace_start_line("SIP/2.0 486 Busy Here"),
-            "SIP/2.0 486 Busy Here"
+            format!("SIP/2.0 486 {SIP_TRACE_REDACTED_RESPONSE_REASON}")
         );
         assert_eq!(
             redact_sip_trace_start_line("malformed secret start line"),
@@ -2225,6 +2259,46 @@ mod tests {
         );
         assert!(!bare_cr.contains("bare-cr-secret"));
         assert!(!bare_cr.contains("private-body-secret"));
+    }
+
+    #[test]
+    fn safe_trace_redacts_response_reasons_and_rejects_malformed_start_lines() {
+        let safe_response =
+            redact_sip_trace_start_line("SIP/2.0 503 upstream-account-secret must not be logged");
+        assert_eq!(
+            safe_response,
+            format!("SIP/2.0 503 {SIP_TRACE_REDACTED_RESPONSE_REASON}")
+        );
+        assert!(!safe_response.contains("upstream-account-secret"));
+
+        for malformed in [
+            "SIP/2.0",
+            "SIP/2.0 503",
+            "SIP/2.0 not-a-status response-secret",
+            "SIP/2.0 99 response-secret",
+            "SIP/2.0 700 response-secret",
+            "INVITE  sip:bob@example.test SIP/2.0",
+            "INVITE sip:bob@example.test SIP/3.0",
+            "INVITE sip:bob@example.test SIP/2.0 extra-secret",
+        ] {
+            assert_eq!(
+                redact_sip_trace_start_line(malformed),
+                "<redacted start line>",
+                "malformed line escaped safe rendering: {malformed}"
+            );
+        }
+
+        let raw = concat!(
+            "SIP/2.0 486 private-response-reason\r\n",
+            "Call-ID: response-call\r\n",
+            "\r\n",
+        );
+        let (rendered, truncated) = format_sip_trace_message(raw, &SipTraceConfig::enabled());
+        assert!(!truncated);
+        assert!(rendered.starts_with(&format!(
+            "SIP/2.0 486 {SIP_TRACE_REDACTED_RESPONSE_REASON}\n"
+        )));
+        assert!(!rendered.contains("private-response-reason"));
     }
 
     #[test]

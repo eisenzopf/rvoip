@@ -220,6 +220,14 @@ pub fn apply_message_redactor(redactor: &dyn TraceRedactor, raw: &str) -> String
         }
     }
 
+    // A fully verbatim policy is the one deliberate exception to the
+    // fail-closed parser below. Keeping this fast path explicit also prevents
+    // malformed diagnostic input from being partly rewritten despite the
+    // operator's passthrough selection.
+    if redactor.allows_verbatim_trace() {
+        return raw.to_string();
+    }
+
     let mut out = String::with_capacity(raw.len());
     let mut continuation = ContinuationDecision::None;
     let mut content_type = None;
@@ -231,14 +239,10 @@ pub fn apply_message_redactor(redactor: &dyn TraceRedactor, raw: &str) -> String
         // works on either CRLF or LF line endings.
         let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
         if first_line {
-            if redactor.allows_verbatim_trace() {
-                out.push_str(line);
-            } else {
-                out.push_str(
-                    &rvoip_infra_common::events::cross_crate::redact_sip_trace_start_line(trimmed),
-                );
-                push_line_ending(&mut out, line);
-            }
+            out.push_str(
+                &rvoip_infra_common::events::cross_crate::redact_sip_trace_start_line(trimmed),
+            );
+            push_line_ending(&mut out, line);
             first_line = false;
             continue;
         }
@@ -268,7 +272,15 @@ pub fn apply_message_redactor(redactor: &dyn TraceRedactor, raw: &str) -> String
         let bytes = trimmed.as_bytes();
         if matches!(bytes.first(), Some(b' ' | b'\t')) {
             match &continuation {
-                ContinuationDecision::None | ContinuationDecision::Keep => out.push_str(line),
+                ContinuationDecision::None => {
+                    let leading_whitespace_len = trimmed.len() - trimmed.trim_start().len();
+                    out.push_str(&trimmed[..leading_whitespace_len]);
+                    out.push_str(
+                        rvoip_infra_common::events::cross_crate::SIP_TRACE_REDACTED_HEADER_VALUE,
+                    );
+                    push_line_ending(&mut out, line);
+                }
+                ContinuationDecision::Keep => out.push_str(line),
                 ContinuationDecision::Redact(replacement) => {
                     let leading_whitespace_len = trimmed.len() - trimmed.trim_start().len();
                     out.push_str(&trimmed[..leading_whitespace_len]);
@@ -280,9 +292,13 @@ pub fn apply_message_redactor(redactor: &dyn TraceRedactor, raw: &str) -> String
             continue;
         }
         let Some(colon) = trimmed.find(':') else {
-            // No colon — not a header (start line); pass verbatim.
-            out.push_str(line);
-            continuation = ContinuationDecision::None;
+            // The start line was consumed above. Any later colonless line in
+            // the header section is malformed and must fail closed.
+            out.push_str(rvoip_infra_common::events::cross_crate::SIP_TRACE_REDACTED_HEADER_VALUE);
+            push_line_ending(&mut out, line);
+            continuation = ContinuationDecision::Redact(
+                rvoip_infra_common::events::cross_crate::SIP_TRACE_REDACTED_HEADER_VALUE.into(),
+            );
             continue;
         };
         let name = trimmed[..colon].trim();

@@ -39,7 +39,8 @@ pub struct SipTrace {
     pub timestamp_unix_millis: u64,
     /// SIP start line, for example `INVITE sip:bob@example.com SIP/2.0`.
     pub start_line: String,
-    /// Wire-level SIP `Call-ID` header value when present.
+    /// Trace-policy result for the SIP `Call-ID` header when present. This is
+    /// the original only when the active policy keeps or passes it through.
     pub sip_call_id: Option<String>,
     /// rvoip-sip session id after mapping, when known.
     pub session_id: Option<CallId>,
