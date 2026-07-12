@@ -7,6 +7,7 @@ use crate::stream::QualitySnapshot;
 use std::fmt;
 use thiserror::Error;
 use tokio::sync::oneshot;
+use zeroize::Zeroize;
 
 /// Maximum UTF-8 size of an adapter-owned inbound routing hint.
 pub const MAX_INBOUND_ROUTING_HINT_BYTES: usize = 2_048;
@@ -76,6 +77,21 @@ impl InboundRoutingHint {
     /// Avoid formatting or logging the returned value.
     pub fn expose_secret(&self) -> &str {
         &self.0
+    }
+
+    /// Transfer the owned routing material to the policy layer.
+    ///
+    /// The returned `String` remains sensitive and its final owner must
+    /// zeroize it. The wrapper's `Drop` implementation clears any value that
+    /// is not explicitly transferred.
+    pub fn into_secret(mut self) -> String {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for InboundRoutingHint {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 
@@ -172,6 +188,15 @@ impl fmt::Debug for InboundSignalingMetadata {
     }
 }
 
+impl Drop for InboundSignalingMetadata {
+    fn drop(&mut self) {
+        for (name, value) in &mut self.entries {
+            name.zeroize();
+            value.zeroize();
+        }
+    }
+}
+
 const fn is_metadata_name_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric()
         || matches!(
@@ -238,6 +263,12 @@ impl InboundConnectionContext {
 
     pub fn routing_hint(&self) -> Option<&InboundRoutingHint> {
         self.routing_hint.as_ref()
+    }
+
+    /// Take the routing hint exactly once for an owning policy boundary.
+    /// Untaken routing material is zeroized when this context is dropped.
+    pub fn take_routing_hint(&mut self) -> Option<InboundRoutingHint> {
+        self.routing_hint.take()
     }
 
     pub fn metadata(&self) -> &InboundSignalingMetadata {
@@ -477,6 +508,26 @@ mod tests {
         assert!(!debug.contains("correlation-secret"));
         assert!(!debug.contains("second-secret"));
         assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn inbound_routing_hint_transfers_owned_secret_exactly_once() {
+        let connection_id = ConnectionId::new();
+        let owner = principal(Some("tenant-a"));
+        let mut context = InboundConnectionContext::new(
+            connection_id,
+            Transport::WebRtc,
+            &owner,
+            Some(InboundRoutingHint::new("attachment-secret").unwrap()),
+            InboundSignalingMetadata::default(),
+        )
+        .unwrap();
+
+        let mut secret = context.take_routing_hint().unwrap().into_secret();
+        assert_eq!(secret, "attachment-secret");
+        assert!(context.take_routing_hint().is_none());
+        secret.zeroize();
+        assert!(secret.is_empty());
     }
 
     #[test]
