@@ -12,13 +12,20 @@ categories.workspace = true
 keywords.workspace = true
 description = "Redis-backed auth provider implementations for RVoIP"
 
+[features]
+default = []
+moq = ["dep:rvoip-moq"]
+
 [dependencies]
 async-trait = { workspace = true }
+chrono = { workspace = true }
 redis = { version = "0.27", default-features = false, features = ["script", "tokio-comp"] }
 rvoip-auth-core.workspace = true
+rvoip-moq = { workspace = true, optional = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+rvoip-core-traits.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]

@@ -6,6 +6,12 @@
 //! implementation for SIP Digest replay, token revocation, and auth rate
 //! limiting.
 
+#[cfg(feature = "moq")]
+mod moq;
+
+#[cfg(feature = "moq")]
+pub use moq::{RedisMoqSessionLeaseConfig, RedisMoqSessionLeaseStore};
+
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
