@@ -317,6 +317,7 @@ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio
 # so the process has exactly ONE rustls CryptoProvider — otherwise rustls
 # can't auto-select one and TLS/WSS paths panic at runtime.
 web-transport-quinn = { version = "0.11", default-features = false, features = ["ring"] }
+web-transport = "0.10.6"
 tokio-util = { version = "0.7", features = ["codec", "compat"] }
 metrics = "0.23"
 # Reviewed MOQT draft-19 fork. Keep every moq-rs crate on the same immutable

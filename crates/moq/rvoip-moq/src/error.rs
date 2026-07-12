@@ -1,7 +1,8 @@
 use rvoip_core_traits::error::RvoipError;
 
 use crate::{
-    LocError, MoqCompatibilityError, MoqGroupIdAllocationError, MoqNamespaceError, MsfCatalogError,
+    LocError, MoqCatalogSubscriberConfigError, MoqCatalogSubscriberFailure, MoqCompatibilityError,
+    MoqGroupIdAllocationError, MoqNamespaceError, MsfCatalogError,
 };
 
 /// Bounded, non-sensitive relay failure categories.
@@ -60,6 +61,10 @@ impl std::fmt::Display for MoqRelayFailure {
 pub enum MoqError {
     #[error("invalid MOQT publisher configuration: {0}")]
     InvalidConfig(&'static str),
+    #[error(transparent)]
+    CatalogSubscriberConfig(#[from] MoqCatalogSubscriberConfigError),
+    #[error("MOQT catalog subscriber failed: {0}")]
+    CatalogSubscriber(MoqCatalogSubscriberFailure),
     #[error("MOQT publisher construction requires an active Tokio runtime")]
     RuntimeUnavailable,
     #[error(transparent)]

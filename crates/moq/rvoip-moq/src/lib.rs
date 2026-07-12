@@ -7,6 +7,8 @@
 mod authorization;
 mod catalog;
 mod catalog_subscriber;
+mod catalog_subscriber_wire;
+mod catalog_subscription;
 mod compatibility;
 mod error;
 mod group;
@@ -34,6 +36,7 @@ pub use catalog_subscriber::{
     MAX_CATALOG_BYTES, MAX_CATALOG_RECONNECT_ATTEMPTS, MAX_CATALOG_RECONNECT_BACKOFF,
     MAX_CATALOG_RECONNECT_DEADLINE, MAX_MOQ_SUBSCRIBER_CREDENTIAL_BYTES,
 };
+pub use catalog_subscription::{MoqCatalogSubscriber, MoqCatalogSubscriberTlsConfig};
 pub use compatibility::{
     MoqCompatibility, MoqCompatibilityError, MoqProtocolVersion, LOC_DRAFT, LOC_DRAFT_NUMBER,
     MOQT_DRAFT, MOQT_DRAFT_NUMBER, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT, MSF_DRAFT_NUMBER,

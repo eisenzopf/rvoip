@@ -310,6 +310,7 @@ pub(crate) struct WireRelayClient {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WireTlsMode {
     ProductionMutualTls,
+    ProductionServerAuthenticated,
     #[cfg(feature = "insecure-development")]
     DevelopmentServerAuthenticated,
     #[cfg(feature = "insecure-development")]
@@ -340,6 +341,18 @@ impl WireRelayClient {
                 if disable_verification {
                     return Err(MoqError::TlsConfiguration(
                         "production relay connections require server certificate verification",
+                    ));
+                }
+            }
+            WireTlsMode::ProductionServerAuthenticated => {
+                if client_certificate.is_some() {
+                    return Err(MoqError::TlsConfiguration(
+                        "server-authenticated subscriber connections cannot present client credentials",
+                    ));
+                }
+                if disable_verification {
+                    return Err(MoqError::TlsConfiguration(
+                        "production subscriber connections require server certificate verification",
                     ));
                 }
             }
@@ -393,6 +406,28 @@ impl WireRelayClient {
             client: endpoint.client,
             require_authenticated_peer,
         })
+    }
+
+    pub(crate) fn bind_server_authenticated(
+        bind: SocketAddr,
+        root_certificates: Vec<PathBuf>,
+    ) -> Result<Self, MoqError> {
+        Self::bind(
+            bind,
+            root_certificates,
+            None,
+            None,
+            false,
+            WireTlsMode::ProductionServerAuthenticated,
+        )
+    }
+
+    pub(crate) fn client(&self) -> &moq_native_ietf::quic::Client {
+        &self.client
+    }
+
+    pub(crate) const fn requires_authenticated_peer(&self) -> bool {
+        self.require_authenticated_peer
     }
 }
 
@@ -631,7 +666,7 @@ pub(crate) async fn publish_to_relay(
     })
 }
 
-fn canonical_session_target(
+pub(crate) fn canonical_session_target(
     relay: &Url,
     substrate_policy: MoqRelaySubstratePolicy,
 ) -> Result<(SessionTarget, MoqRelaySubstratePolicy), MoqError> {
@@ -654,7 +689,7 @@ fn canonical_session_target(
     }
 }
 
-fn native_substrate_policy(
+pub(crate) fn native_substrate_policy(
     substrate_policy: MoqRelaySubstratePolicy,
 ) -> moq_native_ietf::quic::SubstratePolicy {
     match substrate_policy {
@@ -666,7 +701,9 @@ fn native_substrate_policy(
     }
 }
 
-fn map_peer_identity(identity: moq_native_ietf::tls::PeerIdentity) -> MoqRelayPeerIdentity {
+pub(crate) fn map_peer_identity(
+    identity: moq_native_ietf::tls::PeerIdentity,
+) -> MoqRelayPeerIdentity {
     let certificate_fields = |identity: &moq_native_ietf::tls::CertificateIdentity| {
         (
             identity.leaf_sha256_hex(),
@@ -695,7 +732,7 @@ fn map_peer_identity(identity: moq_native_ietf::tls::PeerIdentity) -> MoqRelayPe
     }
 }
 
-fn admit_relay_peer(
+pub(crate) fn admit_relay_peer(
     identity: &MoqRelayPeerIdentity,
     require_authenticated_peer: bool,
 ) -> Result<(), MoqError> {
@@ -1097,6 +1134,18 @@ mod tests {
             .unwrap();
         catalog.finish().unwrap();
         assert!(publication.is_cleanly_completed_for_test());
+    }
+
+    #[tokio::test]
+    async fn production_catalog_subscriber_uses_verified_server_auth_without_a_client_identity() {
+        let pki = TestPki::new();
+        let subscriber = WireRelayClient::bind_server_authenticated(
+            "127.0.0.1:0".parse().unwrap(),
+            vec![pki.certificate().to_owned()],
+        )
+        .unwrap();
+        assert!(subscriber.requires_authenticated_peer());
+        assert!(subscriber.client().verifies_server_certificates());
     }
 
     #[cfg(feature = "insecure-development")]

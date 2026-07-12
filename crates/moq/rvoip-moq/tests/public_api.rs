@@ -7,17 +7,19 @@ use rvoip_core_traits::broadcast::{
 };
 use rvoip_moq::{
     InMemoryMoqGroupIdAllocator, LocOpusPacketizer, MoqBroadcastPublisher, MoqCatalogApplyOutcome,
-    MoqCatalogObject, MoqCatalogStateMachine, MoqCatalogSubscriberConfig,
-    MoqCatalogSubscriberLifecycle, MoqCompatibility, MoqGroupIdAllocator, MoqNamespace,
-    MoqProtocolVersion, MoqPublisherConfig, MoqRelayConnectionPolicy, MoqRelayPeerIdentity,
-    MoqRelaySubstratePolicy, MoqRelayTlsConfig, MoqSubscriberCredential,
-    MoqSubscriberCredentialError, MoqSubscriberCredentialProvider, MoqSubscriberCredentialRequest,
-    MsfCatalog, MsfCatalogState, CATALOG_TRACK, LOC_DRAFT, MOQT_DRAFT, MOQT_NEGOTIATED_PROTOCOL,
-    MSF_DRAFT,
+    MoqCatalogObject, MoqCatalogStateMachine, MoqCatalogSubscriber, MoqCatalogSubscriberConfig,
+    MoqCatalogSubscriberLifecycle, MoqCatalogSubscriberTlsConfig, MoqCompatibility,
+    MoqGroupIdAllocator, MoqNamespace, MoqProtocolVersion, MoqPublisherConfig,
+    MoqRelayConnectionPolicy, MoqRelayPeerIdentity, MoqRelaySubstratePolicy, MoqRelayTlsConfig,
+    MoqSubscriberCredential, MoqSubscriberCredentialError, MoqSubscriberCredentialProvider,
+    MoqSubscriberCredentialRequest, MsfCatalog, MsfCatalogState, CATALOG_TRACK, LOC_DRAFT,
+    MOQT_DRAFT, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT,
 };
 use url::Url;
 
 struct TestCredentialProvider;
+
+fn assert_send_sync<T: Send + Sync>() {}
 
 #[async_trait]
 impl MoqSubscriberCredentialProvider for TestCredentialProvider {
@@ -76,6 +78,11 @@ async fn application_contract_uses_only_rvoip_owned_models() {
     assert_eq!(subscriber_state.update_count(), 1);
     assert!(!MoqCatalogSubscriberLifecycle::Live.is_terminal());
     assert!(MoqCatalogSubscriberLifecycle::PermanentlyCompleted.is_terminal());
+    let subscriber_tls = MoqCatalogSubscriberTlsConfig::default();
+    assert!(subscriber_tls.root_certificates.is_empty());
+    assert!(!format!("{subscriber_tls:?}").contains("PRIVATE KEY"));
+    let _managed_constructor = MoqCatalogSubscriber::bind;
+    assert_send_sync::<MoqCatalogSubscriber>();
 
     let _packetizer = LocOpusPacketizer::new();
     assert_eq!(

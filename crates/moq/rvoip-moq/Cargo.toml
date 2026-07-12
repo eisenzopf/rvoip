@@ -25,6 +25,7 @@ rvoip-auth-core.workspace = true
 moq-transport.workspace = true
 moq-native-ietf.workspace = true
 moq-relay-ietf = { workspace = true, optional = true, default-features = false }
+web-transport.workspace = true
 url.workspace = true
 
 async-trait.workspace = true

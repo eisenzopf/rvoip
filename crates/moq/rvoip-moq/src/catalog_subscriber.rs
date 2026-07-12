@@ -85,6 +85,10 @@ impl MoqSubscriberCredential {
     pub(crate) fn into_wire_bytes(mut self) -> Zeroizing<Vec<u8>> {
         Zeroizing::new(std::mem::take(&mut self.bytes))
     }
+
+    pub(crate) fn fingerprint(&self) -> [u8; 32] {
+        Sha256::digest(&self.bytes).into()
+    }
 }
 
 impl fmt::Debug for MoqSubscriberCredential {
@@ -142,6 +146,11 @@ pub struct MoqCatalogSubscriberConfig {
     pub substrate: MoqRelaySubstratePolicy,
     pub max_catalog_bytes: usize,
     pub attempt_timeout: Duration,
+    /// Total replacement-connection budget for this managed handle.
+    ///
+    /// The count does not reset after a successful reconnect, so a flapping
+    /// peer cannot create an unbounded number of sessions. The deadline below
+    /// does reset after success and bounds each individual outage window.
     pub max_reconnect_attempts: u32,
     pub reconnect_initial_backoff: Duration,
     pub reconnect_max_backoff: Duration,
@@ -362,6 +371,29 @@ pub enum MoqCatalogSubscriberFailure {
     StreamEnded,
     ReconnectExhausted,
     TaskFailed,
+}
+
+impl std::fmt::Display for MoqCatalogSubscriberFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::CredentialUnavailable => "credential-unavailable",
+            Self::CredentialDenied => "credential-denied",
+            Self::CredentialReused => "credential-reused",
+            Self::ConnectFailed => "connect-failed",
+            Self::ConnectTimeout => "connect-timeout",
+            Self::PeerUnauthenticated => "peer-unauthenticated",
+            Self::ProtocolMismatch => "protocol-mismatch",
+            Self::SetupFailed => "setup-failed",
+            Self::SubscribeFailed => "subscribe-failed",
+            Self::InvalidTrack => "invalid-track",
+            Self::InvalidCatalog => "invalid-catalog",
+            Self::PayloadTooLarge => "payload-too-large",
+            Self::StreamEnded => "stream-ended",
+            Self::ReconnectExhausted => "reconnect-exhausted",
+            Self::TaskFailed => "task-failed",
+        };
+        formatter.write_str(value)
+    }
 }
 
 /// Subscriber lifecycle, independent of any draft-specific session handle.
