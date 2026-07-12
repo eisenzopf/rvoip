@@ -4,12 +4,13 @@
 //! readers, writers, sessions, and errors cannot appear in rvoip-moq's public
 //! signatures.
 
-use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+#[cfg(test)]
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use moq_transport::coding::{TrackName, TrackNamespace};
@@ -23,8 +24,8 @@ use tokio::task::JoinHandle;
 use url::Url;
 
 use crate::{
-    LocAudioObject, MoqError, MoqNamespace, MoqRelayFailure, MoqRelaySubstratePolicy, AUDIO_TRACK,
-    CATALOG_TRACK, MOQT_NEGOTIATED_PROTOCOL,
+    LocAudioObject, MoqError, MoqNamespace, MoqRelayFailure, MoqRelayPeerIdentity,
+    MoqRelaySubstratePolicy, AUDIO_TRACK, CATALOG_TRACK, MOQT_NEGOTIATED_PROTOCOL,
 };
 
 pub(crate) struct WirePublication {
@@ -165,6 +166,7 @@ pub(crate) struct WireRelayClient {
     // accept-future set which is intentionally not Sync and is unnecessary for
     // an origin publishing to a relay.
     client: moq_native_ietf::quic::Client,
+    require_authenticated_peer: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -220,92 +222,38 @@ impl WireRelayClient {
                 }
             }
         }
-        let roots = root_certificates;
-        let client = if let (Some(certificate), Some(private_key)) =
-            (client_certificate, client_private_key)
-        {
-            let certificates = rustls_pemfile::certs(&mut BufReader::new(
-                std::fs::File::open(certificate).map_err(|_| {
-                    MoqError::TlsConfiguration("client certificate could not be read")
-                })?,
-            ))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| MoqError::TlsConfiguration("client certificate is invalid"))?;
-            let key = rustls_pemfile::private_key(&mut BufReader::new(
-                std::fs::File::open(private_key).map_err(|_| {
-                    MoqError::TlsConfiguration("client private key could not be read")
-                })?,
-            ))
-            .map_err(|_| MoqError::TlsConfiguration("client private key is invalid"))?
-            .ok_or(MoqError::TlsConfiguration("client private key is empty"))?;
-            let mut root_store = rustls::RootCertStore::empty();
-            if roots.is_empty() {
-                for certificate in rustls_native_certs::load_native_certs().map_err(|_| {
-                    MoqError::TlsConfiguration("system trust roots could not be loaded")
-                })? {
-                    root_store
-                        .add(certificate)
-                        .map_err(|_| MoqError::TlsConfiguration("system trust root is invalid"))?;
-                }
-            } else {
-                for root in roots {
-                    for certificate in rustls_pemfile::certs(&mut BufReader::new(
-                        std::fs::File::open(root).map_err(|_| {
-                            MoqError::TlsConfiguration("relay trust root could not be read")
-                        })?,
-                    )) {
-                        root_store
-                            .add(certificate.map_err(|_| {
-                                MoqError::TlsConfiguration("relay trust root is invalid")
-                            })?)
-                            .map_err(|_| {
-                                MoqError::TlsConfiguration("relay trust root is invalid")
-                            })?;
-                    }
-                }
-            }
-            rustls::ClientConfig::builder_with_provider(Arc::new(
-                rustls::crypto::ring::default_provider(),
-            ))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .map_err(|_| MoqError::TlsConfiguration("TLS 1.3 is unavailable"))?
-            .with_root_certificates(root_store)
-            .with_client_auth_cert(certificates, key)
-            .map_err(|_| MoqError::TlsConfiguration("client credentials are invalid"))?
-        } else {
-            #[cfg(feature = "insecure-development")]
-            {
-                moq_native_ietf::tls::Args {
-                    root: roots,
-                    disable_verify: disable_verification,
-                    ..Default::default()
-                }
-                .load()
-                .map_err(|_| MoqError::TlsConfiguration("relay trust roots could not be loaded"))?
-                .client
-            }
-            #[cfg(not(feature = "insecure-development"))]
-            {
-                let _ = (roots, disable_verification);
-                return Err(MoqError::TlsConfiguration(
-                    "production relay connections require client credentials",
-                ));
-            }
-        };
-        let config = moq_native_ietf::quic::Config::new(
-            bind,
-            None,
-            moq_native_ietf::tls::Config {
-                client,
-                server: None,
-                fingerprints: Vec::new(),
-            },
-        )
-        .map_err(|_| MoqError::TlsConfiguration("QUIC client configuration failed"))?;
+        let require_authenticated_peer = !disable_verification;
+        let tls = moq_native_ietf::tls::Args {
+            root: root_certificates,
+            client_cert: client_certificate,
+            client_key: client_private_key,
+            disable_verify: disable_verification,
+            ..Default::default()
+        }
+        .load()
+        .map_err(|_| MoqError::TlsConfiguration("MOQT TLS configuration could not be loaded"))?;
+        if tls.verifies_server_certificates() != require_authenticated_peer {
+            return Err(MoqError::TlsConfiguration(
+                "MOQT TLS verification posture does not match the requested mode",
+            ));
+        }
+        let config = moq_native_ietf::quic::Config::new(bind, None, tls)
+            .map_err(|_| MoqError::TlsConfiguration("QUIC client configuration failed"))?;
         let endpoint = moq_native_ietf::quic::Endpoint::new(config)
             .map_err(|_| MoqError::TlsConfiguration("QUIC client bind failed"))?;
+        if endpoint.verifies_server_certificates() != require_authenticated_peer
+            || endpoint.client_auth_mode() != moq_native_ietf::tls::ClientAuthMode::Disabled
+            || endpoint.server.is_some()
+            || endpoint.writes_per_connection_diagnostics()
+            || endpoint.tls_key_logging_enabled()
+        {
+            return Err(MoqError::TlsConfiguration(
+                "MOQT endpoint security evidence does not match the origin-client profile",
+            ));
+        }
         Ok(Self {
             client: endpoint.client,
+            require_authenticated_peer,
         })
     }
 }
@@ -316,6 +264,7 @@ pub(crate) struct WireRelayPublication {
     pub(crate) endpoint_uri: String,
     pub(crate) substrate: BroadcastSubstrate,
     pub(crate) negotiated_protocol: String,
+    pub(crate) peer_identity: MoqRelayPeerIdentity,
     session_task: Option<JoinHandle<MoqRelayFailure>>,
     publish_task: Option<JoinHandle<MoqRelayFailure>>,
     runtime: tokio::runtime::Handle,
@@ -458,6 +407,8 @@ pub(crate) async fn publish_to_relay(
         .connect_target(&target, substrate_policy, None)
         .await
         .map_err(|_| MoqError::RelayFailure(MoqRelayFailure::ConnectFailed))?;
+    let peer_identity = map_peer_identity(connection.peer_identity);
+    admit_relay_peer(&peer_identity, client.require_authenticated_peer)?;
     let negotiated = connection.negotiated;
     if negotiated.protocol != MOQT_NEGOTIATED_PROTOCOL {
         return Err(MoqError::NegotiatedProtocolMismatch {
@@ -524,6 +475,7 @@ pub(crate) async fn publish_to_relay(
         endpoint_uri,
         substrate,
         negotiated_protocol,
+        peer_identity,
         session_task: Some(pending_session.take()),
         publish_task: Some(publish_task),
         runtime,
@@ -565,6 +517,45 @@ fn native_substrate_policy(
     }
 }
 
+fn map_peer_identity(identity: moq_native_ietf::tls::PeerIdentity) -> MoqRelayPeerIdentity {
+    let certificate_fields = |identity: &moq_native_ietf::tls::CertificateIdentity| {
+        (
+            identity.leaf_sha256_hex(),
+            identity.chain_len(),
+            identity.total_der_bytes(),
+        )
+    };
+    match identity {
+        moq_native_ietf::tls::PeerIdentity::Anonymous => MoqRelayPeerIdentity::Anonymous,
+        moq_native_ietf::tls::PeerIdentity::UnverifiedCertificate(identity) => {
+            let (leaf_sha256, chain_len, total_der_bytes) = certificate_fields(&identity);
+            MoqRelayPeerIdentity::UnverifiedCertificate {
+                leaf_sha256,
+                chain_len,
+                total_der_bytes,
+            }
+        }
+        moq_native_ietf::tls::PeerIdentity::Certificate(identity) => {
+            let (leaf_sha256, chain_len, total_der_bytes) = certificate_fields(&identity);
+            MoqRelayPeerIdentity::VerifiedCertificate {
+                leaf_sha256,
+                chain_len,
+                total_der_bytes,
+            }
+        }
+    }
+}
+
+fn admit_relay_peer(
+    identity: &MoqRelayPeerIdentity,
+    require_authenticated_peer: bool,
+) -> Result<(), MoqError> {
+    if require_authenticated_peer && !identity.is_authenticated() {
+        return Err(MoqError::RelayPeerUnauthenticated);
+    }
+    Ok(())
+}
+
 fn map_publish_namespace_acceptance_error(error: PublishNamespaceAcceptanceError) -> MoqError {
     match error {
         PublishNamespaceAcceptanceError::Rejected(rejection) => {
@@ -585,6 +576,8 @@ fn map_publish_namespace_acceptance_error(error: PublishNamespaceAcceptanceError
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use bytes::Bytes;
     use moq_transport::coding::ReasonPhrase;
     use moq_transport::coding::Value;
@@ -593,6 +586,104 @@ mod tests {
 
     use super::*;
     use crate::{LOC_TIMESCALE_PROPERTY, LOC_TIMESTAMP_PROPERTY};
+
+    struct TestPki {
+        directory: PathBuf,
+        certificate: PathBuf,
+        private_key: PathBuf,
+    }
+
+    impl TestPki {
+        fn new() -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let directory = std::env::temp_dir().join(format!(
+                "rvoip-moq-opaque-tls-{}-{nonce}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&directory).unwrap();
+            let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+            let certificate = directory.join("identity.pem");
+            let private_key = directory.join("identity.key");
+            std::fs::write(&certificate, generated.cert.pem()).unwrap();
+            std::fs::write(&private_key, generated.signing_key.serialize_pem()).unwrap();
+            Self {
+                directory,
+                certificate,
+                private_key,
+            }
+        }
+
+        fn certificate(&self) -> &Path {
+            &self.certificate
+        }
+
+        fn private_key(&self) -> &Path {
+            &self.private_key
+        }
+    }
+
+    impl Drop for TestPki {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[test]
+    fn opaque_native_tls_configuration_is_the_only_wire_construction_path() {
+        let implementation = include_str!("wire.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        assert!(implementation.contains("moq_native_ietf::tls::Args"));
+        assert!(!implementation.contains("moq_native_ietf::tls::Config {"));
+        assert!(!implementation.contains("rustls::ClientConfig"));
+    }
+
+    #[tokio::test]
+    async fn opaque_tls_builder_preserves_the_production_mtls_posture() {
+        let pki = TestPki::new();
+        let client = WireRelayClient::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            vec![pki.certificate().to_owned()],
+            Some(pki.certificate().to_owned()),
+            Some(pki.private_key().to_owned()),
+            false,
+            WireTlsMode::ProductionMutualTls,
+        )
+        .unwrap();
+        assert!(client.require_authenticated_peer);
+        assert!(client.client.verifies_server_certificates());
+    }
+
+    #[test]
+    fn verified_tls_identity_is_required_outside_insecure_development() {
+        let anonymous = MoqRelayPeerIdentity::Anonymous;
+        let unverified = MoqRelayPeerIdentity::UnverifiedCertificate {
+            leaf_sha256: "22".repeat(32),
+            chain_len: 1,
+            total_der_bytes: 512,
+        };
+        let verified = MoqRelayPeerIdentity::VerifiedCertificate {
+            leaf_sha256: "33".repeat(32),
+            chain_len: 1,
+            total_der_bytes: 512,
+        };
+
+        assert!(matches!(
+            admit_relay_peer(&anonymous, true),
+            Err(MoqError::RelayPeerUnauthenticated)
+        ));
+        assert!(matches!(
+            admit_relay_peer(&unverified, true),
+            Err(MoqError::RelayPeerUnauthenticated)
+        ));
+        admit_relay_peer(&verified, true).unwrap();
+        admit_relay_peer(&anonymous, false).unwrap();
+        admit_relay_peer(&unverified, false).unwrap();
+    }
 
     #[test]
     fn canonical_target_keeps_substrate_policy_separate() {
@@ -621,6 +712,24 @@ mod tests {
             ),
             Err(MoqError::InvalidRelayTarget)
         ));
+    }
+
+    #[test]
+    fn canonical_targets_reject_userinfo_without_leaking_credentials() {
+        for relay in [
+            "moqt://user:password@relay.example/live",
+            "https://user:password@relay.example/live",
+        ] {
+            let error = canonical_session_target(
+                &Url::parse(relay).unwrap(),
+                MoqRelaySubstratePolicy::Auto,
+            )
+            .unwrap_err();
+            assert!(matches!(error, MoqError::InvalidRelayTarget));
+            let diagnostic = format!("{error:?} {error}");
+            assert!(!diagnostic.contains("user"));
+            assert!(!diagnostic.contains("password"));
+        }
     }
 
     #[test]
@@ -742,9 +851,10 @@ mod tests {
     }
 
     #[cfg(feature = "insecure-development")]
-    #[test]
-    fn production_and_development_tls_postures_are_explicit() {
+    #[tokio::test]
+    async fn production_and_development_tls_postures_are_explicit() {
         let bind = "127.0.0.1:0".parse().unwrap();
+        let pki = TestPki::new();
         assert!(matches!(
             WireRelayClient::bind(
                 bind,
@@ -778,6 +888,30 @@ mod tests {
             ),
             Err(MoqError::TlsConfiguration(_))
         ));
+
+        let server_authenticated = WireRelayClient::bind(
+            bind,
+            vec![pki.certificate().to_owned()],
+            None,
+            None,
+            false,
+            WireTlsMode::DevelopmentServerAuthenticated,
+        )
+        .unwrap();
+        assert!(server_authenticated.require_authenticated_peer);
+        assert!(server_authenticated.client.verifies_server_certificates());
+
+        let insecure = WireRelayClient::bind(
+            bind,
+            vec![pki.certificate().to_owned()],
+            None,
+            None,
+            true,
+            WireTlsMode::DevelopmentInsecure,
+        )
+        .unwrap();
+        assert!(!insecure.require_authenticated_peer);
+        assert!(!insecure.client.verifies_server_certificates());
     }
 
     #[test]

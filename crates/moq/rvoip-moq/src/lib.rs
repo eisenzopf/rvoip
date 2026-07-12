@@ -36,8 +36,8 @@ pub use namespace::{MoqNamespace, MoqNamespaceError, NamespaceComponent};
 pub use publisher::MoqRelayDevelopmentMode;
 pub use publisher::{
     MoqBroadcastPublisher, MoqPublisherConfig, MoqRelayClient, MoqRelayConnectionPolicy,
-    MoqRelayHealthIssue, MoqRelayHealthSnapshot, MoqRelayPublication, MoqRelaySubstratePolicy,
-    MoqRelayTlsConfig,
+    MoqRelayHealthIssue, MoqRelayHealthSnapshot, MoqRelayPeerIdentity, MoqRelayPublication,
+    MoqRelaySubstratePolicy, MoqRelayTlsConfig,
 };
 pub use replay::{
     BoundedMemoryMoqReplayStore, MoqReplayError, MoqSessionId, MoqTokenBinding,

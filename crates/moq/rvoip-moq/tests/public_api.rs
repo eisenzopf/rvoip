@@ -3,8 +3,8 @@ use rvoip_core_traits::broadcast::{
 };
 use rvoip_moq::{
     LocOpusPacketizer, MoqBroadcastPublisher, MoqCompatibility, MoqNamespace, MoqProtocolVersion,
-    MoqPublisherConfig, MoqRelayConnectionPolicy, MoqRelaySubstratePolicy, MsfCatalog, LOC_DRAFT,
-    MOQT_DRAFT, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT,
+    MoqPublisherConfig, MoqRelayConnectionPolicy, MoqRelayPeerIdentity, MoqRelaySubstratePolicy,
+    MoqRelayTlsConfig, MsfCatalog, LOC_DRAFT, MOQT_DRAFT, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT,
 };
 
 #[tokio::test]
@@ -37,6 +37,22 @@ async fn application_contract_uses_only_rvoip_owned_models() {
     assert_eq!(
         MoqRelayConnectionPolicy::default().substrate,
         MoqRelaySubstratePolicy::RawQuic
+    );
+    let tls = MoqRelayTlsConfig::default();
+    assert!(tls.client_certificate.is_none());
+    assert!(tls.client_private_key.is_none());
+    let relay_identity = MoqRelayPeerIdentity::VerifiedCertificate {
+        leaf_sha256: "aa".repeat(32),
+        chain_len: 1,
+        total_der_bytes: 512,
+    };
+    assert!(relay_identity.is_authenticated());
+    assert_eq!(
+        serde_json::from_value::<MoqRelayPeerIdentity>(
+            serde_json::to_value(&relay_identity).unwrap()
+        )
+        .unwrap(),
+        relay_identity
     );
     assert!(matches!(
         publisher.endpoint().resource,

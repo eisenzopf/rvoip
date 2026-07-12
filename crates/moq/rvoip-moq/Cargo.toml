@@ -23,9 +23,6 @@ rvoip-core-traits.workspace = true
 moq-transport.workspace = true
 moq-native-ietf.workspace = true
 url.workspace = true
-rustls.workspace = true
-rustls-pemfile.workspace = true
-rustls-native-certs = "0.7"
 
 async-trait.workspace = true
 bytes.workspace = true
@@ -38,6 +35,9 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 metrics.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
 
 [lints]
 workspace = true

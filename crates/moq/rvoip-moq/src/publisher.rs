@@ -56,6 +56,38 @@ pub enum MoqRelaySubstratePolicy {
     WebTransport,
 }
 
+/// Bounded TLS identity diagnostics for an external MOQT relay.
+///
+/// Certificate bodies and subject names are deliberately omitted. The full
+/// leaf fingerprint is retained so an application can bind admission policy
+/// to a reviewed relay identity without depending on moq-rs types.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case", tag = "kind")]
+#[non_exhaustive]
+pub enum MoqRelayPeerIdentity {
+    /// No peer certificate was available.
+    Anonymous,
+    /// A certificate was presented while verification was explicitly disabled.
+    UnverifiedCertificate {
+        leaf_sha256: String,
+        chain_len: u8,
+        total_der_bytes: u32,
+    },
+    /// The peer certificate chain was verified by TLS.
+    VerifiedCertificate {
+        leaf_sha256: String,
+        chain_len: u8,
+        total_der_bytes: u32,
+    },
+}
+
+impl MoqRelayPeerIdentity {
+    /// Whether TLS authenticated this relay certificate chain.
+    pub const fn is_authenticated(&self) -> bool {
+        matches!(self, Self::VerifiedCertificate { .. })
+    }
+}
+
 impl MoqPublisherConfig {
     /// Exact namespace representation retained for source compatibility.
     /// Validation is performed by [`Self::try_namespace`] and publisher
@@ -312,6 +344,7 @@ impl MoqBroadcastPublisher {
             endpoint_uri: diagnostics.endpoint_uri,
             substrate: diagnostics.substrate,
             negotiated_protocol: diagnostics.negotiated_protocol,
+            peer_identity: diagnostics.peer_identity,
             control,
         })
     }
@@ -539,6 +572,8 @@ pub struct MoqRelayPublication {
     pub substrate: BroadcastSubstrate,
     /// MOQT protocol identifier actually negotiated by the initial connection.
     pub negotiated_protocol: String,
+    /// Bounded TLS identity for the initial accepted relay connection.
+    pub peer_identity: MoqRelayPeerIdentity,
     control: Arc<RelayControl>,
 }
 
@@ -608,6 +643,15 @@ impl MoqRelayPublication {
             .map(|diagnostics| diagnostics.negotiated_protocol)
     }
 
+    /// TLS identity of the most recent accepted relay connection.
+    pub fn current_peer_identity(&self) -> Option<MoqRelayPeerIdentity> {
+        self.control
+            .status
+            .snapshot()
+            .diagnostics
+            .map(|diagnostics| diagnostics.peer_identity)
+    }
+
     /// Wait for terminal closure and surface terminal relay failures.
     pub async fn wait(&self) -> Result<(), MoqError> {
         let snapshot = self.control.status.wait_terminal().await;
@@ -649,6 +693,7 @@ trait RelayConnection: Send {
     fn endpoint_uri(&self) -> &str;
     fn substrate(&self) -> BroadcastSubstrate;
     fn negotiated_protocol(&self) -> &str;
+    fn peer_identity(&self) -> MoqRelayPeerIdentity;
     async fn terminated(&mut self) -> MoqRelayFailure;
     async fn close(&mut self);
 }
@@ -673,6 +718,10 @@ impl RelayConnection for WireRelayPublication {
 
     fn negotiated_protocol(&self) -> &str {
         &self.negotiated_protocol
+    }
+
+    fn peer_identity(&self) -> MoqRelayPeerIdentity {
+        self.peer_identity.clone()
     }
 
     async fn terminated(&mut self) -> MoqRelayFailure {
@@ -717,6 +766,7 @@ struct RelayDiagnostics {
     endpoint_uri: String,
     substrate: BroadcastSubstrate,
     negotiated_protocol: String,
+    peer_identity: MoqRelayPeerIdentity,
 }
 
 impl RelayDiagnostics {
@@ -727,6 +777,7 @@ impl RelayDiagnostics {
             endpoint_uri: connection.endpoint_uri().to_owned(),
             substrate: connection.substrate(),
             negotiated_protocol: connection.negotiated_protocol().to_owned(),
+            peer_identity: connection.peer_identity(),
         }
     }
 }
@@ -1448,6 +1499,7 @@ fn relay_failure(error: &MoqError) -> MoqRelayFailure {
             MoqRelayFailure::PublishNamespaceResponseStreamClosed
         }
         MoqError::NegotiatedProtocolMismatch { .. } => MoqRelayFailure::NegotiatedProtocolMismatch,
+        MoqError::RelayPeerUnauthenticated => MoqRelayFailure::RelayPeerUnauthenticated,
         _ => MoqRelayFailure::ConnectFailed,
     }
 }
@@ -1767,6 +1819,21 @@ mod tests {
         }
     }
 
+    fn verified_test_peer_identity() -> MoqRelayPeerIdentity {
+        verified_test_peer_identity_for("accepted")
+    }
+
+    fn verified_test_peer_identity_for(connection_id: &str) -> MoqRelayPeerIdentity {
+        let marker = connection_id
+            .bytes()
+            .fold(0u8, |accumulator, byte| accumulator.wrapping_add(byte));
+        MoqRelayPeerIdentity::VerifiedCertificate {
+            leaf_sha256: format!("{marker:02x}").repeat(32),
+            chain_len: 1,
+            total_der_bytes: 512,
+        }
+    }
+
     struct MockConnection {
         id: String,
         termination: Option<oneshot::Receiver<MoqRelayFailure>>,
@@ -1804,6 +1871,10 @@ mod tests {
             "moqt-19"
         }
 
+        fn peer_identity(&self) -> MoqRelayPeerIdentity {
+            verified_test_peer_identity()
+        }
+
         async fn terminated(&mut self) -> MoqRelayFailure {
             let _ = self
                 .panic_gate
@@ -1838,6 +1909,10 @@ mod tests {
             "moqt-19"
         }
 
+        fn peer_identity(&self) -> MoqRelayPeerIdentity {
+            verified_test_peer_identity()
+        }
+
         async fn terminated(&mut self) -> MoqRelayFailure {
             pending().await
         }
@@ -1868,6 +1943,10 @@ mod tests {
 
         fn negotiated_protocol(&self) -> &str {
             "moqt-19"
+        }
+
+        fn peer_identity(&self) -> MoqRelayPeerIdentity {
+            verified_test_peer_identity_for(&self.id)
         }
 
         async fn terminated(&mut self) -> MoqRelayFailure {
@@ -2130,12 +2209,20 @@ mod tests {
         assert_eq!(publication.substrate, BroadcastSubstrate::RawQuic);
         assert_eq!(publication.negotiated_protocol, "moqt-19");
         assert_eq!(
+            publication.peer_identity,
+            verified_test_peer_identity_for("ready-connection")
+        );
+        assert_eq!(
             publication.current_endpoint_uri().as_deref(),
             Some("moqt://relay.invalid/")
         );
         assert_eq!(
             publication.current_negotiated_protocol().as_deref(),
             Some("moqt-19")
+        );
+        assert_eq!(
+            publication.current_peer_identity(),
+            Some(verified_test_peer_identity_for("ready-connection"))
         );
         assert_eq!(
             publisher.endpoint().uri.as_deref(),
@@ -2208,6 +2295,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unauthenticated_relay_identity_is_typed_and_marks_the_lifecycle_failed() {
+        let (error, snapshot) = gated_connect_error(MoqError::RelayPeerUnauthenticated).await;
+
+        assert!(matches!(error, MoqError::RelayPeerUnauthenticated));
+        assert_eq!(
+            snapshot.failure,
+            Some(MoqRelayFailure::RelayPeerUnauthenticated)
+        );
+    }
+
+    #[tokio::test]
     async fn cancelling_pending_relay_publish_completes_uninstalled_cleanup() {
         let entered = Arc::new(Notify::new());
         let client = Arc::new(test_client(
@@ -2265,6 +2363,10 @@ mod tests {
             .publish_to_relay(&client, &relay_url())
             .await
             .unwrap();
+        assert_eq!(
+            publication.current_peer_identity(),
+            Some(verified_test_peer_identity_for("initial"))
+        );
 
         terminate.send(MoqRelayFailure::SessionEnded).unwrap();
         let error = publication.wait().await.unwrap_err();
@@ -2356,6 +2458,10 @@ mod tests {
             .publish_to_relay(&client, &relay_url())
             .await
             .unwrap();
+        assert_eq!(
+            publication.current_peer_identity(),
+            Some(verified_test_peer_identity_for("initial"))
+        );
 
         terminate.send(MoqRelayFailure::SessionEnded).unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -2373,6 +2479,10 @@ mod tests {
             BroadcastLifecycleState::Ready
         );
         assert_eq!(publication.current_relay_path(), Some("raw-quic"));
+        assert_eq!(
+            publication.current_peer_identity(),
+            Some(verified_test_peer_identity_for("reconnected"))
+        );
 
         publication
             .drain(Utc::now() + chrono::Duration::seconds(1))
@@ -2675,6 +2785,7 @@ mod tests {
                 endpoint_uri: "moqt://relay.invalid/".into(),
                 substrate: BroadcastSubstrate::RawQuic,
                 negotiated_protocol: "moqt-19".into(),
+                peer_identity: verified_test_peer_identity(),
             }),
         );
         assert_eq!(accepted.lifecycle().state, BroadcastLifecycleState::Ready);

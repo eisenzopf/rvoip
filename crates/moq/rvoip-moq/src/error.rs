@@ -17,6 +17,7 @@ pub enum MoqRelayFailure {
     PublishNamespaceAcceptanceTimedOut,
     PublishNamespaceResponseStreamClosed,
     NegotiatedProtocolMismatch,
+    RelayPeerUnauthenticated,
     SessionEnded,
     PublicationEnded,
     ReconnectExhausted,
@@ -34,6 +35,7 @@ impl MoqRelayFailure {
                 "publish-namespace-response-stream-closed"
             }
             Self::NegotiatedProtocolMismatch => "negotiated-protocol-mismatch",
+            Self::RelayPeerUnauthenticated => "relay-peer-unauthenticated",
             Self::SessionEnded => "session-ended",
             Self::PublicationEnded => "publication-ended",
             Self::ReconnectExhausted => "reconnect-exhausted",
@@ -87,6 +89,8 @@ pub enum MoqError {
         expected: &'static str,
         negotiated: String,
     },
+    #[error("relay peer identity was not authenticated by TLS")]
+    RelayPeerUnauthenticated,
     #[error("MOQT wire error: {0}")]
     Wire(String),
     #[error("MSF catalog encoding failed: {0}")]
