@@ -61,6 +61,7 @@ use tracing::{debug, instrument, warn};
 /// when a coordinator or one of its handlers is slow.
 const CROSS_CRATE_EVENT_QUEUE_CAPACITY: usize = 256;
 const INBOUND_ADMISSION_ADAPTER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+const INBOUND_ADMISSION_ADAPTER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(1);
 /// Bounds active lifecycle identities plus process-lifetime retired IDs.
 /// Roughly tens of MiB at typical DashMap/UUID overhead per worker.
 const DEFAULT_CONNECTION_ID_BUDGET: usize = 262_144;
@@ -162,6 +163,10 @@ struct ConnectionEntry {
     inbound_context: Option<InboundConnectionContext>,
     inbound_context_retired: bool,
     inbound_publication: InboundPublicationState,
+    /// Sticky visibility bit retained across `Published -> Rejecting` so a
+    /// concurrent direct terminal fallback still closes a lifecycle that was
+    /// already exposed to consumers.
+    normalized_lifecycle_was_visible: bool,
     deferred_authentication: Option<DeferredAuthentication>,
     deferred_principal_authentication: Option<DeferredPrincipalAuthentication>,
 }
@@ -232,9 +237,23 @@ struct ClaimedInboundRejection {
     normalized_lifecycle_was_visible: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct AdapterCleanupQuarantine {
+    transport: Transport,
+    lifecycle_generation: u64,
+}
+
+struct ConnectionSessionBinding {
+    connection_id: ConnectionId,
+    session_id: SessionId,
+    participant_id: ParticipantId,
+    lifecycle: ConnectionLifecycleTicket,
+    inserted: bool,
+    activated_session: bool,
+}
+
 enum PrincipalEventDecision {
     Handled,
-    Publish,
     Drop,
     Reject(ClaimedInboundRejection),
 }
@@ -249,6 +268,11 @@ enum AtomicPendingUpdate {
     Handled,
     Reject(ClaimedInboundRejection),
     TransportCollision,
+}
+
+enum AtomicPublishedDuplicateDecision {
+    Drop,
+    Reject(ClaimedInboundRejection),
 }
 
 #[derive(Debug)]
@@ -376,6 +400,10 @@ pub struct Orchestrator {
     /// as process-lifetime tombstones because adapter events do not yet carry
     /// a route epoch; adapters must therefore generate non-reusable IDs.
     connection_lifecycles: Arc<DashMap<ConnectionId, Arc<Mutex<ConnectionLifecycleState>>>>,
+    /// Adapter routes that may still exist after their core lifecycle and
+    /// secrets have been synchronously retired. A successful reject/end or a
+    /// later terminal event removes the quarantine entry.
+    adapter_cleanup_quarantines: Arc<DashMap<ConnectionId, AdapterCleanupQuarantine>>,
     events: broadcast::Sender<Event>,
     /// Optional bounded cross-crate publication. A single lazily-started FIFO
     /// worker publishes normalized events without peer-controlled task growth.
@@ -686,6 +714,7 @@ impl Orchestrator {
             connection_id_budget: AtomicUsize::new(DEFAULT_CONNECTION_ID_BUDGET),
             connections: Arc::new(DashMap::new()),
             connection_lifecycles: Arc::new(DashMap::new()),
+            adapter_cleanup_quarantines: Arc::new(DashMap::new()),
             events,
             cross_crate_publisher: None,
             subscriptions: Arc::new(crate::subscriptions::SubscriptionRegistry::new()),
@@ -734,6 +763,7 @@ impl Orchestrator {
             connection_id_budget: AtomicUsize::new(DEFAULT_CONNECTION_ID_BUDGET),
             connections: Arc::new(DashMap::new()),
             connection_lifecycles: Arc::new(DashMap::new()),
+            adapter_cleanup_quarantines: Arc::new(DashMap::new()),
             events,
             cross_crate_publisher: Some(Arc::new(CrossCrateEventPublisher::new(coordinator))),
             subscriptions: Arc::new(crate::subscriptions::SubscriptionRegistry::new()),
@@ -766,6 +796,7 @@ impl Orchestrator {
     /// Returns [`RvoipError::AdapterAlreadyRegistered`] on collision.
     pub fn register(self: &Arc<Self>, adapter: Arc<dyn ConnectionAdapter>) -> Result<()> {
         let transport = adapter.transport();
+        let lifecycle_capabilities = adapter.lifecycle_capabilities();
         {
             let mut registrations = self
                 .adapter_registrations
@@ -774,6 +805,17 @@ impl Orchestrator {
             if self.adapters.contains_key(&transport) || !registrations.insert(transport) {
                 return Err(RvoipError::AdapterAlreadyRegistered(transport));
             }
+        }
+        if self.inbound_admission_gate.get().is_some()
+            && !lifecycle_capabilities.supports_fail_closed_inbound()
+        {
+            self.adapter_registrations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&transport);
+            return Err(RvoipError::InvalidState(
+                "adapter does not support fail-closed inbound admission",
+            ));
         }
         if let Err(error) = adapter.install_lifecycle_sink(Arc::new(OrchestratorLifecycleSink {
             orchestrator: Arc::downgrade(self),
@@ -843,6 +885,38 @@ impl Orchestrator {
         }
         self.connection_id_budget.store(maximum, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Number of adapter routes whose core lifecycle has been retired but
+    /// whose bounded reject/end cleanup has not yet completed conclusively.
+    /// Principals, inbound contexts, and operational core routing are removed
+    /// before an entry appears here.
+    pub fn adapter_cleanup_quarantine_count(&self) -> usize {
+        self.adapter_cleanup_quarantines.len()
+    }
+
+    fn resolve_adapter_cleanup_quarantine(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+        lifecycle_generation: u64,
+    ) {
+        self.adapter_cleanup_quarantines
+            .remove_if(connection_id, |_, quarantine| {
+                quarantine.transport == transport
+                    && quarantine.lifecycle_generation == lifecycle_generation
+            });
+    }
+
+    fn resolve_adapter_cleanup_quarantine_from_terminal(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+    ) {
+        self.adapter_cleanup_quarantines
+            .remove_if(connection_id, |_, quarantine| {
+                quarantine.transport == transport
+            });
     }
 
     /// Install one bounded, fail-closed inbound admission gate.
@@ -1114,6 +1188,7 @@ impl Orchestrator {
                     inbound_context,
                     inbound_context_retired: false,
                     inbound_publication: InboundPublicationState::NotInbound,
+                    normalized_lifecycle_was_visible: false,
                     deferred_authentication: None,
                     deferred_principal_authentication: None,
                 },
@@ -1173,6 +1248,72 @@ impl Orchestrator {
         .await;
     }
 
+    async fn cleanup_failed_adapter_route(
+        &self,
+        adapter: Arc<dyn ConnectionAdapter>,
+        transport: Transport,
+        connection_id: &ConnectionId,
+        detail: &'static str,
+    ) {
+        if !adapter.is_connection_live(connection_id) {
+            return;
+        }
+        let lifecycle_generation = self
+            .connection_lifecycles
+            .get(connection_id)
+            .map(|state| {
+                state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .generation
+            })
+            .unwrap_or(0);
+        let quarantine_inserted = {
+            let _registry = self
+                .connection_registry_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.adapter_cleanup_quarantines.len()
+                < self.connection_id_budget.load(Ordering::Relaxed)
+            {
+                self.adapter_cleanup_quarantines.insert(
+                    connection_id.clone(),
+                    AdapterCleanupQuarantine {
+                        transport,
+                        lifecycle_generation,
+                    },
+                );
+                true
+            } else {
+                false
+            }
+        };
+        if !quarantine_inserted {
+            metrics::counter!("rvoip_core_adapter_cleanup_quarantine_exhausted_total").increment(1);
+        }
+        let stopped = tokio::time::timeout(
+            INBOUND_ADMISSION_ADAPTER_CLEANUP_TIMEOUT,
+            adapter.end(
+                connection_id.clone(),
+                EndReason::Failed {
+                    detail: detail.into(),
+                },
+            ),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok());
+        if stopped {
+            self.resolve_adapter_cleanup_quarantine(connection_id, transport, lifecycle_generation);
+        } else {
+            metrics::counter!(
+                "rvoip_core_adapter_cleanup_total",
+                "result" => "quarantined",
+                "transport" => format!("{transport:?}")
+            )
+            .increment(1);
+        }
+    }
+
     fn track_connection_principal(
         &self,
         conn: &ConnectionId,
@@ -1208,6 +1349,7 @@ impl Orchestrator {
                     inbound_context: None,
                     inbound_context_retired: false,
                     inbound_publication: InboundPublicationState::NotInbound,
+                    normalized_lifecycle_was_visible: false,
                     deferred_authentication: None,
                     deferred_principal_authentication: None,
                 },
@@ -1276,6 +1418,58 @@ impl Orchestrator {
                 retired: true,
             })),
         );
+    }
+
+    /// Reserve a never-before-seen ID for one outbound route. Unlike the
+    /// legacy generic tracker this refuses active inbound setup, active
+    /// outbound routes, and retired IDs alike.
+    fn claim_outbound_connection(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+    ) -> Result<ConnectionLifecycleTicket> {
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.connections.contains_key(connection_id)
+            || self.connection_lifecycles.contains_key(connection_id)
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "outbound connection ID is not vacant",
+            ));
+        }
+        if self.connection_lifecycles.len() >= self.connection_id_budget.load(Ordering::Relaxed) {
+            metrics::counter!("rvoip_core_connection_id_budget_exhausted_total").increment(1);
+            return Err(RvoipError::AdmissionRejected(
+                "connection ID registry is full",
+            ));
+        }
+        let state = Arc::new(Mutex::new(ConnectionLifecycleState {
+            generation: 1,
+            active: true,
+            retired: false,
+        }));
+        self.connection_lifecycles
+            .insert(connection_id.clone(), Arc::clone(&state));
+        self.connections.insert(
+            connection_id.clone(),
+            ConnectionEntry {
+                transport,
+                principal: None,
+                inbound_context: None,
+                inbound_context_retired: true,
+                inbound_publication: InboundPublicationState::NotInbound,
+                normalized_lifecycle_was_visible: false,
+                deferred_authentication: None,
+                deferred_principal_authentication: None,
+            },
+        );
+        Ok(ConnectionLifecycleTicket {
+            connection_id: connection_id.clone(),
+            generation: 1,
+            state,
+        })
     }
 
     fn capture_connection_lifecycles(
@@ -1347,38 +1541,46 @@ impl Orchestrator {
         Ok(())
     }
 
-    fn bind_connection_to_session(
+    fn begin_ticketed_connection_teardown(
         &self,
-        connection_id: &ConnectionId,
-        session_id: &SessionId,
-        participant_id: ParticipantId,
-    ) -> Result<()> {
-        let sess_arc = self
-            .sessions
-            .get(session_id)
-            .map(|entry| Arc::clone(entry.value()))
-            .ok_or_else(|| RvoipError::SessionNotFound(session_id.clone()))?;
-        {
-            let mut sess = sess_arc.write().expect("session lock poisoned");
-            if matches!(sess.state, SessionState::Ended | SessionState::Failed) {
-                return Err(RvoipError::InvalidState(
-                    "bind_connection_to_session: target session is ended",
-                ));
+        ticket: &ConnectionLifecycleTicket,
+    ) -> Option<ForgottenConnection> {
+        let removed = {
+            let _registry = self
+                .connection_registry_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let current = self.connection_lifecycles.get(&ticket.connection_id)?;
+            if !Arc::ptr_eq(current.value(), &ticket.state) {
+                return None;
             }
-            sess.connections.insert(
-                connection_id.clone(),
-                ConnectionRef {
-                    id: connection_id.clone(),
-                    participant_id,
-                },
-            );
-            if sess.state == SessionState::Initiating {
-                sess.state = SessionState::Active;
+            let mut lifecycle = ticket
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !lifecycle.active || lifecycle.retired || lifecycle.generation != ticket.generation {
+                return None;
             }
-        }
-        self.sessions_by_connection
-            .insert(connection_id.clone(), session_id.clone());
-        Ok(())
+            let removed = self.connections.remove(&ticket.connection_id)?;
+            lifecycle.active = false;
+            lifecycle.retired = true;
+            lifecycle.generation = lifecycle.generation.saturating_add(1);
+            removed
+        };
+        self.drop_connection_subscriptions(&ticket.connection_id);
+        Some(ForgottenConnection {
+            was_tracked: true,
+            normalized_lifecycle_was_visible: removed.1.normalized_lifecycle_was_visible,
+        })
+    }
+
+    async fn rollback_ticketed_connection(&self, ticket: &ConnectionLifecycleTicket) -> bool {
+        let Some(forgotten) = self.begin_ticketed_connection_teardown(ticket) else {
+            return false;
+        };
+        self.finish_connection_teardown(&ticket.connection_id, forgotten)
+            .await;
+        true
     }
 
     fn bind_connection_to_session_probe(&self, session_id: &SessionId) -> Result<()> {
@@ -1394,6 +1596,266 @@ impl Orchestrator {
             ));
         }
         Ok(())
+    }
+
+    fn bind_published_connection_to_session(
+        &self,
+        lifecycle: &ConnectionLifecycleTicket,
+        session_id: &SessionId,
+        participant_id: ParticipantId,
+    ) -> Result<ConnectionSessionBinding> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| RvoipError::SessionNotFound(session_id.clone()))?;
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let current = self
+            .connection_lifecycles
+            .get(&lifecycle.connection_id)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(lifecycle.connection_id.clone()))?;
+        if !Arc::ptr_eq(current.value(), &lifecycle.state) {
+            return Err(RvoipError::ConnectionNotFound(
+                lifecycle.connection_id.clone(),
+            ));
+        }
+        let state = lifecycle
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.active || state.retired || state.generation != lifecycle.generation {
+            return Err(RvoipError::ConnectionNotFound(
+                lifecycle.connection_id.clone(),
+            ));
+        }
+        let entry = self
+            .connections
+            .get(&lifecycle.connection_id)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(lifecycle.connection_id.clone()))?;
+        if entry.inbound_publication != InboundPublicationState::Published {
+            return Err(RvoipError::AdmissionRejected(
+                "connection is not operational",
+            ));
+        }
+        drop(entry);
+
+        let existing_session = self
+            .sessions_by_connection
+            .get(&lifecycle.connection_id)
+            .map(|entry| entry.value().clone());
+        if existing_session
+            .as_ref()
+            .is_some_and(|existing| existing != session_id)
+        {
+            return Err(RvoipError::InvalidState(
+                "connection is already bound to another session",
+            ));
+        }
+        let mut session_guard = session.write().expect("session lock poisoned");
+        if matches!(
+            session_guard.state,
+            SessionState::Ended | SessionState::Failed
+        ) {
+            return Err(RvoipError::InvalidState(
+                "route_inbound_connection: target session is ended",
+            ));
+        }
+        if existing_session.is_some() {
+            let same_binding = session_guard
+                .connections
+                .get(&lifecycle.connection_id)
+                .is_some_and(|connection| connection.participant_id == participant_id);
+            if !same_binding {
+                return Err(RvoipError::InvalidState(
+                    "connection session binding is inconsistent",
+                ));
+            }
+            return Ok(ConnectionSessionBinding {
+                connection_id: lifecycle.connection_id.clone(),
+                session_id: session_id.clone(),
+                participant_id,
+                lifecycle: lifecycle.clone(),
+                inserted: false,
+                activated_session: false,
+            });
+        }
+
+        session_guard.connections.insert(
+            lifecycle.connection_id.clone(),
+            ConnectionRef {
+                id: lifecycle.connection_id.clone(),
+                participant_id: participant_id.clone(),
+            },
+        );
+        let activated_session = session_guard.state == SessionState::Initiating;
+        if activated_session {
+            session_guard.state = SessionState::Active;
+        }
+        self.sessions_by_connection
+            .insert(lifecycle.connection_id.clone(), session_id.clone());
+        Ok(ConnectionSessionBinding {
+            connection_id: lifecycle.connection_id.clone(),
+            session_id: session_id.clone(),
+            participant_id,
+            lifecycle: lifecycle.clone(),
+            inserted: true,
+            activated_session,
+        })
+    }
+
+    fn rollback_connection_session_binding(&self, binding: &ConnectionSessionBinding) {
+        if !binding.inserted {
+            return;
+        }
+        let Some(session) = self
+            .sessions
+            .get(&binding.session_id)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            return;
+        };
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(current) = self.connection_lifecycles.get(&binding.connection_id) else {
+            return;
+        };
+        if !Arc::ptr_eq(current.value(), &binding.lifecycle.state) {
+            return;
+        }
+        let state = binding
+            .lifecycle
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.active
+            || state.retired
+            || state.generation != binding.lifecycle.generation
+            || !self.connections.contains_key(&binding.connection_id)
+        {
+            return;
+        }
+        let current_session = self
+            .sessions_by_connection
+            .get(&binding.connection_id)
+            .map(|entry| entry.value().clone());
+        if current_session.as_ref() != Some(&binding.session_id) {
+            return;
+        }
+        let mut session_guard = session.write().expect("session lock poisoned");
+        let same_binding = session_guard
+            .connections
+            .get(&binding.connection_id)
+            .is_some_and(|connection| connection.participant_id == binding.participant_id);
+        if !same_binding {
+            return;
+        }
+        session_guard.connections.remove(&binding.connection_id);
+        self.sessions_by_connection
+            .remove_if(&binding.connection_id, |_, session_id| {
+                session_id == &binding.session_id
+            });
+        if binding.activated_session
+            && session_guard.state == SessionState::Active
+            && session_guard.connections.is_empty()
+        {
+            session_guard.state = SessionState::Initiating;
+        }
+    }
+
+    fn commit_outbound_connection(
+        &self,
+        lifecycle: &ConnectionLifecycleTicket,
+        transport: Transport,
+        session_id: &SessionId,
+        participant_id: ParticipantId,
+    ) -> Result<ConnectionSessionBinding> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| RvoipError::SessionNotFound(session_id.clone()))?;
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let current = self
+            .connection_lifecycles
+            .get(&lifecycle.connection_id)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(lifecycle.connection_id.clone()))?;
+        if !Arc::ptr_eq(current.value(), &lifecycle.state) {
+            return Err(RvoipError::ConnectionNotFound(
+                lifecycle.connection_id.clone(),
+            ));
+        }
+        let state = lifecycle
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.active || state.retired || state.generation != lifecycle.generation {
+            return Err(RvoipError::ConnectionNotFound(
+                lifecycle.connection_id.clone(),
+            ));
+        }
+        let mut entry = self
+            .connections
+            .get_mut(&lifecycle.connection_id)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(lifecycle.connection_id.clone()))?;
+        if entry.transport != transport
+            || entry.inbound_publication != InboundPublicationState::NotInbound
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "outbound lifecycle claim is not publishable",
+            ));
+        }
+        if self
+            .sessions_by_connection
+            .contains_key(&lifecycle.connection_id)
+        {
+            return Err(RvoipError::InvalidState(
+                "outbound connection is already bound to a session",
+            ));
+        }
+        let mut session_guard = session.write().expect("session lock poisoned");
+        if matches!(
+            session_guard.state,
+            SessionState::Ended | SessionState::Failed
+        ) {
+            return Err(RvoipError::InvalidState(
+                "originate_connection: target session is ended",
+            ));
+        }
+        session_guard.connections.insert(
+            lifecycle.connection_id.clone(),
+            ConnectionRef {
+                id: lifecycle.connection_id.clone(),
+                participant_id: participant_id.clone(),
+            },
+        );
+        let activated_session = session_guard.state == SessionState::Initiating;
+        if activated_session {
+            session_guard.state = SessionState::Active;
+        }
+        self.sessions_by_connection
+            .insert(lifecycle.connection_id.clone(), session_id.clone());
+        entry.inbound_publication = InboundPublicationState::Published;
+        entry.normalized_lifecycle_was_visible = true;
+        self.emit(Event::ConnectionOutbound {
+            connection_id: lifecycle.connection_id.clone(),
+            at: Utc::now(),
+        });
+        Ok(ConnectionSessionBinding {
+            connection_id: lifecycle.connection_id.clone(),
+            session_id: session_id.clone(),
+            participant_id,
+            lifecycle: lifecycle.clone(),
+            inserted: true,
+            activated_session,
+        })
     }
 
     /// If `conn` is currently in a cross-transport bridge, return the
@@ -1744,18 +2206,29 @@ impl Orchestrator {
                 state.active = false;
                 state.retired = true;
                 state.generation = state.generation.saturating_add(1);
+            } else if self.connection_lifecycles.len()
+                < self.connection_id_budget.load(Ordering::Relaxed)
+            {
+                // Unknown terminal events are retained as tombstones too.
+                // This closes the originate-return race for legacy adapters:
+                // a handle whose terminal arrived first cannot subsequently
+                // claim and resurrect the same ID.
+                self.connection_lifecycles.insert(
+                    conn.clone(),
+                    Arc::new(Mutex::new(ConnectionLifecycleState {
+                        generation: 1,
+                        active: false,
+                        retired: true,
+                    })),
+                );
+            } else {
+                metrics::counter!("rvoip_core_connection_id_budget_exhausted_total").increment(1);
             }
             self.connections.remove(conn)
         };
         let was_tracked = removed.is_some();
-        let normalized_lifecycle_was_visible = removed.is_some_and(|(_, entry)| {
-            !matches!(
-                entry.inbound_publication,
-                InboundPublicationState::Unseen
-                    | InboundPublicationState::Pending(_)
-                    | InboundPublicationState::Rejecting(_)
-            )
-        });
+        let normalized_lifecycle_was_visible =
+            removed.is_some_and(|(_, entry)| entry.normalized_lifecycle_was_visible);
         self.drop_connection_subscriptions(conn);
         ForgottenConnection {
             was_tracked,
@@ -2882,6 +3355,7 @@ impl Orchestrator {
         let deferred_authentication = entry.deferred_authentication.take();
         let retained_principal = entry.principal.clone();
         entry.inbound_publication = InboundPublicationState::Published;
+        entry.normalized_lifecycle_was_visible = true;
         drop(entry);
 
         self.emit(Event::ConnectionInbound {
@@ -2939,44 +3413,71 @@ impl Orchestrator {
         let transport = claimed.transport;
         let connection_id = claimed.connection_id.clone();
         let normalized_lifecycle_was_visible = claimed.normalized_lifecycle_was_visible;
+        // Retire the lifecycle and erase all principal/attachment context
+        // synchronously, before invoking an adapter that may hang or retain a
+        // hostile peer indefinitely. Adapter cleanup is tracked separately.
+        let Some(forgotten) = self.begin_claimed_inbound_teardown(&claimed) else {
+            return false;
+        };
+        self.adapter_cleanup_quarantines.insert(
+            connection_id.clone(),
+            AdapterCleanupQuarantine {
+                transport,
+                lifecycle_generation: claimed.lifecycle.generation,
+            },
+        );
+        if normalized_lifecycle_was_visible {
+            self.emit(Event::ConnectionFailed {
+                connection_id: connection_id.clone(),
+                detail: "connection authentication policy rejected".into(),
+                at: Utc::now(),
+            });
+        }
         let adapter = self.adapter(transport).ok();
-        let completed = tokio::time::timeout(INBOUND_ADMISSION_ADAPTER_CLEANUP_TIMEOUT, async {
-            let Some(adapter) = adapter else {
-                return false;
-            };
-            let stopped = if adapter.reject(connection_id.clone(), reason).await.is_ok() {
-                true
-            } else {
-                adapter
-                    .end(
-                        connection_id.clone(),
-                        EndReason::Failed {
-                            detail: "inbound admission rejected".into(),
-                        },
+        let cleanup_generation = claimed.lifecycle.generation;
+        let adapter_cleanup = async {
+            let stopped = if let Some(adapter) = adapter {
+                let rejected = tokio::time::timeout(
+                    INBOUND_ADMISSION_ADAPTER_ATTEMPT_TIMEOUT,
+                    adapter.reject(connection_id.clone(), reason),
+                )
+                .await
+                .is_ok_and(|result| result.is_ok());
+                if rejected {
+                    true
+                } else {
+                    tokio::time::timeout(
+                        INBOUND_ADMISSION_ADAPTER_ATTEMPT_TIMEOUT,
+                        adapter.end(
+                            connection_id.clone(),
+                            EndReason::Failed {
+                                detail: "inbound admission rejected".into(),
+                            },
+                        ),
                     )
                     .await
-                    .is_ok()
-            };
-            if !stopped {
-                return false;
-            }
-            if let Some(forgotten) = self.begin_claimed_inbound_teardown(&claimed) {
-                let forgotten = self
-                    .finish_connection_teardown(&connection_id, forgotten)
-                    .await;
-                debug_assert!(forgotten.was_tracked);
-                true
+                    .is_ok_and(|result| result.is_ok())
+                }
             } else {
-                let lifecycle = claimed
-                    .lifecycle
-                    .state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                lifecycle.retired && !lifecycle.active
+                false
+            };
+            if stopped {
+                self.resolve_adapter_cleanup_quarantine(
+                    &connection_id,
+                    transport,
+                    cleanup_generation,
+                );
             }
-        })
-        .await;
-        if !matches!(completed, Ok(true)) {
+            stopped
+        };
+        // Core teardown is never canceled by an uncooperative adapter. The
+        // admission permit remains held while this completes, bounding the
+        // number of cleanup tasks; adapter reject/end each has its own
+        // deadline and runs concurrently.
+        let core_cleanup = self.finish_connection_teardown(&connection_id, forgotten);
+        let (stopped, forgotten) = tokio::join!(adapter_cleanup, core_cleanup);
+        debug_assert!(forgotten.was_tracked);
+        if !stopped {
             metrics::counter!(
                 "rvoip_core_inbound_admission_cleanup_total",
                 "result" => "quarantined",
@@ -2991,13 +3492,6 @@ impl Orchestrator {
             "transport" => format!("{transport:?}")
         )
         .increment(1);
-        if normalized_lifecycle_was_visible {
-            self.emit(Event::ConnectionFailed {
-                connection_id,
-                detail: "connection authentication policy rejected".into(),
-                at: Utc::now(),
-            });
-        }
         true
     }
 
@@ -3346,24 +3840,25 @@ impl Orchestrator {
         if entry.transport != transport {
             return PrincipalEventDecision::Drop;
         }
-        let normalized_lifecycle_was_visible = match entry.inbound_publication {
+        let (pending, normalized_lifecycle_was_visible) = match entry.inbound_publication {
             InboundPublicationState::Pending(pending_generation)
                 if pending_generation == generation =>
             {
-                false
+                (true, false)
             }
-            InboundPublicationState::Published => true,
+            InboundPublicationState::Published => (false, true),
             InboundPublicationState::NotInbound
             | InboundPublicationState::Unseen
             | InboundPublicationState::Pending(_)
             | InboundPublicationState::Rejecting(_) => return PrincipalEventDecision::Drop,
         };
         let tenantless = principal.tenant.as_deref().is_none_or(str::is_empty);
+        let expired = principal.is_expired();
         let owner_mismatch = entry
             .principal
             .as_ref()
             .is_some_and(|current| !current.has_same_owner(principal));
-        if tenantless || owner_mismatch {
+        if tenantless || expired || owner_mismatch {
             entry.inbound_publication = InboundPublicationState::Rejecting(generation);
             return PrincipalEventDecision::Reject(ClaimedInboundRejection {
                 connection_id: connection_id.clone(),
@@ -3376,15 +3871,14 @@ impl Orchestrator {
                 normalized_lifecycle_was_visible,
             });
         }
-        if entry.principal.is_some() {
-            // Freeze the first complete principal for this lifecycle. A
-            // same-owner refresh may change scopes, method, assurance, or
-            // expiry and therefore cannot replace the authorization snapshot
-            // inspected by admission policy.
-            return PrincipalEventDecision::Handled;
-        }
-        entry.principal = Some(principal.clone());
-        if !normalized_lifecycle_was_visible {
+        if pending {
+            if entry.principal.is_some() {
+                // Admission policy evaluates one immutable authorization
+                // snapshot. Same-owner duplicates cannot change its scopes,
+                // method, assurance, or expiry while a decision is pending.
+                return PrincipalEventDecision::Handled;
+            }
+            entry.principal = Some(principal.clone());
             entry.deferred_principal_authentication = Some(DeferredPrincipalAuthentication {
                 participant_id: participant_id.to_owned(),
                 principal: principal.clone(),
@@ -3392,8 +3886,83 @@ impl Orchestrator {
             });
             PrincipalEventDecision::Handled
         } else {
-            PrincipalEventDecision::Publish
+            // Once published, a valid same-owner refresh replaces the
+            // retained authorization atomically and is projected to policy
+            // consumers. Invalid refreshes took the rejection path above.
+            entry.principal = Some(principal.clone());
+            let at = Utc::now();
+            drop(entry);
+            self.emit(Event::ConnectionAuthenticated {
+                connection_id: connection_id.clone(),
+                identity_id: principal.subject.clone(),
+                participant_id: participant_id.to_owned(),
+                assurance: principal.assurance.clone(),
+                at,
+            });
+            self.emit(Event::ConnectionPrincipalAuthenticated {
+                connection_id: connection_id.clone(),
+                participant_id: participant_id.to_owned(),
+                principal: principal.clone(),
+                at,
+            });
+            PrincipalEventDecision::Handled
         }
+    }
+
+    fn decide_atomic_published_duplicate(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+        principal: &AuthenticatedPrincipal,
+    ) -> AtomicPublishedDuplicateDecision {
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(current) = self.connection_lifecycles.get(connection_id) else {
+            return AtomicPublishedDuplicateDecision::Drop;
+        };
+        let lifecycle_state = Arc::clone(current.value());
+        let lifecycle = lifecycle_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !lifecycle.active || lifecycle.retired {
+            return AtomicPublishedDuplicateDecision::Drop;
+        }
+        let generation = lifecycle.generation;
+        let Some(mut entry) = self.connections.get_mut(connection_id) else {
+            return AtomicPublishedDuplicateDecision::Drop;
+        };
+        if entry.transport != transport
+            || entry.inbound_publication != InboundPublicationState::Published
+        {
+            return AtomicPublishedDuplicateDecision::Drop;
+        }
+        let same_owner = entry
+            .principal
+            .as_ref()
+            .is_some_and(|current| current.has_same_owner(principal));
+        if !same_owner
+            || principal.tenant.as_deref().is_none_or(str::is_empty)
+            || principal.is_expired()
+        {
+            entry.inbound_publication = InboundPublicationState::Rejecting(generation);
+            return AtomicPublishedDuplicateDecision::Reject(ClaimedInboundRejection {
+                connection_id: connection_id.clone(),
+                transport,
+                lifecycle: ConnectionLifecycleTicket {
+                    connection_id: connection_id.clone(),
+                    generation,
+                    state: Arc::clone(&lifecycle_state),
+                },
+                normalized_lifecycle_was_visible: true,
+            });
+        }
+        // Atomic connection handoff is not a refresh API. A same-owner
+        // duplicate is harmless once its adapter-owned attachment context is
+        // drained, but it cannot replace the authorization snapshot retained
+        // for the published lifecycle.
+        AtomicPublishedDuplicateDecision::Drop
     }
 
     async fn handle_orchestrator_adapter_event(
@@ -3415,7 +3984,8 @@ impl Orchestrator {
                 }
                 let malformed = connection.transport != transport
                     || connection.direction != Direction::Inbound
-                    || principal.tenant.as_deref().is_none_or(str::is_empty);
+                    || principal.tenant.as_deref().is_none_or(str::is_empty)
+                    || principal.is_expired();
                 if malformed {
                     let _ = self
                         .adapter(transport)
@@ -3459,15 +4029,29 @@ impl Orchestrator {
                         .await;
                     return;
                 }
-                let discard_duplicate = existing_state.is_some_and(|state| {
-                    matches!(
-                        state,
-                        InboundPublicationState::Rejecting(_) | InboundPublicationState::Published
-                    )
-                });
-                if discard_duplicate {
+                if existing_state == Some(InboundPublicationState::Published) {
+                    let _ = self
+                        .adapter(transport)
+                        .ok()
+                        .and_then(|adapter| adapter.take_inbound_context(&connection.id));
+                    if let AtomicPublishedDuplicateDecision::Reject(claimed) = self
+                        .decide_atomic_published_duplicate(&connection.id, transport, &principal)
+                    {
+                        self.reject_claimed_unadmitted_connection(
+                            claimed,
+                            RejectReason::ServerError,
+                            "atomic_owner_changed",
+                        )
+                        .await;
+                    }
+                    return;
+                }
+                if existing_state
+                    .is_some_and(|state| matches!(state, InboundPublicationState::Rejecting(_)))
+                {
                     // A repeated atomic handoff must not retain a second
-                    // adapter-owned attachment context.
+                    // adapter-owned attachment context while cleanup is in
+                    // progress.
                     let _ = self
                         .adapter(transport)
                         .ok()
@@ -3503,60 +4087,96 @@ impl Orchestrator {
                         let Some(mut entry) = self.connections.get_mut(&connection.id) else {
                             return;
                         };
-                        if entry.inbound_publication != InboundPublicationState::Pending(generation)
-                        {
-                            return;
-                        }
                         if entry.transport != transport {
                             AtomicPendingUpdate::TransportCollision
-                        } else if entry
-                            .principal
-                            .as_ref()
-                            .is_some_and(|current| !current.has_same_owner(&principal))
-                        {
-                            entry.inbound_publication =
-                                InboundPublicationState::Rejecting(generation);
-                            AtomicPendingUpdate::Reject(ClaimedInboundRejection {
-                                connection_id: connection.id.clone(),
-                                transport,
-                                lifecycle: ConnectionLifecycleTicket {
-                                    connection_id: connection.id.clone(),
-                                    generation,
-                                    state: Arc::clone(&lifecycle_state),
-                                },
-                                normalized_lifecycle_was_visible: false,
-                            })
                         } else {
-                            if !entry.inbound_context_retired && entry.inbound_context.is_none() {
-                                let context_principal =
-                                    entry.principal.clone().unwrap_or_else(|| principal.clone());
-                                entry.inbound_context = match inbound_context {
-                                    Some(context)
-                                        if context.is_bound_to(
-                                            &connection.id,
+                            match entry.inbound_publication {
+                                InboundPublicationState::Published => {
+                                    let same_owner = entry
+                                        .principal
+                                        .as_ref()
+                                        .is_some_and(|current| current.has_same_owner(&principal));
+                                    if same_owner {
+                                        AtomicPendingUpdate::Handled
+                                    } else {
+                                        entry.inbound_publication =
+                                            InboundPublicationState::Rejecting(generation);
+                                        AtomicPendingUpdate::Reject(ClaimedInboundRejection {
+                                            connection_id: connection.id.clone(),
                                             transport,
-                                            &context_principal,
-                                        ) =>
+                                            lifecycle: ConnectionLifecycleTicket {
+                                                connection_id: connection.id.clone(),
+                                                generation,
+                                                state: Arc::clone(&lifecycle_state),
+                                            },
+                                            normalized_lifecycle_was_visible: true,
+                                        })
+                                    }
+                                }
+                                InboundPublicationState::Pending(pending_generation)
+                                    if pending_generation == generation =>
+                                {
+                                    if entry
+                                        .principal
+                                        .as_ref()
+                                        .is_some_and(|current| !current.has_same_owner(&principal))
                                     {
-                                        Some(context)
+                                        entry.inbound_publication =
+                                            InboundPublicationState::Rejecting(generation);
+                                        AtomicPendingUpdate::Reject(ClaimedInboundRejection {
+                                            connection_id: connection.id.clone(),
+                                            transport,
+                                            lifecycle: ConnectionLifecycleTicket {
+                                                connection_id: connection.id.clone(),
+                                                generation,
+                                                state: Arc::clone(&lifecycle_state),
+                                            },
+                                            normalized_lifecycle_was_visible: false,
+                                        })
+                                    } else {
+                                        if !entry.inbound_context_retired
+                                            && entry.inbound_context.is_none()
+                                        {
+                                            let context_principal = entry
+                                                .principal
+                                                .clone()
+                                                .unwrap_or_else(|| principal.clone());
+                                            entry.inbound_context = match inbound_context {
+                                                Some(context)
+                                                    if context.is_bound_to(
+                                                        &connection.id,
+                                                        transport,
+                                                        &context_principal,
+                                                    ) =>
+                                                {
+                                                    Some(context)
+                                                }
+                                                Some(_) => {
+                                                    entry.inbound_context_retired = true;
+                                                    None
+                                                }
+                                                None => None,
+                                            };
+                                        }
+                                        if entry.principal.is_none() {
+                                            entry.principal = Some(principal.clone());
+                                            entry.deferred_principal_authentication =
+                                                Some(DeferredPrincipalAuthentication {
+                                                    participant_id,
+                                                    principal,
+                                                    at: Utc::now(),
+                                                });
+                                        }
+                                        AtomicPendingUpdate::Handled
                                     }
-                                    Some(_) => {
-                                        entry.inbound_context_retired = true;
-                                        None
-                                    }
-                                    None => None,
-                                };
+                                }
+                                InboundPublicationState::NotInbound
+                                | InboundPublicationState::Unseen
+                                | InboundPublicationState::Pending(_)
+                                | InboundPublicationState::Rejecting(_) => {
+                                    AtomicPendingUpdate::Handled
+                                }
                             }
-                            if entry.principal.is_none() {
-                                entry.principal = Some(principal.clone());
-                                entry.deferred_principal_authentication =
-                                    Some(DeferredPrincipalAuthentication {
-                                        participant_id,
-                                        principal,
-                                        at: Utc::now(),
-                                    });
-                            }
-                            AtomicPendingUpdate::Handled
                         }
                     };
                     match update {
@@ -3732,7 +4352,6 @@ impl Orchestrator {
                     principal,
                 ) {
                     PrincipalEventDecision::Handled | PrincipalEventDecision::Drop => return,
-                    PrincipalEventDecision::Publish => {}
                     PrincipalEventDecision::Reject(claimed) => {
                         self.reject_claimed_unadmitted_connection(
                             claimed,
@@ -3860,6 +4479,7 @@ impl Orchestrator {
                     return;
                 }
                 let forgotten = self.forget_connection(&connection_id).await;
+                self.resolve_adapter_cleanup_quarantine_from_terminal(&connection_id, transport);
                 if forgotten.was_tracked && forgotten.normalized_lifecycle_was_visible {
                     self.emit(Event::ConnectionEnded {
                         connection_id,
@@ -3876,6 +4496,7 @@ impl Orchestrator {
                     return;
                 }
                 let forgotten = self.forget_connection(&connection_id).await;
+                self.resolve_adapter_cleanup_quarantine_from_terminal(&connection_id, transport);
                 if forgotten.was_tracked && forgotten.normalized_lifecycle_was_visible {
                     self.emit(Event::ConnectionFailed {
                         connection_id,
@@ -4180,6 +4801,7 @@ impl Orchestrator {
         connection_id: ConnectionId,
         action: InboundAction,
     ) -> Result<()> {
+        let transport = self.connection_transport(&connection_id)?;
         let adapter = self.adapter_for(&connection_id)?;
         match action {
             // P1.8 — bind the Connection to its target Session before
@@ -4190,32 +4812,60 @@ impl Orchestrator {
                 session_id,
                 participant_id,
             } => {
-                let sess_arc = self
-                    .sessions
-                    .get(&session_id)
-                    .map(|e| Arc::clone(e.value()))
-                    .ok_or_else(|| RvoipError::SessionNotFound(session_id.clone()))?;
-                {
-                    let mut sess = sess_arc.write().expect("session lock poisoned");
-                    if matches!(sess.state, SessionState::Ended | SessionState::Failed) {
-                        return Err(RvoipError::InvalidState(
-                            "route_inbound_connection: target session is ended",
-                        ));
-                    }
-                    sess.connections.insert(
-                        connection_id.clone(),
-                        ConnectionRef {
-                            id: connection_id.clone(),
-                            participant_id,
-                        },
-                    );
-                    if sess.state == SessionState::Initiating {
-                        sess.state = SessionState::Active;
-                    }
+                if !adapter.is_connection_live(&connection_id) {
+                    return Err(RvoipError::ConnectionNotFound(connection_id));
                 }
-                self.sessions_by_connection
-                    .insert(connection_id.clone(), session_id);
-                adapter.accept(connection_id).await
+                let mut lifecycles =
+                    self.capture_connection_lifecycles(std::slice::from_ref(&connection_id))?;
+                let lifecycle = lifecycles.remove(0);
+                let binding = self.bind_published_connection_to_session(
+                    &lifecycle,
+                    &session_id,
+                    participant_id,
+                )?;
+                if let Err(error) = adapter.accept(connection_id.clone()).await {
+                    self.rollback_connection_session_binding(&binding);
+                    let rolled_back = self.rollback_ticketed_connection(&lifecycle).await;
+                    self.cleanup_failed_adapter_route(
+                        Arc::clone(&adapter),
+                        transport,
+                        &connection_id,
+                        "inbound accept failed",
+                    )
+                    .await;
+                    if rolled_back {
+                        self.emit(Event::ConnectionFailed {
+                            connection_id: connection_id.clone(),
+                            detail: "inbound accept failed".into(),
+                            at: Utc::now(),
+                        });
+                    }
+                    return Err(error);
+                }
+                if !adapter.is_connection_live(&connection_id)
+                    || self
+                        .validate_connection_lifecycles(std::slice::from_ref(&lifecycle))
+                        .is_err()
+                {
+                    self.rollback_connection_session_binding(&binding);
+                    let rolled_back = self.rollback_ticketed_connection(&lifecycle).await;
+                    self.cleanup_failed_adapter_route(
+                        Arc::clone(&adapter),
+                        transport,
+                        &connection_id,
+                        "inbound route ended during accept",
+                    )
+                    .await;
+                    if rolled_back {
+                        self.emit(Event::ConnectionFailed {
+                            connection_id: connection_id.clone(),
+                            detail: "inbound route ended during accept".into(),
+                            at: Utc::now(),
+                        });
+                    }
+                    return Err(RvoipError::ConnectionNotFound(connection_id));
+                }
+                Ok(())
             }
             InboundAction::Reject { reason } => adapter.reject(connection_id, reason).await,
             // P2 — inbound gateway pattern: accept the inbound leg,
@@ -4226,55 +4876,74 @@ impl Orchestrator {
             // transport (common case: SIP↔SIP gateway), that's fine.
             InboundAction::BridgeTo {
                 session_id,
-                outbound,
+                mut outbound,
             } => {
                 // 1. Bind inbound to the named Session + accept it.
-                let sess_arc = self
-                    .sessions
-                    .get(&session_id)
-                    .map(|e| Arc::clone(e.value()))
-                    .ok_or_else(|| RvoipError::SessionNotFound(session_id.clone()))?;
-                {
-                    let mut sess = sess_arc.write().expect("session lock poisoned");
-                    if matches!(sess.state, SessionState::Ended | SessionState::Failed) {
-                        return Err(RvoipError::InvalidState(
-                            "BridgeTo: target session is ended",
-                        ));
-                    }
-                    sess.connections.insert(
-                        connection_id.clone(),
-                        ConnectionRef {
-                            id: connection_id.clone(),
-                            // BridgeTo doesn't carry a participant_id;
-                            // use the outbound's invitee as the
-                            // gateway-side identity placeholder.
-                            participant_id: outbound.participant_id.clone(),
-                        },
-                    );
-                    if sess.state == SessionState::Initiating {
-                        sess.state = SessionState::Active;
-                    }
+                if !adapter.is_connection_live(&connection_id) {
+                    return Err(RvoipError::ConnectionNotFound(connection_id));
                 }
-                self.sessions_by_connection
-                    .insert(connection_id.clone(), session_id.clone());
-                adapter.accept(connection_id.clone()).await?;
+                let mut lifecycles =
+                    self.capture_connection_lifecycles(std::slice::from_ref(&connection_id))?;
+                let lifecycle = lifecycles.remove(0);
+                let binding = self.bind_published_connection_to_session(
+                    &lifecycle,
+                    &session_id,
+                    outbound.participant_id.clone(),
+                )?;
+                if let Err(error) = adapter.accept(connection_id.clone()).await {
+                    self.rollback_connection_session_binding(&binding);
+                    let rolled_back = self.rollback_ticketed_connection(&lifecycle).await;
+                    self.cleanup_failed_adapter_route(
+                        Arc::clone(&adapter),
+                        transport,
+                        &connection_id,
+                        "inbound accept failed",
+                    )
+                    .await;
+                    if rolled_back {
+                        self.emit(Event::ConnectionFailed {
+                            connection_id: connection_id.clone(),
+                            detail: "inbound accept failed".into(),
+                            at: Utc::now(),
+                        });
+                    }
+                    return Err(error);
+                }
+                if !adapter.is_connection_live(&connection_id)
+                    || self
+                        .validate_connection_lifecycles(std::slice::from_ref(&lifecycle))
+                        .is_err()
+                {
+                    self.rollback_connection_session_binding(&binding);
+                    let rolled_back = self.rollback_ticketed_connection(&lifecycle).await;
+                    self.cleanup_failed_adapter_route(
+                        Arc::clone(&adapter),
+                        transport,
+                        &connection_id,
+                        "inbound route ended during accept",
+                    )
+                    .await;
+                    if rolled_back {
+                        self.emit(Event::ConnectionFailed {
+                            connection_id: connection_id.clone(),
+                            detail: "inbound route ended during accept".into(),
+                            at: Utc::now(),
+                        });
+                    }
+                    return Err(RvoipError::ConnectionNotFound(connection_id));
+                }
 
                 // 2. Originate the outbound.
-                let out_handle = self.originate_connection(outbound).await?;
+                outbound.session_id = session_id;
+                let out_handle = match self.originate_connection(outbound).await {
+                    Ok(handle) => handle,
+                    // The inbound leg has already been accepted and cannot be
+                    // made pending again. Preserve its binding so callers can
+                    // observe and explicitly tear it down after outbound
+                    // compensation fails.
+                    Err(error) => return Err(error),
+                };
                 let out_id = out_handle.connection.id.clone();
-                // Bind the outbound to the same Session.
-                {
-                    let mut sess = sess_arc.write().expect("session lock poisoned");
-                    sess.connections.insert(
-                        out_id.clone(),
-                        ConnectionRef {
-                            id: out_id.clone(),
-                            participant_id: out_handle.connection.participant_id.clone(),
-                        },
-                    );
-                }
-                self.sessions_by_connection
-                    .insert(out_id.clone(), session_id);
 
                 // 3. Bridge them. Errors here roll up; we leave the
                 // legs attached to the Session so the caller can
@@ -4310,45 +4979,140 @@ impl Orchestrator {
         };
         let adapter = self.adapter(transport)?;
         let handle = adapter.originate(request).await?;
+        let connection_id = handle.connection.id.clone();
         if handle.connection.transport != transport
             || handle.connection.direction != Direction::Outbound
         {
-            self.retire_untracked_connection_id(&handle.connection.id);
-            self.reject_colliding_adapter_route(transport, handle.connection.id.clone())
-                .await;
+            self.retire_untracked_connection_id(&connection_id);
+            self.cleanup_failed_adapter_route(
+                Arc::clone(&adapter),
+                transport,
+                &connection_id,
+                "originated connection transport or direction mismatch",
+            )
+            .await;
             return Err(RvoipError::AdmissionRejected(
                 "originated connection transport or direction mismatch",
             ));
         }
-        if !self.track_connection(&handle.connection.id, transport, None) {
-            self.reject_colliding_adapter_route(transport, handle.connection.id.clone())
+        if !adapter.is_connection_live(&connection_id) {
+            self.retire_untracked_connection_id(&connection_id);
+            self.cleanup_failed_adapter_route(
+                Arc::clone(&adapter),
+                transport,
+                &connection_id,
+                "outbound route ended before lifecycle claim",
+            )
+            .await;
+            return Err(RvoipError::ConnectionNotFound(connection_id));
+        }
+        let lifecycle = match self.claim_outbound_connection(&connection_id, transport) {
+            Ok(lifecycle) => lifecycle,
+            Err(error) => {
+                self.cleanup_failed_adapter_route(
+                    Arc::clone(&adapter),
+                    transport,
+                    &connection_id,
+                    "outbound connection ID claim failed",
+                )
                 .await;
-            return Err(RvoipError::AdmissionRejected(
-                "connection ID is owned by another transport",
+                return Err(error);
+            }
+        };
+        if !adapter.is_connection_live(&connection_id) {
+            self.rollback_ticketed_connection(&lifecycle).await;
+            self.cleanup_failed_adapter_route(
+                Arc::clone(&adapter),
+                transport,
+                &connection_id,
+                "outbound route ended before lifecycle commit",
+            )
+            .await;
+            return Err(RvoipError::ConnectionNotFound(connection_id));
+        }
+        let binding = match self.commit_outbound_connection(
+            &lifecycle,
+            transport,
+            &session_id,
+            participant_id,
+        ) {
+            Ok(binding) => binding,
+            Err(error) => {
+                self.rollback_ticketed_connection(&lifecycle).await;
+                self.cleanup_failed_adapter_route(
+                    Arc::clone(&adapter),
+                    transport,
+                    &connection_id,
+                    "outbound lifecycle commit failed",
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        if self.session_of(&connection_id).as_ref() != Some(&session_id) {
+            self.rollback_connection_session_binding(&binding);
+            let rolled_back = self.rollback_ticketed_connection(&lifecycle).await;
+            self.cleanup_failed_adapter_route(
+                Arc::clone(&adapter),
+                transport,
+                &connection_id,
+                "outbound session ended during lifecycle commit",
+            )
+            .await;
+            if rolled_back {
+                self.emit(Event::ConnectionFailed {
+                    connection_id: connection_id.clone(),
+                    detail: "outbound session ended during lifecycle commit".into(),
+                    at: Utc::now(),
+                });
+            }
+            return Err(RvoipError::InvalidState(
+                "outbound session ended during lifecycle commit",
             ));
         }
-        let published = self
-            .connections
-            .get_mut(&handle.connection.id)
-            .is_some_and(|mut entry| {
-                if entry.transport != transport {
-                    return false;
-                }
-                entry.inbound_publication = InboundPublicationState::Published;
-                true
-            });
-        if !published {
-            self.reject_colliding_adapter_route(transport, handle.connection.id.clone())
-                .await;
-            return Err(RvoipError::AdmissionRejected(
-                "connection ID transport ownership changed during originate",
-            ));
+        if let Err(error) = adapter.activate_outbound(connection_id.clone()).await {
+            self.rollback_connection_session_binding(&binding);
+            let rolled_back = self.rollback_ticketed_connection(&lifecycle).await;
+            self.cleanup_failed_adapter_route(
+                Arc::clone(&adapter),
+                transport,
+                &connection_id,
+                "outbound activation failed",
+            )
+            .await;
+            if rolled_back {
+                self.emit(Event::ConnectionFailed {
+                    connection_id: connection_id.clone(),
+                    detail: "outbound activation failed".into(),
+                    at: Utc::now(),
+                });
+            }
+            return Err(error);
         }
-        self.bind_connection_to_session(&handle.connection.id, &session_id, participant_id)?;
-        self.emit(Event::ConnectionOutbound {
-            connection_id: handle.connection.id.clone(),
-            at: Utc::now(),
-        });
+        if !adapter.is_connection_live(&connection_id)
+            || self
+                .validate_connection_lifecycles(std::slice::from_ref(&lifecycle))
+                .is_err()
+            || self.session_of(&connection_id).as_ref() != Some(&session_id)
+        {
+            self.rollback_connection_session_binding(&binding);
+            let rolled_back = self.rollback_ticketed_connection(&lifecycle).await;
+            self.cleanup_failed_adapter_route(
+                Arc::clone(&adapter),
+                transport,
+                &connection_id,
+                "outbound route ended during activation",
+            )
+            .await;
+            if rolled_back {
+                self.emit(Event::ConnectionFailed {
+                    connection_id: connection_id.clone(),
+                    detail: "outbound route ended during activation".into(),
+                    at: Utc::now(),
+                });
+            }
+            return Err(RvoipError::ConnectionNotFound(connection_id));
+        }
         Ok(handle)
     }
 

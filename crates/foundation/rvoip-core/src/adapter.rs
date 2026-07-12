@@ -302,7 +302,11 @@ pub trait ConnectionAdapter: Send + Sync {
     ///
     /// The default is a no-op for legacy adapters. Implementations that
     /// advertise staged outbound activation must make this operation
-    /// idempotent and release retained events in FIFO order.
+    /// idempotent and release retained events in FIFO order. Adapters that do
+    /// not advertise it are compatibility-only for outbound origination:
+    /// core cannot recover an operational, principal, or terminal event that
+    /// such an adapter emits before `originate` returns its previously
+    /// unknown connection ID.
     async fn activate_outbound(&self, _conn: ConnectionId) -> Result<()> {
         Ok(())
     }
