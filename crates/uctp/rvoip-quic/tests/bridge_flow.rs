@@ -91,7 +91,7 @@ async fn dial_and_invite(
     cert: &rustls::pki_types::CertificateDer<'static>,
     sid: &str,
     participant: &str,
-) -> Arc<UctpQuicClient> {
+) -> (Arc<UctpQuicClient>, u16) {
     let client_cfg = dev_client_config_trusting(cert).expect("client cfg");
     let client = UctpQuicClient::connect(client_ep, server_addr, "localhost", Arc::new(client_cfg))
         .await
@@ -171,7 +171,51 @@ async fn dial_and_invite(
         signature: None,
     };
     client.send(env).await.expect("send invite");
+    let wire_connid = format!("conn_{participant}");
+    let wire_stream_id = format!("strm_{participant}");
     client
+        .send(
+            UctpEnvelope::new(
+                MessageType::ConnectionOffer,
+                serde_json::json!({
+                    "by_participant": participant,
+                    "substrate": "quic",
+                    "capabilities": {},
+                    "streams_offered": [{
+                        "id": wire_stream_id,
+                        "kind": "audio",
+                        "direction": "sendrecv",
+                        "codec_preferences": ["opus"]
+                    }],
+                    "substrate_setup": null
+                }),
+            )
+            .with_sid(sid)
+            .with_connid(wire_connid.clone()),
+        )
+        .await
+        .expect("send connection.offer");
+    client
+        .send(
+            UctpEnvelope::new(MessageType::ConnectionReady, serde_json::json!({}))
+                .with_sid(sid)
+                .with_connid(wire_connid),
+        )
+        .await
+        .expect("send connection.ready");
+
+    let stream_local_id = loop {
+        let envelope = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
+            .await
+            .expect("stream.opened timeout")
+            .expect("inbound closed");
+        if envelope.msg_type == MessageType::StreamOpened {
+            let opened: rvoip_uctp::payloads::stream::StreamOpened =
+                envelope.decode_payload().expect("decode stream.opened");
+            break opened.stream.stream_local_id;
+        }
+    };
+    (client, stream_local_id)
 }
 
 #[tokio::test]
@@ -196,9 +240,9 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
     // --- Two clients ---
     let client_ep_a = client_endpoint();
     let client_ep_b = client_endpoint();
-    let client_a =
+    let (client_a, client_a_local_id) =
         dial_and_invite(&client_ep_a, server_addr, &cert_der, "sess_a", "part_alice").await;
-    let client_b =
+    let (client_b, client_b_local_id) =
         dial_and_invite(&client_ep_b, server_addr, &cert_der, "sess_b", "part_bob").await;
 
     // --- Wait for two InboundConnection events + paired ConnectionAuthenticated ---
@@ -296,7 +340,7 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
         StreamKind::Audio,
         codec.clone(),
         rvoip_core::connection::Direction::Outbound,
-        1, // matches server-side stream_local_id
+        client_a_local_id,
         client_a.connection.clone(),
     );
     let client_b_stream = QuicDatagramMediaStream::start(
@@ -304,7 +348,7 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
         StreamKind::Audio,
         codec,
         rvoip_core::connection::Direction::Inbound,
-        1,
+        client_b_local_id,
         client_b.connection.clone(),
     );
 

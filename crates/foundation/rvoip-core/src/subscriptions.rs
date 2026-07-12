@@ -14,7 +14,8 @@
 //! lets cleanup paths (connection.end, session.end) be eager without
 //! needing precise ordering.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use dashmap::{DashMap, DashSet};
 
@@ -204,12 +205,41 @@ pub struct PublisherEntry {
 /// MP2 introduced the registry keyed by `strm_id`; MP2.5 added a
 /// secondary index `(SessionId, participant_id) -> Vec<strm_id>` so
 /// `from_participant` lookups don't have to scan the whole table.
-#[derive(Default)]
 pub struct PublisherRegistry {
-    inner: DashMap<(SessionId, String), PublisherEntry>,
+    inner: DashMap<(SessionId, String), PublisherRecord>,
     /// Participant → streams index. Snapshots stay coherent with
     /// `inner` because every mutating path updates both.
     by_participant: DashMap<(SessionId, String), Vec<String>>,
+    /// Serializes the small control-plane mutations that must update both
+    /// indexes. Media fanout reads remain lock-free.
+    mutation_lock: Mutex<()>,
+    next_registration_id: AtomicU64,
+}
+
+#[derive(Clone, Debug)]
+struct PublisherRecord {
+    entry: PublisherEntry,
+    registration_id: PublisherRegistrationId,
+}
+
+/// Generation token for an owning publisher registration.
+///
+/// This stays crate-private: public callers keep using the compatible
+/// overwrite-oriented [`PublisherRegistry::register`] API, while managed
+/// orchestrator resources use the token to ensure an old handle can never
+/// remove a newer registration that reused the same Session/Stream key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PublisherRegistrationId(u64);
+
+impl Default for PublisherRegistry {
+    fn default() -> Self {
+        Self {
+            inner: DashMap::new(),
+            by_participant: DashMap::new(),
+            mutation_lock: Mutex::new(()),
+            next_registration_id: AtomicU64::new(1),
+        }
+    }
 }
 
 impl PublisherRegistry {
@@ -222,11 +252,100 @@ impl PublisherRegistry {
     /// when their connection emits `stream.opened`. Idempotent — repeat
     /// registrations overwrite cleanly.
     pub fn register(&self, sid: SessionId, strm_id: String, entry: PublisherEntry) {
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let registration_id = self.next_registration_id();
         let participant_key = (sid.clone(), entry.participant.clone());
-        self.inner.insert((sid.clone(), strm_id.clone()), entry);
-        // Keep by_participant in sync. Push without dedup; if the
-        // adapter announces the same stream twice we tolerate the
-        // duplicate (the primary table overwrote anyway).
+        if let Some(previous) = self.inner.insert(
+            (sid.clone(), strm_id.clone()),
+            PublisherRecord {
+                entry,
+                registration_id,
+            },
+        ) {
+            self.remove_participant_stream(&sid, &previous.entry.participant, &strm_id);
+        }
+        self.add_participant_stream(participant_key, strm_id);
+    }
+
+    /// Install an owning publisher row only when the canonical
+    /// `(SessionId, StreamId)` is unoccupied.
+    ///
+    /// The returned generation is required for exact managed cleanup. It
+    /// prevents a delayed Drop from deleting a replacement registered after
+    /// the managed publisher stopped.
+    pub(crate) fn register_managed(
+        &self,
+        sid: SessionId,
+        strm_id: String,
+        entry: PublisherEntry,
+    ) -> std::result::Result<PublisherRegistrationId, PublisherEntry> {
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = (sid.clone(), strm_id.clone());
+        if let Some(existing) = self.inner.get(&key) {
+            return Err(existing.entry.clone());
+        }
+
+        let registration_id = self.next_registration_id();
+        let participant_key = (sid, entry.participant.clone());
+        self.inner.insert(
+            key,
+            PublisherRecord {
+                entry,
+                registration_id,
+            },
+        );
+        self.add_participant_stream(participant_key, strm_id);
+        Ok(registration_id)
+    }
+
+    pub(crate) fn registration_is_current(
+        &self,
+        sid: &SessionId,
+        strm_id: &str,
+        registration_id: PublisherRegistrationId,
+    ) -> bool {
+        self.inner
+            .get(&(sid.clone(), strm_id.to_string()))
+            .is_some_and(|record| record.registration_id == registration_id)
+    }
+
+    /// Remove only the row installed by `register_managed`.
+    pub(crate) fn remove_registration(
+        &self,
+        sid: &SessionId,
+        strm_id: &str,
+        registration_id: PublisherRegistrationId,
+    ) -> bool {
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = (sid.clone(), strm_id.to_string());
+        let Some(record) = self.inner.get(&key) else {
+            return false;
+        };
+        if record.registration_id != registration_id {
+            return false;
+        }
+        drop(record);
+        let Some((_, removed)) = self.inner.remove(&key) else {
+            return false;
+        };
+        self.remove_participant_stream(sid, &removed.entry.participant, strm_id);
+        true
+    }
+
+    fn next_registration_id(&self) -> PublisherRegistrationId {
+        PublisherRegistrationId(self.next_registration_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn add_participant_stream(&self, participant_key: (SessionId, String), strm_id: String) {
         self.by_participant
             .entry(participant_key)
             .and_modify(|v| {
@@ -237,12 +356,26 @@ impl PublisherRegistry {
             .or_insert_with(|| vec![strm_id]);
     }
 
+    fn remove_participant_stream(&self, sid: &SessionId, participant: &str, strm_id: &str) {
+        let participant_key = (sid.clone(), participant.to_string());
+        if let Some(mut streams) = self.by_participant.get_mut(&participant_key) {
+            streams.retain(|stream| stream != strm_id);
+        }
+        let empty = self
+            .by_participant
+            .get(&participant_key)
+            .is_some_and(|streams| streams.is_empty());
+        if empty {
+            self.by_participant.remove(&participant_key);
+        }
+    }
+
     /// Resolve a wire-level `strm_id` to its publishing Connection.
     /// MP2-era API; preserved for back-compat.
     pub fn publisher(&self, sid: &SessionId, strm_id: &str) -> Option<ConnectionId> {
         self.inner
             .get(&(sid.clone(), strm_id.to_string()))
-            .map(|e| e.value().connection.clone())
+            .map(|record| record.entry.connection.clone())
     }
 
     /// Full publisher entry — used by MP2.5+ for codec / kind / participant
@@ -250,7 +383,7 @@ impl PublisherRegistry {
     pub fn entry(&self, sid: &SessionId, strm_id: &str) -> Option<PublisherEntry> {
         self.inner
             .get(&(sid.clone(), strm_id.to_string()))
-            .map(|e| e.value().clone())
+            .map(|record| record.entry.clone())
     }
 
     /// All `strm_id`s published by `participant` in `sid`. Returns an
@@ -267,61 +400,87 @@ impl PublisherRegistry {
     /// Remove exactly one published stream and its participant-index row.
     /// Idempotent: unknown streams are a no-op.
     pub fn remove_stream(&self, sid: &SessionId, strm_id: &str) {
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let key = (sid.clone(), strm_id.to_string());
         let Some((_, removed)) = self.inner.remove(&key) else {
             return;
         };
-        let participant_key = (sid.clone(), removed.participant);
-        if let Some(mut streams) = self.by_participant.get_mut(&participant_key) {
-            streams.retain(|stream| stream != strm_id);
+        self.remove_participant_stream(sid, &removed.entry.participant, strm_id);
+    }
+
+    /// Remove a Stream only when its current registration belongs to the
+    /// expected publishing Connection.
+    ///
+    /// Transport teardown must use this conditional form: a delayed close for
+    /// an older publisher must not delete a same-named replacement that was
+    /// registered by another Connection in the meantime.
+    pub fn remove_stream_if_publisher(
+        &self,
+        sid: &SessionId,
+        strm_id: &str,
+        publisher: &ConnectionId,
+    ) -> bool {
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = (sid.clone(), strm_id.to_string());
+        let belongs_to_publisher = self
+            .inner
+            .get(&key)
+            .is_some_and(|record| &record.entry.connection == publisher);
+        if !belongs_to_publisher {
+            return false;
         }
-        let empty = self
-            .by_participant
-            .get(&participant_key)
-            .is_some_and(|streams| streams.is_empty());
-        if empty {
-            self.by_participant.remove(&participant_key);
-        }
+        let Some((_, removed)) = self.inner.remove(&key) else {
+            return false;
+        };
+        self.remove_participant_stream(sid, &removed.entry.participant, strm_id);
+        true
     }
 
     /// Drop every registration that names `connid` as publisher (i.e.,
     /// the connection ended). Called by
     /// `crate::Orchestrator::forget_connection`.
     pub fn drop_publisher(&self, connid: &ConnectionId) {
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Collect keys to remove; we can't mutate `inner` while
         // iterating it under DashMap.
-        let to_remove: Vec<(SessionId, String, String)> = self
+        let to_remove: Vec<(SessionId, String, PublisherRegistrationId)> = self
             .inner
             .iter()
-            .filter(|e| &e.value().connection == connid)
+            .filter(|record| &record.entry.connection == connid)
             .map(|e| {
                 let (sid, strm) = e.key();
-                (sid.clone(), strm.clone(), e.value().participant.clone())
+                (sid.clone(), strm.clone(), e.registration_id)
             })
             .collect();
-        for (sid, strm, participant) in to_remove {
-            self.inner.remove(&(sid.clone(), strm.clone()));
-            if let Some(mut entry) = self
-                .by_participant
-                .get_mut(&(sid.clone(), participant.clone()))
-            {
-                entry.retain(|s| s != &strm);
-            }
-            // GC empty participant entries to avoid stale Vec growth.
-            let key = (sid, participant);
-            let is_empty = self
-                .by_participant
+        for (sid, strm, registration_id) in to_remove {
+            let key = (sid.clone(), strm.clone());
+            let is_same_registration = self
+                .inner
                 .get(&key)
-                .map(|e| e.value().is_empty())
-                .unwrap_or(false);
-            if is_empty {
-                self.by_participant.remove(&key);
+                .is_some_and(|record| record.registration_id == registration_id);
+            if is_same_registration {
+                if let Some((_, removed)) = self.inner.remove(&key) {
+                    self.remove_participant_stream(&sid, &removed.entry.participant, &strm);
+                }
             }
         }
     }
 
     /// Drop every registration for a Session. Called on session.ended.
     pub fn drop_session(&self, sid: &SessionId) {
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.inner.retain(|(s, _), _| s != sid);
         self.by_participant.retain(|(s, _), _| s != sid);
     }
@@ -360,6 +519,45 @@ mod publisher_registry_tests {
         registry.remove_stream(&sid, "audio-backup");
         assert!(registry.streams_for_participant(&sid, "alice").is_empty());
         registry.remove_stream(&sid, "audio-backup");
+    }
+
+    #[test]
+    fn conditional_remove_cannot_delete_same_named_replacement() {
+        let registry = PublisherRegistry::new();
+        let sid = SessionId::new();
+        let old_publisher = ConnectionId::new();
+        let replacement = ConnectionId::new();
+        registry.register(
+            sid.clone(),
+            "audio-main".to_string(),
+            PublisherEntry {
+                connection: old_publisher.clone(),
+                participant: "old".to_string(),
+                kind: "audio".to_string(),
+                codec: None,
+            },
+        );
+        registry.register(
+            sid.clone(),
+            "audio-main".to_string(),
+            PublisherEntry {
+                connection: replacement.clone(),
+                participant: "replacement".to_string(),
+                kind: "audio".to_string(),
+                codec: None,
+            },
+        );
+
+        assert!(!registry.remove_stream_if_publisher(&sid, "audio-main", &old_publisher,));
+        assert_eq!(
+            registry.publisher(&sid, "audio-main"),
+            Some(replacement.clone())
+        );
+        assert!(registry.remove_stream_if_publisher(&sid, "audio-main", &replacement,));
+        assert!(registry.entry(&sid, "audio-main").is_none());
+        assert!(registry
+            .streams_for_participant(&sid, "replacement")
+            .is_empty());
     }
 
     #[test]

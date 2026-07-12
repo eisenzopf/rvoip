@@ -3,8 +3,11 @@
 //! `rvoip_core::AdapterEvent`s.
 
 use rvoip_core::identity::IdentityAssurance;
+use tokio::sync::oneshot;
 
 use crate::ids::{ConnectionId, SessionId, StreamId};
+
+use super::connection::AcceptedStream;
 
 /// One coordinator event. Adapter crates map this to
 /// `rvoip_core::AdapterEvent` per design doc §4.4.
@@ -37,6 +40,21 @@ pub enum UctpSessionEvent {
         sid: SessionId,
         connid: ConnectionId,
         chosen_codec: Option<String>,
+    },
+
+    /// Request an all-or-nothing substrate binding for the negotiated media
+    /// Streams before the coordinator announces them with `stream.opened`.
+    ///
+    /// QUIC and WebTransport enable this path because their datagram handle is
+    /// peer-global. The adapter must create the concrete MediaStreams, bind
+    /// their real wire Stream IDs in the peer media router, then reply with one
+    /// local ID per input Stream in the same order. On error it must roll back
+    /// every partial binding before replying.
+    BindMediaStreams {
+        sid: SessionId,
+        connid: ConnectionId,
+        streams: Vec<AcceptedStream>,
+        reply: oneshot::Sender<Result<Vec<u16>, crate::errors::UctpError>>,
     },
 
     /// A Connection moved to `Connected` (after `connection.ready`).

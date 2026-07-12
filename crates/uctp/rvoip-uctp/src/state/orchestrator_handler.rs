@@ -270,8 +270,9 @@ impl SubscriptionHandler for OrchestratorSubscriptionHandler {
         );
     }
 
-    fn unregister_publisher(&self, sid: &SessionId, strm_id: &str) {
-        self.publishers.remove_stream(sid, strm_id);
+    fn unregister_publisher(&self, sid: &SessionId, strm_id: &str, publisher: &ConnectionId) {
+        self.publishers
+            .remove_stream_if_publisher(sid, strm_id, publisher);
     }
 
     fn unregister_connection(&self, _sid: &SessionId, connid: &ConnectionId) {
@@ -315,5 +316,42 @@ mod cleanup_tests {
         assert!(orchestrator
             .subscribers_for(&sid, &publisher, &stream)
             .is_empty());
+    }
+
+    #[test]
+    fn stale_stream_cleanup_cannot_remove_another_publishers_replacement() {
+        let orchestrator = Orchestrator::new(Config::default());
+        let publishers = Arc::new(PublisherRegistry::new());
+        let handler = OrchestratorSubscriptionHandler::new(
+            Arc::clone(&orchestrator),
+            Arc::clone(&publishers),
+        );
+        let sid = SessionId::from_string("session-replacement");
+        let old_publisher = ConnectionId::from_string("publisher-old");
+        let replacement = ConnectionId::from_string("publisher-replacement");
+        publishers.register(
+            sid.clone(),
+            "audio/main".to_string(),
+            PublisherEntry {
+                connection: old_publisher.clone(),
+                participant: "old".to_string(),
+                kind: "audio".to_string(),
+                codec: None,
+            },
+        );
+        publishers.register(
+            sid.clone(),
+            "audio/main".to_string(),
+            PublisherEntry {
+                connection: replacement.clone(),
+                participant: "replacement".to_string(),
+                kind: "audio".to_string(),
+                codec: None,
+            },
+        );
+
+        handler.unregister_publisher(&sid, "audio/main", &old_publisher);
+
+        assert_eq!(publishers.publisher(&sid, "audio/main"), Some(replacement));
     }
 }

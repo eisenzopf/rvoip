@@ -9,6 +9,7 @@
 use chrono::{DateTime, Utc};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+use crate::compatibility::UCTP_ENVELOPE_VERSION;
 use crate::errors::UctpError;
 use crate::types::MessageType;
 
@@ -71,7 +72,7 @@ impl<T> UctpEnvelope<T> {
     /// the chainable setters below.
     pub fn new(msg_type: MessageType, payload: T) -> Self {
         Self {
-            v: 1,
+            v: UCTP_ENVELOPE_VERSION,
             msg_type,
             id: crate::ids::new_envelope_id().to_string(),
             ts: Utc::now(),

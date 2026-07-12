@@ -129,7 +129,7 @@ A binary encoding is planned for v1. Likely candidates: CBOR (general-purpose, s
 ### 4.1 QUIC (native apps, embedded, server-server)
 
 - **Signaling:** one bidirectional stream per logical UCTP channel. Each envelope is length-prefixed (4-byte big-endian uint32 followed by JSON bytes). Multiple envelopes per stream are allowed.
-- **Media:** QUIC datagrams. One datagram per RTP packet. Datagrams carry standard RTP headers preceded by a 4-byte UCTP datagram header (`stream_id` reference, packet sequence). See §10.
+- **Media:** QUIC datagrams. One datagram per RTP packet. Datagrams carry standard RTP headers preceded by an 8-byte UCTP datagram header (version, flags, `stream_local_id`, and datagram sequence). See §10.
 - **Connection migration:** QUIC's native connection migration is supported; the UCTP-level Connection ID is invariant across QUIC migration events.
 - **Multiple Streams over one QUIC connection:** allowed. The UCTP `Connection` is decoupled from the QUIC connection — one QUIC connection can carry several UCTP `Connection`s (e.g., for a Participant with multiple Devices on the same physical link, though that's unusual).
 
@@ -882,7 +882,9 @@ Emitted once a media Stream begins flowing on a Connection (after `connection.re
 }
 ```
 
-`stream_local_id` is the per-Connection 16-bit handle that appears in datagram headers (§10.1). It is assigned at `connection.ready` and announced here.
+`stream_local_id` is the physical-peer-scoped 16-bit handle that appears in
+datagram headers (§10.1). It is assigned while processing `connection.ready`,
+after the substrate has bound the negotiated Stream, and is announced here.
 
 #### `stream.closed` (S→C)
 ```json
@@ -993,7 +995,7 @@ A Session may contain any number of Participants (N ≥ 1). voip-3 §6.3 / §9.8
 - **Participant lifecycle** is per §7.2 — `session.participant.joined` / `session.participant.left` is multicast to every other Participant when membership changes.
 - **Stream publishing.** Each Participant's Streams are advertised via their own `connection.offer` / `connection.answer`. After `connection.ready` fires, those Streams become available for subscription by other Participants.
 - **Stream subscription is explicit.** After `session.started`, a Participant subscribes to peer Streams via `stream.subscribe`. They may subscribe by `strm_id`, by `from_participant`, or by Stream `kind`. A Participant does **not** receive media from Streams it has not subscribed to.
-- **Datagram fan-out is server-side.** A publisher's datagrams (§10.1) arrive at the server keyed by the publisher's Connection and `stream_local_id`. The server forwards each datagram to every Participant subscribed to that `strm_id`, rewriting the `stream_local_id` in the UCTP datagram header to match the subscriber's Connection-local mapping. `datagram_seq` MAY be re-numbered per egress Connection.
+- **Datagram fan-out is server-side.** A publisher's datagrams (§10.1) arrive at the server keyed by the authenticated physical peer and `stream_local_id`. The server resolves that binding to its canonical Session, Connection, and Stream, then forwards each datagram to every Participant subscribed to that `strm_id`, rewriting `stream_local_id` to the subscriber peer's binding. `datagram_seq` MAY be re-numbered per egress binding.
 - **Active speaker** (advisory, optional): the server MAY emit `stream.active-speaker` envelopes when audio-energy detection identifies a new dominant speaker. Clients MUST NOT rely on it for correctness; missing events do not mean no one is speaking.
 - **No SFU envelopes.** Servers may use SFU/MCU machinery internally (selective forwarding, simulcast/SVC, mixing matrices) to scale large Sessions, but no SFU-specific envelopes are exposed at the UCTP wire. From a Participant's perspective, the protocol is unchanged regardless of N.
 - **1:1 is N=2.** A 2-Participant Session uses the same envelopes and lifecycle as a 50-Participant Session.
@@ -1261,13 +1263,29 @@ UCTP datagram header:
 +---------------------------------------------------------------+
 ```
 
-- `stream_local_id` is a per-Connection 16-bit handle assigned at `connection.ready`. Maps to a `strm_*` Stream ID.
+- `stream_local_id` is a physical-peer-scoped, nonzero 16-bit handle bound at
+  `connection.ready`. It maps to an authenticated canonical Session,
+  Connection, and `strm_*` Stream ID and is never reused during that peer's
+  lifetime.
 - `datagram_seq` lets the receiver detect loss and out-of-order arrival without parsing RTP.
 - Payload is a standard RTP packet (RFC 3550) including its own RTP header.
 
+An implementation MUST reject a datagram whose bytes after the UCTP header are
+only codec payload or otherwise do not parse as a complete RTP packet. In
+`rvoip-uctp`, the checked `pack_rtp_datagram` / `unpack_rtp_datagram` APIs are
+the conformance boundary; the opaque raw framing helpers exist only for alpha
+API compatibility.
+
 This dual-header approach (UCTP datagram header + RTP header) is intentional: the UCTP header makes the datagram self-describing for routing across many Connections on one substrate; the RTP header preserves compatibility with codecs and tooling that expect RTP.
 
-In multi-party Sessions (§7.7), `stream_local_id` is **Connection-local** — the server rewrites this header when fanning a publisher's datagram out to subscribers, mapping the publisher's Stream ID to each subscriber's Connection-local handle. The RTP payload is forwarded unchanged. `datagram_seq` MAY be re-numbered per egress Connection if loss-detection statistics differ.
+In multi-party Sessions (§7.7), `stream_local_id` names a Stream binding for a
+logical Connection, but every value MUST also be unique and non-reused for the
+lifetime of the physical QUIC/WebTransport peer. The datagram header contains
+no Session or Connection discriminator, so per-Connection allocators would be
+ambiguous when one peer multiplexes several Connections. The server rewrites
+this header during fanout using the subscriber peer's global handle while
+leaving the RTP payload unchanged. `datagram_seq` MAY be re-numbered per
+egress Connection if loss-detection statistics differ.
 
 ### 10.2 WebSocket fallback (no datagrams)
 

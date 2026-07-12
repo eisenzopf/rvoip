@@ -70,6 +70,24 @@ The legacy `MediaStream::frames_in()` and graph route-ID methods remain, but
 new built-in integrations should use `try_frames_in()` and managed routes so
 duplicate acquisition and teardown failure are explicit.
 
+### MediaGraph-backed virtual publishers
+
+Use `Orchestrator::register_virtual_publisher` to expose an existing
+Connection's audio under a canonical `(SessionId, StreamId)` without taking
+the source receiver away from bridges, recorders, or other broadcasts. Pass a
+`VirtualPublisherDescriptor` containing the Session, logical Stream, and
+publisher Participant name. The returned `ManagedVirtualPublisher` owns a
+bounded ten-frame sink, the fanout task, and an exact-generation publisher
+registry row.
+
+Retain that handle for the publication lifetime. `close().await` converges the
+task and graph route; Drop performs immediate best-effort cancellation. Either
+path unregisters only the row created by that handle, so a stale handle cannot
+delete a newer registration that reused the same Session/Stream identity.
+Duplicate live identities are rejected. Frames delivered to subscribers carry
+the descriptor's canonical Stream ID even when the underlying SIP/WebRTC media
+stream uses a different local ID.
+
 ## WebRTC dependency pin
 
 rvoip currently patches `rtc` to exact fork revision
@@ -101,3 +119,44 @@ bounded replay/capacity state, and couple signaling/media tasks to one peer
 supervisor. `UctpCoordinatorCaps::legacy_permissive` is only for trusted
 development compatibility. QUIC, WebTransport, and WebSocket share the same
 caps and configurable authentication deadline.
+
+## UCTP 0.2 media and resource bindings
+
+UCTP 0.2 removes the alpha invite-time synthetic audio Stream. A media-capable
+peer must complete `connection.offer` and `connection.ready`; the adapter binds
+each accepted wire `strm_id` to a concrete media Stream before the server emits
+`stream.opened`. Applications must use the announced `stream_local_id` rather
+than assuming the first Stream is ID `1`.
+
+The media datagram is exactly an eight-byte UCTP header followed by one complete
+RTP packet. New code must use `RtpDatagram`, `pack_rtp_datagram`, and
+`unpack_rtp_datagram`. The hidden raw helpers exist only to compile alpha
+callers and do not validate their opaque body; payload-only datagrams are not a
+valid 0.2 media path.
+
+Because the datagram header contains no Session or Connection field,
+`stream_local_id` is allocated once across the entire physical QUIC or
+WebTransport peer. IDs are nonzero, monotonically issued, and never reused
+during that peer lifetime. Delayed datagrams therefore cannot land on a later
+Stream. QUIC and WebTransport now share the rvoip `PeerMediaRouter` contract,
+including authenticated owner checks, exact Session/Connection/Stream indexes,
+bounded ingress, diagnostics, and cancellation-coupled cleanup.
+
+Wire Session and Connection IDs are untrusted peer-local values. Deployments
+that intentionally connect multiple peers to one call must configure a
+`SessionBindingResolver` that validates the authenticated principal and maps
+the wire Session to a canonical rvoip Session. Without one, the safe default
+namespaces every peer independently. `PeerResourceBindings` then maps wire
+Connections to real adapter Connections, rechecks expiry, prevents cross-
+Session aliasing, and removes exact sibling resources during teardown.
+
+`stream.subscribe` and `stream.unsubscribe` now operate through those canonical
+bindings. Tests and applications should send the real wire commands rather
+than calling `Orchestrator::add_subscription` as a protocol substitute.
+Publisher cleanup is Connection-conditioned so a delayed close cannot remove
+a same-named replacement Stream.
+
+For an encrypted QUIC capture, explicitly opt in with
+`enable_server_key_log_from_env` and `enable_client_key_log_from_env` after
+setting `SSLKEYLOGFILE`, then supply the resulting key log to Wireshark or
+tshark. rvoip never enables traffic-secret logging implicitly.

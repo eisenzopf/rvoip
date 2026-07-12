@@ -132,6 +132,7 @@ pub mod store;
 pub mod stream;
 pub mod subscriptions;
 pub mod vcon;
+pub mod virtual_publisher;
 
 pub use adapter::{
     AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest,
@@ -178,6 +179,9 @@ pub use stream::{MediaFrame, MediaStream, MediaStreamHandle, QualitySnapshot, St
 pub use vcon::{
     DefaultVconBuilder, VconAnalysis, VconAnalysisKind, VconAttachment, VconBuilderHandle,
     VconDialog, VconDialogKind, VconParty, VconRef, VconSnapshot,
+};
+pub use virtual_publisher::{
+    ManagedVirtualPublisher, VirtualPublisherDescriptor, DEFAULT_VIRTUAL_PUBLISHER_QUEUE_CAPACITY,
 };
 
 // V2.A.8 — when `vcon-signing` is enabled, re-export the

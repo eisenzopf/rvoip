@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -33,7 +33,10 @@ use rvoip_core::identity::IdentityAssurance;
 use super::connection::{ConnectionInput, ConnectionMachine};
 use super::events::UctpSessionEvent;
 use super::session::{SessionInput, SessionMachine};
-use super::subscription::{rejecting_handler, SubscriptionHandler, SubscriptionOutcome};
+use super::subscription::{
+    rejecting_handler, PeerResourceBindings, ResourceBindingError, SubscriptionHandler,
+    SubscriptionOutcome,
+};
 
 /// Substrate transport name used for the `transport` metric/span label.
 /// One coordinator instance per peer connection; the adapter that owns
@@ -277,6 +280,22 @@ pub struct UctpCoordinator {
     /// (or similar) at construction. Default [`RejectingHandler`]
     /// preserves the legacy v0 503 reject.
     subscription_handler: Arc<dyn SubscriptionHandler>,
+    /// Optional authenticated wire-to-core resource authority shared with the
+    /// substrate event pump. It is installed before ingress starts so Session
+    /// authorization occurs in the coordinator before state/event commit.
+    resource_bindings: OnceLock<Arc<PeerResourceBindings>>,
+    /// QUIC/WebTransport set this before accepting traffic so negotiated
+    /// Streams are bound by the adapter's peer-scoped media router before any
+    /// `stream.opened` envelope is emitted. Other substrates use the
+    /// coordinator's peer-global fallback allocator.
+    external_media_binding: AtomicBool,
+    /// Monotonic peer-lifetime fallback allocator. Stored as u32 so 65,535 can
+    /// be issued once and the next request reports exhaustion without wrap.
+    next_stream_local_id: Mutex<u32>,
+    /// Every local ID ever announced during this physical peer lifetime.
+    /// Entries intentionally survive Connection teardown so delayed datagrams
+    /// can never target a newly rebound Stream.
+    announced_stream_local_ids: Mutex<HashMap<u16, ConnectionId>>,
     /// Per-peer auth state (plan §7 G1). Transitions
     /// `Unauthenticated → Authenticated { .. }` in [`handle_auth_response`]
     /// on a successful bearer validation; consulted by every non-auth
@@ -453,6 +472,10 @@ impl UctpCoordinator {
             local_descriptor,
             pending: Arc::new(Pending::new()),
             subscription_handler,
+            resource_bindings: OnceLock::new(),
+            external_media_binding: AtomicBool::new(false),
+            next_stream_local_id: Mutex::new(1),
+            announced_stream_local_ids: Mutex::new(HashMap::new()),
             peer_auth: Arc::new(Mutex::new(PeerAuthState::Unauthenticated)),
             replay_cache: caps
                 .replay_protection
@@ -483,6 +506,33 @@ impl UctpCoordinator {
     /// matched responses via `Pending::deliver`. Drained on `shutdown()`.
     pub fn pending(&self) -> Arc<Pending> {
         Arc::clone(&self.pending)
+    }
+
+    /// Install the peer's authenticated wire-to-core resource authority.
+    ///
+    /// Substrates must call this immediately after construction and before
+    /// forwarding inbound envelopes. A late installation adopts the already
+    /// retained principal first; repeated installation is rejected so the
+    /// authorization boundary cannot change during one physical peer.
+    pub fn set_resource_bindings(
+        &self,
+        bindings: Arc<PeerResourceBindings>,
+    ) -> std::result::Result<(), ResourceBindingError> {
+        if let Some(principal) = self.authenticated_principal() {
+            bindings.authenticate(principal)?;
+        }
+        self.resource_bindings
+            .set(bindings)
+            .map_err(|_| ResourceBindingError::unavailable("resource-bindings-already-installed"))
+    }
+
+    /// Require the owning substrate to bind negotiated media through
+    /// [`UctpSessionEvent::BindMediaStreams`] before announcement.
+    ///
+    /// Adapters call this immediately after construction and before feeding
+    /// the coordinator any inbound envelopes.
+    pub fn enable_external_media_binding(&self) {
+        self.external_media_binding.store(true, Ordering::Release);
     }
 
     /// Variant of [`Self::start_full_with_caps`] that also wires an
@@ -517,6 +567,10 @@ impl UctpCoordinator {
             local_descriptor,
             pending: Arc::new(Pending::new()),
             subscription_handler,
+            resource_bindings: OnceLock::new(),
+            external_media_binding: AtomicBool::new(false),
+            next_stream_local_id: Mutex::new(1),
+            announced_stream_local_ids: Mutex::new(HashMap::new()),
             peer_auth: Arc::new(Mutex::new(PeerAuthState::Unauthenticated)),
             replay_cache: caps
                 .replay_protection
@@ -578,6 +632,10 @@ impl UctpCoordinator {
             local_descriptor,
             pending: Arc::new(Pending::new()),
             subscription_handler,
+            resource_bindings: OnceLock::new(),
+            external_media_binding: AtomicBool::new(false),
+            next_stream_local_id: Mutex::new(1),
+            announced_stream_local_ids: Mutex::new(HashMap::new()),
             peer_auth: Arc::new(Mutex::new(PeerAuthState::Unauthenticated)),
             replay_cache: caps
                 .replay_protection
@@ -1262,7 +1320,7 @@ impl UctpCoordinator {
             if let Some(sid) = sid.as_ref() {
                 for stream_id in machine.lock().stream_ids() {
                     self.subscription_handler
-                        .unregister_publisher(sid, &stream_id);
+                        .unregister_publisher(sid, &stream_id, connid);
                 }
             }
         }
@@ -1283,6 +1341,9 @@ impl UctpCoordinator {
         }
         self.sessions.remove(sid);
         self.handshake_started.remove(sid);
+        if let Some(bindings) = self.resource_bindings.get() {
+            bindings.remove_session(sid);
+        }
         self.refresh_gauges();
     }
 
@@ -1305,6 +1366,11 @@ impl UctpCoordinator {
         }
         self.connection_sessions.clear();
         self.handshake_started.clear();
+        // Binding cleanup is deliberately last: connection/subscription
+        // handlers need the canonical mappings above for exact removal.
+        if let Some(bindings) = self.resource_bindings.get() {
+            bindings.clear();
+        }
         *self.peer_auth.lock() = PeerAuthState::Unauthenticated;
         self.refresh_gauges();
     }
@@ -1505,7 +1571,7 @@ impl UctpCoordinator {
         let challenge = payloads::auth::AuthChallenge {
             nonce: EnvelopeId::new().to_string(),
             accepted_methods: vec!["bearer".into()],
-            server_capabilities: serde_json::Value::Object(Default::default()),
+            server_capabilities: serde_json::to_value(crate::UCTP_COMPATIBILITY)?,
         };
         let reply = UctpEnvelope::new(MessageType::AuthChallenge, serde_json::to_value(challenge)?)
             .with_in_reply_to(env.id);
@@ -1577,6 +1643,19 @@ impl UctpCoordinator {
             });
         match validation {
             Ok(principal) => {
+                if let Some(bindings) = self.resource_bindings.get() {
+                    if let Err(error) = bindings.authenticate(principal.clone()) {
+                        warn!(%error, "auth.bearer: resource binding rejected principal");
+                        return self
+                            .emit_error(
+                                env.id,
+                                error.code,
+                                resource_binding_error_category(error.code),
+                                &error.reason,
+                            )
+                            .await;
+                    }
+                }
                 let assurance = principal.assurance.clone();
                 let session = payloads::auth::AuthSession {
                     identity_id: principal.subject.clone(),
@@ -1679,6 +1758,32 @@ impl UctpCoordinator {
                     None,
                 )
                 .await;
+        }
+
+        // Resolve and authorize the untrusted wire Session ID before any
+        // Session machine, handshake timer, or adapter-visible event exists.
+        // The substrate event pump repeats this call idempotently to obtain
+        // the canonical ID needed for its core Route.
+        if let Some(bindings) = self.resource_bindings.get() {
+            if let Err(error) = bindings.bind_session(&sid) {
+                warn!(
+                    transport = %self.transport,
+                    wire_sid = %sid,
+                    code = error.code,
+                    reason = %error.reason,
+                    "uctp.coordinator: Session resource authorization rejected invite"
+                );
+                return self
+                    .emit_error_full(
+                        env.id,
+                        error.code,
+                        resource_binding_error_category(error.code),
+                        &error.reason,
+                        Some(sid_str),
+                        None,
+                    )
+                    .await;
+            }
         }
 
         self.sessions
@@ -2107,6 +2212,74 @@ impl UctpCoordinator {
         }
     }
 
+    fn allocate_peer_stream_local_ids(&self, count: usize) -> Result<Vec<u16>> {
+        let mut next = self.next_stream_local_id.lock();
+        let count = u32::try_from(count).map_err(|_| UctpError::StreamHandleExhausted)?;
+        let end = (*next)
+            .checked_add(count)
+            .ok_or(UctpError::StreamHandleExhausted)?;
+        if end > u16::MAX as u32 + 1 {
+            return Err(UctpError::StreamHandleExhausted);
+        }
+        let ids = (*next..end).map(|value| value as u16).collect();
+        *next = end;
+        Ok(ids)
+    }
+
+    async fn bind_media_streams(
+        &self,
+        sid: &SessionId,
+        connid: &ConnectionId,
+        streams: &[super::connection::AcceptedStream],
+    ) -> Result<Vec<u16>> {
+        if streams.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = if self.external_media_binding.load(Ordering::Acquire) {
+            let (reply, response) = tokio::sync::oneshot::channel();
+            self.emit_event(UctpSessionEvent::BindMediaStreams {
+                sid: sid.clone(),
+                connid: connid.clone(),
+                streams: streams.to_vec(),
+                reply,
+            })
+            .await?;
+            tokio::time::timeout(self.caps.signaling_send_timeout, response)
+                .await
+                .map_err(|_| UctpError::Timeout)?
+                .map_err(|_| UctpError::Closed)??
+        } else {
+            self.allocate_peer_stream_local_ids(streams.len())?
+        };
+
+        if ids.len() != streams.len() {
+            return Err(UctpError::InvalidStreamBinding("binding-count-mismatch"));
+        }
+        for (index, local_id) in ids.iter().enumerate() {
+            if *local_id == 0 {
+                return Err(UctpError::InvalidStreamBinding("zero-local-id"));
+            }
+            if ids[..index].contains(local_id) {
+                return Err(UctpError::InvalidStreamBinding(
+                    "duplicate-local-id-in-binding",
+                ));
+            }
+        }
+        // Validate the complete batch before reserving any ID. A malformed
+        // external response must not poison otherwise valid IDs and prevent a
+        // corrected `connection.ready` retry.
+        let mut announced = self.announced_stream_local_ids.lock();
+        if ids.iter().any(|local_id| announced.contains_key(local_id)) {
+            return Err(UctpError::InvalidStreamBinding(
+                "peer-local-id-already-announced",
+            ));
+        }
+        for local_id in &ids {
+            announced.insert(*local_id, connid.clone());
+        }
+        Ok(ids)
+    }
+
     async fn handle_connection_ready(&self, env: UctpEnvelope) -> Result<()> {
         if !self.require_connection_binding(&env).await? {
             return Ok(());
@@ -2134,8 +2307,30 @@ impl UctpCoordinator {
             // Allocate stream_local_ids for the streams that survived
             // negotiation. The first call returns the set; subsequent
             // calls (duplicate connection.ready) return empty.
-            (m.take_pending_streams()?, m.lifetime_span())
+            (m.take_pending_streams(), m.lifetime_span())
         };
+
+        let local_ids = match self.bind_media_streams(&sid, &connid, &pending).await {
+            Ok(ids) => ids,
+            Err(error) => {
+                if let Some(machine) = self.connections.get(&connid) {
+                    machine.lock().restore_pending_streams(pending);
+                }
+                return Err(error);
+            }
+        };
+        if let Some(machine) = self.connections.get(&connid) {
+            let mut machine = machine.lock();
+            for (stream, local_id) in pending.iter().zip(&local_ids) {
+                if let Err(error) = machine.bind_stream(
+                    *local_id,
+                    crate::ids::StreamId::from_string(stream.strm_id.clone()),
+                ) {
+                    machine.restore_pending_streams(pending.clone());
+                    return Err(error);
+                }
+            }
+        }
         // C5: wrap the async tail under the per-Connection lifetime
         // span via `.instrument`. A sync `.entered()` guard isn't
         // Send-safe across the `send_out(...).await` in the loop
@@ -2152,7 +2347,7 @@ impl UctpCoordinator {
             // the publisher in whatever subscription handler is
             // configured. CONVERSATION_PROTOCOL.md §7.4: server
             // announces the stream_local_id here.
-            for (stream, local_id) in pending {
+            for (stream, local_id) in pending.into_iter().zip(local_ids) {
                 let stream_info = payloads::stream::StreamInfo {
                     strm_id: stream.strm_id.clone(),
                     kind: stream.kind.clone(),
@@ -2526,6 +2721,19 @@ impl UctpCoordinator {
         });
         match validation {
             Ok(principal) => {
+                if let Some(bindings) = self.resource_bindings.get() {
+                    if let Err(error) = bindings.authenticate(principal.clone()) {
+                        warn!(%error, "auth.refresh: resource binding rejected refreshed principal");
+                        return self
+                            .emit_error(
+                                env.id,
+                                error.code,
+                                resource_binding_error_category(error.code),
+                                &error.reason,
+                            )
+                            .await;
+                    }
+                }
                 let assurance = principal.assurance.clone();
                 let session = payloads::auth::AuthSession {
                     identity_id: identity_id.clone(),
@@ -2606,6 +2814,16 @@ impl UctpCoordinator {
             .await?;
         }
         Ok(())
+    }
+}
+
+fn resource_binding_error_category(code: u16) -> &'static str {
+    match code {
+        401 | 403 => "auth",
+        404 => "not-found",
+        429 => "rate-limit",
+        503 => "transient",
+        _ => "protocol",
     }
 }
 

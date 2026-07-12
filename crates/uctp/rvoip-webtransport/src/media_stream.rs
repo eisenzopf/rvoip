@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::{collections::HashSet, num::NonZeroU16};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -16,7 +17,10 @@ use rvoip_core::connection::Direction;
 use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::ids::StreamId;
 use rvoip_core::stream::{MediaFrame, MediaStream, QualitySnapshot, StreamKind};
-use rvoip_uctp::substrate::datagram::{pack, pack_rtp, unpack_rtp, MediaDatagram};
+use rvoip_uctp::substrate::datagram::{
+    pack_rtp_datagram, unpack_rtp_datagram, RtpDatagram, RtpMediaPayload,
+};
+use rvoip_uctp::substrate::{PeerMediaRegistration, PeerMediaRouteKey, PeerMediaRouter};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace_span, warn};
@@ -97,14 +101,20 @@ impl WebTransportDatagramMediaStream {
                     seq,
                 )
                 .entered();
-                let rtp = match pack_rtp(
-                    frame.payload,
-                    frame.payload_type.unwrap_or(default_payload_type),
-                    rtp_seq,
-                    frame.timestamp_rtp,
-                    ssrc,
-                ) {
-                    Ok(packet) => packet,
+                let datagram = RtpDatagram {
+                    flags: 0,
+                    stream_local_id,
+                    seq,
+                    rtp: RtpMediaPayload {
+                        payload: frame.payload,
+                        payload_type: frame.payload_type.unwrap_or(default_payload_type),
+                        sequence_number: rtp_seq,
+                        timestamp: frame.timestamp_rtp,
+                        ssrc,
+                    },
+                };
+                let bytes = match pack_rtp_datagram(&datagram) {
+                    Ok(bytes) => bytes,
                     Err(error) => {
                         metrics::counter!(
                             "uctp_datagram_drops_total",
@@ -117,13 +127,6 @@ impl WebTransportDatagramMediaStream {
                         continue;
                     }
                 };
-                let datagram = MediaDatagram {
-                    flags: 0,
-                    stream_local_id,
-                    seq,
-                    payload: rtp,
-                };
-                let bytes = pack(&datagram);
                 if let Err(e) = session_for_pump.send_datagram(bytes) {
                     metrics::counter!(
                         "uctp_datagram_drops_total",
@@ -244,41 +247,33 @@ impl MediaStream for WebTransportDatagramMediaStream {
     }
 }
 
-/// Mirror of `rvoip_quic::FanoutContext` for the WT adapter. See
-/// that doc-comment.
-#[derive(Clone)]
-pub struct FanoutContext {
-    pub orchestrator: Arc<rvoip_core::Orchestrator>,
-    pub sid: rvoip_core::ids::SessionId,
-    pub publisher_connid: rvoip_core::ids::ConnectionId,
-}
-
-/// Per-`web_transport_quinn::Session` datagram reader. One reader
-/// serves all `WebTransportDatagramMediaStream`s on this session.
-///
-/// `fanout`: see `rvoip_quic::FanoutContext`; when `Some`, the reader
-/// forwards every successfully-routed frame to
-/// `Orchestrator::fanout_frame(...)` so multi-party subscribers receive
-/// the publisher's media.
+/// Compatibility wrapper for alpha callers that supplied a concrete stream
+/// vector. Production peers use [`spawn_datagram_reader_with_cancel`] with a
+/// single authenticated [`PeerMediaRouter`].
+#[doc(hidden)]
 pub fn spawn_datagram_reader(
     session: web_transport_quinn::Session,
     router: Arc<parking_lot::RwLock<Vec<Arc<WebTransportDatagramMediaStream>>>>,
-    fanout: Option<FanoutContext>,
+    _legacy_fanout: Option<()>,
 ) {
+    let peer_router = legacy_peer_router(&router.read());
     std::mem::drop(spawn_datagram_reader_with_cancel(
         session,
-        router,
-        fanout,
+        peer_router,
+        None,
         CancellationToken::new(),
     ));
 }
 
-/// Spawn the per-peer WebTransport datagram reader with explicit lifecycle
-/// coupling.
+/// Spawn the sole datagram reader for one authenticated physical peer.
+///
+/// The peer-global router resolves the header's sole `stream_local_id` into an
+/// authenticated core route. Publisher fanout uses the key retained on that
+/// exact binding, never a first-Session/global context.
 pub fn spawn_datagram_reader_with_cancel(
     session: web_transport_quinn::Session,
-    router: Arc<parking_lot::RwLock<Vec<Arc<WebTransportDatagramMediaStream>>>>,
-    fanout: Option<FanoutContext>,
+    router: Arc<PeerMediaRouter>,
+    orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
     peer_cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -289,7 +284,7 @@ pub fn spawn_datagram_reader_with_cancel(
             };
             match received {
                 Ok(bytes) => {
-                    let datagram = match rvoip_uctp::substrate::datagram::unpack(&bytes) {
+                    let datagram = match unpack_rtp_datagram(&bytes) {
                         Ok(d) => d,
                         Err(_) => {
                             metrics::counter!(
@@ -302,38 +297,13 @@ pub fn spawn_datagram_reader_with_cancel(
                             continue;
                         }
                     };
-                    let target = {
-                        let guard = router.read();
-                        guard
-                            .iter()
-                            .find(|s| {
-                                !s.is_closed() && s.stream_local_id() == datagram.stream_local_id
-                            })
-                            .cloned()
-                    };
-                    if datagram.seq & 0xff == 0 {
-                        router.write().retain(|stream| !stream.is_closed());
-                    }
+                    let target = NonZeroU16::new(datagram.stream_local_id)
+                        .and_then(|local_id| router.lookup(local_id));
                     match target {
-                        Some(stream) => {
-                            if stream.is_closed() {
+                        Some(binding) => {
+                            if binding.is_cancelled() {
                                 continue;
                             }
-                            // Tight scope for the non-Send span guard;
-                            // it must drop before the fanout await.
-                            let rtp = match unpack_rtp(datagram.payload) {
-                                Ok(rtp) => rtp,
-                                Err(_) => {
-                                    metrics::counter!(
-                                        "uctp_datagram_drops_total",
-                                        "direction" => "in",
-                                        "transport" => "webtransport",
-                                        "reason" => "invalid-rtp"
-                                    )
-                                    .increment(1);
-                                    continue;
-                                }
-                            };
                             let frame = {
                                 let _span = trace_span!(
                                     "uctp.stream.frame",
@@ -344,14 +314,14 @@ pub fn spawn_datagram_reader_with_cancel(
                                 )
                                 .entered();
                                 let frame = MediaFrame {
-                                    stream_id: stream.id(),
-                                    kind: stream.kind(),
-                                    payload: rtp.payload,
-                                    timestamp_rtp: rtp.timestamp,
+                                    stream_id: binding.stream().id(),
+                                    kind: binding.stream().kind(),
+                                    payload: datagram.rtp.payload,
+                                    timestamp_rtp: datagram.rtp.timestamp,
                                     captured_at: Utc::now(),
-                                    payload_type: Some(rtp.payload_type),
+                                    payload_type: Some(datagram.rtp.payload_type),
                                 };
-                                match stream.inbound_tx().try_send(frame.clone()) {
+                                match binding.ingress().try_send(frame.clone()) {
                                     Ok(_) => {
                                         metrics::counter!(
                                             "uctp_datagrams_total",
@@ -372,14 +342,14 @@ pub fn spawn_datagram_reader_with_cancel(
                                 }
                                 frame
                             };
-                            // MP3b — multi-party fanout (mirror of QUIC).
-                            if let Some(ref ctx) = fanout {
-                                let _ = ctx
-                                    .orchestrator
+                            if let (Some(orchestrator), Some(fanout)) =
+                                (orchestrator.as_ref(), binding.fanout())
+                            {
+                                let _ = orchestrator
                                     .fanout_frame(
-                                        &ctx.sid,
-                                        &ctx.publisher_connid,
-                                        &stream.id(),
+                                        &fanout.session_id,
+                                        &fanout.publisher_connection_id,
+                                        &fanout.stream_id,
                                         frame,
                                     )
                                     .await;
@@ -404,6 +374,53 @@ pub fn spawn_datagram_reader_with_cancel(
             }
         }
     })
+}
+
+/// Build a peer router for legacy direct-stream tests. The production server
+/// never uses this path; it creates authenticated route bindings from
+/// coordinator events.
+fn legacy_peer_router(streams: &[Arc<WebTransportDatagramMediaStream>]) -> Arc<PeerMediaRouter> {
+    let router = PeerMediaRouter::new();
+    let owner = rvoip_core::identity::PrincipalOwnershipKey {
+        issuer: None,
+        tenant: None,
+        subject: "legacy-webtransport-reader".into(),
+    };
+    let session_id = rvoip_core::ids::SessionId::from_string("legacy-webtransport-session");
+    let connection_id =
+        rvoip_core::ids::ConnectionId::from_string("legacy-webtransport-connection");
+    let mut ordered = streams.to_vec();
+    ordered.sort_unstable_by_key(|stream| stream.stream_local_id());
+    let mut registered = HashSet::new();
+
+    for stream in ordered {
+        let Some(target) = NonZeroU16::new(stream.stream_local_id()) else {
+            continue;
+        };
+        if !registered.insert(target) {
+            continue;
+        }
+        let reservation = loop {
+            let Ok(candidate) = router.reserve() else {
+                return router;
+            };
+            if candidate.local_id() == target {
+                break candidate;
+            }
+            if candidate.local_id() > target {
+                return router;
+            }
+            drop(candidate);
+        };
+        let stream_dyn: Arc<dyn MediaStream> = stream.clone();
+        let route = PeerMediaRouteKey::new(session_id.clone(), connection_id.clone(), stream.id());
+        let registration =
+            PeerMediaRegistration::new(owner.clone(), route, stream_dyn, stream.inbound_tx());
+        if reservation.commit(registration).is_err() {
+            return router;
+        }
+    }
+    router
 }
 
 fn stable_ssrc(stream_id: &StreamId) -> u32 {

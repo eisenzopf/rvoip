@@ -266,7 +266,7 @@ crates/uctp/rvoip-uctp/src/
   state/
     mod.rs                      -- UctpStateMachine entry point
     session.rs                  -- UctpSessionState + transitions
-    connection.rs               -- UctpConnectionState + transitions + stream_local_id allocator
+    connection.rs               -- UctpConnectionState + negotiated Stream binding bookkeeping
     coordinator.rs              -- UctpCoordinator: per-peer driver; routes envelopes to machines
     events.rs                   -- UctpSessionEvent (InboundInvite, Connected, Ended, MediaFrame, ...)
   substrate/
@@ -563,7 +563,19 @@ The asymmetry is deliberate: a backed-up signaling channel means the peer or coo
 
 ### 3.6 Stream registration
 
-On `connection.ready`, the Connection machine asks `streams::Allocator::allocate(connid) -> Vec<(StreamId, u16 stream_local_id)>`. Allocator is per-Connection, monotonically increments a u16 from 1. Each pair emits `stream.opened`. The `(connid, stream_local_id) → strm_id` map lives in Connection state so inbound `MediaDatagram`s route back to the right StreamId.
+The eight-byte media header carries only `stream_local_id`, not Session or
+Connection IDs. Allocation is therefore peer-global, monotonically increasing,
+and non-reusing for the lifetime of one physical transport. The coordinator
+provides this allocator for substrates without an external media router. QUIC
+and WebTransport enable `BindMediaStreams`: the adapter atomically binds every
+negotiated Stream in its peer router and returns one nonzero, unique local ID
+per Stream before the coordinator may emit `stream.opened`.
+
+A failed, timed-out, wrong-count, zero, duplicate, or previously announced
+binding emits no `stream.opened`; pending Streams are restored so a new
+`connection.ready` envelope can retry. Batch validation reserves no partial
+IDs. Successfully announced IDs are never reused after Connection teardown,
+which prevents delayed datagrams from aliasing a newer Stream.
 
 ### 3.7 `substrate::quinn` shared helpers
 
@@ -624,16 +636,20 @@ pub fn envelope_writer(tx: quinn::SendStream)
     -> impl Sink<UctpEnvelope, Error = SubstrateError>;
 
 // substrate::datagram — 8-byte UCTP header per CONVERSATION_PROTOCOL.md §10.1, then RTP
-/// In-memory shape of a UCTP media datagram. Wire layout per CONVERSATION_PROTOCOL.md §10.1:
-/// `ver(u8=1) | flags(u8) | stream_local_id(u16 BE) | datagram_seq(u32 BE) | RTP packet`.
-pub struct MediaDatagram {
+/// Checked in-memory shape. `rtp.payload` is codec data; the checked packer
+/// generates the complete RTP header and the checked unpacker requires it.
+pub struct RtpDatagram {
     pub flags: u8,
     pub stream_local_id: u16,
     pub seq: u32,
-    pub payload: Bytes,            // RTP packet (header + body); pack/unpack do not parse it
+    pub rtp: RtpMediaPayload,
 }
-pub fn pack(d: &MediaDatagram) -> Bytes;
-pub fn unpack(b: &[u8]) -> Result<MediaDatagram, SubstrateError>;
+pub fn pack_rtp_datagram(d: &RtpDatagram) -> Result<Bytes, SubstrateError>;
+pub fn unpack_rtp_datagram(b: &[u8]) -> Result<RtpDatagram, SubstrateError>;
+
+// The opaque MediaDatagram + pack/unpack helpers remain hidden compatibility
+// APIs for the alpha adapters. They must not be used by new media paths because
+// they cannot distinguish a complete RTP packet from codec payload bytes.
 
 // substrate::correlation — envelope-id round-trips
 pub struct Pending {
@@ -664,7 +680,8 @@ The signaling-side framing is **identical** for QUIC and WebTransport (CONVERSAT
   - `connection_negotiate_488`
   - `session_cancel_during_inviting` → session.ended code 487
   - `session_end_with_two_connections` → session.ended only after second connection.end (§7.3 boundary)
-  - `stream_local_id_round_trip` — allocate id, route inbound datagram via the id back to a `MediaFrame`
+  - `externally_allocated_stream_binding_round_trip` — bind a peer-global id and route it back to the negotiated Stream
+  - external bind failure/duplicate-ID tests — no partial announcement and corrected ready retry
 - **Substrate framing:**
   - Length-prefix codec round-trip through `tokio::io::duplex`
   - Datagram pack/unpack including error branches (too short, bad version)
@@ -1228,7 +1245,7 @@ All green confirms the v0 spike's headline claim — UCTP bridges across substra
 |---|---|---|---|
 | MP1 | Subscription-table API | ✅ | `Orchestrator::add_subscription` / `remove_subscription` / `subscribers_for` / `drop_session_subscriptions`. Per-Session DashMap-backed registry. Cleanup wired into `forget_connection`. Idempotent semantics throughout. ([subscriptions.rs](../../foundation/rvoip-core/src/subscriptions.rs), [orchestrator.rs:153-211](../../foundation/rvoip-core/src/orchestrator.rs)) |
 | MP2 | `SubscriptionHandler` trait + coordinator delegation | ✅ | Trait in `rvoip-uctp::state::subscription`; `RejectingHandler` default (preserves legacy 503); `UctpCoordinator::start_full(...)` accepts an `Arc<dyn SubscriptionHandler>`; on `stream.subscribe`/`stream.unsubscribe` the coordinator delegates and emits ack/error appropriately. Concrete `OrchestratorSubscriptionHandler` in `rvoip-uctp::state::orchestrator_handler` resolves explicit `strm_id` subscriptions through the `PublisherRegistry` into `Orchestrator::add_subscription`. ([state/subscription.rs](src/state/subscription.rs), [state/orchestrator_handler.rs](src/state/orchestrator_handler.rs), [state/coordinator.rs](src/state/coordinator.rs)) |
-| MP2.6 | Publisher registration + adapter wiring | ✅ | Coordinator emits `stream.opened` on `connection.ready` (drains the `ConnectionMachine`'s `pending_streams`, allocates `stream_local_id` per stream, calls `subscription_handler.register_publisher`). `UctpQuicConfig::subscription_handler` + `UctpWtConfig::subscription_handler` thread the handler into `UctpCoordinator::start_full(...)`. `Orchestrator::publisher_registry()` exposes the lazily-initialized shared registry. ([state/connection.rs](src/state/connection.rs) `AcceptedStream` + `take_pending_streams`, [state/coordinator.rs](src/state/coordinator.rs) `handle_connection_ready`) |
+| MP2.6 | Publisher registration + adapter wiring | ✅ | On `connection.ready`, the coordinator drains pending Streams and completes peer-global media binding before it emits `stream.opened` or calls `register_publisher`. Teardown passes the expected publisher Connection through `unregister_publisher`; the registry removes only a still-matching row, so stale cleanup cannot delete another Connection's replacement. `PeerResourceBindings` translates authenticated wire IDs to canonical registry IDs. ([state/connection.rs](src/state/connection.rs), [state/coordinator.rs](src/state/coordinator.rs), [state/subscription.rs](src/state/subscription.rs)) |
 | MP3a | `fanout_frame` primitive | ✅ | `Orchestrator::fanout_frame(sid, publisher, strm_id, frame) -> usize` looks up subscribers, queries each subscriber's `ConnectionAdapter::streams(...)`, finds the first MediaStream matching the frame's `kind`, pushes via `frames_out`. Best-effort delivery; returns delivery count. 5 isolation tests in [tests/fanout_frame.rs](../../foundation/rvoip-core/tests/fanout_frame.rs). |
 | MP3b | Adapter datagram-receive fanout | ✅ | QUIC + WT adapters thread an optional `Arc<Orchestrator>` through their config + server; at InboundInvite time the adapter constructs a `FanoutContext { orchestrator, sid, publisher_connid }` and hands it to `spawn_datagram_reader`. After each successful local route, the reader calls `orchestrator.fanout_frame(...)`. Live-wire test in [tests/multi_party_media.rs](tests/multi_party_media.rs) — two QUIC peers, B subscribes to A, frames injected at A's client-side `frames_out` arrive at B's client-side `frames_in`. |
 | MP3c | Per-subscriber `stream_local_id` rewriting | ✅ | Landed via [§13.2](#13-v0x--production-hardening-track). `ConnectionAdapter::allocate_subscriber_stream` allocates a fresh local_id per (subscriber, publisher_strm), creates a new `QuicDatagramMediaStream`/`WebTransportDatagramMediaStream`, emits synthetic `stream.opened` to the subscriber, and registers in the per-Connection routing table. `Orchestrator::fanout_frame` uses a `(sid, sub, pub, strm) → MediaStream` cache to route. WS returns `NotImplemented` pending webrtc-rs (single-publisher fallback works). Three-party live-wire test at [`tests/three_party_media.rs`](tests/three_party_media.rs) proves no cross-talk. |
@@ -1244,7 +1261,7 @@ End-to-end, on the real QUIC wire ([tests/multi_party_media.rs](tests/multi_part
 
 1. **Publisher peer** connects, authenticates, sends `connection.offer` with `streams_offered` and a `by_participant`.
 2. **Coordinator** runs §8.1 capability negotiation; on Ok, stores accepted streams (including publisher participant) on the `ConnectionMachine`.
-3. **Publisher peer** sends `connection.ready`. Coordinator drains pending streams, allocates `stream_local_id` per stream, emits `stream.opened`, and calls `SubscriptionHandler::register_publisher(PublisherInfo { connection, participant, kind, ... })`.
+3. **Publisher peer** sends `connection.ready`. Coordinator drains pending Streams, obtains an atomic peer-global media binding, emits `stream.opened`, and calls `SubscriptionHandler::register_publisher(PublisherInfo { connection, participant, kind, ... })`.
 4. **`OrchestratorSubscriptionHandler`** writes the publisher entry into the shared `PublisherRegistry` — both by `(sid, strm_id)` and by `(sid, participant)`.
 5. **Subscriber peer** connects, authenticates, sends `stream.subscribe` in any of the three §7.7 forms:
    - **explicit `strm_id`** → `PublisherRegistry::publisher(...)` → `Orchestrator::add_subscription(...)`
@@ -1294,7 +1311,7 @@ Closes the audit's "no per-peer auth gating" architectural concern. With the bea
 
 ### 13.2 MP3c — Per-subscriber `stream_local_id` rewriting
 
-New trait method `ConnectionAdapter::allocate_subscriber_stream(connid, kind, codec) -> Result<Arc<dyn MediaStream>>` with `NotImplemented` default. UCTP QUIC + WT adapters implement it; allocate a fresh local_id on the per-Connection allocator (starts at 2; default audio claims 1), build a new substrate-specific `MediaStream`, register in the per-Connection `streams_router` for inbound routing, emit a synthetic `stream.opened` envelope announcing the new id. `Orchestrator::fanout_frame` caches per-`(sid, sub, pub, strm)` MediaStream so each subscription has stable wire identity. WS returns `NotImplemented` pending the webrtc-rs media plane.
+New trait method `ConnectionAdapter::allocate_subscriber_stream(connid, kind, codec) -> Result<Arc<dyn MediaStream>>` with `NotImplemented` default. UCTP QUIC + WT adapters implement it through their one peer-scoped media router, whose allocator is shared by every Session and Connection on that transport. The adapter builds a substrate-specific `MediaStream`, commits the peer-global binding, and emits a synthetic `stream.opened` announcing the stable ID. `Orchestrator::fanout_frame` caches per-`(sid, sub, pub, strm)` MediaStream. WS returns `NotImplemented` pending the webrtc-rs media plane.
 
 Three-party live-wire test ([`tests/three_party_media.rs`](tests/three_party_media.rs)) proves two publishers fan out to one subscriber on distinct local_ids with no cross-talk.
 

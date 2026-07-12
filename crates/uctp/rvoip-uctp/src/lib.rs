@@ -21,6 +21,7 @@
 //! entry points.
 
 pub mod adapter_helpers;
+pub mod compatibility;
 pub mod envelope;
 pub mod errors;
 pub mod ids;
@@ -34,6 +35,12 @@ pub mod substrate;
 
 // --- Re-exports — public surface per design doc §3.2 ---
 
+pub use crate::compatibility::{
+    UctpCompatibility, UCTP_COMPATIBILITY, UCTP_CRATE_RELEASE, UCTP_DATAGRAM_VERSION,
+    UCTP_DATAGRAM_VERSIONS, UCTP_ENVELOPE_VERSION, UCTP_ENVELOPE_VERSIONS, UCTP_RAW_QUIC_ALPN,
+    UCTP_RAW_QUIC_ALPN_BYTES, UCTP_RTP_DATAGRAM_PROFILE, UCTP_WEBTRANSPORT_ALPN,
+    UCTP_WEBTRANSPORT_ALPN_BYTES,
+};
 pub use crate::envelope::UctpEnvelope;
 pub use crate::errors::{Result, SubstrateError, UctpError};
 pub use crate::ids::{

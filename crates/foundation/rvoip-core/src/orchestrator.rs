@@ -4226,6 +4226,88 @@ impl Orchestrator {
         Ok(route_id)
     }
 
+    /// Publish a Connection's reusable audio source under a canonical
+    /// Session/Stream identity for the existing subscription fanout path.
+    ///
+    /// The returned lease owns a bounded MediaGraph sink, the publisher
+    /// registry generation, and its fanout task. It never acquires the source
+    /// MediaStream receiver directly, so bridges, recorders, and other
+    /// publishers can consume the same source graph concurrently.
+    pub async fn register_virtual_publisher(
+        self: &Arc<Self>,
+        source_connection_id: ConnectionId,
+        descriptor: crate::virtual_publisher::VirtualPublisherDescriptor,
+    ) -> Result<crate::virtual_publisher::ManagedVirtualPublisher> {
+        if descriptor.session_id.as_str().is_empty()
+            || descriptor.stream_id.as_str().is_empty()
+            || descriptor.participant.trim().is_empty()
+        {
+            return Err(RvoipError::InvalidState(
+                "virtual publisher identity fields must be non-empty",
+            ));
+        }
+
+        let lifecycle_tickets =
+            self.capture_connection_lifecycles(std::slice::from_ref(&source_connection_id))?;
+        let graph = self
+            .media_graph_for_connection(source_connection_id.clone())
+            .await?;
+        let codec = graph.latest_snapshot().source_codec;
+        let (target, frames) = tokio::sync::mpsc::channel(
+            crate::virtual_publisher::DEFAULT_VIRTUAL_PUBLISHER_QUEUE_CAPACITY,
+        );
+        let route = graph.add_managed_sink(codec.clone(), target)?;
+        if route.wait_active().await.is_err() {
+            return Err(RvoipError::InvalidState(
+                "virtual publisher media route terminated during setup",
+            ));
+        }
+        if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
+            let _ = route.remove().await;
+            return Err(error);
+        }
+
+        let lifecycle_guards = match self.lock_connection_lifecycles(&lifecycle_tickets) {
+            Ok(guards) => guards,
+            Err(error) => {
+                let _ = route.remove().await;
+                return Err(error);
+            }
+        };
+        let registry = self.publisher_registry();
+        let registration = registry.register_managed(
+            descriptor.session_id.clone(),
+            descriptor.stream_id.to_string(),
+            crate::subscriptions::PublisherEntry {
+                connection: source_connection_id.clone(),
+                participant: descriptor.participant.clone(),
+                kind: "audio".to_string(),
+                codec: Some(codec),
+            },
+        );
+        let registration_id = match registration {
+            Ok(registration_id) => registration_id,
+            Err(_) => {
+                drop(lifecycle_guards);
+                let _ = route.remove().await;
+                return Err(RvoipError::AdmissionRejected(
+                    "virtual publisher stream is already registered",
+                ));
+            }
+        };
+        let publisher = crate::virtual_publisher::ManagedVirtualPublisher::start(
+            Arc::downgrade(self),
+            source_connection_id,
+            descriptor,
+            route,
+            frames,
+            registry,
+            registration_id,
+        );
+        drop(lifecycle_guards);
+        Ok(publisher)
+    }
+
     pub fn detach_media_sink(
         &self,
         connection_id: &ConnectionId,

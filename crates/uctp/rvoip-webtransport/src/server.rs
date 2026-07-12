@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::{collections::HashMap, num::NonZeroU16};
 
 use chrono::Utc;
 use dashmap::DashMap;
@@ -14,21 +15,10 @@ use rvoip_core::adapter::{AdapterEvent, AdapterLifecycleSinkSlot, EndReason, Ter
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
-use rvoip_core::stream::{MediaStream, MediaStreamHandle, StreamKind};
+use rvoip_core::stream::{MediaStream, StreamKind};
 
 use crate::adapter::Route;
 use crate::media_stream::WebTransportDatagramMediaStream;
-
-/// Default audio codec attached to new Connections at `InboundInvite`
-/// time. Codec-renegotiation is v0.x work.
-fn default_audio_codec() -> CodecInfo {
-    CodecInfo {
-        name: "opus".into(),
-        clock_rate_hz: 48000,
-        channels: 1,
-        fmtp: None,
-    }
-}
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::state::{UctpCoordinator, UctpSessionEvent, ENVELOPE_CHANNEL_CAP};
 use rvoip_uctp::substrate::{envelope_reader, envelope_writer};
@@ -51,6 +41,7 @@ impl UctpWtServer {
         mount_path: String,
         quinn_stats_interval: Duration,
         subscription_handler: Option<Arc<dyn rvoip_uctp::state::SubscriptionHandler>>,
+        session_binding_resolver: Option<Arc<dyn rvoip_uctp::state::SessionBindingResolver>>,
         orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
         coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
         sig9421: Option<rvoip_uctp::state::Sig9421Config>,
@@ -82,6 +73,7 @@ impl UctpWtServer {
                 let by_uctp_sid = Arc::clone(&by_uctp_sid);
                 let routes = Arc::clone(&routes);
                 let subscription_handler = subscription_handler.clone();
+                let session_binding_resolver = session_binding_resolver.clone();
                 let orchestrator = orchestrator.clone();
                 let caps = coordinator_caps.clone();
                 let sig9421 = sig9421.clone();
@@ -100,6 +92,7 @@ impl UctpWtServer {
                         mount_path,
                         quinn_stats_interval,
                         subscription_handler,
+                        session_binding_resolver,
                         orchestrator,
                         caps,
                         sig9421,
@@ -139,6 +132,185 @@ fn build_connection(
     (id, conn)
 }
 
+struct BoundMediaBatch {
+    wire_local_ids: Vec<u16>,
+    local_ids: Vec<NonZeroU16>,
+}
+
+struct PreparedMediaBinding {
+    local_id: NonZeroU16,
+    stream: Arc<dyn MediaStream>,
+}
+
+async fn bind_media_batch(
+    route: &Route,
+    media_router: &Arc<rvoip_uctp::substrate::PeerMediaRouter>,
+    core_session_id: &SessionId,
+    core_connection_id: &ConnectionId,
+    streams: Vec<rvoip_uctp::state::connection::AcceptedStream>,
+) -> Result<BoundMediaBatch, rvoip_uctp::errors::UctpError> {
+    if route.route_cancel.is_cancelled() {
+        return Err(rvoip_uctp::errors::UctpError::InvalidStreamBinding(
+            "route-ending",
+        ));
+    }
+
+    let mut prepared = Vec::with_capacity(streams.len());
+    for stream in streams {
+        match bind_one_media_stream(
+            route,
+            media_router,
+            core_session_id,
+            core_connection_id,
+            stream,
+        ) {
+            Ok(binding) => prepared.push(binding),
+            Err(error) => {
+                rollback_prepared_media(media_router, prepared).await;
+                return Err(error);
+            }
+        }
+    }
+
+    if route.route_cancel.is_cancelled() {
+        rollback_prepared_media(media_router, prepared).await;
+        return Err(rvoip_uctp::errors::UctpError::InvalidStreamBinding(
+            "route-ended-during-binding",
+        ));
+    }
+
+    let wire_local_ids = prepared
+        .iter()
+        .map(|binding| binding.local_id.get())
+        .collect();
+    let local_ids = prepared.iter().map(|binding| binding.local_id).collect();
+    for binding in prepared {
+        route.streams.insert(binding.stream.id(), binding.stream);
+    }
+    Ok(BoundMediaBatch {
+        wire_local_ids,
+        local_ids,
+    })
+}
+
+fn bind_one_media_stream(
+    route: &Route,
+    media_router: &Arc<rvoip_uctp::substrate::PeerMediaRouter>,
+    core_session_id: &SessionId,
+    core_connection_id: &ConnectionId,
+    accepted: rvoip_uctp::state::connection::AcceptedStream,
+) -> Result<PreparedMediaBinding, rvoip_uctp::errors::UctpError> {
+    let kind = match accepted.kind.as_str() {
+        "audio" => StreamKind::Audio,
+        "video" => StreamKind::Video,
+        "data" => StreamKind::Data,
+        _ => {
+            return Err(rvoip_uctp::errors::UctpError::InvalidStreamBinding(
+                "unsupported-stream-kind",
+            ));
+        }
+    };
+    let direction = match accepted.direction.as_str() {
+        "recvonly" => Direction::Outbound,
+        "sendonly" | "sendrecv" => Direction::Inbound,
+        _ => {
+            return Err(rvoip_uctp::errors::UctpError::InvalidStreamBinding(
+                "unsupported-stream-direction",
+            ));
+        }
+    };
+    let codec = accepted
+        .chosen_codec
+        .as_deref()
+        .map(CodecInfo::from_name_with_defaults)
+        .ok_or(rvoip_uctp::errors::UctpError::InvalidStreamBinding(
+            "missing-negotiated-codec",
+        ))?;
+    let stream_id = StreamId::from_string(accepted.strm_id);
+    let reservation = media_router.reserve().map_err(|error| {
+        warn!(%error, "WebTransport peer media allocation rejected");
+        match error {
+            rvoip_uctp::substrate::PeerMediaRouterError::LocalIdExhausted => {
+                rvoip_uctp::errors::UctpError::StreamHandleExhausted
+            }
+            _ => rvoip_uctp::errors::UctpError::InvalidStreamBinding("peer-media-router-rejected"),
+        }
+    })?;
+    let local_id = reservation.local_id();
+    let stream = WebTransportDatagramMediaStream::start_with_cancel(
+        stream_id.clone(),
+        kind,
+        codec,
+        direction,
+        local_id.get(),
+        route.session.clone(),
+        reservation.cancellation_token(),
+    );
+    let stream_dyn: Arc<dyn MediaStream> = stream.clone();
+    let mut registration = rvoip_uctp::substrate::PeerMediaRegistration::new(
+        route.binding.owner().clone(),
+        rvoip_uctp::substrate::PeerMediaRouteKey::new(
+            core_session_id.clone(),
+            core_connection_id.clone(),
+            stream_id.clone(),
+        ),
+        Arc::clone(&stream_dyn),
+        stream.inbound_tx(),
+    );
+    if accepted.direction != "recvonly" {
+        registration = registration.with_fanout(rvoip_uctp::substrate::PeerMediaFanoutKey::new(
+            core_session_id.clone(),
+            core_connection_id.clone(),
+            stream_id,
+        ));
+    }
+    reservation.commit(registration).map_err(|error| {
+        warn!(%error, "WebTransport peer media registration rejected");
+        match error {
+            rvoip_uctp::substrate::PeerMediaRouterError::LocalIdExhausted => {
+                rvoip_uctp::errors::UctpError::StreamHandleExhausted
+            }
+            _ => rvoip_uctp::errors::UctpError::InvalidStreamBinding("peer-media-router-rejected"),
+        }
+    })?;
+    Ok(PreparedMediaBinding {
+        local_id,
+        stream: stream_dyn,
+    })
+}
+
+async fn rollback_prepared_media(
+    media_router: &Arc<rvoip_uctp::substrate::PeerMediaRouter>,
+    prepared: Vec<PreparedMediaBinding>,
+) {
+    for binding in prepared {
+        media_router.remove_local_id(binding.local_id);
+        let _ = binding.stream.close().await;
+    }
+}
+
+async fn rollback_media_bindings(
+    route: &Route,
+    media_router: &Arc<rvoip_uctp::substrate::PeerMediaRouter>,
+    local_ids: &[NonZeroU16],
+) {
+    let removed = local_ids
+        .iter()
+        .filter_map(|local_id| media_router.remove_local_id(*local_id))
+        .collect();
+    close_media_bindings(route, removed).await;
+}
+
+async fn close_media_bindings(
+    route: &Route,
+    bindings: Vec<Arc<rvoip_uctp::substrate::PeerMediaBinding>>,
+) {
+    for binding in bindings {
+        route.streams.remove(&binding.stream().id());
+        let _ = Arc::clone(binding.stream()).close().await;
+    }
+}
+
 async fn spawn_peer_session(
     conn: quinn::Connection,
     bearer: Arc<dyn BearerValidator>,
@@ -150,6 +322,7 @@ async fn spawn_peer_session(
     mount_path: String,
     quinn_stats_interval: Duration,
     subscription_handler: Option<Arc<dyn rvoip_uctp::state::SubscriptionHandler>>,
+    session_binding_resolver: Option<Arc<dyn rvoip_uctp::state::SessionBindingResolver>>,
     orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
     coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
     sig9421: Option<rvoip_uctp::state::Sig9421Config>,
@@ -230,22 +403,25 @@ async fn spawn_peer_session(
 
     let route_out_tx = out_tx.clone();
 
-    // Per-peer media-stream router + first-call-spawns-reader semantics.
-    // Parallel to rvoip-quic/src/server.rs — without this the bridge's
-    // `frames_in()` end never receives anything from the wire.
-    let streams_router: Arc<
-        parking_lot::RwLock<Vec<Arc<crate::media_stream::WebTransportDatagramMediaStream>>>,
-    > = Arc::new(parking_lot::RwLock::new(Vec::new()));
-    let reader_spawned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // The UCTP media header contains only a peer-local u16 stream handle, so
+    // every logical Session on this physical WT peer shares one allocator and
+    // one exact routing table.
+    let media_router = rvoip_uctp::substrate::PeerMediaRouter::new();
     let media_cancel = CancellationToken::new();
-    let media_reader = Arc::new(parking_lot::Mutex::new(None));
 
-    let subscription_handler =
+    let inner_subscription_handler =
         subscription_handler.unwrap_or_else(|| rvoip_uctp::state::rejecting_handler());
+    let resolver = session_binding_resolver.unwrap_or_else(|| {
+        rvoip_uctp::state::PeerScopedSessionResolver::new(format!(
+            "wt-peer-{}",
+            ConnectionId::new()
+        ))
+    });
+    let resource_bindings = rvoip_uctp::state::PeerResourceBindings::new(resolver);
     let subscription_handler: Arc<dyn rvoip_uctp::state::SubscriptionHandler> =
-        rvoip_uctp::state::NamespacedSubscriptionHandler::new(
-            ConnectionId::new().to_string(),
-            subscription_handler,
+        rvoip_uctp::state::BoundSubscriptionHandler::new(
+            Arc::clone(&resource_bindings),
+            inner_subscription_handler,
         );
     let drain_grace = coordinator_caps.signaling_send_timeout;
     let coord = if let Some(sig9421) = sig9421 {
@@ -273,10 +449,23 @@ async fn spawn_peer_session(
             coordinator_caps,
         )
     };
+    if let Err(error) = coord.set_resource_bindings(Arc::clone(&resource_bindings)) {
+        warn!(%error, "failed to install WebTransport coordinator resource authority");
+        media_cancel.cancel();
+        coord.abort().await;
+        return;
+    }
+    coord.enable_external_media_binding();
     // Gap plan §4.2 v1 punch list — capture the coordinator's
     // `Pending` correlator so per-Route adapter code can await
     // typed responses.
     let pending = coord.pending();
+    let media_reader = crate::media_stream::spawn_datagram_reader_with_cancel(
+        session.clone(),
+        Arc::clone(&media_router),
+        orchestrator.clone(),
+        media_cancel.clone(),
+    );
     let auth_guard =
         rvoip_uctp::state::spawn_auth_lifecycle_guard(Arc::clone(&coord), authentication_deadline);
 
@@ -315,10 +504,9 @@ async fn spawn_peer_session(
         let by_uctp_sid = Arc::clone(&by_uctp_sid);
         let routes = Arc::clone(&routes);
         let route_out_tx = route_out_tx.clone();
-        let streams_router = Arc::clone(&streams_router);
-        let reader_spawned = Arc::clone(&reader_spawned);
+        let media_router = Arc::clone(&media_router);
         let media_cancel = media_cancel.clone();
-        let media_reader = Arc::clone(&media_reader);
+        let resource_bindings = Arc::clone(&resource_bindings);
         let coord_for_translator = Arc::clone(&coord);
         tokio::spawn(async move {
             // Per-peer auth state; consumed by the InboundInvite arm to
@@ -330,7 +518,9 @@ async fn spawn_peer_session(
                 rvoip_core::identity::IdentityAssurance,
                 Option<rvoip_core::identity::AuthenticatedPrincipal>,
             )> = None;
-            let mut wire_to_core = std::collections::HashMap::<ConnectionId, ConnectionId>::new();
+            let mut wire_to_core = HashMap::<ConnectionId, ConnectionId>::new();
+            let mut wire_media_bindings =
+                HashMap::<(SessionId, ConnectionId), Vec<NonZeroU16>>::new();
 
             while let Some(event) = coord_events_rx.recv().await {
                 let adapter_event: Option<AdapterEvent> = match event {
@@ -339,12 +529,18 @@ async fn spawn_peer_session(
                         participant_id,
                         assurance,
                     } => {
-                        latest_auth = Some((
-                            identity_id,
-                            participant_id,
-                            assurance,
-                            coord_for_translator.authenticated_principal(),
-                        ));
+                        let Some(principal) = coord_for_translator.authenticated_principal() else {
+                            warn!("authenticated event missing retained principal; closing peer");
+                            media_cancel.cancel();
+                            break;
+                        };
+                        if let Err(error) = resource_bindings.authenticate(principal.clone()) {
+                            warn!(%error, "refusing WebTransport resource owner change");
+                            media_cancel.cancel();
+                            break;
+                        }
+                        latest_auth =
+                            Some((identity_id, participant_id, assurance, Some(principal)));
                         Some(AdapterEvent::Native {
                             kind: "uctp.authenticated",
                             detail: "bearer".into(),
@@ -355,59 +551,34 @@ async fn spawn_peer_session(
                             warn!(sid = %sid, "authenticated invite missing retained principal; refusing route");
                             continue;
                         };
-                        let (id, mut connection) =
-                            build_connection(conn_for_translator.clone(), sid.clone(), from);
-                        // Default audio stream — see rvoip-quic/server.rs for
-                        // the rationale on `InboundInvite`-time creation +
-                        // `stream_local_id = 1`. Codec replacement on
-                        // negotiation lands in v0.x.
-                        let route_cancel = media_cancel.child_token();
-                        let stream = WebTransportDatagramMediaStream::start_with_cancel(
-                            StreamId::new(),
-                            StreamKind::Audio,
-                            default_audio_codec(),
-                            Direction::Inbound,
-                            1,
-                            session_for_translator.clone(),
-                            route_cancel.clone(),
+                        let core_session_id = match resource_bindings.bind_session(&sid) {
+                            Ok(core_session_id) => core_session_id,
+                            Err(error) => {
+                                warn!(wire_sid = %sid, %error, "refusing unauthorized Session binding");
+                                continue;
+                            }
+                        };
+                        let (id, connection) = build_connection(
+                            conn_for_translator.clone(),
+                            core_session_id.clone(),
+                            from,
                         );
-                        streams_router.write().push(stream.clone());
-                        if !reader_spawned.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                            let fanout = orchestrator.as_ref().map(|orch| {
-                                crate::media_stream::FanoutContext {
-                                    orchestrator: Arc::clone(orch),
-                                    sid: sid.clone(),
-                                    publisher_connid: id.clone(),
-                                }
-                            });
-                            let reader = crate::media_stream::spawn_datagram_reader_with_cancel(
-                                session_for_translator.clone(),
-                                Arc::clone(&streams_router),
-                                fanout,
-                                media_cancel.clone(),
-                            );
-                            *media_reader.lock() = Some(reader);
-                        }
-                        let stream_dyn: Arc<dyn MediaStream> = stream.clone();
-                        connection
-                            .streams
-                            .push(MediaStreamHandle::new(stream_dyn.clone()));
+                        let route_cancel = media_cancel.child_token();
                         let route_streams: Arc<DashMap<StreamId, Arc<dyn MediaStream>>> =
                             Arc::new(DashMap::new());
-                        route_streams.insert(stream.id(), stream_dyn);
                         by_connection.insert(id.clone(), sid.to_string());
                         by_uctp_sid.insert(sid.to_string(), id.clone());
                         routes.insert(
                             id.clone(),
                             Route {
                                 sid: sid.to_string(),
+                                core_session_id,
                                 binding: rvoip_uctp::adapter_helpers::AuthenticatedConnectionBinding::new(&principal),
                                 out_tx: route_out_tx.clone(),
                                 pending: Arc::clone(&pending),
                                 streams: route_streams,
                                 session: session_for_translator.clone(),
-                                next_local_id: Arc::new(std::sync::atomic::AtomicU16::new(2)),
-                                streams_router: Arc::clone(&streams_router),
+                                media_router: Arc::clone(&media_router),
                                 route_cancel,
                             },
                         );
@@ -453,6 +624,60 @@ async fn spawn_peer_session(
                             }),
                         }
                     }
+                    UctpSessionEvent::BindMediaStreams {
+                        sid,
+                        connid,
+                        streams,
+                        reply,
+                    } => {
+                        let core_session_id = resource_bindings.core_session(&sid);
+                        let core_connection_id = resource_bindings.core_connection(&sid, &connid);
+                        let route = core_connection_id
+                            .as_ref()
+                            .and_then(|connection_id| routes.get(connection_id).map(|r| r.clone()));
+                        match (core_session_id, core_connection_id, route) {
+                            (Some(core_session_id), Some(core_connection_id), Some(route))
+                                if route.core_session_id == core_session_id =>
+                            {
+                                match bind_media_batch(
+                                    &route,
+                                    &media_router,
+                                    &core_session_id,
+                                    &core_connection_id,
+                                    streams,
+                                )
+                                .await
+                                {
+                                    Ok(batch) => {
+                                        if reply.send(Ok(batch.wire_local_ids.clone())).is_ok() {
+                                            wire_media_bindings
+                                                .entry((sid, connid))
+                                                .or_default()
+                                                .extend(batch.local_ids);
+                                        } else {
+                                            rollback_media_bindings(
+                                                &route,
+                                                &media_router,
+                                                &batch.local_ids,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        let _ = reply.send(Err(error));
+                                    }
+                                }
+                            }
+                            _ => {
+                                let _ = reply.send(Err(
+                                    rvoip_uctp::errors::UctpError::InvalidStreamBinding(
+                                        "wire-resource-binding-not-ready",
+                                    ),
+                                ));
+                            }
+                        }
+                        None
+                    }
                     UctpSessionEvent::ConnectionConnected { connid, .. } => wire_to_core
                         .get(&connid)
                         .cloned()
@@ -463,67 +688,76 @@ async fn spawn_peer_session(
                                 detail: connid.to_string(),
                             })
                         }),
-                    UctpSessionEvent::ConnectionEnded { connid, reason, .. } => {
-                        match wire_to_core.get(&connid).cloned() {
-                            Some(connection_id) => {
-                                let has_sibling = wire_to_core
-                                    .iter()
-                                    .any(|(wire, core)| wire != &connid && core == &connection_id);
-                                if has_sibling {
-                                    wire_to_core.remove(&connid);
-                                    Some(AdapterEvent::Native {
-                                        kind: "uctp.connection_ended",
-                                        detail: format!("connid={connid} reason={reason}"),
-                                    })
-                                } else {
-                                    let terminal = AdapterEvent::Ended {
-                                        connection_id: connection_id.clone(),
-                                        reason: EndReason::Failed { detail: reason },
-                                    };
-                                    if events_tx.try_send(terminal).is_err() {
-                                        warn!(%connid, "terminal adapter event backpressured; preserving route for peer cleanup");
-                                        break;
+                    UctpSessionEvent::ConnectionEnded {
+                        sid,
+                        connid,
+                        reason,
+                    } => match wire_to_core.get(&connid).cloned() {
+                        Some(connection_id) => {
+                            let has_sibling = wire_to_core
+                                .iter()
+                                .any(|(wire, core)| wire != &connid && core == &connection_id);
+                            if has_sibling {
+                                wire_to_core.remove(&connid);
+                                resource_bindings.remove_connection(&sid, &connid);
+                                if let Some(local_ids) =
+                                    wire_media_bindings.remove(&(sid.clone(), connid.clone()))
+                                {
+                                    if let Some(route) =
+                                        routes.get(&connection_id).map(|entry| entry.clone())
+                                    {
+                                        rollback_media_bindings(&route, &media_router, &local_ids)
+                                            .await;
                                     }
-                                    wire_to_core.remove(&connid);
-                                    let sid = by_connection
-                                        .get(&connection_id)
-                                        .map(|entry| entry.clone());
-                                    by_connection.remove(&connection_id);
-                                    if let Some(sid) = sid {
-                                        if by_uctp_sid
-                                            .get(&sid)
-                                            .is_some_and(|mapped| *mapped == connection_id)
-                                        {
-                                            by_uctp_sid.remove(&sid);
-                                        }
-                                    }
-                                    if let Some((_, route)) = routes.remove(&connection_id) {
-                                        route.route_cancel.cancel();
-                                        let streams = route
-                                            .streams
-                                            .iter()
-                                            .map(|entry| entry.value().clone())
-                                            .collect::<Vec<_>>();
-                                        let stream_ids = streams
-                                            .iter()
-                                            .map(|stream| stream.id())
-                                            .collect::<std::collections::HashSet<_>>();
-                                        streams_router
-                                            .write()
-                                            .retain(|stream| !stream_ids.contains(&stream.id()));
-                                        for stream in streams {
-                                            let _ = stream.close().await;
-                                        }
-                                    }
-                                    None
                                 }
+                                Some(AdapterEvent::Native {
+                                    kind: "uctp.connection_ended",
+                                    detail: format!("connid={connid} reason={reason}"),
+                                })
+                            } else {
+                                let terminal = AdapterEvent::Ended {
+                                    connection_id: connection_id.clone(),
+                                    reason: EndReason::Failed { detail: reason },
+                                };
+                                if events_tx.try_send(terminal).is_err() {
+                                    warn!(%connid, "terminal adapter event backpressured; preserving route for peer cleanup");
+                                    break;
+                                }
+                                wire_to_core.remove(&connid);
+                                wire_media_bindings.remove(&(sid.clone(), connid.clone()));
+                                resource_bindings.remove_connection(&sid, &connid);
+                                let sid =
+                                    by_connection.get(&connection_id).map(|entry| entry.clone());
+                                by_connection.remove(&connection_id);
+                                if let Some(sid) = sid {
+                                    if by_uctp_sid
+                                        .get(&sid)
+                                        .is_some_and(|mapped| *mapped == connection_id)
+                                    {
+                                        by_uctp_sid.remove(&sid);
+                                    }
+                                }
+                                if let Some((_, route)) = routes.remove(&connection_id) {
+                                    route.route_cancel.cancel();
+                                    let connection_key =
+                                        rvoip_uctp::substrate::PeerMediaConnectionKey::new(
+                                            route.core_session_id.clone(),
+                                            connection_id.clone(),
+                                        );
+                                    let removed = media_router.remove_connection(&connection_key);
+                                    close_media_bindings(&route, removed).await;
+                                }
+                                None
                             }
-                            None => Some(AdapterEvent::Native {
+                        }
+                        None => {
+                            resource_bindings.remove_connection(&sid, &connid);
+                            Some(AdapterEvent::Native {
                                 kind: "uctp.connection_ended_orphan",
                                 detail: connid.to_string(),
-                            }),
+                            })
                         }
-                    }
+                    },
                     UctpSessionEvent::SessionEnded { sid, reason } => {
                         match by_uctp_sid.get(sid.as_str()).map(|entry| entry.clone()) {
                             Some(connection_id) => {
@@ -540,32 +774,28 @@ async fn spawn_peer_session(
                                     break;
                                 }
                                 wire_to_core.retain(|_, core| core != &connection_id);
+                                wire_media_bindings.retain(|(wire_sid, _), _| wire_sid != &sid);
                                 by_connection.remove(&connection_id);
                                 by_uctp_sid.remove(sid.as_str());
+                                let core_session_id = resource_bindings.core_session(&sid);
+                                resource_bindings.remove_session(&sid);
                                 if let Some((_, route)) = routes.remove(&connection_id) {
                                     route.route_cancel.cancel();
-                                    let streams = route
-                                        .streams
-                                        .iter()
-                                        .map(|entry| entry.value().clone())
-                                        .collect::<Vec<_>>();
-                                    let stream_ids = streams
-                                        .iter()
-                                        .map(|stream| stream.id())
-                                        .collect::<std::collections::HashSet<_>>();
-                                    streams_router
-                                        .write()
-                                        .retain(|stream| !stream_ids.contains(&stream.id()));
-                                    for stream in streams {
-                                        let _ = stream.close().await;
-                                    }
+                                    let removed = core_session_id
+                                        .as_ref()
+                                        .map(|session_id| media_router.remove_session(session_id))
+                                        .unwrap_or_default();
+                                    close_media_bindings(&route, removed).await;
                                 }
                                 None
                             }
-                            None => Some(AdapterEvent::Native {
-                                kind: "uctp.session_ended_orphan",
-                                detail: format!("sid={} reason={}", sid, reason),
-                            }),
+                            None => {
+                                resource_bindings.remove_session(&sid);
+                                Some(AdapterEvent::Native {
+                                    kind: "uctp.session_ended_orphan",
+                                    detail: format!("sid={} reason={}", sid, reason),
+                                })
+                            }
                         }
                     }
                     UctpSessionEvent::ConnectionOpened { sid, connid, .. } => {
@@ -586,25 +816,47 @@ async fn spawn_peer_session(
                                                 detail: connid.to_string(),
                                             })
                                         }
-                                        _ => match binding
-                                            .bind_wire_connection(&principal, connid.clone())
-                                        {
-                                            Ok(()) => {
-                                                wire_to_core
-                                                    .insert(connid.clone(), core_connection_id);
-                                                Some(AdapterEvent::Native {
-                                                    kind: "uctp.connection_bound",
-                                                    detail: connid.to_string(),
-                                                })
+                                        _ => {
+                                            let resource_bound = resource_bindings.bind_connection(
+                                                &sid,
+                                                &connid,
+                                                core_connection_id.clone(),
+                                            );
+                                            match resource_bound {
+                                                Ok(()) => match binding.bind_wire_connection(
+                                                    &principal,
+                                                    connid.clone(),
+                                                ) {
+                                                    Ok(()) => {
+                                                        wire_to_core.insert(
+                                                            connid.clone(),
+                                                            core_connection_id,
+                                                        );
+                                                        Some(AdapterEvent::Native {
+                                                            kind: "uctp.connection_bound",
+                                                            detail: connid.to_string(),
+                                                        })
+                                                    }
+                                                    Err(error) => {
+                                                        resource_bindings
+                                                            .remove_connection(&sid, &connid);
+                                                        warn!(wire_connid = %connid, error = %error, "refusing UCTP connection binding");
+                                                        Some(AdapterEvent::Native {
+                                                            kind:
+                                                                "uctp.connection_binding_rejected",
+                                                            detail: connid.to_string(),
+                                                        })
+                                                    }
+                                                },
+                                                Err(error) => {
+                                                    warn!(wire_connid = %connid, %error, "refusing wire-to-core Connection binding");
+                                                    Some(AdapterEvent::Native {
+                                                        kind: "uctp.connection_binding_rejected",
+                                                        detail: connid.to_string(),
+                                                    })
+                                                }
                                             }
-                                            Err(error) => {
-                                                warn!(wire_connid = %connid, error = %error, "refusing UCTP connection binding");
-                                                Some(AdapterEvent::Native {
-                                                    kind: "uctp.connection_binding_rejected",
-                                                    detail: connid.to_string(),
-                                                })
-                                            }
-                                        },
+                                        }
                                     },
                                     None => Some(AdapterEvent::Native {
                                         kind: "uctp.connection_opened_orphan",
@@ -708,17 +960,19 @@ async fn spawn_peer_session(
     .await;
     media_cancel.cancel();
     conn.close(quinn::VarInt::from_u32(0), b"UCTP peer session ended");
-    let media_reader_task = media_reader.lock().take();
-    if let Some(mut task) = media_reader_task {
-        if tokio::time::timeout(drain_grace, &mut task).await.is_err() {
-            task.abort();
-            let _ = task.await;
-        }
+    let mut media_reader = media_reader;
+    if tokio::time::timeout(drain_grace, &mut media_reader)
+        .await
+        .is_err()
+    {
+        media_reader.abort();
+        let _ = media_reader.await;
     }
-    let media_streams = streams_router.write().drain(..).collect::<Vec<_>>();
-    for stream in media_streams {
-        let _ = stream.close().await;
+    let media_bindings = media_router.shutdown();
+    for binding in media_bindings {
+        let _ = Arc::clone(binding.stream()).close().await;
     }
+    resource_bindings.clear();
     let stale_routes = routes
         .iter()
         .filter(|entry| entry.value().out_tx.same_channel(&route_out_tx))
@@ -731,7 +985,9 @@ async fn spawn_peer_session(
                 detail: "webtransport transport closed".into(),
             },
         };
-        routes.remove(&connection_id);
+        if let Some((_, route)) = routes.remove(&connection_id) {
+            route.route_cancel.cancel();
+        }
         by_connection.remove(&connection_id);
         if by_uctp_sid
             .get(&sid)

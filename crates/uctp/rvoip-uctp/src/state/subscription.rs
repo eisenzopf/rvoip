@@ -16,7 +16,12 @@
 //! implementations don't have to re-decode the JSON. Wire-format
 //! changes flow through the payload types, not through this trait.
 
+use std::collections::HashSet;
 use std::sync::Arc;
+
+use dashmap::DashMap;
+use parking_lot::{Mutex, RwLock};
+use rvoip_core::identity::{AuthenticatedPrincipal, PrincipalOwnershipKey};
 
 use crate::ids::{ConnectionId, SessionId};
 use crate::payloads::stream::{StreamSubscribe, StreamUnsubscribe};
@@ -89,14 +94,451 @@ pub trait SubscriptionHandler: Send + Sync {
     /// and `kinds`-filtered subscriptions.
     fn register_publisher(&self, _info: PublisherInfo<'_>) {}
 
-    /// Drop a publisher registration. The coordinator calls this when
-    /// it emits `stream.closed` for one of its own streams. Default
-    /// no-op.
-    fn unregister_publisher(&self, _sid: &SessionId, _strm_id: &str) {}
+    /// Drop a publisher registration only if it is still owned by the named
+    /// Connection. The coordinator calls this during exact Connection
+    /// teardown. Implementations must not remove a same-named replacement
+    /// installed by another publisher after an older Connection began
+    /// closing. Default no-op.
+    fn unregister_publisher(&self, _sid: &SessionId, _strm_id: &str, _publisher: &ConnectionId) {}
 
     /// Drop every publisher/subscriber resource owned by a Connection.
     /// Called on explicit end, transport loss, expiry, and coordinator drain.
     fn unregister_connection(&self, _sid: &SessionId, _connid: &ConnectionId) {}
+}
+
+/// Resolves a peer-supplied Session ID to the canonical Session ID used by
+/// the process-wide publisher/subscriber registry.
+///
+/// The resolver is the authorization boundary between an untrusted wire ID
+/// and a tenant-owned resource. Deployments that need two physical peers to
+/// meet in the same Session (for example Bridgefu attachment tokens) provide
+/// a resolver backed by their authenticated call/session store. The default
+/// resolver remains peer-scoped and therefore cannot cross-connect peers.
+pub trait SessionBindingResolver: Send + Sync {
+    fn resolve_session(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        wire_session: &SessionId,
+    ) -> Result<SessionId, ResourceBindingError>;
+}
+
+impl<F> SessionBindingResolver for F
+where
+    F: Fn(&AuthenticatedPrincipal, &SessionId) -> Result<SessionId, ResourceBindingError>
+        + Send
+        + Sync,
+{
+    fn resolve_session(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        wire_session: &SessionId,
+    ) -> Result<SessionId, ResourceBindingError> {
+        self(principal, wire_session)
+    }
+}
+
+/// An explicit protocol-facing resource authorization failure.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("{reason}")]
+pub struct ResourceBindingError {
+    pub code: u16,
+    pub reason: String,
+}
+
+impl ResourceBindingError {
+    pub fn new(code: u16, reason: impl Into<String>) -> Self {
+        Self {
+            code,
+            reason: reason.into(),
+        }
+    }
+
+    pub fn forbidden(reason: impl Into<String>) -> Self {
+        Self::new(403, reason)
+    }
+
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self::new(503, reason)
+    }
+
+    fn subscription_outcome(&self) -> SubscriptionOutcome {
+        SubscriptionOutcome::reject(self.code, self.reason.clone())
+    }
+}
+
+/// Safe standalone resolver. Its namespace is unique to one physical peer,
+/// so identical remote Session IDs on different peers never alias.
+pub struct PeerScopedSessionResolver {
+    namespace: String,
+}
+
+impl PeerScopedSessionResolver {
+    pub fn new(namespace: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self {
+            namespace: namespace.into(),
+        })
+    }
+}
+
+impl SessionBindingResolver for PeerScopedSessionResolver {
+    fn resolve_session(
+        &self,
+        _principal: &AuthenticatedPrincipal,
+        wire_session: &SessionId,
+    ) -> Result<SessionId, ResourceBindingError> {
+        Ok(SessionId::from_string(format!(
+            "{}:{}",
+            self.namespace, wire_session
+        )))
+    }
+}
+
+/// Authenticated wire-to-core resource bindings for one physical peer.
+///
+/// Connection mappings are keyed by `(wire Session, wire Connection)` rather
+/// than Connection alone. This avoids accidental aliasing when a peer reuses
+/// a Connection ID in another logical Session. Bindings are removed exactly
+/// on Connection/Session teardown and never inferred from attacker-controlled
+/// strings inside the shared registry.
+pub struct PeerResourceBindings {
+    resolver: Arc<dyn SessionBindingResolver>,
+    mutation: Mutex<()>,
+    principal: RwLock<Option<AuthenticatedPrincipal>>,
+    owner: RwLock<Option<PrincipalOwnershipKey>>,
+    sessions: DashMap<SessionId, SessionId>,
+    connections: DashMap<(SessionId, ConnectionId), ConnectionId>,
+    /// Reverse ownership index. One adapter/core Connection may represent
+    /// multiple sibling wire Connections inside the same wire Session, but it
+    /// must never alias across wire Sessions.
+    core_connections: DashMap<ConnectionId, (SessionId, HashSet<ConnectionId>)>,
+}
+
+struct RemovedConnectionBinding {
+    core_session: SessionId,
+    core_connection: ConnectionId,
+    release_core_connection: bool,
+}
+
+impl PeerResourceBindings {
+    pub fn new(resolver: Arc<dyn SessionBindingResolver>) -> Arc<Self> {
+        Arc::new(Self {
+            resolver,
+            mutation: Mutex::new(()),
+            principal: RwLock::new(None),
+            owner: RwLock::new(None),
+            sessions: DashMap::new(),
+            connections: DashMap::new(),
+            core_connections: DashMap::new(),
+        })
+    }
+
+    /// Retain the authenticated principal that authorizes every mapping on
+    /// this peer. Re-authentication may refresh scopes/expiry but cannot
+    /// change issuer+tenant+subject ownership in place.
+    pub fn authenticate(
+        &self,
+        principal: AuthenticatedPrincipal,
+    ) -> Result<(), ResourceBindingError> {
+        if principal.is_expired_at(chrono::Utc::now()) {
+            return Err(ResourceBindingError::forbidden("principal-expired"));
+        }
+        let _mutation = self.mutation.lock();
+        let incoming_owner = principal.ownership_key();
+        let mut owner = self.owner.write();
+        if owner
+            .as_ref()
+            .is_some_and(|current| current != &incoming_owner)
+        {
+            return Err(ResourceBindingError::forbidden(
+                "principal-ownership-change",
+            ));
+        }
+        *owner = Some(incoming_owner);
+        *self.principal.write() = Some(principal);
+        Ok(())
+    }
+
+    pub fn bind_session(
+        &self,
+        wire_session: &SessionId,
+    ) -> Result<SessionId, ResourceBindingError> {
+        let _mutation = self.mutation.lock();
+        self.bind_session_locked(wire_session)
+    }
+
+    fn bind_session_locked(
+        &self,
+        wire_session: &SessionId,
+    ) -> Result<SessionId, ResourceBindingError> {
+        let principal = self.active_principal_locked()?;
+        if let Some(existing) = self.sessions.get(wire_session) {
+            return Ok(existing.value().clone());
+        }
+        let canonical = self.resolver.resolve_session(&principal, wire_session)?;
+        self.sessions
+            .insert(wire_session.clone(), canonical.clone());
+        Ok(canonical)
+    }
+
+    fn active_principal_locked(&self) -> Result<AuthenticatedPrincipal, ResourceBindingError> {
+        let principal = self
+            .principal
+            .read()
+            .clone()
+            .ok_or_else(|| ResourceBindingError::forbidden("peer-not-authenticated"))?;
+        if principal.is_expired_at(chrono::Utc::now()) {
+            return Err(ResourceBindingError::forbidden("principal-expired"));
+        }
+        Ok(principal)
+    }
+
+    pub fn bind_connection(
+        &self,
+        wire_session: &SessionId,
+        wire_connection: &ConnectionId,
+        core_connection: ConnectionId,
+    ) -> Result<(), ResourceBindingError> {
+        let _mutation = self.mutation.lock();
+        let session_preexisting = self.sessions.contains_key(wire_session);
+        self.bind_session_locked(wire_session)?;
+        let key = (wire_session.clone(), wire_connection.clone());
+        if let Some(existing) = self.connections.get(&key) {
+            if existing.value() != &core_connection {
+                drop(existing);
+                if !session_preexisting {
+                    self.sessions.remove(wire_session);
+                }
+                return Err(ResourceBindingError::forbidden(
+                    "wire-connection-already-bound",
+                ));
+            }
+            return Ok(());
+        }
+        if let Some(mut reverse) = self.core_connections.get_mut(&core_connection) {
+            if &reverse.0 != wire_session {
+                drop(reverse);
+                if !session_preexisting {
+                    self.sessions.remove(wire_session);
+                }
+                return Err(ResourceBindingError::forbidden(
+                    "core-connection-bound-to-another-session",
+                ));
+            }
+            reverse.1.insert(wire_connection.clone());
+        } else {
+            self.core_connections.insert(
+                core_connection.clone(),
+                (
+                    wire_session.clone(),
+                    HashSet::from([wire_connection.clone()]),
+                ),
+            );
+        }
+        self.connections.insert(key, core_connection);
+        Ok(())
+    }
+
+    pub fn core_session(&self, wire_session: &SessionId) -> Option<SessionId> {
+        self.sessions
+            .get(wire_session)
+            .map(|entry| entry.value().clone())
+    }
+
+    pub fn core_connection(
+        &self,
+        wire_session: &SessionId,
+        wire_connection: &ConnectionId,
+    ) -> Option<ConnectionId> {
+        self.connections
+            .get(&(wire_session.clone(), wire_connection.clone()))
+            .map(|entry| entry.value().clone())
+    }
+
+    pub fn remove_connection(
+        &self,
+        wire_session: &SessionId,
+        wire_connection: &ConnectionId,
+    ) -> Option<ConnectionId> {
+        let _mutation = self.mutation.lock();
+        self.remove_connection_locked(wire_session, wire_connection)
+            .map(|removed| removed.core_connection)
+    }
+
+    /// Remove one exact wire mapping and prune its Session row only after the
+    /// final sibling Connection is gone. The canonical pair is retained for
+    /// downstream registry cleanup after the untrusted mapping is no longer
+    /// reachable.
+    fn remove_connection_locked(
+        &self,
+        wire_session: &SessionId,
+        wire_connection: &ConnectionId,
+    ) -> Option<RemovedConnectionBinding> {
+        let core_session = self
+            .sessions
+            .get(wire_session)
+            .map(|entry| entry.value().clone());
+        let core_connection = self
+            .connections
+            .remove(&(wire_session.clone(), wire_connection.clone()))
+            .map(|(_, core)| core)?;
+        let remove_reverse =
+            if let Some(mut reverse) = self.core_connections.get_mut(&core_connection) {
+                reverse.1.remove(wire_connection);
+                reverse.1.is_empty()
+            } else {
+                // The forward row is authoritative for cleanup. A missing
+                // reverse row must not suppress downstream release and leak
+                // the core Connection's registry resources.
+                true
+            };
+        if remove_reverse {
+            self.core_connections.remove(&core_connection);
+        }
+        let has_sibling = self
+            .connections
+            .iter()
+            .any(|entry| &entry.key().0 == wire_session);
+        if !has_sibling {
+            self.sessions.remove(wire_session);
+        }
+        core_session.map(|session| RemovedConnectionBinding {
+            core_session: session,
+            core_connection,
+            release_core_connection: remove_reverse,
+        })
+    }
+
+    pub fn remove_session(&self, wire_session: &SessionId) -> Option<SessionId> {
+        let _mutation = self.mutation.lock();
+        let removed_connections = self
+            .connections
+            .iter()
+            .filter(|entry| &entry.key().0 == wire_session)
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect::<Vec<_>>();
+        for (wire, core) in removed_connections {
+            self.connections.remove(&wire);
+            self.core_connections.remove(&core);
+        }
+        self.sessions.remove(wire_session).map(|(_, core)| core)
+    }
+
+    pub fn clear(&self) {
+        let _mutation = self.mutation.lock();
+        self.core_connections.clear();
+        self.connections.clear();
+        self.sessions.clear();
+    }
+}
+
+/// Translates authenticated peer-local wire IDs into canonical registry IDs
+/// before delegating to a process-wide [`SubscriptionHandler`].
+pub struct BoundSubscriptionHandler {
+    bindings: Arc<PeerResourceBindings>,
+    inner: Arc<dyn SubscriptionHandler>,
+}
+
+impl BoundSubscriptionHandler {
+    pub fn new(
+        bindings: Arc<PeerResourceBindings>,
+        inner: Arc<dyn SubscriptionHandler>,
+    ) -> Arc<Self> {
+        Arc::new(Self { bindings, inner })
+    }
+
+    pub fn bindings(&self) -> Arc<PeerResourceBindings> {
+        Arc::clone(&self.bindings)
+    }
+
+    fn with_resolved<T>(
+        &self,
+        sid: &SessionId,
+        connection: &ConnectionId,
+        operation: impl FnOnce(&SessionId, &ConnectionId) -> T,
+    ) -> Result<T, ResourceBindingError> {
+        // Hold the peer mutation barrier through the synchronous registry
+        // operation. Teardown waits for an in-flight subscribe to finish,
+        // removes the mapping, and then cleans the registry; a later request
+        // cannot slip between cleanup and mapping removal.
+        let _mutation = self.bindings.mutation.lock();
+        self.bindings.active_principal_locked()?;
+        let core_session = self
+            .bindings
+            .core_session(sid)
+            .ok_or_else(|| ResourceBindingError::unavailable("session-binding-not-ready"))?;
+        let core_connection = self
+            .bindings
+            .core_connection(sid, connection)
+            .ok_or_else(|| ResourceBindingError::unavailable("connection-binding-not-ready"))?;
+        Ok(operation(&core_session, &core_connection))
+    }
+}
+
+impl SubscriptionHandler for BoundSubscriptionHandler {
+    fn subscribe(
+        &self,
+        sid: &SessionId,
+        subscriber: &ConnectionId,
+        request: &StreamSubscribe,
+    ) -> SubscriptionOutcome {
+        match self.with_resolved(sid, subscriber, |session, connection| {
+            self.inner.subscribe(session, connection, request)
+        }) {
+            Ok(outcome) => outcome,
+            Err(error) => error.subscription_outcome(),
+        }
+    }
+
+    fn unsubscribe(
+        &self,
+        sid: &SessionId,
+        subscriber: &ConnectionId,
+        request: &StreamUnsubscribe,
+    ) -> SubscriptionOutcome {
+        match self.with_resolved(sid, subscriber, |session, connection| {
+            self.inner.unsubscribe(session, connection, request)
+        }) {
+            Ok(outcome) => outcome,
+            Err(error) => error.subscription_outcome(),
+        }
+    }
+
+    fn register_publisher(&self, info: PublisherInfo<'_>) {
+        let _ = self.with_resolved(info.sid, info.connection, |session, connection| {
+            self.inner.register_publisher(PublisherInfo {
+                sid: session,
+                strm_id: info.strm_id,
+                connection,
+                participant: info.participant,
+                kind: info.kind,
+                codec: info.codec,
+            });
+        });
+    }
+
+    fn unregister_publisher(&self, sid: &SessionId, strm_id: &str, publisher: &ConnectionId) {
+        let _mutation = self.bindings.mutation.lock();
+        if let (Some(session), Some(connection)) = (
+            self.bindings.core_session(sid),
+            self.bindings.core_connection(sid, publisher),
+        ) {
+            self.inner
+                .unregister_publisher(&session, strm_id, &connection);
+        }
+    }
+
+    fn unregister_connection(&self, sid: &SessionId, connid: &ConnectionId) {
+        let removed = {
+            let _mutation = self.bindings.mutation.lock();
+            self.bindings.remove_connection_locked(sid, connid)
+        };
+        if let Some(removed) = removed {
+            if removed.release_core_connection {
+                self.inner
+                    .unregister_connection(&removed.core_session, &removed.core_connection);
+            }
+        }
+    }
 }
 
 /// Peer-local namespace wrapper for a shared production handler. Wire Session
@@ -158,8 +600,9 @@ impl SubscriptionHandler for NamespacedSubscriptionHandler {
         });
     }
 
-    fn unregister_publisher(&self, sid: &SessionId, strm_id: &str) {
-        self.inner.unregister_publisher(&self.session(sid), strm_id);
+    fn unregister_publisher(&self, sid: &SessionId, strm_id: &str, publisher: &ConnectionId) {
+        self.inner
+            .unregister_publisher(&self.session(sid), strm_id, &self.connection(publisher));
     }
 
     fn unregister_connection(&self, sid: &SessionId, connid: &ConnectionId) {
@@ -225,6 +668,57 @@ pub fn rejecting_handler() -> Arc<dyn SubscriptionHandler> {
 mod namespace_tests {
     use super::*;
 
+    #[derive(Default)]
+    struct RecordingHandler {
+        subscriptions: parking_lot::Mutex<Vec<(SessionId, ConnectionId)>>,
+        publishers: parking_lot::Mutex<Vec<(SessionId, ConnectionId, String)>>,
+        removed_publishers: parking_lot::Mutex<Vec<(SessionId, ConnectionId, String)>>,
+        removed: parking_lot::Mutex<Vec<(SessionId, ConnectionId)>>,
+    }
+
+    impl SubscriptionHandler for RecordingHandler {
+        fn subscribe(
+            &self,
+            sid: &SessionId,
+            subscriber: &ConnectionId,
+            _: &StreamSubscribe,
+        ) -> SubscriptionOutcome {
+            self.subscriptions
+                .lock()
+                .push((sid.clone(), subscriber.clone()));
+            SubscriptionOutcome::Ok
+        }
+
+        fn unsubscribe(
+            &self,
+            _: &SessionId,
+            _: &ConnectionId,
+            _: &StreamUnsubscribe,
+        ) -> SubscriptionOutcome {
+            SubscriptionOutcome::Ok
+        }
+
+        fn register_publisher(&self, info: PublisherInfo<'_>) {
+            self.publishers.lock().push((
+                info.sid.clone(),
+                info.connection.clone(),
+                info.strm_id.to_owned(),
+            ));
+        }
+
+        fn unregister_publisher(&self, sid: &SessionId, strm_id: &str, publisher: &ConnectionId) {
+            self.removed_publishers.lock().push((
+                sid.clone(),
+                publisher.clone(),
+                strm_id.to_string(),
+            ));
+        }
+
+        fn unregister_connection(&self, sid: &SessionId, connid: &ConnectionId) {
+            self.removed.lock().push((sid.clone(), connid.clone()));
+        }
+    }
+
     #[test]
     fn identical_wire_ids_from_two_peers_map_to_distinct_registry_ids() {
         let peer_a = NamespacedSubscriptionHandler::new("peer-a", rejecting_handler());
@@ -234,5 +728,325 @@ mod namespace_tests {
 
         assert_ne!(peer_a.session(&sid), peer_b.session(&sid));
         assert_ne!(peer_a.connection(&connid), peer_b.connection(&connid));
+    }
+
+    #[test]
+    fn bound_handler_never_delegates_unbound_wire_ids() {
+        let resolver = PeerScopedSessionResolver::new("peer-a");
+        let bindings = PeerResourceBindings::new(resolver);
+        bindings
+            .authenticate(AuthenticatedPrincipal::anonymous())
+            .unwrap();
+        let inner = Arc::new(RecordingHandler::default());
+        let handler = BoundSubscriptionHandler::new(bindings, inner.clone());
+
+        let outcome = handler.subscribe(
+            &SessionId::from_string("wire-session"),
+            &ConnectionId::from_string("wire-connection"),
+            &StreamSubscribe {
+                by_participant: "listener".into(),
+                subscriptions: Vec::new(),
+            },
+        );
+
+        assert_eq!(
+            outcome,
+            SubscriptionOutcome::reject(503, "session-binding-not-ready")
+        );
+        assert!(inner.subscriptions.lock().is_empty());
+    }
+
+    #[test]
+    fn bound_handler_translates_and_removes_exact_core_resources() {
+        let canonical_session = SessionId::from_string("core-session");
+        let resolver: Arc<dyn SessionBindingResolver> = Arc::new({
+            let canonical_session = canonical_session.clone();
+            move |_: &AuthenticatedPrincipal, _: &SessionId| Ok(canonical_session.clone())
+        });
+        let bindings = PeerResourceBindings::new(resolver);
+        bindings
+            .authenticate(AuthenticatedPrincipal::anonymous())
+            .unwrap();
+        let wire_session = SessionId::from_string("wire-session");
+        let wire_connection = ConnectionId::from_string("wire-connection");
+        let core_connection = ConnectionId::from_string("core-connection");
+        bindings
+            .bind_connection(&wire_session, &wire_connection, core_connection.clone())
+            .unwrap();
+
+        let inner = Arc::new(RecordingHandler::default());
+        let handler = BoundSubscriptionHandler::new(bindings.clone(), inner.clone());
+        assert_eq!(
+            handler.subscribe(
+                &wire_session,
+                &wire_connection,
+                &StreamSubscribe {
+                    by_participant: "listener".into(),
+                    subscriptions: Vec::new(),
+                },
+            ),
+            SubscriptionOutcome::Ok
+        );
+        handler.register_publisher(PublisherInfo {
+            sid: &wire_session,
+            strm_id: "audio/main",
+            connection: &wire_connection,
+            participant: "publisher",
+            kind: "audio",
+            codec: None,
+        });
+        handler.unregister_publisher(&wire_session, "audio/main", &wire_connection);
+        handler.unregister_connection(&wire_session, &wire_connection);
+
+        assert_eq!(
+            *inner.subscriptions.lock(),
+            vec![(canonical_session.clone(), core_connection.clone())]
+        );
+        assert_eq!(
+            *inner.publishers.lock(),
+            vec![(
+                canonical_session.clone(),
+                core_connection.clone(),
+                "audio/main".into()
+            )]
+        );
+        assert_eq!(
+            *inner.removed.lock(),
+            vec![(canonical_session, core_connection)]
+        );
+        assert_eq!(
+            *inner.removed_publishers.lock(),
+            vec![(
+                SessionId::from_string("core-session"),
+                ConnectionId::from_string("core-connection"),
+                "audio/main".to_string(),
+            )]
+        );
+        assert!(bindings
+            .core_connection(&wire_session, &wire_connection)
+            .is_none());
+        assert!(bindings.core_session(&wire_session).is_none());
+    }
+
+    #[test]
+    fn resolver_can_authorize_two_peers_into_one_canonical_session() {
+        let canonical_session = SessionId::from_string("tenant-call-42");
+        let resolver: Arc<dyn SessionBindingResolver> = Arc::new({
+            let canonical_session = canonical_session.clone();
+            move |_: &AuthenticatedPrincipal, _: &SessionId| Ok(canonical_session.clone())
+        });
+        let peer_a = PeerResourceBindings::new(resolver.clone());
+        let peer_b = PeerResourceBindings::new(resolver);
+        peer_a
+            .authenticate(AuthenticatedPrincipal::anonymous())
+            .unwrap();
+        peer_b
+            .authenticate(AuthenticatedPrincipal::anonymous())
+            .unwrap();
+
+        let wire_session_a = SessionId::from_string("attachment-token-a");
+        let wire_session_b = SessionId::from_string("attachment-token-b");
+        let wire_connection_a = ConnectionId::from_string("wire-a");
+        let wire_connection_b = ConnectionId::from_string("wire-b");
+        let core_connection_a = ConnectionId::from_string("core-a");
+        let core_connection_b = ConnectionId::from_string("core-b");
+        peer_a
+            .bind_connection(
+                &wire_session_a,
+                &wire_connection_a,
+                core_connection_a.clone(),
+            )
+            .unwrap();
+        peer_b
+            .bind_connection(
+                &wire_session_b,
+                &wire_connection_b,
+                core_connection_b.clone(),
+            )
+            .unwrap();
+
+        let inner = Arc::new(RecordingHandler::default());
+        let handler_a = BoundSubscriptionHandler::new(peer_a, inner.clone());
+        let handler_b = BoundSubscriptionHandler::new(peer_b, inner.clone());
+        let request = StreamSubscribe {
+            by_participant: "listener".into(),
+            subscriptions: Vec::new(),
+        };
+        assert_eq!(
+            handler_a.subscribe(&wire_session_a, &wire_connection_a, &request),
+            SubscriptionOutcome::Ok
+        );
+        assert_eq!(
+            handler_b.subscribe(&wire_session_b, &wire_connection_b, &request),
+            SubscriptionOutcome::Ok
+        );
+        assert_eq!(
+            *inner.subscriptions.lock(),
+            vec![
+                (canonical_session.clone(), core_connection_a),
+                (canonical_session, core_connection_b),
+            ]
+        );
+    }
+
+    #[test]
+    fn cached_bindings_and_handler_operations_reject_expired_principal() {
+        let canonical_session = SessionId::from_string("core-session");
+        let resolver: Arc<dyn SessionBindingResolver> = Arc::new({
+            let canonical_session = canonical_session.clone();
+            move |_: &AuthenticatedPrincipal, _: &SessionId| Ok(canonical_session.clone())
+        });
+        let bindings = PeerResourceBindings::new(resolver);
+        bindings
+            .authenticate(AuthenticatedPrincipal::anonymous())
+            .unwrap();
+        let wire_session = SessionId::from_string("wire-session");
+        let wire_connection = ConnectionId::from_string("wire-connection");
+        bindings
+            .bind_connection(
+                &wire_session,
+                &wire_connection,
+                ConnectionId::from_string("core-connection"),
+            )
+            .unwrap();
+        bindings
+            .principal
+            .write()
+            .as_mut()
+            .expect("authenticated principal")
+            .expires_at = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+
+        assert_eq!(
+            bindings.bind_session(&wire_session).unwrap_err(),
+            ResourceBindingError::forbidden("principal-expired")
+        );
+        let inner = Arc::new(RecordingHandler::default());
+        let handler = BoundSubscriptionHandler::new(bindings, inner.clone());
+        assert_eq!(
+            handler.subscribe(
+                &wire_session,
+                &wire_connection,
+                &StreamSubscribe {
+                    by_participant: "listener".into(),
+                    subscriptions: Vec::new(),
+                },
+            ),
+            SubscriptionOutcome::reject(403, "principal-expired")
+        );
+        assert!(inner.subscriptions.lock().is_empty());
+    }
+
+    #[test]
+    fn sibling_wire_connections_share_one_core_leg_and_cleanup_exactly() {
+        let canonical_session = SessionId::from_string("core-session");
+        let resolver: Arc<dyn SessionBindingResolver> = Arc::new({
+            let canonical_session = canonical_session.clone();
+            move |_: &AuthenticatedPrincipal, _: &SessionId| Ok(canonical_session.clone())
+        });
+        let bindings = PeerResourceBindings::new(resolver);
+        bindings
+            .authenticate(AuthenticatedPrincipal::anonymous())
+            .unwrap();
+        let wire_session = SessionId::from_string("wire-session");
+        let sibling_a = ConnectionId::from_string("wire-a");
+        let sibling_b = ConnectionId::from_string("wire-b");
+        let core_connection = ConnectionId::from_string("core-leg");
+        bindings
+            .bind_connection(&wire_session, &sibling_a, core_connection.clone())
+            .unwrap();
+        bindings
+            .bind_connection(&wire_session, &sibling_b, core_connection.clone())
+            .unwrap();
+
+        let other_session = SessionId::from_string("other-wire-session");
+        assert_eq!(
+            bindings
+                .bind_connection(
+                    &other_session,
+                    &ConnectionId::from_string("wire-c"),
+                    core_connection.clone(),
+                )
+                .unwrap_err(),
+            ResourceBindingError::forbidden("core-connection-bound-to-another-session")
+        );
+        assert!(
+            bindings.core_session(&other_session).is_none(),
+            "failed cross-Session alias must roll back its empty Session row"
+        );
+
+        let inner = Arc::new(RecordingHandler::default());
+        let handler = BoundSubscriptionHandler::new(bindings.clone(), inner.clone());
+        handler.unregister_connection(&wire_session, &sibling_a);
+        handler.unregister_connection(&wire_session, &sibling_a);
+        assert!(bindings
+            .core_connection(&wire_session, &sibling_a)
+            .is_none());
+        assert_eq!(
+            bindings.core_connection(&wire_session, &sibling_b),
+            Some(core_connection.clone())
+        );
+        assert_eq!(
+            bindings.core_session(&wire_session),
+            Some(canonical_session.clone())
+        );
+
+        handler.unregister_connection(&wire_session, &sibling_b);
+        assert!(bindings
+            .core_connection(&wire_session, &sibling_b)
+            .is_none());
+        assert!(bindings.core_session(&wire_session).is_none());
+        assert_eq!(
+            *inner.removed.lock(),
+            vec![(canonical_session, core_connection)]
+        );
+    }
+
+    #[test]
+    fn remove_session_releases_reverse_rows_without_touching_siblings() {
+        let bindings = PeerResourceBindings::new(PeerScopedSessionResolver::new("peer"));
+        bindings
+            .authenticate(AuthenticatedPrincipal::anonymous())
+            .unwrap();
+        let session_a = SessionId::from_string("session-a");
+        let session_b = SessionId::from_string("session-b");
+        let wire_a = ConnectionId::from_string("wire-a");
+        let wire_b = ConnectionId::from_string("wire-b");
+        let core_a = ConnectionId::from_string("core-a");
+        let core_b = ConnectionId::from_string("core-b");
+        bindings
+            .bind_connection(&session_a, &wire_a, core_a.clone())
+            .unwrap();
+        bindings
+            .bind_connection(&session_b, &wire_b, core_b.clone())
+            .unwrap();
+
+        assert!(bindings.remove_session(&session_a).is_some());
+        assert!(bindings.core_session(&session_a).is_none());
+        assert!(bindings.core_connection(&session_a, &wire_a).is_none());
+        assert_eq!(bindings.core_connection(&session_b, &wire_b), Some(core_b));
+        bindings
+            .bind_connection(
+                &session_a,
+                &ConnectionId::from_string("wire-a-reused"),
+                core_a,
+            )
+            .expect("reverse row for removed Session is released");
+    }
+
+    #[test]
+    fn principal_refresh_cannot_change_resource_owner() {
+        let bindings = PeerResourceBindings::new(PeerScopedSessionResolver::new("peer"));
+        let mut first = AuthenticatedPrincipal::anonymous();
+        first.subject = "alice".into();
+        first.tenant = Some("tenant-a".into());
+        bindings.authenticate(first).unwrap();
+
+        let mut other = AuthenticatedPrincipal::anonymous();
+        other.subject = "alice".into();
+        other.tenant = Some("tenant-b".into());
+        assert_eq!(
+            bindings.authenticate(other).unwrap_err(),
+            ResourceBindingError::forbidden("principal-ownership-change")
+        );
     }
 }

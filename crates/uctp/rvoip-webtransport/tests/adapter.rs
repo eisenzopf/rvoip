@@ -183,35 +183,32 @@ async fn wt_adapter_emits_inbound_connection_on_session_invite() {
     let core_connection_id = match event {
         AdapterEvent::InboundConnection { connection } => {
             assert_eq!(connection.transport, Transport::WebTransport);
-            assert_eq!(connection.session_id.as_str(), "sess_wt_adapter_test");
+            assert!(
+                connection
+                    .session_id
+                    .as_str()
+                    .ends_with(":sess_wt_adapter_test"),
+                "default resolver must retain the wire ID inside a peer-private namespace"
+            );
+            assert_ne!(connection.session_id.as_str(), "sess_wt_adapter_test");
             assert_eq!(
                 connection.participant_id.as_str(),
                 authenticated_participant.as_str()
             );
 
-            // SP-D: default audio stream is now populated at InboundInvite.
+            // Media is bound only after connection.offer/ready supplies the
+            // authenticated wire Stream ID and negotiated codec.
             assert_eq!(
                 connection.streams.len(),
-                1,
-                "expected one default audio stream populated at InboundInvite"
+                0,
+                "invite-time synthetic streams would race negotiated binding"
             );
-            assert_eq!(
-                rvoip_core::stream::MediaStream::kind(connection.streams[0].stream().as_ref()),
-                rvoip_core::stream::StreamKind::Audio
-            );
-            let codec =
-                rvoip_core::stream::MediaStream::codec(connection.streams[0].stream().as_ref());
-            assert_eq!(codec.name, "opus");
 
             let via_adapter = adapter
                 .streams(connection.id.clone())
                 .await
                 .expect("streams ok");
-            assert_eq!(via_adapter.len(), 1);
-            assert_eq!(
-                rvoip_core::stream::MediaStream::kind(via_adapter[0].as_ref()),
-                rvoip_core::stream::StreamKind::Audio
-            );
+            assert!(via_adapter.is_empty());
             connection.id
         }
         other => panic!("expected InboundConnection, got {:?}", other),
@@ -241,6 +238,81 @@ async fn wt_adapter_emits_inbound_connection_on_session_invite() {
         )
         .await
         .expect("send connection offer");
+    client
+        .send(
+            UctpEnvelope::new(MessageType::ConnectionReady, serde_json::json!({}))
+                .with_sid("sess_wt_adapter_test")
+                .with_connid(wire_connection_id),
+        )
+        .await
+        .expect("send connection ready");
+
+    let bound_streams = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let streams = adapter
+                .streams(core_connection_id.clone())
+                .await
+                .expect("streams ok");
+            if !streams.is_empty() {
+                break streams;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("negotiated media binding timeout");
+    assert_eq!(bound_streams.len(), 1);
+    assert_eq!(bound_streams[0].id().as_str(), "strm_wt_data");
+    assert_eq!(
+        bound_streams[0].kind(),
+        rvoip_core::stream::StreamKind::Audio
+    );
+    assert_eq!(bound_streams[0].codec().name, "opus");
+
+    let opened = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let envelope = inbound.recv().await.expect("client inbound closed");
+            if envelope.msg_type == MessageType::StreamOpened {
+                break envelope
+                    .decode_payload::<rvoip_uctp::payloads::stream::StreamOpened>()
+                    .expect("decode stream.opened");
+            }
+        }
+    })
+    .await
+    .expect("stream.opened timeout");
+    assert_eq!(opened.stream.strm_id, "strm_wt_data");
+    assert_ne!(opened.stream.stream_local_id, 0);
+
+    let mut media_in = bound_streams[0]
+        .try_frames_in()
+        .expect("acquire negotiated media receiver");
+    let datagram = rvoip_uctp::substrate::pack_rtp_datagram(&rvoip_uctp::substrate::RtpDatagram {
+        flags: 0,
+        stream_local_id: opened.stream.stream_local_id,
+        seq: 9,
+        rtp: rvoip_uctp::substrate::RtpMediaPayload {
+            payload: bytes::Bytes::from_static(b"negotiated-opus-frame"),
+            payload_type: 111,
+            sequence_number: 17,
+            timestamp: 960,
+            ssrc: 0x1020_3040,
+        },
+    })
+    .expect("encode complete RTP datagram");
+    client
+        .session
+        .send_datagram(datagram)
+        .expect("send media datagram");
+    let media_frame = tokio::time::timeout(Duration::from_secs(5), media_in.recv())
+        .await
+        .expect("media frame timeout")
+        .expect("media receiver closed");
+    assert_eq!(media_frame.stream_id.as_str(), "strm_wt_data");
+    assert_eq!(media_frame.payload.as_ref(), b"negotiated-opus-frame");
+    assert_eq!(media_frame.payload_type, Some(111));
+    assert_eq!(media_frame.timestamp_rtp, 960);
+
     client
         .send(
             UctpEnvelope::new(

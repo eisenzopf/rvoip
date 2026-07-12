@@ -2,8 +2,8 @@
 //!
 //! Headline test of the v0.x multi-party track: two QUIC peers connect
 //! to one Orchestrator. Peer B subscribes to peer A's audio stream
-//! via `Orchestrator::add_subscription`; a frame injected at peer A's
-//! client-side stream travels over QUIC to the orchestrator, gets
+//! with an authenticated `stream.subscribe` envelope; a frame injected at
+//! peer A's client-side stream travels over QUIC to the orchestrator, gets
 //! fanned out by the adapter's datagram reader (calling
 //! `orch.fanout_frame(...)`) into peer B's server-side MediaStream's
 //! `frames_out`, which pumps the frame back over QUIC to peer B's
@@ -13,7 +13,7 @@
 //! Companion to `cross_transport_bridge.rs` (which proves 1:1
 //! orchestrator-orchestrated bridging). This test proves multi-party
 //! N-way fanout in the same shape — the only difference is the
-//! `bridge_connections` call is replaced with `add_subscription`.
+//! `bridge_connections` call is replaced by the protocol subscription.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,7 +23,7 @@ use chrono::Utc;
 use rvoip_auth_core::bearer_stub;
 use rvoip_core::adapter::ConnectionAdapter;
 use rvoip_core::events::Event;
-use rvoip_core::ids::{ConnectionId, SessionId};
+use rvoip_core::ids::{ConnectionId, SessionId, StreamId};
 use rvoip_core::stream::{MediaFrame, MediaStream, StreamKind};
 use rvoip_core::{Config, Orchestrator};
 use rvoip_quic::{
@@ -31,8 +31,10 @@ use rvoip_quic::{
     UctpQuicClient, UctpQuicConfig,
 };
 use rvoip_uctp::envelope::UctpEnvelope;
-use rvoip_uctp::payloads::{auth, session::SessionInvite};
-use rvoip_uctp::state::OrchestratorSubscriptionHandler;
+use rvoip_uctp::payloads::{auth, session::SessionInvite, stream};
+use rvoip_uctp::state::{
+    OrchestratorSubscriptionHandler, ResourceBindingError, SessionBindingResolver,
+};
 use rvoip_uctp::substrate::{dev_client_config_trusting, dispatch_by_alpn, self_signed_for_dev};
 use rvoip_uctp::types::MessageType;
 
@@ -135,7 +137,9 @@ async fn drive_auth_quic(
 /// arrives; return its `stream_local_id`. The MP3c fanout path
 /// (plan B1) announces the subscriber's per-publisher local_id this
 /// way so the subscriber's client can build a matching MediaStream.
-async fn wait_for_stream_opened(inbound: &mut tokio::sync::mpsc::Receiver<UctpEnvelope>) -> u16 {
+async fn wait_for_stream_opened(
+    inbound: &mut tokio::sync::mpsc::Receiver<UctpEnvelope>,
+) -> stream::StreamInfo {
     for _ in 0..30 {
         let env = tokio::time::timeout(Duration::from_millis(500), inbound.recv())
             .await
@@ -146,7 +150,7 @@ async fn wait_for_stream_opened(inbound: &mut tokio::sync::mpsc::Receiver<UctpEn
         }
         let payload: rvoip_uctp::payloads::stream::StreamOpened =
             env.decode_payload().expect("decode stream.opened");
-        return payload.stream.stream_local_id;
+        return payload.stream;
     }
     panic!("no stream.opened envelope arrived");
 }
@@ -193,6 +197,12 @@ fn connection_offer(sid: &str, connid: &str, participant: &str) -> UctpEnvelope 
     .with_connid(connid)
 }
 
+fn connection_ready(sid: &str, connid: &str) -> UctpEnvelope {
+    UctpEnvelope::new(MessageType::ConnectionReady, serde_json::json!({}))
+        .with_sid(sid)
+        .with_connid(connid)
+}
+
 #[tokio::test]
 async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -209,9 +219,17 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
     let publishers = orchestrator.publisher_registry();
     let handler =
         OrchestratorSubscriptionHandler::new(Arc::clone(&orchestrator), Arc::clone(&publishers));
+    let canonical_session = SessionId::new();
+    let resolver: Arc<dyn SessionBindingResolver> = Arc::new({
+        let canonical_session = canonical_session.clone();
+        move |_: &rvoip_core::identity::AuthenticatedPrincipal,
+              _: &SessionId|
+              -> Result<SessionId, ResourceBindingError> { Ok(canonical_session.clone()) }
+    });
     let quic_adapter = UctpQuicAdapter::new(
         UctpQuicConfig::new(Arc::clone(&server_ep), quic_accept_rx, bearer_stub())
             .with_subscription_handler(handler)
+            .with_session_binding_resolver(resolver)
             .with_orchestrator(Arc::clone(&orchestrator)),
     )
     .await
@@ -266,11 +284,16 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
         ))
         .await
         .unwrap();
+    client_a
+        .send(connection_ready("sess_a", "conn_wire_a"))
+        .await
+        .unwrap();
+    let publisher_stream = wait_for_stream_opened(&mut in_a).await;
     client_b
         .send(invite("sess_b", "part_b_subscriber"))
         .await
         .unwrap();
-    let subscriber_connid = loop {
+    let _subscriber_connid = loop {
         if let Ok(Ok(Event::ConnectionInbound { connection_id, .. })) =
             tokio::time::timeout(Duration::from_secs(5), events.recv()).await
         {
@@ -285,10 +308,13 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
         ))
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    client_b
+        .send(connection_ready("sess_b", "conn_wire_b"))
+        .await
+        .unwrap();
+    let _subscriber_published_stream = wait_for_stream_opened(&mut in_b).await;
 
-    // Look up the publisher's server-side StreamId (the default audio
-    // stream the adapter created on InboundInvite).
+    // The offered wire Stream ID is the actual server-side Stream ID.
     let publisher_streams = quic_adapter
         .streams(publisher_connid.clone())
         .await
@@ -298,35 +324,37 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
         .find(|s| s.kind() == StreamKind::Audio)
         .expect("publisher has audio stream")
         .id();
+    assert_eq!(publisher_strm_id.as_str(), publisher_stream.strm_id);
 
-    // The publisher's adapter knows what `SessionId` it belongs to —
-    // the fanout context was built at InboundInvite from the wire `sid`.
-    // We have to use the SAME sid the adapter knows. We didn't capture
-    // it directly, but `add_subscription` is per-(sid, publisher, strm).
-    // The adapter's fanout call uses *its* known sid; the subscription
-    // table is keyed on the same sid. So as long as we register against
-    // that sid, the fanout will route. We learn the publisher's sid
-    // from the adapter's internal map indirectly — but the simplest
-    // path is: the publisher's session id is sess_a (the wire string
-    // from the invite).
-    let publisher_sid = SessionId::from_string("sess_a");
-
-    // Register the subscription: subscriber_connid receives publisher's
-    // audio stream.
-    orchestrator.add_subscription(
-        publisher_sid.clone(),
-        subscriber_connid.clone(),
-        publisher_connid.clone(),
-        publisher_strm_id.clone(),
-    );
+    // Exercise the real authenticated wire API. Both peer-local Session IDs
+    // resolve to the same canonical Session through the test resolver.
+    let subscribe = UctpEnvelope::new(
+        MessageType::StreamSubscribe,
+        serde_json::to_value(stream::StreamSubscribe {
+            by_participant: "part_b_subscriber".into(),
+            subscriptions: vec![stream::StreamSubscription {
+                strm_id: Some(publisher_stream.strm_id.clone()),
+                ..Default::default()
+            }],
+        })
+        .unwrap(),
+    )
+    .with_sid("sess_b")
+    .with_connid("conn_wire_b");
+    client_b.send(subscribe).await.expect("wire subscribe");
+    let ack = tokio::time::timeout(Duration::from_secs(5), in_b.recv())
+        .await
+        .expect("subscribe reply timeout")
+        .expect("subscriber signaling closed");
+    assert_eq!(ack.msg_type, MessageType::Ack);
 
     // --- Publisher-side client stream so we can inject ---
     let publisher_client_stream = QuicDatagramMediaStream::start(
-        rvoip_core::ids::StreamId::new(),
+        StreamId::from_string(publisher_stream.strm_id.clone()),
         StreamKind::Audio,
         default_codec(),
         rvoip_core::connection::Direction::Outbound,
-        1,
+        publisher_stream.stream_local_id,
         client_a.connection.clone(),
     );
     let publisher_router = Arc::new(parking_lot::RwLock::new(vec![Arc::clone(
@@ -358,14 +386,15 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
     // subscription and emits `stream.opened` announcing it. Build the
     // subscriber-side MediaStream with whatever id the server picked,
     // mirroring how a real client would learn it.
-    let subscriber_local_id = wait_for_stream_opened(&mut in_b).await;
+    let subscriber_fanout_stream = wait_for_stream_opened(&mut in_b).await;
+    let subscriber_local_id = subscriber_fanout_stream.stream_local_id;
     assert!(
         subscriber_local_id >= 2,
         "MP3c must allocate a fresh local_id (got {})",
         subscriber_local_id
     );
     let subscriber_client_stream = QuicDatagramMediaStream::start(
-        rvoip_core::ids::StreamId::new(),
+        StreamId::from_string(subscriber_fanout_stream.strm_id),
         StreamKind::Audio,
         default_codec(),
         rvoip_core::connection::Direction::Inbound,
@@ -417,6 +446,41 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
             payload
         );
     }
+
+    // Real wire unsubscribe removes the canonical route immediately; the
+    // already-allocated subscriber MediaStream must not receive later media.
+    let unsubscribe = UctpEnvelope::new(
+        MessageType::StreamUnsubscribe,
+        serde_json::to_value(stream::StreamUnsubscribe {
+            strm_ids: vec![publisher_stream.strm_id.clone()],
+        })
+        .unwrap(),
+    )
+    .with_sid("sess_b")
+    .with_connid("conn_wire_b");
+    client_b.send(unsubscribe).await.expect("wire unsubscribe");
+    let ack = tokio::time::timeout(Duration::from_secs(5), in_b.recv())
+        .await
+        .expect("unsubscribe reply timeout")
+        .expect("subscriber signaling closed");
+    assert_eq!(ack.msg_type, MessageType::Ack);
+    publisher_out
+        .send(MediaFrame {
+            stream_id: publisher_client_stream.id(),
+            kind: StreamKind::Audio,
+            payload: Bytes::from_static(b"after-unsubscribe"),
+            timestamp_rtp: 960,
+            captured_at: Utc::now(),
+            payload_type: Some(111),
+        })
+        .await
+        .expect("send after unsubscribe");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), subscriber_in.recv())
+            .await
+            .is_err(),
+        "subscriber received media after stream.unsubscribe"
+    );
 }
 
 #[tokio::test]
@@ -473,6 +537,16 @@ async fn fanout_with_no_subscription_does_not_leak_frames() {
         .send(connection_offer("sess_b", "conn_wire_b", "part_b"))
         .await
         .unwrap();
+    client_a
+        .send(connection_ready("sess_a", "conn_wire_a"))
+        .await
+        .unwrap();
+    client_b
+        .send(connection_ready("sess_b", "conn_wire_b"))
+        .await
+        .unwrap();
+    let publisher_stream = wait_for_stream_opened(&mut in_a).await;
+    let subscriber_stream = wait_for_stream_opened(&mut in_b).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let mut conn_ids: Vec<ConnectionId> = Vec::new();
@@ -491,19 +565,19 @@ async fn fanout_with_no_subscription_does_not_leak_frames() {
     // No subscription registered → no fanout.
 
     let publisher_client_stream = QuicDatagramMediaStream::start(
-        rvoip_core::ids::StreamId::new(),
+        StreamId::from_string(publisher_stream.strm_id),
         StreamKind::Audio,
         default_codec(),
         rvoip_core::connection::Direction::Outbound,
-        1,
+        publisher_stream.stream_local_id,
         client_a.connection.clone(),
     );
     let subscriber_client_stream = QuicDatagramMediaStream::start(
-        rvoip_core::ids::StreamId::new(),
+        StreamId::from_string(subscriber_stream.strm_id),
         StreamKind::Audio,
         default_codec(),
         rvoip_core::connection::Direction::Inbound,
-        1,
+        subscriber_stream.stream_local_id,
         client_b.connection.clone(),
     );
     let publisher_router = Arc::new(parking_lot::RwLock::new(vec![Arc::clone(

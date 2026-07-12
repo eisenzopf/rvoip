@@ -19,7 +19,7 @@ use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::identity::IdentityAssurance;
-use rvoip_core::ids::ConnectionId;
+use rvoip_core::ids::{ConnectionId, SessionId, StreamId};
 use rvoip_core::message::Message;
 use rvoip_core::stream::MediaStream;
 use rvoip_core::{DataMessage, DataReliability};
@@ -38,6 +38,7 @@ pub const ADAPTER_EVENT_CAP: usize = 256;
 #[derive(Clone)]
 pub(crate) struct Route {
     pub sid: String,
+    pub core_session_id: SessionId,
     pub binding: rvoip_uctp::adapter_helpers::AuthenticatedConnectionBinding,
     pub out_tx: mpsc::Sender<UctpEnvelope>,
     /// Gap plan §4.2 v1 punch list — see rvoip-quic Route doc.
@@ -46,13 +47,9 @@ pub(crate) struct Route {
     /// The WT session; cloned into per-Stream pumps allocated by
     /// `allocate_subscriber_stream` (plan B1 / MP3c).
     pub session: web_transport_quinn::Session,
-    /// Next free `stream_local_id` on this connection. Default audio
-    /// stream claims `1`; allocator starts at `2`.
-    pub next_local_id: Arc<std::sync::atomic::AtomicU16>,
-    /// Per-Connection inbound routing table — the WT datagram reader
-    /// consults it to dispatch by `stream_local_id`.
-    pub streams_router:
-        Arc<parking_lot::RwLock<Vec<Arc<crate::media_stream::WebTransportDatagramMediaStream>>>>,
+    /// One peer-global local-ID namespace shared by every logical Session and
+    /// Connection carried over this physical WebTransport peer.
+    pub media_router: Arc<rvoip_uctp::substrate::PeerMediaRouter>,
     pub route_cancel: CancellationToken,
 }
 
@@ -70,6 +67,10 @@ pub struct UctpWtConfig {
     /// `UctpQuicConfig`
     /// for semantics — identical wiring.
     pub subscription_handler: Option<Arc<dyn rvoip_uctp::state::SubscriptionHandler>>,
+    /// Authorization boundary between a peer-supplied Session ID and the
+    /// canonical core Session used by shared publisher/subscriber registries.
+    /// When omitted, every physical peer receives an isolated namespace.
+    pub session_binding_resolver: Option<Arc<dyn rvoip_uctp::state::SessionBindingResolver>>,
     /// Orchestrator reference for multi-party media fanout (v0.x MP3b).
     /// See `UctpQuicConfig`.
     pub orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
@@ -99,6 +100,7 @@ impl UctpWtConfig {
             client_endpoint: None,
             client_tls: None,
             subscription_handler: None,
+            session_binding_resolver: None,
             orchestrator: None,
             coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps::default(),
             sig9421: None,
@@ -120,6 +122,14 @@ impl UctpWtConfig {
         handler: Arc<dyn rvoip_uctp::state::SubscriptionHandler>,
     ) -> Self {
         self.subscription_handler = Some(handler);
+        self
+    }
+
+    pub fn with_session_binding_resolver(
+        mut self,
+        resolver: Arc<dyn rvoip_uctp::state::SessionBindingResolver>,
+    ) -> Self {
+        self.session_binding_resolver = Some(resolver);
         self
     }
 
@@ -187,6 +197,7 @@ impl UctpWtAdapter {
             config.mount_path,
             config.quinn_stats_interval,
             config.subscription_handler,
+            config.session_binding_resolver,
             config.orchestrator,
             config.coordinator_caps,
             config.sig9421,
@@ -374,64 +385,41 @@ impl ConnectionAdapter for UctpWtAdapter {
         kind: rvoip_core::stream::StreamKind,
         codec: rvoip_core::capability::CodecInfo,
     ) -> RvoipResult<Arc<dyn MediaStream>> {
-        // Mirrors `rvoip_quic::UctpQuicAdapter::allocate_subscriber_stream`
-        // (plan B1 / MP3c). Only differences: uses
-        // `WebTransportDatagramMediaStream` (WT session datagrams) and
-        // the WT-specific `streams_router` shape.
         let route = self
             .route(&subscriber)
             .ok_or_else(|| RvoipError::ConnectionNotFound(subscriber.clone()))?;
         if route.route_cancel.is_cancelled() {
             return Err(RvoipError::InvalidState("UCTP route is ending"));
         }
+        let wire_connection_id =
+            rvoip_uctp::adapter_helpers::require_bound_wire_connection(&route.binding)?;
 
-        let local_id = loop {
-            let next = route
-                .next_local_id
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if next == 0 || next == 1 {
-                continue;
-            }
-            break next;
-        };
+        let reservation = route
+            .media_router
+            .reserve()
+            .map_err(peer_media_router_error)?;
+        let local_id = reservation.local_id();
+        let stream_id = StreamId::new();
 
         let stream = crate::media_stream::WebTransportDatagramMediaStream::start_with_cancel(
-            rvoip_core::ids::StreamId::new(),
+            stream_id.clone(),
             kind,
             codec.clone(),
             rvoip_core::connection::Direction::Outbound,
-            local_id,
+            local_id.get(),
             route.session.clone(),
-            route.route_cancel.clone(),
+            reservation.cancellation_token(),
         );
         if route.route_cancel.is_cancelled() {
+            drop(reservation);
             let _ = stream.close().await;
             return Err(RvoipError::InvalidState(
                 "UCTP route ended during allocation",
             ));
         }
 
-        route.streams_router.write().push(Arc::clone(&stream));
-        let stream_dyn: Arc<dyn MediaStream> = Arc::clone(&stream) as Arc<dyn MediaStream>;
-        let stream_id = stream.id();
-        route
-            .streams
-            .insert(stream_id.clone(), Arc::clone(&stream_dyn));
-        if route.route_cancel.is_cancelled() {
-            route.streams.remove(&stream_id);
-            route
-                .streams_router
-                .write()
-                .retain(|candidate| candidate.id() != stream_id);
-            let _ = stream.close().await;
-            return Err(RvoipError::InvalidState(
-                "UCTP route ended during allocation",
-            ));
-        }
-
-        let strm_id = format!("strm_sub_{}", rvoip_core::ids::StreamId::new().to_string());
         let stream_info = payloads::stream::StreamInfo {
-            strm_id,
+            strm_id: stream_id.to_string(),
             kind: match kind {
                 rvoip_core::stream::StreamKind::Audio => "audio".into(),
                 rvoip_core::stream::StreamKind::Video => "video".into(),
@@ -445,7 +433,7 @@ impl ConnectionAdapter for UctpWtAdapter {
                 }
             }),
             direction: "recvonly".into(),
-            stream_local_id: local_id,
+            stream_local_id: local_id.get(),
             opened_at: chrono::Utc::now(),
         };
         let opened_env = UctpEnvelope::new(
@@ -456,15 +444,41 @@ impl ConnectionAdapter for UctpWtAdapter {
             .map_err(|e| RvoipError::Adapter(format!("encode stream.opened: {e}")))?,
         )
         .with_sid(route.sid.clone())
-        .with_connid(
-            rvoip_uctp::adapter_helpers::require_bound_wire_connection(&route.binding)?.to_string(),
+        .with_connid(wire_connection_id.to_string());
+
+        let stream_dyn: Arc<dyn MediaStream> = Arc::clone(&stream) as Arc<dyn MediaStream>;
+        let registration = rvoip_uctp::substrate::PeerMediaRegistration::new(
+            route.binding.owner().clone(),
+            rvoip_uctp::substrate::PeerMediaRouteKey::new(
+                route.core_session_id.clone(),
+                subscriber.clone(),
+                stream_id.clone(),
+            ),
+            Arc::clone(&stream_dyn),
+            stream.inbound_tx(),
         );
+        let binding = match reservation.commit(registration) {
+            Ok(binding) => binding,
+            Err(error) => {
+                let _ = stream.close().await;
+                return Err(peer_media_router_error(error));
+            }
+        };
+        route
+            .streams
+            .insert(stream_id.clone(), Arc::clone(&stream_dyn));
+        if route.route_cancel.is_cancelled() {
+            route.streams.remove(&stream_id);
+            route.media_router.remove_local_id(binding.local_id());
+            let _ = stream.close().await;
+            return Err(RvoipError::InvalidState(
+                "UCTP route ended during allocation",
+            ));
+        }
+
         if route.out_tx.try_send(opened_env).is_err() {
             route.streams.remove(&stream_id);
-            route
-                .streams_router
-                .write()
-                .retain(|candidate| candidate.id() != stream_id);
+            route.media_router.remove_local_id(binding.local_id());
             let _ = stream.close().await;
             return Err(RvoipError::Adapter(
                 "peer signaling channel closed or backpressured".into(),
@@ -605,6 +619,15 @@ impl ConnectionAdapter for UctpWtAdapter {
         Err(RvoipError::NotImplemented(
             "rvoip-webtransport::verify_request_signature",
         ))
+    }
+}
+
+fn peer_media_router_error(error: rvoip_uctp::substrate::PeerMediaRouterError) -> RvoipError {
+    match error {
+        rvoip_uctp::substrate::PeerMediaRouterError::LocalIdExhausted => {
+            RvoipError::AdmissionRejected("UCTP peer media stream-local-id namespace exhausted")
+        }
+        other => RvoipError::Adapter(format!("UCTP peer media route rejected: {other}")),
     }
 }
 

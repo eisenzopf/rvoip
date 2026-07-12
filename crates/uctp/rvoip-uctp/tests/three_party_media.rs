@@ -1,20 +1,17 @@
-//! v0.x MP3c — per-subscriber `stream_local_id` rewriting (plan B1 / G4).
+//! Gate 4 — real wire-driven two-publisher QUIC fanout.
 //!
-//! Three QUIC peers in one Session: two publishers (A, B) and one
-//! subscriber (S). S subscribes to both A's and B's audio streams.
+//! Three authenticated QUIC peers resolve their peer-local Session IDs to one
+//! explicit canonical Session: two publishers (A, B) and one subscriber (S).
+//! S subscribes to both publishers through `stream.subscribe` envelopes.
 //! The server allocates a **distinct** `stream_local_id` per
 //! subscription so S can demultiplex A's frames from B's on the wire
-//! (CONVERSATION_PROTOCOL.md §10.1 multi-party note). Without this fix
-//! (pre-B1 behavior) both publishers' fanout datagrams would land on
-//! S's default audio stream with the same local_id=1, indistinguishable
-//! at S's jitter buffer.
+//! (CONVERSATION_PROTOCOL.md §10.1 multi-party note).
 //!
 //! What this asserts:
-//! 1. The server emits one `stream.opened` envelope per subscription,
-//!    each carrying a fresh `stream_local_id` (≥ 2, allocator skips
-//!    the default audio stream's slot of 1).
-//! 2. The two announced local_ids are distinct.
-//! 3. Frames injected at A arrive at S on A's allocated local_id;
+//! 1. Every offered publisher stream is negotiated by `connection.ready` and
+//!    announced with its real Stream ID and peer-local media handle.
+//! 2. Real subscriber wire requests create two fresh, distinct fanout handles.
+//! 3. Frames injected at A arrive at S on A's allocated handle;
 //!    frames injected at B arrive at S on B's allocated local_id; no
 //!    cross-talk.
 
@@ -26,7 +23,7 @@ use chrono::Utc;
 use rvoip_auth_core::bearer_stub;
 use rvoip_core::adapter::ConnectionAdapter;
 use rvoip_core::events::Event;
-use rvoip_core::ids::SessionId;
+use rvoip_core::ids::{SessionId, StreamId};
 use rvoip_core::stream::{MediaFrame, MediaStream, StreamKind};
 use rvoip_core::{Config, Orchestrator};
 use rvoip_quic::{
@@ -34,8 +31,10 @@ use rvoip_quic::{
     UctpQuicClient, UctpQuicConfig,
 };
 use rvoip_uctp::envelope::UctpEnvelope;
-use rvoip_uctp::payloads::{auth, session::SessionInvite};
-use rvoip_uctp::state::OrchestratorSubscriptionHandler;
+use rvoip_uctp::payloads::{auth, session::SessionInvite, stream};
+use rvoip_uctp::state::{
+    OrchestratorSubscriptionHandler, ResourceBindingError, SessionBindingResolver,
+};
 use rvoip_uctp::substrate::{dev_client_config_trusting, dispatch_by_alpn, self_signed_for_dev};
 use rvoip_uctp::types::MessageType;
 
@@ -130,6 +129,28 @@ fn connection_offer(sid: &str, connid: &str, participant: &str) -> UctpEnvelope 
     .with_connid(connid)
 }
 
+fn connection_ready(sid: &str, connid: &str) -> UctpEnvelope {
+    UctpEnvelope::new(MessageType::ConnectionReady, serde_json::json!({}))
+        .with_sid(sid)
+        .with_connid(connid)
+}
+
+fn stream_subscribe(sid: &str, connid: &str, strm_id: &str) -> UctpEnvelope {
+    UctpEnvelope::new(
+        MessageType::StreamSubscribe,
+        serde_json::to_value(stream::StreamSubscribe {
+            by_participant: "part_s".into(),
+            subscriptions: vec![stream::StreamSubscription {
+                strm_id: Some(strm_id.into()),
+                ..Default::default()
+            }],
+        })
+        .unwrap(),
+    )
+    .with_sid(sid)
+    .with_connid(connid)
+}
+
 async fn drive_auth_quic(
     client: &Arc<UctpQuicClient>,
     inbound: &mut tokio::sync::mpsc::Receiver<UctpEnvelope>,
@@ -172,12 +193,10 @@ async fn drive_auth_quic(
     assert_eq!(session.msg_type, MessageType::AuthSession);
 }
 
-/// Drain envelopes until the next `stream.opened` arrives; return its
-/// `stream_local_id`. Used to learn the MP3c-allocated subscriber-side
-/// local_id from the server's announcement.
-async fn next_stream_opened_local_id(
+/// Drain envelopes until the next `stream.opened` arrives.
+async fn next_stream_opened(
     inbound: &mut tokio::sync::mpsc::Receiver<UctpEnvelope>,
-) -> u16 {
+) -> stream::StreamInfo {
     for _ in 0..30 {
         let env = tokio::time::timeout(Duration::from_millis(500), inbound.recv())
             .await
@@ -188,9 +207,24 @@ async fn next_stream_opened_local_id(
         }
         let payload: rvoip_uctp::payloads::stream::StreamOpened =
             env.decode_payload().expect("decode stream.opened");
-        return payload.stream.stream_local_id;
+        return payload.stream;
     }
     panic!("no stream.opened envelope arrived");
+}
+
+async fn next_ack(inbound: &mut tokio::sync::mpsc::Receiver<UctpEnvelope>) {
+    for _ in 0..30 {
+        let envelope = tokio::time::timeout(Duration::from_millis(500), inbound.recv())
+            .await
+            .expect("ack timeout")
+            .expect("inbound closed");
+        match envelope.msg_type {
+            MessageType::Ack => return,
+            MessageType::Error => panic!("stream.subscribe rejected: {envelope:?}"),
+            _ => {}
+        }
+    }
+    panic!("no stream.subscribe ack arrived");
 }
 
 #[tokio::test]
@@ -207,9 +241,17 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
     let publishers = orchestrator.publisher_registry();
     let handler =
         OrchestratorSubscriptionHandler::new(Arc::clone(&orchestrator), Arc::clone(&publishers));
+    let canonical_session = SessionId::new();
+    let resolver: Arc<dyn SessionBindingResolver> = Arc::new({
+        let canonical_session = canonical_session.clone();
+        move |_: &rvoip_core::identity::AuthenticatedPrincipal,
+              _: &SessionId|
+              -> Result<SessionId, ResourceBindingError> { Ok(canonical_session.clone()) }
+    });
     let quic_adapter = UctpQuicAdapter::new(
         UctpQuicConfig::new(Arc::clone(&server_ep), quic_accept_rx, bearer_stub())
             .with_subscription_handler(handler)
+            .with_session_binding_resolver(resolver)
             .with_orchestrator(Arc::clone(&orchestrator)),
     )
     .await
@@ -257,6 +299,13 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
         .send(connection_offer("sess_3p", "conn_wire_a", "part_a"))
         .await
         .expect("offer a");
+    client_a
+        .send(connection_ready("sess_3p", "conn_wire_a"))
+        .await
+        .expect("ready a");
+    let opened_a = next_stream_opened(&mut in_a).await;
+    assert_eq!(opened_a.strm_id, "strm_conn_wire_a");
+
     client_b
         .send(invite("sess_3p_b", "part_b"))
         .await
@@ -272,11 +321,18 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
         .send(connection_offer("sess_3p_b", "conn_wire_b", "part_b"))
         .await
         .expect("offer b");
+    client_b
+        .send(connection_ready("sess_3p_b", "conn_wire_b"))
+        .await
+        .expect("ready b");
+    let opened_b = next_stream_opened(&mut in_b).await;
+    assert_eq!(opened_b.strm_id, "strm_conn_wire_b");
+
     client_s
         .send(invite("sess_3p_s", "part_s"))
         .await
         .expect("invite s");
-    let conn_s = loop {
+    let _conn_s = loop {
         if let Ok(Ok(Event::ConnectionInbound { connection_id, .. })) =
             tokio::time::timeout(Duration::from_secs(5), events.recv()).await
         {
@@ -287,9 +343,16 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
         .send(connection_offer("sess_3p_s", "conn_wire_s", "part_s"))
         .await
         .expect("offer s");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    client_s
+        .send(connection_ready("sess_3p_s", "conn_wire_s"))
+        .await
+        .expect("ready s");
+    let opened_s = next_stream_opened(&mut in_s).await;
+    assert_eq!(opened_s.strm_id, "strm_conn_wire_s");
 
-    // Look up each publisher's server-side audio strm_id.
+    // The offered wire Stream ID is the server-side Stream ID. This proves
+    // bind-before-announce populated each adapter route with the negotiated
+    // stream rather than an invite-time synthetic stream.
     let strm_a = quic_adapter
         .streams(conn_a.clone())
         .await
@@ -306,44 +369,47 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
         .find(|s| s.kind() == StreamKind::Audio)
         .expect("audio stream on b")
         .id();
+    assert_eq!(strm_a.as_str(), opened_a.strm_id);
+    assert_eq!(strm_b.as_str(), opened_b.strm_id);
 
-    // Register two subscriptions for s: from a's audio AND from b's
-    // audio. The orchestrator's subscription table keys on the
-    // **publisher's** sid (the sid the publisher's adapter passes to
-    // `fanout_frame` when it sees an inbound datagram). The fanout
-    // call goes through each publisher's own coordinator, so the
-    // subscription must be registered against that publisher's sid.
-    let sid_a = SessionId::from_string("sess_3p");
-    let sid_b = SessionId::from_string("sess_3p_b");
-    orchestrator.add_subscription(
-        sid_a.clone(),
-        conn_s.clone(),
-        conn_a.clone(),
-        strm_a.clone(),
-    );
-    orchestrator.add_subscription(
-        sid_b.clone(),
-        conn_s.clone(),
-        conn_b.clone(),
-        strm_b.clone(),
-    );
+    // Exercise the authenticated wire API. All three peer-local Session IDs
+    // resolve to `canonical_session`, so the shared publisher registry can
+    // resolve both explicit Stream IDs for the subscriber.
+    client_s
+        .send(stream_subscribe(
+            "sess_3p_s",
+            "conn_wire_s",
+            &opened_a.strm_id,
+        ))
+        .await
+        .expect("subscribe to a");
+    next_ack(&mut in_s).await;
+    client_s
+        .send(stream_subscribe(
+            "sess_3p_s",
+            "conn_wire_s",
+            &opened_b.strm_id,
+        ))
+        .await
+        .expect("subscribe to b");
+    next_ack(&mut in_s).await;
 
-    // --- Publisher-side client streams (both fixed local_id=1, the
-    // server-side default audio stream's slot) ---
+    // Publisher-side client streams use the handles negotiated for their own
+    // physical peers. No fixed/default local-ID assumption remains.
     let pub_a_stream = QuicDatagramMediaStream::start(
-        rvoip_core::ids::StreamId::new(),
+        StreamId::from_string(opened_a.strm_id.clone()),
         StreamKind::Audio,
         default_codec(),
         rvoip_core::connection::Direction::Outbound,
-        1,
+        opened_a.stream_local_id,
         client_a.connection.clone(),
     );
     let pub_b_stream = QuicDatagramMediaStream::start(
-        rvoip_core::ids::StreamId::new(),
+        StreamId::from_string(opened_b.strm_id.clone()),
         StreamKind::Audio,
         default_codec(),
         rvoip_core::connection::Direction::Outbound,
-        1,
+        opened_b.stream_local_id,
         client_b.connection.clone(),
     );
     quic_spawn_datagram_reader(
@@ -357,10 +423,10 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
         None,
     );
 
-    // --- Trigger lazy allocation by priming the fanout from each
-    // publisher. The first frame on each path may be lost (the
-    // subscriber's reader / per-publisher MediaStream isn't ready
-    // yet); subsequent frames carry the test payload. ---
+    // Trigger lazy allocation one publisher at a time so each subscriber-side
+    // `stream.opened` can be correlated to its source without inspecting any
+    // server-internal subscription state. Priming frames may be lost before
+    // the matching client-side reader exists; later test frames are not.
     let prime = Bytes::from(vec![0x00, 0x00, 0x00, 0x00, 0xFF]);
     pub_a_stream
         .frames_out()
@@ -374,6 +440,8 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
         })
         .await
         .expect("prime a");
+    let fanout_a = next_stream_opened(&mut in_s).await;
+
     pub_b_stream
         .frames_out()
         .send(MediaFrame {
@@ -386,53 +454,45 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
         })
         .await
         .expect("prime b");
+    let fanout_b = next_stream_opened(&mut in_s).await;
 
-    // Receive the two `stream.opened` envelopes from the subscriber's
-    // signaling channel — order isn't deterministic between A and B,
-    // so we collect both and dispatch by local_id.
-    let local_id_one = next_stream_opened_local_id(&mut in_s).await;
-    let local_id_two = next_stream_opened_local_id(&mut in_s).await;
     assert_ne!(
-        local_id_one, local_id_two,
-        "MP3c: each subscription must get a distinct stream_local_id"
+        fanout_a.stream_local_id, fanout_b.stream_local_id,
+        "each subscription must get a distinct stream_local_id"
     );
     assert!(
-        local_id_one >= 2 && local_id_two >= 2,
-        "MP3c: allocator must skip the default audio stream's slot (1)"
+        fanout_a.stream_local_id != opened_s.stream_local_id
+            && fanout_b.stream_local_id != opened_s.stream_local_id,
+        "fanout handles must not alias the subscriber's negotiated publisher handle"
     );
 
-    // Build subscriber-side MediaStreams for both local_ids. The
-    // subscriber doesn't yet know which publisher owns which id (it
-    // would need to correlate strm_id strings); for this test we just
-    // verify that frames arrive on distinct local_ids and we can
-    // identify each publisher's signature.
-    let sub_stream_one = QuicDatagramMediaStream::start(
-        rvoip_core::ids::StreamId::new(),
+    let sub_stream_a = QuicDatagramMediaStream::start(
+        StreamId::from_string(fanout_a.strm_id),
         StreamKind::Audio,
         default_codec(),
         rvoip_core::connection::Direction::Inbound,
-        local_id_one,
+        fanout_a.stream_local_id,
         client_s.connection.clone(),
     );
-    let sub_stream_two = QuicDatagramMediaStream::start(
-        rvoip_core::ids::StreamId::new(),
+    let sub_stream_b = QuicDatagramMediaStream::start(
+        StreamId::from_string(fanout_b.strm_id),
         StreamKind::Audio,
         default_codec(),
         rvoip_core::connection::Direction::Inbound,
-        local_id_two,
+        fanout_b.stream_local_id,
         client_s.connection.clone(),
     );
     quic_spawn_datagram_reader(
         client_s.connection.clone(),
         Arc::new(parking_lot::RwLock::new(vec![
-            Arc::clone(&sub_stream_one),
-            Arc::clone(&sub_stream_two),
+            Arc::clone(&sub_stream_a),
+            Arc::clone(&sub_stream_b),
         ])),
         None,
     );
 
-    let mut rx_one = rvoip_core::stream::MediaStream::frames_in(sub_stream_one.as_ref());
-    let mut rx_two = rvoip_core::stream::MediaStream::frames_in(sub_stream_two.as_ref());
+    let mut rx_a = rvoip_core::stream::MediaStream::frames_in(sub_stream_a.as_ref());
+    let mut rx_b = rvoip_core::stream::MediaStream::frames_in(sub_stream_b.as_ref());
 
     // Inject distinctive payloads: A → 0xAA marker, B → 0xBB marker.
     for i in 0u8..5 {
@@ -462,26 +522,26 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
             .expect("inject b");
     }
 
-    // Drain both subscriber streams. Each should receive only one
-    // publisher's marker — never both. Collect for a generous window
-    // and then check the cross-talk invariant.
-    let mut on_one: Vec<u8> = Vec::new();
-    let mut on_two: Vec<u8> = Vec::new();
+    // Drain both subscriber streams. Because priming was sequential, the
+    // subscriber handles are correlated: A must carry only 0xAA and B only
+    // 0xBB. Any opposite marker is cross-talk in the peer-local router.
+    let mut on_a: Vec<u8> = Vec::new();
+    let mut on_b: Vec<u8> = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    while std::time::Instant::now() < deadline && (on_one.len() + on_two.len()) < 10 {
+    while std::time::Instant::now() < deadline && (on_a.len() + on_b.len()) < 10 {
         tokio::select! {
             biased;
-            frame = rx_one.recv() => {
+            frame = rx_a.recv() => {
                 if let Some(f) = frame {
                     if f.payload.as_ref() != prime.as_ref() {
-                        on_one.push(f.payload[0]);
+                        on_a.push(f.payload[0]);
                     }
                 }
             }
-            frame = rx_two.recv() => {
+            frame = rx_b.recv() => {
                 if let Some(f) = frame {
                     if f.payload.as_ref() != prime.as_ref() {
-                        on_two.push(f.payload[0]);
+                        on_b.push(f.payload[0]);
                     }
                 }
             }
@@ -489,32 +549,18 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
         }
     }
 
-    // Cross-talk invariant: each subscriber-side stream only carries
-    // ONE publisher's marker. Mixing would indicate the MP3c
-    // local_id rewrite isn't working — both publishers' frames would
-    // land on the same MediaStream.
-    let one_markers: std::collections::HashSet<u8> = on_one.iter().copied().collect();
-    let two_markers: std::collections::HashSet<u8> = on_two.iter().copied().collect();
-    assert!(
-        one_markers.len() <= 1,
-        "MP3c: subscriber stream one received mixed publishers: {:?}",
-        on_one
+    let a_markers: std::collections::HashSet<u8> = on_a.iter().copied().collect();
+    let b_markers: std::collections::HashSet<u8> = on_b.iter().copied().collect();
+    assert!(!on_a.is_empty(), "publisher A produced no subscriber media");
+    assert!(!on_b.is_empty(), "publisher B produced no subscriber media");
+    assert_eq!(
+        a_markers,
+        std::collections::HashSet::from([0xAA]),
+        "A route cross-talk: {on_a:?}"
     );
-    assert!(
-        two_markers.len() <= 1,
-        "MP3c: subscriber stream two received mixed publishers: {:?}",
-        on_two
-    );
-    // And the two streams must carry different markers (one A, one B).
-    if !on_one.is_empty() && !on_two.is_empty() {
-        assert_ne!(
-            on_one[0], on_two[0],
-            "MP3c: both subscriber streams carry the same publisher — local_id rewrite collapsed"
-        );
-    }
-    // Sanity: at least one publisher made it through on each stream.
-    assert!(
-        !on_one.is_empty() || !on_two.is_empty(),
-        "no fanout frames reached the subscriber at all"
+    assert_eq!(
+        b_markers,
+        std::collections::HashSet::from([0xBB]),
+        "B route cross-talk: {on_b:?}"
     );
 }

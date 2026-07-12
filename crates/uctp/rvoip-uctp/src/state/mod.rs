@@ -23,8 +23,9 @@ pub use orchestrator_handler::{OrchestratorSubscriptionHandler, DEFAULT_ACCEPTED
 pub use session::{SessionInput, SessionMachine, UctpSessionState};
 pub use signature_policy::{Sig9421Config, Sig9421Policy};
 pub use subscription::{
-    rejecting_handler, NamespacedSubscriptionHandler, PublisherInfo, RejectingHandler,
-    SubscriptionHandler, SubscriptionOutcome,
+    rejecting_handler, BoundSubscriptionHandler, NamespacedSubscriptionHandler,
+    PeerResourceBindings, PeerScopedSessionResolver, PublisherInfo, RejectingHandler,
+    ResourceBindingError, SessionBindingResolver, SubscriptionHandler, SubscriptionOutcome,
 };
 pub use supervisor::{
     spawn_auth_lifecycle_guard, supervise_peer_tasks, supervise_peer_tasks_with_media_cancel,

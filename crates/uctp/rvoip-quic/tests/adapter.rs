@@ -187,38 +187,27 @@ async fn adapter_emits_inbound_connection_on_session_invite() {
     let core_connection_id = match event {
         AdapterEvent::InboundConnection { connection } => {
             assert_eq!(connection.transport, Transport::Quic);
-            assert_eq!(connection.session_id.as_str(), "sess_adapter_test");
+            assert!(
+                connection
+                    .session_id
+                    .as_str()
+                    .ends_with(":sess_adapter_test"),
+                "the safe default must retain the wire ID inside a peer-scoped namespace"
+            );
+            assert_ne!(connection.session_id.as_str(), "sess_adapter_test");
             assert_eq!(
                 connection.participant_id.as_str(),
                 authenticated_participant.as_str()
             );
 
-            // SP-D: default audio stream is now populated at InboundInvite
-            // time so `Orchestrator::bridge_connections` has something to
-            // bridge.
-            assert_eq!(
-                connection.streams.len(),
-                1,
-                "expected one default audio stream populated at InboundInvite"
-            );
-            assert_eq!(
-                rvoip_core::stream::MediaStream::kind(connection.streams[0].stream().as_ref()),
-                rvoip_core::stream::StreamKind::Audio
-            );
-            let codec =
-                rvoip_core::stream::MediaStream::codec(connection.streams[0].stream().as_ref());
-            assert_eq!(codec.name, "opus");
-
-            // The adapter's `streams(id)` returns the same stream by id.
+            // Streams are created from negotiated `connection.offer` data,
+            // never synthetically at invite time.
+            assert!(connection.streams.is_empty());
             let via_adapter = adapter
                 .streams(connection.id.clone())
                 .await
                 .expect("streams ok");
-            assert_eq!(via_adapter.len(), 1);
-            assert_eq!(
-                rvoip_core::stream::MediaStream::kind(via_adapter[0].as_ref()),
-                rvoip_core::stream::StreamKind::Audio
-            );
+            assert!(via_adapter.is_empty());
             connection.id
         }
         other => panic!("expected InboundConnection, got {:?}", other),

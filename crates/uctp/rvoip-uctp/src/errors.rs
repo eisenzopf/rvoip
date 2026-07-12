@@ -35,6 +35,9 @@ pub enum UctpError {
     #[error("stream-handle exhausted (u16 wrap)")]
     StreamHandleExhausted,
 
+    #[error("invalid stream binding: {0}")]
+    InvalidStreamBinding(&'static str),
+
     #[error("operation timed out")]
     Timeout,
 

@@ -230,9 +230,9 @@ rvoip-vcon          = { path = "crates/extensions/rvoip-vcon", version = "0.1.3"
 rvoip-vcon-postgres = { path = "crates/extensions/rvoip-vcon-postgres", version = "0.1.3" }
 rvoip-harness       = { path = "crates/extensions/rvoip-harness", version = "0.1.3" }
 rvoip               = { path = "crates/rvoip", version = "0.2.5" }
-rvoip-uctp          = { path = "crates/uctp/rvoip-uctp", version = "0.1.3" }
-rvoip-quic          = { path = "crates/uctp/rvoip-quic", version = "0.1.3" }
-rvoip-webtransport  = { path = "crates/uctp/rvoip-webtransport", version = "0.1.3" }
+rvoip-uctp          = { path = "crates/uctp/rvoip-uctp", version = "0.2.0" }
+rvoip-quic          = { path = "crates/uctp/rvoip-quic", version = "0.2.0" }
+rvoip-webtransport  = { path = "crates/uctp/rvoip-webtransport", version = "0.2.0" }
 rvoip-websocket     = { path = "crates/uctp/rvoip-websocket", version = "0.1.3" }
 rvoip-moq           = { path = "crates/moq/rvoip-moq", version = "0.1.0" }
 rvoip-webrtc        = { path = "crates/webrtc/rvoip-webrtc", version = "0.1.3" }

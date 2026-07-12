@@ -143,6 +143,47 @@ fn invite(sid: &str, participant: &str) -> UctpEnvelope {
     }
 }
 
+fn connection_offer(sid: &str, connid: &str, participant: &str, substrate: &str) -> UctpEnvelope {
+    UctpEnvelope::new(
+        MessageType::ConnectionOffer,
+        serde_json::json!({
+            "by_participant": participant,
+            "substrate": substrate,
+            "capabilities": {},
+            "streams_offered": [{
+                "id": format!("strm_{connid}"),
+                "kind": "audio",
+                "direction": "sendrecv",
+                "codec_preferences": ["opus"]
+            }],
+            "substrate_setup": null
+        }),
+    )
+    .with_sid(sid)
+    .with_connid(connid)
+}
+
+fn connection_ready(sid: &str, connid: &str) -> UctpEnvelope {
+    UctpEnvelope::new(MessageType::ConnectionReady, serde_json::json!({}))
+        .with_sid(sid)
+        .with_connid(connid)
+}
+
+async fn wait_for_stream_opened(inbound: &mut tokio::sync::mpsc::Receiver<UctpEnvelope>) -> u16 {
+    for _ in 0..30 {
+        let env = tokio::time::timeout(Duration::from_millis(500), inbound.recv())
+            .await
+            .expect("stream.opened timeout")
+            .expect("signaling channel closed");
+        if env.msg_type == MessageType::StreamOpened {
+            let payload: rvoip_uctp::payloads::stream::StreamOpened =
+                env.decode_payload().expect("decode stream.opened");
+            return payload.stream.stream_local_id;
+        }
+    }
+    panic!("stream.opened was not received");
+}
+
 #[tokio::test]
 async fn quic_to_wt_bridge_flows_frames_end_to_end() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -214,6 +255,20 @@ async fn quic_to_wt_bridge_flows_frames_end_to_end() {
         .send(invite("sess_quic", "part_quic_alice"))
         .await
         .expect("quic invite");
+    quic_client
+        .send(connection_offer(
+            "sess_quic",
+            "conn_quic",
+            "part_quic_alice",
+            "quic",
+        ))
+        .await
+        .expect("quic offer");
+    quic_client
+        .send(connection_ready("sess_quic", "conn_quic"))
+        .await
+        .expect("quic ready");
+    let quic_stream_local_id = wait_for_stream_opened(&mut quic_in).await;
 
     // --- WT client dials in + sends session.invite ---
     let wt_client_ep = client_endpoint();
@@ -250,6 +305,20 @@ async fn quic_to_wt_bridge_flows_frames_end_to_end() {
         .send(invite("sess_wt", "part_wt_bob"))
         .await
         .expect("wt invite");
+    wt_client
+        .send(connection_offer(
+            "sess_wt",
+            "conn_wt",
+            "part_wt_bob",
+            "webtransport",
+        ))
+        .await
+        .expect("wt offer");
+    wt_client
+        .send(connection_ready("sess_wt", "conn_wt"))
+        .await
+        .expect("wt ready");
+    let wt_stream_local_id = wait_for_stream_opened(&mut wt_in).await;
 
     // --- Capture both InboundConnection events ---
     let mut conn_ids: Vec<ConnectionId> = Vec::new();
@@ -304,7 +373,7 @@ async fn quic_to_wt_bridge_flows_frames_end_to_end() {
         StreamKind::Audio,
         default_codec(),
         rvoip_core::connection::Direction::Outbound,
-        1,
+        quic_stream_local_id,
         quic_client.connection.clone(),
     );
     let wt_client_stream = WebTransportDatagramMediaStream::start(
@@ -312,7 +381,7 @@ async fn quic_to_wt_bridge_flows_frames_end_to_end() {
         StreamKind::Audio,
         default_codec(),
         rvoip_core::connection::Direction::Inbound,
-        1,
+        wt_stream_local_id,
         wt_client.session.clone(),
     );
 
@@ -434,6 +503,34 @@ async fn wt_to_wt_bridge_flows_frames_end_to_end() {
 
     client_a.send(invite("sess_a", "part_a")).await.unwrap();
     client_b.send(invite("sess_b", "part_b")).await.unwrap();
+    client_a
+        .send(connection_offer(
+            "sess_a",
+            "conn_a",
+            "part_a",
+            "webtransport",
+        ))
+        .await
+        .unwrap();
+    client_b
+        .send(connection_offer(
+            "sess_b",
+            "conn_b",
+            "part_b",
+            "webtransport",
+        ))
+        .await
+        .unwrap();
+    client_a
+        .send(connection_ready("sess_a", "conn_a"))
+        .await
+        .unwrap();
+    client_b
+        .send(connection_ready("sess_b", "conn_b"))
+        .await
+        .unwrap();
+    let local_id_a = wait_for_stream_opened(&mut in_a).await;
+    let local_id_b = wait_for_stream_opened(&mut in_b).await;
 
     let mut conn_ids: Vec<ConnectionId> = Vec::new();
     for _ in 0..50 {
@@ -460,7 +557,7 @@ async fn wt_to_wt_bridge_flows_frames_end_to_end() {
         StreamKind::Audio,
         default_codec(),
         rvoip_core::connection::Direction::Outbound,
-        1,
+        local_id_a,
         client_a.session.clone(),
     );
     let stream_b = WebTransportDatagramMediaStream::start(
@@ -468,7 +565,7 @@ async fn wt_to_wt_bridge_flows_frames_end_to_end() {
         StreamKind::Audio,
         default_codec(),
         rvoip_core::connection::Direction::Inbound,
-        1,
+        local_id_b,
         client_b.session.clone(),
     );
     let router_a = Arc::new(parking_lot::RwLock::new(vec![Arc::clone(&stream_a)]));

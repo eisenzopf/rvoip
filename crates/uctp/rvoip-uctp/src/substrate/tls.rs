@@ -9,8 +9,34 @@
 
 use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use std::sync::Arc;
 
 use crate::errors::SubstrateError;
+
+/// Enable NSS-format TLS secret logging for an explicitly configured capture
+/// run. Returns `false` and leaves the configuration unchanged unless
+/// `SSLKEYLOGFILE` is present.
+///
+/// This is never called implicitly: production deployments must not emit QUIC
+/// traffic secrets merely because a process inherited an unexpected
+/// environment variable. Conformance harnesses opt in before constructing the
+/// quinn endpoint, then provide the resulting file to Wireshark/tshark.
+pub fn enable_server_key_log_from_env(config: &mut rustls::ServerConfig) -> bool {
+    if std::env::var_os("SSLKEYLOGFILE").is_none() {
+        return false;
+    }
+    config.key_log = Arc::new(rustls::KeyLogFile::new());
+    true
+}
+
+/// Client-side counterpart of [`enable_server_key_log_from_env`].
+pub fn enable_client_key_log_from_env(config: &mut rustls::ClientConfig) -> bool {
+    if std::env::var_os("SSLKEYLOGFILE").is_none() {
+        return false;
+    }
+    config.key_log = Arc::new(rustls::KeyLogFile::new());
+    true
+}
 
 /// Generate a fresh self-signed certificate covering the listed
 /// SAN domains. Used by demo orchestrators to bring up a QUIC endpoint

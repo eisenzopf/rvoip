@@ -197,6 +197,15 @@ async fn auth_hello_produces_challenge() {
     let reply = out_rx.recv().await.expect("expected challenge");
     assert_eq!(reply.msg_type, MessageType::AuthChallenge);
     assert!(reply.in_reply_to.is_some());
+    let payload: auth::AuthChallenge = reply.decode_payload().unwrap();
+    assert_eq!(
+        payload.server_capabilities["media_profile"],
+        rvoip_uctp::UCTP_RTP_DATAGRAM_PROFILE
+    );
+    assert_eq!(
+        payload.server_capabilities["envelope_versions"],
+        serde_json::json!([1])
+    );
 }
 
 #[tokio::test]
@@ -489,6 +498,48 @@ async fn inbound_invite_emits_event() {
         }
         other => panic!("expected InboundInvite, got {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn resolver_rejection_precedes_session_commit_and_inbound_event() {
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let coord = UctpCoordinator::start("quic", in_rx, out_tx, events_tx, bearer_stub());
+    let resolver: Arc<dyn rvoip_uctp::state::SessionBindingResolver> = Arc::new(
+        |_: &AuthenticatedPrincipal, _: &rvoip_uctp::ids::SessionId| {
+            Err(rvoip_uctp::state::ResourceBindingError::forbidden(
+                "attachment-token-denied",
+            ))
+        },
+    );
+    let bindings = rvoip_uctp::state::PeerResourceBindings::new(resolver);
+    coord
+        .set_resource_bindings(Arc::clone(&bindings))
+        .expect("fresh coordinator accepts one resource authority");
+
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
+    assert!(matches!(
+        events_rx.recv().await,
+        Some(UctpSessionEvent::Authenticated { .. })
+    ));
+    let invite = session_invite_env("sess_denied", "conv_denied");
+    let invite_id = invite.id.clone();
+    in_tx.send(invite).await.unwrap();
+
+    let error = out_rx.recv().await.expect("resolver rejection error");
+    assert_eq!(error.msg_type, MessageType::Error);
+    assert_eq!(error.in_reply_to.as_deref(), Some(invite_id.as_str()));
+    assert_eq!(error.sid.as_deref(), Some("sess_denied"));
+    let payload: rvoip_uctp::payloads::control::Error = error.decode_payload().unwrap();
+    assert_eq!(payload.code, 403);
+    assert_eq!(payload.category, "auth");
+    assert_eq!(payload.reason, "attachment-token-denied");
+    assert_eq!(coord.resource_snapshot().sessions, 0);
+    assert!(events_rx.try_recv().is_err(), "InboundInvite must not emit");
+    assert!(bindings
+        .core_session(&rvoip_uctp::ids::SessionId::from_string("sess_denied"))
+        .is_none());
 }
 
 #[tokio::test]
@@ -1184,6 +1235,269 @@ async fn stream_offer_cap_is_cumulative_across_reoffers() {
     assert_eq!(payload.reason, "too-many-streams");
     assert_eq!(coord.resource_snapshot().connections, 1);
     assert!(events_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn fallback_stream_local_ids_are_peer_global_and_not_reused_after_teardown() {
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, _events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let _coord = UctpCoordinator::start_with_descriptor(
+        "quic",
+        in_rx,
+        out_tx,
+        events_tx,
+        bearer_stub(),
+        answerer_with(&["opus"]),
+    );
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
+
+    let mut announced_ids = Vec::new();
+    for suffix in ["a", "b"] {
+        let sid = format!("sess_peer_{suffix}");
+        let connid = format!("conn_peer_{suffix}");
+        establish_session(&in_tx, &sid).await;
+        in_tx
+            .send(connection_offer_env(&sid, &connid, &["opus"]))
+            .await
+            .unwrap();
+        in_tx
+            .send(connection_ready_env(&sid, &connid))
+            .await
+            .unwrap();
+        let opened = out_rx.recv().await.expect("stream.opened");
+        assert_eq!(opened.msg_type, MessageType::StreamOpened);
+        let payload: rvoip_uctp::payloads::stream::StreamOpened = opened.decode_payload().unwrap();
+        announced_ids.push(payload.stream.stream_local_id);
+        if suffix == "a" {
+            in_tx
+                .send(
+                    UctpEnvelope::new(MessageType::ConnectionEnd, serde_json::json!({}))
+                        .with_connid(connid),
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    assert_eq!(announced_ids, vec![1, 2]);
+}
+
+#[tokio::test]
+async fn external_media_binding_completes_before_stream_announcement() {
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let coord = UctpCoordinator::start_with_descriptor(
+        "quic",
+        in_rx,
+        out_tx,
+        events_tx,
+        bearer_stub(),
+        answerer_with(&["opus"]),
+    );
+    coord.enable_external_media_binding();
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
+    assert!(matches!(
+        events_rx.recv().await,
+        Some(UctpSessionEvent::Authenticated { .. })
+    ));
+    establish_session(&in_tx, "sess_external_bind").await;
+    assert!(matches!(
+        events_rx.recv().await,
+        Some(UctpSessionEvent::InboundInvite { .. })
+    ));
+    in_tx
+        .send(connection_offer_env(
+            "sess_external_bind",
+            "conn_external_bind",
+            &["opus"],
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        events_rx.recv().await,
+        Some(UctpSessionEvent::ConnectionOpened { .. })
+    ));
+    in_tx
+        .send(connection_ready_env(
+            "sess_external_bind",
+            "conn_external_bind",
+        ))
+        .await
+        .unwrap();
+
+    let bind = events_rx.recv().await.expect("binding request");
+    match bind {
+        UctpSessionEvent::BindMediaStreams {
+            sid,
+            connid,
+            streams,
+            reply,
+        } => {
+            assert_eq!(sid.as_str(), "sess_external_bind");
+            assert_eq!(connid.as_str(), "conn_external_bind");
+            assert_eq!(streams.len(), 1);
+            assert_eq!(streams[0].strm_id, "strm_1");
+            reply.send(Ok(vec![77])).unwrap();
+        }
+        other => panic!("expected BindMediaStreams, got {other:?}"),
+    }
+
+    let opened = out_rx.recv().await.expect("stream.opened after binding");
+    let payload: rvoip_uctp::payloads::stream::StreamOpened = opened.decode_payload().unwrap();
+    assert_eq!(payload.stream.stream_local_id, 77);
+    assert!(matches!(
+        events_rx.recv().await,
+        Some(UctpSessionEvent::ConnectionConnected { .. })
+    ));
+}
+
+#[tokio::test]
+async fn external_binding_failure_emits_no_stream_and_ready_can_retry() {
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let coord = UctpCoordinator::start_with_descriptor(
+        "quic",
+        in_rx,
+        out_tx,
+        events_tx,
+        bearer_stub(),
+        answerer_with(&["opus"]),
+    );
+    coord.enable_external_media_binding();
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
+    let _ = events_rx.recv().await;
+    establish_session(&in_tx, "sess_bind_retry").await;
+    let _ = events_rx.recv().await;
+    in_tx
+        .send(connection_offer_env(
+            "sess_bind_retry",
+            "conn_bind_retry",
+            &["opus"],
+        ))
+        .await
+        .unwrap();
+    let _ = events_rx.recv().await;
+
+    in_tx
+        .send(connection_ready_env("sess_bind_retry", "conn_bind_retry"))
+        .await
+        .unwrap();
+    match events_rx.recv().await.expect("first binding request") {
+        UctpSessionEvent::BindMediaStreams { reply, .. } => reply
+            .send(Err(rvoip_uctp::UctpError::InvalidStreamBinding(
+                "adapter-binding-failed",
+            )))
+            .unwrap(),
+        other => panic!("expected BindMediaStreams, got {other:?}"),
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(75), out_rx.recv())
+            .await
+            .is_err(),
+        "failed binding must not announce stream.opened"
+    );
+    assert!(events_rx.try_recv().is_err());
+
+    in_tx
+        .send(connection_ready_env("sess_bind_retry", "conn_bind_retry"))
+        .await
+        .unwrap();
+    match events_rx.recv().await.expect("retry binding request") {
+        UctpSessionEvent::BindMediaStreams { reply, .. } => {
+            reply.send(Ok(vec![81])).unwrap();
+        }
+        other => panic!("expected BindMediaStreams retry, got {other:?}"),
+    }
+    let opened = out_rx.recv().await.expect("stream.opened after retry");
+    let payload: rvoip_uctp::payloads::stream::StreamOpened = opened.decode_payload().unwrap();
+    assert_eq!(payload.stream.stream_local_id, 81);
+    assert!(matches!(
+        events_rx.recv().await,
+        Some(UctpSessionEvent::ConnectionConnected { .. })
+    ));
+}
+
+#[tokio::test]
+async fn duplicate_external_ids_are_rejected_atomically_and_can_be_corrected() {
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let coord = UctpCoordinator::start_with_descriptor(
+        "quic",
+        in_rx,
+        out_tx,
+        events_tx,
+        bearer_stub(),
+        answerer_with(&["opus"]),
+    );
+    coord.enable_external_media_binding();
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
+    let _ = events_rx.recv().await;
+    establish_session(&in_tx, "sess_duplicate_bind").await;
+    let _ = events_rx.recv().await;
+
+    let mut offer = connection_offer_env("sess_duplicate_bind", "conn_duplicate_bind", &["opus"]);
+    let mut offer_payload: connection::ConnectionOffer = offer.decode_payload().unwrap();
+    let mut second = offer_payload.streams_offered[0].clone();
+    second.id = "strm_2".into();
+    offer_payload.streams_offered.push(second);
+    offer.payload = serde_json::to_value(offer_payload).unwrap();
+    in_tx.send(offer).await.unwrap();
+    let _ = events_rx.recv().await;
+
+    in_tx
+        .send(connection_ready_env(
+            "sess_duplicate_bind",
+            "conn_duplicate_bind",
+        ))
+        .await
+        .unwrap();
+    match events_rx.recv().await.expect("invalid binding request") {
+        UctpSessionEvent::BindMediaStreams { streams, reply, .. } => {
+            assert_eq!(streams.len(), 2);
+            reply.send(Ok(vec![91, 91])).unwrap();
+        }
+        other => panic!("expected BindMediaStreams, got {other:?}"),
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(75), out_rx.recv())
+            .await
+            .is_err(),
+        "duplicate IDs must not partially announce streams"
+    );
+    assert!(events_rx.try_recv().is_err());
+
+    // ID 91 from the rejected batch was never reserved. Returning it in a
+    // corrected all-unique batch proves validation is atomic.
+    in_tx
+        .send(connection_ready_env(
+            "sess_duplicate_bind",
+            "conn_duplicate_bind",
+        ))
+        .await
+        .unwrap();
+    match events_rx.recv().await.expect("corrected binding request") {
+        UctpSessionEvent::BindMediaStreams { streams, reply, .. } => {
+            assert_eq!(streams.len(), 2);
+            reply.send(Ok(vec![91, 92])).unwrap();
+        }
+        other => panic!("expected corrected BindMediaStreams, got {other:?}"),
+    }
+    let mut announced = Vec::new();
+    for _ in 0..2 {
+        let opened = out_rx.recv().await.expect("corrected stream.opened");
+        let payload: rvoip_uctp::payloads::stream::StreamOpened = opened.decode_payload().unwrap();
+        announced.push(payload.stream.stream_local_id);
+    }
+    assert_eq!(announced, vec![91, 92]);
+    assert!(matches!(
+        events_rx.recv().await,
+        Some(UctpSessionEvent::ConnectionConnected { .. })
+    ));
 }
 
 #[tokio::test]
