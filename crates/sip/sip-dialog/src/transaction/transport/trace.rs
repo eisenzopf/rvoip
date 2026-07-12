@@ -506,6 +506,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_lower_level_trace_redacts_orphan_fold_before_any_header() {
+        let coordinator = Arc::new(
+            GlobalEventCoordinator::new(EventCoordinatorConfig::monolithic())
+                .await
+                .unwrap(),
+        );
+        let mut receiver = coordinator.subscribe("transport_to_session").await.unwrap();
+        let (mut manager, _transport_events) = TransportManager::with_defaults().await.unwrap();
+        manager.enable_sip_trace(
+            "lower-orphan-trace".into(),
+            SipTraceConfig::enabled(),
+            coordinator,
+        );
+        let runtime = manager
+            .sip_trace_runtime()
+            .expect("public API installs trace runtime");
+        let response = Response::new(StatusCode::ServiceUnavailable)
+            .with_reason("private-orphan-response-reason")
+            .with_header(TypedHeader::Other(
+                HeaderName::Other("\t".into()),
+                HeaderValue::Raw(b"orphan-fold-event-secret".to_vec()),
+            ))
+            .with_header(TypedHeader::CallId(CallId::new("orphan-response-call")));
+        let message = Message::Response(response);
+        let wire_before_trace = message.to_bytes();
+
+        runtime.publish(
+            SipTraceDirection::Inbound,
+            TransportType::Tcp,
+            "127.0.0.1:5060".parse::<SocketAddr>().unwrap(),
+            "127.0.0.1:5080".parse::<SocketAddr>().unwrap(),
+            &message,
+        );
+        assert_eq!(message.to_bytes(), wire_before_trace);
+
+        let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let event = event
+            .as_any()
+            .downcast_ref::<RvoipCrossCrateEvent>()
+            .unwrap();
+        let RvoipCrossCrateEvent::TransportToSession(trace) = event else {
+            panic!("expected transport_to_session trace event");
+        };
+
+        assert_eq!(trace.start_line, "SIP/2.0 503 <redacted-reason>");
+        assert_eq!(trace.sip_call_id.as_deref(), Some("orphan-response-call"));
+        assert_eq!(trace.original_len, wire_before_trace.len());
+        assert!(!trace.truncated);
+        assert!(trace.redacted);
+        assert!(trace
+            .raw_message
+            .contains("\n\t<redacted>\nCall-ID: orphan-response-call\n"));
+        let serialized = serde_json::to_string(trace).unwrap();
+        let debug = format!("{trace:?}");
+        for surface in [&trace.raw_message, &trace.start_line, &serialized, &debug] {
+            assert!(!surface.contains("private-orphan-response-reason"));
+            assert!(!surface.contains("orphan-fold-event-secret"));
+        }
+    }
+
+    #[tokio::test]
     async fn lower_safe_runtime_retains_response_status_but_not_reason_in_any_event_surface() {
         let response = Response::new(StatusCode::BusyHere)
             .with_reason("private-upstream-response-reason")

@@ -530,7 +530,9 @@ pub fn redact_sip_message(raw: &str) -> String {
     let normalized = normalize_line_endings(raw);
     let mut in_headers = true;
     let mut first_line = true;
-    let mut redact_continuation = false;
+    // A continuation is safe only after an explicitly allowlisted owning
+    // header. Fail closed for an orphan fold before the first header.
+    let mut redact_continuation = true;
     let mut body_redacted = false;
     let mut redacted = Vec::new();
 
@@ -2299,6 +2301,23 @@ mod tests {
             "SIP/2.0 486 {SIP_TRACE_REDACTED_RESPONSE_REASON}\n"
         )));
         assert!(!rendered.contains("private-response-reason"));
+    }
+
+    #[test]
+    fn safe_static_trace_redacts_orphan_fold_before_any_header() {
+        let raw = concat!(
+            "SIP/2.0 503 private-response-reason\r\n",
+            "\torphan-fold-secret\r\n",
+            "Call-ID: response-call\r\n",
+            "\r\n",
+        );
+
+        let (rendered, truncated) = format_sip_trace_message(raw, &SipTraceConfig::enabled());
+
+        assert!(!truncated);
+        assert!(rendered.contains("\n\t<redacted>\nCall-ID: response-call\n"));
+        assert!(!rendered.contains("private-response-reason"));
+        assert!(!rendered.contains("orphan-fold-secret"));
     }
 
     #[test]
