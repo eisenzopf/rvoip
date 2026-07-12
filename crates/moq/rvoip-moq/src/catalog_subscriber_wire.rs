@@ -5,12 +5,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_transport::coding::{TrackName, TrackNamespace};
+use moq_transport::coding::{Location, TrackName, TrackNamespace};
 use moq_transport::data::ObjectStatus;
-use moq_transport::serve::{SubgroupsReader, Track, TrackReaderMode};
+use moq_transport::serve::{SubgroupsReader, Track, TrackReader, TrackReaderMode};
 use moq_transport::session::{
-    Fetch, PublishedNamespace, Session, SessionError, SetupAuthorization, Subscribe, Subscriber,
-    Transport,
+    EndOfGroupState, Fetch, PublishedNamespace, Session, SessionError, SetupAuthorization,
+    Subscribe, Subscriber, Transport,
 };
 use rvoip_core_traits::broadcast::BroadcastSubstrate;
 use tokio::task::JoinHandle;
@@ -20,8 +20,9 @@ use crate::wire::{
     WireRelayClient,
 };
 use crate::{
-    MoqCatalogSubscriberConfig, MoqCatalogValidationError, MoqError, MoqRelayPeerIdentity,
-    MoqRelaySubstratePolicy, MoqSubscriberCredential, CATALOG_TRACK, MOQT_NEGOTIATED_PROTOCOL,
+    MoqCatalogSubscriberConfig, MoqCatalogValidationError, MoqEndOfGroupEvidence, MoqError,
+    MoqRelayPeerIdentity, MoqRelaySubstratePolicy, MoqSubscriberCredential, CATALOG_TRACK,
+    MOQT_NEGOTIATED_PROTOCOL,
 };
 
 const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -102,11 +103,11 @@ impl WireCatalogSubscriberClient {
             .ok()
             .map_err(|_| WireCatalogFailure::SubscribeFailed)?;
 
-        let (subscribe, fetch, groups) = {
+        let (subscribe, fetch, track_reader, fetch_cutoff) = {
             let setup = async {
                 let (track_writer, track_reader) =
                     Track::new(expected_namespace, TrackName::from(CATALOG_TRACK)).produce();
-                let (subscribe, mut fetch) = subscriber
+                let (subscribe, fetch) = subscriber
                     .subscribe_joining(track_writer)
                     .await
                     .map_err(|_| WireCatalogFailure::SubscribeFailed)?;
@@ -114,30 +115,12 @@ impl WireCatalogSubscriberClient {
                     .ok()
                     .await
                     .map_err(|_| WireCatalogFailure::SubscribeFailed)?;
-                fetch
+                let fetch_ok = fetch
                     .ok()
                     .await
                     .map_err(|_| WireCatalogFailure::SubscribeFailed)?;
 
-                // The merged Track receives a clone of every FETCH Object.
-                // Drain the separately exposed observation queue so its
-                // bounded capacity cannot stall the session, then retain the
-                // completed handle until connection teardown.
-                while fetch.next_object().await.is_some() {}
-                fetch
-                    .completed()
-                    .await
-                    .map_err(|_| WireCatalogFailure::SubscribeFailed)?;
-
-                let groups = match track_reader
-                    .mode()
-                    .await
-                    .map_err(|_| WireCatalogFailure::InvalidTrack)?
-                {
-                    TrackReaderMode::Subgroups(groups) => groups,
-                    _ => return Err(WireCatalogFailure::InvalidTrack),
-                };
-                Ok::<_, WireCatalogFailure>((subscribe, fetch, groups))
+                Ok::<_, WireCatalogFailure>((subscribe, fetch, track_reader, fetch_ok.end_location))
             };
             tokio::pin!(setup);
             tokio::select! {
@@ -156,7 +139,10 @@ impl WireCatalogSubscriberClient {
             negotiated_protocol,
             peer_identity,
             subscriber,
-            groups,
+            track_reader: Some(track_reader),
+            groups: None,
+            fetch_cutoff,
+            fetch_drained: false,
             fetch: Some(fetch),
             subscribe: Some(subscribe),
             published_namespace: Some(published_namespace),
@@ -173,7 +159,10 @@ pub(crate) struct WireCatalogSubscription {
     pub(crate) negotiated_protocol: String,
     pub(crate) peer_identity: MoqRelayPeerIdentity,
     subscriber: Subscriber,
-    groups: SubgroupsReader,
+    track_reader: Option<TrackReader>,
+    groups: Option<SubgroupsReader>,
+    fetch_cutoff: Location,
+    fetch_drained: bool,
     fetch: Option<Fetch>,
     subscribe: Option<Subscribe>,
     published_namespace: Option<PublishedNamespace>,
@@ -187,65 +176,143 @@ impl WireCatalogSubscription {
         &mut self,
         max_catalog_bytes: usize,
     ) -> Result<Option<WireCatalogObject>, WireCatalogFailure> {
-        let subgroup = tokio::select! {
-            result = self.groups.next() => {
-                result.map_err(|_| WireCatalogFailure::StreamEnded)?
+        if !self.fetch_drained {
+            let fetched = tokio::select! {
+                result = self.fetch.as_mut().expect("catalog FETCH handle missing").next_object() => result,
+                result = session_task(self.session_task.as_mut()) => {
+                    self.session_task.take();
+                    return Err(map_session_result(result));
+                }
+                unexpected = self.subscriber.published_namespace() => {
+                    drop(unexpected);
+                    return Err(WireCatalogFailure::InvalidTrack);
+                }
+            };
+            if let Some(fetched) = fetched {
+                if fetched.payload.len() > max_catalog_bytes {
+                    return Err(WireCatalogFailure::PayloadTooLarge);
+                }
+                return Ok(Some(WireCatalogObject {
+                    group_id: fetched.location.group_id,
+                    subgroup_id: fetched.subgroup_id,
+                    object_id: fetched.location.object_id,
+                    first_object: fetched.location.object_id == 0,
+                    end_of_group: map_group_end(fetched.group_end),
+                    extension_header_count: fetched.properties.0.len(),
+                    declared_payload_len: fetched.payload.len() as u64,
+                    payload: fetched.payload,
+                }));
             }
-            result = session_task(self.session_task.as_mut()) => {
-                self.session_task.take();
-                return Err(map_session_result(result));
+            let completion = tokio::select! {
+                result = self.fetch.as_ref().expect("catalog FETCH handle missing").completed() => result,
+                result = session_task(self.session_task.as_mut()) => {
+                    self.session_task.take();
+                    return Err(map_session_result(result));
+                }
+                unexpected = self.subscriber.published_namespace() => {
+                    drop(unexpected);
+                    return Err(WireCatalogFailure::InvalidTrack);
+                }
+            };
+            completion.map_err(|_| WireCatalogFailure::SubscribeFailed)?;
+            self.fetch_drained = true;
+        }
+
+        if self.groups.is_none() {
+            let mode = tokio::select! {
+                result = self.track_reader.as_ref().expect("catalog Track reader missing").mode() => result,
+                result = session_task(self.session_task.as_mut()) => {
+                    self.session_task.take();
+                    return Err(map_session_result(result));
+                }
+                unexpected = self.subscriber.published_namespace() => {
+                    drop(unexpected);
+                    return Err(WireCatalogFailure::InvalidTrack);
+                }
             }
-            unexpected = self.subscriber.published_namespace() => {
-                drop(unexpected);
-                return Err(WireCatalogFailure::InvalidTrack);
+            .map_err(|_| WireCatalogFailure::InvalidTrack)?;
+            self.groups = match mode {
+                TrackReaderMode::Subgroups(groups) => Some(groups),
+                _ => return Err(WireCatalogFailure::InvalidTrack),
+            };
+            self.track_reader.take();
+        }
+
+        loop {
+            let subgroup = tokio::select! {
+                result = self.groups.as_mut().expect("catalog subgroup reader missing").next() => {
+                    result.map_err(|_| WireCatalogFailure::StreamEnded)?
+                }
+                result = session_task(self.session_task.as_mut()) => {
+                    self.session_task.take();
+                    return Err(map_session_result(result));
+                }
+                unexpected = self.subscriber.published_namespace() => {
+                    drop(unexpected);
+                    return Err(WireCatalogFailure::InvalidTrack);
+                }
+            };
+            let Some(mut subgroup) = subgroup else {
+                return Ok(None);
+            };
+            let Some(mut object) = subgroup
+                .next()
+                .await
+                .map_err(|_| WireCatalogFailure::StreamEnded)?
+            else {
+                return Err(WireCatalogFailure::InvalidCatalog(
+                    MoqCatalogValidationError::InvalidObject,
+                ));
+            };
+            if object.status != ObjectStatus::NormalObject {
+                return Err(WireCatalogFailure::InvalidCatalog(
+                    MoqCatalogValidationError::InvalidObject,
+                ));
             }
-        };
-        let Some(mut subgroup) = subgroup else {
-            return Ok(None);
-        };
-        let Some(mut object) = subgroup
-            .next()
-            .await
-            .map_err(|_| WireCatalogFailure::StreamEnded)?
-        else {
-            return Err(WireCatalogFailure::InvalidCatalog(
-                MoqCatalogValidationError::InvalidObject,
-            ));
-        };
-        if object.status != ObjectStatus::NormalObject {
-            return Err(WireCatalogFailure::InvalidCatalog(
-                MoqCatalogValidationError::InvalidObject,
-            ));
+            if object.size > max_catalog_bytes {
+                return Err(WireCatalogFailure::PayloadTooLarge);
+            }
+            let declared_payload_len = u64::try_from(object.size).unwrap_or(u64::MAX);
+            let extension_header_count = object.extension_headers.0.len();
+            let location = Location::new(subgroup.group_id, object.object_id);
+            let payload = object
+                .read_all()
+                .await
+                .map_err(|_| WireCatalogFailure::StreamEnded)?;
+            if subgroup
+                .next()
+                .await
+                .map_err(|_| WireCatalogFailure::StreamEnded)?
+                .is_some()
+            {
+                return Err(WireCatalogFailure::InvalidCatalog(
+                    MoqCatalogValidationError::InvalidObject,
+                ));
+            }
+
+            // Joining FETCH also inserts fetched Objects into the merged
+            // Track. They were already delivered above with explicit
+            // UnknownFromFetch evidence, so discard only coordinates covered
+            // by the immutable FETCH cutoff. Live Objects after the cutoff
+            // retain their actual subgroup boundary flags.
+            if location <= self.fetch_cutoff {
+                continue;
+            }
+            return Ok(Some(WireCatalogObject {
+                group_id: subgroup.group_id,
+                subgroup_id: subgroup.subgroup_id,
+                object_id: object.object_id,
+                first_object: subgroup.first_object,
+                end_of_group: if subgroup.end_of_group {
+                    MoqEndOfGroupEvidence::Signaled
+                } else {
+                    MoqEndOfGroupEvidence::NotSignaled
+                },
+                extension_header_count,
+                declared_payload_len,
+                payload,
+            }));
         }
-        if object.size > max_catalog_bytes {
-            return Err(WireCatalogFailure::PayloadTooLarge);
-        }
-        let declared_payload_len = u64::try_from(object.size).unwrap_or(u64::MAX);
-        let extension_header_count = object.extension_headers.0.len();
-        let payload = object
-            .read_all()
-            .await
-            .map_err(|_| WireCatalogFailure::StreamEnded)?;
-        if subgroup
-            .next()
-            .await
-            .map_err(|_| WireCatalogFailure::StreamEnded)?
-            .is_some()
-        {
-            return Err(WireCatalogFailure::InvalidCatalog(
-                MoqCatalogValidationError::InvalidObject,
-            ));
-        }
-        Ok(Some(WireCatalogObject {
-            group_id: subgroup.group_id,
-            subgroup_id: subgroup.subgroup_id,
-            object_id: object.object_id,
-            first_object: subgroup.first_object,
-            end_of_group: subgroup.end_of_group,
-            extension_header_count,
-            declared_payload_len,
-            payload,
-        }))
     }
 
     pub(crate) async fn close(mut self, reason: &'static str) {
@@ -282,7 +349,7 @@ pub(crate) struct WireCatalogObject {
     pub(crate) subgroup_id: u64,
     pub(crate) object_id: u64,
     pub(crate) first_object: bool,
-    pub(crate) end_of_group: bool,
+    pub(crate) end_of_group: MoqEndOfGroupEvidence,
     pub(crate) extension_header_count: usize,
     pub(crate) declared_payload_len: u64,
     pub(crate) payload: Bytes,
@@ -383,6 +450,14 @@ const fn map_substrate(substrate: Transport) -> BroadcastSubstrate {
     match substrate {
         Transport::RawQuic => BroadcastSubstrate::RawQuic,
         Transport::WebTransport => BroadcastSubstrate::WebTransport,
+    }
+}
+
+const fn map_group_end(group_end: EndOfGroupState) -> MoqEndOfGroupEvidence {
+    match group_end {
+        EndOfGroupState::Signaled => MoqEndOfGroupEvidence::Signaled,
+        EndOfGroupState::NotSignaled => MoqEndOfGroupEvidence::NotSignaled,
+        EndOfGroupState::UnknownFromFetch => MoqEndOfGroupEvidence::UnknownFromFetch,
     }
 }
 

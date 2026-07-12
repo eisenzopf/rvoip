@@ -456,7 +456,9 @@ pub enum MoqCatalogValidationError {
     InvalidSubgroup,
     #[error("catalog profile requires Object zero")]
     InvalidObject,
-    #[error("catalog subgroup must assert FIRST_OBJECT and END_OF_GROUP")]
+    #[error(
+        "catalog object must assert FIRST_OBJECT and live subgroup delivery must assert END_OF_GROUP"
+    )]
     InvalidSubgroupFlags,
     #[error("catalog objects cannot carry extension headers")]
     ExtensionHeadersForbidden,
@@ -478,6 +480,20 @@ pub enum MoqCatalogValidationError {
     SequenceOverflow,
 }
 
+/// Evidence available for the catalog object's group boundary.
+///
+/// Draft-19 subgroup delivery carries `END_OF_GROUP`, while FETCH delivery
+/// does not have a field for it. The unknown state is therefore valid only
+/// when a standards-compliant FETCH adapter explicitly reports it; it must
+/// never be promoted to a signaled boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MoqEndOfGroupEvidence {
+    Signaled,
+    NotSignaled,
+    UnknownFromFetch,
+}
+
 /// Decoded catalog object supplied by a private MOQT wire adapter.
 ///
 /// This contains only rvoip-owned primitives. It is public so an independent
@@ -491,7 +507,7 @@ pub struct MoqCatalogObject<'a> {
     pub subgroup_id: u64,
     pub object_id: u64,
     pub first_object: bool,
-    pub end_of_group: bool,
+    pub end_of_group: MoqEndOfGroupEvidence,
     pub extension_header_count: usize,
     pub declared_payload_len: u64,
     pub payload: &'a [u8],
@@ -561,7 +577,7 @@ impl MoqCatalogStateMachine {
         if object.object_id != 0 {
             return Err(MoqCatalogValidationError::InvalidObject);
         }
-        if !object.first_object || !object.end_of_group {
+        if !object.first_object || object.end_of_group == MoqEndOfGroupEvidence::NotSignaled {
             return Err(MoqCatalogValidationError::InvalidSubgroupFlags);
         }
         if object.extension_header_count != 0 {
@@ -685,7 +701,7 @@ mod tests {
             subgroup_id: 0,
             object_id: 0,
             first_object: true,
-            end_of_group: true,
+            end_of_group: MoqEndOfGroupEvidence::Signaled,
             extension_header_count: 0,
             declared_payload_len: payload.len() as u64,
             payload,
@@ -851,7 +867,7 @@ mod tests {
             |object| object.subgroup_id = 1,
             |object| object.object_id = 1,
             |object| object.first_object = false,
-            |object| object.end_of_group = false,
+            |object| object.end_of_group = MoqEndOfGroupEvidence::NotSignaled,
             |object| object.extension_header_count = 1,
             |object| object.declared_payload_len += 1,
         ];
@@ -869,6 +885,26 @@ mod tests {
             validator.apply(envelope(&payload, 1)),
             Err(MoqCatalogValidationError::PayloadTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn validator_accepts_unknown_group_end_only_for_fetch_evidence() {
+        let payload = live(10);
+        let mut validator = MoqCatalogStateMachine::new(&config()).unwrap();
+        let mut fetched = envelope(&payload, 1);
+        fetched.end_of_group = MoqEndOfGroupEvidence::UnknownFromFetch;
+        assert!(matches!(
+            validator.apply(fetched).unwrap(),
+            MoqCatalogApplyOutcome::Update(_)
+        ));
+
+        let mut invalid = MoqCatalogStateMachine::new(&config()).unwrap();
+        let mut live_without_boundary = envelope(&payload, 1);
+        live_without_boundary.end_of_group = MoqEndOfGroupEvidence::NotSignaled;
+        assert_eq!(
+            invalid.apply(live_without_boundary).unwrap_err(),
+            MoqCatalogValidationError::InvalidSubgroupFlags
+        );
     }
 
     #[test]

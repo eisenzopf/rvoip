@@ -31,10 +31,11 @@ pub use catalog_subscriber::{
     MoqCatalogApplyOutcome, MoqCatalogObject, MoqCatalogStateMachine, MoqCatalogSubscriberConfig,
     MoqCatalogSubscriberConfigError, MoqCatalogSubscriberFailure, MoqCatalogSubscriberLifecycle,
     MoqCatalogSubscriptionSnapshot, MoqCatalogUpdate, MoqCatalogValidationError,
-    MoqSubscriberCredential, MoqSubscriberCredentialError, MoqSubscriberCredentialProvider,
-    MoqSubscriberCredentialRequest, DEFAULT_MAX_CATALOG_BYTES, MAX_CATALOG_ATTEMPT_TIMEOUT,
-    MAX_CATALOG_BYTES, MAX_CATALOG_RECONNECT_ATTEMPTS, MAX_CATALOG_RECONNECT_BACKOFF,
-    MAX_CATALOG_RECONNECT_DEADLINE, MAX_MOQ_SUBSCRIBER_CREDENTIAL_BYTES,
+    MoqEndOfGroupEvidence, MoqSubscriberCredential, MoqSubscriberCredentialError,
+    MoqSubscriberCredentialProvider, MoqSubscriberCredentialRequest, DEFAULT_MAX_CATALOG_BYTES,
+    MAX_CATALOG_ATTEMPT_TIMEOUT, MAX_CATALOG_BYTES, MAX_CATALOG_RECONNECT_ATTEMPTS,
+    MAX_CATALOG_RECONNECT_BACKOFF, MAX_CATALOG_RECONNECT_DEADLINE,
+    MAX_MOQ_SUBSCRIBER_CREDENTIAL_BYTES,
 };
 pub use catalog_subscription::{MoqCatalogSubscriber, MoqCatalogSubscriberTlsConfig};
 pub use compatibility::{

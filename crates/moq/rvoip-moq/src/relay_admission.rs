@@ -154,6 +154,12 @@ impl RvoipMoqRelayAdmission {
         let authorization = request
             .setup_authorization
             .ok_or(AdmissionError::PolicyDenied)?;
+        // Bridgefu 1.0 uses the draft-19 out-of-band bearer token type. Other
+        // token types require a dedicated validator and must never be silently
+        // interpreted as UTF-8 bearer credentials.
+        if authorization.token_type() != 0 || authorization.is_empty() {
+            return Err(AdmissionError::PolicyDenied);
+        }
         let token = std::str::from_utf8(authorization.as_bytes())
             .map_err(|_| AdmissionError::PolicyDenied)?;
         let fingerprint: [u8; 32] = Sha256::digest(authorization.as_bytes()).into();

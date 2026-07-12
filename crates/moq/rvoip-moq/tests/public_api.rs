@@ -9,11 +9,11 @@ use rvoip_moq::{
     InMemoryMoqGroupIdAllocator, LocOpusPacketizer, MoqBroadcastPublisher, MoqCatalogApplyOutcome,
     MoqCatalogObject, MoqCatalogStateMachine, MoqCatalogSubscriber, MoqCatalogSubscriberConfig,
     MoqCatalogSubscriberLifecycle, MoqCatalogSubscriberTlsConfig, MoqCompatibility,
-    MoqGroupIdAllocator, MoqNamespace, MoqProtocolVersion, MoqPublisherConfig,
-    MoqRelayConnectionPolicy, MoqRelayPeerIdentity, MoqRelaySubstratePolicy, MoqRelayTlsConfig,
-    MoqSubscriberCredential, MoqSubscriberCredentialError, MoqSubscriberCredentialProvider,
-    MoqSubscriberCredentialRequest, MsfCatalog, MsfCatalogState, CATALOG_TRACK, LOC_DRAFT,
-    MOQT_DRAFT, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT,
+    MoqEndOfGroupEvidence, MoqGroupIdAllocator, MoqNamespace, MoqProtocolVersion,
+    MoqPublisherConfig, MoqRelayConnectionPolicy, MoqRelayPeerIdentity, MoqRelaySubstratePolicy,
+    MoqRelayTlsConfig, MoqSubscriberCredential, MoqSubscriberCredentialError,
+    MoqSubscriberCredentialProvider, MoqSubscriberCredentialRequest, MsfCatalog, MsfCatalogState,
+    CATALOG_TRACK, LOC_DRAFT, MOQT_DRAFT, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT,
 };
 use url::Url;
 
@@ -67,7 +67,7 @@ async fn application_contract_uses_only_rvoip_owned_models() {
             subgroup_id: 0,
             object_id: 0,
             first_object: true,
-            end_of_group: true,
+            end_of_group: MoqEndOfGroupEvidence::Signaled,
             extension_header_count: 0,
             declared_payload_len: catalog_payload.len() as u64,
             payload: &catalog_payload,

@@ -23,8 +23,8 @@ use crate::catalog_subscriber_wire::{
 use crate::{
     MoqCatalogApplyOutcome, MoqCatalogObject, MoqCatalogStateMachine, MoqCatalogSubscriberConfig,
     MoqCatalogSubscriberFailure, MoqCatalogSubscriberLifecycle, MoqCatalogSubscriptionSnapshot,
-    MoqError, MoqProtocolVersion, MoqSubscriberCredential, MoqSubscriberCredentialError,
-    MoqSubscriberCredentialProvider, MsfCatalogState, CATALOG_TRACK,
+    MoqEndOfGroupEvidence, MoqError, MoqProtocolVersion, MoqSubscriberCredential,
+    MoqSubscriberCredentialError, MoqSubscriberCredentialProvider, MsfCatalogState, CATALOG_TRACK,
 };
 
 const DROP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -42,7 +42,7 @@ struct ManagedCatalogObject {
     subgroup_id: u64,
     object_id: u64,
     first_object: bool,
-    end_of_group: bool,
+    end_of_group: MoqEndOfGroupEvidence,
     extension_header_count: usize,
     declared_payload_len: u64,
     payload: bytes::Bytes,
@@ -911,7 +911,7 @@ mod tests {
         config
     }
 
-    fn terminal_object(end_of_group: bool) -> ManagedCatalogObject {
+    fn terminal_object(end_of_group: MoqEndOfGroupEvidence) -> ManagedCatalogObject {
         let payload = crate::MsfCatalog::permanently_completed(1)
             .to_json_bytes()
             .unwrap();
@@ -1099,7 +1099,9 @@ mod tests {
     async fn terminal_catalog_completes_and_closes_without_reconnect() {
         let credentials = Arc::new(SequenceCredentials::new([Ok(b"one".to_vec())]));
         let connector = Arc::new(MockConnector::new([MockAttempt::Connected(
-            MockStream::Events(VecDeque::from([Ok(Some(terminal_object(true)))])),
+            MockStream::Events(VecDeque::from([Ok(Some(terminal_object(
+                MoqEndOfGroupEvidence::Signaled,
+            )))])),
         )]));
         let subscriber = start_mock(config(0), credentials, Arc::clone(&connector));
         subscriber.wait().await.unwrap();
@@ -1116,19 +1118,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retained_fetch_without_end_of_group_is_rejected_not_fabricated() {
+    async fn retained_fetch_with_unknown_group_end_is_accepted_without_fabrication() {
         let credentials = Arc::new(SequenceCredentials::new([Ok(b"one".to_vec())]));
         let connector = Arc::new(MockConnector::new([MockAttempt::Connected(
-            MockStream::Events(VecDeque::from([Ok(Some(terminal_object(false)))])),
+            MockStream::Events(VecDeque::from([Ok(Some(terminal_object(
+                MoqEndOfGroupEvidence::UnknownFromFetch,
+            )))])),
         )]));
         let subscriber = start_mock(config(0), credentials, connector);
-        let result = subscriber.wait().await;
-        assert!(matches!(
-            result,
-            Err(MoqError::CatalogSubscriber(
-                MoqCatalogSubscriberFailure::InvalidCatalog
-            ))
-        ));
+        subscriber.wait().await.unwrap();
+        let snapshot = subscriber.snapshot();
+        assert_eq!(
+            snapshot.lifecycle,
+            MoqCatalogSubscriberLifecycle::PermanentlyCompleted
+        );
+        assert_eq!(snapshot.failure, None);
     }
 
     #[tokio::test]

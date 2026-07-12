@@ -110,6 +110,11 @@ impl RequestFixture {
             setup_authorization: self.authorization.as_ref(),
         }
     }
+
+    fn with_authorization(mut self, authorization: SetupAuthorization) -> Self {
+        self.authorization = Some(authorization);
+        self
+    }
 }
 
 struct Harness {
@@ -510,6 +515,25 @@ async fn transport_target_tenant_and_exact_receive_only_scope_are_enforced() {
         harness.policy.admit_session(request).await,
         Err(AdmissionError::PolicyDenied)
     ));
+
+    let unsupported_token_type = RequestFixture::new(
+        "unsupported-token-type",
+        "moqt://relay.test/tenant-a/broadcast-a",
+        None,
+    )
+    .with_authorization(
+        SetupAuthorization::new_typed(7, b"provider-specific-token")
+            .expect("bounded typed authorization"),
+    );
+    assert_eq!(
+        require_denied(
+            &harness.policy,
+            &unsupported_token_type,
+            Transport::WebTransport,
+        )
+        .await,
+        AdmissionError::PolicyDenied
+    );
 }
 
 #[tokio::test]
