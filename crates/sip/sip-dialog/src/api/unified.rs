@@ -140,8 +140,8 @@
 //! # }
 //! ```
 
-use std::net::SocketAddr;
 use std::sync::Arc;
+use std::{fmt, net::SocketAddr};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -227,7 +227,7 @@ fn add_contact_header(response: &mut Response, contact_uri: &str) -> ApiResult<(
 ///
 /// SIP_API_DESIGN_2 Phase B added `Default`, `extra_headers`, and
 /// `refresh` to support the unified builder dispatch on top.
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct RegisterRequestOptions {
     pub registrar_uri: String,
     pub aor_uri: String,
@@ -254,6 +254,9 @@ pub struct RegisterRequestOptions {
 // to the request-builder template path
 // (`transaction/dialog/request_builder_from_dialog_template`) which
 // appends them *after* the stack-managed headers are stamped.
+// Their custom `Debug` implementations expose only operational flags, counts,
+// durations, and sequence values; retained URI, authorization, header, SDP,
+// and body values are never formatted.
 // ─────────────────────────────────────────────────────────────────────────
 
 use bytes::Bytes;
@@ -261,7 +264,7 @@ use rvoip_sip_core::types::TypedHeader;
 use std::time::Duration;
 
 /// REFER options (RFC 3515 + 3891 Replaces + 4538 Target-Dialog).
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct ReferRequestOptions {
     pub refer_to: String,
     pub replaces: Option<String>,
@@ -271,7 +274,7 @@ pub struct ReferRequestOptions {
 }
 
 /// NOTIFY options (RFC 6665).
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct NotifyRequestOptions {
     pub event: String,
     pub subscription_state: String,
@@ -284,7 +287,7 @@ pub struct NotifyRequestOptions {
 }
 
 /// INFO options (RFC 6086).
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct InfoRequestOptions {
     pub content_type: String,
     pub body: Bytes,
@@ -292,21 +295,21 @@ pub struct InfoRequestOptions {
 }
 
 /// BYE options (RFC 3326 `Reason`).
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct ByeRequestOptions {
     pub reason: Option<String>,
     pub extra_headers: Vec<TypedHeader>,
 }
 
 /// CANCEL options (RFC 3326 `Reason`).
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct CancelRequestOptions {
     pub reason: Option<String>,
     pub extra_headers: Vec<TypedHeader>,
 }
 
 /// UPDATE options (RFC 3311).
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct UpdateRequestOptions {
     pub sdp: Option<String>,
     pub session_timer_refresh: bool,
@@ -314,7 +317,7 @@ pub struct UpdateRequestOptions {
 }
 
 /// re-INVITE options.
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct ReInviteRequestOptions {
     pub sdp: Option<String>,
     pub session_timer_refresh: bool,
@@ -331,7 +334,7 @@ pub struct ReInviteRequestOptions {
 /// `extra_headers` (a second `From`/`Contact` would be malformed). Everything
 /// the builder simply appends (PAI, Route, Subject, Privacy, X-*) still rides
 /// `extra_headers`, the designed application-header channel.
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct InviteRequestOptions {
     pub from_uri: String,
     pub to_uri: String,
@@ -350,7 +353,7 @@ pub struct InviteRequestOptions {
 }
 
 /// SUBSCRIBE options (RFC 6665).
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct SubscribeRequestOptions {
     pub event: String,
     pub expires: u32,
@@ -368,7 +371,7 @@ pub struct SubscribeRequestOptions {
 }
 
 /// out-of-dialog MESSAGE options (RFC 3428).
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct MessageRequestOptions {
     pub from_uri: String,
     pub to_uri: String,
@@ -382,7 +385,7 @@ pub struct MessageRequestOptions {
 }
 
 /// out-of-dialog OPTIONS options (RFC 3261 §11).
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct OptionsRequestOptions {
     pub from_uri: String,
     pub to_uri: String,
@@ -392,6 +395,340 @@ pub struct OptionsRequestOptions {
     pub call_id: Option<String>,
     pub from_tag: Option<String>,
     pub extra_headers: Vec<TypedHeader>,
+}
+
+impl fmt::Debug for RegisterRequestOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RegisterRequestOptions")
+            .field("registrar_uri_present", &!self.registrar_uri.is_empty())
+            .field("aor_uri_present", &!self.aor_uri.is_empty())
+            .field("contact_uri_present", &!self.contact_uri.is_empty())
+            .field("expires", &self.expires)
+            .field("authorization_present", &self.authorization.is_some())
+            .field(
+                "proxy_authorization_present",
+                &self.proxy_authorization.is_some(),
+            )
+            .field("call_id_present", &self.call_id.is_some())
+            .field("cseq", &self.cseq)
+            .field("outbound_contact_present", &self.outbound_contact.is_some())
+            .field(
+                "outbound_proxy_uri_present",
+                &self.outbound_proxy_uri.is_some(),
+            )
+            .field("extra_header_count", &self.extra_headers.len())
+            .field("refresh", &self.refresh)
+            .finish()
+    }
+}
+
+impl fmt::Debug for ReferRequestOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReferRequestOptions")
+            .field("refer_to_present", &!self.refer_to.is_empty())
+            .field("replaces_present", &self.replaces.is_some())
+            .field("referred_by_present", &self.referred_by.is_some())
+            .field("target_dialog_present", &self.target_dialog.is_some())
+            .field("extra_header_count", &self.extra_headers.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for NotifyRequestOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NotifyRequestOptions")
+            .field("event_present", &!self.event.is_empty())
+            .field(
+                "subscription_state_present",
+                &!self.subscription_state.is_empty(),
+            )
+            .field("content_type_present", &self.content_type.is_some())
+            .field("body_present", &self.body.is_some())
+            .field("body_len", &self.body.as_ref().map_or(0, bytes::Bytes::len))
+            .field("subscription_id_present", &self.subscription_id.is_some())
+            .field("extra_header_count", &self.extra_headers.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for InfoRequestOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InfoRequestOptions")
+            .field("content_type_present", &!self.content_type.is_empty())
+            .field("body_len", &self.body.len())
+            .field("extra_header_count", &self.extra_headers.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for ByeRequestOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ByeRequestOptions")
+            .field("reason_present", &self.reason.is_some())
+            .field("extra_header_count", &self.extra_headers.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for CancelRequestOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CancelRequestOptions")
+            .field("reason_present", &self.reason.is_some())
+            .field("extra_header_count", &self.extra_headers.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for UpdateRequestOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UpdateRequestOptions")
+            .field("sdp_present", &self.sdp.is_some())
+            .field("session_timer_refresh", &self.session_timer_refresh)
+            .field("extra_header_count", &self.extra_headers.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for ReInviteRequestOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReInviteRequestOptions")
+            .field("sdp_present", &self.sdp.is_some())
+            .field("session_timer_refresh", &self.session_timer_refresh)
+            .field(
+                "precomputed_authorization_present",
+                &self.precomputed_authorization.is_some(),
+            )
+            .field("extra_header_count", &self.extra_headers.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for InviteRequestOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InviteRequestOptions")
+            .field("from_uri_present", &!self.from_uri.is_empty())
+            .field("to_uri_present", &!self.to_uri.is_empty())
+            .field("sdp_present", &self.sdp.is_some())
+            .field("call_id_present", &self.call_id.is_some())
+            .field("from_display_present", &self.from_display.is_some())
+            .field("contact_uri_present", &self.contact_uri.is_some())
+            .field(
+                "precomputed_authorization_present",
+                &self.precomputed_authorization.is_some(),
+            )
+            .field("extra_header_count", &self.extra_headers.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for SubscribeRequestOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SubscribeRequestOptions")
+            .field("event_present", &!self.event.is_empty())
+            .field("expires", &self.expires)
+            .field("accept_present", &self.accept.is_some())
+            .field("from_uri_present", &self.from_uri.is_some())
+            .field("contact_uri_present", &self.contact_uri.is_some())
+            .field("authorization_present", &self.authorization.is_some())
+            .field("cseq", &self.cseq)
+            .field("call_id_present", &self.call_id.is_some())
+            .field("from_tag_present", &self.from_tag.is_some())
+            .field("refresh", &self.refresh)
+            .field("extra_header_count", &self.extra_headers.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for MessageRequestOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MessageRequestOptions")
+            .field("from_uri_present", &!self.from_uri.is_empty())
+            .field("to_uri_present", &!self.to_uri.is_empty())
+            .field("content_type_present", &!self.content_type.is_empty())
+            .field("body_len", &self.body.len())
+            .field("authorization_present", &self.authorization.is_some())
+            .field("cseq", &self.cseq)
+            .field("call_id_present", &self.call_id.is_some())
+            .field("from_tag_present", &self.from_tag.is_some())
+            .field("extra_header_count", &self.extra_headers.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for OptionsRequestOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OptionsRequestOptions")
+            .field("from_uri_present", &!self.from_uri.is_empty())
+            .field("to_uri_present", &!self.to_uri.is_empty())
+            .field("accept_present", &self.accept.is_some())
+            .field("timeout", &self.timeout)
+            .field("cseq", &self.cseq)
+            .field("call_id_present", &self.call_id.is_some())
+            .field("from_tag_present", &self.from_tag.is_some())
+            .field("extra_header_count", &self.extra_headers.len())
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod retained_request_debug_tests {
+    use super::*;
+    use rvoip_sip_core::types::{headers::HeaderValue, HeaderName};
+
+    const SECRET: &str = "retained-option-secret-canary";
+    const SECRET_HEADER_NAME: &str = "X-Retained-Option-Secret-Canary";
+
+    fn secret_header() -> TypedHeader {
+        TypedHeader::Other(
+            HeaderName::Other(SECRET_HEADER_NAME.into()),
+            HeaderValue::Raw(SECRET.as_bytes().to_vec()),
+        )
+    }
+
+    fn assert_redacted(debug: &str) {
+        assert!(!debug.contains(SECRET), "secret escaped through {debug}");
+        assert!(
+            !debug.contains(SECRET_HEADER_NAME),
+            "header name escaped through {debug}"
+        );
+        assert!(debug.contains("extra_header_count: 1"));
+    }
+
+    #[test]
+    fn retained_request_options_debug_never_formats_values() {
+        let register = RegisterRequestOptions {
+            registrar_uri: format!("sip:{SECRET}@registrar.invalid"),
+            aor_uri: format!("sip:{SECRET}@aor.invalid"),
+            contact_uri: format!("sip:{SECRET}@contact.invalid"),
+            expires: 600,
+            authorization: Some(format!("Bearer {SECRET}")),
+            proxy_authorization: Some(format!("Digest {SECRET}")),
+            call_id: Some(SECRET.into()),
+            cseq: Some(7),
+            outbound_proxy_uri: Some(format!("sip:{SECRET}@proxy.invalid").parse().unwrap()),
+            extra_headers: vec![secret_header()],
+            refresh: true,
+            ..Default::default()
+        };
+        let refer = ReferRequestOptions {
+            refer_to: format!("sip:{SECRET}@target.invalid"),
+            replaces: Some(SECRET.into()),
+            referred_by: Some(SECRET.into()),
+            target_dialog: Some(SECRET.into()),
+            extra_headers: vec![secret_header()],
+        };
+        let notify = NotifyRequestOptions {
+            event: SECRET.into(),
+            subscription_state: SECRET.into(),
+            content_type: Some(SECRET.into()),
+            body: Some(Bytes::from_static(SECRET.as_bytes())),
+            subscription_id: Some(SECRET.into()),
+            extra_headers: vec![secret_header()],
+        };
+        let info = InfoRequestOptions {
+            content_type: SECRET.into(),
+            body: Bytes::from_static(SECRET.as_bytes()),
+            extra_headers: vec![secret_header()],
+        };
+        let bye = ByeRequestOptions {
+            reason: Some(SECRET.into()),
+            extra_headers: vec![secret_header()],
+        };
+        let cancel = CancelRequestOptions {
+            reason: Some(SECRET.into()),
+            extra_headers: vec![secret_header()],
+        };
+        let update = UpdateRequestOptions {
+            sdp: Some(format!("v=0\r\na={SECRET}")),
+            session_timer_refresh: true,
+            extra_headers: vec![secret_header()],
+        };
+        let reinvite = ReInviteRequestOptions {
+            sdp: Some(format!("v=0\r\na={SECRET}")),
+            session_timer_refresh: true,
+            precomputed_authorization: Some(format!("Bearer {SECRET}")),
+            extra_headers: vec![secret_header()],
+        };
+        let invite = InviteRequestOptions {
+            from_uri: format!("sip:{SECRET}@from.invalid"),
+            to_uri: format!("sip:{SECRET}@to.invalid"),
+            sdp: Some(format!("v=0\r\na={SECRET}")),
+            call_id: Some(SECRET.into()),
+            from_display: Some(SECRET.into()),
+            contact_uri: Some(format!("sip:{SECRET}@contact.invalid")),
+            precomputed_authorization: Some(format!("Bearer {SECRET}")),
+            extra_headers: vec![secret_header()],
+        };
+        let subscribe = SubscribeRequestOptions {
+            event: SECRET.into(),
+            expires: 300,
+            accept: Some(SECRET.into()),
+            from_uri: Some(format!("sip:{SECRET}@from.invalid")),
+            contact_uri: Some(format!("sip:{SECRET}@contact.invalid")),
+            authorization: Some(format!("Bearer {SECRET}")),
+            cseq: Some(8),
+            call_id: Some(SECRET.into()),
+            from_tag: Some(SECRET.into()),
+            refresh: true,
+            extra_headers: vec![secret_header()],
+        };
+        let message = MessageRequestOptions {
+            from_uri: format!("sip:{SECRET}@from.invalid"),
+            to_uri: format!("sip:{SECRET}@to.invalid"),
+            content_type: SECRET.into(),
+            body: Bytes::from_static(SECRET.as_bytes()),
+            authorization: Some(format!("Bearer {SECRET}")),
+            cseq: Some(9),
+            call_id: Some(SECRET.into()),
+            from_tag: Some(SECRET.into()),
+            extra_headers: vec![secret_header()],
+        };
+        let options = OptionsRequestOptions {
+            from_uri: format!("sip:{SECRET}@from.invalid"),
+            to_uri: format!("sip:{SECRET}@to.invalid"),
+            accept: Some(SECRET.into()),
+            timeout: Some(Duration::from_secs(3)),
+            cseq: Some(10),
+            call_id: Some(SECRET.into()),
+            from_tag: Some(SECRET.into()),
+            extra_headers: vec![secret_header()],
+        };
+
+        for debug in [
+            format!("{register:?}"),
+            format!("{refer:?}"),
+            format!("{notify:?}"),
+            format!("{info:?}"),
+            format!("{bye:?}"),
+            format!("{cancel:?}"),
+            format!("{update:?}"),
+            format!("{reinvite:?}"),
+            format!("{invite:?}"),
+            format!("{subscribe:?}"),
+            format!("{message:?}"),
+            format!("{options:?}"),
+        ] {
+            assert_redacted(&debug);
+        }
+
+        let invite_debug = format!("{invite:?}");
+        assert!(invite_debug.contains("precomputed_authorization_present: true"));
+        assert!(invite_debug.contains("sdp_present: true"));
+        let message_debug = format!("{message:?}");
+        assert!(message_debug.contains(&format!("body_len: {}", SECRET.len())));
+    }
 }
 
 /// SIP_API_DESIGN_2 Phase D — defence-in-depth header filter for the

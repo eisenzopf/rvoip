@@ -1,6 +1,6 @@
 //! `OutboundCallBuilder` — SIP_API_DESIGN_2 §3.3 INVITE builder.
 
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use rvoip_sip_core::types::Method;
 
@@ -12,8 +12,10 @@ use crate::errors::Result;
 use crate::types::Credentials;
 
 /// Per-request override for the `P-Asserted-Identity` (RFC 3325).
+///
+/// `Debug` reports the selected variant without formatting the URI override.
 #[non_exhaustive]
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub enum PaiOverride {
     /// Inherit `Config.pai_uri`.
     #[default]
@@ -24,9 +26,21 @@ pub enum PaiOverride {
     Use(String),
 }
 
+impl fmt::Debug for PaiOverride {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Default => "Default",
+            Self::Suppress => "Suppress",
+            Self::Use(_) => "Use",
+        })
+    }
+}
+
 /// Per-request override for the outbound proxy `Route:` header.
+///
+/// `Debug` reports the selected variant without formatting the URI override.
 #[non_exhaustive]
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub enum ProxyOverride {
     /// Inherit `Config.outbound_proxy_uri`.
     #[default]
@@ -35,6 +49,16 @@ pub enum ProxyOverride {
     Suppress,
     /// Override the outbound proxy `Route:` for this call only.
     Use(String),
+}
+
+impl fmt::Debug for ProxyOverride {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Default => "Default",
+            Self::Suppress => "Suppress",
+            Self::Use(_) => "Use",
+        })
+    }
 }
 
 /// SIP_API_DESIGN_2 §7.1 — frozen snapshot of an `OutboundCallBuilder`
@@ -47,7 +71,10 @@ pub enum ProxyOverride {
 /// `supported_100rel`. The state machine unpacks it at the
 /// DialogAdapter boundary and calls rvoip-sip-dialog's existing
 /// `make_call_with_extra_headers_for_session`.
-#[derive(Default, Debug, Clone)]
+///
+/// `Debug` intentionally exposes only operational flags and counts; retained
+/// URIs, SDP, credentials, authorization, and application headers are redacted.
+#[derive(Default, Clone)]
 pub struct OutboundCallOptionsSnapshot {
     /// `From:` URI; falls back to `Config.local_uri` when `None`.
     pub from: Option<String>,
@@ -86,6 +113,40 @@ pub struct OutboundCallOptionsSnapshot {
     /// want B2BUA-style hiding turn this on per call via
     /// [`OutboundCallBuilder::with_topology_hiding`].
     pub topology_hiding: bool,
+}
+
+impl fmt::Debug for OutboundCallOptionsSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let pai_override = match &self.pai_override {
+            PaiOverride::Default => "default",
+            PaiOverride::Suppress => "suppress",
+            PaiOverride::Use(_) => "override",
+        };
+        let outbound_proxy_override = match &self.outbound_proxy_override {
+            ProxyOverride::Default => "default",
+            ProxyOverride::Suppress => "suppress",
+            ProxyOverride::Use(_) => "override",
+        };
+
+        formatter
+            .debug_struct("OutboundCallOptionsSnapshot")
+            .field("from_present", &self.from.is_some())
+            .field("target_present", &!self.to.is_empty())
+            .field("sdp_present", &self.sdp.is_some())
+            .field("credentials_present", &self.credentials.is_some())
+            .field("auth_present", &self.auth.is_some())
+            .field("pai_override", &pai_override)
+            .field("contact_uri_present", &self.contact_uri.is_some())
+            .field("outbound_proxy_override", &outbound_proxy_override)
+            .field("subject_present", &self.subject.is_some())
+            .field("from_display_present", &self.from_display.is_some())
+            .field("precomputed_auth_present", &self.precomputed_auth.is_some())
+            .field("transfer_leg_present", &self.transfer_leg.is_some())
+            .field("supported_100rel", &self.supported_100rel)
+            .field("extra_header_count", &self.extra_headers.len())
+            .field("topology_hiding", &self.topology_hiding)
+            .finish()
+    }
 }
 
 /// Outbound INVITE builder.
@@ -456,5 +517,53 @@ impl SipRequestOptions for OutboundCallBuilder {
     }
     fn header_state(&self) -> &BuilderHeaderState {
         &self.state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rvoip_sip_core::types::{headers::HeaderValue, HeaderName, TypedHeader};
+
+    #[test]
+    fn outbound_call_snapshot_debug_redacts_every_retained_value() {
+        const SECRET: &str = "outbound-snapshot-secret-canary";
+        let snapshot = OutboundCallOptionsSnapshot {
+            from: Some(format!("sip:{SECRET}@from.invalid")),
+            to: format!("sip:{SECRET}@target.invalid"),
+            sdp: Some(format!("v=0\r\na={SECRET}")),
+            credentials: Some(Credentials::new(SECRET, SECRET)),
+            auth: Some(SipClientAuth::bearer_token(SECRET)),
+            pai_override: PaiOverride::Use(format!("sip:{SECRET}@pai.invalid")),
+            contact_uri: Some(format!("sip:{SECRET}@contact.invalid")),
+            outbound_proxy_override: ProxyOverride::Use(format!("sip:{SECRET}@proxy.invalid")),
+            subject: Some(SECRET.into()),
+            from_display: Some(SECRET.into()),
+            precomputed_auth: Some(format!("Bearer {SECRET}")),
+            transfer_leg: Some(SECRET.into()),
+            supported_100rel: true,
+            extra_headers: vec![TypedHeader::Other(
+                HeaderName::Other("X-Secret-Canary".into()),
+                HeaderValue::Raw(SECRET.as_bytes().to_vec()),
+            )],
+            topology_hiding: true,
+        };
+
+        let debug = format!("{snapshot:?}");
+        assert!(!debug.contains(SECRET));
+        assert!(!debug.contains("X-Secret-Canary"));
+        assert!(debug.contains("credentials_present: true"));
+        assert!(debug.contains("auth_present: true"));
+        assert!(debug.contains("pai_override: \"override\""));
+        assert!(debug.contains("outbound_proxy_override: \"override\""));
+        assert!(debug.contains("extra_header_count: 1"));
+        assert!(debug.contains("supported_100rel: true"));
+
+        let pai_debug = format!("{:?}", PaiOverride::Use(SECRET.into()));
+        let proxy_debug = format!("{:?}", ProxyOverride::Use(SECRET.into()));
+        assert_eq!(pai_debug, "Use");
+        assert_eq!(proxy_debug, "Use");
+        assert!(!pai_debug.contains(SECRET));
+        assert!(!proxy_debug.contains(SECRET));
     }
 }

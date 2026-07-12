@@ -2,6 +2,7 @@ use crate::state_table::{CallId, DialogId, MediaSessionId, SessionId};
 use rvoip_sip_dialog::transaction::TransactionKey;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::net::SocketAddr;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -23,12 +24,22 @@ pub struct NegotiatedConfig {
 /// Kind of mid-dialog re-INVITE that was in flight when a 491 Request
 /// Pending arrived — captured so `ScheduleReinviteRetry` can re-issue the
 /// correct operation after the RFC 3261 §14.1 random backoff.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum PendingReinvite {
     Hold,
     Resume,
     /// Generic SDP update with a specific offer (codec change, etc.).
     SdpUpdate(String),
+}
+
+impl fmt::Debug for PendingReinvite {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Hold => "Hold",
+            Self::Resume => "Resume",
+            Self::SdpUpdate(_) => "SdpUpdate",
+        })
+    }
 }
 
 /// Transfer state tracking
@@ -39,8 +50,12 @@ pub enum TransferState {
     TransferCompleted,
 }
 
-/// Complete state of a session
-#[derive(Debug, Clone)]
+/// Complete state of a session.
+///
+/// `Debug` reports operational state, counts, and presence flags without
+/// formatting retained SIP URIs, SDP, authentication material, headers, or
+/// message bodies.
+#[derive(Clone)]
 pub struct SessionState {
     // Identity
     pub session_id: SessionId,
@@ -296,6 +311,274 @@ pub struct SessionState {
     pub history: Option<SessionHistory>,
 }
 
+impl fmt::Debug for SessionState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let pending_option_count = [
+            self.pending_invite_options.is_some(),
+            self.pending_reinvite_options.is_some(),
+            self.pending_register_options.is_some(),
+            self.pending_refer_options.is_some(),
+            self.pending_bye_options.is_some(),
+            self.pending_cancel_options.is_some(),
+            self.pending_notify_options.is_some(),
+            self.pending_subscribe_options.is_some(),
+            self.pending_info_options.is_some(),
+            self.pending_update_options.is_some(),
+            self.pending_message_options.is_some(),
+            self.pending_options_options.is_some(),
+        ]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+        let pending_reinvite = self.pending_reinvite.as_ref().map(|pending| match pending {
+            PendingReinvite::Hold => "hold",
+            PendingReinvite::Resume => "resume",
+            PendingReinvite::SdpUpdate(_) => "sdp_update",
+        });
+        let pending_auth_status = self.pending_auth.as_ref().map(|(status, _)| *status);
+        let pending_auth_transport_secure = self
+            .pending_auth_transport
+            .as_ref()
+            .map(crate::auth::SipTransportSecurityContext::is_secure);
+        let transfer_target_last_status = self
+            .transfer_target_last_progress
+            .as_ref()
+            .map(|(status, _)| *status);
+        let media_security_keying = self.media_security.as_ref().map(|state| state.keying);
+        let media_security_suite = self.media_security.as_ref().map(|state| state.suite);
+        let media_security_profile = self.media_security.as_ref().map(|state| state.profile);
+        let media_security_contexts_installed = self
+            .media_security
+            .as_ref()
+            .map(|state| state.contexts_installed);
+        let history_total_transitions = self
+            .history
+            .as_ref()
+            .map(|history| history.total_transitions);
+        let history_total_errors = self.history.as_ref().map(|history| history.total_errors);
+
+        formatter
+            .debug_struct("SessionState")
+            .field("session_id", &self.session_id)
+            .field("role", &self.role)
+            .field("call_state", &self.call_state)
+            .field("dialog_established", &self.dialog_established)
+            .field("media_session_ready", &self.media_session_ready)
+            .field("sdp_negotiated", &self.sdp_negotiated)
+            .field(
+                "call_established_triggered",
+                &self.call_established_triggered,
+            )
+            .field("local_sdp_present", &self.local_sdp.is_some())
+            .field("remote_sdp_present", &self.remote_sdp.is_some())
+            .field(
+                "negotiated_config_present",
+                &self.negotiated_config.is_some(),
+            )
+            .field("media_security_keying", &media_security_keying)
+            .field("media_security_suite", &media_security_suite)
+            .field("media_security_profile", &media_security_profile)
+            .field(
+                "media_security_contexts_installed",
+                &media_security_contexts_installed,
+            )
+            .field("sdp_origin_version", &self.sdp_origin_version)
+            .field("local_media_direction", &self.local_media_direction)
+            .field("remote_media_direction", &self.remote_media_direction)
+            .field("dialog_id_present", &self.dialog_id.is_some())
+            .field("media_session_id_present", &self.media_session_id.is_some())
+            .field("call_id_present", &self.call_id.is_some())
+            .field(
+                "pending_inbound_invite_transaction_present",
+                &self.pending_inbound_invite_transaction_id.is_some(),
+            )
+            .field(
+                "incoming_invite_received_at_present",
+                &self.incoming_invite_received_at.is_some(),
+            )
+            .field("local_uri_present", &self.local_uri.is_some())
+            .field("remote_uri_present", &self.remote_uri.is_some())
+            .field(
+                "last_200_ok_len",
+                &self.last_200_ok.as_ref().map_or(0, Vec::len),
+            )
+            .field("bridged_to_present", &self.bridged_to.is_some())
+            .field(
+                "conference_mixer_present",
+                &self.conference_mixer_id.is_some(),
+            )
+            .field("transfer_target_present", &self.transfer_target.is_some())
+            .field("dtmf_digits_present", &self.dtmf_digits.is_some())
+            .field("reject_status", &self.reject_status)
+            .field("reject_reason_present", &self.reject_reason.is_some())
+            .field(
+                "reject_response_extra_count",
+                &self.reject_response_extras.as_ref().map_or(0, Vec::len),
+            )
+            .field("redirect_response_status", &self.redirect_response_status)
+            .field(
+                "redirect_response_contact_count",
+                &self.redirect_response_contacts.len(),
+            )
+            .field("early_media_sdp_present", &self.early_media_sdp.is_some())
+            .field("pending_auth_status", &pending_auth_status)
+            .field(
+                "pending_auth_method_present",
+                &self.pending_auth_method.is_some(),
+            )
+            .field(
+                "pending_auth_transport_present",
+                &self.pending_auth_transport.is_some(),
+            )
+            .field(
+                "pending_auth_transport_secure",
+                &pending_auth_transport_secure,
+            )
+            .field("request_auth_retry_count", &self.request_auth_retry_count)
+            .field("invite_auth_retry_count", &self.invite_auth_retry_count)
+            .field("redirect_target_count", &self.redirect_targets.len())
+            .field("redirect_attempts", &self.redirect_attempts)
+            .field("pending_reinvite", &pending_reinvite)
+            .field("reinvite_retry_attempts", &self.reinvite_retry_attempts)
+            .field("session_timer_min_se", &self.session_timer_min_se)
+            .field("session_timer_retry_count", &self.session_timer_retry_count)
+            .field("transfer_state", &self.transfer_state)
+            .field(
+                "transfer_notify_dialog_present",
+                &self.transfer_notify_dialog.is_some(),
+            )
+            .field("replaces_header_present", &self.replaces_header.is_some())
+            .field("referred_by_present", &self.referred_by.is_some())
+            .field(
+                "refer_transaction_id_present",
+                &self.refer_transaction_id.is_some(),
+            )
+            .field("is_transfer_call", &self.is_transfer_call)
+            .field(
+                "transferor_session_id_present",
+                &self.transferor_session_id.is_some(),
+            )
+            .field(
+                "transfer_target_progress_seen",
+                &self.transfer_target_progress_seen,
+            )
+            .field("transfer_target_last_status", &transfer_target_last_status)
+            .field(
+                "pending_bye_reason_present",
+                &self.pending_bye_reason.is_some(),
+            )
+            .field("pending_option_count", &pending_option_count)
+            .field(
+                "pending_invite_options_present",
+                &self.pending_invite_options.is_some(),
+            )
+            .field(
+                "pending_reinvite_options_present",
+                &self.pending_reinvite_options.is_some(),
+            )
+            .field(
+                "pending_register_options_present",
+                &self.pending_register_options.is_some(),
+            )
+            .field(
+                "pending_refer_options_present",
+                &self.pending_refer_options.is_some(),
+            )
+            .field(
+                "pending_bye_options_present",
+                &self.pending_bye_options.is_some(),
+            )
+            .field(
+                "pending_cancel_options_present",
+                &self.pending_cancel_options.is_some(),
+            )
+            .field(
+                "pending_notify_options_present",
+                &self.pending_notify_options.is_some(),
+            )
+            .field(
+                "pending_subscribe_options_present",
+                &self.pending_subscribe_options.is_some(),
+            )
+            .field(
+                "pending_info_options_present",
+                &self.pending_info_options.is_some(),
+            )
+            .field(
+                "pending_update_options_present",
+                &self.pending_update_options.is_some(),
+            )
+            .field(
+                "pending_message_options_present",
+                &self.pending_message_options.is_some(),
+            )
+            .field(
+                "pending_options_options_present",
+                &self.pending_options_options.is_some(),
+            )
+            .field("registrar_uri_present", &self.registrar_uri.is_some())
+            .field("registration_expires", &self.registration_expires)
+            .field(
+                "registration_contact_present",
+                &self.registration_contact.is_some(),
+            )
+            .field(
+                "registration_call_id_present",
+                &self.registration_call_id.is_some(),
+            )
+            .field("registration_cseq", &self.registration_cseq)
+            .field(
+                "registration_accepted_expires",
+                &self.registration_accepted_expires,
+            )
+            .field(
+                "registration_registered_at_present",
+                &self.registration_registered_at.is_some(),
+            )
+            .field(
+                "registration_next_refresh_at_present",
+                &self.registration_next_refresh_at.is_some(),
+            )
+            .field(
+                "registration_last_failure_present",
+                &self.registration_last_failure.is_some(),
+            )
+            .field(
+                "registration_service_route_count",
+                &self.registration_service_route.as_ref().map_or(0, Vec::len),
+            )
+            .field(
+                "registration_pub_gruu_present",
+                &self.registration_pub_gruu.is_some(),
+            )
+            .field(
+                "registration_temp_gruu_present",
+                &self.registration_temp_gruu.is_some(),
+            )
+            .field("credentials_present", &self.credentials.is_some())
+            .field("auth_present", &self.auth.is_some())
+            .field("pai_uri_present", &self.pai_uri.is_some())
+            .field("extra_header_count", &self.extra_headers.len())
+            .field("is_registered", &self.is_registered)
+            .field("auth_challenge_present", &self.auth_challenge.is_some())
+            .field(
+                "auth_challenge_raw_present",
+                &self.auth_challenge_raw.is_some(),
+            )
+            .field("auth_challenge_stale", &self.auth_challenge_stale)
+            .field(
+                "auth_challenge_replaces_nonce_present",
+                &self.auth_challenge_replaces_nonce.is_some(),
+            )
+            .field("registration_retry_count", &self.registration_retry_count)
+            .field("digest_nonce_count", &self.digest_nc.len())
+            .field("history_present", &self.history.is_some())
+            .field("history_total_transitions", &history_total_transitions)
+            .field("history_total_errors", &history_total_errors)
+            .finish()
+    }
+}
+
 impl SessionState {
     /// Create a new session state
     pub fn new(session_id: SessionId, role: Role) -> Self {
@@ -495,9 +778,122 @@ fn stable_sdp_origin_session_id(raw_id: &str) -> String {
 }
 
 #[cfg(test)]
-mod digest_nc_tests {
+mod tests {
     use super::*;
+    use crate::api::send::outbound_call::{
+        OutboundCallOptionsSnapshot, PaiOverride, ProxyOverride,
+    };
+    use crate::auth::SipClientAuth;
     use crate::state_table::{Role, SessionId};
+    use crate::types::Credentials;
+    use rvoip_sip_core::types::{headers::HeaderValue, HeaderName, TypedHeader};
+    use std::sync::Arc;
+
+    const SECRET: &str = "session-state-secret-canary";
+    const SECRET_HEADER_NAME: &str = "X-Session-State-Secret-Canary";
+
+    fn secret_header() -> TypedHeader {
+        TypedHeader::Other(
+            HeaderName::Other(SECRET_HEADER_NAME.into()),
+            HeaderValue::Raw(SECRET.as_bytes().to_vec()),
+        )
+    }
+
+    #[test]
+    fn pending_reinvite_debug_redacts_sdp_update_body() {
+        let debug = format!("{:?}", PendingReinvite::SdpUpdate(SECRET.into()));
+
+        assert_eq!(debug, "SdpUpdate");
+        assert!(!debug.contains(SECRET));
+    }
+
+    #[test]
+    fn session_state_debug_redacts_retained_values() {
+        let mut session =
+            SessionState::new(SessionId::from_string("session-visible-id"), Role::UAC);
+        session.local_sdp = Some(format!("v=0\r\na={SECRET}"));
+        session.remote_sdp = Some(format!("v=0\r\na={SECRET}"));
+        session.sdp_origin_session_id = SECRET.into();
+        session.call_id = Some(SECRET.into());
+        session.local_uri = Some(format!("sip:{SECRET}@local.invalid"));
+        session.remote_uri = Some(format!("sip:{SECRET}@remote.invalid"));
+        session.last_200_ok = Some(SECRET.as_bytes().to_vec());
+        session.transfer_target = Some(format!("sip:{SECRET}@transfer.invalid"));
+        session.dtmf_digits = Some(SECRET.into());
+        session.reject_reason = Some(SECRET.into());
+        session.reject_response_extras = Some(vec![secret_header()]);
+        session.redirect_response_contacts = vec![format!("sip:{SECRET}@redirect.invalid")];
+        session.early_media_sdp = Some(format!("v=0\r\na={SECRET}"));
+        session.pending_auth = Some((401, format!("Digest {SECRET}")));
+        session.pending_auth_method = Some(SECRET.into());
+        session.redirect_targets = vec![format!("sip:{SECRET}@retry.invalid")];
+        session.pending_reinvite = Some(PendingReinvite::SdpUpdate(format!("v=0\r\na={SECRET}")));
+        session.replaces_header = Some(SECRET.into());
+        session.referred_by = Some(SECRET.into());
+        session.refer_transaction_id = Some(SECRET.into());
+        session.transfer_target_last_progress = Some((183, SECRET.into()));
+        session.pending_bye_reason = Some((SECRET.into(), 500, Some(SECRET.into())));
+        session.pending_invite_options = Some(Arc::new(OutboundCallOptionsSnapshot {
+            from: Some(format!("sip:{SECRET}@from.invalid")),
+            to: format!("sip:{SECRET}@target.invalid"),
+            sdp: Some(format!("v=0\r\na={SECRET}")),
+            credentials: Some(Credentials::new(SECRET, SECRET)),
+            auth: Some(SipClientAuth::bearer_token(SECRET)),
+            pai_override: PaiOverride::Use(format!("sip:{SECRET}@pai.invalid")),
+            contact_uri: Some(format!("sip:{SECRET}@contact.invalid")),
+            outbound_proxy_override: ProxyOverride::Use(format!("sip:{SECRET}@proxy.invalid")),
+            subject: Some(SECRET.into()),
+            from_display: Some(SECRET.into()),
+            precomputed_auth: Some(format!("Bearer {SECRET}")),
+            transfer_leg: Some(SECRET.into()),
+            supported_100rel: true,
+            extra_headers: vec![secret_header()],
+            topology_hiding: true,
+        }));
+        session.pending_register_options = Some(Arc::new(
+            rvoip_sip_dialog::api::unified::RegisterRequestOptions {
+                registrar_uri: format!("sip:{SECRET}@registrar.invalid"),
+                aor_uri: format!("sip:{SECRET}@aor.invalid"),
+                contact_uri: format!("sip:{SECRET}@contact.invalid"),
+                authorization: Some(format!("Bearer {SECRET}")),
+                proxy_authorization: Some(format!("Digest {SECRET}")),
+                call_id: Some(SECRET.into()),
+                extra_headers: vec![secret_header()],
+                ..Default::default()
+            },
+        ));
+        session.registrar_uri = Some(format!("sip:{SECRET}@registrar.invalid"));
+        session.registration_contact = Some(format!("sip:{SECRET}@contact.invalid"));
+        session.registration_call_id = Some(SECRET.into());
+        session.registration_last_failure = Some(SECRET.into());
+        session.registration_service_route = Some(vec![format!("sip:{SECRET}@route.invalid")]);
+        session.registration_pub_gruu = Some(format!("sip:{SECRET}@pub-gruu.invalid"));
+        session.registration_temp_gruu = Some(format!("sip:{SECRET}@temp-gruu.invalid"));
+        session.credentials = Some(Credentials::new(SECRET, SECRET));
+        session.auth = Some(SipClientAuth::bearer_token(SECRET));
+        session.pai_uri = Some(format!("sip:{SECRET}@pai.invalid"));
+        session.extra_headers = vec![secret_header()];
+        session.auth_challenge_raw = Some(format!("Digest {SECRET}"));
+        session.auth_challenge_replaces_nonce = Some(SECRET.into());
+        session.digest_nc.insert((SECRET.into(), SECRET.into()), 3);
+
+        let debug = format!("{session:?}");
+
+        assert!(!debug.contains(SECRET), "secret escaped through {debug}");
+        assert!(
+            !debug.contains(SECRET_HEADER_NAME),
+            "header name escaped through {debug}"
+        );
+        assert!(debug.contains("call_state: Idle"));
+        assert!(debug.contains("local_sdp_present: true"));
+        assert!(debug.contains("pending_auth_status: Some(401)"));
+        assert!(debug.contains("pending_reinvite: Some(\"sdp_update\")"));
+        assert!(debug.contains("pending_option_count: 2"));
+        assert!(debug.contains("credentials_present: true"));
+        assert!(debug.contains("auth_present: true"));
+        assert!(debug.contains("extra_header_count: 1"));
+        assert!(debug.contains("digest_nonce_count: 1"));
+    }
 
     /// RFC 7616 §3.4.5 — repeated requests reusing the same nonce
     /// must carry monotonically incrementing `nc`. The exact idiom

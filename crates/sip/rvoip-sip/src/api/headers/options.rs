@@ -21,7 +21,10 @@ use super::view::SipHeaderView;
 /// Shared per-builder state. Embedded by every concrete builder and
 /// surfaced to the trait defaults through
 /// [`SipRequestOptions::header_state_mut`].
-#[derive(Default, Debug, Clone)]
+///
+/// Its `Debug` output reports only the header count and strictness so staged
+/// application header names and values cannot enter diagnostics.
+#[derive(Default, Clone)]
 pub struct BuilderHeaderState {
     /// Application-staged headers in wire order. Stack-managed headers
     /// (Call-ID, Via, CSeq, …) are never visible here; they are stamped
@@ -30,6 +33,16 @@ pub struct BuilderHeaderState {
     /// Validation strictness. Defaults to
     /// [`BuilderStrictness::Strict`].
     pub strictness: BuilderStrictness,
+}
+
+impl fmt::Debug for BuilderHeaderState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BuilderHeaderState")
+            .field("header_count", &self.headers.len())
+            .field("strictness", &self.strictness)
+            .finish()
+    }
 }
 
 /// Validation strictness for builder header policy.
@@ -292,5 +305,22 @@ mod tests {
         assert_eq!(canonicalize_other("x-customer-id"), "X-Customer-Id");
         assert_eq!(canonicalize_other("X-CUSTOMER-ID"), "X-Customer-Id");
         assert_eq!(canonicalize_other("history-info"), "History-Info");
+    }
+
+    #[test]
+    fn builder_header_state_debug_reports_shape_without_header_values() {
+        let state = BuilderHeaderState {
+            headers: vec![TypedHeader::Other(
+                HeaderName::Other("X-Secret-Canary".into()),
+                HeaderValue::Raw(b"builder-header-secret-canary".to_vec()),
+            )],
+            strictness: BuilderStrictness::Lenient,
+        };
+
+        let debug = format!("{state:?}");
+        assert!(debug.contains("header_count: 1"));
+        assert!(debug.contains("strictness: Lenient"));
+        assert!(!debug.contains("X-Secret-Canary"));
+        assert!(!debug.contains("builder-header-secret-canary"));
     }
 }
