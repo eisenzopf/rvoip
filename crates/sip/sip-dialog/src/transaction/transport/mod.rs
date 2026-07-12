@@ -512,6 +512,13 @@ impl TransportManager {
     }
 
     /// Enable transport-boundary SIP tracing for this manager.
+    ///
+    /// The public lower-level path is safe without an application redactor:
+    /// request targets, non-allowlisted and folded header values, and body bytes
+    /// are replaced by fixed markers while `redact_sensitive_headers` remains
+    /// enabled. Verbatim diagnostics require an explicit
+    /// [`SipTraceConfig::verbatim_for_development`](rvoip_infra_common::events::cross_crate::SipTraceConfig::verbatim_for_development)
+    /// override.
     pub fn enable_sip_trace(
         &mut self,
         owner_id: String,

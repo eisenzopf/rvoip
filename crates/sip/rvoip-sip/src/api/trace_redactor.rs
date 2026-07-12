@@ -22,7 +22,8 @@ use rvoip_sip_core::types::headers::HeaderName;
 ///
 /// Body policies cannot supply their own replacement text, which prevents a
 /// policy from accidentally reflecting body-derived secrets into a trace.
-pub const REDACTED_BODY_MARKER: &str = "<redacted body>";
+pub const REDACTED_BODY_MARKER: &str =
+    rvoip_infra_common::events::cross_crate::SIP_TRACE_REDACTED_BODY;
 
 /// Outcome of a trace-redaction policy decision for one header.
 #[derive(Clone, PartialEq, Eq)]
@@ -61,7 +62,8 @@ pub enum BodyRedactionDecision {
     Drop,
 }
 
-/// Policy hook consulted for headers and the body at the trace boundary.
+/// Policy hook consulted for the request target, headers, and body at the trace
+/// boundary.
 /// Implement for application-specific redaction (e.g. log Authorization
 /// headers as `Authorization: <redacted>`, drop `X-Customer-Token` entirely,
 /// and retain the safe default body decision).
@@ -79,40 +81,61 @@ pub trait TraceRedactor: Send + Sync + std::fmt::Debug {
     fn redact_body(&self, _content_type: Option<&str>) -> BodyRedactionDecision {
         BodyRedactionDecision::Redact
     }
+
+    /// Whether this policy deliberately permits a fully verbatim SIP trace,
+    /// including the Request-URI and body bytes.
+    ///
+    /// The safe additive default is `false`. Only controlled development or
+    /// operator policies should override it. Returning `true` also disables the
+    /// lower transport layer's defense-in-depth sanitizer.
+    fn allows_verbatim_trace(&self) -> bool {
+        false
+    }
 }
 
 /// Production-safe default trace policy.
 ///
 /// Authentication material, asserted identities, addressing fields that may
 /// carry PII, every application-defined header value, and every non-empty body
-/// are redacted. Common protocol-routing and capability headers remain
-/// available for diagnostics.
+/// are redacted. A deliberately small set of sequencing, framing, capability,
+/// and expiry headers remains available for diagnostics.
 #[derive(Clone, Debug, Default)]
 pub struct DefaultTraceRedactor;
 
 impl TraceRedactor for DefaultTraceRedactor {
     fn redact(&self, header: &HeaderName, _value: &str) -> RedactionDecision {
         match header {
-            HeaderName::Authorization
-            | HeaderName::ProxyAuthorization
-            | HeaderName::WwwAuthenticate
-            | HeaderName::ProxyAuthenticate
-            | HeaderName::AuthenticationInfo
-            | HeaderName::Identity
-            | HeaderName::PAssertedIdentity
-            | HeaderName::PPreferredIdentity
-            | HeaderName::From
-            | HeaderName::To
-            | HeaderName::Contact
-            | HeaderName::ReplyTo
-            | HeaderName::ReferTo
-            | HeaderName::ReferredBy
-            | HeaderName::Subject
-            | HeaderName::AlertInfo
-            | HeaderName::CallInfo
-            | HeaderName::ErrorInfo
-            | HeaderName::Other(_) => RedactionDecision::Redact("<redacted>".to_string()),
-            _ => RedactionDecision::Keep,
+            // Deliberately retained protocol sequencing, framing, capability,
+            // and expiry values. New typed headers fail closed in the branch
+            // below until they are explicitly reviewed.
+            HeaderName::CallId
+            | HeaderName::ContentLength
+            | HeaderName::ContentType
+            | HeaderName::CSeq
+            | HeaderName::MaxForwards
+            | HeaderName::Allow
+            | HeaderName::Expires
+            | HeaderName::MinExpires
+            | HeaderName::Supported
+            | HeaderName::RAck
+            | HeaderName::Accept
+            | HeaderName::AcceptEncoding
+            | HeaderName::ContentEncoding
+            | HeaderName::Require
+            | HeaderName::Timestamp
+            | HeaderName::Priority
+            | HeaderName::Date
+            | HeaderName::MimeVersion
+            | HeaderName::ProxyRequire
+            | HeaderName::Unsupported
+            | HeaderName::SessionExpires
+            | HeaderName::MinSE
+            | HeaderName::RSeq
+            | HeaderName::AllowEvents => RedactionDecision::Keep,
+            // Authentication, identities, addressing, routing, descriptive
+            // free text, opaque entity tags, and every application-defined
+            // header use a fixed non-reflective marker.
+            _ => RedactionDecision::Redact("<redacted>".to_string()),
         }
     }
 }
@@ -137,6 +160,10 @@ impl TraceRedactor for PassthroughRedactor {
 
     fn redact_body(&self, _content_type: Option<&str>) -> BodyRedactionDecision {
         BodyRedactionDecision::Keep
+    }
+
+    fn allows_verbatim_trace(&self) -> bool {
+        true
     }
 }
 
@@ -164,8 +191,10 @@ pub fn apply_redaction(
     }
 }
 
-/// Apply a `TraceRedactor` to a rendered SIP message, walking each
-/// header line and consulting the redactor per-header. Lines that the
+/// Apply a `TraceRedactor` to a rendered SIP message. Request targets use a
+/// fixed marker unless [`TraceRedactor::allows_verbatim_trace`] explicitly opts
+/// into development/operator output. Each header line then consults the
+/// redactor per-header. Lines that the
 /// redactor returns `Drop` for are omitted from the trace output; lines
 /// that return `Redact(replacement)` are rewritten to
 /// `<HeaderName>: <replacement>`; lines marked `Keep` pass through
@@ -195,11 +224,24 @@ pub fn apply_message_redactor(redactor: &dyn TraceRedactor, raw: &str) -> String
     let mut continuation = ContinuationDecision::None;
     let mut content_type = None;
     let mut offset = 0;
+    let mut first_line = true;
     for line in raw.split_inclusive('\n') {
         offset += line.len();
         // Strip the trailing newline for inspection so the parse logic
         // works on either CRLF or LF line endings.
         let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+        if first_line {
+            if redactor.allows_verbatim_trace() {
+                out.push_str(line);
+            } else {
+                out.push_str(
+                    &rvoip_infra_common::events::cross_crate::redact_sip_trace_start_line(trimmed),
+                );
+                push_line_ending(&mut out, line);
+            }
+            first_line = false;
+            continue;
+        }
         if trimmed.is_empty() {
             // Header/body boundary.
             out.push_str(line);

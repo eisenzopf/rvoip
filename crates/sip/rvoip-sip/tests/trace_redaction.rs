@@ -96,7 +96,7 @@ fn production_default_redacts_credentials_and_application_context() {
         .as_ref()
         .expect("Config defaults to an explicit safe redactor");
     let raw = concat!(
-        "MESSAGE sip:bob@example.com SIP/2.0\r\n",
+        "MESSAGE sip:uri-user:uri-password@example.com;opaque=uri-param-secret?X-Token=uri-query-secret SIP/2.0\r\n",
         "Authorization: Bearer credential-secret\r\n",
         "X-Bridgefu-Context: application-secret\r\n",
         "Call-ID: operational-call-id\r\n",
@@ -107,8 +107,20 @@ fn production_default_redacts_credentials_and_application_context() {
     assert!(scrubbed.contains("Authorization: <redacted>"));
     assert!(scrubbed.contains("X-Bridgefu-Context: <redacted>"));
     assert!(scrubbed.contains("Call-ID: operational-call-id"));
+    assert!(scrubbed.starts_with("MESSAGE <redacted-request-uri> SIP/2.0"));
     assert!(!scrubbed.contains("credential-secret"));
     assert!(!scrubbed.contains("application-secret"));
+    for secret in [
+        "uri-user",
+        "uri-password",
+        "uri-param-secret",
+        "uri-query-secret",
+    ] {
+        assert!(
+            !scrubbed.contains(secret),
+            "request target leaked: {secret}"
+        );
+    }
 
     let custom = HeaderName::Other("X-Context".into());
     assert_eq!(
@@ -118,10 +130,49 @@ fn production_default_redacts_credentials_and_application_context() {
 }
 
 #[test]
+fn production_default_uses_a_deliberate_typed_header_allowlist() {
+    for header in [
+        HeaderName::Authorization,
+        HeaderName::From,
+        HeaderName::To,
+        HeaderName::Contact,
+        HeaderName::Via,
+        HeaderName::Route,
+        HeaderName::RecordRoute,
+        HeaderName::UserAgent,
+        HeaderName::Reason,
+        HeaderName::SipETag,
+        HeaderName::Other("X-Application-Context".into()),
+    ] {
+        assert_eq!(
+            apply_redaction(None, &header, "typed-header-secret").as_deref(),
+            Some("<redacted>"),
+            "{header} unexpectedly escaped the safe default"
+        );
+    }
+    for header in [
+        HeaderName::CallId,
+        HeaderName::ContentLength,
+        HeaderName::ContentType,
+        HeaderName::CSeq,
+        HeaderName::MaxForwards,
+        HeaderName::Supported,
+    ] {
+        assert_eq!(
+            apply_redaction(None, &header, "operational-value").as_deref(),
+            Some("operational-value"),
+            "{header} should remain diagnostically useful"
+        );
+    }
+}
+
+#[test]
 fn passthrough_requires_explicit_development_configuration() {
     let config = Config::local("trace-development", 0).trace_passthrough_for_development();
     assert!(!config.sip_trace.redact_sensitive_headers);
+    assert!(config.sip_trace.include_body);
     let redactor = config.trace_redaction.as_ref().unwrap();
+    assert!(redactor.allows_verbatim_trace());
     let raw = "OPTIONS sip:bob@example.com SIP/2.0\r\nX-Context: visible-by-opt-in\r\n\r\n";
     assert_eq!(apply_message_redactor(redactor.as_ref(), raw), raw);
 }
@@ -297,7 +348,10 @@ impl TraceRedactor for ExplicitBodyKeepPolicy {
 #[test]
 fn custom_policy_must_explicitly_keep_body_bytes() {
     let raw = "MESSAGE sip:bob@example.com SIP/2.0\nContent-Type: text/plain\n\nexplicit-body";
-    assert_eq!(apply_message_redactor(&ExplicitBodyKeepPolicy, raw), raw);
+    let body_keep = apply_message_redactor(&ExplicitBodyKeepPolicy, raw);
+    assert!(body_keep.starts_with("MESSAGE <redacted-request-uri> SIP/2.0"));
+    assert!(body_keep.ends_with("explicit-body"));
+    assert!(!body_keep.contains("sip:bob@example.com"));
     let safe_custom = apply_message_redactor(&AuthRedactor, raw);
     assert!(safe_custom.ends_with(REDACTED_BODY_MARKER));
     assert!(!safe_custom.contains("explicit-body"));
@@ -340,9 +394,10 @@ fn default_trace_policy_redacts_identity_tokens_and_sdp_keying() {
     assert!(scrubbed.contains("Identity: <redacted>"));
     assert!(scrubbed.contains("P-Asserted-Identity: <redacted>"));
     assert!(scrubbed.contains("X-Carrier-Token: <redacted>"));
-    assert!(scrubbed.contains("a=crypto:<redacted>"));
-    assert!(scrubbed.contains("a=ice-pwd:<redacted>"));
-    assert!(scrubbed.contains("a=rtpmap:0 PCMU/8000"));
+    assert!(scrubbed.ends_with(REDACTED_BODY_MARKER));
+    assert!(!scrubbed.contains("a=crypto"));
+    assert!(!scrubbed.contains("a=ice-pwd"));
+    assert!(!scrubbed.contains("a=rtpmap"));
     assert!(!scrubbed.contains("deadbeef"));
     assert!(!scrubbed.contains("signed-passport"));
     assert!(!scrubbed.contains("carrier-secret-token"));

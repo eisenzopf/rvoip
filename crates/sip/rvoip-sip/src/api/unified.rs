@@ -1147,7 +1147,7 @@ impl Config {
         self.trace_redaction = Some(std::sync::Arc::new(
             crate::api::trace_redactor::PassthroughRedactor,
         ));
-        self.sip_trace.redact_sensitive_headers = false;
+        self.sip_trace = self.sip_trace.verbatim_for_development();
         self
     }
 
@@ -4006,6 +4006,16 @@ impl UnifiedCoordinator {
         // `PassthroughRedactor`; absence is never a credential-leaking mode.
         if config.trace_redaction.is_none() {
             config.trace_redaction = Some(crate::api::trace_redactor::default_trace_redactor());
+        }
+        if config
+            .trace_redaction
+            .as_ref()
+            .is_some_and(|redactor| redactor.allows_verbatim_trace())
+        {
+            // A verbatim trait policy is an explicit development/operator
+            // decision. Mirror it into the transport policy so the lower
+            // defense-in-depth sanitizer does not silently re-redact the trace.
+            config.sip_trace = config.sip_trace.verbatim_for_development();
         }
         config.validate()?;
         listener_auth_policy.validate()?;

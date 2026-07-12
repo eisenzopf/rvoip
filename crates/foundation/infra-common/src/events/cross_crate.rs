@@ -301,10 +301,16 @@ pub struct SipTraceConfig {
     pub enabled: bool,
     /// Suggested in-memory capacity for consumers that keep a trace ring.
     pub capacity: usize,
-    /// Whether authentication-bearing SIP headers should be redacted.
+    /// Whether SIP request targets and non-allowlisted header values should be
+    /// redacted.
+    ///
+    /// Disabling this is a sensitive development/operator override. Use
+    /// [`Self::verbatim_for_development`] to make that intent explicit.
     pub redact_sensitive_headers: bool,
-    /// Whether message bodies, including SDP, may be included after any
-    /// application trace-redaction policy is applied.
+    /// Whether the trace may retain a body after the active redaction policy is
+    /// applied. The safe redactor-less default emits only a fixed marker. A
+    /// custom policy must explicitly retain body bytes, while fully verbatim
+    /// built-in tracing also requires sensitive redaction to be disabled.
     pub include_body: bool,
 }
 
@@ -318,6 +324,17 @@ impl SipTraceConfig {
             enabled: true,
             ..Self::default()
         }
+    }
+
+    /// Explicitly permit verbatim request targets, headers, and included body
+    /// bytes for controlled development diagnostics.
+    ///
+    /// This can disclose credentials, application metadata, telephone numbers,
+    /// and SDP keying material. Production configurations must not select it.
+    pub fn verbatim_for_development(mut self) -> Self {
+        self.redact_sensitive_headers = false;
+        self.include_body = true;
+        self
     }
 }
 
@@ -398,6 +415,15 @@ impl SipTransportContext {
 /// Maximum rendered SIP message bytes kept in one trace event.
 pub const SIP_TRACE_MAX_MESSAGE_BYTES: usize = 64 * 1024;
 
+/// Fixed replacement for a request target in safe trace output.
+pub const SIP_TRACE_REDACTED_REQUEST_URI: &str = "<redacted-request-uri>";
+
+/// Fixed replacement for a non-allowlisted SIP header value.
+pub const SIP_TRACE_REDACTED_HEADER_VALUE: &str = "<redacted>";
+
+/// Fixed replacement for a non-empty SIP message body.
+pub const SIP_TRACE_REDACTED_BODY: &str = "<redacted body>";
+
 /// Apply trace policy to a rendered SIP message.
 pub fn format_sip_trace_message(raw: &str, config: &SipTraceConfig) -> (String, bool) {
     let original_len = raw.len();
@@ -418,14 +444,69 @@ pub fn format_sip_trace_message(raw: &str, config: &SipTraceConfig) -> (String, 
     )
 }
 
-/// Redact auth-bearing and identity-bearing SIP headers plus SDP keying
-/// material while preserving all other lines.
+/// Apply the configured trace policy to a separately retained SIP start line.
+///
+/// Request methods and the SIP version remain visible, while the complete
+/// Request-URI is replaced. Response status lines contain no Request-URI and
+/// pass through unchanged. Verbatim request targets require sensitive
+/// redaction to be explicitly disabled.
+pub fn format_sip_trace_start_line(start_line: &str, config: &SipTraceConfig) -> String {
+    if config.redact_sensitive_headers {
+        redact_sip_trace_start_line(start_line)
+    } else {
+        start_line.to_string()
+    }
+}
+
+/// Replace the complete Request-URI in a rendered SIP start line.
+///
+/// Malformed non-response start lines fail closed to a fixed marker so parser
+/// errors cannot reflect attacker-controlled text into diagnostics.
+pub fn redact_sip_trace_start_line(start_line: &str) -> String {
+    if start_line.bytes().any(|byte| matches!(byte, b'\r' | b'\n')) {
+        return "<redacted start line>".to_string();
+    }
+    let mut fields = start_line.split_ascii_whitespace();
+    let first = fields.next();
+    if first.is_some_and(|version| version.eq_ignore_ascii_case("SIP/2.0")) {
+        return start_line.to_string();
+    }
+    let second = fields.next();
+    let third = fields.next();
+    let extra = fields.next();
+
+    match (first, second, third, extra) {
+        (Some(method), Some(_request_uri), Some(version), None)
+            if version.eq_ignore_ascii_case("SIP/2.0") =>
+        {
+            format!("{method} {SIP_TRACE_REDACTED_REQUEST_URI} {version}")
+        }
+        _ => "<redacted start line>".to_string(),
+    }
+}
+
+/// Produce a safe diagnostic rendering of a SIP message.
+///
+/// The Request-URI, every non-allowlisted header value, folded continuations
+/// belonging to redacted headers, and every non-empty body are replaced with
+/// fixed markers. This is intentionally conservative: new or application
+/// headers are redacted until they are deliberately added to the allowlist.
+/// It operates only on a diagnostic string and never changes wire bytes.
 pub fn redact_sip_message(raw: &str) -> String {
+    let normalized = normalize_line_endings(raw);
     let mut in_headers = true;
+    let mut first_line = true;
+    let mut redact_continuation = false;
+    let mut body_redacted = false;
     let mut redacted = Vec::new();
 
-    for line in raw.lines() {
+    for line in normalized.lines() {
         let trimmed = line.trim_end_matches('\r');
+        if first_line {
+            redacted.push(redact_sip_trace_start_line(trimmed));
+            first_line = false;
+            continue;
+        }
         if in_headers && trimmed.is_empty() {
             in_headers = false;
             redacted.push(String::new());
@@ -433,17 +514,39 @@ pub fn redact_sip_message(raw: &str) -> String {
         }
 
         if in_headers {
+            if matches!(trimmed.as_bytes().first(), Some(b' ' | b'\t')) {
+                if redact_continuation {
+                    let leading_whitespace_len =
+                        trimmed.len().saturating_sub(trimmed.trim_start().len());
+                    redacted.push(format!(
+                        "{}{SIP_TRACE_REDACTED_HEADER_VALUE}",
+                        &trimmed[..leading_whitespace_len]
+                    ));
+                } else {
+                    redacted.push(trimmed.to_string());
+                }
+                continue;
+            }
             if let Some((name, _value)) = trimmed.split_once(':') {
-                if is_sensitive_sip_header(name) {
-                    redacted.push(format!("{}: <redacted>", name.trim()));
+                redact_continuation = !is_safe_sip_trace_header(name);
+                if redact_continuation {
+                    redacted.push(format!(
+                        "{}: {SIP_TRACE_REDACTED_HEADER_VALUE}",
+                        name.trim()
+                    ));
                     continue;
                 }
-            }
-        } else if is_sensitive_sdp_line(trimmed) {
-            if let Some((name, _value)) = trimmed.split_once(':') {
-                redacted.push(format!("{}:<redacted>", name.trim()));
             } else {
-                redacted.push("<redacted>".to_string());
+                // A rendered SIP message should contain only the start line and
+                // `name: value` header lines. Fail closed for malformed input.
+                redact_continuation = true;
+                redacted.push(SIP_TRACE_REDACTED_HEADER_VALUE.to_string());
+                continue;
+            }
+        } else {
+            if !body_redacted {
+                redacted.push(SIP_TRACE_REDACTED_BODY.to_string());
+                body_redacted = true;
             }
             continue;
         }
@@ -470,30 +573,46 @@ fn strip_sip_body(raw: &str) -> String {
     }
 }
 
-fn is_sensitive_sip_header(name: &str) -> bool {
+/// Whether a free-text SIP header name is deliberately safe to retain in
+/// production trace output.
+///
+/// Values of every unlisted or application-defined header are redacted. Keep
+/// this allowlist synchronized with the typed policy in `rvoip-sip`.
+pub fn is_safe_sip_trace_header(name: &str) -> bool {
     let name = name.trim().to_ascii_lowercase();
     matches!(
         name.as_str(),
-        "authorization"
-            | "proxy-authorization"
-            | "www-authenticate"
-            | "proxy-authenticate"
-            | "cookie"
-            | "set-cookie"
-            | "identity"
-            | "p-asserted-identity"
-            | "p-preferred-identity"
-    ) || name.contains("token")
-        || name.contains("secret")
-        || name.contains("credential")
-        || name.contains("api-key")
-}
-
-fn is_sensitive_sdp_line(line: &str) -> bool {
-    let lower = line.trim_start().to_ascii_lowercase();
-    lower.starts_with("a=crypto:")
-        || lower.starts_with("a=ice-pwd:")
-        || lower.starts_with("a=identity:")
+        "call-id"
+            | "i"
+            | "content-length"
+            | "l"
+            | "content-type"
+            | "c"
+            | "cseq"
+            | "max-forwards"
+            | "allow"
+            | "expires"
+            | "min-expires"
+            | "supported"
+            | "k"
+            | "rack"
+            | "accept"
+            | "accept-encoding"
+            | "content-encoding"
+            | "e"
+            | "require"
+            | "timestamp"
+            | "priority"
+            | "date"
+            | "mime-version"
+            | "proxy-require"
+            | "unsupported"
+            | "session-expires"
+            | "min-se"
+            | "rseq"
+            | "allow-events"
+            | "u"
+    )
 }
 
 fn truncate_at_char_boundary(raw: &str, max_bytes: usize) -> (String, bool) {
@@ -1985,8 +2104,11 @@ mod tests {
 
         assert!(redacted.contains("Authorization: <redacted>"));
         assert!(redacted.contains("Proxy-Authorization: <redacted>"));
-        assert!(redacted.contains("Via: SIP/2.0/UDP 127.0.0.1:5060"));
-        assert!(redacted.contains("body"));
+        assert!(redacted.contains("Via: <redacted>"));
+        assert!(redacted.contains(SIP_TRACE_REDACTED_BODY));
+        assert!(redacted.contains(&format!("INVITE {SIP_TRACE_REDACTED_REQUEST_URI} SIP/2.0")));
+        assert!(!redacted.contains("sip:bob@example.com"));
+        assert!(!redacted.contains("\nbody"));
         assert!(!redacted.contains("secret"));
         assert!(!redacted.contains("proxy-secret"));
     }
@@ -2014,9 +2136,10 @@ mod tests {
         assert!(redacted.contains("P-Asserted-Identity: <redacted>"));
         assert!(redacted.contains("X-Customer-Token: <redacted>"));
         assert!(redacted.contains("Cookie: <redacted>"));
-        assert!(redacted.contains("a=crypto:<redacted>"));
-        assert!(redacted.contains("a=ice-pwd:<redacted>"));
-        assert!(redacted.contains("a=rtpmap:0 PCMU/8000"));
+        assert!(redacted.ends_with(SIP_TRACE_REDACTED_BODY));
+        assert!(!redacted.contains("a=crypto"));
+        assert!(!redacted.contains("a=ice-pwd"));
+        assert!(!redacted.contains("a=rtpmap"));
         assert!(!redacted.contains("tenant-token-123"));
         assert!(!redacted.contains("super-secret-cookie"));
         assert!(!redacted.contains("keying-material"));
@@ -2043,5 +2166,87 @@ mod tests {
         assert!(!truncated);
         assert!(message.contains("Authorization: Digest response=\"secret\""));
         assert!(!message.contains("private body"));
+    }
+
+    #[test]
+    fn safe_trace_format_redacts_target_folds_application_headers_and_body() {
+        let raw = concat!(
+            "MESSAGE sip:uri-user:uri-password@example.test;uri-param=param-secret?X-Token=query-secret SIP/2.0\r\n",
+            "Authorization: Digest first-auth-secret\r\n",
+            "\tsecond-auth-secret\r\n",
+            "X-Bridgefu-Context: application-secret\r\n",
+            " application-fold-secret\r\n",
+            "Call-ID: operational-call-id\r\n",
+            "Supported: timer,\r\n",
+            "\tpath\r\n",
+            "Content-Type: application/json\r\n",
+            "\r\n",
+            "{\"token\":\"body-secret\"}",
+        );
+
+        let (message, truncated) = format_sip_trace_message(raw, &SipTraceConfig::enabled());
+
+        assert!(!truncated);
+        assert!(message.starts_with(&format!(
+            "MESSAGE {SIP_TRACE_REDACTED_REQUEST_URI} SIP/2.0\n"
+        )));
+        assert!(message.contains("Authorization: <redacted>\n\t<redacted>"));
+        assert!(message.contains("X-Bridgefu-Context: <redacted>\n <redacted>"));
+        assert!(message.contains("Call-ID: operational-call-id"));
+        assert!(message.contains("Supported: timer,\n\tpath"));
+        assert!(message.ends_with(SIP_TRACE_REDACTED_BODY));
+        for secret in [
+            "uri-user",
+            "uri-password",
+            "param-secret",
+            "query-secret",
+            "first-auth-secret",
+            "second-auth-secret",
+            "application-secret",
+            "application-fold-secret",
+            "body-secret",
+        ] {
+            assert!(!message.contains(secret), "trace secret leaked: {secret}");
+        }
+        assert_eq!(
+            redact_sip_trace_start_line("SIP/2.0 486 Busy Here"),
+            "SIP/2.0 486 Busy Here"
+        );
+        assert_eq!(
+            redact_sip_trace_start_line("malformed secret start line"),
+            "<redacted start line>"
+        );
+        assert_eq!(
+            redact_sip_trace_start_line("SIP/2.0 200 OK\r\nAuthorization: injected-secret"),
+            "<redacted start line>"
+        );
+        let bare_cr = redact_sip_message(
+            "SIP/2.0 200 OK\rAuthorization: bare-cr-secret\r\rprivate-body-secret",
+        );
+        assert!(!bare_cr.contains("bare-cr-secret"));
+        assert!(!bare_cr.contains("private-body-secret"));
+    }
+
+    #[test]
+    fn verbatim_trace_requires_explicit_development_override() {
+        let raw = concat!(
+            "MESSAGE sip:visible-user@example.test;token=visible-param SIP/2.0\r\n",
+            "X-Context: visible-header\r\n",
+            "Content-Type: text/plain\r\n",
+            "\r\n",
+            "visible-body",
+        );
+        let config = SipTraceConfig::enabled().verbatim_for_development();
+
+        let (message, truncated) = format_sip_trace_message(raw, &config);
+
+        assert!(!truncated);
+        assert!(message.contains("sip:visible-user@example.test;token=visible-param"));
+        assert!(message.contains("X-Context: visible-header"));
+        assert!(message.contains("visible-body"));
+        assert_eq!(
+            format_sip_trace_start_line("MESSAGE sip:visible-user@example.test SIP/2.0", &config,),
+            "MESSAGE sip:visible-user@example.test SIP/2.0"
+        );
     }
 }
