@@ -234,6 +234,58 @@ async fn wait_for_connection_principal(orchestrator: &Orchestrator, connection_i
 }
 
 #[tokio::test]
+async fn atomic_authenticated_inbound_handoff_preserves_legacy_normalized_order() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let (adapter, adapter_tx, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let mut events = orchestrator.subscribe_events();
+
+    let connection = fake_inbound_connection();
+    let connection_id = connection.id.clone();
+    let owner = authenticated_principal("tenant-a");
+    adapter.mark_live(connection_id.clone());
+    adapter.set_inbound_context(
+        InboundConnectionContext::new(
+            connection_id.clone(),
+            Transport::Sip,
+            &owner,
+            Some(InboundRoutingHint::new("atomic-attachment").unwrap()),
+            InboundSignalingMetadata::default(),
+        )
+        .unwrap(),
+    );
+    adapter_tx
+        .send(AdapterEvent::AuthenticatedInboundConnection {
+            connection,
+            participant_id: "participant-a".into(),
+            principal: owner.clone(),
+        })
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        Event::ConnectionInbound { connection_id: id, .. } if id == connection_id
+    ));
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        Event::ConnectionAuthenticated { connection_id: id, .. } if id == connection_id
+    ));
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        Event::ConnectionPrincipalAuthenticated { connection_id: id, .. } if id == connection_id
+    ));
+    let context = orchestrator
+        .take_inbound_context(&connection_id, &owner)
+        .unwrap()
+        .expect("atomic handoff retained context");
+    assert_eq!(
+        context.routing_hint().unwrap().expose_secret(),
+        "atomic-attachment"
+    );
+}
+
+#[tokio::test]
 async fn inbound_context_is_owner_bound_single_take_and_erased_on_terminal() {
     let orchestrator = Orchestrator::new(Config::default());
     let (adapter, adapter_tx, _) = StubAdapter::new();

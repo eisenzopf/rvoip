@@ -89,8 +89,10 @@ pub use rvoip_sip_dialog::api::RelUsage;
 
 const MAX_INBOUND_INVITE_OBSERVERS: usize = 16;
 
-/// Parsed, authenticated inbound INVITE material exposed only to internal
-/// adapter observers before the public `IncomingCall` event is published.
+/// Authenticated inbound INVITE material exposed only to internal adapter
+/// observers before the public `IncomingCall` event is published. `request`
+/// is absent when the compatibility event did not retain parseable raw bytes;
+/// the authenticated principal is still delivered atomically in that case.
 ///
 /// This deliberately bypasses `SessionRegistry::pending_incoming_request`,
 /// whose compatibility slot is not keyed by session and therefore is unsafe
@@ -98,7 +100,7 @@ const MAX_INBOUND_INVITE_OBSERVERS: usize = 16;
 #[derive(Clone)]
 pub(crate) struct InboundInviteObservation {
     pub(crate) session_id: SessionId,
-    pub(crate) request: Arc<Request>,
+    pub(crate) request: Option<Arc<Request>>,
     pub(crate) principal: Option<rvoip_core_traits::identity::AuthenticatedPrincipal>,
 }
 
@@ -2900,6 +2902,14 @@ impl UnifiedCoordinator {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&observer_id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inbound_invite_observer_count(&self) -> usize {
+        self.inbound_invite_observers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
     }
 
     pub(crate) fn notify_inbound_invite_observers(&self, observation: InboundInviteObservation) {

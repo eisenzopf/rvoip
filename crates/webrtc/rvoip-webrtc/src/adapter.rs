@@ -11,9 +11,10 @@ use chrono::Utc;
 use dashmap::DashMap;
 use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
 use rvoip_core::adapter::{
-    AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason,
-    InboundConnectionContext, InboundRoutingHint, InboundSignalingMetadata, OriginateRequest,
-    RejectReason, SignatureHeaders, TransferTarget,
+    AdapterEvent, AdapterKind, AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter,
+    ConnectionHandle, EndReason, InboundConnectionContext, InboundContextError, InboundRoutingHint,
+    InboundSignalingMetadata, OriginateRequest, RejectReason, SignatureHeaders, TerminalDelivery,
+    TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
@@ -41,6 +42,7 @@ const OUTBOUND_MESSAGE_CHANNEL_LABEL: &str = "rvoip-messages";
 const MAX_DATA_CHANNELS_PER_ROUTE: usize = 64;
 const DATA_CHANNEL_SCAN_INTERVAL: Duration = Duration::from_millis(25);
 const DATA_CHANNEL_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
+const INBOUND_EVENT_DELIVERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Background reaper poll interval.
 const REAPER_TICK: Duration = Duration::from_secs(30);
@@ -202,6 +204,7 @@ pub struct WebRtcAdapter {
     routes: Arc<DashMap<ConnectionId, Route>>,
     events_tx: mpsc::Sender<AdapterEvent>,
     events_rx: StdMutex<Option<mpsc::Receiver<AdapterEvent>>>,
+    lifecycle: AdapterLifecycleSinkSlot,
     /// Cancel for the global reaper task spawned in [`WebRtcAdapter::new`].
     reaper_cancel: Arc<Notify>,
     metrics_inbound: Arc<AtomicU64>,
@@ -230,6 +233,7 @@ impl WebRtcAdapter {
             routes: Arc::new(DashMap::new()),
             events_tx,
             events_rx: StdMutex::new(Some(events_rx)),
+            lifecycle: AdapterLifecycleSinkSlot::default(),
             reaper_cancel: Arc::clone(&reaper_cancel),
             metrics_inbound: Arc::new(AtomicU64::new(0)),
             metrics_outbound: Arc::new(AtomicU64::new(0)),
@@ -246,6 +250,7 @@ impl WebRtcAdapter {
         if ttl_secs > 0 {
             let routes = Arc::clone(&adapter.routes);
             let events_tx = adapter.events_tx.clone();
+            let lifecycle = adapter.lifecycle.clone();
             let live = Arc::clone(&adapter.live_sessions);
             tokio::spawn(async move {
                 Self::run_reaper(
@@ -255,6 +260,7 @@ impl WebRtcAdapter {
                     ttl_secs,
                     metrics_reaped,
                     live,
+                    lifecycle,
                 )
                 .await;
             });
@@ -504,15 +510,15 @@ impl WebRtcAdapter {
 
     /// Decrement the live-session counter (called when a route is removed).
     fn release_session_slot(&self) {
+        Self::release_session_slot_from(&self.live_sessions);
+    }
+
+    fn release_session_slot_from(live_sessions: &std::sync::atomic::AtomicUsize) {
         // saturating sub so a double-release can't underflow.
-        let mut cur = self.live_sessions.load(Ordering::Acquire);
+        let mut cur = live_sessions.load(Ordering::Acquire);
         while cur > 0 {
-            match self.live_sessions.compare_exchange(
-                cur,
-                cur - 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
+            match live_sessions.compare_exchange(cur, cur - 1, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => return,
                 Err(actual) => cur = actual,
             }
@@ -610,6 +616,39 @@ impl WebRtcAdapter {
     fn try_send(&self, event: AdapterEvent) {
         if self.events_tx.try_send(event).is_err() {
             warn!("WebRtcAdapter event channel full or closed");
+        }
+    }
+
+    async fn send_inbound_event(&self, event: AdapterEvent) -> bool {
+        Self::send_inbound_event_to(&self.events_tx, event).await
+    }
+
+    async fn send_inbound_event_to(
+        events_tx: &mpsc::Sender<AdapterEvent>,
+        event: AdapterEvent,
+    ) -> bool {
+        match tokio::time::timeout(INBOUND_EVENT_DELIVERY_TIMEOUT, events_tx.send(event)).await {
+            Ok(Ok(())) => true,
+            Ok(Err(_)) => {
+                warn!("WebRtcAdapter inbound event channel closed");
+                false
+            }
+            Err(_) => {
+                warn!("WebRtcAdapter inbound event delivery timed out");
+                false
+            }
+        }
+    }
+
+    async fn deliver_terminal_event(
+        lifecycle: &AdapterLifecycleSinkSlot,
+        events_tx: &mpsc::Sender<AdapterEvent>,
+        event: AdapterEvent,
+        source: &'static str,
+    ) {
+        let delivery = lifecycle.queue_or_deliver_terminal(events_tx, event).await;
+        if delivery == TerminalDelivery::Undeliverable {
+            warn!(source, "WebRtcAdapter terminal event was undeliverable");
         }
     }
 
@@ -1197,18 +1236,25 @@ impl WebRtcAdapter {
 
         let routes_fail = Arc::clone(&self.routes);
         let events_fail = self.events_tx.clone();
+        let lifecycle_fail = self.lifecycle.clone();
+        let live_sessions_fail = Arc::clone(&self.live_sessions);
         let conn_fail = conn_id.clone();
         let peer_fail = route.peer.clone();
         tokio::spawn(async move {
             peer_fail.wait_failed().await;
             if let Some((_, route)) = routes_fail.remove(&conn_fail) {
                 route.cancel_tasks();
-                let _ = events_fail
-                    .send(AdapterEvent::Failed {
+                Self::release_session_slot_from(&live_sessions_fail);
+                Self::deliver_terminal_event(
+                    &lifecycle_fail,
+                    &events_fail,
+                    AdapterEvent::Failed {
                         connection_id: conn_fail,
                         detail: "peer connection failed".into(),
-                    })
-                    .await;
+                    },
+                    "peer-failure",
+                )
+                .await;
             }
         });
         self.routes.insert(conn_id, route);
@@ -1229,6 +1275,7 @@ impl WebRtcAdapter {
         ttl_secs: u64,
         reaped_counter: Arc<AtomicU64>,
         live_sessions: Arc<std::sync::atomic::AtomicUsize>,
+        lifecycle: AdapterLifecycleSinkSlot,
     ) {
         let ttl = Duration::from_secs(ttl_secs);
         loop {
@@ -1250,25 +1297,17 @@ impl WebRtcAdapter {
                 if let Some((_, route)) = routes.remove(&id) {
                     route.cancel_tasks();
                     let _ = route.peer.close().await;
-                    // Mirror release_session_slot inline (we don't have &self here).
-                    let mut cur = live_sessions.load(Ordering::Acquire);
-                    while cur > 0 {
-                        match live_sessions.compare_exchange(
-                            cur,
-                            cur - 1,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        ) {
-                            Ok(_) => break,
-                            Err(actual) => cur = actual,
-                        }
-                    }
-                    let _ = events_tx
-                        .send(AdapterEvent::Ended {
+                    Self::release_session_slot_from(&live_sessions);
+                    Self::deliver_terminal_event(
+                        &lifecycle,
+                        &events_tx,
+                        AdapterEvent::Ended {
                             connection_id: id,
                             reason: EndReason::Normal,
-                        })
-                        .await;
+                        },
+                        "session-reaper",
+                    )
+                    .await;
                     reaped_counter.fetch_add(1, Ordering::Relaxed);
                     debug!("session reaper removed idle/failed route");
                 }
@@ -1310,6 +1349,34 @@ impl WebRtcAdapter {
             .await
     }
 
+    fn authenticated_inbound_context(
+        connection_id: ConnectionId,
+        authorization: &RouteAuthorization,
+        routing_hint: Option<InboundRoutingHint>,
+    ) -> Result<Option<InboundConnectionContext>> {
+        authorization.ensure_active()?;
+        let Some(principal) = authorization.principal.as_ref() else {
+            return Ok(None);
+        };
+        InboundConnectionContext::new(
+            connection_id,
+            Transport::WebRtc,
+            principal,
+            routing_hint,
+            InboundSignalingMetadata::default(),
+        )
+        .map(Some)
+        .map_err(|error| match error {
+            InboundContextError::MissingTenant => {
+                WebRtcError::Unauthorized("authenticated principal has no tenant".into())
+            }
+            InboundContextError::ExpiredPrincipal => {
+                WebRtcError::Unauthorized("authenticated principal has expired".into())
+            }
+            _ => WebRtcError::Signaling("authenticated inbound routing context is invalid".into()),
+        })
+    }
+
     async fn apply_remote_offer_inner(
         &self,
         offer_sdp: &str,
@@ -1332,19 +1399,16 @@ impl WebRtcAdapter {
 
         let cancel = Arc::new(Notify::new());
         let (data_cancel, _) = watch::channel(false);
-        let inbound_context = authorization
-            .as_ref()
-            .and_then(|authorization| authorization.principal.as_ref())
-            .and_then(|principal| {
-                InboundConnectionContext::new(
-                    conn_id.clone(),
-                    Transport::WebRtc,
-                    principal,
-                    routing_hint,
-                    InboundSignalingMetadata::default(),
-                )
-                .ok()
-            });
+        // SDP parsing, fingerprint policy, PeerConnection construction, and
+        // ICE gathering can outlive a short-lived access token. Revalidate at
+        // the publication boundary and propagate context failures rather than
+        // creating a route the now-expired owner cannot update or delete.
+        let inbound_context = match authorization.as_ref() {
+            Some(authorization) => {
+                Self::authenticated_inbound_context(conn_id.clone(), authorization, routing_hint)?
+            }
+            None => None,
+        };
         let route = Route {
             peer: Arc::clone(&peer),
             streams: Arc::new(DashMap::new()),
@@ -1377,13 +1441,26 @@ impl WebRtcAdapter {
         let connection =
             self.build_connection(conn_id.clone(), Direction::Inbound, negotiated, handle);
         let participant_id = connection.participant_id.clone();
-        self.try_send(AdapterEvent::InboundConnection { connection });
-        if let Some(principal) = authorization.and_then(|value| value.principal) {
-            self.try_send(AdapterEvent::PrincipalAuthenticated {
-                connection_id: conn_id.clone(),
+        let delivered = if let Some(principal) = authorization.and_then(|value| value.principal) {
+            self.send_inbound_event(AdapterEvent::AuthenticatedInboundConnection {
+                connection,
                 participant_id: participant_id.to_string(),
                 principal,
-            });
+            })
+            .await
+        } else {
+            self.send_inbound_event(AdapterEvent::InboundConnection { connection })
+                .await
+        };
+        if !delivered {
+            if let Some((_, route)) = self.routes.remove(&conn_id) {
+                route.cancel_tasks();
+                let _ = route.peer.close().await;
+                self.release_session_slot();
+            }
+            return Err(WebRtcError::Signaling(
+                "authenticated inbound event delivery failed".into(),
+            ));
         }
 
         Ok(conn_id)
@@ -1569,6 +1646,12 @@ impl ConnectionAdapter for WebRtcAdapter {
         AdapterKind::Interop
     }
 
+    fn install_lifecycle_sink(&self, sink: Arc<dyn AdapterLifecycleSink>) -> RvoipResult<()> {
+        self.lifecycle
+            .install(sink)
+            .map_err(|_| RvoipError::InvalidState("WebRTC lifecycle sink already installed"))
+    }
+
     fn is_connection_live(&self, conn: &ConnectionId) -> bool {
         self.routes.contains_key(conn)
     }
@@ -1691,10 +1774,16 @@ impl ConnectionAdapter for WebRtcAdapter {
             route.peer.close().await.ok();
             self.release_session_slot();
         }
-        self.try_send(AdapterEvent::Failed {
-            connection_id: conn,
-            detail: "rejected".into(),
-        });
+        Self::deliver_terminal_event(
+            &self.lifecycle,
+            &self.events_tx,
+            AdapterEvent::Failed {
+                connection_id: conn,
+                detail: "rejected".into(),
+            },
+            "reject",
+        )
+        .await;
         Ok(())
     }
 
@@ -1706,10 +1795,16 @@ impl ConnectionAdapter for WebRtcAdapter {
             self.release_session_slot();
             info!(conn = %conn, "ended");
         }
-        self.try_send(AdapterEvent::Ended {
-            connection_id: conn,
-            reason,
-        });
+        Self::deliver_terminal_event(
+            &self.lifecycle,
+            &self.events_tx,
+            AdapterEvent::Ended {
+                connection_id: conn,
+                reason,
+            },
+            "end",
+        )
+        .await;
         Ok(())
     }
 
@@ -2046,4 +2141,174 @@ pub async fn export_local_sdp(peer: &Arc<RvoipPeerConnection>) -> Result<String>
         .await
         .ok_or_else(|| WebRtcError::Sdp("no local description".into()))?;
     sdp_to_string(&desc)
+}
+
+#[cfg(test)]
+mod inbound_hardening_tests {
+    use super::*;
+    use rvoip_core::identity::{AuthenticationMethod, CredentialKind};
+    use std::sync::atomic::AtomicUsize;
+
+    struct RecordingLifecycleSink {
+        deliveries: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AdapterLifecycleSink for RecordingLifecycleSink {
+        async fn deliver_terminal(&self, _event: AdapterEvent) {
+            self.deliveries.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn principal(
+        tenant: Option<&str>,
+        expires_at: Option<chrono::DateTime<Utc>>,
+    ) -> AuthenticatedPrincipal {
+        AuthenticatedPrincipal {
+            subject: "webrtc-owner".into(),
+            tenant: tenant.map(str::to_owned),
+            scopes: vec!["webrtc:connect".into()],
+            issuer: Some("webrtc-hardening-test".into()),
+            expires_at,
+            method: AuthenticationMethod::Jwt,
+            assurance: IdentityAssurance::Identified {
+                credential_kind: CredentialKind::Oidc,
+            },
+        }
+    }
+
+    fn inbound_connection(connection_id: ConnectionId) -> Connection {
+        Connection {
+            id: connection_id,
+            session_id: rvoip_core::ids::SessionId::new(),
+            participant_id: rvoip_core::ids::ParticipantId::new(),
+            transport: Transport::WebRtc,
+            direction: Direction::Inbound,
+            state: ConnectionState::Connecting,
+            capabilities: CapabilityDescriptor::default(),
+            negotiated_codecs: NegotiatedCodecs::default(),
+            streams: Vec::new(),
+            messaging_enabled: false,
+            transport_handle: TransportHandle(Arc::new(())),
+            opened_at: Utc::now(),
+            closed_at: None,
+        }
+    }
+
+    #[test]
+    fn publication_boundary_rejects_tenantless_and_newly_expired_principals() {
+        let connection_id = ConnectionId::new();
+        let tenantless = RouteAuthorization::principal(principal(None, None));
+        assert!(matches!(
+            WebRtcAdapter::authenticated_inbound_context(
+                connection_id.clone(),
+                &tenantless,
+                Some(InboundRoutingHint::new("tenantless").unwrap()),
+            ),
+            Err(WebRtcError::Unauthorized(detail)) if detail == "authenticated principal has no tenant"
+        ));
+
+        let expires_at = Utc::now() + chrono::Duration::milliseconds(5);
+        let expiring = RouteAuthorization::principal(principal(Some("tenant-a"), Some(expires_at)));
+        expiring.ensure_active().expect("principal starts active");
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(matches!(
+            WebRtcAdapter::authenticated_inbound_context(
+                connection_id,
+                &expiring,
+                Some(InboundRoutingHint::new("expired-after-gather").unwrap()),
+            ),
+            Err(WebRtcError::Unauthorized(detail)) if detail == "authenticated principal has expired"
+        ));
+    }
+
+    #[tokio::test]
+    async fn authenticated_inbound_event_is_one_bounded_queue_item() {
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+        events_tx
+            .send(AdapterEvent::Native {
+                kind: "queue-filler",
+                detail: String::new(),
+            })
+            .await
+            .unwrap();
+        let connection_id = ConnectionId::new();
+        let event = AdapterEvent::AuthenticatedInboundConnection {
+            connection: inbound_connection(connection_id.clone()),
+            participant_id: "webrtc-owner".into(),
+            principal: principal(Some("tenant-a"), None),
+        };
+        let sender = events_tx.clone();
+        let send =
+            tokio::spawn(async move { WebRtcAdapter::send_inbound_event_to(&sender, event).await });
+        tokio::task::yield_now().await;
+        assert!(
+            !send.is_finished(),
+            "full queue applies bounded backpressure"
+        );
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(AdapterEvent::Native { .. })
+        ));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(AdapterEvent::AuthenticatedInboundConnection { connection, principal, .. })
+                if connection.id == connection_id && principal.tenant.as_deref() == Some("tenant-a")
+        ));
+        assert!(send.await.unwrap());
+        assert!(matches!(
+            events_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn saturated_and_closed_terminal_queues_fallback_exactly_once() {
+        let lifecycle = AdapterLifecycleSinkSlot::default();
+        let sink = Arc::new(RecordingLifecycleSink {
+            deliveries: AtomicUsize::new(0),
+        });
+        assert!(lifecycle.install(sink.clone()).is_ok());
+
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+        events_tx
+            .send(AdapterEvent::Native {
+                kind: "queue-filler",
+                detail: String::new(),
+            })
+            .await
+            .unwrap();
+        WebRtcAdapter::deliver_terminal_event(
+            &lifecycle,
+            &events_tx,
+            AdapterEvent::Ended {
+                connection_id: ConnectionId::new(),
+                reason: EndReason::Normal,
+            },
+            "test-full",
+        )
+        .await;
+        assert_eq!(sink.deliveries.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(AdapterEvent::Native { .. })
+        ));
+        assert!(matches!(
+            events_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        drop(events_rx);
+        WebRtcAdapter::deliver_terminal_event(
+            &lifecycle,
+            &events_tx,
+            AdapterEvent::Failed {
+                connection_id: ConnectionId::new(),
+                detail: "closed".into(),
+            },
+            "test-closed",
+        )
+        .await;
+        assert_eq!(sink.deliveries.load(Ordering::SeqCst), 2);
+    }
 }

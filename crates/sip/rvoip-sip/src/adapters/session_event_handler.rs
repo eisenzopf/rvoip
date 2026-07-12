@@ -1901,6 +1901,7 @@ impl SessionCrossCrateEventHandler {
             // after the fast 200 OK path has completed, but before app
             // observation events are published. Failure to parse is never
             // fatal — we fall back to the legacy headers-only path.
+            let mut observed_request = None;
             if let Some(bytes) = raw_request.as_ref() {
                 match rvoip_sip_core::parse_message(bytes.as_ref()) {
                     Ok(rvoip_sip_core::Message::Request(req)) => {
@@ -1908,17 +1909,7 @@ impl SessionCrossCrateEventHandler {
                         self.registry
                             .store_pending_incoming_request(Arc::clone(&req))
                             .await;
-                        if let Some(coordinator) =
-                            self.coordinator.get().and_then(|weak| weak.upgrade())
-                        {
-                            coordinator.notify_inbound_invite_observers(
-                                crate::api::unified::InboundInviteObservation {
-                                    session_id: session_id.clone(),
-                                    request: req,
-                                    principal: authenticated_principal.clone(),
-                                },
-                            );
-                        }
+                        observed_request = Some(req);
                     }
                     Ok(_) => {
                         tracing::warn!(
@@ -1935,6 +1926,15 @@ impl SessionCrossCrateEventHandler {
                         );
                     }
                 }
+            }
+            if let Some(coordinator) = self.coordinator.get().and_then(|weak| weak.upgrade()) {
+                coordinator.notify_inbound_invite_observers(
+                    crate::api::unified::InboundInviteObservation {
+                        session_id: session_id.clone(),
+                        request: observed_request,
+                        principal: authenticated_principal.clone(),
+                    },
+                );
             }
             self.registry
                 .store_pending_incoming_transport(sip_transport_context(&transport))

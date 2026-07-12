@@ -14,9 +14,10 @@ use crate::SessionId;
 use chrono::Utc;
 use dashmap::DashMap;
 use rvoip_core::adapter::{
-    AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason,
-    InboundConnectionContext, InboundContextError, InboundRoutingHint, InboundSignalingMetadata,
-    OriginateRequest, RejectReason, SignatureHeaders, TransferTarget,
+    AdapterEvent, AdapterKind, AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter,
+    ConnectionHandle, EndReason, InboundConnectionContext, InboundContextError, InboundRoutingHint,
+    InboundSignalingMetadata, OriginateRequest, RejectReason, SignatureHeaders, TerminalDelivery,
+    TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
@@ -26,14 +27,19 @@ use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId as CoreSessionId};
 use rvoip_core::message::Message;
 use rvoip_core::stream::{MediaStream, MediaStreamHandle};
 use rvoip_sip_core::types::headers::{HeaderName, TypedHeader};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::mpsc;
+use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
 
 const MAX_SIP_INBOUND_ALLOWLIST_HEADERS: usize = 32;
+const MAX_PENDING_SIP_INBOUND_CONTEXTS: usize = 4_096;
+const PENDING_SIP_INBOUND_CONTEXT_TTL: Duration = Duration::from_secs(120);
+const PENDING_SIP_INBOUND_CONTEXT_REAPER_INTERVAL: Duration = Duration::from_secs(1);
+const SIP_INBOUND_EVENT_DELIVERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Configuration error for the SIP inbound signaling-metadata allowlist.
 ///
@@ -56,8 +62,9 @@ pub enum SipInboundContextPolicyError {
 /// Explicit allowlist for SIP headers exposed as inbound signaling metadata.
 ///
 /// The default allowlist is empty. Request-URI routing remains independent of
-/// this list, and sensitive routing, identity, authentication, and dialog
-/// headers cannot be enabled even when named explicitly.
+/// this list. Only `X-*` application-extension headers are eligible; standard
+/// SIP headers and the reserved `X-Bridgefu-*`/`X-Rvoip-*` namespaces remain
+/// unavailable even when named explicitly.
 #[derive(Clone, Default)]
 pub struct SipInboundContextPolicy {
     allowed_headers: Arc<HashSet<String>>,
@@ -75,13 +82,13 @@ impl SipInboundContextPolicy {
             let supplied = supplied.as_ref();
             if supplied.is_empty()
                 || supplied.len() > rvoip_core_traits::adapter::MAX_INBOUND_METADATA_NAME_BYTES
-                || supplied.chars().any(char::is_control)
+                || !supplied.bytes().all(is_sip_metadata_name_byte)
             {
                 return Err(SipInboundContextPolicyError::InvalidHeaderName);
             }
             let header = HeaderName::from_str(supplied)
                 .map_err(|_| SipInboundContextPolicyError::InvalidHeaderName)?;
-            if sip_inbound_header_is_forbidden(&header) {
+            if !sip_inbound_header_is_application_extension(&header) {
                 return Err(SipInboundContextPolicyError::ForbiddenHeaderName);
             }
             let normalized = header.as_str().to_ascii_lowercase();
@@ -110,21 +117,22 @@ impl SipInboundContextPolicy {
 
     fn capture(
         &self,
-        observation: InboundInviteObservation,
+        observation: &InboundInviteObservation,
     ) -> std::result::Result<Option<PendingSipInboundContext>, InboundContextError> {
-        let Some(principal) = observation.principal else {
+        if observation.principal.is_none() {
+            return Ok(None);
+        }
+        let Some(request) = observation.request.as_ref() else {
             return Ok(None);
         };
 
-        let routing_hint = observation
-            .request
+        let routing_hint = request
             .uri()
             .username()
             .map(|username| InboundRoutingHint::new(username.to_owned()))
             .transpose()?;
 
-        let metadata = observation
-            .request
+        let metadata = request
             .headers
             .iter()
             .filter_map(|header| {
@@ -138,7 +146,6 @@ impl SipInboundContextPolicy {
         let metadata = InboundSignalingMetadata::new(metadata)?;
 
         Ok(Some(PendingSipInboundContext {
-            principal,
             routing_hint,
             metadata,
         }))
@@ -154,43 +161,35 @@ impl fmt::Debug for SipInboundContextPolicy {
     }
 }
 
-fn sip_inbound_header_is_forbidden(header: &HeaderName) -> bool {
-    if matches!(
-        header,
-        HeaderName::Via
-            | HeaderName::Route
-            | HeaderName::RecordRoute
-            | HeaderName::Path
-            | HeaderName::ServiceRoute
-            | HeaderName::MaxForwards
-            | HeaderName::CallId
-            | HeaderName::CSeq
-            | HeaderName::ContentLength
-            | HeaderName::Authorization
-            | HeaderName::ProxyAuthorization
-            | HeaderName::WwwAuthenticate
-            | HeaderName::ProxyAuthenticate
-            | HeaderName::AuthenticationInfo
-            | HeaderName::Identity
-            | HeaderName::From
-            | HeaderName::To
-            | HeaderName::Contact
-            | HeaderName::ReplyTo
-            | HeaderName::ReferredBy
-            | HeaderName::PAssertedIdentity
-            | HeaderName::PPreferredIdentity
-    ) {
-        return true;
-    }
+const fn is_sip_metadata_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
 
-    matches!(
-        header.as_str().to_ascii_lowercase().as_str(),
-        "x-bridgefu-tenant"
-            | "x-bridgefu-tenant-id"
-            | "x-bridgefu-call-id"
-            | "x-bridgefu-leg-id"
-            | "x-bridgefu-source-leg-id"
-    )
+fn sip_inbound_header_is_application_extension(header: &HeaderName) -> bool {
+    let HeaderName::Other(name) = header else {
+        return false;
+    };
+    let normalized = name.to_ascii_lowercase();
+    normalized.starts_with("x-")
+        && !normalized.starts_with("x-bridgefu-")
+        && !normalized.starts_with("x-rvoip-")
 }
 
 fn sip_header_value(header: &TypedHeader) -> Option<String> {
@@ -206,14 +205,14 @@ fn sip_header_value(header: &TypedHeader) -> Option<String> {
 }
 
 struct PendingSipInboundContext {
-    principal: AuthenticatedPrincipal,
     routing_hint: Option<InboundRoutingHint>,
     metadata: InboundSignalingMetadata,
 }
 
-enum PendingSipInboundContextState {
-    Available(Box<PendingSipInboundContext>),
-    Unavailable,
+struct PendingSipInboundObservation {
+    observed_at: Instant,
+    principal: Option<AuthenticatedPrincipal>,
+    context: Option<Box<PendingSipInboundContext>>,
 }
 
 enum SipInboundContextState {
@@ -221,33 +220,97 @@ enum SipInboundContextState {
     Consumed,
 }
 
-#[derive(Default)]
+enum SipInboundBinding {
+    Observed(Option<AuthenticatedPrincipal>),
+    Missing,
+}
+
 struct SipInboundContextStore {
-    pending_by_session: DashMap<SessionId, PendingSipInboundContextState>,
+    pending_by_session: StdMutex<HashMap<SessionId, PendingSipInboundObservation>>,
     by_connection: DashMap<ConnectionId, SipInboundContextState>,
+    max_pending: usize,
+    pending_ttl: Duration,
+}
+
+impl Default for SipInboundContextStore {
+    fn default() -> Self {
+        Self {
+            pending_by_session: StdMutex::new(HashMap::new()),
+            by_connection: DashMap::new(),
+            max_pending: MAX_PENDING_SIP_INBOUND_CONTEXTS,
+            pending_ttl: PENDING_SIP_INBOUND_CONTEXT_TTL,
+        }
+    }
 }
 
 impl SipInboundContextStore {
-    fn observe(&self, session_id: SessionId, state: PendingSipInboundContextState) {
-        self.pending_by_session.entry(session_id).or_insert(state);
+    #[cfg(test)]
+    fn with_pending_limits(max_pending: usize, pending_ttl: Duration) -> Self {
+        Self {
+            max_pending,
+            pending_ttl,
+            ..Self::default()
+        }
     }
 
-    fn bind(&self, session_id: &SessionId, connection_id: &ConnectionId) {
+    fn observe(
+        &self,
+        session_id: SessionId,
+        principal: Option<AuthenticatedPrincipal>,
+        context: Option<PendingSipInboundContext>,
+    ) -> bool {
+        let now = Instant::now();
+        let mut pending = self
+            .pending_by_session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        pending.retain(|_, observation| {
+            now.saturating_duration_since(observation.observed_at) <= self.pending_ttl
+        });
+        if pending.contains_key(&session_id) {
+            return true;
+        }
+        if pending.len() >= self.max_pending {
+            return false;
+        }
+        pending.insert(
+            session_id,
+            PendingSipInboundObservation {
+                observed_at: now,
+                principal,
+                context: context.map(Box::new),
+            },
+        );
+        true
+    }
+
+    fn bind(&self, session_id: &SessionId, connection_id: &ConnectionId) -> SipInboundBinding {
         let pending = self
             .pending_by_session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(session_id)
-            .map(|(_, state)| state)
-            .unwrap_or(PendingSipInboundContextState::Unavailable);
+            .filter(|observation| observation.observed_at.elapsed() <= self.pending_ttl);
+        let Some(pending) = pending else {
+            self.by_connection
+                .insert(connection_id.clone(), SipInboundContextState::Consumed);
+            return SipInboundBinding::Missing;
+        };
+        let principal = pending.principal.clone();
 
         self.by_connection
             .entry(connection_id.clone())
             .or_insert_with(|| match pending {
-                PendingSipInboundContextState::Available(pending) => {
+                PendingSipInboundObservation {
+                    principal: Some(principal),
+                    context: Some(pending),
+                    ..
+                } => {
                     let pending = *pending;
                     match InboundConnectionContext::new(
                         connection_id.clone(),
                         Transport::Sip,
-                        &pending.principal,
+                        &principal,
                         pending.routing_hint,
                         pending.metadata,
                     ) {
@@ -262,8 +325,37 @@ impl SipInboundContextStore {
                         }
                     }
                 }
-                PendingSipInboundContextState::Unavailable => SipInboundContextState::Consumed,
+                _ => SipInboundContextState::Consumed,
             });
+        SipInboundBinding::Observed(principal)
+    }
+
+    fn has_pending(&self, session_id: &SessionId) -> bool {
+        let now = Instant::now();
+        let mut pending = self
+            .pending_by_session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let is_fresh = pending.get(session_id).is_some_and(|observation| {
+            now.saturating_duration_since(observation.observed_at) <= self.pending_ttl
+        });
+        if !is_fresh {
+            pending.remove(session_id);
+        }
+        is_fresh
+    }
+
+    fn purge_expired(&self) -> usize {
+        let now = Instant::now();
+        let mut pending = self
+            .pending_by_session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = pending.len();
+        pending.retain(|_, observation| {
+            now.saturating_duration_since(observation.observed_at) <= self.pending_ttl
+        });
+        before.saturating_sub(pending.len())
     }
 
     fn take(&self, connection_id: &ConnectionId) -> Option<InboundConnectionContext> {
@@ -281,8 +373,23 @@ impl SipInboundContextStore {
     }
 
     fn forget(&self, session_id: &SessionId, connection_id: &ConnectionId) {
-        self.pending_by_session.remove(session_id);
+        self.forget_pending(session_id);
         self.by_connection.remove(connection_id);
+    }
+
+    fn forget_pending(&self, session_id: &SessionId) {
+        self.pending_by_session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(session_id);
+    }
+
+    #[cfg(test)]
+    fn pending_len(&self) -> usize {
+        self.pending_by_session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
     }
 }
 
@@ -307,6 +414,9 @@ pub struct SipAdapter {
     /// see a non-empty vec (QUIC/WT parity, gap plan §2.2).
     streams_cache: Arc<DashMap<ConnectionId, Arc<crate::media_stream::SipMediaStream>>>,
     inbound_contexts: Arc<SipInboundContextStore>,
+    authenticated_inbound_sessions: DashMap<SessionId, ()>,
+    lifecycle: AdapterLifecycleSinkSlot,
+    translator_cancel: watch::Sender<bool>,
     inbound_invite_observer_id: u64,
 }
 
@@ -331,28 +441,33 @@ impl SipAdapter {
         // receiver and lose their matching IncomingCall event.
         let mut events = coordinator.events().await?;
         let (out_tx, out_rx) = mpsc::channel(256);
+        let (translator_cancel, mut translator_cancel_rx) = watch::channel(false);
+        let context_reaper_cancel_rx = translator_cancel.subscribe();
         let inbound_contexts = Arc::new(SipInboundContextStore::default());
-        let contexts_for_observer = Arc::clone(&inbound_contexts);
+        let contexts_for_observer = Arc::downgrade(&inbound_contexts);
         let inbound_invite_observer_id = coordinator.add_inbound_invite_observer(Arc::new(
             move |observation: InboundInviteObservation| {
+                let Some(contexts) = contexts_for_observer.upgrade() else {
+                    return;
+                };
                 let session_id = observation.session_id.clone();
-                let state = match policy.capture(observation) {
-                    Ok(Some(context)) => {
-                        PendingSipInboundContextState::Available(Box::new(context))
-                    }
-                    Ok(None) => PendingSipInboundContextState::Unavailable,
+                let principal = observation.principal.clone();
+                let context = match policy.capture(&observation) {
+                    Ok(context) => context,
                     Err(error) => {
                         warn!(
                             ?error,
                             "SipAdapter rejected malformed inbound signaling context"
                         );
-                        PendingSipInboundContextState::Unavailable
+                        None
                     }
                 };
                 // First observation wins. Retransmitted/replayed INVITE
                 // notifications cannot replace a context already tied to the
                 // session's authenticated request.
-                contexts_for_observer.observe(session_id, state);
+                if !contexts.observe(session_id, principal, context) {
+                    warn!("SipAdapter inbound context admission capacity reached");
+                }
             },
         ))?;
         let adapter = Arc::new(Self {
@@ -363,19 +478,42 @@ impl SipAdapter {
             out_rx: StdMutex::new(Some(out_rx)),
             streams_cache: Arc::new(DashMap::new()),
             inbound_contexts,
+            authenticated_inbound_sessions: DashMap::new(),
+            lifecycle: AdapterLifecycleSinkSlot::default(),
+            translator_cancel,
             inbound_invite_observer_id,
         });
 
         // Subscribe to the coordinator's typed event stream and spawn the
         // translator task. EventReceiver yields api::Event values; we map
         // each into AdapterEvent and forward.
-        let me = Arc::clone(&adapter);
+        let me = Arc::downgrade(&adapter);
         tokio::spawn(async move {
-            while let Some(event) = events.next().await {
-                me.translate_api_event(event).await;
+            loop {
+                tokio::select! {
+                    changed = translator_cancel_rx.changed() => {
+                        if changed.is_err() || *translator_cancel_rx.borrow() {
+                            break;
+                        }
+                    }
+                    event = events.next() => {
+                        let Some(event) = event else {
+                            break;
+                        };
+                        let Some(adapter) = me.upgrade() else {
+                            break;
+                        };
+                        adapter.translate_api_event(event).await;
+                    }
+                }
             }
             debug!("SipAdapter event translator stream ended");
         });
+        tokio::spawn(Self::run_pending_context_reaper(
+            Arc::downgrade(&adapter.inbound_contexts),
+            context_reaper_cancel_rx,
+            PENDING_SIP_INBOUND_CONTEXT_REAPER_INTERVAL,
+        ));
 
         Ok(adapter)
     }
@@ -422,13 +560,42 @@ impl SipAdapter {
         conn_id
     }
 
+    async fn run_pending_context_reaper(
+        contexts: Weak<SipInboundContextStore>,
+        mut cancel: watch::Receiver<bool>,
+        interval: Duration,
+    ) {
+        let mut tick = tokio::time::interval(interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        tick.tick().await;
+        loop {
+            tokio::select! {
+                changed = cancel.changed() => {
+                    if changed.is_err() || *cancel.borrow() {
+                        break;
+                    }
+                }
+                _ = tick.tick() => {
+                    let Some(contexts) = contexts.upgrade() else {
+                        break;
+                    };
+                    let removed = contexts.purge_expired();
+                    if removed > 0 {
+                        debug!(removed, "SipAdapter purged expired inbound contexts");
+                    }
+                }
+            }
+        }
+    }
+
     fn forget(&self, session_id: &SessionId) {
+        self.authenticated_inbound_sessions.remove(session_id);
         if let Some((_, conn_id)) = self.by_session.remove(session_id) {
             self.by_connection.remove(&conn_id);
             self.streams_cache.remove(&conn_id);
             self.inbound_contexts.forget(session_id, &conn_id);
         } else {
-            self.inbound_contexts.pending_by_session.remove(session_id);
+            self.inbound_contexts.forget_pending(session_id);
         }
     }
 
@@ -503,23 +670,78 @@ impl SipAdapter {
         match event {
             ApiEvent::IncomingCall { call_id, .. } => {
                 let conn_id = self.ensure_mapped(call_id.clone());
-                self.inbound_contexts.bind(&call_id, &conn_id);
+                let principal = match self.inbound_contexts.bind(&call_id, &conn_id) {
+                    SipInboundBinding::Observed(principal) => principal,
+                    SipInboundBinding::Missing => {
+                        // Every new inbound call is synchronously observed
+                        // before its public event is emitted. A missing entry
+                        // therefore means admission overflow, expiry, or a
+                        // startup race; fail closed instead of publishing a
+                        // route without its authentication state.
+                        warn!("SipAdapter rejected inbound route without its observation");
+                        if let Err(error) = self
+                            .coordinator
+                            .reject(&call_id)
+                            .with_status(503)
+                            .with_reason("Signaling Context Unavailable")
+                            .send()
+                            .await
+                        {
+                            warn!(%error, "SipAdapter failed to reject contextless inbound route");
+                        }
+                        return;
+                    }
+                };
                 let connection = self
                     .build_connection(conn_id.clone(), Direction::Inbound)
                     .await;
-                if !self.try_send(AdapterEvent::InboundConnection { connection }) {
+                let adapter_event = if let Some(principal) = principal {
+                    self.authenticated_inbound_sessions
+                        .insert(call_id.clone(), ());
+                    AdapterEvent::AuthenticatedInboundConnection {
+                        participant_id: principal.subject.clone(),
+                        connection,
+                        principal,
+                    }
+                } else {
+                    AdapterEvent::InboundConnection { connection }
+                };
+                if !self.send_inbound_event(adapter_event).await {
                     // Keep the consumed tombstone until terminal cleanup so a
                     // replayed IncomingCall cannot recreate the secret.
                     self.inbound_contexts.discard(&conn_id);
+                    if let Err(error) = self
+                        .coordinator
+                        .reject(&call_id)
+                        .with_status(503)
+                        .with_reason("Signaling Event Backpressure")
+                        .send()
+                        .await
+                    {
+                        warn!(%error, "SipAdapter failed to reject undeliverable inbound route");
+                    }
                 }
             }
             ApiEvent::IncomingCallAuthenticated { call_id, principal } => {
-                let conn_id = self.ensure_mapped(call_id);
-                self.try_send(AdapterEvent::PrincipalAuthenticated {
-                    connection_id: conn_id,
-                    participant_id: principal.subject.clone(),
-                    principal,
-                });
+                if self.authenticated_inbound_sessions.contains_key(&call_id) {
+                    return;
+                }
+                // The coordinator normally publishes IncomingCall first, but
+                // its bounded broadcast bridge may report a later auth event
+                // first after lag recovery. The synchronous observation is
+                // already present, so defer to the atomic inbound event rather
+                // than exposing a principal-only route.
+                if self.inbound_contexts.has_pending(&call_id) {
+                    return;
+                }
+                // Authentication is published only as part of the atomic
+                // inbound handoff. A principal-only event here could create a
+                // partially authenticated route after admission overflow,
+                // expiry, or an undeliverable inbound queue.
+                warn!(
+                    subject = %principal.subject,
+                    "SipAdapter suppressed unmatched inbound authentication event"
+                );
             }
             ApiEvent::CallAnswered { call_id, .. } => {
                 let conn_id = self.ensure_mapped(call_id);
@@ -542,10 +764,14 @@ impl SipAdapter {
             ApiEvent::CallEnded { call_id, reason } => {
                 let conn_id = self.ensure_mapped(call_id.clone());
                 self.forget(&call_id);
-                self.try_send(AdapterEvent::Ended {
-                    connection_id: conn_id,
-                    reason: EndReason::Failed { detail: reason },
-                });
+                self.deliver_terminal_event(
+                    AdapterEvent::Ended {
+                        connection_id: conn_id,
+                        reason: EndReason::Failed { detail: reason },
+                    },
+                    "call-ended",
+                )
+                .await;
             }
             ApiEvent::CallFailed {
                 call_id,
@@ -554,18 +780,26 @@ impl SipAdapter {
             } => {
                 let conn_id = self.ensure_mapped(call_id.clone());
                 self.forget(&call_id);
-                self.try_send(AdapterEvent::Failed {
-                    connection_id: conn_id,
-                    detail: format!("{} {}", status_code, reason),
-                });
+                self.deliver_terminal_event(
+                    AdapterEvent::Failed {
+                        connection_id: conn_id,
+                        detail: format!("{} {}", status_code, reason),
+                    },
+                    "call-failed",
+                )
+                .await;
             }
             ApiEvent::CallCancelled { call_id } => {
                 let conn_id = self.ensure_mapped(call_id.clone());
                 self.forget(&call_id);
-                self.try_send(AdapterEvent::Ended {
-                    connection_id: conn_id,
-                    reason: EndReason::Cancelled,
-                });
+                self.deliver_terminal_event(
+                    AdapterEvent::Ended {
+                        connection_id: conn_id,
+                        reason: EndReason::Cancelled,
+                    },
+                    "call-cancelled",
+                )
+                .await;
             }
             ApiEvent::DtmfReceived { call_id, digit } => {
                 // P12.8 — surface inbound DTMF (RFC 2833 + SIP INFO,
@@ -624,6 +858,43 @@ impl SipAdapter {
         }
     }
 
+    async fn send_inbound_event(&self, event: AdapterEvent) -> bool {
+        Self::send_inbound_event_to(&self.out_tx, event).await
+    }
+
+    async fn send_inbound_event_to(
+        events: &mpsc::Sender<AdapterEvent>,
+        event: AdapterEvent,
+    ) -> bool {
+        match tokio::time::timeout(SIP_INBOUND_EVENT_DELIVERY_TIMEOUT, events.send(event)).await {
+            Ok(Ok(())) => true,
+            Ok(Err(_)) => {
+                warn!("SipAdapter inbound event channel closed");
+                false
+            }
+            Err(_) => {
+                warn!("SipAdapter inbound event delivery timed out");
+                false
+            }
+        }
+    }
+
+    async fn deliver_terminal_event(&self, event: AdapterEvent, source: &'static str) {
+        Self::deliver_terminal_event_to(&self.lifecycle, &self.out_tx, event, source).await;
+    }
+
+    async fn deliver_terminal_event_to(
+        lifecycle: &AdapterLifecycleSinkSlot,
+        events: &mpsc::Sender<AdapterEvent>,
+        event: AdapterEvent,
+        source: &'static str,
+    ) {
+        let delivery = lifecycle.queue_or_deliver_terminal(events, event).await;
+        if delivery == TerminalDelivery::Undeliverable {
+            warn!(source, "SipAdapter terminal event was undeliverable");
+        }
+    }
+
     fn map_session_err(err: crate::errors::SessionError) -> RvoipError {
         RvoipError::Adapter(format!("rvoip-sip: {}", err))
     }
@@ -631,6 +902,7 @@ impl SipAdapter {
 
 impl Drop for SipAdapter {
     fn drop(&mut self) {
+        let _ = self.translator_cancel.send(true);
         self.coordinator
             .remove_inbound_invite_observer(self.inbound_invite_observer_id);
     }
@@ -644,6 +916,12 @@ impl ConnectionAdapter for SipAdapter {
 
     fn kind(&self) -> AdapterKind {
         AdapterKind::Interop
+    }
+
+    fn install_lifecycle_sink(&self, sink: Arc<dyn AdapterLifecycleSink>) -> CoreResult<()> {
+        self.lifecycle
+            .install(sink)
+            .map_err(|_| RvoipError::InvalidState("SIP lifecycle sink already installed"))
     }
 
     fn is_connection_live(&self, conn: &ConnectionId) -> bool {
@@ -860,6 +1138,18 @@ impl ConnectionAdapter for SipAdapter {
 mod inbound_context_tests {
     use super::*;
     use rvoip_core::identity::{AuthenticationMethod, IdentityAssurance};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RecordingLifecycleSink {
+        deliveries: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl AdapterLifecycleSink for RecordingLifecycleSink {
+        async fn deliver_terminal(&self, _event: AdapterEvent) {
+            self.deliveries.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     fn principal(tenant: &str) -> AuthenticatedPrincipal {
         AuthenticatedPrincipal {
@@ -901,15 +1191,33 @@ mod inbound_context_tests {
     ) -> InboundInviteObservation {
         InboundInviteObservation {
             session_id,
-            request: request(route, correlation_values),
+            request: Some(request(route, correlation_values)),
             principal,
+        }
+    }
+
+    fn inbound_connection(connection_id: ConnectionId) -> Connection {
+        Connection {
+            id: connection_id,
+            session_id: CoreSessionId::new(),
+            participant_id: ParticipantId::new(),
+            transport: Transport::Sip,
+            direction: Direction::Inbound,
+            state: ConnectionState::Connecting,
+            capabilities: CapabilityDescriptor::default(),
+            negotiated_codecs: NegotiatedCodecs::default(),
+            streams: Vec::new(),
+            messaging_enabled: false,
+            transport_handle: TransportHandle(Arc::new(())),
+            opened_at: Utc::now(),
+            closed_at: None,
         }
     }
 
     #[test]
     fn policy_is_explicit_and_hard_denies_routing_auth_and_identity_headers() {
-        let policy =
-            SipInboundContextPolicy::new(["X-Correlation-Id", "Subject"]).expect("safe allowlist");
+        let policy = SipInboundContextPolicy::new(["X-Correlation-Id", "X-App-Context"])
+            .expect("safe application-extension allowlist");
         assert_eq!(policy.allowed_header_count(), 2);
 
         for forbidden in [
@@ -919,8 +1227,24 @@ mod inbound_context_tests {
             "Authorization",
             "Identity",
             "P-Asserted-Identity",
+            "Proxy-Require",
+            "Refer-To",
+            "RAck",
+            "RSeq",
+            "In-Reply-To",
+            "Session-Expires",
+            "Min-SE",
+            "Event",
+            "Subscription-State",
+            "SIP-ETag",
+            "SIP-If-Match",
+            "Replaces",
+            "Join",
+            "Target-Dialog",
             "X-Bridgefu-Tenant-Id",
             "X-Bridgefu-Call-Id",
+            "X-Bridgefu-Correlation-Id",
+            "X-Rvoip-Route",
         ] {
             assert!(
                 matches!(
@@ -934,6 +1258,10 @@ mod inbound_context_tests {
             SipInboundContextPolicy::new(["bad\r\nname"]),
             Err(SipInboundContextPolicyError::InvalidHeaderName)
         ));
+        assert!(matches!(
+            SipInboundContextPolicy::new(["bad header"]),
+            Err(SipInboundContextPolicyError::InvalidHeaderName)
+        ));
     }
 
     #[test]
@@ -942,22 +1270,24 @@ mod inbound_context_tests {
         let session_id = SessionId::new();
         let connection_id = ConnectionId::new();
         let principal = principal("tenant-a");
+        let initial_observation = observation(
+            session_id.clone(),
+            "attach-secret-a",
+            &["first", "second"],
+            Some(principal.clone()),
+        );
         let pending = policy
-            .capture(observation(
-                session_id.clone(),
-                "attach-secret-a",
-                &["first", "second"],
-                Some(principal.clone()),
-            ))
+            .capture(&initial_observation)
             .unwrap()
             .expect("authenticated context");
 
         let store = SipInboundContextStore::default();
-        store.observe(
-            session_id.clone(),
-            PendingSipInboundContextState::Available(Box::new(pending)),
-        );
-        store.bind(&session_id, &connection_id);
+        assert!(store.observe(session_id.clone(), Some(principal.clone()), Some(pending)));
+        assert!(matches!(
+            store.bind(&session_id, &connection_id),
+            SipInboundBinding::Observed(Some(bound))
+                if bound.tenant.as_deref() == Some("tenant-a")
+        ));
 
         let context = store.take(&connection_id).expect("first take");
         assert!(context.is_bound_to(&connection_id, Transport::Sip, &principal));
@@ -980,25 +1310,20 @@ mod inbound_context_tests {
 
         // A retransmitted observation plus replayed IncomingCall cannot
         // overwrite the consumed per-live-route tombstone.
-        let replay = policy
-            .capture(observation(
-                session_id.clone(),
-                "attacker-replay",
-                &["replacement"],
-                Some(principal),
-            ))
-            .unwrap()
-            .unwrap();
-        store.observe(
+        let replay_observation = observation(
             session_id.clone(),
-            PendingSipInboundContextState::Available(Box::new(replay)),
+            "attacker-replay",
+            &["replacement"],
+            Some(principal.clone()),
         );
+        let replay = policy.capture(&replay_observation).unwrap().unwrap();
+        assert!(store.observe(session_id.clone(), Some(principal), Some(replay)));
         store.bind(&session_id, &connection_id);
         assert!(store.take(&connection_id).is_none());
 
         store.forget(&session_id, &connection_id);
         assert!(store.take(&connection_id).is_none());
-        assert!(!store.pending_by_session.contains_key(&session_id));
+        assert_eq!(store.pending_len(), 0);
     }
 
     #[test]
@@ -1012,32 +1337,22 @@ mod inbound_context_tests {
         let principal_b = principal("tenant-b");
         let store = SipInboundContextStore::default();
 
-        let pending_b = policy
-            .capture(observation(
-                session_b.clone(),
-                "token-b",
-                &[],
-                Some(principal_b.clone()),
-            ))
-            .unwrap()
-            .unwrap();
-        let pending_a = policy
-            .capture(observation(
-                session_a.clone(),
-                "token-a",
-                &[],
-                Some(principal_a.clone()),
-            ))
-            .unwrap()
-            .unwrap();
-        store.observe(
+        let observation_b =
+            observation(session_b.clone(), "token-b", &[], Some(principal_b.clone()));
+        let pending_b = policy.capture(&observation_b).unwrap().unwrap();
+        let observation_a =
+            observation(session_a.clone(), "token-a", &[], Some(principal_a.clone()));
+        let pending_a = policy.capture(&observation_a).unwrap().unwrap();
+        assert!(store.observe(
             session_b.clone(),
-            PendingSipInboundContextState::Available(Box::new(pending_b)),
-        );
-        store.observe(
+            Some(principal_b.clone()),
+            Some(pending_b)
+        ));
+        assert!(store.observe(
             session_a.clone(),
-            PendingSipInboundContextState::Available(Box::new(pending_a)),
-        );
+            Some(principal_a.clone()),
+            Some(pending_a)
+        ));
 
         // Bind in the opposite order from observation.
         store.bind(&session_a, &connection_a);
@@ -1056,24 +1371,221 @@ mod inbound_context_tests {
         let policy = SipInboundContextPolicy::default();
         let session_id = SessionId::new();
         let connection_id = ConnectionId::new();
-        assert!(policy
-            .capture(observation(
-                session_id.clone(),
-                "anonymous-token",
-                &[],
-                None,
-            ))
-            .unwrap()
-            .is_none());
+        let anonymous = observation(session_id.clone(), "anonymous-token", &[], None);
+        assert!(policy.capture(&anonymous).unwrap().is_none());
 
         let store = SipInboundContextStore::default();
-        store.observe(
-            session_id.clone(),
-            PendingSipInboundContextState::Unavailable,
-        );
+        assert!(store.observe(session_id.clone(), None, None));
         store.bind(&session_id, &connection_id);
         assert!(store.take(&connection_id).is_none());
         store.forget(&session_id, &connection_id);
         assert!(store.take(&connection_id).is_none());
+    }
+
+    #[test]
+    fn pending_observations_are_strictly_bounded_and_expire() {
+        let store = SipInboundContextStore::with_pending_limits(2, Duration::from_secs(1));
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let third = SessionId::new();
+        assert!(store.observe(first, Some(principal("tenant-a")), None));
+        assert!(store.observe(second, Some(principal("tenant-a")), None));
+        assert!(!store.observe(third.clone(), Some(principal("tenant-a")), None));
+        assert_eq!(store.pending_len(), 2);
+        assert!(matches!(
+            store.bind(&third, &ConnectionId::new()),
+            SipInboundBinding::Missing
+        ));
+
+        let expiring = SipInboundContextStore::with_pending_limits(2, Duration::from_millis(2));
+        assert!(expiring.observe(SessionId::new(), Some(principal("tenant-a")), None));
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(expiring.observe(third, Some(principal("tenant-a")), None));
+        assert_eq!(expiring.pending_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn periodic_reaper_physically_removes_idle_expired_contexts() {
+        let store = Arc::new(SipInboundContextStore::with_pending_limits(
+            2,
+            Duration::from_millis(2),
+        ));
+        assert!(store.observe(SessionId::new(), Some(principal("tenant-a")), None));
+        let (cancel, cancel_rx) = watch::channel(false);
+        let reaper = tokio::spawn(SipAdapter::run_pending_context_reaper(
+            Arc::downgrade(&store),
+            cancel_rx,
+            Duration::from_millis(1),
+        ));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if store.pending_len() == 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("periodic reaper removes expired state without another signaling event");
+        cancel.send(true).unwrap();
+        reaper.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn authenticated_inbound_event_is_one_bounded_queue_item() {
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+        events_tx
+            .send(AdapterEvent::Native {
+                kind: "queue-filler",
+                detail: String::new(),
+            })
+            .await
+            .unwrap();
+        let connection_id = ConnectionId::new();
+        let event = AdapterEvent::AuthenticatedInboundConnection {
+            connection: inbound_connection(connection_id.clone()),
+            participant_id: "sip-peer".into(),
+            principal: principal("tenant-a"),
+        };
+        let sender = events_tx.clone();
+        let send =
+            tokio::spawn(async move { SipAdapter::send_inbound_event_to(&sender, event).await });
+        tokio::task::yield_now().await;
+        assert!(
+            !send.is_finished(),
+            "full queue applies bounded backpressure"
+        );
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(AdapterEvent::Native { .. })
+        ));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(AdapterEvent::AuthenticatedInboundConnection { connection, principal, .. })
+                if connection.id == connection_id && principal.tenant.as_deref() == Some("tenant-a")
+        ));
+        assert!(send.await.unwrap());
+        assert!(matches!(
+            events_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn saturated_and_closed_terminal_queues_fallback_exactly_once() {
+        let lifecycle = AdapterLifecycleSinkSlot::default();
+        let sink = Arc::new(RecordingLifecycleSink {
+            deliveries: AtomicUsize::new(0),
+        });
+        assert!(lifecycle.install(sink.clone()).is_ok());
+
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+        events_tx
+            .send(AdapterEvent::Native {
+                kind: "queue-filler",
+                detail: String::new(),
+            })
+            .await
+            .unwrap();
+        SipAdapter::deliver_terminal_event_to(
+            &lifecycle,
+            &events_tx,
+            AdapterEvent::Ended {
+                connection_id: ConnectionId::new(),
+                reason: EndReason::Normal,
+            },
+            "test-full",
+        )
+        .await;
+        assert_eq!(sink.deliveries.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(AdapterEvent::Native { .. })
+        ));
+        assert!(matches!(
+            events_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        drop(events_rx);
+        SipAdapter::deliver_terminal_event_to(
+            &lifecycle,
+            &events_tx,
+            AdapterEvent::Failed {
+                connection_id: ConnectionId::new(),
+                detail: "closed".into(),
+            },
+            "test-closed",
+        )
+        .await;
+        assert_eq!(sink.deliveries.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn adapter_drop_cancels_translator_and_unregisters_weak_observer() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("adapter-drop", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        assert_eq!(coordinator.inbound_invite_observer_count(), 1);
+        let weak = Arc::downgrade(&adapter);
+        drop(adapter);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if weak.upgrade().is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("translator releases its weak adapter handle");
+        assert_eq!(coordinator.inbound_invite_observer_count(), 0);
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn failed_atomic_delivery_tombstone_suppresses_late_principal_event() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("atomic-failure", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let mut events = ConnectionAdapter::subscribe_events(adapter.as_ref());
+        let session_id = SessionId::new();
+        adapter
+            .authenticated_inbound_sessions
+            .insert(session_id.clone(), ());
+
+        adapter
+            .translate_api_event(ApiEvent::IncomingCallAuthenticated {
+                call_id: session_id.clone(),
+                principal: principal("tenant-a"),
+            })
+            .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), events.recv())
+                .await
+                .is_err()
+        );
+        assert!(adapter
+            .authenticated_inbound_sessions
+            .contains_key(&session_id));
+        adapter.forget(&session_id);
+        assert!(!adapter
+            .authenticated_inbound_sessions
+            .contains_key(&session_id));
+
+        drop(adapter);
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
     }
 }

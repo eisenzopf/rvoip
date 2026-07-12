@@ -24,6 +24,7 @@ impl PrincipalTokenAuth {
         let (issuer, tenant, expired) = match token {
             Some("owner") => ("issuer-a", "tenant-a", false),
             Some("expired") => ("issuer-a", "tenant-a", true),
+            Some("tenantless") => ("issuer-a", "", false),
             Some("other-issuer") => ("issuer-b", "tenant-a", false),
             Some("other-tenant") => ("issuer-a", "tenant-b", false),
             _ => {
@@ -170,24 +171,29 @@ async fn issuer_tenant_and_subject_all_participate_in_update_delete_ownership() 
     assert_eq!(expired.status(), reqwest::StatusCode::UNAUTHORIZED);
     assert!(server.adapter().routes().is_empty());
 
+    let tenantless = http()
+        .post(format!("http://{address}/whip/tenantless"))
+        .header("authorization", "Bearer tenantless")
+        .header("content-type", "application/sdp")
+        .body(offer.clone())
+        .send()
+        .await
+        .expect("tenantless principal POST");
+    assert_eq!(tenantless.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert!(server.adapter().routes().is_empty());
+
     let (route_url, connection_id) = create_owned_whip_route(&server, &offer).await;
     match next_event(&mut events).await {
-        AdapterEvent::InboundConnection { connection } => {
-            assert_eq!(connection.id, connection_id);
-        }
-        other => panic!("expected inbound connection, got {other:?}"),
-    }
-    match next_event(&mut events).await {
-        AdapterEvent::PrincipalAuthenticated {
-            connection_id: event_connection,
+        AdapterEvent::AuthenticatedInboundConnection {
+            connection,
             principal,
             ..
         } => {
-            assert_eq!(event_connection, connection_id);
+            assert_eq!(connection.id, connection_id);
             assert_eq!(principal.issuer.as_deref(), Some("issuer-a"));
             assert_eq!(principal.tenant.as_deref(), Some("tenant-a"));
         }
-        other => panic!("expected complete principal event, got {other:?}"),
+        other => panic!("expected atomic authenticated inbound connection, got {other:?}"),
     }
 
     let inbound_context =
@@ -432,16 +438,9 @@ async fn websocket_session_hint_becomes_single_take_inbound_context() {
     assert!(answer.is_text());
 
     let connection_id = match next_event(&mut events).await {
-        AdapterEvent::InboundConnection { connection } => connection.id,
-        other => panic!("expected inbound connection, got {other:?}"),
+        AdapterEvent::AuthenticatedInboundConnection { connection, .. } => connection.id,
+        other => panic!("expected atomic authenticated inbound connection, got {other:?}"),
     };
-    match next_event(&mut events).await {
-        AdapterEvent::PrincipalAuthenticated {
-            connection_id: authenticated_id,
-            ..
-        } => assert_eq!(authenticated_id, connection_id),
-        other => panic!("expected principal event, got {other:?}"),
-    }
 
     let context =
         ConnectionAdapter::take_inbound_context(server.adapter().as_ref(), &connection_id)

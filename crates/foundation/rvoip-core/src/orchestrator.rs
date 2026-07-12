@@ -2338,7 +2338,10 @@ impl Orchestrator {
 
     async fn handle_adapter_event(&self, transport: Transport, event: AdapterEvent) {
         let scoped_connection_id = match &event {
-            AdapterEvent::InboundConnection { connection } => Some(&connection.id),
+            AdapterEvent::InboundConnection { connection }
+            | AdapterEvent::AuthenticatedInboundConnection { connection, .. } => {
+                Some(&connection.id)
+            }
             AdapterEvent::Connected { connection_id }
             | AdapterEvent::Authenticated { connection_id, .. }
             | AdapterEvent::PrincipalAuthenticated { connection_id, .. }
@@ -2377,9 +2380,52 @@ impl Orchestrator {
                             && context.transport() == transport
                     });
                 self.track_connection(&connection.id, transport, inbound_context);
+                if !self.adapter_connection_is_live(transport, &connection.id) {
+                    self.forget_connection(&connection.id).await;
+                    return;
+                }
                 self.emit(Event::ConnectionInbound {
                     connection_id: connection.id.clone(),
                     at: Utc::now(),
+                });
+            }
+            AdapterEvent::AuthenticatedInboundConnection {
+                connection,
+                participant_id,
+                principal,
+            } => {
+                let inbound_context = self
+                    .adapter(transport)
+                    .ok()
+                    .and_then(|adapter| adapter.take_inbound_context(&connection.id))
+                    .filter(|context| {
+                        connection.transport == transport
+                            && context.connection_id() == &connection.id
+                            && context.transport() == transport
+                    });
+                self.track_connection(&connection.id, transport, inbound_context);
+                self.track_connection_principal(&connection.id, transport, principal.clone());
+                if !self.adapter_connection_is_live(transport, &connection.id) {
+                    self.forget_connection(&connection.id).await;
+                    return;
+                }
+                let at = Utc::now();
+                self.emit(Event::ConnectionInbound {
+                    connection_id: connection.id.clone(),
+                    at,
+                });
+                self.emit(Event::ConnectionAuthenticated {
+                    connection_id: connection.id.clone(),
+                    identity_id: principal.subject.clone(),
+                    participant_id: participant_id.clone(),
+                    assurance: principal.assurance.clone(),
+                    at,
+                });
+                self.emit(Event::ConnectionPrincipalAuthenticated {
+                    connection_id: connection.id,
+                    participant_id,
+                    principal,
+                    at,
                 });
             }
             AdapterEvent::Connected { connection_id } => {
