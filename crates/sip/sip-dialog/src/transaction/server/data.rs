@@ -55,7 +55,6 @@ pub type CommandReceiver = mpsc::Receiver<InternalTransactionCommand>;
 ///
 /// Both `ServerInviteTransaction` and `ServerNonInviteTransaction` use this structure
 /// as their core data store, while implementing different behavior around it.
-#[derive(Debug)]
 pub struct ServerTransactionData {
     /// Transaction ID based on RFC 3261 transaction matching rules
     pub id: TransactionKey,
@@ -95,15 +94,46 @@ pub struct ServerTransactionData {
     pub timer_config: TimerSettings,
 }
 
+impl std::fmt::Debug for ServerTransactionData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerTransactionData")
+            .field(
+                "id",
+                &crate::transaction::safe_diagnostics::SafeTransactionKey::new(&self.id),
+            )
+            .field("state", &self.state.get())
+            .field("remote_addr", &self.remote_addr)
+            .field("request_header_count", &self.request.all_headers().len())
+            .field("request_body_len", &self.request.body().len())
+            .field(
+                "has_last_response",
+                &self
+                    .last_response
+                    .try_lock()
+                    .map(|response| response.is_some())
+                    .unwrap_or(false),
+            )
+            .field(
+                "has_event_loop",
+                &self
+                    .event_loop_handle
+                    .try_lock()
+                    .map(|handle| handle.is_some())
+                    .unwrap_or(false),
+            )
+            .finish()
+    }
+}
+
 impl Drop for ServerTransactionData {
     fn drop(&mut self) {
         // Try to terminate the event loop when the transaction is dropped
-        debug!(id=%self.id, "ServerTransactionData dropped, attempting to terminate event loop");
+        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&self.id), "ServerTransactionData dropped, attempting to terminate event loop");
 
         if let Ok(mut handle_guard) = self.event_loop_handle.try_lock() {
             if let Some(handle) = handle_guard.take() {
                 handle.abort();
-                debug!(id=%self.id, "Aborted server transaction event loop");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&self.id), "Aborted server transaction event loop");
             }
         }
     }

@@ -281,18 +281,12 @@ impl MultiplexedTransport {
                     return Ok(target.addr);
                 }
                 Err(e) if e.is_recoverable() => {
-                    debug!(
-                        "RFC 3263 §4.3: candidate {} of {} ({}/{}) failed recoverably: {}; trying next",
-                        attempt, total, target.transport, target.addr, e
-                    );
+                    debug!(attempt, total, transport=%target.transport, destination=%target.addr, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Candidate failed recoverably; trying next");
                     last_err = Some(e);
                     continue;
                 }
                 Err(e) => {
-                    debug!(
-                        "RFC 3263 §4.3: candidate {} of {} ({}/{}) failed non-recoverably: {}; aborting failover",
-                        attempt, total, target.transport, target.addr, e
-                    );
+                    debug!(attempt, total, transport=%target.transport, destination=%target.addr, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Candidate failed non-recoverably; aborting failover");
                     return Err(e);
                 }
             }
@@ -397,18 +391,12 @@ impl Transport for MultiplexedTransport {
         let mut last_err: Option<TransportError> = None;
         for (kind, transport) in &self.transports {
             if let Err(e) = transport.close().await {
-                warn!(
-                    "MultiplexedTransport: error closing {} transport: {}",
-                    kind, e
-                );
+                warn!(transport=%kind, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error closing transport");
                 last_err = Some(e);
             }
         }
         if let Err(e) = self.default.close().await {
-            warn!(
-                "MultiplexedTransport: error closing default transport: {}",
-                e
-            );
+            warn!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error closing default transport");
             last_err = Some(e);
         }
         match last_err {

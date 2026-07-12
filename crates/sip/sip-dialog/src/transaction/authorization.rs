@@ -54,7 +54,7 @@ impl SipRequestIngressContext {
 }
 
 /// A denial response sent by the transaction layer without TU dispatch.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SipRequestRejection {
     /// Final SIP status returned to the peer.
     pub status: StatusCode,
@@ -62,6 +62,16 @@ pub struct SipRequestRejection {
     pub headers: Vec<TypedHeader>,
     /// Credential-free diagnostic detail. This is never sent on the wire.
     pub reason: Option<String>,
+}
+
+impl fmt::Debug for SipRequestRejection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SipRequestRejection")
+            .field("status", &self.status)
+            .field("header_count", &self.headers.len())
+            .field("has_reason", &self.reason.is_some())
+            .finish()
+    }
 }
 
 impl SipRequestRejection {
@@ -88,7 +98,7 @@ impl SipRequestRejection {
 }
 
 /// Result returned by [`SipRequestIngressAuthorizer`].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum SipRequestAuthorization {
     /// The request may proceed to the transaction user under this principal.
     Authorized {
@@ -97,6 +107,15 @@ pub enum SipRequestAuthorization {
     },
     /// The request must be answered locally and not dispatched upward.
     Rejected(SipRequestRejection),
+}
+
+impl fmt::Debug for SipRequestAuthorization {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Authorized { .. } => f.write_str("Authorized { principal: <redacted> }"),
+            Self::Rejected(rejection) => f.debug_tuple("Rejected").field(rejection).finish(),
+        }
+    }
 }
 
 /// Policy hook for new inbound SIP transactions.

@@ -327,7 +327,7 @@ pub fn parse_message_with_mode(input: &[u8], mode: ParseMode) -> Result<Message>
             tracing::debug!(
                 offset,
                 code = ?e.code,
-                remaining = %String::from_utf8_lossy(e.input),
+                remaining_len = e.input.len(),
                 "SIP parse failed"
             );
             Err(Error::ParseError(format!(

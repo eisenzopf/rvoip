@@ -175,10 +175,10 @@ impl ClientNonInviteLogic {
         {
             Ok(handle) => {
                 timer_handles.timer_e = Some(handle);
-                trace!(id=%tx_id, interval=?initial_interval_e, "Started Timer E for Trying state");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), interval=?initial_interval_e, "Started Timer E for Trying state");
             }
             Err(e) => {
-                error!(id=%tx_id, error=%e, "Failed to start Timer E");
+                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to start Timer E");
             }
         }
     }
@@ -214,10 +214,10 @@ impl ClientNonInviteLogic {
         {
             Ok(handle) => {
                 timer_handles.timer_f = Some(handle);
-                trace!(id=%tx_id, interval=?interval_f, "Started Timer F for Trying state");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), interval=?interval_f, "Started Timer F for Trying state");
             }
             Err(e) => {
-                error!(id=%tx_id, error=%e, "Failed to start Timer F");
+                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to start Timer F");
             }
         }
     }
@@ -254,10 +254,10 @@ impl ClientNonInviteLogic {
         {
             Ok(handle) => {
                 timer_handles.timer_k = Some(handle);
-                trace!(id=%tx_id, interval=?interval_k, "Started Timer K for Completed state");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), interval=?interval_k, "Started Timer K for Completed state");
             }
             Err(e) => {
-                error!(id=%tx_id, error=%e, "Failed to start Timer K");
+                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to start Timer K");
             }
         }
     }
@@ -275,14 +275,14 @@ impl ClientNonInviteLogic {
         let tx_id = &data.id;
 
         // Send the initial request
-        debug!(id=%tx_id, "ClientNonInviteLogic: Sending initial request in Trying state");
+        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "ClientNonInviteLogic: Sending initial request in Trying state");
         let request_guard: &Request = &data.request;
         if let Err(e) = data
             .transport
             .send_message(Message::Request(request_guard.clone()), data.remote_addr)
             .await
         {
-            error!(id=%tx_id, error=%e, "Failed to send initial request from Trying state");
+            error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send initial request from Trying state");
             common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
             // If send fails, command a transition to Terminated
             let _ = command_tx
@@ -319,7 +319,7 @@ impl ClientNonInviteLogic {
 
         match current_state {
             TransactionState::Trying | TransactionState::Proceeding => {
-                debug!(id=%tx_id, "Timer E triggered, retransmitting request");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer E triggered, retransmitting request");
 
                 // Retransmit the request
                 let request_guard: &Request = &data.request;
@@ -328,7 +328,7 @@ impl ClientNonInviteLogic {
                     .send_message(Message::Request(request_guard.clone()), data.remote_addr)
                     .await
                 {
-                    error!(id=%tx_id, error=%e, "Failed to retransmit request");
+                    error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to retransmit request");
                     common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
                     return Ok(Some(TransactionState::Terminated));
                 }
@@ -355,15 +355,15 @@ impl ClientNonInviteLogic {
                 {
                     Ok(handle) => {
                         timer_handles.timer_e = Some(handle);
-                        trace!(id=%tx_id, interval=?new_interval, "Restarted Timer E with backoff");
+                        trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), interval=?new_interval, "Restarted Timer E with backoff");
                     }
                     Err(e) => {
-                        error!(id=%tx_id, error=%e, "Failed to restart Timer E");
+                        error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to restart Timer E");
                     }
                 }
             }
             _ => {
-                trace!(id=%tx_id, state=?current_state, "Timer E fired in invalid state, ignoring");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Timer E fired in invalid state, ignoring");
             }
         }
 
@@ -385,7 +385,7 @@ impl ClientNonInviteLogic {
 
         match current_state {
             TransactionState::Trying | TransactionState::Proceeding => {
-                warn!(id=%tx_id, "Timer F (Timeout) fired in state {:?}", current_state);
+                warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer F (Timeout) fired in state {:?}", current_state);
 
                 // Notify TU about timeout using common logic
                 common_logic::send_transaction_timeout_event(tx_id, &data.events_tx).await;
@@ -394,7 +394,7 @@ impl ClientNonInviteLogic {
                 return Ok(Some(TransactionState::Terminated));
             }
             _ => {
-                trace!(id=%tx_id, state=?current_state, "Timer F fired in invalid state, ignoring");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Timer F fired in invalid state, ignoring");
             }
         }
 
@@ -417,12 +417,12 @@ impl ClientNonInviteLogic {
 
         match current_state {
             TransactionState::Completed => {
-                debug!(id=%tx_id, "Timer K fired in Completed state, terminating");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer K fired in Completed state, terminating");
                 // Timer K automatically transitions to Terminated, no need to return a state
                 Ok(None)
             }
             _ => {
-                trace!(id=%tx_id, state=?current_state, "Timer K fired in invalid state, ignoring");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Timer K fired in invalid state, ignoring");
                 Ok(None)
             }
         }
@@ -441,7 +441,7 @@ impl ClientNonInviteLogic {
     ) -> Result<Option<TransactionState>> {
         let tx_id = &data.id;
 
-        debug!(id=%tx_id, status=%response.status(), state=?current_state, "🔍 DEBUG: process_response called");
+        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), state=?current_state, "🔍 DEBUG: process_response called");
 
         // Get the original method from the request to validate the response
         let request_guard: &Request = &data.request;
@@ -452,7 +452,7 @@ impl ClientNonInviteLogic {
         if let Err(e) =
             validators::validate_response_matches_transaction(&response, tx_id, &original_method)
         {
-            warn!(id=%tx_id, error=%e, "Response validation failed");
+            warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Response validation failed");
             return Ok(None);
         }
 
@@ -461,30 +461,30 @@ impl ClientNonInviteLogic {
         let is_provisional = status.is_provisional();
         let is_final = !is_provisional;
 
-        debug!(id=%tx_id, status=%status, is_provisional=%is_provisional, is_final=%is_final, state=?current_state,
+        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%status, is_provisional=%is_provisional, is_final=%is_final, state=?current_state,
                "🔍 DEBUG: Response classification");
 
         match current_state {
             TransactionState::Trying | TransactionState::Proceeding => {
-                debug!(id=%tx_id, "🔍 DEBUG: In Trying/Proceeding state");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "🔍 DEBUG: In Trying/Proceeding state");
 
                 // **RFC 3261 COMPLIANCE**: Cancel Timer E for final responses
                 // Section 17.1.2.2: "When a final response is received, the client
                 // transaction enters the Completed state after possibly generating an ACK"
                 if is_final {
-                    debug!(id=%tx_id, "🔍 DEBUG: This is a final response, checking Timer E");
+                    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "🔍 DEBUG: This is a final response, checking Timer E");
 
                     // Cancel Timer E (retransmission timer) for final responses
                     if let Some(handle) = timer_handles.timer_e.take() {
                         handle.abort();
-                        debug!(id=%tx_id, status=%status, "✅ Cancelled Timer E (final response received)");
+                        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%status, "✅ Cancelled Timer E (final response received)");
                     } else {
-                        debug!(id=%tx_id, "🔍 DEBUG: No Timer E handle found to cancel");
+                        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "🔍 DEBUG: No Timer E handle found to cancel");
                     }
                     // Reset the interval tracking
                     timer_handles.current_timer_e_interval = None;
                 } else {
-                    debug!(id=%tx_id, "🔍 DEBUG: This is a provisional response, keeping Timer E running");
+                    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "🔍 DEBUG: This is a provisional response, keeping Timer E running");
                 }
 
                 // Note: Timer F (transaction timeout) is left running until state transition
@@ -492,7 +492,7 @@ impl ClientNonInviteLogic {
             }
             _ => {
                 // In other states, no timer changes needed for response processing
-                debug!(id=%tx_id, state=?current_state, "🔍 DEBUG: In non-active state, no timer changes");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "🔍 DEBUG: In non-active state, no timer changes");
             }
         }
 
@@ -508,7 +508,7 @@ impl ClientNonInviteLogic {
         )
         .await;
 
-        debug!(id=%tx_id, old_state=?current_state, new_state=?new_state, "🔍 DEBUG: State transition result");
+        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), old_state=?current_state, new_state=?new_state, "🔍 DEBUG: State transition result");
 
         Ok(new_state)
     }
@@ -558,7 +558,7 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
                     .await?;
             }
             TransactionState::Proceeding => {
-                trace!(id=%tx_id, "Entered Proceeding state. Timers E & F continue.");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Entered Proceeding state. Timers E & F continue.");
                 // Timer E continues with its current backoff interval.
                 // Timer F continues. No new timers are started specifically for entering Proceeding.
             }
@@ -567,14 +567,14 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
                 self.start_timer_k(data, timer_handles, command_tx).await;
             }
             TransactionState::Terminated => {
-                trace!(id=%tx_id, "Entered Terminated state. Specific timers should have been cancelled by runner.");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Entered Terminated state. Specific timers should have been cancelled by runner.");
                 // Unregister from timer manager when terminated
                 let timer_manager = self.timer_factory.timer_manager();
                 timer_utils::unregister_transaction(&timer_manager, tx_id).await;
             }
             _ => {
                 // Initial state, or others not directly part of the main flow.
-                trace!(id=%tx_id, "Entered unhandled state {:?} in on_enter_state", new_state);
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Entered unhandled state {:?} in on_enter_state", new_state);
             }
         }
         Ok(())
@@ -615,7 +615,7 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
                     .await
             }
             _ => {
-                warn!(id=%tx_id, timer_name=%timer_name, "Unknown timer triggered for ClientNonInvite");
+                warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), timer_name=%timer_name, "Unknown timer triggered for ClientNonInvite");
                 Ok(None)
             }
         }
@@ -630,13 +630,13 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
     ) -> Result<Option<TransactionState>> {
         let tx_id = &data.id;
 
-        debug!(id=%tx_id, state=?current_state, "🔍 DEBUG: process_message called with message type: {}",
+        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "🔍 DEBUG: process_message called with message type: {}",
                if message.is_response() { "Response" } else { "Request" });
 
         // Use the validators utility to extract and validate the response
         match validators::extract_response(&message, tx_id) {
             Ok(response) => {
-                debug!(id=%tx_id, status=%response.status(), "🔍 DEBUG: Extracted response, storing and processing");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "🔍 DEBUG: Extracted response, storing and processing");
 
                 // Store the response
                 {
@@ -648,11 +648,11 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
                 let result = self
                     .process_response(data, response, current_state, timer_handles)
                     .await;
-                debug!(id=%tx_id, "🔍 DEBUG: process_response completed");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "🔍 DEBUG: process_response completed");
                 result
             }
             Err(e) => {
-                warn!(id=%tx_id, error=%e, "Received non-response message");
+                warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Received non-response message");
                 Ok(None)
             }
         }
@@ -768,7 +768,7 @@ impl ClientTransaction for ClientNonInviteTransaction {
         let tx_id = self.data.id.clone(); // Get ID for logging
 
         Box::pin(async move {
-            tracing::trace!("ClientNonInviteTransaction::initiate called for {}", tx_id);
+            tracing::trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "ClientNonInviteTransaction::initiate called");
             let current_state = data.state.get();
             tracing::trace!("Current state is {:?}", current_state);
 
@@ -783,7 +783,7 @@ impl ClientTransaction for ClientNonInviteTransaction {
                 ));
             }
 
-            tracing::trace!("Sending TransitionTo(Trying) command for {}", tx_id);
+            tracing::trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Sending TransitionTo(Trying) command");
             match data
                 .cmd_tx
                 .send(InternalTransactionCommand::TransitionTo(
@@ -792,7 +792,7 @@ impl ClientTransaction for ClientNonInviteTransaction {
                 .await
             {
                 Ok(_) => {
-                    tracing::trace!("Successfully sent TransitionTo command for {}", tx_id);
+                    tracing::trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Successfully sent TransitionTo command");
                     // Wait a small amount of time to allow the transaction runner to process the command
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
@@ -809,7 +809,7 @@ impl ClientTransaction for ClientNonInviteTransaction {
                     Ok(())
                 }
                 Err(e) => {
-                    tracing::trace!("Failed to send command: {}", e);
+                    tracing::trace!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send command");
                     Err(Error::Other(format!("Failed to send command: {}", e)))
                 }
             }
@@ -822,7 +822,7 @@ impl ClientTransaction for ClientNonInviteTransaction {
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         let data = self.data.clone();
         Box::pin(async move {
-            trace!(id=%data.id, method=%response.status(), "Received response");
+            trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&data.id), method=%response.status(), "Received response");
 
             data.cmd_tx
                 .send(InternalTransactionCommand::ProcessMessage(

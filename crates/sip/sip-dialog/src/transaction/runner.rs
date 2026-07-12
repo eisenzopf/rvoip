@@ -108,20 +108,27 @@ pub async fn run_transaction_loop<D, TH, L>(
     let tx_id = data.as_ref_key().clone();
     diagnostics::record_transaction_runner_started();
 
-    tracing::trace!("Transaction loop starting for {}", tx_id);
+    tracing::trace!(
+        transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id),
+        "Transaction loop starting"
+    );
     tracing::trace!("Initial state: {:?}", data.as_ref_state().get());
-    debug!(id = %tx_id, test_mode = is_test_mode, "Generic transaction loop starting. Initial state: {:?}", data.as_ref_state().get());
+    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), test_mode = is_test_mode, "Generic transaction loop starting. Initial state: {:?}", data.as_ref_state().get());
 
     while let Some(command) = cmd_rx.recv().await {
         let current_state = data.as_ref_state().get();
         let tx_id_clone = data.as_ref_key().clone();
 
         tracing::trace!(
-            "Received command: {:?} for transaction {}",
-            command,
-            tx_id_clone
+            command = ?crate::transaction::safe_diagnostics::SafeTransactionCommand::new(&command),
+            transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone),
+            "Received transaction command"
         );
-        debug!(id=%tx_id_clone, ?command, "Transaction received command");
+        debug!(
+            id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone),
+            command=?crate::transaction::safe_diagnostics::SafeTransactionCommand::new(&command),
+            "Transaction received command"
+        );
 
         match command {
             InternalTransactionCommand::TransitionTo(requested_new_state) => {
@@ -130,14 +137,14 @@ pub async fn run_transaction_loop<D, TH, L>(
                     requested_new_state,
                     current_state
                 );
-                debug!(id=%tx_id_clone, current_state=?current_state, new_state=?requested_new_state, "Processing state transition");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), current_state=?current_state, new_state=?requested_new_state, "Processing state transition");
 
                 if current_state == requested_new_state {
                     tracing::trace!(
                         "Already in requested state, no transition needed: {:?}",
                         current_state
                     );
-                    trace!(id=%tx_id_clone, state=?current_state, "Already in requested state, no transition needed.");
+                    trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), state=?current_state, "Already in requested state, no transition needed.");
                     continue;
                 }
 
@@ -147,12 +154,12 @@ pub async fn run_transaction_loop<D, TH, L>(
                     requested_new_state,
                 ) {
                     tracing::trace!(
-                        "Invalid state transition: {:?} -> {:?}, error: {}",
-                        current_state,
-                        requested_new_state,
-                        e
+                        ?current_state,
+                        ?requested_new_state,
+                        error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e),
+                        "Invalid state transition"
                     );
-                    error!(id=%tx_id_clone, error=%e, "Invalid state transition: {:?} -> {:?}", current_state, requested_new_state);
+                    error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Invalid state transition: {:?} -> {:?}", current_state, requested_new_state);
                     let _ = data
                         .get_tu_event_sender()
                         .send(TransactionEvent::Error {
@@ -168,15 +175,15 @@ pub async fn run_transaction_loop<D, TH, L>(
                     current_state,
                     requested_new_state
                 );
-                debug!(id=%tx_id_clone, "State transition: {:?} -> {:?}", current_state, requested_new_state);
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "State transition: {:?} -> {:?}", current_state, requested_new_state);
                 logic.cancel_all_specific_timers(&mut timer_handles);
                 let previous_state = data.as_ref_state().set(requested_new_state);
                 tracing::trace!("State successfully changed to: {:?}", requested_new_state);
-                debug!(id=%tx_id_clone, "State changed from {:?} to {:?}", previous_state, requested_new_state);
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "State changed from {:?} to {:?}", previous_state, requested_new_state);
 
                 // Handle lifecycle transition if entering terminal state
                 if requested_new_state == TransactionState::Terminated {
-                    debug!(id=%tx_id_clone, "Entering terminal state - transitioning to Terminating lifecycle");
+                    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Entering terminal state - transitioning to Terminating lifecycle");
                     data.set_lifecycle(TransactionLifecycle::Terminating);
                 }
 
@@ -199,20 +206,20 @@ pub async fn run_transaction_loop<D, TH, L>(
                             tracing::trace!("Sent StateChanged event result: Success");
                         }
                         Err(TrySendError::Full(_)) => {
-                            debug!(id=%tx_id_clone, "Dropped StateChanged event because TU event channel is full");
+                            debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Dropped StateChanged event because TU event channel is full");
                         }
                         Err(TrySendError::Closed(_)) => {
-                            error!(id=%tx_id_clone, "Failed to send StateChanged event: channel closed");
+                            error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Failed to send StateChanged event: channel closed");
 
                             // In test mode, don't terminate transactions when event channels close
                             if is_test_mode {
-                                debug!(id=%tx_id_clone, "Test mode detected, continuing despite closed event channel");
+                                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Test mode detected, continuing despite closed event channel");
                             } else if requested_new_state == TransactionState::Terminated {
                                 // If we're already terminating, this is expected
-                                debug!(id=%tx_id_clone, "Event channel closed during termination - expected");
+                                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Event channel closed during termination - expected");
                             } else {
                                 // In production, only terminate if we're certain the channel is closed
-                                warn!(id=%tx_id_clone, "Event channel appears closed, initiating graceful shutdown");
+                                warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Event channel appears closed, initiating graceful shutdown");
                                 logic.cancel_all_specific_timers(&mut timer_handles);
                                 data.as_ref_state().set(TransactionState::Terminated);
                                 break;
@@ -220,14 +227,14 @@ pub async fn run_transaction_loop<D, TH, L>(
                         }
                     }
                 } else {
-                    debug!(id=%tx_id_clone, "Transaction in draining state, not emitting StateChanged event");
+                    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Transaction in draining state, not emitting StateChanged event");
                 }
 
                 // If we've reached Terminated state, start grace period timer
                 if requested_new_state == TransactionState::Terminated
                     && data.get_lifecycle() == TransactionLifecycle::Terminating
                 {
-                    debug!(id=%tx_id_clone, "Starting grace period for terminated transaction");
+                    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Starting grace period for terminated transaction");
                     let data_clone = data.clone();
                     let tx_id_for_timer = tx_id_clone.clone();
                     let destroy_wake_tx = data.get_self_command_sender();
@@ -235,12 +242,12 @@ pub async fn run_transaction_loop<D, TH, L>(
                     tokio::spawn(async move {
                         // Wait for grace period
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        debug!(id=%tx_id_for_timer, "Grace period expired, transitioning to Draining");
+                        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_for_timer), "Grace period expired, transitioning to Draining");
                         data_clone.set_lifecycle(TransactionLifecycle::Draining);
 
                         // After additional time, transition to Destroyed
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        debug!(id=%tx_id_for_timer, "Draining period complete, ready for cleanup");
+                        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_for_timer), "Draining period complete, ready for cleanup");
                         data_clone.set_lifecycle(TransactionLifecycle::Destroyed);
 
                         match destroy_wake_tx.try_send(InternalTransactionCommand::Terminate) {
@@ -248,11 +255,11 @@ pub async fn run_transaction_loop<D, TH, L>(
                                 diagnostics::record_transaction_runner_destroy_wake_sent();
                             }
                             Err(TrySendError::Full(_)) => {
-                                debug!(id=%tx_id_for_timer, "Transaction command channel full after Destroyed lifecycle; existing queued command will wake runner");
+                                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_for_timer), "Transaction command channel full after Destroyed lifecycle; existing queued command will wake runner");
                             }
                             Err(TrySendError::Closed(_)) => {
                                 diagnostics::record_transaction_runner_destroy_wake_failed();
-                                debug!(id=%tx_id_for_timer, "Transaction command channel already closed after Destroyed lifecycle");
+                                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_for_timer), "Transaction command channel already closed after Destroyed lifecycle");
                             }
                         }
                     });
@@ -268,7 +275,7 @@ pub async fn run_transaction_loop<D, TH, L>(
                     )
                     .await
                 {
-                    error!(id=%tx_id_clone, error=%e, "Error in on_enter_state for state {:?}", requested_new_state);
+                    error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error in on_enter_state for state {:?}", requested_new_state);
 
                     // Try to send error event with timeout
                     let sender = data.get_tu_event_sender();
@@ -284,7 +291,7 @@ pub async fn run_transaction_loop<D, TH, L>(
                     // Only terminate on actual channel closure, not on timeout
                     if let Ok(Err(_)) = result {
                         if !is_test_mode {
-                            debug!(id=%tx_id_clone, "Cannot send errors to TU, initiating graceful shutdown");
+                            debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Cannot send errors to TU, initiating graceful shutdown");
                             logic.cancel_all_specific_timers(&mut timer_handles);
                             data.as_ref_state().set(TransactionState::Terminated);
                             break;
@@ -293,7 +300,11 @@ pub async fn run_transaction_loop<D, TH, L>(
                 }
             }
             InternalTransactionCommand::ProcessMessage(message) => {
-                debug!(id=%tx_id_clone, "Received ProcessMessage command with {:?}", message);
+                debug!(
+                    id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone),
+                    message=?crate::transaction::safe_diagnostics::SafeSipMessage::new(&message),
+                    "Received ProcessMessage command"
+                );
                 match logic
                     .process_message(&data, message, current_state, &mut timer_handles)
                     .await
@@ -304,12 +315,12 @@ pub async fn run_transaction_loop<D, TH, L>(
                             .send(InternalTransactionCommand::TransitionTo(next_state))
                             .await
                         {
-                            error!(id=%tx_id_clone, error=%e, "Failed to send self-command for state transition after ProcessMessage");
+                            error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send self-command for state transition after ProcessMessage");
                         }
                     }
                     Ok(None) => { /* No state change needed */ }
                     Err(e) => {
-                        error!(id=%tx_id_clone, error=%e, "Error processing message in state {:?}", current_state);
+                        error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error processing message in state {:?}", current_state);
 
                         // Try to send error event with timeout
                         let sender = data.get_tu_event_sender();
@@ -327,7 +338,7 @@ pub async fn run_transaction_loop<D, TH, L>(
                         // Only terminate on actual channel closure, not on timeout
                         if let Ok(Err(_)) = result {
                             if !is_test_mode {
-                                debug!(id=%tx_id_clone, "Cannot send errors to TU, initiating graceful shutdown");
+                                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Cannot send errors to TU, initiating graceful shutdown");
                                 logic.cancel_all_specific_timers(&mut timer_handles);
                                 data.as_ref_state().set(TransactionState::Terminated);
                                 break;
@@ -347,12 +358,12 @@ pub async fn run_transaction_loop<D, TH, L>(
                             .send(InternalTransactionCommand::TransitionTo(next_state))
                             .await
                         {
-                            error!(id=%tx_id_clone, error=%e, "Failed to send self-command for state transition after Timer");
+                            error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send self-command for state transition after Timer");
                         }
                     }
                     Ok(None) => { /* No state change needed */ }
                     Err(e) => {
-                        error!(id=%tx_id_clone, error=%e, "Error handling timer '{}' in state {:?}", timer_name, current_state);
+                        error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error handling timer '{}' in state {:?}", timer_name, current_state);
 
                         // Try to send error event with timeout
                         let sender = data.get_tu_event_sender();
@@ -370,7 +381,7 @@ pub async fn run_transaction_loop<D, TH, L>(
                         // Only terminate on actual channel closure, not on timeout
                         if let Ok(Err(_)) = result {
                             if !is_test_mode {
-                                debug!(id=%tx_id_clone, "Cannot send errors to TU, initiating graceful shutdown");
+                                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Cannot send errors to TU, initiating graceful shutdown");
                                 logic.cancel_all_specific_timers(&mut timer_handles);
                                 data.as_ref_state().set(TransactionState::Terminated);
                                 break;
@@ -380,7 +391,7 @@ pub async fn run_transaction_loop<D, TH, L>(
                 }
             }
             InternalTransactionCommand::TransportError => {
-                error!(id=%tx_id_clone, "Transport error occurred, terminating transaction");
+                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Transport error occurred, terminating transaction");
 
                 // Try to send transport error event with timeout
                 let sender = data.get_tu_event_sender();
@@ -394,7 +405,7 @@ pub async fn run_transaction_loop<D, TH, L>(
                 // Only skip shutdown on actual channel closure in test mode
                 if let Ok(Err(_)) = result {
                     if !is_test_mode {
-                        debug!(id=%tx_id_clone, "Cannot send transport error to TU, initiating graceful shutdown");
+                        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Cannot send transport error to TU, initiating graceful shutdown");
                         logic.cancel_all_specific_timers(&mut timer_handles);
                         data.as_ref_state().set(TransactionState::Terminated);
                         break;
@@ -408,7 +419,7 @@ pub async fn run_transaction_loop<D, TH, L>(
                     ))
                     .await
                 {
-                    error!(id=%tx_id_clone, error=%e, "Failed to send self-command for Terminated state on TransportError");
+                    error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send self-command for Terminated state on TransportError");
                     // Even if we can't send the command, still terminate
                     if !is_test_mode {
                         data.as_ref_state().set(TransactionState::Terminated);
@@ -417,7 +428,7 @@ pub async fn run_transaction_loop<D, TH, L>(
                 }
             }
             InternalTransactionCommand::Terminate => {
-                debug!(id=%tx_id_clone, "Received Terminate command, shutting down transaction");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Received Terminate command, shutting down transaction");
                 logic.cancel_all_specific_timers(&mut timer_handles);
                 data.as_ref_state().set(TransactionState::Terminated);
                 data.set_lifecycle(TransactionLifecycle::Destroyed);
@@ -425,11 +436,11 @@ pub async fn run_transaction_loop<D, TH, L>(
             }
 
             InternalTransactionCommand::CancelTimer100 => {
-                debug!(id=%tx_id_clone, "Received CancelTimer100 command, canceling automatic 100 Trying timer");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Received CancelTimer100 command, canceling automatic 100 Trying timer");
                 // This command is specific to INVITE server transactions
                 // The logic implementation will handle the actual timer cancellation
                 if let Err(e) = logic.handle_cancel_timer_100(&mut timer_handles).await {
-                    error!(id=%tx_id_clone, error=%e, "Failed to cancel Timer 100");
+                    error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to cancel Timer 100");
                 }
             }
         }
@@ -437,24 +448,28 @@ pub async fn run_transaction_loop<D, TH, L>(
         // Check lifecycle state instead of just RFC state for termination
         let lifecycle_state = data.get_lifecycle();
         if lifecycle_state == TransactionLifecycle::Destroyed {
-            debug!(id=%tx_id_clone, "Transaction lifecycle is Destroyed, stopping event loop.");
+            debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Transaction lifecycle is Destroyed, stopping event loop.");
             break;
         }
 
         // Handle messages in different lifecycle states
         if lifecycle_state != TransactionLifecycle::Active {
-            debug!(id=%tx_id_clone, "Transaction in {:?} lifecycle - processing commands silently", lifecycle_state);
+            debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Transaction in {:?} lifecycle - processing commands silently", lifecycle_state);
         }
     }
 
     let final_state = data.as_ref_state().get();
     tracing::trace!(
-        "Transaction loop ending for {}. Final state: {:?}",
-        data.as_ref_key(),
-        final_state
+        transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(data.as_ref_key()),
+        ?final_state,
+        "Transaction loop ending"
     );
     logic.cancel_all_specific_timers(&mut timer_handles);
-    debug!(id = %data.as_ref_key().branch, final_state=?final_state, "Generic transaction loop ended.");
+    debug!(
+        id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(data.as_ref_key()),
+        final_state=?final_state,
+        "Generic transaction loop ended."
+    );
 
     if final_state == TransactionState::Terminated {
         // TransactionTerminated drives manager cleanup. Unlike diagnostic

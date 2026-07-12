@@ -158,9 +158,9 @@ impl TimerManager {
             .insert(transaction_id.clone(), command_tx)
             .is_some()
         {
-            debug!(id=%transaction_id, "Transaction channel replaced for already registered transaction.");
+            debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Transaction channel replaced for already registered transaction.");
         }
-        trace!(id=%transaction_id, "Transaction registered with TimerManager.");
+        trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Transaction registered with TimerManager.");
     }
 
     /// Unregisters a transaction from the `TimerManager`.
@@ -184,9 +184,9 @@ impl TimerManager {
     pub async fn unregister_transaction(&self, transaction_id: &TransactionKey) {
         let mut channels = self.transaction_channels.lock().await;
         if channels.remove(transaction_id).is_some() {
-            trace!(id=%transaction_id, "Transaction unregistered from TimerManager.");
+            trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Transaction unregistered from TimerManager.");
         } else {
-            trace!(id=%transaction_id, "Attempted to unregister a non-existent transaction.");
+            trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Attempted to unregister a non-existent transaction.");
         }
     }
 
@@ -237,21 +237,21 @@ impl TimerManager {
         // { // Scope for the lock
         //     let channels_guard = transaction_channels_clone.lock().await;
         //     if !channels_guard.contains_key(&transaction_id) {
-        //         warn!(id = %transaction_id, timer = %timer_type, "Cannot start timer, transaction not registered.");
+        //         warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), timer = %timer_type, "Cannot start timer, transaction not registered.");
         //         // How to return an error that fits crate::error::Error type?
         //         // For now, let's stick to the original behavior of spawning and checking later.
         //     }
         // }
 
         let handle = tokio::spawn(async move {
-            trace!(id=%transaction_id, timer=%timer_type, duration=?duration, "Timer task started.");
+            trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), timer=%timer_type, duration=?duration, "Timer task started.");
 
             sleep(duration).await;
 
             let channels_guard = transaction_channels_clone.lock().await;
             if let Some(cmd_tx) = channels_guard.get(&transaction_id) {
                 let timer_event_payload = timer_type.to_string();
-                trace!(id=%transaction_id, timer=%timer_type, "Timer fired. Attempting to send event.");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), timer=%timer_type, "Timer fired. Attempting to send event.");
                 if let Err(e) = cmd_tx
                     .send(InternalTransactionCommand::Timer(
                         timer_event_payload.clone(),
@@ -259,13 +259,13 @@ impl TimerManager {
                     .await
                 {
                     // This error typically means the receiver (transaction) has been dropped/terminated.
-                    debug!(id=%transaction_id, timer=%timer_event_payload, error=%e, "Failed to send timer event (receiver dropped).");
+                    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), timer=%timer_event_payload, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send timer event (receiver dropped).");
                 } else {
-                    debug!(id=%transaction_id, timer=%timer_event_payload, "Timer event sent successfully.");
+                    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), timer=%timer_event_payload, "Timer event sent successfully.");
                 }
             } else {
                 // Transaction was unregistered before timer fired.
-                trace!(id=%transaction_id, timer=%timer_type, "Timer fired, but transaction no longer registered.");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), timer=%timer_type, "Timer fired, but transaction no longer registered.");
             }
         });
 

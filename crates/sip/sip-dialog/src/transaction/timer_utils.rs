@@ -39,7 +39,7 @@ pub async fn start_transaction_timer(
         .start_timer(tx_id.clone(), timer_type, interval)
         .await?;
 
-    trace!(id=%tx_id, timer=%timer_name, interval=?interval, "Started transaction timer");
+    trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), timer=%timer_name, interval=?interval, "Started transaction timer");
     Ok(handle)
 }
 
@@ -82,7 +82,7 @@ pub async fn start_timer_with_transition(
         tokio::time::sleep(interval).await;
 
         // Then send both commands
-        debug!(id=%tx_id_clone, timer=%timer_name_clone, "Timer fired with transition to {:?}", state);
+        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), timer=%timer_name_clone, "Timer fired with transition to {:?}", state);
 
         // First send the timer event
         let _ = cmd_tx_clone
@@ -95,7 +95,7 @@ pub async fn start_timer_with_transition(
             .await;
     });
 
-    trace!(id=%tx_id, timer=%timer_name, interval=?interval, target_state=?target_state, "Started timer with transition");
+    trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), timer=%timer_name, interval=?interval, target_state=?target_state, "Started timer with transition");
     Ok(handle)
 }
 
@@ -106,7 +106,7 @@ pub async fn start_timer_with_transition(
 /// * `tx_id` - Transaction ID to unregister
 pub async fn unregister_transaction(timer_manager: &TimerManager, tx_id: &TransactionKey) {
     timer_manager.unregister_transaction(tx_id).await;
-    trace!(id=%tx_id, "Unregistered transaction from timer manager");
+    trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Unregistered transaction from timer manager");
 }
 
 /// Helper that creates a proper backoff interval for retransmission timers

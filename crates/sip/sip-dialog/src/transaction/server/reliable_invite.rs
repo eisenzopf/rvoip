@@ -71,10 +71,7 @@ pub fn spawn_reliable_provisional_retransmit(
                     );
                 }
                 Err(e) => {
-                    warn!(
-                        "Retransmit of reliable 18x (dialog={}, rseq={}) failed: {} — stopping",
-                        dialog_id, rseq, e
-                    );
+                    warn!(dialog=%dialog_id, rseq, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Retransmit of reliable 18x failed; stopping");
                     break;
                 }
             }

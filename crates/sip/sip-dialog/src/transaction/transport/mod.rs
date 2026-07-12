@@ -226,7 +226,7 @@ async fn forward_transport_event(
         Err(TrySendError::Full(event)) => {
             let started = Instant::now();
             if let Err(e) = event_tx.send(event).await {
-                error!("Failed to forward transport event: {}", e);
+                error!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to forward transport event");
                 false
             } else {
                 udp_diagnostics::record_manager_channel_backpressure(started.elapsed());
@@ -357,7 +357,7 @@ impl TransportManager {
                         initialized = true;
                     }
                     Err(e) => {
-                        error!("Failed to initialize UDP transport on {}: {}", addr, e);
+                        error!(%addr, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to initialize UDP transport");
                         initialization_errors
                             .push(format!("UDP transport on {} failed: {}", addr, e));
                     }
@@ -379,7 +379,7 @@ impl TransportManager {
                         initialized = true;
                     }
                     Err(e) => {
-                        error!("Failed to initialize TCP transport on {}: {}", addr, e);
+                        error!(%addr, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to initialize TCP transport");
                         initialization_errors
                             .push(format!("TCP transport on {} failed: {}", addr, e));
                     }
@@ -432,7 +432,7 @@ impl TransportManager {
                             initialized = true;
                         }
                         Err(e) => {
-                            error!("Failed to initialize TLS transport on {}: {}", addr, e);
+                            error!(%addr, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to initialize TLS transport");
                             initialization_errors
                                 .push(format!("TLS transport on {} failed: {}", addr, e));
                         }
@@ -455,10 +455,7 @@ impl TransportManager {
                         initialized = true;
                     }
                     Err(e) => {
-                        error!(
-                            "Failed to initialize WebSocket transport on {}: {}",
-                            addr, e
-                        );
+                        error!(%addr, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to initialize WebSocket transport");
                         initialization_errors
                             .push(format!("WebSocket transport on {} failed: {}", addr, e));
                     }
@@ -482,7 +479,7 @@ impl TransportManager {
                                 initialized = true;
                             }
                             Err(e) => {
-                                error!("Failed to initialize WSS transport on {}: {}", addr, e);
+                                error!(%addr, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to initialize WSS transport");
                                 initialization_errors
                                     .push(format!("WSS transport on {} failed: {}", addr, e));
                             }
@@ -930,7 +927,7 @@ impl TransportManager {
 
         for (key, transport) in transports.iter() {
             if let Err(e) = transport.close().await {
-                error!("Failed to close transport {}: {}", key, e);
+                error!(transport_key_len=key.len(), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to close transport");
             }
         }
 

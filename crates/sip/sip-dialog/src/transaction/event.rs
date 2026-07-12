@@ -55,7 +55,7 @@ use rvoip_sip_core::prelude::{Request, Response};
 /// These events provide the TU with all the information it needs to implement proper SIP
 /// dialog and session behavior without having to understand the complexities of the
 /// transaction state machines.
-use std::net::SocketAddr;
+use std::{fmt, net::SocketAddr};
 
 use crate::transaction::{TransactionKey, TransactionState};
 
@@ -64,7 +64,7 @@ use crate::transaction::{TransactionKey, TransactionState};
 ///
 /// These events inform the TU about incoming requests, responses, state changes,
 /// errors, and timeouts related to SIP transactions.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum TransactionEvent {
     // --- Request Processing (Events primarily for Server Transactions) ---
     /// An ACK request was received, matching an Invite Server Transaction that had previously
@@ -320,6 +320,12 @@ pub enum TransactionEvent {
 
     /// Transaction manager shutdown complete
     ShutdownComplete,
+}
+
+impl fmt::Debug for TransactionEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        crate::transaction::safe_diagnostics::SafeTransactionEvent::new(self).fmt(f)
+    }
 }
 
 #[cfg(test)]

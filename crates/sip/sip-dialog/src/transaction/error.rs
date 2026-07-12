@@ -6,7 +6,7 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors that can occur in SIP transaction handling
-#[derive(Error, Debug)]
+#[derive(Error)]
 pub enum Error {
     /// Error originating from the sip-core crate (parsing, building messages, etc.)
     #[error("SIP core error: {0}")]
@@ -77,6 +77,12 @@ pub enum Error {
     /// Other miscellaneous errors.
     #[error("Other error: {0}")]
     Other(String),
+}
+
+impl std::fmt::Debug for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        crate::transaction::safe_diagnostics::SafeTransactionError::new(self).fmt(f)
+    }
 }
 
 /// Wrapper for transport errors to provide consistent Debug/Display

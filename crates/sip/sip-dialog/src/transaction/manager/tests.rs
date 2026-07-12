@@ -311,6 +311,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_transaction_rejects_unsafe_typed_request_before_reservation_or_io() -> Result<()>
+    {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+        let destination: SocketAddr = "192.0.2.1:5060".parse().unwrap();
+
+        let invalid_requests = [
+            Request::new(
+                Method::Extension("X-UNSAFE\r\nX-Injected: method-secret".into()),
+                Uri::custom("sip:alice@example.invalid"),
+            ),
+            Request::new(
+                Method::Options,
+                Uri::custom("sip:alice@example.invalid\r\nX-Injected: uri-secret"),
+            ),
+            Request::new(Method::Options, Uri::custom("sip:alice@example.invalid")).with_header(
+                TypedHeader::Subject(rvoip_sip_core::types::Subject::new(
+                    "safe\r\nX-Injected: header-secret",
+                )),
+            ),
+        ];
+
+        for request in invalid_requests {
+            assert!(
+                manager
+                    .create_client_transaction(request, destination)
+                    .await
+                    .is_err(),
+                "unsafe typed request must fail at transaction-manager entry"
+            );
+        }
+
+        assert!(manager.client_transactions.is_empty());
+        assert!(manager.transaction_destinations.is_empty());
+        assert!(transport.get_sent_messages().await.is_empty());
+        assert_eq!(transport.raw_send_count(), 0);
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn ingress_authorization_rejects_before_tu_and_reuses_transaction_on_retransmit(
     ) -> Result<()> {
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));

@@ -842,7 +842,7 @@ async fn process_transaction_dispatch_event(
     let kind = queued.kind;
     let handler_started = timing_enabled.then(Instant::now);
     if let Err(e) = manager.handle_transport_event(queued.event).await {
-        error!("Error handling transport message: {}", e);
+        error!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error handling transport message");
     }
     if let Some(started) = handler_started {
         diagnostics::record_transaction_handler(kind.as_str(), started.elapsed());
@@ -954,7 +954,7 @@ impl TransactionManager {
             if ready || item.attempts >= TERMINATED_CLEANUP_MAX_ATTEMPTS {
                 if !ready {
                     warn!(
-                        transaction_id = %item.transaction_id,
+                        transaction_id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&item.transaction_id),
                         attempts = item.attempts,
                         "Lifecycle cleanup timeout, forcing transaction removal"
                     );
@@ -2020,7 +2020,7 @@ impl TransactionManager {
     /// # }
     /// ```
     pub async fn send_request(&self, transaction_id: &TransactionKey) -> Result<()> {
-        debug!(%transaction_id, "TransactionManager::send_request - sending request");
+        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "TransactionManager::send_request - sending request");
 
         // Clone the Arc<dyn ClientTransaction> out of the shard so we
         // don't hold the DashMap guard across `initiate().await` —
@@ -2031,13 +2031,13 @@ impl TransactionManager {
             .get(transaction_id)
             .map(|r| r.value().clone());
         let Some(tx) = tx_arc else {
-            debug!(%transaction_id, "TransactionManager::send_request - transaction not found");
+            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "TransactionManager::send_request - transaction not found");
             return Err(Error::transaction_not_found(
                 transaction_id.clone(),
                 "send_request - transaction not found",
             ));
         };
-        debug!(%transaction_id, kind=?tx.kind(), state=?tx.state(), "TransactionManager::send_request - found transaction");
+        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), kind=?tx.kind(), state=?tx.state(), "TransactionManager::send_request - found transaction");
 
         let tx_kind = tx.kind();
         let _initial_state = tx.state();
@@ -2050,15 +2050,15 @@ impl TransactionManager {
         use crate::transaction::client::TransactionExt;
 
         if let Some(client_tx) = tx.as_client_transaction() {
-            debug!(%transaction_id, "TransactionManager::send_request - initiating client transaction");
+            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "TransactionManager::send_request - initiating client transaction");
 
             // We're holding a per-tx Arc; the DashMap shard guard
             // released when `.get()` returned above.
             let result = client_tx.initiate().await;
-            debug!(%transaction_id, success=?result.is_ok(), "TransactionManager::send_request - initiate result");
+            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), success=?result.is_ok(), "TransactionManager::send_request - initiate result");
 
             if let Err(e) = result {
-                debug!(%transaction_id, error=%e, "TransactionManager::send_request - initiate failed immediately");
+                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "TransactionManager::send_request - initiate failed immediately");
                 return Err(e);
             }
 
@@ -2070,11 +2070,11 @@ impl TransactionManager {
                         .await
                         .is_some_and(|response| response.status().is_success())
                     {
-                        debug!(%transaction_id, "INVITE client terminated during initiate - treating as success (fast 2xx)");
+                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "INVITE client terminated during initiate - treating as success (fast 2xx)");
                         return Ok(());
                     }
                 }
-                debug!(%transaction_id, "Transaction terminated immediately during initiate - likely transport error");
+                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Transaction terminated immediately during initiate - likely transport error");
                 return Err(Error::transport_error(
                     rvoip_sip_transport::Error::ProtocolError(
                         "Transaction terminated immediately".into(),
@@ -2093,7 +2093,7 @@ impl TransactionManager {
                                 transaction_id: tx_id,
                                 ..
                             } if tx_id == *transaction_id => {
-                                debug!(%transaction_id, "Received TransportError event");
+                                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Received TransportError event");
                                 return Err(Error::transport_error(
                                     rvoip_sip_transport::Error::ProtocolError(
                                         "Transport error during request send".into(),
@@ -2106,14 +2106,14 @@ impl TransactionManager {
                                 previous_state,
                                 new_state,
                             } if tx_id == *transaction_id => {
-                                debug!(%transaction_id, previous=?previous_state, new=?new_state, "Transaction state changed");
+                                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), previous=?previous_state, new=?new_state, "Transaction state changed");
 
                                 if new_state == TransactionState::Terminated
                                     && (previous_state == TransactionState::Initial
                                         || previous_state == TransactionState::Calling
                                         || previous_state == TransactionState::Trying)
                                 {
-                                    debug!(%transaction_id, kind=?tx_kind, ?previous_state, "Transaction moved to Terminated state - likely transport error");
+                                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), kind=?tx_kind, ?previous_state, "Transaction moved to Terminated state - likely transport error");
                                     return Err(Error::transport_error(
                                         rvoip_sip_transport::Error::ProtocolError(
                                             "Transaction terminated unexpectedly".into(),
@@ -2132,7 +2132,7 @@ impl TransactionManager {
                         .map(|entry| entry.value().state())
                     {
                         Some(TransactionState::Terminated) => {
-                            debug!(%transaction_id, "Non-INVITE transaction terminated during send wait - likely transport error");
+                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Non-INVITE transaction terminated during send wait - likely transport error");
                             Err(Error::transport_error(
                                 rvoip_sip_transport::Error::ProtocolError(
                                     "Transaction terminated after processing".into(),
@@ -2141,11 +2141,11 @@ impl TransactionManager {
                             ))
                         }
                         Some(final_state) => {
-                            debug!(%transaction_id, state=?final_state, "Non-INVITE transaction send initiated");
+                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), state=?final_state, "Non-INVITE transaction send initiated");
                             Ok(())
                         }
                         None => {
-                            debug!(%transaction_id, "Non-INVITE transaction was removed during send wait");
+                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Non-INVITE transaction was removed during send wait");
                             Err(Error::transport_error(
                                 rvoip_sip_transport::Error::ProtocolError(
                                     "Transaction was removed".into(),
@@ -2163,7 +2163,7 @@ impl TransactionManager {
                         .map(|entry| entry.value().state())
                     {
                         Some(TransactionState::Terminated) => {
-                            debug!(%transaction_id, "Non-INVITE terminated within 100 ms safety wait - likely transport error");
+                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Non-INVITE terminated within 100 ms safety wait - likely transport error");
                             Err(Error::transport_error(
                                 rvoip_sip_transport::Error::ProtocolError(
                                     "Transaction terminated after timeout".into(),
@@ -2172,11 +2172,11 @@ impl TransactionManager {
                             ))
                         }
                         Some(final_state) => {
-                            debug!(%transaction_id, state=?final_state, "Non-INVITE transaction still exists after safety wait");
+                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), state=?final_state, "Non-INVITE transaction still exists after safety wait");
                             Ok(())
                         }
                         None => {
-                            debug!(%transaction_id, "Non-INVITE transaction was removed after safety wait");
+                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Non-INVITE transaction was removed after safety wait");
                             Err(Error::transport_error(
                                 rvoip_sip_transport::Error::ProtocolError(
                                     "Transaction was removed after timeout".into(),
@@ -2198,7 +2198,7 @@ impl TransactionManager {
                         transaction_id: tx_id,
                         ..
                     } if tx_id == *transaction_id => {
-                        debug!(%transaction_id, "Received TransportError event");
+                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Received TransportError event");
                         return Err(Error::transport_error(
                             rvoip_sip_transport::Error::ProtocolError(
                                 "Transport error during request send".into(),
@@ -2211,7 +2211,7 @@ impl TransactionManager {
                         previous_state,
                         new_state,
                     } if tx_id == *transaction_id => {
-                        debug!(%transaction_id, previous=?previous_state, new=?new_state, "Transaction state changed");
+                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), previous=?previous_state, new=?new_state, "Transaction state changed");
 
                         if new_state == TransactionState::Terminated {
                             let invite_2xx_path = tx_kind == TransactionKind::InviteClient
@@ -2221,14 +2221,14 @@ impl TransactionManager {
                                     .await
                                     .is_some_and(|response| response.status().is_success());
                             if invite_2xx_path {
-                                debug!(%transaction_id, "INVITE client Calling → Terminated (RFC 3261 §17.1.1.2 2xx) - treating as success");
+                                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "INVITE client Calling → Terminated (RFC 3261 §17.1.1.2 2xx) - treating as success");
                                 return Ok(());
                             }
                             if previous_state == TransactionState::Initial
                                 || previous_state == TransactionState::Calling
                                 || previous_state == TransactionState::Trying
                             {
-                                debug!(%transaction_id, kind=?tx_kind, ?previous_state, "Transaction moved to Terminated state - likely transport error");
+                                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), kind=?tx_kind, ?previous_state, "Transaction moved to Terminated state - likely transport error");
                                 return Err(Error::transport_error(
                                     rvoip_sip_transport::Error::ProtocolError(
                                         "Transaction terminated unexpectedly".into(),
@@ -2254,10 +2254,10 @@ impl TransactionManager {
                             .await
                             .is_some_and(|response| response.status().is_success())
                     {
-                        debug!(%transaction_id, "INVITE client terminated during immediate event drain - treating as success (fast 2xx)");
+                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "INVITE client terminated during immediate event drain - treating as success (fast 2xx)");
                         Ok(())
                     } else {
-                        debug!(%transaction_id, "Transaction is terminated after immediate event drain");
+                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Transaction is terminated after immediate event drain");
                         Err(Error::transport_error(
                             rvoip_sip_transport::Error::ProtocolError(
                                 "Transaction terminated after processing".into(),
@@ -2267,15 +2267,15 @@ impl TransactionManager {
                     }
                 }
                 Some(final_state) => {
-                    debug!(%transaction_id, state=?final_state, "Transaction send initiated");
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), state=?final_state, "Transaction send initiated");
                     Ok(())
                 }
                 None if tx_kind == TransactionKind::InviteClient => {
-                    debug!(%transaction_id, "INVITE client transaction removed during immediate event drain - treating as success (fast 2xx)");
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "INVITE client transaction removed during immediate event drain - treating as success (fast 2xx)");
                     Ok(())
                 }
                 None => {
-                    debug!(%transaction_id, "Transaction was removed during immediate event drain");
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Transaction was removed during immediate event drain");
                     Err(Error::transport_error(
                         rvoip_sip_transport::Error::ProtocolError("Transaction was removed".into()),
                         "Failed to send request - transaction removed",
@@ -2283,7 +2283,7 @@ impl TransactionManager {
                 }
             }
         } else {
-            debug!(%transaction_id, "TransactionManager::send_request - failed to downcast to client transaction");
+            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "TransactionManager::send_request - failed to downcast to client transaction");
             Err(Error::Other(
                 "Failed to downcast to client transaction".to_string(),
             ))
@@ -2666,7 +2666,7 @@ impl TransactionManager {
             .or_insert_with(Vec::new)
             .push(transaction_id.clone());
 
-        debug!(%transaction_id, subscriber_id, "Added transaction-specific subscriber");
+        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), subscriber_id, "Added transaction-specific subscriber");
 
         Ok(rx)
     }
@@ -2756,7 +2756,7 @@ impl TransactionManager {
         // Step 2: Transport should already be closed by this point via events
         // But ensure it's closed just in case
         if let Err(e) = self.transport.close().await {
-            debug!("Transport close during shutdown: {}", e);
+            debug!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Transport close during shutdown");
         }
 
         // Step 2.5: Tell every in-flight transaction to terminate so its event
@@ -2963,7 +2963,7 @@ impl TransactionManager {
             if e.to_string().contains("channel closed") {
                 debug!("Primary event channel closed during shutdown (expected)");
             } else {
-                warn!("Failed to send event to primary channel: {}", e);
+                warn!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send event to primary channel");
             }
         }
 
@@ -2994,7 +2994,7 @@ impl TransactionManager {
                                 sub.id
                             );
                         } else {
-                            warn!("Failed to send event to subscriber {}: {}", sub.id, e);
+                            warn!(subscriber_id=sub.id, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send event to subscriber");
                         }
                     }
                 }
@@ -3011,7 +3011,7 @@ impl TransactionManager {
                             sub.id
                         );
                     } else {
-                        warn!("Failed to send event to subscriber {}: {}", sub.id, e);
+                        warn!(subscriber_id=sub.id, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send event to subscriber");
                     }
                 }
             }
@@ -3128,20 +3128,20 @@ impl TransactionManager {
 
     /// Actually remove a terminated transaction from all maps
     async fn remove_terminated_transaction(&self, transaction_id: &TransactionKey) {
-        debug!(%transaction_id, "Removing terminated transaction after grace period");
+        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Removing terminated transaction after grace period");
 
         let mut terminated = false;
         self.request_transaction_runner_stop(transaction_id);
 
         if self.client_transactions.remove(transaction_id).is_some() {
-            debug!(%transaction_id, "Removed terminated client transaction");
+            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Removed terminated client transaction");
             terminated = true;
         }
 
         // Defensive: also remove from server in case of duplication.
         if self.server_transactions.remove(transaction_id).is_some() {
             self.retire_server_invite_dialog_index_for(transaction_id);
-            debug!(%transaction_id, "Removed terminated server transaction");
+            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Removed terminated server transaction");
             terminated = true;
         }
 
@@ -3150,7 +3150,7 @@ impl TransactionManager {
             .remove(transaction_id)
             .is_some()
         {
-            debug!(%transaction_id, "Removed transaction from destinations map");
+            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Removed transaction from destinations map");
         }
         self.terminated_transactions.remove(transaction_id);
         self.pending_inbound_bytes.remove(transaction_id);
@@ -3160,7 +3160,7 @@ impl TransactionManager {
 
         // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
         if let Some((_, subscriber_ids)) = self.transaction_to_subscribers.remove(transaction_id) {
-            debug!(%transaction_id, subscriber_count = subscriber_ids.len(), "Removed transaction from subscriber mappings");
+            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), subscriber_count = subscriber_ids.len(), "Removed transaction from subscriber mappings");
 
             for subscriber_id in subscriber_ids {
                 let mut empty = false;
@@ -3171,7 +3171,7 @@ impl TransactionManager {
                 }
                 if empty {
                     self.subscriber_to_transactions.remove(&subscriber_id);
-                    debug!(%transaction_id, subscriber_id, "Removed empty subscriber mapping");
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), subscriber_id, "Removed empty subscriber mapping");
                 }
             }
         }
@@ -3184,12 +3184,12 @@ impl TransactionManager {
         if let Some(started) = unregister_started {
             diagnostics::record_termination_cleanup_timer_unregister(started.elapsed());
         }
-        debug!(%transaction_id, "Unregistered transaction from timer manager");
+        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Unregistered transaction from timer manager");
 
         if terminated {
-            debug!(%transaction_id, "Successfully cleaned up terminated transaction");
+            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Successfully cleaned up terminated transaction");
         } else {
-            debug!(%transaction_id, "Transaction not found for termination - may have been already removed");
+            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Transaction not found for termination - may have been already removed");
         }
     }
 
@@ -3272,7 +3272,7 @@ impl TransactionManager {
                                 ).await;
                             } else {
                                 if let Err(e) = manager_arc.handle_transport_event(message_event).await {
-                                    error!("Error handling transport message: {}", e);
+                                    error!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error handling transport message");
                                 }
                             }
                         } else {
@@ -3316,7 +3316,7 @@ impl TransactionManager {
                                         );
                                     }
                                     Err(e) => {
-                                        error!("Periodic transaction cleanup failed: {}", e);
+                                        error!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Periodic transaction cleanup failed");
                                     }
                                     _ => {}
                                 }
@@ -3366,13 +3366,23 @@ impl TransactionManager {
         request: Request,
         destination: SocketAddr,
     ) -> Result<TransactionKey> {
-        debug!(method=%request.method(), destination=%destination, "Creating client transaction");
+        // Reject caller-controlled start lines and fields before route/Via
+        // inspection, normalization, transaction allocation, or any route log.
+        rvoip_sip_core::validation::validate_typed_outbound_message(&Message::Request(
+            request.clone(),
+        ))?;
+        debug!(
+            method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
+            destination=%destination,
+            via_count=request.via_headers().len(),
+            "Creating client transaction"
+        );
 
-        // Debug the Via headers in the request
-        tracing::trace!("Request Via headers before transaction creation:");
-        for (i, via) in request.via_headers().iter().enumerate() {
-            tracing::trace!("  Via[{}]: {}", i, via);
-        }
+        tracing::trace!(
+            via_count = request.via_headers().len(),
+            has_top_route = top_route_uri(&request).is_some(),
+            "Client transaction request routing metadata before normalization"
+        );
 
         // Extract branch parameter from the top Via header or generate a new one
         let branch = match request.first_via() {
@@ -3431,25 +3441,21 @@ impl TransactionManager {
 
         if sip_diagnostics_enabled() {
             if let Some(via) = modified_request.first_via() {
-                let top_route = top_route_uri(&modified_request)
-                    .map(|uri| uri.to_string())
-                    .unwrap_or_else(|| "<none>".to_string());
                 info!(
-                    method = %modified_request.method(),
-                    uri = %modified_request.uri(),
-                    top_route = %top_route,
-                    next_hop = %next_hop_uri_for_request(&modified_request),
+                    method=%crate::transaction::safe_diagnostics::SafeMethod::new(&modified_request.method()),
+                    has_top_route=top_route_uri(&modified_request).is_some(),
                     destination = %destination,
-                    top_via = %via,
-                    "RVOIP_SIP_DIAG final outgoing request after transaction normalization"
+                    top_via_has_branch=via.branch().is_some(),
+                    via_count=modified_request.via_headers().len(),
+                    "RVOIP_SIP_DIAG outgoing request routing metadata after transaction normalization"
                 );
             }
         }
 
-        tracing::trace!("Request Via headers after potential modification:");
-        for (i, via) in modified_request.via_headers().iter().enumerate() {
-            tracing::trace!("  Via[{}]: {}", i, via);
-        }
+        tracing::trace!(
+            via_count = modified_request.via_headers().len(),
+            "Client transaction request Via metadata after normalization"
+        );
 
         rvoip_sip_core::validation::validate_wire_request(&modified_request)?;
 
@@ -3458,7 +3464,7 @@ impl TransactionManager {
         // Arc out before any `.await`.
         let transaction: ArcClientTransaction = match modified_request.method() {
             Method::Invite => {
-                tracing::trace!("Creating ClientInviteTransaction: {}", key);
+                tracing::trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Creating ClientInviteTransaction");
                 let tx = ClientInviteTransaction::new_with_command_channel_capacity(
                     key.clone(),
                     modified_request.clone(),
@@ -3468,12 +3474,16 @@ impl TransactionManager {
                     self.timer_settings_for_request(&modified_request),
                     self.transaction_command_channel_capacity,
                 )?;
-                tracing::trace!("Created ClientInviteTransaction: {}", key);
+                tracing::trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Created ClientInviteTransaction");
                 Arc::new(tx)
             }
             Method::Cancel => {
                 if let Err(e) = cancel::validate_cancel_request(&modified_request) {
-                    warn!(method = %modified_request.method(), error = %e, "Creating transaction for CANCEL with possible validation issues");
+                    warn!(
+                        method=%crate::transaction::safe_diagnostics::SafeMethod::new(&modified_request.method()),
+                        error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e),
+                        "Creating transaction for CANCEL with possible validation issues"
+                    );
                 }
                 let tx = ClientNonInviteTransaction::new_with_command_channel_capacity(
                     key.clone(),
@@ -3488,7 +3498,11 @@ impl TransactionManager {
             }
             Method::Update => {
                 if let Err(e) = update::validate_update_request(&modified_request) {
-                    warn!(method = %modified_request.method(), error = %e, "Creating transaction for UPDATE with possible validation issues");
+                    warn!(
+                        method=%crate::transaction::safe_diagnostics::SafeMethod::new(&modified_request.method()),
+                        error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e),
+                        "Creating transaction for UPDATE with possible validation issues"
+                    );
                 }
                 let tx = ClientNonInviteTransaction::new_with_command_channel_capacity(
                     key.clone(),
@@ -3520,10 +3534,10 @@ impl TransactionManager {
         self.transaction_destinations
             .insert(key.clone(), destination);
 
-        debug!(id=%key, "Created client transaction");
+        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Created client transaction");
 
         if request.method() == Method::Cancel {
-            debug!(id=%key, original_id=%branch, "Created CANCEL transaction");
+            debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Created CANCEL transaction");
         }
 
         Ok(key)
@@ -3790,7 +3804,11 @@ impl TransactionManager {
             .map(|r| r.value().clone());
         if let Some(transaction) = existing {
             transaction.process_request(request.clone()).await?;
-            debug!(id=%key, method=%request.method(), "Processed retransmitted request in existing transaction");
+            debug!(
+                id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key),
+                method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
+                "Processed retransmitted request in existing transaction"
+            );
             return Ok(transaction);
         }
 
@@ -3807,14 +3825,22 @@ impl TransactionManager {
                     self.transaction_command_channel_capacity,
                 )?);
 
-                info!(id=%tx.id(), method=%request.method(), "Created new ServerInviteTransaction");
+                info!(
+                    id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(tx.id()),
+                    method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
+                    "Created new ServerInviteTransaction"
+                );
                 self.index_server_invite_dialog(&request, &key);
                 tx
             }
             Method::Cancel => {
                 // Validate the CANCEL request
                 if let Err(e) = cancel::validate_cancel_request(&request) {
-                    warn!(method = %request.method(), error = %e, "Creating transaction for CANCEL with possible validation issues");
+                    warn!(
+                        method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
+                        error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e),
+                        "Creating transaction for CANCEL with possible validation issues"
+                    );
                 }
 
                 let invite_tx_id = key.with_method(Method::Invite);
@@ -3839,14 +3865,14 @@ impl TransactionManager {
                     )?,
                 );
 
-                info!(id=%tx.id(), method=%request.method(), "Created new ServerNonInviteTransaction for CANCEL");
+                info!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(tx.id()), method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()), "Created new ServerNonInviteTransaction for CANCEL");
 
                 tx
             }
             Method::Update => {
                 // Validate the UPDATE request
                 if let Err(e) = update::validate_update_request(&request) {
-                    warn!(method = %request.method(), error = %e, "Creating transaction for UPDATE with possible validation issues");
+                    warn!(method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Creating transaction for UPDATE with possible validation issues");
                 }
 
                 // Create a non-INVITE server transaction for UPDATE
@@ -3862,7 +3888,7 @@ impl TransactionManager {
                     )?,
                 );
 
-                info!(id=%tx.id(), method=%request.method(), "Created new ServerNonInviteTransaction for UPDATE");
+                info!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(tx.id()), method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()), "Created new ServerNonInviteTransaction for UPDATE");
                 tx
             }
             _ => {
@@ -3878,7 +3904,7 @@ impl TransactionManager {
                     )?,
                 );
 
-                info!(id=%tx.id(), method=%request.method(), "Created new ServerNonInviteTransaction");
+                info!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(tx.id()), method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()), "Created new ServerNonInviteTransaction");
                 tx
             }
         };
@@ -3898,7 +3924,7 @@ impl TransactionManager {
             .send_command(InternalTransactionCommand::TransitionTo(initial_state))
             .await
         {
-            error!(id=%transaction.id(), error=%e, "Failed to initialize new server transaction");
+            error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction.id()), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to initialize new server transaction");
             return Err(e);
         }
 
@@ -3918,7 +3944,7 @@ impl TransactionManager {
                 },
             };
             if let Err(error) = self.events_tx.send(event).await {
-                warn!(id=%transaction_id, %error, "Failed to publish CANCEL transaction event");
+                warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&error), "Failed to publish CANCEL transaction event");
                 let _ = self.terminate_transaction(&transaction_id).await;
             }
         }
@@ -4004,7 +4030,8 @@ impl TransactionManager {
             Ok(()) => Ok(()),
             Err(TransportError::NotImplemented(reason)) => {
                 trace!(
-                    reason = %reason,
+                    reason_present=true,
+                    reason_len=reason.len(),
                     destination = %destination,
                     context,
                     "Cached response raw send unavailable; falling back to structured send"
@@ -4374,7 +4401,7 @@ impl TransactionManager {
                 }
                 Err(e) => {
                     debug!(
-                        error = %e,
+                        error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e),
                         destination = %destination,
                         "Failed to retransmit cached INVITE 2xx response"
                     );
@@ -4508,7 +4535,7 @@ impl TransactionManager {
         invite_tx_id: &TransactionKey,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<TransactionKey> {
-        debug!(id=%invite_tx_id, "Canceling invite transaction");
+        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_tx_id), "Canceling invite transaction");
 
         // Check that this is an INVITE client transaction
         if invite_tx_id.method() != &Method::Invite || invite_tx_id.is_server() {
@@ -4522,7 +4549,7 @@ impl TransactionManager {
         let invite_request =
             utils::get_transaction_request(&self.client_transactions, invite_tx_id).await?;
 
-        debug!(id=%invite_tx_id, "Got INVITE request for cancellation");
+        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_tx_id), "Got INVITE request for cancellation");
 
         // Create a CANCEL request from the INVITE
         let local_addr = self
@@ -4541,7 +4568,7 @@ impl TransactionManager {
 
         // Log and validate the CANCEL request to help with debugging
         if let Err(e) = cancel::validate_cancel_request(&cancel_request) {
-            warn!(method = %cancel_request.method(), error = %e, "CANCEL request validation issue - proceeding anyway");
+            warn!(method=%crate::transaction::safe_diagnostics::SafeMethod::new(&cancel_request.method()), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "CANCEL request validation issue - proceeding anyway");
         }
 
         // Get the destination for the CANCEL request (same as the INVITE)
@@ -4560,7 +4587,7 @@ impl TransactionManager {
             .create_client_transaction(cancel_request, destination)
             .await?;
 
-        debug!(id=%cancel_tx_id, original_id=%invite_tx_id, "Created CANCEL transaction");
+        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&cancel_tx_id), original_id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_tx_id), "Created CANCEL transaction");
 
         // Send the CANCEL request immediately
         self.send_request(&cancel_tx_id).await?;

@@ -105,12 +105,12 @@ pub struct ClientTransactionData {
 impl Drop for ClientTransactionData {
     fn drop(&mut self) {
         // Try to terminate the event loop when the transaction is dropped
-        debug!(id=%self.id, "ClientTransactionData dropped, attempting to terminate event loop");
+        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&self.id), "ClientTransactionData dropped, attempting to terminate event loop");
 
         if let Ok(mut handle_guard) = self.event_loop_handle.try_lock() {
             if let Some(handle) = handle_guard.take() {
                 handle.abort();
-                debug!(id=%self.id, "Aborted client transaction event loop");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&self.id), "Aborted client transaction event loop");
             }
         }
     }
@@ -150,7 +150,7 @@ pub trait CommonClientTransaction {
         let data = self.data().clone();
 
         Box::pin(async move {
-            trace!(id=%data.id, method=%response.status(), "Received response");
+            trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&data.id), method=%response.status(), "Received response");
 
             data.cmd_tx
                 .send(InternalTransactionCommand::ProcessMessage(
@@ -167,9 +167,22 @@ pub trait CommonClientTransaction {
 impl fmt::Debug for ClientTransactionData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClientTransactionData")
-            .field("id", &self.id)
+            .field(
+                "id",
+                &crate::transaction::safe_diagnostics::SafeTransactionKey::new(&self.id),
+            )
             .field("state", &self.state.get())
             .field("remote_addr", &self.remote_addr)
+            .field("request_header_count", &self.request.all_headers().len())
+            .field("request_body_len", &self.request.body().len())
+            .field(
+                "has_last_response",
+                &self
+                    .last_response
+                    .try_lock()
+                    .map(|response| response.is_some())
+                    .unwrap_or(false),
+            )
             .field(
                 "has_event_loop",
                 &self

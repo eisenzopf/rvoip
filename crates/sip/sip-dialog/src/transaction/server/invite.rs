@@ -164,7 +164,7 @@ impl ServerInviteLogic {
         // Start Timer 100 with 200ms interval
         let interval_100 = timer_config.timer_100_interval;
         if interval_100.is_zero() {
-            trace!(id=%tx_id, "Timer 100 disabled by transaction timer settings");
+            trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer 100 disabled by transaction timer settings");
             return;
         }
 
@@ -179,13 +179,13 @@ impl ServerInviteLogic {
             tokio::time::sleep(interval_100).await;
 
             if data.state.get() != TransactionState::Proceeding {
-                trace!(id=%tx_id_for_task, "Timer 100 fired after transaction left Proceeding");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_for_task), "Timer 100 fired after transaction left Proceeding");
                 return;
             }
 
             let should_send_100 = data.last_response.lock().await.is_none();
             if !should_send_100 {
-                trace!(id=%tx_id_for_task, "Timer 100 fired but TU already sent a response");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_for_task), "Timer 100 fired but TU already sent a response");
                 return;
             }
 
@@ -208,7 +208,7 @@ impl ServerInviteLogic {
                 .send_message(Message::Response(trying_response.clone()), data.remote_addr)
                 .await
             {
-                error!(id=%tx_id_for_task, error=%e, "Failed to send automatic 100 Trying response");
+                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_for_task), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send automatic 100 Trying response");
                 common_logic::send_transport_error_event(&tx_id_for_task, &data.events_tx).await;
                 return;
             }
@@ -216,12 +216,12 @@ impl ServerInviteLogic {
             let mut last_response = data.last_response.lock().await;
             if last_response.is_none() {
                 *last_response = Some(trying_response);
-                debug!(id=%tx_id_for_task, "Sent automatic 100 Trying response per RFC 3261");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_for_task), "Sent automatic 100 Trying response per RFC 3261");
             }
         });
 
         timer_handles.timer_100 = Some(handle);
-        trace!(id=%tx_id, interval=?interval_100, "Started Timer 100 for automatic 100 Trying");
+        trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), interval=?interval_100, "Started Timer 100 for automatic 100 Trying");
     }
 
     /// Cancels Timer 100 (automatic 100 Trying response timer)
@@ -249,7 +249,7 @@ impl ServerInviteLogic {
 
         match current_state {
             TransactionState::Proceeding => {
-                debug!(id=%tx_id, "Timer 100 triggered, sending automatic 100 Trying response");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer 100 triggered, sending automatic 100 Trying response");
 
                 // Check if TU has already sent a provisional response
                 let last_response = data.last_response.lock().await;
@@ -282,10 +282,10 @@ impl ServerInviteLogic {
                         .send_message(Message::Response(trying_response.clone()), data.remote_addr)
                         .await
                     {
-                        error!(id=%tx_id, error=%e, "Failed to send automatic 100 Trying response");
+                        error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send automatic 100 Trying response");
                         common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
                     } else {
-                        debug!(id=%tx_id, "✅ Sent automatic 100 Trying response per RFC 3261");
+                        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "✅ Sent automatic 100 Trying response per RFC 3261");
 
                         // Store the 100 Trying as last response
                         let mut last_response = data.last_response.lock().await;
@@ -293,11 +293,11 @@ impl ServerInviteLogic {
                     }
                     // `original_request` is a plain `&Request`, no lock to release.
                 } else {
-                    trace!(id=%tx_id, "Timer 100 fired but TU already sent provisional response, ignoring");
+                    trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer 100 fired but TU already sent provisional response, ignoring");
                 }
             }
             _ => {
-                trace!(id=%tx_id, state=?current_state, "Timer 100 fired in invalid state, ignoring");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Timer 100 fired in invalid state, ignoring");
             }
         }
 
@@ -337,10 +337,10 @@ impl ServerInviteLogic {
         {
             Ok(handle) => {
                 timer_handles.timer_g = Some(handle);
-                trace!(id=%tx_id, interval=?initial_interval_g, "Started Timer G for Completed state");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), interval=?initial_interval_g, "Started Timer G for Completed state");
             }
             Err(e) => {
-                error!(id=%tx_id, error=%e, "Failed to start Timer G");
+                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to start Timer G");
             }
         }
     }
@@ -376,10 +376,10 @@ impl ServerInviteLogic {
         {
             Ok(handle) => {
                 timer_handles.timer_h = Some(handle);
-                trace!(id=%tx_id, interval=?interval_h, "Started Timer H for Completed state");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), interval=?interval_h, "Started Timer H for Completed state");
             }
             Err(e) => {
-                error!(id=%tx_id, error=%e, "Failed to start Timer H");
+                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to start Timer H");
             }
         }
     }
@@ -416,10 +416,10 @@ impl ServerInviteLogic {
         {
             Ok(handle) => {
                 timer_handles.timer_i = Some(handle);
-                trace!(id=%tx_id, interval=?interval_i, "Started Timer I for Confirmed state");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), interval=?interval_i, "Started Timer I for Confirmed state");
             }
             Err(e) => {
-                error!(id=%tx_id, error=%e, "Failed to start Timer I");
+                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to start Timer I");
             }
         }
     }
@@ -440,7 +440,7 @@ impl ServerInviteLogic {
 
         match current_state {
             TransactionState::Completed => {
-                debug!(id=%tx_id, "Timer G triggered, retransmitting final response");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer G triggered, retransmitting final response");
 
                 // Retransmit the final response
                 let response_guard = data.last_response.lock().await;
@@ -450,7 +450,7 @@ impl ServerInviteLogic {
                         .send_message(Message::Response(response.clone()), data.remote_addr)
                         .await
                     {
-                        error!(id=%tx_id, error=%e, "Failed to retransmit response");
+                        error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to retransmit response");
                         common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
                         return Ok(Some(TransactionState::Terminated));
                     }
@@ -469,7 +469,7 @@ impl ServerInviteLogic {
                 self.start_timer_g(data, timer_handles, command_tx).await;
             }
             _ => {
-                trace!(id=%tx_id, state=?current_state, "Timer G fired in invalid state, ignoring");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Timer G fired in invalid state, ignoring");
             }
         }
 
@@ -490,7 +490,7 @@ impl ServerInviteLogic {
 
         match current_state {
             TransactionState::Completed => {
-                warn!(id=%tx_id, "Timer H (ACK Timeout) fired in Completed state");
+                warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer H (ACK Timeout) fired in Completed state");
 
                 // Notify TU about timeout using common logic
                 common_logic::send_transaction_timeout_event(tx_id, &data.events_tx).await;
@@ -499,7 +499,7 @@ impl ServerInviteLogic {
                 return Ok(Some(TransactionState::Terminated));
             }
             _ => {
-                trace!(id=%tx_id, state=?current_state, "Timer H fired in invalid state, ignoring");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Timer H fired in invalid state, ignoring");
             }
         }
 
@@ -520,12 +520,12 @@ impl ServerInviteLogic {
 
         match current_state {
             TransactionState::Confirmed => {
-                debug!(id=%tx_id, "Timer I fired in Confirmed state, terminating");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer I fired in Confirmed state, terminating");
                 // Timer I automatically transitions to Terminated, no need to return a state
                 Ok(None)
             }
             _ => {
-                trace!(id=%tx_id, state=?current_state, "Timer I fired in invalid state, ignoring");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Timer I fired in invalid state, ignoring");
                 Ok(None)
             }
         }
@@ -546,7 +546,7 @@ impl ServerInviteLogic {
 
         match current_state {
             TransactionState::Proceeding => {
-                debug!(id=%tx_id, "Received INVITE retransmission in Proceeding state");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Received INVITE retransmission in Proceeding state");
 
                 // Retransmit the last provisional response
                 let last_response = data.last_response.lock().await;
@@ -556,7 +556,7 @@ impl ServerInviteLogic {
                         .send_message(Message::Response(response.clone()), data.remote_addr)
                         .await
                     {
-                        error!(id=%tx_id, error=%e, "Failed to retransmit response");
+                        error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to retransmit response");
                         return Ok(None);
                     }
                 }
@@ -571,13 +571,13 @@ impl ServerInviteLogic {
                 };
                 if let Some(response) = response {
                     if response.status().is_success() {
-                        debug!(id=%tx_id, "Retransmitting cached 2xx response for INVITE retransmission");
+                        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Retransmitting cached 2xx response for INVITE retransmission");
                         if let Err(e) = data
                             .transport
                             .send_message(Message::Response(response), data.remote_addr)
                             .await
                         {
-                            error!(id=%tx_id, error=%e, "Failed to retransmit 2xx response");
+                            error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to retransmit 2xx response");
                         }
                     }
                 }
@@ -585,7 +585,7 @@ impl ServerInviteLogic {
             }
             _ => {
                 // INVITE retransmissions in other states are ignored
-                trace!(id=%tx_id, state=?current_state, "Ignoring INVITE retransmission in state {:?}", current_state);
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Ignoring INVITE retransmission in state {:?}", current_state);
                 Ok(None)
             }
         }
@@ -606,7 +606,7 @@ impl ServerInviteLogic {
 
         match current_state {
             TransactionState::Completed => {
-                debug!(id=%tx_id, "Received ACK in Completed state");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Received ACK in Completed state");
 
                 // Notify TU about ACK
                 let _ = data
@@ -622,11 +622,11 @@ impl ServerInviteLogic {
             }
             TransactionState::Confirmed => {
                 // ACK retransmission, already in Confirmed state
-                trace!(id=%tx_id, "Received duplicate ACK in Confirmed state, ignoring");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Received duplicate ACK in Confirmed state, ignoring");
                 Ok(None)
             }
             _ => {
-                warn!(id=%tx_id, state=?current_state, "Received ACK in unexpected state");
+                warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Received ACK in unexpected state");
                 Ok(None)
             }
         }
@@ -648,7 +648,7 @@ impl ServerInviteLogic {
 
         match current_state {
             TransactionState::Proceeding => {
-                debug!(id=%tx_id, "Received CANCEL in Proceeding state");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Received CANCEL in Proceeding state");
 
                 // Notify TU about CANCEL
                 let _ = data
@@ -663,7 +663,7 @@ impl ServerInviteLogic {
                 Ok(None)
             }
             _ => {
-                trace!(id=%tx_id, state=?current_state, "Ignoring CANCEL in non-proceeding state");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Ignoring CANCEL in non-proceeding state");
                 Ok(None)
             }
         }
@@ -713,7 +713,7 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
 
         match new_state {
             TransactionState::Proceeding => {
-                debug!(id=%tx_id, "Entered Proceeding state");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Entered Proceeding state");
 
                 // **RFC 3261 COMPLIANCE**: Start automatic 100 Trying timer
                 // RFC 3261 Section 17.2.1: "If the TU does not send a provisional response
@@ -722,7 +722,7 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
                     .await;
             }
             TransactionState::Completed => {
-                debug!(id=%tx_id, "Entered Completed state, starting Timers G and H");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Entered Completed state, starting Timers G and H");
 
                 // Cancel Timer 100 if still running (TU sent a response)
                 self.cancel_timer_100(timer_handles);
@@ -735,7 +735,7 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
                 self.start_timer_h(data, timer_handles, command_tx).await;
             }
             TransactionState::Confirmed => {
-                debug!(id=%tx_id, "Entered Confirmed state, starting Timer I");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Entered Confirmed state, starting Timer I");
 
                 // Cancel Timers G and H
                 if let Some(handle) = timer_handles.timer_g.take() {
@@ -749,13 +749,13 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
                 self.start_timer_i(data, timer_handles, command_tx).await;
             }
             TransactionState::Terminated => {
-                debug!(id=%tx_id, "Entered Terminated state, canceling all timers");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Entered Terminated state, canceling all timers");
 
                 // Cancel all timers
                 self.cancel_all_specific_timers(timer_handles);
             }
             _ => {
-                trace!(id=%tx_id, state=?new_state, "Entered state with no specific timer actions");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?new_state, "Entered state with no specific timer actions");
             }
         }
 
@@ -812,7 +812,7 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
                     .await
             }
             _ => {
-                warn!(id=%tx_id, timer_name=%timer_name, "Unknown timer triggered for ServerInvite");
+                warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), timer_name=%timer_name, "Unknown timer triggered for ServerInvite");
                 Ok(None)
             }
         }
@@ -839,13 +839,13 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
                     Method::Ack => self.process_ack(data, request, current_state).await,
                     Method::Cancel => self.process_cancel(data, request, current_state).await,
                     _ => {
-                        warn!(id=%tx_id, method=%method, "Received unexpected request method");
+                        warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), method=%crate::transaction::safe_diagnostics::SafeMethod::new(&method), "Received unexpected request method");
                         Ok(None)
                     }
                 }
             }
             Message::Response(_) => {
-                warn!(id=%tx_id, "Server transaction received a Response, ignoring");
+                warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Server transaction received a Response, ignoring");
                 Ok(None)
             }
         }
@@ -1128,13 +1128,13 @@ impl ServerTransaction for ServerInviteTransaction {
             // For preliminary responses in Proceeding state, stay in Proceeding
             if is_provisional && current_state == TransactionState::Proceeding {
                 // Stays in Proceeding state, no state change
-                trace!(id=%data.id, "Sent provisional response, staying in Proceeding state");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&data.id), "Sent provisional response, staying in Proceeding state");
                 return Ok(());
             }
 
             // For 2xx responses, directly terminate the transaction
             if is_success {
-                debug!(id=%data.id, "Sent 2xx response, transitioning to Terminated");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&data.id), "Sent 2xx response, transitioning to Terminated");
 
                 // TU level will handle reliable delivery of 2xx responses
                 data.cmd_tx
@@ -1151,7 +1151,7 @@ impl ServerTransaction for ServerInviteTransaction {
 
             // For >= 300 responses, transition to Completed
             if !is_provisional && !is_success && current_state == TransactionState::Proceeding {
-                debug!(id=%data.id, "Sent >= 300 response, transitioning to Completed");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&data.id), "Sent >= 300 response, transitioning to Completed");
 
                 data.cmd_tx
                     .send(InternalTransactionCommand::TransitionTo(

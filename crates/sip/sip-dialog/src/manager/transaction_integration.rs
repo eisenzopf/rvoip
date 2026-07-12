@@ -200,10 +200,7 @@ impl DialogManager {
         body: Option<bytes::Bytes>,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> DialogResult<TransactionKey> {
-        debug!(
-            "Sending {} request for dialog {} using Phase 3 dialog functions",
-            method, dialog_id
-        );
+        debug!(method=%crate::transaction::safe_diagnostics::SafeMethod::new(&method), dialog=%dialog_id, "Sending request using dialog functions");
 
         // Get dialog context and build the request. Destination is resolved
         // from the final request next hop after Route headers are present.
@@ -260,8 +257,11 @@ impl DialogManager {
                 // For certain methods in confirmed dialogs, remote tag is required
                 (_, crate::dialog::DialogState::Confirmed) => {
                     error!(
-                        "Dialog {} in Confirmed state but missing remote tag for {} request. Dialog details: local_tag={:?}, remote_tag={:?}",
-                        dialog_id, method, dialog.local_tag, dialog.remote_tag
+                        dialog=%dialog_id,
+                        method=%crate::transaction::safe_diagnostics::SafeMethod::new(&method),
+                        has_local_tag=dialog.local_tag.is_some(),
+                        has_remote_tag=dialog.remote_tag.is_some(),
+                        "Confirmed dialog is missing remote tag for request"
                     );
                     return Err(crate::errors::DialogError::protocol_error(&format!(
                         "{} request in confirmed dialog missing remote tag",
@@ -576,8 +576,10 @@ impl DialogManager {
             .await?;
 
         debug!(
-            "✅ Sent {} request for dialog {} (transaction: {}) via §4.3 failover path",
-            method, dialog_id, transaction_id
+            method=%crate::transaction::safe_diagnostics::SafeMethod::new(&method),
+            dialog=%dialog_id,
+            transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id),
+            "Sent request via candidate failover path"
         );
 
         Ok(transaction_id)
@@ -595,11 +597,7 @@ impl DialogManager {
         transaction_id: &TransactionKey,
         mut response: Response,
     ) -> DialogResult<()> {
-        debug!(
-            "Sending response {} for transaction {}",
-            response.status_code(),
-            transaction_id
-        );
+        debug!(status=response.status_code(), transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), "Sending response");
 
         // RFC 4028: echo Session-Expires on 2xx to INVITE so the UAC learns
         // the negotiated interval + refresher assignment.
@@ -692,10 +690,7 @@ impl DialogManager {
             );
         }
 
-        debug!(
-            "Successfully sent response for transaction {}",
-            transaction_id
-        );
+        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), "Successfully sent response");
         Ok(())
     }
 }
@@ -926,10 +921,7 @@ impl DialogManager {
             )
             .await?;
 
-        debug!(
-            "Auth-retry INVITE sent for dialog {} (tx {}) via §4.3 failover path",
-            dialog_id, transaction_id
-        );
+        debug!(dialog=%dialog_id, transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Auth-retry INVITE sent via candidate failover path");
         Ok(transaction_id)
     }
 
@@ -1045,10 +1037,7 @@ impl DialogManager {
             )
             .await?;
 
-        debug!(
-            "422-retry INVITE sent for dialog {} (tx {}, SE={}, Min-SE={}) via §4.3 failover path",
-            dialog_id, transaction_id, session_secs, min_se
-        );
+        debug!(dialog=%dialog_id, transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), session_secs, min_se, "422-retry INVITE sent via candidate failover path");
         Ok(transaction_id)
     }
 
@@ -1201,10 +1190,7 @@ impl DialogManager {
             )
             .await?;
 
-        debug!(
-            "Initial INVITE-with-extras sent for dialog {} (tx {})",
-            dialog_id, transaction_id
-        );
+        debug!(dialog=%dialog_id, transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Initial INVITE-with-extras sent");
         Ok(transaction_id)
     }
 
@@ -1362,8 +1348,11 @@ impl DialogManager {
                         matches!(&e, crate::transaction::error::Error::TransportError { .. });
                     if is_transport_failure && idx + 1 < total {
                         debug!(
-                            "RFC 3263 §4.3: candidate {}/{} ({}) failed with transport error: {}; trying next",
-                            attempt, total, target.addr, e
+                            attempt,
+                            total,
+                            destination=%target.addr,
+                            error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e),
+                            "Candidate failed with transport error; trying next"
                         );
                         // Drop the failed-leg mapping so the next
                         // attempt's tx is the canonical one for this
@@ -1477,10 +1466,7 @@ impl TransactionHelpers for DialogManager {
     /// Creates the mapping between transactions and dialogs for proper message routing.
     fn link_transaction_to_dialog(&self, transaction_id: &TransactionKey, dialog_id: &DialogId) {
         self.link_transaction_to_dialog_indexed(transaction_id, dialog_id);
-        debug!(
-            "Linked transaction {} to dialog {}",
-            transaction_id, dialog_id
-        );
+        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), dialog=%dialog_id, "Linked transaction to dialog");
     }
 
     /// Create ACK for 2xx response using transaction-core helpers
@@ -1521,8 +1507,10 @@ impl DialogManager {
         event: TransactionEvent,
     ) -> DialogResult<()> {
         debug!(
-            "Processing transaction event for {} in dialog {}: {:?}",
-            transaction_id, dialog_id, event
+            transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id),
+            %dialog_id,
+            event=?crate::transaction::safe_diagnostics::SafeTransactionEvent::new(&event),
+            "Processing transaction event"
         );
 
         match event {
@@ -1562,8 +1550,10 @@ impl DialogManager {
 
             TransactionEvent::TimerTriggered { timer, .. } => {
                 debug!(
-                    "Timer {} triggered for transaction {} in dialog {}",
-                    timer, transaction_id, dialog_id
+                    timer_len=timer.len(),
+                    transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id),
+                    %dialog_id,
+                    "Transaction timer triggered"
                 );
                 Ok(()) // Most timer events don't require dialog-level action
             }
@@ -1585,8 +1575,9 @@ impl DialogManager {
 
             _ => {
                 debug!(
-                    "Unhandled transaction event type for dialog {}: {:?}",
-                    dialog_id, event
+                    %dialog_id,
+                    event=?crate::transaction::safe_diagnostics::SafeTransactionEvent::new(&event),
+                    "Unhandled transaction event type for dialog"
                 );
                 Ok(())
             }
@@ -1601,26 +1592,17 @@ impl DialogManager {
         previous_state: TransactionState,
         new_state: TransactionState,
     ) -> DialogResult<()> {
-        debug!(
-            "Transaction {} state: {:?} → {:?} for dialog {}",
-            transaction_id, previous_state, new_state, dialog_id
-        );
+        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), ?previous_state, ?new_state, dialog=%dialog_id, "Transaction state changed");
 
         // Update dialog state based on transaction state changes
         match new_state {
             TransactionState::Completed => {
-                debug!(
-                    "Transaction {} completed for dialog {}",
-                    transaction_id, dialog_id
-                );
+                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), dialog=%dialog_id, "Transaction completed");
                 // Transaction completed successfully - dialog remains active
             }
 
             TransactionState::Terminated => {
-                debug!(
-                    "Transaction {} terminated for dialog {}",
-                    transaction_id, dialog_id
-                );
+                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), dialog=%dialog_id, "Transaction terminated");
                 // Client INVITE transactions can emit StateChanged(Terminated)
                 // before the final failure response has been routed up to the
                 // dialog manager. Keep that mapping until the explicit
@@ -1636,10 +1618,7 @@ impl DialogManager {
 
             _ => {
                 // Other state changes are informational
-                debug!(
-                    "Transaction {} in state {:?} for dialog {}",
-                    transaction_id, new_state, dialog_id
-                );
+                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), ?new_state, dialog=%dialog_id, "Transaction state observed");
             }
         }
 
@@ -1653,13 +1632,7 @@ impl DialogManager {
         transaction_id: &TransactionKey,
         response: Response,
     ) -> DialogResult<()> {
-        info!(
-            "Transaction {} received success response {} {} for dialog {}",
-            transaction_id,
-            response.status_code(),
-            response.reason_phrase(),
-            dialog_id
-        );
+        info!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), status=response.status_code(), reason_len=response.reason_phrase().len(), dialog=%dialog_id, "Transaction received success response");
 
         // Update dialog state based on successful response
         let dialog_state_changed = {
@@ -1669,10 +1642,7 @@ impl DialogManager {
             // Update dialog with response information (remote tag, etc.)
             if let Some(to_header) = response.to() {
                 if let Some(to_tag) = to_header.tag() {
-                    info!(
-                        "Updating remote tag for dialog {} to: {}",
-                        dialog_id, to_tag
-                    );
+                    info!(dialog=%dialog_id, remote_tag_len=to_tag.len(), "Updating remote tag for dialog");
                     dialog.set_remote_tag(to_tag.to_string());
                 } else {
                     warn!("200 OK response has no To tag for dialog {}", dialog_id);
@@ -1807,7 +1777,7 @@ impl DialogManager {
                             if let Some(session_id) = session_id_for_diag.as_deref() {
                                 crate::diagnostics::record_call_timing_uac_ack_failure(session_id);
                             }
-                            warn!("Failed to send automatic ACK for 200 OK to INVITE: {}", e);
+                            warn!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send automatic ACK for 200 OK to INVITE");
                         }
                     }
                 }
@@ -1884,21 +1854,9 @@ impl DialogManager {
         response: Response,
     ) -> DialogResult<()> {
         if response.status_code() == 487 {
-            info!(
-                "Transaction {} received CANCEL terminal response {} {} for dialog {}",
-                transaction_id,
-                response.status_code(),
-                response.reason_phrase(),
-                dialog_id
-            );
+            info!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), status=response.status_code(), reason_len=response.reason_phrase().len(), dialog=%dialog_id, "Transaction received CANCEL terminal response");
         } else {
-            warn!(
-                "Transaction {} received failure response {} {} for dialog {}",
-                transaction_id,
-                response.status_code(),
-                response.reason_phrase(),
-                dialog_id
-            );
+            warn!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), status=response.status_code(), reason_len=response.reason_phrase().len(), dialog=%dialog_id, "Transaction received failure response");
         }
 
         // Handle specific failure cases and emit appropriate events
@@ -2011,13 +1969,7 @@ impl DialogManager {
         transaction_id: &TransactionKey,
         response: Response,
     ) -> DialogResult<()> {
-        debug!(
-            "Transaction {} received provisional response {} {} for dialog {}",
-            transaction_id,
-            response.status_code(),
-            response.reason_phrase(),
-            dialog_id
-        );
+        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), status=response.status_code(), reason_len=response.reason_phrase().len(), dialog=%dialog_id, "Transaction received provisional response");
 
         // Update dialog state for early dialogs
         let dialog_created = {
@@ -2081,10 +2033,7 @@ impl DialogManager {
 
                 if should_send {
                     if let Err(e) = self.send_prack(dialog_id, rseq_value).await {
-                        warn!(
-                            "Auto-PRACK failed for dialog {} (RSeq={}): {}",
-                            dialog_id, rseq_value, e
-                        );
+                        warn!(dialog=%dialog_id, rseq=rseq_value, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Auto-PRACK failed");
                         // Roll back the ack record so a retransmit can re-trigger.
                         if let Ok(mut dialog) = self.get_dialog_mut(dialog_id) {
                             // Only roll back if we're still the most recent acker.
@@ -2155,10 +2104,7 @@ impl DialogManager {
         dialog_id: &DialogId,
         transaction_id: &TransactionKey,
     ) -> DialogResult<()> {
-        debug!(
-            "Transaction {} terminated for dialog {}",
-            transaction_id, dialog_id
-        );
+        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), dialog=%dialog_id, "Transaction terminated for dialog");
 
         // Clean up transaction-dialog association
         self.unlink_transaction_from_dialog_indexed(transaction_id);
@@ -2191,22 +2137,16 @@ impl DialogManager {
             .map(|state| state.is_terminated())
             .unwrap_or(false)
         {
-            debug!(
-                "Ignoring ACK for terminated dialog {} on transaction {}",
-                dialog_id, transaction_id
-            );
+            debug!(dialog=%dialog_id, transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), "Ignoring ACK for terminated dialog");
             return Ok(());
         }
 
-        info!(
-            "✅ RFC 3261: ACK received for transaction {} in dialog {} - time to start media (UAS side)",
-            transaction_id, dialog_id
-        );
+        info!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), dialog=%dialog_id, "ACK received; media may start on UAS side");
 
         // Extract any SDP from the ACK (though typically ACK doesn't have SDP for 2xx responses)
         let negotiated_sdp = if !request.body().is_empty() {
             let sdp = String::from_utf8_lossy(request.body()).to_string();
-            info!("ACK contains SDP body: {}", sdp);
+            info!(body_len = request.body().len(), "ACK contains SDP body");
             Some(sdp)
         } else {
             info!("ACK has no SDP body (normal for 2xx ACK)");
@@ -2242,9 +2182,9 @@ impl DialogManager {
         source: SocketAddr,
     ) -> DialogResult<TransactionKey> {
         debug!(
-            "Creating server transaction for {} request from {}",
-            request.method(),
-            source
+            method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
+            %source,
+            "Creating server transaction for request"
         );
 
         let server_transaction = self
@@ -2257,7 +2197,7 @@ impl DialogManager {
 
         let transaction_id = server_transaction.id().clone();
 
-        debug!("Created server transaction {} for request", transaction_id);
+        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Created server transaction for request");
         Ok(transaction_id)
     }
 
@@ -2270,10 +2210,7 @@ impl DialogManager {
         destination: SocketAddr,
         method: &Method,
     ) -> DialogResult<TransactionKey> {
-        debug!(
-            "Creating client transaction for {} request to {}",
-            method, destination
-        );
+        debug!(method=%crate::transaction::safe_diagnostics::SafeMethod::new(method), %destination, "Creating client transaction for request");
 
         // STIR/SHAKEN (RFC 8224) — fire the request lifecycle for
         // INVITE so the installed PASSporTSigner attaches an
@@ -2299,10 +2236,7 @@ impl DialogManager {
             message: format!("Failed to create {} client transaction: {}", method, e),
         })?;
 
-        debug!(
-            "Created client transaction {} for {} request",
-            transaction_id, method
-        );
+        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), method=%crate::transaction::safe_diagnostics::SafeMethod::new(method), "Created client transaction for request");
         Ok(transaction_id)
     }
 
@@ -2331,18 +2265,12 @@ impl DialogManager {
                 Ok(request) => match self.find_dialog_for_request(&request).await {
                     Some(dialog_id) => return Some(dialog_id),
                     None => {
-                        warn!(
-                            "Cannot emit CallCancelled for {}: no dialog mapping or request match",
-                            invite_tx_id
-                        );
+                        warn!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(invite_tx_id), "Cannot emit CallCancelled: no dialog mapping or request match");
                         return None;
                     }
                 },
                 Err(e) => {
-                    warn!(
-                        "Cannot emit CallCancelled for {}: failed to fetch INVITE request: {}",
-                        invite_tx_id, e
-                    );
+                    warn!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(invite_tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Cannot emit CallCancelled: failed to fetch INVITE request");
                     return None;
                 }
             }
@@ -2403,11 +2331,7 @@ impl DialogManager {
         invite_tx_id: &TransactionKey,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> DialogResult<TransactionKey> {
-        debug!(
-            "Cancelling INVITE transaction {} with dialog cleanup ({} extra headers)",
-            invite_tx_id,
-            extra_headers.len()
-        );
+        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(invite_tx_id), extra_header_count=extra_headers.len(), "Cancelling INVITE transaction with dialog cleanup");
         let pre_cancel_dialog_id = self
             .transaction_to_dialog
             .get(invite_tx_id)
@@ -2432,10 +2356,7 @@ impl DialogManager {
                 .await;
         }
 
-        debug!(
-            "Successfully cancelled INVITE transaction {}, created CANCEL transaction {}",
-            invite_tx_id, cancel_tx_id
-        );
+        debug!(invite_transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(invite_tx_id), cancel_transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&cancel_tx_id), "Successfully cancelled INVITE transaction and created CANCEL transaction");
         Ok(cancel_tx_id)
     }
 
@@ -2592,10 +2513,7 @@ impl DialogManager {
             destination,
         );
 
-        info!(
-            "Sent PRACK for dialog {} (transaction {}, RSeq={})",
-            dialog_id, transaction_id, rseq
-        );
+        info!(dialog=%dialog_id, transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), rseq, "Sent PRACK");
         Ok(transaction_id)
     }
 

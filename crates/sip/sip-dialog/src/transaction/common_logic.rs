@@ -52,7 +52,7 @@ pub async fn send_state_changed_event(
     new_state: TransactionState,
     events_tx: &mpsc::Sender<TransactionEvent>,
 ) {
-    debug!(id=%tx_id, "State transition: {:?} -> {:?}", previous_state, new_state);
+    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "State transition: {:?} -> {:?}", previous_state, new_state);
     let _ = events_tx
         .send(TransactionEvent::StateChanged {
             transaction_id: tx_id.clone(),
@@ -80,7 +80,7 @@ pub async fn send_transaction_terminated_event(
     tx_id: &TransactionKey,
     events_tx: &mpsc::Sender<TransactionEvent>,
 ) {
-    debug!(id=%tx_id, "Transaction terminated");
+    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Transaction terminated");
     let _ = events_tx
         .send(TransactionEvent::TransactionTerminated {
             transaction_id: tx_id.clone(),
@@ -108,7 +108,7 @@ pub async fn send_timer_triggered_event(
     timer_name: &str,
     events_tx: &mpsc::Sender<TransactionEvent>,
 ) {
-    trace!(id=%tx_id, timer=%timer_name, "Timer triggered event");
+    trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), timer=%timer_name, "Timer triggered event");
     let _ = events_tx
         .send(TransactionEvent::TimerTriggered {
             transaction_id: tx_id.clone(),
@@ -136,7 +136,7 @@ pub async fn send_transaction_timeout_event(
     tx_id: &TransactionKey,
     events_tx: &mpsc::Sender<TransactionEvent>,
 ) {
-    debug!(id=%tx_id, "Transaction timed out");
+    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Transaction timed out");
     let _ = events_tx
         .send(TransactionEvent::TransactionTimeout {
             transaction_id: tx_id.clone(),
@@ -164,7 +164,7 @@ pub async fn send_provisional_response_event(
     response: Response,
     events_tx: &mpsc::Sender<TransactionEvent>,
 ) {
-    trace!(id=%tx_id, status=%response.status(), "Sending provisional response event");
+    trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "Sending provisional response event");
     let _ = events_tx
         .send(TransactionEvent::ProvisionalResponse {
             transaction_id: tx_id.clone(),
@@ -195,7 +195,7 @@ pub async fn send_success_response_event(
     events_tx: &mpsc::Sender<TransactionEvent>,
     remote_addr: SocketAddr,
 ) {
-    debug!(id=%tx_id, status=%response.status(), "Sending success response event");
+    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "Sending success response event");
     let _ = events_tx
         .send(TransactionEvent::SuccessResponse {
             transaction_id: tx_id.clone(),
@@ -227,7 +227,7 @@ pub async fn send_failure_response_event(
     response: Response,
     events_tx: &mpsc::Sender<TransactionEvent>,
 ) {
-    debug!(id=%tx_id, status=%response.status(), "Sending failure response event");
+    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "Sending failure response event");
     let _ = events_tx
         .send(TransactionEvent::FailureResponse {
             transaction_id: tx_id.clone(),
@@ -254,7 +254,7 @@ pub async fn send_transport_error_event(
     tx_id: &TransactionKey,
     events_tx: &mpsc::Sender<TransactionEvent>,
 ) {
-    debug!(id=%tx_id, "Sending transport error event");
+    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Sending transport error event");
     let _ = events_tx
         .send(TransactionEvent::TransportError {
             transaction_id: tx_id.clone(),
@@ -353,12 +353,12 @@ pub async fn handle_response_by_status(
             // In Completed state, any response is a retransmission
             // For INVITE client transactions, we might need to resend ACK
             // For non-INVITE, we just ignore it
-            trace!(id=%tx_id, status=%status, "Received response in Completed state");
+            trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%status, "Received response in Completed state");
             None // Stay in Completed
         }
         _ => {
             // Other states like Initial, Terminated
-            trace!(id=%tx_id, state=?current_state, status=%status, "Received response in unexpected state");
+            trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, status=%status, "Received response in unexpected state");
             None
         }
     }
@@ -385,7 +385,7 @@ async fn handle_success_response_for_client_non_invite_transaction(
 ) {
     // Success response
     // Deliver the response to the transaction user
-    debug!(id=%tx_id, "Delivering success response to transaction user");
+    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Delivering success response to transaction user");
     send_success_response_event(tx_id, response, events_tx, remote_addr).await;
 }
 
@@ -458,7 +458,7 @@ pub async fn handle_response_for_client_transaction(
                         // 1xx response
                         // Move to the Proceeding state
                         // and deliver the response to the transaction user
-                        debug!(id=%tx_id, "Received 1xx response in {:?} state", state);
+                        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Received 1xx response in {:?} state", state);
                         let _ = events_tx
                             .send(TransactionEvent::ProvisionalResponse {
                                 transaction_id: tx_id.clone(),
@@ -471,7 +471,7 @@ pub async fn handle_response_for_client_transaction(
                         // 2xx response
                         // Move to the Terminated state
                         // and deliver the response to the transaction user
-                        debug!(id=%tx_id, "Received 2xx response in {:?} state", state);
+                        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Received 2xx response in {:?} state", state);
                         handle_success_response_for_client_invite_transaction(
                             tx_id,
                             state,
@@ -486,7 +486,7 @@ pub async fn handle_response_for_client_transaction(
                         // 3xx-6xx response
                         // Move to the Completed state
                         // and deliver the response to the transaction user
-                        debug!(id=%tx_id, "Received failure response in {:?} state", state);
+                        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Received failure response in {:?} state", state);
                         let _ = events_tx
                             .send(TransactionEvent::FailureResponse {
                                 transaction_id: tx_id.clone(),
@@ -510,7 +510,7 @@ pub async fn handle_response_for_client_transaction(
                         // 1xx response
                         // Move to the Proceeding state
                         // and deliver the response to the transaction user
-                        debug!(id=%tx_id, "Received 1xx response in {:?} state", state);
+                        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Received 1xx response in {:?} state", state);
                         let _ = events_tx
                             .send(TransactionEvent::ProvisionalResponse {
                                 transaction_id: tx_id.clone(),
@@ -523,7 +523,7 @@ pub async fn handle_response_for_client_transaction(
                         // Final response
                         // Move to the Completed state
                         // and deliver the response to the transaction user
-                        debug!(id=%tx_id, "Received final response in {:?} state", state);
+                        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Received final response in {:?} state", state);
                         if status_code.is_success() {
                             handle_success_response_for_client_non_invite_transaction(
                                 tx_id,
@@ -552,7 +552,7 @@ pub async fn handle_response_for_client_transaction(
         }
         _ => {
             // Unexpected transaction kind
-            error!(id=%tx_id, "Unexpected transaction kind {:?} in handle_response_for_client_transaction", kind);
+            error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Unexpected transaction kind {:?} in handle_response_for_client_transaction", kind);
             return Err(Error::Other(format!(
                 "Unexpected transaction kind {:?}",
                 kind

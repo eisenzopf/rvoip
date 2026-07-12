@@ -94,6 +94,7 @@ pub mod event;
 pub mod key;
 pub mod logic;
 pub mod runner;
+pub mod safe_diagnostics;
 pub mod state;
 pub mod timer_utils;
 pub mod validators;
@@ -186,7 +187,7 @@ impl fmt::Display for TransactionKind {
 /// typically by the `TransactionManager` or the transaction itself (e.g., for timer events).
 ///
 /// These commands drive the transaction's state machine and interactions.
-#[derive(Debug, Clone)] // Clone is useful if commands need to be resent or duplicated.
+#[derive(Clone)] // Clone is useful if commands need to be resent or duplicated.
 pub enum InternalTransactionCommand {
     /// Instructs the transaction to transition to a specified `TransactionState`.
     /// This should be used carefully, respecting the valid state transitions for the transaction kind.
@@ -208,6 +209,12 @@ pub enum InternalTransactionCommand {
     /// RFC 3261 Section 17.2.1: "If the TU does not send a provisional response within 200ms,
     /// the server transaction MUST send a 100 Trying response."
     CancelTimer100,
+}
+
+impl fmt::Debug for InternalTransactionCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self::safe_diagnostics::SafeTransactionCommand::new(self).fmt(f)
+    }
 }
 
 /// A common, object-safe trait providing synchronous access to core properties of a SIP transaction.

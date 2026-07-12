@@ -229,19 +229,19 @@ impl TransactionManager {
         // Subscribe to transaction events
         let mut rx = self.subscribe();
 
-        debug!(%tx_id, ?target_state, "Waiting for transaction state");
+        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), ?target_state, "Waiting for transaction state");
 
         // Check if the transaction is already in the target state
         let current_state = match self.transaction_state(tx_id).await {
             Ok(state) => state,
             Err(e) => {
-                warn!(%tx_id, error=%e, "Error checking transaction state");
+                warn!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error checking transaction state");
                 return Err(e);
             }
         };
 
         if current_state == target_state {
-            debug!(%tx_id, ?current_state, "Transaction already in target state");
+            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), ?current_state, "Transaction already in target state");
             return Ok(true);
         }
 
@@ -253,7 +253,7 @@ impl TransactionManager {
             // Check if we've exceeded the timeout
             let elapsed = start_time.elapsed();
             if elapsed >= timeout_duration {
-                debug!(%tx_id, ?current_state, ?target_state, elapsed=?elapsed, "Timeout waiting for state");
+                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), ?current_state, ?target_state, elapsed=?elapsed, "Timeout waiting for state");
                 return Ok(false);
             }
 
@@ -266,17 +266,17 @@ impl TransactionManager {
             // without receiving an event
             match self.transaction_state(tx_id).await {
                 Ok(state) if state == target_state => {
-                    debug!(%tx_id, ?state, "Transaction reached target state (detected by polling)");
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), ?state, "Transaction reached target state (detected by polling)");
                     return Ok(true);
                 }
                 Ok(_) => {} // Not in target state yet, continue waiting
                 Err(e) => {
                     // If transaction is not found, return false (it may have been terminated)
                     if matches!(e, Error::TransactionNotFound { .. }) {
-                        debug!(%tx_id, "Transaction not found while waiting for state change, likely terminated");
+                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Transaction not found while waiting for state change, likely terminated");
                         return Ok(false);
                     }
-                    warn!(%tx_id, error=%e, "Error checking transaction state");
+                    warn!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error checking transaction state");
                 }
             }
 
@@ -288,20 +288,20 @@ impl TransactionManager {
                     new_state,
                     ..
                 })) if transaction_id == *tx_id && new_state == target_state => {
-                    debug!(%tx_id, ?new_state, "Transaction reached target state (from event)");
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), ?new_state, "Transaction reached target state (from event)");
                     return Ok(true);
                 }
                 // Transaction terminated, will never reach target state
                 Ok(Some(TransactionEvent::TransactionTerminated { transaction_id, .. }))
                     if transaction_id == *tx_id =>
                 {
-                    debug!(%tx_id, "Transaction terminated while waiting for state change");
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Transaction terminated while waiting for state change");
                     return Ok(false);
                 }
                 // Any other event or no event yet
                 Ok(Some(_)) | Ok(None) | Err(_) => {
                     // Continue the loop, polling the transaction state again
-                    trace!(%tx_id, ?target_state, elapsed=?elapsed, "Still waiting for state change");
+                    trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), ?target_state, elapsed=?elapsed, "Still waiting for state change");
                 }
             }
         }
@@ -356,17 +356,17 @@ impl TransactionManager {
         // Subscribe to transaction events
         let mut rx = self.subscribe();
 
-        debug!(%tx_id, "Waiting for final response");
+        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Waiting for final response");
 
         // Check if the transaction already has a final response
         match self.last_response(tx_id).await {
             Ok(Some(response)) if response.status().as_u16() >= 200 => {
-                debug!(%tx_id, status=%response.status(), "Transaction already has final response");
+                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "Transaction already has final response");
                 return Ok(Some(response));
             }
             Ok(_) => {} // No response or non-final response
             Err(e) => {
-                warn!(%tx_id, error=%e, "Error checking transaction last response");
+                warn!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error checking transaction last response");
                 return Err(e);
             }
         };
@@ -379,7 +379,7 @@ impl TransactionManager {
             // Check if we've exceeded the timeout
             let elapsed = start_time.elapsed();
             if elapsed >= timeout_duration {
-                debug!(%tx_id, elapsed=?elapsed, "Timeout waiting for final response");
+                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), elapsed=?elapsed, "Timeout waiting for final response");
                 return Ok(None);
             }
 
@@ -391,17 +391,17 @@ impl TransactionManager {
             // Poll for a final response
             match self.last_response(tx_id).await {
                 Ok(Some(response)) if response.status().as_u16() >= 200 => {
-                    debug!(%tx_id, status=%response.status(), "Received final response (detected by polling)");
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "Received final response (detected by polling)");
                     return Ok(Some(response));
                 }
                 Ok(_) => {} // No final response yet
                 Err(e) => {
                     // If transaction is gone, we'll never get a response
                     if matches!(e, Error::TransactionNotFound { .. }) {
-                        debug!(%tx_id, "Transaction not found while waiting for final response");
+                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Transaction not found while waiting for final response");
                         return Ok(None);
                     }
-                    warn!(%tx_id, error=%e, "Error checking transaction last response");
+                    warn!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error checking transaction last response");
                 }
             }
 
@@ -413,7 +413,7 @@ impl TransactionManager {
                     response,
                     ..
                 })) if transaction_id == *tx_id => {
-                    debug!(%tx_id, status=%response.status(), "Received success response event");
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "Received success response event");
                     return Ok(Some(response));
                 }
                 // Received a failure response event
@@ -422,23 +422,23 @@ impl TransactionManager {
                     response,
                     ..
                 })) if transaction_id == *tx_id => {
-                    debug!(%tx_id, status=%response.status(), "Received failure response event");
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "Received failure response event");
                     return Ok(Some(response));
                 }
                 // Transaction terminated with possible final response
                 Ok(Some(TransactionEvent::TransactionTerminated { transaction_id, .. }))
                     if transaction_id == *tx_id =>
                 {
-                    debug!(%tx_id, "Transaction terminated, checking for final response before returning");
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Transaction terminated, checking for final response before returning");
 
                     // Last attempt to get a final response
                     match self.last_response(tx_id).await {
                         Ok(Some(response)) if response.status().as_u16() >= 200 => {
-                            debug!(%tx_id, status=%response.status(), "Found final response after termination");
+                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "Found final response after termination");
                             return Ok(Some(response));
                         }
                         _ => {
-                            debug!(%tx_id, "No final response after termination");
+                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "No final response after termination");
                             return Ok(None);
                         }
                     }
@@ -446,7 +446,7 @@ impl TransactionManager {
                 // Any other event or no event yet
                 Ok(Some(_)) | Ok(None) | Err(_) => {
                     // Continue the loop, will poll again
-                    trace!(%tx_id, elapsed=?elapsed, "Still waiting for final response");
+                    trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), elapsed=?elapsed, "Still waiting for final response");
                 }
             }
         }
@@ -515,7 +515,7 @@ impl TransactionManager {
 
         // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
         if let Some((_, subscriber_ids)) = self.transaction_to_subscribers.remove(tx_id) {
-            debug!(%tx_id, subscriber_count = subscriber_ids.len(), "Removed terminated transaction from subscriber mappings");
+            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), subscriber_count = subscriber_ids.len(), "Removed terminated transaction from subscriber mappings");
             for subscriber_id in subscriber_ids {
                 let mut empty = false;
                 if let Some(mut entry) = self.subscriber_to_transactions.get_mut(&subscriber_id) {
@@ -525,14 +525,14 @@ impl TransactionManager {
                 }
                 if empty {
                     self.subscriber_to_transactions.remove(&subscriber_id);
-                    debug!(%tx_id, subscriber_id, "Removed empty subscriber mapping");
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), subscriber_id, "Removed empty subscriber mapping");
                 }
             }
         }
 
         // Unregister from timer manager
         self.timer_manager.unregister_transaction(tx_id).await;
-        debug!(%tx_id, "Unregistered transaction from timer manager");
+        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Unregistered transaction from timer manager");
 
         if terminated {
             // Broadcast a transaction terminated event
@@ -660,7 +660,7 @@ impl TransactionManager {
                 .collect();
             debug!("Found {} orphaned destination entries", orphaned_keys.len());
             for key in orphaned_keys {
-                debug!(%key, "Removing orphaned destination entry");
+                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Removing orphaned destination entry");
                 self.transaction_destinations.remove(&key);
             }
         }
@@ -717,7 +717,7 @@ impl TransactionManager {
                 .unwrap_or(false);
             if remove_client {
                 self.request_transaction_runner_stop(&key);
-                debug!(%key, "Removing terminated client transaction");
+                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Removing terminated client transaction");
                 self.client_transactions.remove(&key);
                 removed = true;
             }
@@ -729,7 +729,7 @@ impl TransactionManager {
                 .unwrap_or(false);
             if remove_server {
                 self.request_transaction_runner_stop(&key);
-                debug!(%key, "Removing terminated server transaction");
+                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Removing terminated server transaction");
                 self.server_transactions.remove(&key);
                 self.retire_server_invite_dialog_index_for(&key);
                 removed = true;
@@ -762,7 +762,7 @@ impl TransactionManager {
         let mut subscriber_ids_to_clean = Vec::new();
         for tx_id in &terminated_transaction_ids {
             if let Some((_, subscriber_ids)) = self.transaction_to_subscribers.remove(tx_id) {
-                debug!(%tx_id, subscriber_count = subscriber_ids.len(), "Removed terminated transaction from subscriber mappings");
+                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), subscriber_count = subscriber_ids.len(), "Removed terminated transaction from subscriber mappings");
                 subscriber_ids_to_clean.extend(subscriber_ids);
             }
         }
@@ -796,7 +796,7 @@ impl TransactionManager {
         // Unregister terminated transactions from timer manager
         for tx_id in &terminated_transaction_ids {
             self.timer_manager.unregister_transaction(tx_id).await;
-            debug!(%tx_id, "Unregistered terminated transaction from timer manager");
+            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Unregistered terminated transaction from timer manager");
         }
 
         Ok(cleaned_count)

@@ -77,10 +77,10 @@ impl ServerNonInviteLogic {
         {
             Ok(handle) => {
                 timer_handles.timer_j = Some(handle);
-                trace!(id=%tx_id, interval=?interval_j, "Started Timer J for Completed state");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), interval=?interval_j, "Started Timer J for Completed state");
             }
             Err(e) => {
-                error!(id=%tx_id, error=%e, "Failed to start Timer J");
+                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to start Timer J");
             }
         }
     }
@@ -96,12 +96,12 @@ impl ServerNonInviteLogic {
 
         match current_state {
             TransactionState::Completed => {
-                debug!(id=%tx_id, "Timer J fired in Completed state, terminating");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer J fired in Completed state, terminating");
                 // Timer J automatically transitions to Terminated, no need to return a state
                 Ok(None)
             }
             _ => {
-                trace!(id=%tx_id, state=?current_state, "Timer J fired in invalid state, ignoring");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Timer J fired in invalid state, ignoring");
                 Ok(None)
             }
         }
@@ -120,7 +120,7 @@ impl ServerNonInviteLogic {
             TransactionState::Trying
             | TransactionState::Proceeding
             | TransactionState::Completed => {
-                debug!(id=%tx_id, state=?current_state, "Received request retransmission");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Received request retransmission");
 
                 // If in Completed state, retransmit the last response
                 if current_state == TransactionState::Completed {
@@ -131,7 +131,7 @@ impl ServerNonInviteLogic {
                             .send_message(Message::Response(response.clone()), data.remote_addr)
                             .await
                         {
-                            error!(id=%tx_id, error=%e, "Failed to retransmit response");
+                            error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to retransmit response");
                         }
                     }
                 }
@@ -141,7 +141,7 @@ impl ServerNonInviteLogic {
             }
             _ => {
                 // Requests in other states are ignored
-                trace!(id=%tx_id, state=?current_state, "Ignoring request in state {:?}", current_state);
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Ignoring request in state {:?}", current_state);
                 Ok(None)
             }
         }
@@ -180,25 +180,25 @@ impl TransactionLogic<ServerTransactionData, ServerNonInviteTimerHandles> for Se
 
         match new_state {
             TransactionState::Trying => {
-                trace!(id=%tx_id, "Entered Trying state. No timers are started yet until a response is sent.");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Entered Trying state. No timers are started yet until a response is sent.");
             }
             TransactionState::Proceeding => {
-                debug!(id=%tx_id, "Entered Proceeding state after sending provisional response.");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Entered Proceeding state after sending provisional response.");
                 // No timers are started in Proceeding state for non-INVITE server transactions
             }
             TransactionState::Completed => {
-                debug!(id=%tx_id, "Entered Completed state after sending final response.");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Entered Completed state after sending final response.");
                 // Start Timer J
                 self.start_timer_j(data, timer_handles, command_tx).await;
             }
             TransactionState::Terminated => {
-                trace!(id=%tx_id, "Entered Terminated state. Specific timers should have been cancelled by runner.");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Entered Terminated state. Specific timers should have been cancelled by runner.");
                 // Unregister from timer manager when terminated
                 let timer_manager = self.timer_factory.timer_manager();
                 timer_utils::unregister_transaction(&timer_manager, tx_id).await;
             }
             _ => {
-                trace!(id=%tx_id, "Entered unhandled state {:?} in on_enter_state", new_state);
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Entered unhandled state {:?} in on_enter_state", new_state);
             }
         }
         Ok(())
@@ -230,7 +230,7 @@ impl TransactionLogic<ServerTransactionData, ServerNonInviteTimerHandles> for Se
                     .await
             }
             _ => {
-                warn!(id=%tx_id, timer_name=%timer_name, "Unknown timer triggered for ServerNonInvite");
+                warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), timer_name=%timer_name, "Unknown timer triggered for ServerNonInvite");
                 Ok(None)
             }
         }
@@ -251,7 +251,7 @@ impl TransactionLogic<ServerTransactionData, ServerNonInviteTimerHandles> for Se
                     .await
             }
             Message::Response(_) => {
-                warn!(id=%tx_id, "Server transaction received a Response, ignoring");
+                warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Server transaction received a Response, ignoring");
                 Ok(None)
             }
         }
@@ -485,7 +485,7 @@ impl ServerTransaction for ServerNonInviteTransaction {
             if current_state == TransactionState::Trying {
                 if is_provisional {
                     // 1xx -> Proceeding
-                    debug!(id=%data.id, "Sent provisional response, transitioning to Proceeding");
+                    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&data.id), "Sent provisional response, transitioning to Proceeding");
                     data.cmd_tx
                         .send(InternalTransactionCommand::TransitionTo(
                             TransactionState::Proceeding,
@@ -496,7 +496,7 @@ impl ServerTransaction for ServerNonInviteTransaction {
                         })?;
                 } else {
                     // Final response -> Completed
-                    debug!(id=%data.id, "Sent final response, transitioning to Completed");
+                    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&data.id), "Sent final response, transitioning to Completed");
                     data.cmd_tx
                         .send(InternalTransactionCommand::TransitionTo(
                             TransactionState::Completed,
@@ -509,7 +509,7 @@ impl ServerTransaction for ServerNonInviteTransaction {
             } else if current_state == TransactionState::Proceeding {
                 if !is_provisional {
                     // Final response -> Completed
-                    debug!(id=%data.id, "Sent final response, transitioning to Completed");
+                    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&data.id), "Sent final response, transitioning to Completed");
                     data.cmd_tx
                         .send(InternalTransactionCommand::TransitionTo(
                             TransactionState::Completed,

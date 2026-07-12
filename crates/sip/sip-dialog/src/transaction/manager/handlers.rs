@@ -127,7 +127,7 @@ pub(crate) async fn handle_transport_message(
                             let tx_kind = tx.kind();
 
                             if tx_kind == TransactionKind::InviteServer {
-                                debug!(%tx_id, "Processing ACK for server INVITE transaction");
+                                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Processing ACK for server INVITE transaction");
 
                                 let tx_clone = tx.clone();
 
@@ -164,14 +164,14 @@ pub(crate) async fn handle_transport_message(
                                             }
                                             Err(e) => {
                                                 // Transaction error - likely channel closed
-                                                warn!(%tx_id, error=%e, "Failed to process ACK request, treating as stray ACK");
+                                                warn!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to process ACK request, treating as stray ACK");
                                                 // Fall through to stray ACK handling
                                             }
                                         }
                                     }
                                     Err(_) => {
                                         // Timeout waiting for transaction to process ACK
-                                        warn!(%tx_id, "Timeout processing ACK request, treating as stray ACK");
+                                        warn!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timeout processing ACK request, treating as stray ACK");
                                         // Fall through to stray ACK handling
                                     }
                                 }
@@ -264,7 +264,7 @@ pub(crate) async fn handle_transport_message(
                         // Create a modified key for the INVITE transaction with the same branch
                         let invite_tx_id = TransactionKey::new(cancel_branch, Method::Invite, true);
 
-                        debug!("Looking for INVITE transaction with key: {}", invite_tx_id);
+                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_tx_id), "Looking for INVITE transaction");
 
                         // Check if we have a matching INVITE transaction with the same branch.
                         // Clone the Arc out of the DashMap shard so the shard
@@ -282,7 +282,7 @@ pub(crate) async fn handle_transport_message(
                             // Now proceed with the transaction outside the lock
                             let request_clone = request.clone();
 
-                            debug!(%tx_id_clone, "Processing CANCEL for server INVITE transaction");
+                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Processing CANCEL for server INVITE transaction");
 
                             // Broadcast event
                             TransactionManager::broadcast_event(
@@ -335,7 +335,7 @@ pub(crate) async fn handle_transport_message(
                             }
 
                             // Now send 487 Request Terminated for the original INVITE
-                            debug!(%tx_id_clone, "Sending 487 Request Terminated for the original INVITE");
+                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Sending 487 Request Terminated for the original INVITE");
 
                             let mut builder =
                                 ResponseBuilder::new(StatusCode::RequestTerminated, None);
@@ -369,7 +369,7 @@ pub(crate) async fn handle_transport_message(
                                 // send through the transaction's send_response method
                                 // This ensures proper state transition and processing
                                 if let Err(e) = tx.send_response(invite_response).await {
-                                    warn!(%tx_id_clone, error=%e, "Failed to send 487 Request Terminated through transaction");
+                                    warn!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send 487 Request Terminated through transaction");
                                     return Err(Error::Other(format!(
                                         "Failed to send 487 Request Terminated: {}",
                                         e
@@ -402,7 +402,7 @@ pub(crate) async fn handle_transport_message(
                     let existing_tx = server_transactions.get(&tx_id).map(|r| r.value().clone());
 
                     if let Some(tx) = existing_tx {
-                        debug!(%tx_id, "Processing retransmission of existing request");
+                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Processing retransmission of existing request");
 
                         let lifecycle = tx.data().get_lifecycle();
                         if !matches!(lifecycle, TransactionLifecycle::Active) {
@@ -413,7 +413,7 @@ pub(crate) async fn handle_transport_message(
                             {
                                 return Ok(());
                             }
-                            debug!(%tx_id, ?lifecycle, "Skipping request processing for non-active transaction");
+                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), ?lifecycle, "Skipping request processing for non-active transaction");
                             return Ok(());
                         }
 
@@ -439,7 +439,7 @@ pub(crate) async fn handle_transport_message(
                     }
 
                     // If we get here, this is a new request
-                    debug!(%tx_id, method = ?request.method(), "Received new request, delegate to proper handler");
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()), "Received new request, delegate to proper handler");
 
                     // Delegate to the actual request handler which will create appropriate transactions
                     // and generate the correct InviteRequest or NonInviteRequest events
@@ -447,7 +447,7 @@ pub(crate) async fn handle_transport_message(
                         .handle_request(request, source, &ingress_context)
                         .await
                     {
-                        warn!(error=%e, "Failed to handle new request");
+                        warn!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to handle new request");
                     }
 
                     return Ok(());
@@ -471,11 +471,11 @@ pub(crate) async fn handle_transport_message(
                         let tx_kind = tx.kind();
                         let remote_addr = tx.remote_addr();
 
-                        debug!(%tx_id, status = ?response.status(), "Routing response to client transaction");
+                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status = ?response.status(), "Routing response to client transaction");
 
                         let lifecycle = tx.data().get_lifecycle();
                         if !matches!(lifecycle, TransactionLifecycle::Active) {
-                            debug!(%tx_id, ?lifecycle, "Skipping response processing for non-active transaction");
+                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), ?lifecycle, "Skipping response processing for non-active transaction");
                             return Ok(());
                         }
 
@@ -485,7 +485,7 @@ pub(crate) async fn handle_transport_message(
                         if !response.status().is_success()
                             && tx_kind == TransactionKind::InviteClient
                         {
-                            debug!(%tx_id, status=%response.status(), "Sending ACK automatically for non-2xx response");
+                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "Sending ACK automatically for non-2xx response");
 
                             // Create a dummy request for ACK creation
                             let dummy_uri = if let Some(to) = response.to() {
@@ -510,7 +510,7 @@ pub(crate) async fn handle_transport_message(
                                     }
                                 }
                                 Err(e) => {
-                                    warn!(%tx_id, error=%e, "Failed to create ACK request");
+                                    warn!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to create ACK request");
                                 }
                             }
                         }
@@ -537,7 +537,7 @@ pub(crate) async fn handle_transport_message(
             }
         }
         TransportEvent::Error { error } => {
-            warn!("Transport error: {}", error);
+            warn!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&error), "Transport error");
             // TODO: Determine if any transactions were affected by this error
             // and propagate the error to them
         }
@@ -645,7 +645,11 @@ async fn resolve_host_to_socketaddr(host: &rvoip_sip_core::Host, port: u16) -> O
             match tokio::net::lookup_host(format!("{}:{}", domain, port)).await {
                 Ok(mut addrs) => addrs.next(),
                 Err(e) => {
-                    error!(error = %e, domain = %domain, "DNS lookup failed for ACK destination");
+                    error!(
+                        error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e),
+                        domain_len=domain.len(),
+                        "DNS lookup failed for ACK destination"
+                    );
                     None
                 }
             }
@@ -948,9 +952,10 @@ impl TransactionManager {
                 response.headers.extend(headers);
                 if let Some(reason) = reason {
                     warn!(
-                        method = %request.method(),
+                        method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
                         source = %ingress_context.source,
-                        reason,
+                        reason_present=true,
+                        reason_len=reason.len(),
                         "SIP listener authorization rejected request"
                     );
                 }
@@ -1008,7 +1013,7 @@ impl TransactionManager {
                             .is_none()
                     {
                         warn!(
-                            %key,
+                            transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key),
                             source = %ingress_context.source,
                             "Dropping transaction replay from a different authenticated peer binding"
                         );
@@ -1047,7 +1052,7 @@ impl TransactionManager {
                         }
                         diagnostics::record_duplicate_invite_cache_miss();
                     }
-                    debug!(%key, ?lifecycle, "Skipping request processing for non-active transaction");
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), ?lifecycle, "Skipping request processing for non-active transaction");
                     return Ok(());
                 }
                 if request.method() == Method::Invite
@@ -1221,14 +1226,17 @@ impl TransactionManager {
         if let Some(key) = crate::transaction::utils::transaction_key_from_message(
             &Message::Response(response.clone()),
         ) {
-            debug!(id=%key, "🔍 RESPONSE HANDLER: Generated transaction key from response");
+            debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "🔍 RESPONSE HANDLER: Generated transaction key from response");
 
             // Debug the current client transactions (gated on debug level)
             if tracing::enabled!(tracing::Level::DEBUG) {
                 let client_keys: Vec<String> = self
                     .client_transactions
                     .iter()
-                    .map(|r| r.key().to_string())
+                    .map(|r| {
+                        crate::transaction::safe_diagnostics::SafeTransactionKey::new(r.key())
+                            .to_string()
+                    })
                     .collect();
                 debug!(
                     "🔍 RESPONSE HANDLER: Current client transactions: {:?}",
@@ -1236,7 +1244,7 @@ impl TransactionManager {
                 );
             }
 
-            debug!(id=%key, "Found matching transaction for response");
+            debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Found matching transaction for response");
 
             if key.is_server() {
                 return Err(Error::Other(format!(
@@ -1261,7 +1269,7 @@ impl TransactionManager {
 
                 let lifecycle = transaction.data().get_lifecycle();
                 if !matches!(lifecycle, TransactionLifecycle::Active) {
-                    debug!(%key, ?lifecycle, "Skipping response processing for non-active transaction");
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), ?lifecycle, "Skipping response processing for non-active transaction");
                     return Ok(());
                 }
 
@@ -1271,21 +1279,18 @@ impl TransactionManager {
                     diagnostics::record_existing_transaction_dispatch(started.elapsed());
                 }
                 if let Err(e) = process_result {
-                    warn!(id=%key, error=%e, "Error processing response");
+                    warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error processing response");
                 } else {
                     debug!("🔍 RESPONSE HANDLER: Successfully processed response in transaction");
                     processed = true;
                 }
             } else {
-                debug!(
-                    "🔍 RESPONSE HANDLER: No matching client transaction found for key {}",
-                    key
-                );
+                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "No matching client transaction found for response key");
             }
 
             // If not processed via transaction, still send the event
             if !processed {
-                debug!(id=%key, "Response matches key but no active transaction found");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Response matches key but no active transaction found");
 
                 // Deliver to the transaction user anyway
                 let status = response.status();
@@ -1406,7 +1411,7 @@ impl TransactionManager {
                             .is_none()
                     {
                         warn!(
-                            transaction_id = %invite_key,
+                            transaction_id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_key),
                             source = %source,
                             "Dropping non-2xx ACK from an unauthorized transport peer"
                         );
@@ -1414,13 +1419,10 @@ impl TransactionManager {
                     }
                     let lifecycle = transaction.data().get_lifecycle();
                     if !matches!(lifecycle, TransactionLifecycle::Active) {
-                        debug!(%invite_key, ?lifecycle, "Skipping ACK processing for non-active transaction");
+                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_key), ?lifecycle, "Skipping ACK processing for non-active transaction");
                         return Ok(());
                     }
-                    debug!(
-                        "Processing ACK for non-2xx response in transaction {}",
-                        invite_key
-                    );
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_key), "Processing ACK for non-2xx response");
                     self.mark_invite_2xx_response_cache_acked(&invite_key);
                     let dispatch_started =
                         diagnostics::transaction_timing_enabled().then(Instant::now);
@@ -1443,16 +1445,13 @@ impl TransactionManager {
                     .is_none()
             {
                 warn!(
-                    transaction_id = %tx_id,
+                    transaction_id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id),
                     source = %source,
                     "Dropping 2xx ACK from an unauthorized transport peer"
                 );
                 return Ok(());
             }
-            debug!(
-                "Found ACK for 2xx response using dialog-based matching: {}",
-                tx_id
-            );
+            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Found ACK for 2xx response using dialog-based matching");
             self.mark_invite_2xx_response_cache_acked(&tx_id);
 
             // RFC 3261: ACK for 2xx responses should NOT be processed in the transaction
@@ -1494,7 +1493,10 @@ impl TransactionManager {
         let (exact_key, fallback_key) = ServerInviteDialogKey::ack_lookup_keys(request)?;
 
         if let Some(entry) = self.lookup_server_invite_by_dialog_key(&exact_key) {
-            debug!(call_id=%exact_key.call_id, "Found matching INVITE server transaction for ACK by dialog index");
+            debug!(
+                call_id_len = exact_key.call_id.len(),
+                "Found matching INVITE server transaction for ACK by dialog index"
+            );
             let transaction_id = entry.transaction_id;
             self.mark_invite_2xx_response_cache_acked(&transaction_id);
             return Some(transaction_id);
@@ -1502,7 +1504,10 @@ impl TransactionManager {
 
         if let Some(fallback_key) = fallback_key.as_ref() {
             if let Some(entry) = self.lookup_server_invite_by_dialog_key(fallback_key) {
-                debug!(call_id=%fallback_key.call_id, "Found matching INVITE server transaction for ACK by dialog index fallback");
+                debug!(
+                    call_id_len = fallback_key.call_id.len(),
+                    "Found matching INVITE server transaction for ACK by dialog index fallback"
+                );
                 let transaction_id = entry.transaction_id.clone();
                 self.insert_server_invite_dialog_index_entry(exact_key, entry);
                 self.mark_invite_2xx_response_cache_acked(&transaction_id);
@@ -1511,7 +1516,7 @@ impl TransactionManager {
         }
 
         debug!(
-            call_id=%exact_key.call_id,
+            call_id_len = exact_key.call_id.len(),
             "No matching INVITE server transaction for ACK in dialog index"
         );
         None
