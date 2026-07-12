@@ -17,8 +17,14 @@ use std::str::FromStr;
 /// The Authorization header is used by clients to provide authentication credentials
 /// in response to a WWW-Authenticate challenge. It typically contains the necessary
 /// information for the server to verify the client's identity.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Authorization(pub Credentials); // Holds the Credentials enum directly
+
+impl fmt::Debug for Authorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Authorization([redacted])")
+    }
+}
 
 impl fmt::Display for Authorization {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

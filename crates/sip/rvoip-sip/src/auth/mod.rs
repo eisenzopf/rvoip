@@ -629,7 +629,7 @@ fn transport_name_is_secure(transport: &str) -> bool {
 /// `Credentials` shorthand still works and converts into
 /// [`SipClientAuth::Digest`].
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum SipClientAuth {
     /// Digest username/password credentials.
     Digest(Credentials),
@@ -657,6 +657,38 @@ pub enum SipClientAuth {
     /// then Digest, then Basic when the peer offers several compatible
     /// challenges.
     Composite(Vec<SipClientAuth>),
+}
+
+impl std::fmt::Debug for SipClientAuth {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Digest(_) => formatter
+                .debug_struct("SipClientAuth::Digest")
+                .field("credentials", &"[redacted]")
+                .finish(),
+            Self::BearerToken(_) => formatter
+                .debug_tuple("SipClientAuth::BearerToken")
+                .field(&"[redacted]")
+                .finish(),
+            Self::BearerTokenCleartextAllowed(_) => formatter
+                .debug_tuple("SipClientAuth::BearerTokenCleartextAllowed")
+                .field(&"[redacted]")
+                .finish(),
+            Self::Basic {
+                allow_cleartext, ..
+            } => formatter
+                .debug_struct("SipClientAuth::Basic")
+                .field("username", &"[redacted]")
+                .field("password", &"[redacted]")
+                .field("allow_cleartext", allow_cleartext)
+                .finish(),
+            Self::Aka(_) => formatter.write_str("SipClientAuth::Aka([redacted])"),
+            Self::Composite(auth) => formatter
+                .debug_struct("SipClientAuth::Composite")
+                .field("option_count", &auth.len())
+                .finish(),
+        }
+    }
 }
 
 impl SipClientAuth {
@@ -897,7 +929,7 @@ impl From<Credentials> for SipClientAuth {
 }
 
 /// UAC auth header value selected by [`SipClientAuth`] for a challenge.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ClientAuthHeader {
     /// Authorization header body.
     pub value: String,
@@ -907,6 +939,18 @@ pub struct ClientAuthHeader {
     pub digest_challenge: Option<DigestChallenge>,
     /// Whether the selected Digest challenge carried `stale=true`.
     pub stale: bool,
+}
+
+impl std::fmt::Debug for ClientAuthHeader {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClientAuthHeader")
+            .field("value", &"[redacted]")
+            .field("scheme", &self.scheme)
+            .field("has_digest_challenge", &self.digest_challenge.is_some())
+            .field("stale", &self.stale)
+            .finish()
+    }
 }
 
 /// UAC-side IMS AKA client configuration.

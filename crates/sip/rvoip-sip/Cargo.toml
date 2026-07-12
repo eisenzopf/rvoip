@@ -371,6 +371,7 @@ ipnet = "2.12"
 base64 = "0.22"
 rvoip-auth-core.workspace = true
 rvoip-sip-registrar.workspace = true
+zeroize.workspace = true
 
 # State management
 lazy_static = "1.4"

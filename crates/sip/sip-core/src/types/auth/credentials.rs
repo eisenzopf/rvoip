@@ -10,7 +10,7 @@ use std::fmt;
 ///
 /// Credentials are sent by clients in response to authentication challenges. They
 /// contain the information needed for the server to authenticate the client.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum Credentials {
     /// Digest authentication credentials with associated parameters
     Digest { params: Vec<DigestParam> },
@@ -23,6 +23,24 @@ pub enum Credentials {
         scheme: String,
         params: Vec<AuthParam>,
     },
+}
+
+impl fmt::Debug for Credentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Digest { params } => formatter
+                .debug_struct("Credentials::Digest")
+                .field("param_count", &params.len())
+                .finish(),
+            Self::Basic { .. } => formatter.write_str("Credentials::Basic([redacted])"),
+            Self::Bearer { .. } => formatter.write_str("Credentials::Bearer([redacted])"),
+            Self::Other { params, .. } => formatter
+                .debug_struct("Credentials::Other")
+                .field("scheme", &"[redacted]")
+                .field("param_count", &params.len())
+                .finish(),
+        }
+    }
 }
 
 impl Credentials {
@@ -88,5 +106,26 @@ impl fmt::Display for Credentials {
                 write!(f, "{}", params_str)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Credentials;
+    use crate::types::auth::{Authorization, ProxyAuthorization};
+
+    #[test]
+    fn auth_debug_is_redacted_while_display_remains_the_wire_value() {
+        let credentials = Credentials::bearer("direct-wire-secret");
+        assert_eq!(credentials.to_string(), "Bearer direct-wire-secret");
+        assert!(!format!("{credentials:?}").contains("direct-wire-secret"));
+
+        let authorization = Authorization(credentials.clone());
+        assert_eq!(authorization.to_string(), "Bearer direct-wire-secret");
+        assert!(!format!("{authorization:?}").contains("direct-wire-secret"));
+
+        let proxy_authorization = ProxyAuthorization(credentials);
+        assert_eq!(proxy_authorization.to_string(), "Bearer direct-wire-secret");
+        assert!(!format!("{proxy_authorization:?}").contains("direct-wire-secret"));
     }
 }

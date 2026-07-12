@@ -403,7 +403,7 @@ pub enum PresenceStatus {
 }
 
 /// User credentials for authentication
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Credentials {
     /// Username/account
     pub username: String,
@@ -411,6 +411,17 @@ pub struct Credentials {
     pub password: String,
     /// Optional realm
     pub realm: Option<String>,
+}
+
+impl fmt::Debug for Credentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Credentials")
+            .field("username", &"[redacted]")
+            .field("password", &"[redacted]")
+            .field("has_realm", &self.realm.is_some())
+            .finish()
+    }
 }
 
 impl Credentials {

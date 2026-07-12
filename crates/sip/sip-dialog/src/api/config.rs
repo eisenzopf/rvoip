@@ -112,6 +112,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -969,7 +970,7 @@ impl ClientConfig {
 ///     .with_realm("example.com");
 /// assert_eq!(creds.realm.unwrap(), "example.com");
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Credentials {
     /// Username for authentication
     pub username: String,
@@ -983,6 +984,17 @@ pub struct Credentials {
     /// from the authentication challenge. Setting it explicitly can be
     /// useful for pre-configured authentication scenarios.
     pub realm: Option<String>,
+}
+
+impl fmt::Debug for Credentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Credentials")
+            .field("username", &"[redacted]")
+            .field("password", &"[redacted]")
+            .field("has_realm", &self.realm.is_some())
+            .finish()
+    }
 }
 
 impl Credentials {
@@ -1039,5 +1051,21 @@ impl Credentials {
     pub fn with_realm(mut self, realm: impl Into<String>) -> Self {
         self.realm = Some(realm.into());
         self
+    }
+}
+
+#[cfg(test)]
+mod credential_debug_tests {
+    use super::Credentials;
+
+    #[test]
+    fn credential_debug_redacts_username_password_and_realm() {
+        let credentials =
+            Credentials::new("dialog-user", "dialog-password").with_realm("dialog-realm");
+        let debug = format!("{credentials:?}");
+        for secret in ["dialog-user", "dialog-password", "dialog-realm"] {
+            assert!(!debug.contains(secret));
+        }
+        assert!(debug.contains("has_realm: true"));
     }
 }

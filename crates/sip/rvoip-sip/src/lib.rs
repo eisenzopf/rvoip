@@ -471,6 +471,8 @@ pub mod errors;
 /// D4 — `MediaStream` wrapper that bridges a SIP audio session into
 /// `rvoip_core::ConnectionAdapter::streams`. See module docs.
 pub mod media_stream;
+/// Typed, redacted SIP options for transport-neutral outbound origination.
+pub mod originate;
 pub mod server;
 
 // These modules remain public for existing internal-style integrations, but
@@ -503,6 +505,14 @@ pub mod types;
 
 // Peer types
 pub use adapter::{SipAdapter, SipInboundContextPolicy, SipInboundContextPolicyError};
+pub use originate::{
+    SipInitialHeaders, SipInitialHeadersError, SipOriginateContext, SipOriginateContextError,
+    MAX_SIP_INITIAL_HEADERS, MAX_SIP_INITIAL_HEADER_BYTES, MAX_SIP_INITIAL_HEADER_NAME_BYTES,
+    MAX_SIP_INITIAL_HEADER_VALUE_BYTES, MAX_SIP_ORIGINATE_AUTH_BYTES,
+    MAX_SIP_ORIGINATE_AUTH_OPTIONS, MAX_SIP_ORIGINATE_AUTH_PASSWORD_BYTES,
+    MAX_SIP_ORIGINATE_AUTH_REALM_BYTES, MAX_SIP_ORIGINATE_AUTH_USERNAME_BYTES,
+    MAX_SIP_ORIGINATE_BEARER_TOKEN_BYTES, MAX_SIP_ORIGINATE_FROM_URI_BYTES,
+};
 
 pub use api::callback_peer::{
     CallHandler, CallHandlerDecision, CallbackPeer, CallbackPeerBuilder, CallbackPeerControl,
@@ -634,10 +644,11 @@ pub mod prelude {
         Registration, RegistrationHandle, RegistrationInfo, RegistrationStatus, Result,
         RtpSessionBufferConfig, RtpTransportBufferConfig, SessionError, SessionHandle, SipAccount,
         SipAuthDecision, SipAuthScheme, SipAuthService, SipAuthSource, SipClientAuth,
-        SipContactMode, SipDigestAuthService, SipReason, SipTlsMode, SipTrace, SipTraceConfig,
-        SipTraceDirection, SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState,
-        TransferDialogMatcher, TransferKind, TransferLifecycleOptions, TransferOutcome,
-        TransferTargetEvidence, TransferWaitMode, TypedHeader,
+        SipContactMode, SipDigestAuthService, SipInitialHeaders, SipOriginateContext, SipReason,
+        SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection, SrtpSuitePolicy, StreamPeer,
+        StreamPeerBuilder, SubscriptionState, TransferDialogMatcher, TransferKind,
+        TransferLifecycleOptions, TransferOutcome, TransferTargetEvidence, TransferWaitMode,
+        TypedHeader,
     };
 }
 

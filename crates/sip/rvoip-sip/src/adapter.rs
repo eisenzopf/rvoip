@@ -10,6 +10,7 @@
 
 use crate::api::events::Event as ApiEvent;
 use crate::api::unified::{Config as ApiConfig, InboundInviteObservation, UnifiedCoordinator};
+use crate::originate::SipOriginateContext;
 use crate::types::CallState;
 use crate::SessionId;
 use chrono::Utc;
@@ -525,6 +526,11 @@ pub struct SipAdapter {
     /// Bounded per-outbound-route FIFO released by `activate_outbound` only
     /// after core has committed the Connection lifecycle.
     outbound_event_stages: DashMap<ConnectionId, Arc<OutboundEventStage>>,
+    /// Validated, transport-owned options retained for each outbound route.
+    /// Gate 7's true activation path will consume these only after durable
+    /// orchestration binding; retaining them now makes wrong-context
+    /// rejection happen before any SIP side effect.
+    outbound_originate_contexts: DashMap<ConnectionId, Arc<SipOriginateContext>>,
     out_tx: mpsc::Sender<OrchestratorAdapterEvent>,
     /// Single-take receiver for [`ConnectionAdapter::subscribe_events`].
     out_rx: StdMutex<Option<mpsc::Receiver<OrchestratorAdapterEvent>>>,
@@ -544,6 +550,25 @@ pub struct SipAdapter {
 }
 
 impl SipAdapter {
+    fn outbound_originate_context(
+        request: &OriginateRequest,
+    ) -> CoreResult<Arc<SipOriginateContext>> {
+        let context = if request.context.is_empty() {
+            Arc::new(SipOriginateContext::default())
+        } else {
+            request
+                .context
+                .downcast_arc::<SipOriginateContext>()
+                .ok_or(RvoipError::AdmissionRejected(
+                    "outbound SIP originate context type mismatch",
+                ))?
+        };
+        context.validate().map_err(|_| {
+            RvoipError::AdmissionRejected("outbound SIP originate context failed validation")
+        })?;
+        Ok(context)
+    }
+
     /// Construct from a fully-configured [`UnifiedCoordinator`]. Spawns the
     /// background event-translation task; the returned `Arc<SipAdapter>` is
     /// what gets registered with [`rvoip_core::Orchestrator::register`].
@@ -604,6 +629,7 @@ impl SipAdapter {
             active_connection_budget: AtomicUsize::new(DEFAULT_SIP_ACTIVE_CONNECTION_BUDGET),
             retired_session_budget: AtomicUsize::new(DEFAULT_SIP_RETIRED_SESSION_BUDGET),
             outbound_event_stages: DashMap::new(),
+            outbound_originate_contexts: DashMap::new(),
             out_tx: out_tx.clone(),
             out_rx: StdMutex::new(Some(out_rx)),
             streams_cache: Arc::new(DashMap::new()),
@@ -874,6 +900,7 @@ impl SipAdapter {
         if let Some((_, conn_id)) = self.by_session.remove(session_id) {
             self.by_connection.remove(&conn_id);
             self.streams_cache.remove(&conn_id);
+            self.outbound_originate_contexts.remove(&conn_id);
             self.inbound_contexts.forget(session_id, &conn_id);
             let remove_stage = self
                 .outbound_event_stages
@@ -1398,6 +1425,7 @@ impl ConnectionAdapter for SipAdapter {
     }
 
     async fn originate(&self, request: OriginateRequest) -> CoreResult<ConnectionHandle> {
+        let originate_context = Self::outbound_originate_context(&request)?;
         // The OriginateRequest's `target` is the SIP URI to dial; without an
         // explicit `from` we synthesize a local AOR. Step-7 keeps this simple;
         // step 9 wires real auth/PAI when orchestration-core flows through.
@@ -1405,6 +1433,8 @@ impl ConnectionAdapter for SipAdapter {
         let session_id = SessionId::new();
         let conn_id = ConnectionId::new();
         self.reserve_outbound_mapping(session_id.clone(), conn_id.clone())?;
+        self.outbound_originate_contexts
+            .insert(conn_id.clone(), originate_context);
         self.outbound_event_stages
             .insert(conn_id.clone(), Arc::new(OutboundEventStage::default()));
         let sent = self
@@ -1776,6 +1806,141 @@ mod inbound_context_tests {
             opened_at: Utc::now(),
             closed_at: None,
         }
+    }
+
+    #[test]
+    fn empty_originate_context_uses_redacted_sip_defaults() {
+        let request = OriginateRequest::new(
+            CoreSessionId::new(),
+            ParticipantId::new(),
+            "sip:target@example.test",
+            Direction::Outbound,
+            CapabilityDescriptor::default(),
+        )
+        .with_transport(Transport::Sip);
+        let context = SipAdapter::outbound_originate_context(&request).expect("SIP defaults");
+        assert!(context.from_uri().is_none());
+        assert!(context.auth().is_none());
+        assert!(context.initial_headers().is_empty());
+        assert_eq!(
+            format!("{context:?}"),
+            "SipOriginateContext { has_from_uri: false, has_auth: false, initial_header_count: 0 }"
+        );
+    }
+
+    #[test]
+    fn typed_originate_context_survives_the_admission_downcast_exactly() {
+        let typed = SipOriginateContext::new()
+            .with_from_uri("sips:private-caller@example.test")
+            .expect("valid From URI")
+            .with_auth(crate::auth::SipClientAuth::digest(
+                "private-user",
+                "private-password",
+            ))
+            .expect("bounded auth")
+            .with_initial_headers(
+                crate::SipInitialHeaders::new([
+                    ("X-App-Context", "first-secret"),
+                    ("x-app-context", "second-secret"),
+                ])
+                .expect("validated headers"),
+            );
+        let opaque = rvoip_core::adapter::OriginateContext::new(typed);
+        let expected = opaque
+            .downcast_arc::<SipOriginateContext>()
+            .expect("typed context before request construction");
+        let request = OriginateRequest::new(
+            CoreSessionId::new(),
+            ParticipantId::new(),
+            "sip:target@example.test",
+            Direction::Outbound,
+            CapabilityDescriptor::default(),
+        )
+        .with_transport(Transport::Sip)
+        .with_originate_context(opaque);
+
+        let admitted = SipAdapter::outbound_originate_context(&request).expect("typed admission");
+        assert!(Arc::ptr_eq(&expected, &admitted));
+        assert_eq!(
+            admitted.from_uri(),
+            Some("sips:private-caller@example.test")
+        );
+        let Some(crate::auth::SipClientAuth::Digest(credentials)) = admitted.auth() else {
+            panic!("expected retained Digest auth")
+        };
+        assert_eq!(credentials.username, "private-user");
+        assert_eq!(credentials.password, "private-password");
+        assert_eq!(
+            admitted
+                .initial_headers()
+                .iter()
+                .map(|(name, value)| (name.as_str(), value))
+                .collect::<Vec<_>>(),
+            vec![
+                ("X-App-Context", "first-secret"),
+                ("x-app-context", "second-secret"),
+            ]
+        );
+        let debug = format!("{admitted:?}");
+        for secret in [
+            "private-caller",
+            "private-user",
+            "private-password",
+            "first-secret",
+            "second-secret",
+        ] {
+            assert!(!debug.contains(secret));
+        }
+    }
+
+    #[tokio::test]
+    async fn wrong_nonempty_originate_context_fails_before_any_sip_side_effect() {
+        let capture = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("capture socket");
+        let target = capture.local_addr().expect("capture address");
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("wrong-context", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let request = OriginateRequest::new(
+            CoreSessionId::new(),
+            ParticipantId::new(),
+            format!("sip:target@{target}"),
+            Direction::Outbound,
+            CapabilityDescriptor::default(),
+        )
+        .with_transport(Transport::Sip)
+        .with_context(String::from("wrong-context-secret"));
+
+        assert!(matches!(
+            ConnectionAdapter::originate(adapter.as_ref(), request).await,
+            Err(RvoipError::AdmissionRejected(
+                "outbound SIP originate context type mismatch"
+            ))
+        ));
+        assert!(adapter.by_connection.is_empty());
+        assert!(adapter.by_session.is_empty());
+        assert!(adapter.outbound_event_stages.is_empty());
+        assert!(adapter.outbound_originate_contexts.is_empty());
+        assert!(adapter.retired_sessions.is_empty());
+        assert!(coordinator.list_sessions().await.is_empty());
+
+        let mut packet = [0u8; 2_048];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), capture.recv_from(&mut packet))
+                .await
+                .is_err(),
+            "wrong context must not emit a SIP packet"
+        );
+
+        drop(adapter);
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
     }
 
     #[test]
