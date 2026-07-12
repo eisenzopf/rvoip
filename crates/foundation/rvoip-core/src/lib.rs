@@ -122,6 +122,7 @@ pub mod events;
 pub mod harness;
 pub mod identity;
 pub mod ids;
+pub mod inbound_admission;
 pub mod media_graph;
 pub mod message;
 pub mod orchestrator;
@@ -170,6 +171,7 @@ pub use ids::{
     ListenerId, MediaRouteId, MessageId, ParticipantId, PlaybackId, RecordingId, SessionId,
     StreamId, TenantId, TranscriptionId,
 };
+pub use inbound_admission::InboundAdmission;
 pub use media_graph::{
     start_media_graph, MediaGraphHandle, MediaGraphPolicy, DEFAULT_MEDIA_GRAPH_MAX_SINKS,
 };

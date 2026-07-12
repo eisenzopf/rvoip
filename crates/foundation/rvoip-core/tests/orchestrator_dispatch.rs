@@ -1,7 +1,7 @@
 //! Smoke test: Orchestrator dispatches commands through a registered adapter
 //! and emits normalized events from adapter-event traffic.
 
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use rvoip_core::adapter::{
     AdapterEvent, AdapterKind, AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter,
     ConnectionHandle, EndReason, InboundConnectionContext, InboundRoutingHint,
@@ -20,14 +20,15 @@ use rvoip_core::identity::{
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
 use rvoip_core::message::Message;
 use rvoip_core::orchestrator::Orchestrator;
-use rvoip_core::stream::MediaStream;
+use rvoip_core::stream::{MediaStream, QualitySnapshot};
+use rvoip_core::DataMessage;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Barrier};
 
 #[derive(Debug, Default)]
 struct CallCounts {
@@ -38,6 +39,7 @@ struct CallCounts {
     resume: AtomicUsize,
     transfer: AtomicUsize,
     dtmf: AtomicUsize,
+    reject_reasons: Mutex<Vec<RejectReason>>,
 }
 
 struct StubAdapter {
@@ -151,12 +153,15 @@ impl ConnectionAdapter for StubAdapter {
         self.counts.accept.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn reject(&self, _conn: ConnectionId, _reason: RejectReason) -> Result<()> {
+    async fn reject(&self, conn: ConnectionId, reason: RejectReason) -> Result<()> {
         self.counts.reject.fetch_add(1, Ordering::SeqCst);
+        self.counts.reject_reasons.lock().unwrap().push(reason);
+        self.mark_ended(&conn);
         Ok(())
     }
-    async fn end(&self, _conn: ConnectionId, _reason: EndReason) -> Result<()> {
+    async fn end(&self, conn: ConnectionId, _reason: EndReason) -> Result<()> {
         self.counts.end.fetch_add(1, Ordering::SeqCst);
+        self.mark_ended(&conn);
         Ok(())
     }
     async fn hold(&self, _conn: ConnectionId) -> Result<()> {
@@ -809,4 +814,883 @@ async fn queued_nonterminal_events_cannot_resurrect_an_ended_route() {
     }
     assert_eq!(terminal_count, 1);
     assert_eq!(stale_count, 0);
+}
+
+fn prepare_atomic_inbound(
+    adapter: &StubAdapter,
+    tenant: &str,
+    routing_hint: &str,
+) -> (Connection, AuthenticatedPrincipal) {
+    let connection = fake_inbound_connection();
+    let principal = authenticated_principal(tenant);
+    adapter.mark_live(connection.id.clone());
+    adapter.set_inbound_context(
+        InboundConnectionContext::new(
+            connection.id.clone(),
+            Transport::Sip,
+            &principal,
+            Some(InboundRoutingHint::new(routing_hint).unwrap()),
+            InboundSignalingMetadata::default(),
+        )
+        .unwrap(),
+    );
+    (connection, principal)
+}
+
+async fn announce_atomic_inbound(
+    sender: &StubEventSender,
+    connection: Connection,
+    principal: AuthenticatedPrincipal,
+) {
+    sender
+        .send_atomic(OrchestratorAdapterEvent::AuthenticatedInboundConnection {
+            connection,
+            participant_id: "admission-participant".into(),
+            principal,
+        })
+        .await
+        .unwrap();
+}
+
+async fn wait_for_count(counter: &AtomicUsize, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while counter.load(Ordering::SeqCst) != expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("counter reached expected value");
+}
+
+#[tokio::test]
+async fn admission_gate_delays_publication_and_preserves_atomic_principal_context() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(2, Duration::from_secs(1))
+        .unwrap();
+    let (adapter, adapter_tx, counts) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let mut events = orchestrator.subscribe_events();
+
+    let (connection, principal) =
+        prepare_atomic_inbound(&adapter, "tenant-secret", "private-routing-token");
+    let connection_id = connection.id.clone();
+    announce_atomic_inbound(&adapter_tx, connection, principal.clone()).await;
+
+    let mut admission = tokio::time::timeout(Duration::from_secs(1), admissions.recv())
+        .await
+        .unwrap()
+        .expect("admission ticket");
+    assert_eq!(admission.connection_id(), &connection_id);
+    assert_eq!(admission.transport(), Transport::Sip);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), events.recv())
+            .await
+            .is_err()
+    );
+
+    let rendered = format!("{admission:?}");
+    assert!(!rendered.contains("private-routing-token"));
+    assert!(!rendered.contains("attachment-owner"));
+    assert!(!rendered.contains("tenant-secret"));
+    assert!(admission
+        .authenticated_principal()
+        .unwrap()
+        .has_same_owner(&principal));
+    assert!(matches!(
+        orchestrator.take_inbound_context(&connection_id, &principal),
+        Err(RvoipError::AdmissionRejected(
+            "inbound context is reserved by admission policy"
+        ))
+    ));
+    let context = admission
+        .take_inbound_context()
+        .unwrap()
+        .expect("context retained atomically");
+    assert_eq!(
+        context.routing_hint().unwrap().expose_secret(),
+        "private-routing-token"
+    );
+    assert!(admission.take_inbound_context().unwrap().is_none());
+
+    admission.accept().await.unwrap();
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        Event::ConnectionInbound { connection_id: id, .. } if id == connection_id
+    ));
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        Event::ConnectionAuthenticated { connection_id: id, .. } if id == connection_id
+    ));
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        Event::ConnectionPrincipalAuthenticated { connection_id: id, .. } if id == connection_id
+    ));
+    assert_eq!(counts.reject.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn explicit_rejection_erases_context_and_publishes_no_inbound_events() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(1, Duration::from_secs(1))
+        .unwrap();
+    let (adapter, adapter_tx, counts) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let mut events = orchestrator.subscribe_events();
+    let (connection, principal) =
+        prepare_atomic_inbound(&adapter, "tenant-a", "reject-private-token");
+    let connection_id = connection.id.clone();
+    announce_atomic_inbound(&adapter_tx, connection, principal).await;
+
+    let admission = admissions.recv().await.unwrap();
+    admission.reject(RejectReason::Forbidden).await.unwrap();
+    wait_for_count(&counts.reject, 1).await;
+    assert!(matches!(
+        counts.reject_reasons.lock().unwrap().as_slice(),
+        [RejectReason::Forbidden]
+    ));
+    assert!(matches!(
+        orchestrator.connection_transport(&connection_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), events.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn dropped_ticket_and_decision_timeout_fail_closed() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(2, Duration::from_millis(30))
+        .unwrap();
+    let (adapter, adapter_tx, counts) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let mut events = orchestrator.subscribe_events();
+
+    let (dropped, principal) = prepare_atomic_inbound(&adapter, "tenant-a", "drop-private-token");
+    let dropped_id = dropped.id.clone();
+    announce_atomic_inbound(&adapter_tx, dropped, principal).await;
+    drop(admissions.recv().await.unwrap());
+    wait_for_count(&counts.reject, 1).await;
+    assert!(matches!(
+        orchestrator.connection_transport(&dropped_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+
+    let (timed_out, principal) =
+        prepare_atomic_inbound(&adapter, "tenant-a", "timeout-private-token");
+    let timed_out_id = timed_out.id.clone();
+    announce_atomic_inbound(&adapter_tx, timed_out, principal).await;
+    let admission = admissions.recv().await.unwrap();
+    wait_for_count(&counts.reject, 2).await;
+    assert!(admission.accept().await.is_err());
+    assert!(matches!(
+        orchestrator.connection_transport(&timed_out_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), events.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn closed_receiver_and_capacity_exhaustion_reject_without_task_growth() {
+    let closed = Orchestrator::new(Config::default());
+    let closed_admissions = closed
+        .install_inbound_admission_gate(1, Duration::from_secs(1))
+        .unwrap();
+    drop(closed_admissions);
+    let (closed_adapter, closed_tx, closed_counts) = StubAdapter::new();
+    closed.register(closed_adapter.clone()).unwrap();
+    let (connection, principal) =
+        prepare_atomic_inbound(&closed_adapter, "tenant-a", "closed-receiver-token");
+    let connection_id = connection.id.clone();
+    announce_atomic_inbound(&closed_tx, connection, principal).await;
+    wait_for_count(&closed_counts.reject, 1).await;
+    assert!(matches!(
+        closed.connection_transport(&connection_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+
+    let bounded = Orchestrator::new(Config::default());
+    let mut admissions = bounded
+        .install_inbound_admission_gate(1, Duration::from_secs(1))
+        .unwrap();
+    let (adapter, sender, counts) = StubAdapter::new();
+    bounded.register(adapter.clone()).unwrap();
+    let mut events = bounded.subscribe_events();
+    let (first, first_principal) =
+        prepare_atomic_inbound(&adapter, "tenant-a", "first-bounded-token");
+    let first_id = first.id.clone();
+    announce_atomic_inbound(&sender, first, first_principal).await;
+    let first_admission = admissions.recv().await.unwrap();
+
+    let (second, second_principal) =
+        prepare_atomic_inbound(&adapter, "tenant-a", "second-bounded-token");
+    let second_id = second.id.clone();
+    announce_atomic_inbound(&sender, second, second_principal).await;
+    wait_for_count(&counts.reject, 1).await;
+    assert!(matches!(
+        bounded.connection_transport(&second_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), events.recv())
+            .await
+            .is_err()
+    );
+
+    first_admission.accept().await.unwrap();
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        Event::ConnectionInbound { connection_id, .. } if connection_id == first_id
+    ));
+    let _ = events.recv().await.unwrap();
+    let _ = events.recv().await.unwrap();
+
+    // The waiter permit is released after resolution, so later work is
+    // admitted without creating more than one concurrent waiter.
+    let (third, third_principal) =
+        prepare_atomic_inbound(&adapter, "tenant-a", "third-bounded-token");
+    announce_atomic_inbound(&sender, third, third_principal).await;
+    let third_admission = tokio::time::timeout(Duration::from_secs(1), admissions.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    third_admission
+        .reject(RejectReason::Forbidden)
+        .await
+        .unwrap();
+    wait_for_count(&counts.reject, 2).await;
+}
+
+#[tokio::test]
+async fn terminal_race_invalidates_ticket_and_late_accept_cannot_resurrect() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(1, Duration::from_secs(1))
+        .unwrap();
+    let (adapter, sender, counts) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let mut events = orchestrator.subscribe_events();
+    let (connection, principal) =
+        prepare_atomic_inbound(&adapter, "tenant-a", "terminal-race-token");
+    let connection_id = connection.id.clone();
+    announce_atomic_inbound(&sender, connection, principal).await;
+    let admission = admissions.recv().await.unwrap();
+
+    adapter.mark_ended(&connection_id);
+    adapter
+        .deliver_terminal(AdapterEvent::Ended {
+            connection_id: connection_id.clone(),
+            reason: EndReason::Normal,
+        })
+        .await;
+    assert!(admission.authenticated_principal().is_err());
+    assert!(admission.accept().await.is_err());
+    assert_eq!(counts.reject.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        orchestrator.connection_transport(&connection_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+    let mut inbound_events = 0;
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(50), events.recv()).await {
+        if matches!(
+            event,
+            Event::ConnectionInbound { .. }
+                | Event::ConnectionAuthenticated { .. }
+                | Event::ConnectionPrincipalAuthenticated { .. }
+        ) {
+            inbound_events += 1;
+        }
+    }
+    assert_eq!(inbound_events, 0);
+}
+
+#[tokio::test]
+async fn duplicate_inbound_handoffs_create_one_ticket_and_one_publication() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(2, Duration::from_secs(1))
+        .unwrap();
+    let (adapter, sender, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let mut events = orchestrator.subscribe_events();
+    let (connection, principal) = prepare_atomic_inbound(&adapter, "tenant-a", "duplicate-token");
+    let connection_id = connection.id.clone();
+    announce_atomic_inbound(&sender, connection.clone(), principal.clone()).await;
+    let admission = admissions.recv().await.unwrap();
+    announce_atomic_inbound(&sender, connection.clone(), principal.clone()).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), admissions.recv())
+            .await
+            .is_err()
+    );
+
+    admission.accept().await.unwrap();
+    for _ in 0..3 {
+        let _ = events.recv().await.unwrap();
+    }
+    announce_atomic_inbound(&sender, connection, principal).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), admissions.recv())
+            .await
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), events.recv())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        orchestrator.connection_transport(&connection_id).unwrap(),
+        Transport::Sip
+    );
+}
+
+#[tokio::test]
+async fn anonymous_and_mismatched_contexts_remain_fail_closed_for_policy() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(2, Duration::from_secs(1))
+        .unwrap();
+    let (adapter, sender, counts) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let mut events = orchestrator.subscribe_events();
+
+    let anonymous = fake_inbound_connection();
+    adapter.mark_live(anonymous.id.clone());
+    sender
+        .send(AdapterEvent::InboundConnection {
+            connection: anonymous,
+        })
+        .await
+        .unwrap();
+    let mut admission = admissions.recv().await.unwrap();
+    assert!(matches!(
+        admission.authenticated_principal(),
+        Err(RvoipError::InvalidState(
+            "connection has no authenticated principal"
+        ))
+    ));
+    assert!(admission.take_inbound_context().is_err());
+    admission.reject(RejectReason::Forbidden).await.unwrap();
+
+    let connection = fake_inbound_connection();
+    let principal = authenticated_principal("tenant-a");
+    adapter.mark_live(connection.id.clone());
+    adapter.set_inbound_context(
+        InboundConnectionContext::new(
+            connection.id.clone(),
+            Transport::WebRtc,
+            &principal,
+            Some(InboundRoutingHint::new("wrong-transport-token").unwrap()),
+            InboundSignalingMetadata::default(),
+        )
+        .unwrap(),
+    );
+    announce_atomic_inbound(&sender, connection, principal).await;
+    let mut admission = admissions.recv().await.unwrap();
+    assert!(admission.authenticated_principal().is_ok());
+    assert!(admission.take_inbound_context().unwrap().is_none());
+    admission.reject(RejectReason::Forbidden).await.unwrap();
+
+    wait_for_count(&counts.reject, 2).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), events.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn split_authentication_is_deferred_until_admission_and_context_stays_reserved() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(1, Duration::from_secs(1))
+        .unwrap();
+    let (adapter, sender, counts) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let mut events = orchestrator.subscribe_events();
+
+    let connection = fake_inbound_connection();
+    let connection_id = connection.id.clone();
+    let principal = authenticated_principal("tenant-split-auth");
+    adapter.mark_live(connection_id.clone());
+    adapter.set_inbound_context(
+        InboundConnectionContext::new(
+            connection_id.clone(),
+            Transport::Sip,
+            &principal,
+            Some(InboundRoutingHint::new("split-auth-private-token").unwrap()),
+            InboundSignalingMetadata::default(),
+        )
+        .unwrap(),
+    );
+    sender
+        .send(AdapterEvent::InboundConnection { connection })
+        .await
+        .unwrap();
+    let mut admission = admissions.recv().await.unwrap();
+    assert!(matches!(
+        admission.authenticated_principal(),
+        Err(RvoipError::InvalidState(
+            "connection has no authenticated principal"
+        ))
+    ));
+
+    sender
+        .send(AdapterEvent::Authenticated {
+            connection_id: connection_id.clone(),
+            identity_id: "legacy-private-identity".into(),
+            participant_id: "legacy-private-participant".into(),
+            assurance: principal.assurance.clone(),
+        })
+        .await
+        .unwrap();
+    sender
+        .send(AdapterEvent::PrincipalAuthenticated {
+            connection_id: connection_id.clone(),
+            participant_id: "split-auth-participant".into(),
+            principal: principal.clone(),
+        })
+        .await
+        .unwrap();
+    wait_for_connection_principal(&orchestrator, &connection_id).await;
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), events.recv())
+            .await
+            .is_err()
+    );
+    assert!(admission
+        .authenticated_principal()
+        .unwrap()
+        .has_same_owner(&principal));
+    assert!(matches!(
+        orchestrator.take_inbound_context(&connection_id, &principal),
+        Err(RvoipError::AdmissionRejected(
+            "inbound context is reserved by admission policy"
+        ))
+    ));
+    let context = admission
+        .take_inbound_context()
+        .unwrap()
+        .expect("the generation-bound ticket owns the context");
+    assert_eq!(
+        context.routing_hint().unwrap().expose_secret(),
+        "split-auth-private-token"
+    );
+
+    admission.accept().await.unwrap();
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        Event::ConnectionInbound { connection_id: id, .. } if id == connection_id
+    ));
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        Event::ConnectionAuthenticated {
+            connection_id: id,
+            identity_id,
+            participant_id,
+            ..
+        } if id == connection_id
+            && identity_id == principal.subject
+            && participant_id == "split-auth-participant"
+    ));
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        Event::ConnectionPrincipalAuthenticated { connection_id: id, .. }
+            if id == connection_id
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), events.recv())
+            .await
+            .is_err()
+    );
+    assert_eq!(counts.reject.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn operational_events_before_admission_fail_closed_without_publication() {
+    type EventFactory = fn(ConnectionId) -> AdapterEvent;
+    let cases: [(&str, EventFactory); 6] = [
+        ("connected", |connection_id| AdapterEvent::Connected {
+            connection_id,
+        }),
+        ("dtmf", |connection_id| AdapterEvent::Dtmf {
+            connection_id,
+            digits: "1".into(),
+            duration_ms: 100,
+        }),
+        ("quality", |connection_id| AdapterEvent::Quality {
+            connection_id,
+            snapshot: QualitySnapshot::default(),
+        }),
+        ("message", |connection_id| AdapterEvent::Message {
+            connection_id,
+            text: "must-not-escape".into(),
+        }),
+        ("data-message", |connection_id| AdapterEvent::DataMessage {
+            connection_id,
+            message: DataMessage::reliable(
+                "bridgefu.context.v1",
+                "application/json",
+                br#"{"private":"must-not-escape"}"#.to_vec(),
+            ),
+        }),
+        ("step-up-response", |connection_id| {
+            AdapterEvent::StepUpResponse {
+                connection_id,
+                method: "passkey".into(),
+                credential: "private-step-up-credential".into(),
+            }
+        }),
+    ];
+
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(1, Duration::from_secs(1))
+        .unwrap();
+    let (adapter, sender, counts) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let mut events = orchestrator.subscribe_events();
+
+    for (index, (case, event_factory)) in cases.into_iter().enumerate() {
+        let (connection, principal) =
+            prepare_atomic_inbound(&adapter, "tenant-a", "operational-private-token");
+        let connection_id = connection.id.clone();
+        announce_atomic_inbound(&sender, connection, principal).await;
+        let admission = admissions.recv().await.unwrap();
+
+        sender
+            .send(event_factory(connection_id.clone()))
+            .await
+            .unwrap();
+        wait_for_count(&counts.reject, index + 1).await;
+        assert!(admission.accept().await.is_err(), "{case} ticket survived");
+        assert!(
+            matches!(
+                orchestrator.connection_transport(&connection_id),
+                Err(RvoipError::ConnectionNotFound(_))
+            ),
+            "{case} route survived"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), events.recv())
+                .await
+                .is_err(),
+            "{case} escaped onto the normalized event bus"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accept_and_operational_event_race_has_one_linearized_outcome() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(2, Duration::from_secs(2))
+        .unwrap();
+    let (adapter, sender, counts) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let mut events = orchestrator.subscribe_events();
+    let mut rejected = 0;
+
+    for iteration in 0..32 {
+        let (connection, principal) =
+            prepare_atomic_inbound(&adapter, "tenant-race", "race-private-token");
+        let connection_id = connection.id.clone();
+        announce_atomic_inbound(&sender, connection, principal).await;
+        let admission = admissions.recv().await.unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+
+        let accept_barrier = Arc::clone(&barrier);
+        let accept_task = tokio::spawn(async move {
+            accept_barrier.wait().await;
+            if iteration % 2 == 0 {
+                tokio::task::yield_now().await;
+            }
+            admission.accept().await
+        });
+        let event_barrier = Arc::clone(&barrier);
+        let event_sender = sender.clone();
+        let event_connection_id = connection_id.clone();
+        let event_task = tokio::spawn(async move {
+            event_barrier.wait().await;
+            if iteration % 2 != 0 {
+                tokio::task::yield_now().await;
+            }
+            event_sender
+                .send(AdapterEvent::Connected {
+                    connection_id: event_connection_id,
+                })
+                .await
+        });
+        barrier.wait().await;
+        let accepted = accept_task.await.unwrap().is_ok();
+        event_task.await.unwrap().unwrap();
+
+        if accepted {
+            assert_eq!(
+                orchestrator.connection_transport(&connection_id).unwrap(),
+                Transport::Sip,
+                "accepted iteration {iteration} was silently removed"
+            );
+            let mut inbound = false;
+            let mut authenticated = false;
+            let mut principal_authenticated = false;
+            let mut connected = false;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !(inbound && authenticated && principal_authenticated && connected) {
+                    match events.recv().await.unwrap() {
+                        Event::ConnectionInbound {
+                            connection_id: id, ..
+                        } if id == connection_id => inbound = true,
+                        Event::ConnectionAuthenticated {
+                            connection_id: id, ..
+                        } if id == connection_id => authenticated = true,
+                        Event::ConnectionPrincipalAuthenticated {
+                            connection_id: id, ..
+                        } if id == connection_id => principal_authenticated = true,
+                        Event::ConnectionConnected {
+                            connection_id: id, ..
+                        } if id == connection_id => connected = true,
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("accepted route publishes its complete lifecycle");
+
+            adapter.mark_ended(&connection_id);
+            adapter
+                .deliver_terminal(AdapterEvent::Ended {
+                    connection_id: connection_id.clone(),
+                    reason: EndReason::Normal,
+                })
+                .await;
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(1), events.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                Event::ConnectionEnded { connection_id: id, .. } if id == connection_id
+            ));
+        } else {
+            rejected += 1;
+            wait_for_count(&counts.reject, rejected).await;
+            assert!(matches!(
+                orchestrator.connection_transport(&connection_id),
+                Err(RvoipError::ConnectionNotFound(_))
+            ));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), events.recv())
+                    .await
+                    .is_err(),
+                "rejected iteration {iteration} leaked a normalized event"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn stale_timeout_cannot_reject_a_reused_connection_generation() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(2, Duration::from_millis(500))
+        .unwrap();
+    let (adapter, sender, counts) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let mut events = orchestrator.subscribe_events();
+
+    let (old_connection, old_principal) =
+        prepare_atomic_inbound(&adapter, "tenant-old", "old-private-token");
+    let connection_id = old_connection.id.clone();
+    announce_atomic_inbound(&sender, old_connection, old_principal).await;
+    let old_admission = admissions.recv().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(350)).await;
+
+    adapter.mark_ended(&connection_id);
+    adapter
+        .deliver_terminal(AdapterEvent::Ended {
+            connection_id: connection_id.clone(),
+            reason: EndReason::Normal,
+        })
+        .await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while orchestrator.connection_transport(&connection_id).is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let mut new_connection = fake_inbound_connection();
+    new_connection.id = connection_id.clone();
+    let new_principal = authenticated_principal("tenant-new");
+    adapter.mark_live(connection_id.clone());
+    adapter.set_inbound_context(
+        InboundConnectionContext::new(
+            connection_id.clone(),
+            Transport::Sip,
+            &new_principal,
+            Some(InboundRoutingHint::new("new-private-token").unwrap()),
+            InboundSignalingMetadata::default(),
+        )
+        .unwrap(),
+    );
+    announce_atomic_inbound(&sender, new_connection, new_principal.clone()).await;
+    let new_admission = admissions.recv().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(old_admission.accept().await.is_err());
+    assert_eq!(counts.reject.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        orchestrator.connection_transport(&connection_id).unwrap(),
+        Transport::Sip
+    );
+    assert!(new_admission
+        .authenticated_principal()
+        .unwrap()
+        .has_same_owner(&new_principal));
+    new_admission.accept().await.unwrap();
+    assert_eq!(counts.reject.load(Ordering::SeqCst), 0);
+    for expected in ["inbound", "authenticated", "principal"] {
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                (&*expected, event),
+                ("inbound", Event::ConnectionInbound { connection_id: id, .. })
+                    | ("authenticated", Event::ConnectionAuthenticated { connection_id: id, .. })
+                    | ("principal", Event::ConnectionPrincipalAuthenticated { connection_id: id, .. })
+                    if id == connection_id
+            ),
+            "unexpected {expected} publication"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pending_principal_owner_change_fails_closed() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(1, Duration::from_secs(1))
+        .unwrap();
+    let (adapter, sender, counts) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let mut events = orchestrator.subscribe_events();
+
+    let (connection, principal) =
+        prepare_atomic_inbound(&adapter, "tenant-a", "principal-change-private-token");
+    let connection_id = connection.id.clone();
+    announce_atomic_inbound(&sender, connection, principal).await;
+    let admission = admissions.recv().await.unwrap();
+
+    sender
+        .send(AdapterEvent::PrincipalAuthenticated {
+            connection_id: connection_id.clone(),
+            participant_id: "replacement-participant".into(),
+            principal: authenticated_principal("tenant-b"),
+        })
+        .await
+        .unwrap();
+    wait_for_count(&counts.reject, 1).await;
+    assert!(admission.accept().await.is_err());
+    assert!(matches!(
+        orchestrator.connection_transport(&connection_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), events.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn principal_expiry_is_rechecked_when_admission_accepts() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(1, Duration::from_secs(2))
+        .unwrap();
+    let (adapter, sender, counts) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let mut events = orchestrator.subscribe_events();
+
+    let (connection, mut principal) =
+        prepare_atomic_inbound(&adapter, "tenant-a", "expiry-private-token");
+    let connection_id = connection.id.clone();
+    principal.expires_at = Some(Utc::now() + ChronoDuration::milliseconds(250));
+    adapter.set_inbound_context(
+        InboundConnectionContext::new(
+            connection_id.clone(),
+            Transport::Sip,
+            &principal,
+            Some(InboundRoutingHint::new("expiry-private-token").unwrap()),
+            InboundSignalingMetadata::default(),
+        )
+        .unwrap(),
+    );
+    assert!(!principal.is_expired());
+    announce_atomic_inbound(&sender, connection, principal.clone()).await;
+    let admission = admissions.recv().await.unwrap();
+    assert!(admission
+        .authenticated_principal()
+        .unwrap()
+        .has_same_owner(&principal));
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(principal.is_expired());
+    assert!(admission.accept().await.is_err());
+    wait_for_count(&counts.reject, 1).await;
+    assert!(matches!(
+        orchestrator.connection_transport(&connection_id),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), events.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn admission_gate_configuration_is_single_use_and_pre_registration() {
+    let invalid = Orchestrator::new(Config::default());
+    assert!(matches!(
+        invalid.install_inbound_admission_gate(0, Duration::from_secs(1)),
+        Err(RvoipError::InvalidState(_))
+    ));
+    assert!(matches!(
+        invalid.install_inbound_admission_gate(1, Duration::ZERO),
+        Err(RvoipError::InvalidState(_))
+    ));
+    let _receiver = invalid
+        .install_inbound_admission_gate(1, Duration::from_secs(1))
+        .unwrap();
+    assert!(matches!(
+        invalid.install_inbound_admission_gate(1, Duration::from_secs(1)),
+        Err(RvoipError::InvalidState(
+            "inbound admission gate already installed"
+        ))
+    ));
+
+    let too_late = Orchestrator::new(Config::default());
+    let (adapter, _, _) = StubAdapter::new();
+    too_late.register(adapter).unwrap();
+    assert!(matches!(
+        too_late.install_inbound_admission_gate(1, Duration::from_secs(1)),
+        Err(RvoipError::InvalidState(
+            "inbound admission gate must be installed before adapters"
+        ))
+    ));
 }
