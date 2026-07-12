@@ -4,6 +4,7 @@ use rvoip_auth_core::{
 };
 use rvoip_core_traits::identity::IdentityAssurance;
 use serde_json::json;
+use std::time::{Duration, UNIX_EPOCH};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -80,6 +81,102 @@ async fn principal_preserves_introspection_authorization_claims() {
         }
         other => panic!("expected UserAuthorized, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn credential_preserves_provider_token_id_alias_and_iat() {
+    let server = MockServer::start().await;
+    let issued_at = u64::try_from(Utc::now().timestamp()).unwrap() - 30;
+    Mock::given(method("POST"))
+        .and(path("/introspect"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "active": true,
+            "sub": "id_alice",
+            "token_id": "opaque-id-123",
+            "iat": issued_at,
+            "exp": (Utc::now() + chrono::Duration::hours(1)).timestamp()
+        })))
+        .mount(&server)
+        .await;
+    let validator =
+        OAuth2IntrospectionValidator::new(format!("{}/introspect", server.uri()).parse().unwrap());
+
+    let credential = validator.validate_credential("opaque-token").await.unwrap();
+    assert_eq!(credential.token_id.as_deref(), Some("opaque-id-123"));
+    assert_eq!(
+        credential.issued_at,
+        Some(UNIX_EPOCH + Duration::from_secs(issued_at))
+    );
+}
+
+#[tokio::test]
+async fn missing_provider_token_id_uses_stable_redacted_fingerprint() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/introspect"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "active": true,
+            "sub": "id_alice"
+        })))
+        .mount(&server)
+        .await;
+    let validator =
+        OAuth2IntrospectionValidator::new(format!("{}/introspect", server.uri()).parse().unwrap());
+
+    let first = validator.validate_credential("opaque-a").await.unwrap();
+    let repeated = validator.validate_credential("opaque-a").await.unwrap();
+    let different = validator.validate_credential("opaque-b").await.unwrap();
+    assert_eq!(first.token_id, repeated.token_id);
+    assert_ne!(first.token_id, different.token_id);
+    let fingerprint = first.token_id.as_deref().unwrap();
+    assert!(fingerprint.starts_with("sha256:"));
+    let diagnostic = format!("{first:?}");
+    assert!(diagnostic.contains("<redacted>"));
+    assert!(!diagnostic.contains(fingerprint));
+    assert!(!diagnostic.contains("opaque-a"));
+}
+
+#[tokio::test]
+async fn production_policy_can_require_provider_token_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/introspect"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "active": true,
+            "sub": "id_alice"
+        })))
+        .mount(&server)
+        .await;
+    let validator =
+        OAuth2IntrospectionValidator::new(format!("{}/introspect", server.uri()).parse().unwrap())
+            .with_required_token_id();
+
+    assert!(matches!(
+        validator.validate_credential("opaque-token").await,
+        Err(BearerAuthError::Invalid(ref reason)) if reason.contains("required token id")
+    ));
+}
+
+#[tokio::test]
+async fn introspection_metadata_is_validated_before_exposure() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/introspect"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "active": true,
+            "sub": "id_alice",
+            "jti": "",
+            "iat": u64::MAX
+        })))
+        .mount(&server)
+        .await;
+    let validator =
+        OAuth2IntrospectionValidator::new(format!("{}/introspect", server.uri()).parse().unwrap());
+
+    assert!(matches!(
+        validator.validate_credential("opaque-token").await,
+        Err(BearerAuthError::Invalid(ref reason)) if reason.contains("token id")
+    ));
 }
 
 #[tokio::test]

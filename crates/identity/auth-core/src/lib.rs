@@ -21,6 +21,9 @@
 //! ## Bearer and Token Validators
 //!
 //! [`BearerValidator`] is the common async validation trait for Bearer tokens.
+//! Its source-compatible [`BearerValidator::validate_credential`] method
+//! returns [`ValidatedBearer`] when adapters also need a bounded token ID and
+//! issue time for revocation, replay, or lease enforcement.
 //! [`JwtValidator`], [`JwksJwtValidator`], [`OAuth2IntrospectionValidator`],
 //! and [`AAuthValidator`] are concrete validator families that can be plugged
 //! into `rvoip-sip`'s `SipAuthService` for UAS-side SIP Bearer validation.
@@ -58,7 +61,9 @@ pub mod types;
 pub use aauth::{AAuthValidator, ActorClaims, ActorTokenValidator};
 pub use bearer::{
     bearer_stub, ensure_principal_active, AuthenticatedPrincipal, AuthenticationMethod,
-    BearerAuthError, BearerValidator, PrincipalOwnershipKey,
+    BearerAuthError, BearerValidator, PrincipalOwnershipKey, ValidatedBearer,
+    MAX_BEARER_ISSUER_BYTES, MAX_BEARER_SUBJECT_BYTES, MAX_BEARER_TENANT_BYTES,
+    MAX_BEARER_TOKEN_ID_BYTES,
 };
 pub use dpop::{
     jwk_thumbprint, DpopError, DpopProof, DpopValidator, ValidatedDpop, DEFAULT_IAT_LEEWAY,

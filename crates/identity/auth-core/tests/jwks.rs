@@ -10,10 +10,15 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
 
 use chrono::Utc;
 use jsonwebtoken::{encode, EncodingKey, Header};
-use rvoip_auth_core::{AuthenticationMethod, BearerAuthError, BearerValidator, JwksJwtValidator};
+use rvoip_auth_core::{
+    AuthenticationMethod, BearerAuthError, BearerValidator, CredentialAuthError, JwksJwtValidator,
+    TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
+    MAX_BEARER_TOKEN_ID_BYTES,
+};
 use rvoip_core_traits::identity::IdentityAssurance;
 use serde::Serialize;
 use serde_json::json;
@@ -76,11 +81,27 @@ struct Claims {
     resource_access: Option<HashMap<String, RoleAccessClaims>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tenant_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jti: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iat: Option<u64>,
 }
 
 #[derive(Serialize)]
 struct RoleAccessClaims {
     roles: Vec<String>,
+}
+
+struct ActiveRevocationChecker;
+
+#[async_trait::async_trait]
+impl TokenRevocationChecker for ActiveRevocationChecker {
+    async fn check_token(
+        &self,
+        _context: &TokenRevocationContext,
+    ) -> Result<TokenRevocationStatus, CredentialAuthError> {
+        Ok(TokenRevocationStatus::Active)
+    }
 }
 
 fn mint(sub: &str, exp_in_secs: i64, aud: Option<&str>, scope: Option<&str>) -> String {
@@ -105,6 +126,8 @@ fn mint_with_kid(
         realm_access: None,
         resource_access: None,
         tenant_id: None,
+        jti: None,
+        iat: None,
     };
     encode(
         &header,
@@ -135,6 +158,8 @@ fn mint_with_keycloak_roles() -> String {
         }),
         resource_access: Some(resource_access),
         tenant_id: None,
+        jti: None,
+        iat: None,
     };
     encode(
         &header,
@@ -156,6 +181,8 @@ fn mint_with_issuer(issuer: &str) -> String {
         realm_access: None,
         resource_access: None,
         tenant_id: None,
+        jti: None,
+        iat: None,
     };
     encode(
         &header,
@@ -229,6 +256,8 @@ async fn principal_preserves_jwks_authorization_claims() {
             realm_access: None,
             resource_access: None,
             tenant_id: Some("tenant-a".into()),
+            jti: None,
+            iat: None,
         },
         &EncodingKey::from_rsa_pem(TEST_PRIVATE_PEM.as_bytes()).expect("rsa pem"),
     )
@@ -255,6 +284,93 @@ async fn principal_preserves_jwks_authorization_claims() {
         }
         other => panic!("expected UserAuthorized, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn credential_preserves_validated_jti_and_iat() {
+    let server = setup_server(jwks_body(TEST_KID)).await;
+    let validator = JwksJwtValidator::new(jwks_url(&server));
+    let issued_at = u64::try_from(Utc::now().timestamp()).unwrap() - 30;
+    let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+    header.kid = Some(TEST_KID.to_string());
+    let token = encode(
+        &header,
+        &Claims {
+            sub: "metadata-subject".into(),
+            exp: Utc::now().timestamp() + 3600,
+            aud: None,
+            iss: Some("https://issuer.example".into()),
+            scope: None,
+            realm_access: None,
+            resource_access: None,
+            tenant_id: Some("tenant-a".into()),
+            jti: Some("jwks-token-123".into()),
+            iat: Some(issued_at),
+        },
+        &EncodingKey::from_rsa_pem(TEST_PRIVATE_PEM.as_bytes()).expect("rsa pem"),
+    )
+    .unwrap();
+
+    let credential = validator.validate_credential(&token).await.unwrap();
+    assert_eq!(credential.token_id.as_deref(), Some("jwks-token-123"));
+    assert_eq!(
+        credential.issued_at,
+        Some(UNIX_EPOCH + Duration::from_secs(issued_at))
+    );
+    assert_eq!(credential.principal.tenant.as_deref(), Some("tenant-a"));
+}
+
+#[tokio::test]
+async fn required_and_malformed_jti_fail_closed() {
+    let server = setup_server(jwks_body(TEST_KID)).await;
+    let required = JwksJwtValidator::new(jwks_url(&server)).with_required_jti();
+    assert!(matches!(
+        required
+            .validate_credential(&mint("id_x", 3600, None, None))
+            .await,
+        Err(BearerAuthError::Invalid(ref reason)) if reason.contains("required jti")
+    ));
+
+    let validator = JwksJwtValidator::new(jwks_url(&server));
+    for jti in ["".to_string(), "x".repeat(MAX_BEARER_TOKEN_ID_BYTES + 1)] {
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(TEST_KID.to_string());
+        let token = encode(
+            &header,
+            &Claims {
+                sub: "id_x".into(),
+                exp: Utc::now().timestamp() + 3600,
+                aud: None,
+                iss: None,
+                scope: None,
+                realm_access: None,
+                resource_access: None,
+                tenant_id: None,
+                jti: Some(jti),
+                iat: None,
+            },
+            &EncodingKey::from_rsa_pem(TEST_PRIVATE_PEM.as_bytes()).expect("rsa pem"),
+        )
+        .unwrap();
+        assert!(matches!(
+            validator.validate_credential(&token).await,
+            Err(BearerAuthError::Invalid(ref reason)) if reason.contains("token id")
+        ));
+    }
+}
+
+#[tokio::test]
+async fn revocation_policy_requires_jti_even_without_explicit_required_flag() {
+    let server = setup_server(jwks_body(TEST_KID)).await;
+    let validator = JwksJwtValidator::new(jwks_url(&server))
+        .with_revocation_checker(Arc::new(ActiveRevocationChecker));
+
+    assert!(matches!(
+        validator
+            .validate_credential(&mint("id_x", 3600, None, None))
+            .await,
+        Err(BearerAuthError::Invalid(ref reason)) if reason.contains("missing jti")
+    ));
 }
 
 #[tokio::test]

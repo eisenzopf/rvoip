@@ -125,7 +125,8 @@ impl ActorTokenValidator for crate::jwks::JwksJwtValidator {
 /// `IdentityAssurance::UserAuthorized` already carries distinct
 /// `user_id` and `identity` fields (added in v0.x precisely for this
 /// shape), where `user_id` is the human subject and `identity` is
-/// the acting agent. v0 stamps [`CredentialKind::AAuth`] as the
+/// the acting agent. v0 stamps
+/// [`CredentialKind::AAuth`](rvoip_core_traits::identity::CredentialKind::AAuth) as the
 /// credential kind for diagnostics — that's metadata only; the
 /// `IdentityAssurance::UserAuthorized` variant has no credential
 /// kind field. See `CONVERSATION_PROTOCOL.md` §5.6.

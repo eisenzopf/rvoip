@@ -9,10 +9,12 @@ use jsonwebtoken::{encode, Algorithm, DecodingKey, EncodingKey, Header};
 use rvoip_auth_core::{
     AuthenticationMethod, BearerAuthError, BearerValidator, CredentialAuthError, JwtValidator,
     TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
+    MAX_BEARER_TOKEN_ID_BYTES,
 };
 use rvoip_core_traits::identity::IdentityAssurance;
 use serde::Serialize;
 use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
 
 const HMAC_SECRET: &[u8] = b"test-secret-key-do-not-use-in-prod";
 
@@ -22,6 +24,8 @@ struct TestClaims {
     exp: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     jti: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iat: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     aud: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -42,6 +46,7 @@ impl Default for TestClaims {
             sub: "id_alice".into(),
             exp: (Utc::now() + chrono::Duration::hours(1)).timestamp(),
             jti: None,
+            iat: None,
             aud: None,
             iss: None,
             scope: None,
@@ -138,6 +143,77 @@ async fn principal_preserves_jwt_authorization_claims() {
         }
         other => panic!("expected UserAuthorized, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn credential_preserves_validated_jti_and_iat() {
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let issued_at = u64::try_from(Utc::now().timestamp()).unwrap() - 30;
+    let token = mint(&TestClaims {
+        jti: Some("token-id-123".into()),
+        iat: Some(issued_at),
+        ..Default::default()
+    });
+
+    let credential = validator.validate_credential(&token).await.unwrap();
+    assert_eq!(credential.token_id.as_deref(), Some("token-id-123"));
+    assert_eq!(
+        credential.issued_at,
+        Some(UNIX_EPOCH + Duration::from_secs(issued_at))
+    );
+    assert_eq!(credential.principal.subject, "id_alice");
+}
+
+#[tokio::test]
+async fn production_jti_policy_and_metadata_bounds_fail_closed() {
+    let required = JwtValidator::from_hmac_secret(HMAC_SECRET).with_required_jti();
+    assert!(matches!(
+        required
+            .validate_credential(&mint(&TestClaims::default()))
+            .await,
+        Err(BearerAuthError::Invalid(ref reason)) if reason.contains("required jti")
+    ));
+
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    for jti in [
+        "".to_string(),
+        "line\nbreak".to_string(),
+        "x".repeat(MAX_BEARER_TOKEN_ID_BYTES + 1),
+    ] {
+        let token = mint(&TestClaims {
+            jti: Some(jti),
+            ..Default::default()
+        });
+        assert!(matches!(
+            validator.validate_credential(&token).await,
+            Err(BearerAuthError::Invalid(ref reason)) if reason.contains("token id")
+        ));
+    }
+}
+
+#[tokio::test]
+async fn issued_at_range_and_order_fail_closed() {
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let expires_at = (Utc::now() + chrono::Duration::hours(1)).timestamp();
+    let after_expiry = u64::try_from(expires_at).unwrap() + 1;
+    let token = mint(&TestClaims {
+        exp: expires_at,
+        iat: Some(after_expiry),
+        ..Default::default()
+    });
+    assert!(matches!(
+        validator.validate_credential(&token).await,
+        Err(BearerAuthError::Invalid(ref reason)) if reason.contains("issued-at") && reason.contains("expiry")
+    ));
+
+    let token = mint(&TestClaims {
+        iat: Some(u64::MAX),
+        ..Default::default()
+    });
+    assert!(matches!(
+        validator.validate_credential(&token).await,
+        Err(BearerAuthError::Invalid(ref reason)) if reason.contains("iat") && reason.contains("range")
+    ));
 }
 
 #[tokio::test]

@@ -29,9 +29,19 @@ rvoip-auth-core = "0.2.2"
 
 ## Where to start
 
-- Token verification: see [`bearer_stub`](src/bearer_stub.rs) for the
-  minimal JWK/JWS verifier `rvoip-vcon` and `rvoip-sip-registrar` plug
-  into.
+- Token verification: implement [`BearerValidator`](src/bearer.rs) or use
+  `JwtValidator`, `JwksJwtValidator`, or `OAuth2IntrospectionValidator`.
+  Existing validators that implement only `validate` remain compatible.
+- Credential-aware integrations should call `validate_credential`. Its
+  `ValidatedBearer` result retains the complete principal plus an optional
+  bounded token ID and `SystemTime` issue time. JWT/JWKS use validated
+  `jti`/`iat` claims. Introspection accepts `jti` or `token_id` and derives a
+  SHA-256 credential fingerprint only when the provider supplies neither.
+  Token IDs and fingerprints are correlation-sensitive and must never be
+  logged; `ValidatedBearer` redacts them from `Debug` output.
+- Production JWT/JWKS deployments can enable `with_required_jti`; configuring
+  a revocation checker also requires `jti`. Introspection deployments can use
+  `with_required_token_id` when a provider-issued identifier is mandatory.
 - Integration examples live in the [rvoip-sip
   README](../../sip/rvoip-sip/README.md) and in
   [`crates/sip/rvoip-sip/examples/callback_peer/`](../../sip/rvoip-sip/examples/callback_peer/).

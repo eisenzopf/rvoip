@@ -14,11 +14,12 @@ use chrono::Utc;
 use rvoip_core_traits::identity::IdentityAssurance;
 use rvoip_core_traits::ids::IdentityId;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::bearer::{
-    ensure_principal_active, AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError,
-    BearerValidator,
+    unix_time_from_seconds, validate_optional_token_id, AuthenticatedPrincipal,
+    AuthenticationMethod, BearerAuthError, BearerValidator, ValidatedBearer,
 };
 
 /// OAuth2 token introspection validator for opaque Bearer tokens.
@@ -34,6 +35,7 @@ struct Inner {
     client_auth: Option<IntrospectionClientAuth>,
     issuers: Option<HashSet<String>>,
     audiences: Option<HashSet<String>>,
+    require_token_id: bool,
 }
 
 #[derive(Clone)]
@@ -62,6 +64,10 @@ struct IntrospectionResponse {
     iss: Option<String>,
     #[serde(default)]
     exp: Option<u64>,
+    #[serde(default)]
+    iat: Option<u64>,
+    #[serde(default, alias = "token_id")]
+    jti: Option<String>,
     #[serde(default, alias = "tenant", alias = "tid")]
     tenant_id: Option<String>,
     #[serde(default)]
@@ -90,6 +96,7 @@ impl OAuth2IntrospectionValidator {
                 client_auth: None,
                 issuers: None,
                 audiences: None,
+                require_token_id: false,
             }),
         }
     }
@@ -111,6 +118,7 @@ impl OAuth2IntrospectionValidator {
                 }),
                 issuers: inner.issuers.clone(),
                 audiences: inner.audiences.clone(),
+                require_token_id: inner.require_token_id,
             }),
         }
     }
@@ -125,6 +133,7 @@ impl OAuth2IntrospectionValidator {
                 client_auth: Some(IntrospectionClientAuth::Bearer(token.into())),
                 issuers: inner.issuers.clone(),
                 audiences: inner.audiences.clone(),
+                require_token_id: inner.require_token_id,
             }),
         }
     }
@@ -148,6 +157,7 @@ impl OAuth2IntrospectionValidator {
                         .collect(),
                 ),
                 audiences: inner.audiences.clone(),
+                require_token_id: inner.require_token_id,
             }),
         }
     }
@@ -172,6 +182,23 @@ impl OAuth2IntrospectionValidator {
                         .map(|audience| audience.as_ref().to_string())
                         .collect(),
                 ),
+                require_token_id: inner.require_token_id,
+            }),
+        }
+    }
+
+    /// Require the introspection server to return a non-empty, bounded `jti`
+    /// or `token_id` rather than using a local credential fingerprint.
+    pub fn with_required_token_id(self) -> Self {
+        let inner = &*self.inner;
+        Self {
+            inner: Arc::new(Inner {
+                endpoint: inner.endpoint.clone(),
+                client: inner.client.clone(),
+                client_auth: inner.client_auth.clone(),
+                issuers: inner.issuers.clone(),
+                audiences: inner.audiences.clone(),
+                require_token_id: true,
             }),
         }
     }
@@ -216,13 +243,17 @@ impl OAuth2IntrospectionValidator {
 #[async_trait]
 impl BearerValidator for OAuth2IntrospectionValidator {
     async fn validate(&self, token: &str) -> Result<IdentityAssurance, BearerAuthError> {
-        Ok(self.validate_principal(token).await?.assurance)
+        Ok(self.validate_credential(token).await?.principal.assurance)
     }
 
     async fn validate_principal(
         &self,
         token: &str,
     ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+        Ok(self.validate_credential(token).await?.principal)
+    }
+
+    async fn validate_credential(&self, token: &str) -> Result<ValidatedBearer, BearerAuthError> {
         if token.is_empty() {
             return Err(BearerAuthError::Empty);
         }
@@ -232,6 +263,18 @@ impl BearerValidator for OAuth2IntrospectionValidator {
         }
         validate_issuer(&response, self.inner.issuers.as_ref())?;
         validate_audience(&response, self.inner.audiences.as_ref())?;
+
+        let explicit_token_id = validate_optional_token_id(response.jti.clone())?;
+        if self.inner.require_token_id && explicit_token_id.is_none() {
+            return Err(BearerAuthError::Invalid(
+                "introspection response missing required token id".into(),
+            ));
+        }
+        let token_id = explicit_token_id.or_else(|| Some(credential_fingerprint(token)));
+        let issued_at = response
+            .iat
+            .map(|iat| unix_time_from_seconds(iat, "introspection iat"))
+            .transpose()?;
 
         let expires_at = response.exp.map(expiration_from_unix).transpose()?;
         if expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
@@ -254,16 +297,28 @@ impl BearerValidator for OAuth2IntrospectionValidator {
             user_id: identity,
             scopes: scopes.clone(),
         };
-        ensure_principal_active(AuthenticatedPrincipal {
-            subject,
-            tenant: response.tenant_id,
-            scopes,
-            issuer: response.iss,
-            expires_at,
-            method: AuthenticationMethod::OAuth2Introspection,
-            assurance,
-        })
+        ValidatedBearer::new(
+            AuthenticatedPrincipal {
+                subject,
+                tenant: response.tenant_id,
+                scopes,
+                issuer: response.iss,
+                expires_at,
+                method: AuthenticationMethod::OAuth2Introspection,
+                assurance,
+            },
+            token_id,
+            issued_at,
+        )
     }
+}
+
+/// Produce a stable opaque-token identifier without retaining the credential.
+/// The result is correlation-sensitive and is only returned through the
+/// redacting [`ValidatedBearer`] metadata surface; it is never logged here.
+fn credential_fingerprint(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    format!("sha256:{}", hex::encode(digest))
 }
 
 fn expiration_from_unix(seconds: u64) -> Result<chrono::DateTime<Utc>, BearerAuthError> {

@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
@@ -23,8 +23,8 @@ use rvoip_core_traits::ids::IdentityId;
 use serde::Deserialize;
 
 use crate::bearer::{
-    ensure_principal_active, AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError,
-    BearerValidator,
+    unix_time_from_seconds, validate_optional_token_id, AuthenticatedPrincipal,
+    AuthenticationMethod, BearerAuthError, BearerValidator, ValidatedBearer,
 };
 use crate::providers::{
     CredentialAuthError, TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
@@ -81,6 +81,7 @@ pub struct JwtValidator {
     decoding_key: DecodingKey,
     validation: Validation,
     revocation_checker: Option<Arc<dyn TokenRevocationChecker>>,
+    require_jti: bool,
 }
 
 impl JwtValidator {
@@ -95,6 +96,7 @@ impl JwtValidator {
             decoding_key,
             validation,
             revocation_checker: None,
+            require_jti: false,
         }
     }
 
@@ -111,6 +113,7 @@ impl JwtValidator {
             decoding_key: DecodingKey::from_secret(secret),
             validation,
             revocation_checker: None,
+            require_jti: false,
         }
     }
 
@@ -125,6 +128,7 @@ impl JwtValidator {
             decoding_key: key,
             validation,
             revocation_checker: None,
+            require_jti: false,
         })
     }
 
@@ -138,6 +142,7 @@ impl JwtValidator {
             decoding_key: key,
             validation,
             revocation_checker: None,
+            require_jti: false,
         })
     }
 
@@ -156,6 +161,16 @@ impl JwtValidator {
     /// cannot participate in revocation checks.
     pub fn with_revocation_checker(mut self, checker: Arc<dyn TokenRevocationChecker>) -> Self {
         self.revocation_checker = Some(checker);
+        self
+    }
+
+    /// Require a non-empty, bounded JWT `jti` even without a revocation store.
+    ///
+    /// Production deployments that use token IDs for replay, lease, or audit
+    /// correlation should enable this policy. Configuring a revocation checker
+    /// already requires `jti` regardless of this setting.
+    pub fn with_required_jti(mut self) -> Self {
+        self.require_jti = true;
         self
     }
 
@@ -203,20 +218,43 @@ impl JwtValidator {
 #[async_trait]
 impl BearerValidator for JwtValidator {
     async fn validate(&self, token: &str) -> Result<IdentityAssurance, BearerAuthError> {
-        Ok(self.validate_principal(token).await?.assurance)
+        Ok(self.validate_credential(token).await?.principal.assurance)
     }
 
     async fn validate_principal(
         &self,
         token: &str,
     ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+        Ok(self.validate_credential(token).await?.principal)
+    }
+
+    async fn validate_credential(&self, token: &str) -> Result<ValidatedBearer, BearerAuthError> {
         if token.is_empty() {
             return Err(BearerAuthError::Empty);
         }
         let data = decode::<Claims>(token, &self.decoding_key, &self.validation)
             .map_err(|e| BearerAuthError::Invalid(e.to_string()))?;
         let claims = data.claims;
-        let revocation_context = revocation_context_from_claims(&claims);
+        let token_id = validate_optional_token_id(claims.jti.clone())?;
+        if self.require_jti && token_id.is_none() {
+            return Err(BearerAuthError::Invalid(
+                "token missing required jti".into(),
+            ));
+        }
+        let issued_at = claims
+            .iat
+            .map(|iat| unix_time_from_seconds(iat, "iat"))
+            .transpose()?;
+        let expires_at_system = claims
+            .exp
+            .map(|exp| unix_time_from_seconds(exp, "exp"))
+            .transpose()?;
+        let revocation_context = revocation_context_from_claims(
+            &claims,
+            token_id.as_deref(),
+            issued_at,
+            expires_at_system,
+        );
         check_revocation(
             self.revocation_checker.as_ref(),
             revocation_context.as_ref(),
@@ -237,15 +275,19 @@ impl BearerValidator for JwtValidator {
             user_id: identity,
             scopes: scopes.clone(),
         };
-        ensure_principal_active(AuthenticatedPrincipal {
-            subject,
-            tenant: claims.tenant_id,
-            scopes,
-            issuer: claims.iss,
-            expires_at,
-            method: AuthenticationMethod::Jwt,
-            assurance,
-        })
+        ValidatedBearer::new(
+            AuthenticatedPrincipal {
+                subject,
+                tenant: claims.tenant_id,
+                scopes,
+                issuer: claims.iss,
+                expires_at,
+                method: AuthenticationMethod::Jwt,
+                assurance,
+            },
+            token_id,
+            issued_at,
+        )
     }
 }
 
@@ -278,21 +320,18 @@ async fn check_revocation(
     }
 }
 
-fn revocation_context_from_claims(claims: &Claims) -> Option<TokenRevocationContext> {
-    let token_id = claims.jti.clone()?;
-    let mut context = TokenRevocationContext::new(token_id).with_subject(claims.sub.clone());
+fn revocation_context_from_claims(
+    claims: &Claims,
+    token_id: Option<&str>,
+    issued_at: Option<SystemTime>,
+    expires_at: Option<SystemTime>,
+) -> Option<TokenRevocationContext> {
+    let mut context = TokenRevocationContext::new(token_id?).with_subject(claims.sub.clone());
     if let Some(issuer) = claims.iss.clone() {
         context = context.with_issuer(issuer);
     }
-    context = context.with_times(
-        claims.iat.and_then(unix_seconds_to_system_time),
-        claims.exp.and_then(unix_seconds_to_system_time),
-    );
+    context = context.with_times(issued_at, expires_at);
     Some(context)
-}
-
-fn unix_seconds_to_system_time(seconds: u64) -> Option<SystemTime> {
-    UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
 }
 
 fn scopes_from_claims(
