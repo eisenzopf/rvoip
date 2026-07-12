@@ -101,6 +101,8 @@ impl TestPki {
             root_certificates: vec![self.server_certificate.clone()],
             client_certificate: Some(self.publisher_certificate.clone()),
             client_private_key: Some(self.publisher_private_key.clone()),
+            #[cfg(feature = "insecure-development")]
+            disable_verification: false,
         }
     }
 }
