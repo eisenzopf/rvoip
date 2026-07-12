@@ -717,7 +717,7 @@ pub struct EndpointSipTrace {
     pub original_len: usize,
     /// Whether `raw_message` was truncated for bounded diagnostics.
     pub truncated: bool,
-    /// Whether sensitive headers were redacted.
+    /// Whether headers or body content were redacted.
     pub redacted: bool,
 }
 

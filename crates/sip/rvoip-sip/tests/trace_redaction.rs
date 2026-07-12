@@ -11,8 +11,8 @@
 use proptest::prelude::*;
 use rvoip_infra_common::events::cross_crate::{format_sip_trace_message, SipTraceConfig};
 use rvoip_sip::api::trace_redactor::{
-    apply_message_redactor, apply_redaction, DefaultTraceRedactor, PassthroughRedactor,
-    RedactionDecision, TraceRedactor,
+    apply_message_redactor, apply_redaction, BodyRedactionDecision, DefaultTraceRedactor,
+    PassthroughRedactor, RedactionDecision, TraceRedactor, REDACTED_BODY_MARKER,
 };
 use rvoip_sip::Config;
 use rvoip_sip_core::types::header::HeaderName;
@@ -74,10 +74,12 @@ fn redactor_strips_authorization_from_trace_payload() {
 #[test]
 fn passthrough_redactor_is_identity_on_trace_payload() {
     let raw = concat!(
-        "OPTIONS sip:bob@example.com SIP/2.0\r\n",
+        "MESSAGE sip:bob@example.com SIP/2.0\r\n",
         "Via: SIP/2.0/UDP 127.0.0.1:5060\r\n",
         "Authorization: Digest secret\r\n",
+        "Content-Type: application/json\r\n",
         "\r\n",
+        "{\"context\":\"visible-by-explicit-opt-in\"}",
     );
     let out = apply_message_redactor(&PassthroughRedactor, raw);
     assert_eq!(
@@ -157,8 +159,9 @@ fn folded_sensitive_headers_inherit_redaction_for_crlf_and_lf() {
         ] {
             assert!(!scrubbed.contains(secret), "folded secret leaked: {secret}");
         }
-        assert!(scrubbed.contains("Authorization: body-value-must-remain"));
-        assert!(scrubbed.contains("\tbody-fold-must-remain"));
+        assert!(scrubbed.ends_with(REDACTED_BODY_MARKER));
+        assert!(!scrubbed.contains("body-value-must-remain"));
+        assert!(!scrubbed.contains("body-fold-must-remain"));
         assert!(
             !scrubbed.ends_with('\n'),
             "missing final newline was invented"
@@ -206,10 +209,98 @@ fn folded_keep_redact_drop_and_body_boundary_are_preserved() {
         assert!(!scrubbed.contains("redact-secret"));
         assert!(!scrubbed.contains("redact-fold-secret"));
         assert!(scrubbed.contains(&format!("Supported: timer,{ending}\tpath")));
-        assert!(scrubbed.contains("X-Drop-Me: body-drop-value"));
-        assert!(scrubbed.contains("\tbody-drop-fold"));
+        assert!(scrubbed.ends_with(REDACTED_BODY_MARKER));
+        assert!(!scrubbed.contains("body-drop-value"));
+        assert!(!scrubbed.contains("body-drop-fold"));
         assert!(!scrubbed.ends_with('\n'));
     }
+}
+
+#[test]
+fn safe_default_redacts_message_json_and_multiline_sdp_bodies() {
+    let json = concat!(
+        "MESSAGE sip:bob@example.com SIP/2.0\r\n",
+        "Content-Type: application/json\r\n",
+        "Content-Length: 68\r\n",
+        "\r\n",
+        "{\"type\":\"bridgefu.context.v1\",\"token\":\"json-body-secret\"}",
+    );
+    let scrubbed_json = apply_message_redactor(&DefaultTraceRedactor, json);
+    assert!(scrubbed_json.ends_with("\r\n\r\n<redacted body>"));
+    assert_eq!(scrubbed_json.matches(REDACTED_BODY_MARKER).count(), 1);
+    assert!(!scrubbed_json.contains("bridgefu.context.v1"));
+    assert!(!scrubbed_json.contains("json-body-secret"));
+    assert!(!scrubbed_json.ends_with('\n'));
+
+    for ending in ["\r\n", "\n"] {
+        let sdp = format!(
+            "INVITE sip:bob@example.com SIP/2.0{ending}\
+             Content-Type: application/sdp{ending}\
+             Content-Length: 99{ending}\
+             {ending}\
+             v=0{ending}\
+             a=ice-pwd:sdp-body-secret{ending}\
+             a=rtpmap:111 opus/48000/2{ending}"
+        );
+        let scrubbed_sdp = apply_message_redactor(&DefaultTraceRedactor, &sdp);
+        assert_eq!(scrubbed_sdp.matches(REDACTED_BODY_MARKER).count(), 1);
+        assert!(scrubbed_sdp.ends_with(&format!("{ending}{ending}{REDACTED_BODY_MARKER}{ending}")));
+        assert!(!scrubbed_sdp.contains("sdp-body-secret"));
+        assert!(!scrubbed_sdp.contains("a=rtpmap"));
+    }
+}
+
+#[derive(Debug)]
+struct DropBodyPolicy;
+
+impl TraceRedactor for DropBodyPolicy {
+    fn redact(&self, _header: &HeaderName, _value: &str) -> RedactionDecision {
+        RedactionDecision::Keep
+    }
+
+    fn redact_body(&self, content_type: Option<&str>) -> BodyRedactionDecision {
+        assert_eq!(content_type, Some("application/json"));
+        BodyRedactionDecision::Drop
+    }
+}
+
+#[test]
+fn body_drop_omits_body_but_preserves_header_boundary() {
+    for ending in ["\r\n", "\n"] {
+        let raw = format!(
+            "MESSAGE sip:bob@example.com SIP/2.0{ending}\
+             Content-Type: application/json{ending}\
+             Content-Length: 21{ending}\
+             {ending}\
+             drop-body-secret"
+        );
+        let scrubbed = apply_message_redactor(&DropBodyPolicy, &raw);
+        assert!(scrubbed.ends_with(&format!("Content-Length: 21{ending}{ending}")));
+        assert!(!scrubbed.contains("drop-body-secret"));
+        assert!(!scrubbed.contains(REDACTED_BODY_MARKER));
+    }
+}
+
+#[derive(Debug)]
+struct ExplicitBodyKeepPolicy;
+
+impl TraceRedactor for ExplicitBodyKeepPolicy {
+    fn redact(&self, _header: &HeaderName, _value: &str) -> RedactionDecision {
+        RedactionDecision::Keep
+    }
+
+    fn redact_body(&self, _content_type: Option<&str>) -> BodyRedactionDecision {
+        BodyRedactionDecision::Keep
+    }
+}
+
+#[test]
+fn custom_policy_must_explicitly_keep_body_bytes() {
+    let raw = "MESSAGE sip:bob@example.com SIP/2.0\nContent-Type: text/plain\n\nexplicit-body";
+    assert_eq!(apply_message_redactor(&ExplicitBodyKeepPolicy, raw), raw);
+    let safe_custom = apply_message_redactor(&AuthRedactor, raw);
+    assert!(safe_custom.ends_with(REDACTED_BODY_MARKER));
+    assert!(!safe_custom.contains("explicit-body"));
 }
 
 #[test]

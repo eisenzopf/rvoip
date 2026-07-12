@@ -552,7 +552,8 @@ pub use api::incoming::{
     IncomingCall, IncomingCallGuard, IncomingRegister, IncomingRequest, IncomingResponse,
 };
 pub use api::trace_redactor::{
-    DefaultTraceRedactor, PassthroughRedactor, RedactionDecision, TraceRedactor,
+    BodyRedactionDecision, DefaultTraceRedactor, PassthroughRedactor, RedactionDecision,
+    TraceRedactor, REDACTED_BODY_MARKER,
 };
 pub use auth::{
     AAuthValidator, AkaClientConfig, AkaClientProvider, AkaVectorProvider, ApiKeyVerifier,

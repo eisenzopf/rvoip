@@ -303,7 +303,8 @@ pub struct SipTraceConfig {
     pub capacity: usize,
     /// Whether authentication-bearing SIP headers should be redacted.
     pub redact_sensitive_headers: bool,
-    /// Whether message bodies, including SDP, should be included.
+    /// Whether message bodies, including SDP, may be included after any
+    /// application trace-redaction policy is applied.
     pub include_body: bool,
 }
 
@@ -358,7 +359,7 @@ pub struct SipTraceEvent {
     pub original_len: usize,
     /// Whether `raw_message` was truncated for bounded diagnostics.
     pub truncated: bool,
-    /// Whether sensitive headers were redacted.
+    /// Whether headers or body content were redacted.
     pub redacted: bool,
 }
 

@@ -74,9 +74,10 @@ impl SipTraceRuntime {
         // wire form is unaffected.
         let rendered = match &self.redactor {
             Some(redact) => redact(&raw),
-            None => raw,
+            None => raw.clone(),
         };
-        let original_len = rendered.len();
+        let redactor_changed_message = rendered != raw;
+        let original_len = raw.len();
         let (raw_message, truncated) = format_sip_trace_message(&rendered, &self.config);
         let event = SipTraceEvent {
             owner_id: self.owner_id.clone(),
@@ -91,7 +92,7 @@ impl SipTraceRuntime {
             raw_message,
             original_len,
             truncated,
-            redacted: self.config.redact_sensitive_headers,
+            redacted: self.config.redact_sensitive_headers || redactor_changed_message,
         };
         let coordinator = self.coordinator.clone();
         tokio::spawn(async move {
@@ -138,7 +139,7 @@ fn start_line(message: &Message) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::SipTraceRuntime;
+    use super::{SipTraceRuntime, TraceRedactorFn};
     use rvoip_infra_common::events::config::EventCoordinatorConfig;
     use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
     use rvoip_infra_common::events::cross_crate::{
@@ -173,6 +174,66 @@ mod tests {
 
         assert_eq!(trace.direction, SipTraceDirection::Inbound);
         assert_eq!(trace.sip_call_id.as_deref(), Some("trace-call"));
+    }
+
+    #[tokio::test]
+    async fn custom_body_redaction_sets_trace_event_redacted_flag() {
+        let coordinator = Arc::new(
+            GlobalEventCoordinator::new(EventCoordinatorConfig::monolithic())
+                .await
+                .unwrap(),
+        );
+        let mut receiver = coordinator.subscribe("transport_to_session").await.unwrap();
+        let config = SipTraceConfig {
+            enabled: true,
+            redact_sensitive_headers: false,
+            include_body: true,
+            ..SipTraceConfig::default()
+        };
+        let redactor: TraceRedactorFn =
+            Arc::new(|raw| raw.replace("trace-body-secret", "<redacted body>"));
+        let runtime = SipTraceRuntime::new_with_redactor(
+            "trace-owner".into(),
+            config,
+            coordinator,
+            Some(redactor),
+        )
+        .unwrap();
+        let message = Message::Request(
+            SimpleRequestBuilder::new(Method::Message, "sip:example.com")
+                .unwrap()
+                .from("alice", "sip:alice@example.com", Some("tag-a"))
+                .to("bob", "sip:bob@example.com", None)
+                .call_id("trace-body-call")
+                .cseq(1)
+                .content_type("application/json")
+                .body("trace-body-secret")
+                .build(),
+        );
+
+        runtime.publish(
+            SipTraceDirection::Outbound,
+            TransportType::Udp,
+            "127.0.0.1:5060".parse::<SocketAddr>().unwrap(),
+            "127.0.0.1:5080".parse::<SocketAddr>().unwrap(),
+            &message,
+        );
+
+        let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let event = event
+            .as_any()
+            .downcast_ref::<RvoipCrossCrateEvent>()
+            .unwrap();
+        let RvoipCrossCrateEvent::TransportToSession(trace) = event else {
+            panic!("expected transport_to_session trace event");
+        };
+        assert!(trace.redacted);
+        assert!(trace.raw_message.contains("<redacted body>"));
+        assert!(!trace.raw_message.contains("trace-body-secret"));
+        assert!(trace.original_len > trace.raw_message.len());
     }
 
     async fn publish_trace(

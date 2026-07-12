@@ -8,8 +8,8 @@
 //!
 //! `TraceRedactor` is the policy hook called by the trace path at the
 //! [`DialogAdapter`](crate::adapters::dialog_adapter::DialogAdapter)
-//! boundary just before a header value lands in the trace sink. The
-//! returned [`RedactionDecision`] controls the wire-vs-trace divergence:
+//! boundary just before a header value or body lands in the trace sink. The
+//! returned decisions control the wire-vs-trace divergence:
 //! the wire form is untouched, the trace form follows the decision.
 //!
 //! Configure via [`Config::trace_redaction`](crate::Config::trace_redaction).
@@ -17,6 +17,12 @@
 use std::sync::Arc;
 
 use rvoip_sip_core::types::headers::HeaderName;
+
+/// Fixed diagnostic marker emitted in place of a redacted SIP body.
+///
+/// Body policies cannot supply their own replacement text, which prevents a
+/// policy from accidentally reflecting body-derived secrets into a trace.
+pub const REDACTED_BODY_MARKER: &str = "<redacted body>";
 
 /// Outcome of a trace-redaction policy decision for one header.
 #[derive(Clone, PartialEq, Eq)]
@@ -41,20 +47,46 @@ impl std::fmt::Debug for RedactionDecision {
     }
 }
 
-/// Policy hook consulted per header at the trace boundary. Implement
-/// for application-specific redaction (e.g. log Authorization headers
-/// as `Authorization: <redacted>`, drop `X-Customer-Token` entirely,
-/// keep everything else verbatim).
+/// Outcome of a trace-redaction policy decision for a SIP message body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyRedactionDecision {
+    /// Trace the body verbatim.
+    ///
+    /// This must be an explicit policy override. The trait default is
+    /// [`BodyRedactionDecision::Redact`].
+    Keep,
+    /// Replace the complete body with [`REDACTED_BODY_MARKER`].
+    Redact,
+    /// Omit the complete body from trace output.
+    Drop,
+}
+
+/// Policy hook consulted for headers and the body at the trace boundary.
+/// Implement for application-specific redaction (e.g. log Authorization
+/// headers as `Authorization: <redacted>`, drop `X-Customer-Token` entirely,
+/// and retain the safe default body decision).
 pub trait TraceRedactor: Send + Sync + std::fmt::Debug {
     /// Decide what trace output should record for this header.
     fn redact(&self, header: &HeaderName, value: &str) -> RedactionDecision;
+
+    /// Decide what trace output should record for the complete message body.
+    ///
+    /// The safe additive default redacts every non-empty body. Existing custom
+    /// header policies therefore cannot begin leaking MESSAGE JSON, SDP, or
+    /// other content when body tracing is enabled. Implementations receive the
+    /// declared content type, but never the body bytes. Verbatim body tracing
+    /// requires an explicit [`BodyRedactionDecision::Keep`] override.
+    fn redact_body(&self, _content_type: Option<&str>) -> BodyRedactionDecision {
+        BodyRedactionDecision::Redact
+    }
 }
 
 /// Production-safe default trace policy.
 ///
 /// Authentication material, asserted identities, addressing fields that may
-/// carry PII, and every application-defined header value are redacted. Common
-/// protocol-routing and capability headers remain available for diagnostics.
+/// carry PII, every application-defined header value, and every non-empty body
+/// are redacted. Common protocol-routing and capability headers remain
+/// available for diagnostics.
 #[derive(Clone, Debug, Default)]
 pub struct DefaultTraceRedactor;
 
@@ -92,14 +124,19 @@ pub fn default_trace_redactor() -> Arc<dyn TraceRedactor> {
 
 /// Explicit no-op policy for controlled development/operator diagnostics.
 ///
-/// Selecting this policy can expose credentials, PII, and application context
-/// in trace sinks. Production/default configuration never selects it.
+/// Selecting this policy can expose credentials, PII, application context,
+/// SDP, and other body content in trace sinks. Production/default
+/// configuration never selects it.
 #[derive(Clone, Debug, Default)]
 pub struct PassthroughRedactor;
 
 impl TraceRedactor for PassthroughRedactor {
     fn redact(&self, _header: &HeaderName, _value: &str) -> RedactionDecision {
         RedactionDecision::Keep
+    }
+
+    fn redact_body(&self, _content_type: Option<&str>) -> BodyRedactionDecision {
+        BodyRedactionDecision::Keep
     }
 }
 
@@ -134,8 +171,10 @@ pub fn apply_redaction(
 /// `<HeaderName>: <replacement>`; lines marked `Keep` pass through
 /// verbatim.
 ///
-/// Request/response start line and body bytes are preserved unchanged
-/// — the redactor only sees header values.
+/// The complete body is handled as a separate decision. The safe trait
+/// default replaces any non-empty body with [`REDACTED_BODY_MARKER`]; only an
+/// explicit [`BodyRedactionDecision::Keep`] override preserves body bytes.
+/// The header/body boundary and the body's final-newline state are retained.
 pub fn apply_message_redactor(redactor: &dyn TraceRedactor, raw: &str) -> String {
     enum ContinuationDecision {
         None,
@@ -153,23 +192,33 @@ pub fn apply_message_redactor(redactor: &dyn TraceRedactor, raw: &str) -> String
     }
 
     let mut out = String::with_capacity(raw.len());
-    let mut in_headers = true;
     let mut continuation = ContinuationDecision::None;
+    let mut content_type = None;
+    let mut offset = 0;
     for line in raw.split_inclusive('\n') {
+        offset += line.len();
         // Strip the trailing newline for inspection so the parse logic
         // works on either CRLF or LF line endings.
         let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
-        if !in_headers {
-            // Body: pass through verbatim.
-            out.push_str(line);
-            continue;
-        }
         if trimmed.is_empty() {
             // Header/body boundary.
             out.push_str(line);
-            in_headers = false;
-            continuation = ContinuationDecision::None;
-            continue;
+            let body = &raw[offset..];
+            if !body.is_empty() {
+                match redactor.redact_body(content_type.as_deref()) {
+                    BodyRedactionDecision::Keep => out.push_str(body),
+                    BodyRedactionDecision::Redact => {
+                        out.push_str(REDACTED_BODY_MARKER);
+                        if body.ends_with("\r\n") {
+                            out.push_str("\r\n");
+                        } else if body.ends_with('\n') {
+                            out.push('\n');
+                        }
+                    }
+                    BodyRedactionDecision::Drop => {}
+                }
+            }
+            return out;
         }
         // RFC 3261 §7.3.1 continuation lines inherit the complete decision
         // made for their owning header. A redacted or dropped header must
@@ -199,6 +248,9 @@ pub fn apply_message_redactor(redactor: &dyn TraceRedactor, raw: &str) -> String
         let header_name = name
             .parse::<HeaderName>()
             .unwrap_or_else(|_| HeaderName::Other(name.to_string()));
+        if header_name == HeaderName::ContentType {
+            content_type = Some(value.to_string());
+        }
         match redactor.redact(&header_name, value) {
             RedactionDecision::Keep => {
                 out.push_str(line);
