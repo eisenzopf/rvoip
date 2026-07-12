@@ -365,7 +365,11 @@ impl StateMachine {
         use crate::session_store::{ActionRecord, GuardResult, TransitionRecord};
         use std::time::Instant;
 
-        debug!("Processing event {:?} for session {}", event, session_id);
+        debug!(
+            "Processing event {} for session {}",
+            state_machine_event_name(&event),
+            session_id
+        );
         let transition_start = Instant::now();
 
         // 1. Get current session state
@@ -533,7 +537,11 @@ impl StateMachine {
         let transition = match self.table.get(&key) {
             Some(t) => t,
             None => {
-                debug!("No transition defined for {:?}", key);
+                let event_name = state_machine_event_name(&event);
+                debug!(
+                    "No transition defined for role={:?}, state={:?}, event={}",
+                    key.role, key.state, event_name
+                );
 
                 // Record failed transition attempt in history
                 if session.history.is_some() {
@@ -551,7 +559,10 @@ impl StateMachine {
                         guards_evaluated: vec![],
                         actions_executed: vec![],
                         duration_ms: transition_start.elapsed().as_millis() as u64,
-                        errors: vec![format!("No transition defined for {:?}", key)],
+                        errors: vec![format!(
+                            "No transition defined for role={:?}, state={:?}, event={}",
+                            key.role, key.state, event_name
+                        )],
                         events_published: vec![],
                     };
                     session.record_transition(record);
@@ -616,7 +627,11 @@ impl StateMachine {
             }
         }
 
-        info!("Executing transition for {:?} + {:?}", old_state, event);
+        info!(
+            "Executing transition for {:?} + {}",
+            old_state,
+            state_machine_event_name(&event)
+        );
 
         // Apply next_state and persist BEFORE executing actions so that any
         // follow-up event queued by an action observes the post-transition

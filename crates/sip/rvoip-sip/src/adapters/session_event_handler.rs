@@ -40,6 +40,94 @@ fn is_missing_credentials_for_auth_error(
     )
 }
 
+fn safe_auth_method_label(method: &str) -> &'static str {
+    match method.trim().to_ascii_uppercase().as_str() {
+        "INVITE" => "INVITE",
+        "REGISTER" => "REGISTER",
+        "BYE" => "BYE",
+        "REFER" => "REFER",
+        "NOTIFY" => "NOTIFY",
+        "INFO" => "INFO",
+        "UPDATE" => "UPDATE",
+        "MESSAGE" => "MESSAGE",
+        "OPTIONS" => "OPTIONS",
+        "SUBSCRIBE" => "SUBSCRIBE",
+        _ => "extension",
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OutboundAuthTerminalClass {
+    MissingCredentials,
+    ChallengeResponse,
+    RetryLimit,
+    StateMachine,
+}
+
+impl OutboundAuthTerminalClass {
+    fn from_error(error: &(dyn std::error::Error + Send + Sync + 'static)) -> Self {
+        match error.downcast_ref::<SessionError>() {
+            Some(
+                SessionError::MissingCredentialsForInviteAuth
+                | SessionError::MissingCredentialsForRequestAuth { .. },
+            ) => Self::MissingCredentials,
+            Some(
+                SessionError::InviteAuthConstructionFailed
+                | SessionError::RequestAuthConstructionFailed
+                | SessionError::RegisterAuthConstructionFailed
+                | SessionError::AuthError(_),
+            ) => Self::ChallengeResponse,
+            Some(
+                SessionError::InviteAuthRetryExhausted
+                | SessionError::RequestAuthRetryExhausted { .. },
+            ) => Self::RetryLimit,
+            _ => Self::StateMachine,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::MissingCredentials => "missing-credentials",
+            Self::ChallengeResponse => "challenge-response",
+            Self::RetryLimit => "retry-limit",
+            Self::StateMachine => "state-machine",
+        }
+    }
+
+    fn invite_reason(self) -> String {
+        format!("INVITE authentication failed (class={})", self.label())
+    }
+}
+
+enum CallFailureReason {
+    Protocol(String),
+    OutboundInviteAuth(OutboundAuthTerminalClass),
+}
+
+impl CallFailureReason {
+    fn into_event_reason(self) -> String {
+        match self {
+            Self::Protocol(reason) => reason,
+            Self::OutboundInviteAuth(class) => class.invite_reason(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CallFailureDiagnostics {
+    reason_present: bool,
+    reason_bytes: usize,
+}
+
+impl CallFailureDiagnostics {
+    fn new(reason: &str) -> Self {
+        Self {
+            reason_present: !reason.is_empty(),
+            reason_bytes: reason.len(),
+        }
+    }
+}
+
 /// Window within which repeated RFC 5626 flow-failure events for the
 /// same AoR collapse to a single re-REGISTER. Matches the guidance in
 /// RFC 5626 §4.4.1 (flow recovery should not storm the registrar).
@@ -434,7 +522,7 @@ impl SessionCrossCrateEventHandler {
                 self.handle_call_failed_parts(
                     SessionId(session_id.clone()),
                     *status_code,
-                    reason_phrase.clone(),
+                    CallFailureReason::Protocol(reason_phrase.clone()),
                     raw_response.clone(),
                 )
                 .await
@@ -1368,12 +1456,9 @@ impl SessionCrossCrateEventHandler {
             }
         }
         warn!(
-            "⚠️ [extract_session_id] Failed to extract session_id from event: {}",
-            if event_str.len() > 200 {
-                &event_str[..200]
-            } else {
-                event_str
-            }
+            "⚠️ [extract_session_id] Failed to extract session_id (event_present={}, event_bytes={})",
+            !event_str.is_empty(),
+            event_str.len()
         );
         None
     }
@@ -2103,25 +2188,30 @@ impl SessionCrossCrateEventHandler {
             )
             .await
         {
+            let failure_class = OutboundAuthTerminalClass::from_error(e.as_ref());
             if is_missing_credentials_for_auth_error(e.as_ref()) {
                 debug!(
-                    "Failed to process AuthRequired({}) for session {}: {}",
-                    status, session_id, e
+                    "Failed to process AuthRequired({}) for session {} (class={})",
+                    status,
+                    session_id,
+                    failure_class.label()
                 );
             } else {
                 error!(
-                    "Failed to process AuthRequired({}) for session {}: {}",
-                    status, session_id, e
+                    "Failed to process AuthRequired({}) for session {} (class={})",
+                    status,
+                    session_id,
+                    failure_class.label()
                 );
             }
             if matches!(state_before_auth, Some(crate::types::CallState::Initiating)) {
-                let reason = if let Some(session_error) = e.downcast_ref::<SessionError>() {
-                    session_error.to_string()
-                } else {
-                    format!("INVITE authentication failed: {}", e)
-                };
-                self.handle_call_failed_parts(session_id, status, reason, None)
-                    .await?;
+                self.handle_call_failed_parts(
+                    session_id,
+                    status,
+                    CallFailureReason::OutboundInviteAuth(failure_class),
+                    None,
+                )
+                .await?;
             }
         }
         Ok(())
@@ -2633,7 +2723,7 @@ impl SessionCrossCrateEventHandler {
             "🎯 [handle_auth_required] session={} status={} method={} challenge.len={}",
             session_id,
             status,
-            method,
+            safe_auth_method_label(&method),
             challenge.len()
         );
 
@@ -2662,25 +2752,30 @@ impl SessionCrossCrateEventHandler {
             )
             .await
         {
+            let failure_class = OutboundAuthTerminalClass::from_error(e.as_ref());
             if is_missing_credentials_for_auth_error(e.as_ref()) {
                 debug!(
-                    "Failed to process AuthRequired({}) for session {}: {}",
-                    status, session_id, e
+                    "Failed to process AuthRequired({}) for session {} (class={})",
+                    status,
+                    session_id,
+                    failure_class.label()
                 );
             } else {
                 error!(
-                    "Failed to process AuthRequired({}) for session {}: {}",
-                    status, session_id, e
+                    "Failed to process AuthRequired({}) for session {} (class={})",
+                    status,
+                    session_id,
+                    failure_class.label()
                 );
             }
             if matches!(state_before_auth, Some(crate::types::CallState::Initiating)) {
-                let reason = if let Some(session_error) = e.downcast_ref::<SessionError>() {
-                    session_error.to_string()
-                } else {
-                    format!("INVITE authentication failed: {}", e)
-                };
-                self.handle_call_failed_parts(session_id, status, reason, None)
-                    .await?;
+                self.handle_call_failed_parts(
+                    session_id,
+                    status,
+                    CallFailureReason::OutboundInviteAuth(failure_class),
+                    None,
+                )
+                .await?;
             }
         }
         Ok(())
@@ -2709,15 +2804,20 @@ impl SessionCrossCrateEventHandler {
             .extract_field(event_str, "reason_phrase: \"")
             .unwrap_or_else(|| "Failure".to_string());
 
-        self.handle_call_failed_parts(session_id, status, reason, None)
-            .await
+        self.handle_call_failed_parts(
+            session_id,
+            status,
+            CallFailureReason::Protocol(reason),
+            None,
+        )
+        .await
     }
 
     async fn handle_call_failed_parts(
         &self,
         session_id: SessionId,
         status: u16,
-        reason: String,
+        reason: CallFailureReason,
         raw_response: Option<bytes::Bytes>,
     ) -> Result<()> {
         if !self.is_our_session(&session_id).await {
@@ -2728,9 +2828,13 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         }
 
+        let reason = reason.into_event_reason();
+
         info!(
-            "[handle_call_failed] session={} status={} reason={}",
-            session_id, status, reason
+            "[handle_call_failed] session={} status={} {:?}",
+            session_id,
+            status,
+            CallFailureDiagnostics::new(&reason)
         );
 
         // RFC 3261 §14.1 — a non-2xx response to a *re-INVITE* (e.g. during
@@ -5019,15 +5123,107 @@ fn parse_sipfrag_status_line(body: &str) -> Option<(u16, String)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        dialog_bye_requires_terminal_release, map_sip_trace_session_id, parse_sipfrag_status_line,
-        sip_trace_owner_matches,
+        build_incoming_response_from_bytes, dialog_bye_requires_terminal_release,
+        map_sip_trace_session_id, parse_sipfrag_status_line, safe_auth_method_label,
+        sip_trace_owner_matches, CallFailureDiagnostics, CallFailureReason,
+        OutboundAuthTerminalClass,
     };
+    use crate::errors::SessionError;
     use crate::state_machine::ProcessEventResult;
     use crate::state_table::types::SessionId;
     use crate::state_table::{ConditionUpdates, Transition};
     use crate::types::CallState;
     use dashmap::DashMap;
     use rvoip_infra_common::events::cross_crate::{SipTraceDirection, SipTraceEvent};
+
+    #[test]
+    fn outbound_auth_terminal_reasons_and_log_metadata_are_value_free() {
+        const SECRET: &str = "terminal-auth-provider-secret-canary";
+        let lower = SessionError::AuthError(format!("AKA provider failed: {SECRET}"));
+        let class = OutboundAuthTerminalClass::from_error(&lower);
+        assert_eq!(class, OutboundAuthTerminalClass::ChallengeResponse);
+
+        let reason = CallFailureReason::OutboundInviteAuth(class).into_event_reason();
+        assert_eq!(
+            reason,
+            "INVITE authentication failed (class=challenge-response)"
+        );
+        assert!(!reason.contains(SECRET));
+
+        let legacy_event = crate::api::events::Event::CallFailed {
+            call_id: SessionId("safe-call".to_string()),
+            status_code: 401,
+            reason: reason.clone(),
+        };
+        let detailed = build_incoming_response_from_bytes(
+            SessionId("safe-call".to_string()),
+            401,
+            reason.clone(),
+            None,
+            None,
+        );
+        assert!(!format!("{legacy_event:?}").contains(SECRET));
+        assert!(!detailed.reason_phrase.contains(SECRET));
+        assert_eq!(detailed.reason_phrase, reason);
+
+        let protocol_reason = format!("peer-controlled reason {SECRET}");
+        let log_metadata = format!("{:?}", CallFailureDiagnostics::new(&protocol_reason));
+        assert!(!log_metadata.contains(SECRET));
+        assert!(log_metadata.contains(&format!("reason_bytes: {}", protocol_reason.len())));
+        assert_eq!(safe_auth_method_label(SECRET), "extension");
+    }
+
+    #[test]
+    fn auth_failure_source_has_no_lower_error_or_reason_log_relay() {
+        let handler_source = include_str!("session_event_handler.rs");
+        for forbidden in [
+            ["Failed to process AuthRequired({}) for session {}", ": {}"].concat(),
+            ["INVITE authentication failed", ": {}"].concat(),
+            ["[handle_call_failed] session={} status={} ", "reason={}"].concat(),
+            ["Failed to extract session_id from event", ": {}"].concat(),
+        ] {
+            assert!(
+                !handler_source.contains(&forbidden),
+                "auth diagnostic relay returned: {forbidden}"
+            );
+        }
+
+        let actions_source = include_str!("../state_machine/actions.rs");
+        assert_eq!(
+            actions_source
+                .matches("OutboundAuthOperation::Invite")
+                .count(),
+            1
+        );
+        assert_eq!(
+            actions_source
+                .matches("OutboundAuthOperation::Request")
+                .count(),
+            1
+        );
+        assert!(!actions_source.contains("realm={}, nonce={}"));
+
+        let executor_source = include_str!("../state_machine/executor.rs");
+        assert!(!executor_source.contains(&["Processing event ", "{:?}"].concat()));
+        assert!(!executor_source.contains(&["Executing transition for {:?} + ", "{:?}"].concat()));
+        assert!(!executor_source
+            .contains(&["No transition defined for ", "{:?}", "\"", ", key"].concat()));
+
+        let dialog_source = include_str!("dialog_adapter.rs");
+        assert_eq!(
+            dialog_source
+                .matches("OutboundAuthOperation::Register")
+                .count(),
+            1
+        );
+        let unified_source = include_str!("../api/unified.rs");
+        assert_eq!(
+            unified_source
+                .matches("OutboundAuthOperation::Request")
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn sipfrag_parses_progress_and_final() {

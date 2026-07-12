@@ -2380,14 +2380,21 @@ impl DialogAdapter {
                 // REGISTER body is empty; pass `None` so the qop
                 // selector picks `auth` (or legacy if no qop offered)
                 // rather than `auth-int`.
-                let selected = auth.authorization_for_challenge_with_transport_context(
-                    &challenge_raw,
-                    "REGISTER",
-                    registrar_uri,
-                    nc_value,
-                    None,
-                    &transport_context,
-                )?;
+                let selected = auth
+                    .authorization_for_challenge_with_transport_context(
+                        &challenge_raw,
+                        "REGISTER",
+                        registrar_uri,
+                        nc_value,
+                        None,
+                        &transport_context,
+                    )
+                    .map_err(|error| {
+                        crate::errors::redacted_outbound_auth_error(
+                            crate::errors::OutboundAuthOperation::Register,
+                            error,
+                        )
+                    })?;
 
                 tracing::info!(
                     "🔍 CLIENT: Computed REGISTER auth using {:?}",

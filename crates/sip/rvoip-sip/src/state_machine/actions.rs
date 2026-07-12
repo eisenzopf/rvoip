@@ -1565,8 +1565,12 @@ pub(crate) async fn execute_action(
                     rvoip_auth_core::DigestAuthenticator::parse_challenge_details(challenge_str)
                 {
                     info!(
-                        "Stored digest auth challenge for session {} (realm={}, nonce={})",
-                        session.session_id, parsed.challenge.realm, parsed.challenge.nonce
+                        "Stored digest auth challenge for session {} (realm_present={}, realm_bytes={}, nonce_present={}, nonce_bytes={})",
+                        session.session_id,
+                        !parsed.challenge.realm.is_empty(),
+                        parsed.challenge.realm.len(),
+                        !parsed.challenge.nonce.is_empty(),
+                        parsed.challenge.nonce.len()
                     );
                     session.auth_challenge_stale = parsed.stale;
                     session.auth_challenge_replaces_nonce = previous_nonce;
@@ -1671,14 +1675,21 @@ pub(crate) async fn execute_action(
                 .pending_auth_transport
                 .clone()
                 .unwrap_or_else(|| dialog_adapter.outbound_transport_context_for_uri(&request_uri));
-            let selected_auth = auth.authorization_for_challenge_with_transport_context(
-                &challenge_raw,
-                "INVITE",
-                &request_uri,
-                nc_value,
-                body_bytes,
-                &transport_context,
-            )?;
+            let selected_auth = auth
+                .authorization_for_challenge_with_transport_context(
+                    &challenge_raw,
+                    "INVITE",
+                    &request_uri,
+                    nc_value,
+                    body_bytes,
+                    &transport_context,
+                )
+                .map_err(|error| {
+                    crate::errors::redacted_outbound_auth_error(
+                        crate::errors::OutboundAuthOperation::Invite,
+                        error,
+                    )
+                })?;
             let header_value = selected_auth.value;
 
             session.pending_auth.take();
@@ -1741,8 +1752,13 @@ pub(crate) async fn execute_action(
             // empty), computes the selected auth scheme, and dispatches via
             // the matching `DialogAdapter::send_<method>_with_auth`.
             info!(
-                "Action::SendRequestWithAuth for session {} (method={:?})",
-                session.session_id, session.pending_auth_method
+                "Action::SendRequestWithAuth for session {} (method={})",
+                session.session_id,
+                session
+                    .pending_auth_method
+                    .as_deref()
+                    .map(safe_outbound_auth_method_label)
+                    .unwrap_or("unset")
             );
             const CAP: u8 = 1;
             if !auth_retry_allowed(
@@ -1842,14 +1858,21 @@ pub(crate) async fn execute_action(
                 .pending_auth_transport
                 .clone()
                 .unwrap_or_else(|| dialog_adapter.outbound_transport_context_for_uri(&request_uri));
-            let selected_auth = auth.authorization_for_challenge_with_transport_context(
-                &challenge_raw,
-                &method,
-                &request_uri,
-                nc_value,
-                body_bytes_ref,
-                &transport_context,
-            )?;
+            let selected_auth = auth
+                .authorization_for_challenge_with_transport_context(
+                    &challenge_raw,
+                    &method,
+                    &request_uri,
+                    nc_value,
+                    body_bytes_ref,
+                    &transport_context,
+                )
+                .map_err(|error| {
+                    crate::errors::redacted_outbound_auth_error(
+                        crate::errors::OutboundAuthOperation::Request,
+                        error,
+                    )
+                })?;
             let header_value = selected_auth.value;
             session.pending_auth_transport = None;
 
@@ -2848,6 +2871,22 @@ fn auth_method_for_error(method: &str) -> rvoip_sip_core::Method {
         "OPTIONS" => rvoip_sip_core::Method::Options,
         "SUBSCRIBE" => rvoip_sip_core::Method::Subscribe,
         other => rvoip_sip_core::Method::Extension(other.to_string()),
+    }
+}
+
+fn safe_outbound_auth_method_label(method: &str) -> &'static str {
+    match method.trim().to_ascii_uppercase().as_str() {
+        "INVITE" => "INVITE",
+        "REGISTER" => "REGISTER",
+        "BYE" => "BYE",
+        "REFER" => "REFER",
+        "NOTIFY" => "NOTIFY",
+        "INFO" => "INFO",
+        "UPDATE" => "UPDATE",
+        "MESSAGE" => "MESSAGE",
+        "OPTIONS" => "OPTIONS",
+        "SUBSCRIBE" => "SUBSCRIBE",
+        _ => "extension",
     }
 }
 

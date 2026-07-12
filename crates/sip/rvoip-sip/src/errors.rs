@@ -120,6 +120,21 @@ pub enum SessionError {
     #[error("Authentication error: {0}")]
     AuthError(String),
 
+    /// An outbound INVITE challenge could not be converted into a safe
+    /// Authorization response. Lower parser/provider diagnostics are omitted.
+    #[error("outbound INVITE authentication failed (class=challenge-response)")]
+    InviteAuthConstructionFailed,
+
+    /// A non-INVITE outbound challenge could not be converted into a safe
+    /// Authorization response. Lower parser/provider diagnostics are omitted.
+    #[error("outbound request authentication failed (class=challenge-response)")]
+    RequestAuthConstructionFailed,
+
+    /// An outbound REGISTER challenge could not be converted into a safe
+    /// Authorization response. Lower parser/provider diagnostics are omitted.
+    #[error("outbound REGISTER authentication failed (class=challenge-response)")]
+    RegisterAuthConstructionFailed,
+
     /// A REGISTER flow failed after any supported retry path.
     #[error("Registration failed: {0}")]
     RegistrationFailed(String),
@@ -167,6 +182,26 @@ pub enum SessionError {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OutboundAuthOperation {
+    Invite,
+    Request,
+    Register,
+}
+
+/// Collapse a lower challenge parser, Digest algorithm, or authentication
+/// provider failure into a value-free typed operation class.
+pub(crate) fn redacted_outbound_auth_error<E>(
+    operation: OutboundAuthOperation,
+    _source: E,
+) -> SessionError {
+    match operation {
+        OutboundAuthOperation::Invite => SessionError::InviteAuthConstructionFailed,
+        OutboundAuthOperation::Request => SessionError::RequestAuthConstructionFailed,
+        OutboundAuthOperation::Register => SessionError::RegisterAuthConstructionFailed,
+    }
+}
+
 impl From<crate::api::headers::HeaderPolicyViolation> for SessionError {
     fn from(v: crate::api::headers::HeaderPolicyViolation) -> Self {
         SessionError::HeaderPolicy {
@@ -208,5 +243,111 @@ impl From<Box<dyn std::error::Error + Send + Sync>> for SessionError {
 impl From<rvoip_auth_core::AuthError> for SessionError {
     fn from(err: rvoip_auth_core::AuthError) -> Self {
         SessionError::AuthError(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod outbound_auth_redaction_tests {
+    use super::*;
+    use crate::auth::{
+        AkaClientConfig, AkaClientProvider, SipClientAuth, SipTransportSecurityContext,
+    };
+    use std::sync::Arc;
+
+    const ALGORITHM_SECRET: &str = "MALICIOUS-ALGORITHM-CANARY";
+    const PROVIDER_SECRET: &str = "ARBITRARY-AKA-PROVIDER-CANARY";
+
+    struct FailingAkaProvider;
+
+    impl AkaClientProvider for FailingAkaProvider {
+        fn authorization(
+            &self,
+            _challenge_header: &str,
+            _method: &str,
+            _request_uri: &str,
+            _nonce_count: u32,
+        ) -> Result<String> {
+            Err(SessionError::AuthError(format!(
+                "AKA provider failure: {PROVIDER_SECRET}"
+            )))
+        }
+    }
+
+    fn assert_redacted(error: SessionError, secret: &str) {
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        for rendered in [&display, &debug] {
+            assert!(!rendered.contains(secret), "auth source leaked: {rendered}");
+        }
+        assert!(display.contains("challenge-response"));
+        assert!(matches!(error, SessionError::InviteAuthConstructionFailed));
+    }
+
+    #[test]
+    fn malicious_digest_algorithm_is_collapsed_before_retry_dispatch() {
+        let challenge = format!(
+            "Digest realm=\"pbx\", nonce=\"n1\", algorithm={ALGORITHM_SECRET}, qop=\"auth\""
+        );
+        let lower = SipClientAuth::digest("alice", "secret")
+            .authorization_for_challenge_with_transport_context(
+                &challenge,
+                "INVITE",
+                "sip:bob@example.test",
+                1,
+                None,
+                &SipTransportSecurityContext::from_transport_name("TLS"),
+            )
+            .expect_err("unsupported peer algorithm must fail");
+        assert!(lower.to_string().contains(ALGORITHM_SECRET));
+
+        assert_redacted(
+            redacted_outbound_auth_error(OutboundAuthOperation::Invite, lower),
+            ALGORITHM_SECRET,
+        );
+    }
+
+    #[test]
+    fn arbitrary_aka_provider_error_is_collapsed_before_retry_dispatch() {
+        let lower = SipClientAuth::aka(AkaClientConfig::new(Arc::new(FailingAkaProvider)))
+            .authorization_for_challenge_with_transport_context(
+                r#"Digest realm="ims", nonce="n1", algorithm=AKAv1-MD5"#,
+                "INVITE",
+                "sip:bob@example.test",
+                1,
+                None,
+                &SipTransportSecurityContext::from_transport_name("TLS"),
+            )
+            .expect_err("provider failure must fail auth construction");
+        assert!(lower.to_string().contains(PROVIDER_SECRET));
+
+        assert_redacted(
+            redacted_outbound_auth_error(OutboundAuthOperation::Invite, lower),
+            PROVIDER_SECRET,
+        );
+    }
+
+    #[test]
+    fn every_outbound_auth_operation_maps_to_a_fixed_typed_class() {
+        for (operation, expected) in [
+            (
+                OutboundAuthOperation::Invite,
+                SessionError::InviteAuthConstructionFailed,
+            ),
+            (
+                OutboundAuthOperation::Request,
+                SessionError::RequestAuthConstructionFailed,
+            ),
+            (
+                OutboundAuthOperation::Register,
+                SessionError::RegisterAuthConstructionFailed,
+            ),
+        ] {
+            let mapped = redacted_outbound_auth_error(
+                operation,
+                SessionError::AuthError(PROVIDER_SECRET.to_string()),
+            );
+            assert_eq!(mapped.to_string(), expected.to_string());
+            assert!(!mapped.to_string().contains(PROVIDER_SECRET));
+        }
     }
 }

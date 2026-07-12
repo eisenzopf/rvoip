@@ -3668,14 +3668,21 @@ impl UnifiedCoordinator {
         let transport = self
             .dialog_adapter
             .outbound_transport_context_for_response(response, request_uri);
-        let selected = auth.authorization_for_challenge_with_transport_context(
-            &challenge_value,
-            method.as_str(),
-            request_uri,
-            1,
-            body,
-            &transport,
-        )?;
+        let selected = auth
+            .authorization_for_challenge_with_transport_context(
+                &challenge_value,
+                method.as_str(),
+                request_uri,
+                1,
+                body,
+                &transport,
+            )
+            .map_err(|error| {
+                crate::errors::redacted_outbound_auth_error(
+                    crate::errors::OutboundAuthOperation::Request,
+                    error,
+                )
+            })?;
         let nonce = selected
             .digest_challenge
             .as_ref()
