@@ -49,6 +49,12 @@ fn session_coordination_event_kind(event: &SessionCoordinationEvent) -> &'static
     }
 }
 
+fn parse_event_transaction_key(value: &str) -> Result<TransactionKey> {
+    value
+        .parse::<TransactionKey>()
+        .map_err(|_error| anyhow::anyhow!("Invalid transaction identifier"))
+}
+
 impl DialogEventHub {
     /// Create a new dialog event hub
     pub async fn new(
@@ -1191,9 +1197,7 @@ impl DialogEventHub {
         );
 
         // Parse transaction_id to TransactionKey
-        let tx_key = transaction_id
-            .parse::<TransactionKey>()
-            .map_err(|e| anyhow::anyhow!("Failed to parse transaction_id: {}", e))?;
+        let tx_key = parse_event_transaction_key(transaction_id)?;
 
         // Check if this transaction exists in our dialog manager
         // This prevents multiple DialogEventHubs from trying to handle the same event
@@ -1219,7 +1223,7 @@ impl DialogEventHub {
                 expires,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to send REGISTER response: {}", e))?;
+            .map_err(|_error| anyhow::anyhow!("REGISTER response send failed"))?;
 
         info!(
             "✅ Sent REGISTER response: {} reason_present={}",
@@ -1268,9 +1272,7 @@ impl DialogEventHub {
                 .await;
         }
 
-        let tx_key = transaction_id
-            .parse::<TransactionKey>()
-            .map_err(|e| anyhow::anyhow!("Failed to parse transaction_id: {}", e))?;
+        let tx_key = parse_event_transaction_key(transaction_id)?;
 
         if self
             .dialog_manager
@@ -1298,7 +1300,7 @@ impl DialogEventHub {
                 extra_headers,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to send REGISTER response: {}", e))?;
+            .map_err(|_error| anyhow::anyhow!("REGISTER response send failed"))?;
 
         info!(
             "✅ Sent REGISTER response (with {} extras): {} reason_present={}",
@@ -1421,4 +1423,20 @@ fn extract_digest_realm(challenge: &str) -> Option<String> {
     let rest = &challenge[start..];
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
+}
+
+#[cfg(test)]
+mod safe_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_transaction_error_does_not_reflect_input() {
+        const SECRET: &str = "event-transaction-secret-canary\r\nX-Leak: yes";
+        let error = parse_event_transaction_key(SECRET).expect_err("malformed key");
+        let rendered = error.to_string();
+
+        assert_eq!(rendered, "Invalid transaction identifier");
+        assert!(!rendered.contains(SECRET));
+        assert!(!rendered.contains("X-Leak"));
+    }
 }

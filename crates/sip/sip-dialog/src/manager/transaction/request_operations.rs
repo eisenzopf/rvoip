@@ -71,7 +71,7 @@ impl TransactionIntegration for DialogManager {
                 (_, crate::dialog::DialogState::Confirmed) => {
                     return Err(crate::errors::DialogError::protocol_error(&format!(
                         "{} request in confirmed dialog missing remote tag",
-                        method
+                        method_class(&method)
                     )));
                 }
 
@@ -474,7 +474,7 @@ impl DialogManager {
                 let remote_tag = remote_tag.ok_or_else(|| {
                     crate::errors::DialogError::protocol_error(&format!(
                         "{} request requires remote tag in established dialog",
-                        method
+                        method_class(&method)
                     ))
                 })?;
 

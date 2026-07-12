@@ -7,6 +7,8 @@
 
 use rvoip_sip_core::Method;
 
+use crate::transaction::TransactionKey;
+
 /// Return a fixed, non-reflecting method class.
 pub(crate) const fn method_class(method: &Method) -> &'static str {
     match method {
@@ -33,6 +35,20 @@ pub(crate) const fn error_class<T>(_: &T) -> &'static str {
     "operation_failed"
 }
 
+/// Metadata-only transaction-key view for logs outside the transaction layer.
+pub(crate) struct SafeTransactionKey<'a>(pub(crate) &'a TransactionKey);
+
+impl std::fmt::Debug for SafeTransactionKey<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TransactionKey")
+            .field("method", &method_class(&self.0.method))
+            .field("side", &if self.0.is_server { "server" } else { "client" })
+            .field("branch_len", &self.0.branch.len())
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,6 +68,21 @@ mod tests {
         let rendered = error_class(&SECRET);
         assert_eq!(rendered, "operation_failed");
         assert!(!rendered.contains(SECRET));
+    }
+
+    #[test]
+    fn transaction_key_debug_is_metadata_only() {
+        let key = TransactionKey::new(
+            SECRET.to_string(),
+            Method::Extension(SECRET.to_string()),
+            true,
+        );
+        let debug = format!("{:?}", SafeTransactionKey(&key));
+
+        assert!(!debug.contains(SECRET));
+        assert!(debug.contains("method: \"extension\""));
+        assert!(debug.contains("side: \"server\""));
+        assert!(debug.contains(&format!("branch_len: {}", SECRET.len())));
     }
 
     #[test]
@@ -89,6 +120,13 @@ mod tests {
             "ACK contains SDP body: {}",
             "flow_key = ?",
             "error = %e",
+            "Associated transaction {} with dialog {}",
+            "Unsupported method: {}",
+            "request in confirmed dialog missing remote tag\",\n                        method",
+            "request requires remote tag in established dialog\",\n                        method",
+            "Failed to parse transaction_id: {}",
+            "Failed to send REGISTER response: {}",
+            "STIR/SHAKEN reject: outcome={:?}",
         ] {
             assert!(
                 !source.contains(forbidden),

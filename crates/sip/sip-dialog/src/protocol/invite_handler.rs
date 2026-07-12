@@ -22,6 +22,7 @@ use std::net::SocketAddr;
 use tracing::{debug, info, warn};
 
 use crate::api::config::RelUsage;
+use crate::diagnostics::safe_log::SafeTransactionKey;
 use crate::dialog::{DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
@@ -207,8 +208,8 @@ impl DialogManager {
         // Associate transaction with dialog
         self.associate_transaction_with_dialog(&transaction_id, &dialog_id);
         tracing::debug!(
-            "🔍 INVITE HANDLER: Associated transaction {} with dialog {}",
-            transaction_id,
+            "🔍 INVITE HANDLER: Associated transaction {:?} with dialog {}",
+            SafeTransactionKey(&transaction_id),
             dialog_id
         );
 

@@ -260,6 +260,41 @@ fn session_coordination_event_kind(event: &SessionCoordinationEvent) -> &'static
     }
 }
 
+fn verification_outcome_class(outcome: &crate::manager::VerificationOutcome) -> &'static str {
+    match outcome {
+        crate::manager::VerificationOutcome::Valid { .. } => "valid",
+        crate::manager::VerificationOutcome::Stale { .. } => "stale",
+        crate::manager::VerificationOutcome::BadSignature => "bad_signature",
+        crate::manager::VerificationOutcome::BadChain { .. } => "bad_chain",
+        crate::manager::VerificationOutcome::ClaimMismatch { .. } => "claim_mismatch",
+        crate::manager::VerificationOutcome::BadInfo { .. } => "bad_info",
+        crate::manager::VerificationOutcome::NoIdentity => "no_identity",
+    }
+}
+
+#[cfg(test)]
+mod verification_diagnostic_tests {
+    use super::verification_outcome_class;
+    use crate::manager::VerificationOutcome;
+
+    #[test]
+    fn verification_outcome_class_does_not_reflect_reason() {
+        const SECRET: &str = "verification-secret-canary\r\nX-Leak: yes";
+        for outcome in [
+            VerificationOutcome::BadChain {
+                reason: SECRET.to_string(),
+            },
+            VerificationOutcome::BadInfo {
+                reason: SECRET.to_string(),
+            },
+        ] {
+            let class = verification_outcome_class(&outcome);
+            assert!(matches!(class, "bad_chain" | "bad_info"));
+            assert!(!class.contains(SECRET));
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TerminatedByeTombstone {
     pub(crate) cseq: u32,
@@ -983,10 +1018,9 @@ impl DialogManager {
         let status = StatusCode::from_u16(status_u16).unwrap_or(StatusCode::Forbidden);
 
         tracing::info!(
-            "STIR/SHAKEN reject: outcome={:?} → {} {} on transaction",
-            outcome,
-            status_u16,
-            reason
+            "STIR/SHAKEN reject: outcome_class={} status={} on transaction",
+            verification_outcome_class(outcome),
+            status_u16
         );
 
         let response =
@@ -2300,8 +2334,8 @@ impl DialogManager {
                 // noisier than the failure they're supposed to flag.
                 debug!("Unsupported SIP method class={}", method_class(&method));
                 Err(DialogError::protocol_error(&format!(
-                    "Unsupported method: {}",
-                    method
+                    "Unsupported method class: {}",
+                    method_class(&method)
                 )))
             }
         }
