@@ -412,6 +412,19 @@ pub enum MoqCatalogSubscriberLifecycle {
     Failed,
 }
 
+/// Retention handoff selected for the active catalog subscription.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum MoqCatalogDeliveryMode {
+    /// The relay reported a Largest Object and the subscriber joined retained
+    /// state to the live edge with a Relative Joining FETCH.
+    RelativeJoiningFetch,
+    /// A cold relay reported no Largest Object, so the subscriber atomically
+    /// released its join barrier and continued on the live subscription.
+    LiveFallback,
+}
+
 impl MoqCatalogSubscriberLifecycle {
     pub const fn is_terminal(self) -> bool {
         matches!(
@@ -437,6 +450,7 @@ pub struct MoqCatalogSubscriptionSnapshot {
     pub substrate: Option<BroadcastSubstrate>,
     pub negotiated_protocol: Option<String>,
     pub peer_identity: Option<MoqRelayPeerIdentity>,
+    pub delivery_mode: Option<MoqCatalogDeliveryMode>,
 }
 
 impl MoqCatalogSubscriptionSnapshot {
@@ -990,6 +1004,7 @@ mod tests {
             substrate: Some(BroadcastSubstrate::WebTransport),
             negotiated_protocol: Some("moqt-19".into()),
             peer_identity: None,
+            delivery_mode: Some(MoqCatalogDeliveryMode::LiveFallback),
         };
         assert!(snapshot.is_terminal());
         let json = serde_json::to_string(&snapshot).unwrap();

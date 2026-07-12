@@ -11,9 +11,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::FutureExt;
 use moq_relay_ietf::{
-    CertificateFingerprintAdmission, Coordinator, CoordinatorError, CoordinatorResult,
-    ListenerSecurityPolicy, NamespaceOrigin, NamespaceRegistration, Relay, RelayCapacityLimitSet,
-    RelayCapacityLimits, RelayConfig, RelayDiagnostics, RemoteManagerLimits, SessionAdmission,
+    AdmissionDecision, CertificateFingerprintAdmission, Coordinator, CoordinatorError,
+    CoordinatorResult, ListenerSecurityPolicy, Locals, NamespaceOrigin, NamespaceRegistration,
+    Relay, RelayCapacityLimitSet, RelayCapacityLimits, RelayConfig, RelayDiagnostics,
+    RemoteManagerLimits, ScopeInfo, ScopePermissions, SessionAdmission,
 };
 use moq_transport::coding::TrackNamespace;
 use tokio::sync::watch;
@@ -272,6 +273,58 @@ pub struct MoqRelayRuntimeConfig {
     pub timeouts: MoqRelayRuntimeTimeouts,
 }
 
+/// Shared in-process routing state for role-separated relay listeners.
+///
+/// Production publisher listeners require mutual TLS while subscriber
+/// listeners require receive-only SETUP tokens, so those roles cannot safely
+/// share one public socket. A topology lets the role-specific runtimes share
+/// namespace registration and lookup without exposing `moq-rs` coordinator
+/// types to applications.
+#[derive(Clone)]
+pub struct MoqRelayTopology {
+    coordinator: Arc<LocalCoordinator>,
+    locals: Locals,
+}
+
+impl MoqRelayTopology {
+    /// Create a bounded topology whose registered origins route back to the
+    /// publisher listener at `publisher_endpoint`.
+    pub fn new(
+        publisher_endpoint: Url,
+        publisher_socket_addr: Option<SocketAddr>,
+        max_namespaces: usize,
+    ) -> Result<Self, MoqRelayRuntimeError> {
+        validate_authority_endpoint(&publisher_endpoint)?;
+        if max_namespaces == 0 {
+            return Err(MoqRelayRuntimeError::InvalidConfig(
+                "relay topology namespace limit must be greater than zero",
+            ));
+        }
+        Ok(Self {
+            coordinator: Arc::new(LocalCoordinator::new(
+                publisher_endpoint,
+                publisher_socket_addr,
+                max_namespaces,
+            )),
+            locals: Locals::new(),
+        })
+    }
+
+    /// Aggregate-safe count of namespaces currently registered by publishers.
+    pub fn coordinated_namespaces(&self) -> usize {
+        self.coordinator.len()
+    }
+}
+
+impl std::fmt::Debug for MoqRelayTopology {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MoqRelayTopology")
+            .field("coordinated_namespaces", &self.coordinated_namespaces())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Managed relay lifecycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -396,53 +449,79 @@ impl RuntimeLifecycle {
 impl MoqRelayRuntime {
     /// Bind and supervise one production relay listener.
     pub fn start(config: MoqRelayRuntimeConfig) -> Result<Self, MoqRelayRuntimeError> {
+        let topology = MoqRelayTopology::new(
+            config.advertised_endpoint.clone(),
+            config.advertised_socket_addr,
+            config.limits.max_coordinated_namespaces,
+        )?;
+        Self::start_with_topology(config, topology)
+    }
+
+    /// Bind one role-specific listener into shared in-process routing state.
+    ///
+    /// Publisher and subscriber listeners that belong to the same embedded
+    /// relay deployment must use the same topology. The topology's publisher
+    /// endpoint must match the publisher runtime's advertised endpoint.
+    pub fn start_with_topology(
+        config: MoqRelayRuntimeConfig,
+        topology: MoqRelayTopology,
+    ) -> Result<Self, MoqRelayRuntimeError> {
         validate_config(&config)?;
+        if matches!(
+            &config.security,
+            MoqRelayRuntimeSecurity::PublisherMutualTls { .. }
+        ) && (topology.coordinator.advertised_endpoint != config.advertised_endpoint
+            || topology.coordinator.advertised_socket_addr != config.advertised_socket_addr)
+        {
+            return Err(MoqRelayRuntimeError::InvalidConfig(
+                "publisher runtime endpoint must match its shared relay topology",
+            ));
+        }
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| MoqRelayRuntimeError::RuntimeUnavailable)?;
         let listener = config.security.listener_kind();
         let tls = load_tls(&config)?;
         let (listener_security, admission) = admission_for(&config.security)?;
-        let coordinator = Arc::new(LocalCoordinator::new(
-            config.advertised_endpoint.clone(),
-            config.advertised_socket_addr,
-            config.limits.max_coordinated_namespaces,
-        ));
-        let relay = Relay::new(RelayConfig {
-            bind: Some(config.bind),
-            endpoints: Vec::new(),
-            tls,
-            qlog_dir: None,
-            mlog_dir: None,
-            announce: None,
-            node: Some(config.advertised_endpoint),
-            coordinator: coordinator.clone(),
-            admission,
-            development: false,
-            listener_security,
-            setup_timeout: config.timeouts.setup,
-            admission_timeout: config.timeouts.admission,
-            cleanup_timeout: config.timeouts.pre_admission_cleanup,
-            session_close_timeout: config.timeouts.admission_session_close,
-            max_pending_admissions: config.limits.max_pending_admissions,
-            max_active_sessions: config.limits.max_active_sessions,
-            token_revalidation_interval: config.timeouts.token_revalidation_interval,
-            capacity_limits: RelayCapacityLimits {
-                process: config.limits.process.into(),
-                per_principal: config.limits.per_principal.into(),
-                per_scope: config.limits.per_scope.into(),
+        let coordinator = topology.coordinator;
+        let relay = Relay::new_with_locals(
+            RelayConfig {
+                bind: Some(config.bind),
+                endpoints: Vec::new(),
+                tls,
+                qlog_dir: None,
+                mlog_dir: None,
+                announce: None,
+                node: Some(config.advertised_endpoint),
+                coordinator: coordinator.clone(),
+                admission,
+                development: false,
+                listener_security,
+                setup_timeout: config.timeouts.setup,
+                admission_timeout: config.timeouts.admission,
+                cleanup_timeout: config.timeouts.pre_admission_cleanup,
+                session_close_timeout: config.timeouts.admission_session_close,
+                max_pending_admissions: config.limits.max_pending_admissions,
+                max_active_sessions: config.limits.max_active_sessions,
+                token_revalidation_interval: config.timeouts.token_revalidation_interval,
+                capacity_limits: RelayCapacityLimits {
+                    process: config.limits.process.into(),
+                    per_principal: config.limits.per_principal.into(),
+                    per_scope: config.limits.per_scope.into(),
+                },
+                remote_limits: RemoteManagerLimits {
+                    max_connections: config.limits.max_upstream_connections,
+                    max_tracks: config.limits.max_upstream_tracks,
+                    track_idle_timeout: config.timeouts.upstream_track_idle,
+                    connection_idle_timeout: config.timeouts.upstream_connection_idle,
+                },
+                tracks_limits: moq_transport::serve::TracksLimits {
+                    max_cached_tracks: config.limits.max_cached_tracks_per_namespace,
+                    max_pending_requests: config.limits.max_pending_track_requests_per_namespace,
+                },
+                request_limits: moq_transport::session::RequestLimits::default(),
             },
-            remote_limits: RemoteManagerLimits {
-                max_connections: config.limits.max_upstream_connections,
-                max_tracks: config.limits.max_upstream_tracks,
-                track_idle_timeout: config.timeouts.upstream_track_idle,
-                connection_idle_timeout: config.timeouts.upstream_connection_idle,
-            },
-            tracks_limits: moq_transport::serve::TracksLimits {
-                max_cached_tracks: config.limits.max_cached_tracks_per_namespace,
-                max_pending_requests: config.limits.max_pending_track_requests_per_namespace,
-            },
-            request_limits: moq_transport::session::RequestLimits::default(),
-        })
+            topology.locals,
+        )
         .map_err(|_| MoqRelayRuntimeError::StartFailed)?;
         let diagnostics = relay.diagnostics();
         let lifecycle = Arc::new(RuntimeLifecycle::new());
@@ -603,17 +682,7 @@ fn lifecycle_label(lifecycle: MoqRelayRuntimeLifecycle) -> &'static str {
 }
 
 fn validate_config(config: &MoqRelayRuntimeConfig) -> Result<(), MoqRelayRuntimeError> {
-    if config.advertised_endpoint.scheme() != "moqt"
-        || !config.advertised_endpoint.username().is_empty()
-        || config.advertised_endpoint.password().is_some()
-        || config.advertised_endpoint.query().is_some()
-        || config.advertised_endpoint.fragment().is_some()
-        || !matches!(config.advertised_endpoint.path(), "" | "/")
-    {
-        return Err(MoqRelayRuntimeError::InvalidConfig(
-            "advertised endpoint must be a credential-free authority-only moqt:// URL",
-        ));
-    }
+    validate_authority_endpoint(&config.advertised_endpoint)?;
     if config.tls.server_certificates.is_empty()
         || config.tls.server_certificates.len() != config.tls.server_private_keys.len()
     {
@@ -694,6 +763,22 @@ fn validate_config(config: &MoqRelayRuntimeConfig) -> Result<(), MoqRelayRuntime
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_authority_endpoint(endpoint: &Url) -> Result<(), MoqRelayRuntimeError> {
+    if endpoint.scheme() != "moqt"
+        || endpoint.host_str().is_none_or(str::is_empty)
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+        || !matches!(endpoint.path(), "" | "/")
+    {
+        return Err(MoqRelayRuntimeError::InvalidConfig(
+            "advertised endpoint must be a credential-free authority-only moqt:// URL",
+        ));
     }
     Ok(())
 }
@@ -826,11 +911,49 @@ impl Drop for LocalRegistration {
 
 #[async_trait]
 impl Coordinator for LocalCoordinator {
+    async fn resolve_admitted_scope(
+        &self,
+        admission: &AdmissionDecision,
+        connection_path: Option<&str>,
+    ) -> CoordinatorResult<Option<ScopeInfo>> {
+        let path = connection_path.ok_or_else(|| {
+            CoordinatorError::from(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "role-separated relay sessions require a namespace path",
+            ))
+        })?;
+        if !path.starts_with('/')
+            || path.len() > moq_relay_ietf::AdmissionClaims::MAX_SCOPE_BYTES
+            || path.contains(['?', '#'])
+            || (!admission.claims.publish && !admission.claims.subscribe)
+        {
+            return Err(CoordinatorError::from(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid admitted relay scope",
+            )));
+        }
+        Ok(Some(ScopeInfo {
+            scope_id: path.to_owned(),
+            permissions: if admission.claims.publish {
+                ScopePermissions::ReadWrite
+            } else {
+                ScopePermissions::ReadOnly
+            },
+        }))
+    }
+
     async fn register_namespace(
         &self,
         scope: Option<&str>,
         namespace: &TrackNamespace,
     ) -> CoordinatorResult<NamespaceRegistration> {
+        let namespace_path = namespace.to_utf8_path();
+        if scope != Some(namespace_path.as_str()) {
+            return Err(CoordinatorError::from(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "publisher scope does not match its namespace",
+            )));
+        }
         let key = NamespaceKey {
             scope: scope.map(str::to_owned),
             namespace: namespace.clone(),
@@ -848,11 +971,13 @@ impl Coordinator for LocalCoordinator {
                 resource: "local_namespaces",
             });
         }
+        let mut url = self.advertised_endpoint.clone();
+        url.set_path(&namespace_path);
         state.namespaces.insert(
             key.clone(),
             LocalOrigin {
                 registration_id,
-                url: self.advertised_endpoint.clone(),
+                url,
                 addr: self.advertised_socket_addr,
             },
         );
@@ -905,11 +1030,9 @@ impl Coordinator for LocalCoordinator {
     }
 
     async fn shutdown(&self) -> CoordinatorResult<()> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .namespaces
-            .clear();
+        // Runtime listeners can share this coordinator. Their namespace
+        // registration handles remove exact entries as publisher sessions
+        // close; stopping a subscriber listener must not erase live origins.
         Ok(())
     }
 }

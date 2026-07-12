@@ -21,10 +21,11 @@ use crate::catalog_subscriber_wire::{
     WireCatalogFailure, WireCatalogObject, WireCatalogSubscriberClient, WireCatalogSubscription,
 };
 use crate::{
-    MoqCatalogApplyOutcome, MoqCatalogObject, MoqCatalogStateMachine, MoqCatalogSubscriberConfig,
-    MoqCatalogSubscriberFailure, MoqCatalogSubscriberLifecycle, MoqCatalogSubscriptionSnapshot,
-    MoqEndOfGroupEvidence, MoqError, MoqProtocolVersion, MoqSubscriberCredential,
-    MoqSubscriberCredentialError, MoqSubscriberCredentialProvider, MsfCatalogState, CATALOG_TRACK,
+    MoqCatalogApplyOutcome, MoqCatalogDeliveryMode, MoqCatalogObject, MoqCatalogStateMachine,
+    MoqCatalogSubscriberConfig, MoqCatalogSubscriberFailure, MoqCatalogSubscriberLifecycle,
+    MoqCatalogSubscriptionSnapshot, MoqEndOfGroupEvidence, MoqError, MoqProtocolVersion,
+    MoqSubscriberCredential, MoqSubscriberCredentialError, MoqSubscriberCredentialProvider,
+    MsfCatalogState, CATALOG_TRACK,
 };
 
 const DROP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -35,6 +36,7 @@ struct CatalogConnectionDiagnostics {
     substrate: rvoip_core_traits::broadcast::BroadcastSubstrate,
     negotiated_protocol: String,
     peer_identity: crate::MoqRelayPeerIdentity,
+    delivery_mode: MoqCatalogDeliveryMode,
 }
 
 struct ManagedCatalogObject {
@@ -88,6 +90,7 @@ impl CatalogConnection for WireCatalogSubscription {
             substrate: self.substrate,
             negotiated_protocol: self.negotiated_protocol.clone(),
             peer_identity: self.peer_identity.clone(),
+            delivery_mode: self.delivery_mode,
         }
     }
 
@@ -329,6 +332,7 @@ impl CatalogSubscriberStatus {
             substrate: None,
             negotiated_protocol: None,
             peer_identity: None,
+            delivery_mode: None,
         };
         let (sender, _) = watch::channel(snapshot);
         Self { sender }
@@ -361,6 +365,15 @@ impl CatalogSubscriberStatus {
 
     fn connected(&self, diagnostics: CatalogConnectionDiagnostics) {
         let now = Utc::now();
+        let delivery_mode = match diagnostics.delivery_mode {
+            MoqCatalogDeliveryMode::RelativeJoiningFetch => "relative-joining-fetch",
+            MoqCatalogDeliveryMode::LiveFallback => "live-fallback",
+        };
+        metrics::counter!(
+            "rvoip_moq_catalog_delivery_mode_total",
+            "mode" => delivery_mode
+        )
+        .increment(1);
         self.sender.send_modify(|snapshot| {
             if snapshot.lifecycle.is_terminal() {
                 return;
@@ -373,6 +386,7 @@ impl CatalogSubscriberStatus {
             snapshot.substrate = Some(diagnostics.substrate);
             snapshot.negotiated_protocol = Some(diagnostics.negotiated_protocol);
             snapshot.peer_identity = Some(diagnostics.peer_identity);
+            snapshot.delivery_mode = Some(diagnostics.delivery_mode);
         });
     }
 
@@ -874,6 +888,7 @@ mod tests {
                     chain_len: 1,
                     total_der_bytes: 512,
                 },
+                delivery_mode: MoqCatalogDeliveryMode::RelativeJoiningFetch,
             }
         }
 

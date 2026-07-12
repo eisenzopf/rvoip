@@ -9,8 +9,8 @@ use moq_transport::coding::{Location, TrackName, TrackNamespace};
 use moq_transport::data::ObjectStatus;
 use moq_transport::serve::{SubgroupsReader, Track, TrackReader, TrackReaderMode};
 use moq_transport::session::{
-    EndOfGroupState, Fetch, PublishedNamespace, Session, SessionError, SetupAuthorization,
-    Subscribe, Subscriber, Transport,
+    EndOfGroupState, Fetch, Session, SessionError, SetupAuthorization, Subscribe, Subscriber,
+    Transport,
 };
 use rvoip_core_traits::broadcast::BroadcastSubstrate;
 use tokio::task::JoinHandle;
@@ -20,9 +20,9 @@ use crate::wire::{
     WireRelayClient,
 };
 use crate::{
-    MoqCatalogSubscriberConfig, MoqCatalogValidationError, MoqEndOfGroupEvidence, MoqError,
-    MoqRelayPeerIdentity, MoqRelaySubstratePolicy, MoqSubscriberCredential, CATALOG_TRACK,
-    MOQT_NEGOTIATED_PROTOCOL,
+    MoqCatalogDeliveryMode, MoqCatalogSubscriberConfig, MoqCatalogValidationError,
+    MoqEndOfGroupEvidence, MoqError, MoqRelayPeerIdentity, MoqRelaySubstratePolicy,
+    MoqSubscriberCredential, CATALOG_TRACK, MOQT_NEGOTIATED_PROTOCOL,
 };
 
 const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -86,41 +86,32 @@ impl WireCatalogSubscriberClient {
 
         let session_task = tokio::spawn(session.run());
         let mut pending = PendingCatalogSession::new(raw_session, session_task, runtime.clone());
-        let mut published_namespace = tokio::select! {
-            namespace = subscriber.published_namespace() => {
-                namespace.ok_or(WireCatalogFailure::SessionEnded)?
-            }
-            result = pending.task_mut() => {
-                pending.disarm_completed();
-                return Err(map_session_result(result));
-            }
-        };
         let expected_namespace = TrackNamespace::from_utf8_path(config.namespace.as_str());
-        if published_namespace.info.namespace != expected_namespace {
-            return Err(WireCatalogFailure::InvalidTrack);
-        }
-        published_namespace
-            .ok()
-            .map_err(|_| WireCatalogFailure::SubscribeFailed)?;
 
         let (subscribe, fetch, track_reader, fetch_cutoff) = {
             let setup = async {
                 let (track_writer, track_reader) =
                     Track::new(expected_namespace, TrackName::from(CATALOG_TRACK)).produce();
                 let (subscribe, fetch) = subscriber
-                    .subscribe_joining(track_writer)
+                    .subscribe_joining_or_live(track_writer)
                     .await
                     .map_err(|_| WireCatalogFailure::SubscribeFailed)?;
                 subscribe
                     .ok()
                     .await
                     .map_err(|_| WireCatalogFailure::SubscribeFailed)?;
-                let fetch_ok = fetch
-                    .ok()
-                    .await
-                    .map_err(|_| WireCatalogFailure::SubscribeFailed)?;
+                let fetch_cutoff = match fetch.as_ref() {
+                    Some(fetch) => Some(
+                        fetch
+                            .ok()
+                            .await
+                            .map_err(|_| WireCatalogFailure::SubscribeFailed)?
+                            .end_location,
+                    ),
+                    None => None,
+                };
 
-                Ok::<_, WireCatalogFailure>((subscribe, fetch, track_reader, fetch_ok.end_location))
+                Ok::<_, WireCatalogFailure>((subscribe, fetch, track_reader, fetch_cutoff))
             };
             tokio::pin!(setup);
             tokio::select! {
@@ -132,20 +123,25 @@ impl WireCatalogSubscriberClient {
             }
         };
         let (raw_session, session_task) = pending.into_parts();
+        let delivery_mode = if fetch.is_some() {
+            MoqCatalogDeliveryMode::RelativeJoiningFetch
+        } else {
+            MoqCatalogDeliveryMode::LiveFallback
+        };
 
         Ok(WireCatalogSubscription {
             endpoint_uri,
             substrate,
             negotiated_protocol,
             peer_identity,
+            delivery_mode,
             subscriber,
             track_reader: Some(track_reader),
             groups: None,
             fetch_cutoff,
-            fetch_drained: false,
-            fetch: Some(fetch),
+            fetch_drained: fetch.is_none(),
+            fetch,
             subscribe: Some(subscribe),
-            published_namespace: Some(published_namespace),
             raw_session: Some(raw_session),
             session_task: Some(session_task),
             runtime,
@@ -158,14 +154,14 @@ pub(crate) struct WireCatalogSubscription {
     pub(crate) substrate: BroadcastSubstrate,
     pub(crate) negotiated_protocol: String,
     pub(crate) peer_identity: MoqRelayPeerIdentity,
+    pub(crate) delivery_mode: MoqCatalogDeliveryMode,
     subscriber: Subscriber,
     track_reader: Option<TrackReader>,
     groups: Option<SubgroupsReader>,
-    fetch_cutoff: Location,
+    fetch_cutoff: Option<Location>,
     fetch_drained: bool,
     fetch: Option<Fetch>,
     subscribe: Option<Subscribe>,
-    published_namespace: Option<PublishedNamespace>,
     raw_session: Option<web_transport::Session>,
     session_task: Option<JoinHandle<Result<(), SessionError>>>,
     runtime: tokio::runtime::Handle,
@@ -295,7 +291,7 @@ impl WireCatalogSubscription {
             // UnknownFromFetch evidence, so discard only coordinates covered
             // by the immutable FETCH cutoff. Live Objects after the cutoff
             // retain their actual subgroup boundary flags.
-            if location <= self.fetch_cutoff {
+            if self.fetch_cutoff.is_some_and(|cutoff| location <= cutoff) {
                 continue;
             }
             return Ok(Some(WireCatalogObject {
@@ -318,7 +314,6 @@ impl WireCatalogSubscription {
     pub(crate) async fn close(mut self, reason: &'static str) {
         self.fetch.take();
         self.subscribe.take();
-        self.published_namespace.take();
         if let Some(raw_session) = self.raw_session.take() {
             raw_session.close(0, reason);
         }
@@ -330,7 +325,6 @@ impl Drop for WireCatalogSubscription {
     fn drop(&mut self) {
         self.fetch.take();
         self.subscribe.take();
-        self.published_namespace.take();
         if let Some(raw_session) = self.raw_session.take() {
             raw_session.close(0, "rvoip catalog subscriber dropped");
         }

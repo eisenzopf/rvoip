@@ -143,7 +143,7 @@ fn relay_runtime_contract_uses_only_rvoip_owned_models() {
     use rvoip_moq::{
         MoqRelayDeploymentMode, MoqRelayListenerKind, MoqRelayPublisherBinding,
         MoqRelayRuntimeLimits, MoqRelayRuntimeSecurity, MoqRelayRuntimeTimeouts,
-        MoqRelayServerTlsConfig,
+        MoqRelayServerTlsConfig, MoqRelayTopology,
     };
 
     let security = MoqRelayRuntimeSecurity::PublisherMutualTls {
@@ -166,4 +166,12 @@ fn relay_runtime_contract_uses_only_rvoip_owned_models() {
     assert!(MoqRelayServerTlsConfig::default()
         .server_certificates
         .is_empty());
+    let topology = MoqRelayTopology::new(
+        Url::parse("moqt://publisher.internal:443").unwrap(),
+        None,
+        64,
+    )
+    .unwrap();
+    assert_eq!(topology.coordinated_namespaces(), 0);
+    assert!(!format!("{topology:?}").contains("publisher.internal"));
 }
