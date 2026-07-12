@@ -2903,6 +2903,47 @@ mod tests {
         assert!(matches!(headers[0], TypedHeader::Route(_)));
         assert!(matches!(headers[1], TypedHeader::PAssertedIdentity(_)));
     }
+
+    #[test]
+    fn auth_retry_policy_rejects_line_smuggling_for_401_and_407_headers() {
+        for header_name in ["Authorization", "Proxy-Authorization"] {
+            let canary = format!("Bearer safe\r\nX-Injected-{header_name}: yes");
+            let error = apply_outbound_extras_policy_with_auth(
+                rvoip_sip_core::types::Method::Invite,
+                Vec::new(),
+                None,
+                header_name,
+                canary.clone(),
+            )
+            .expect_err("auth retry controls must fail before header insertion");
+            assert!(!error.to_string().contains(&canary));
+        }
+    }
+
+    #[test]
+    fn auth_retry_policy_preserves_valid_values_for_401_and_407_headers() {
+        use rvoip_sip_core::types::headers::{HeaderName, HeaderValue};
+
+        for (wire_name, expected_name) in [
+            ("Authorization", HeaderName::Authorization),
+            ("Proxy-Authorization", HeaderName::ProxyAuthorization),
+        ] {
+            let value = "Digest username=\"alice\", response=\"safe\"";
+            let headers = apply_outbound_extras_policy_with_auth(
+                rvoip_sip_core::types::Method::Invite,
+                Vec::new(),
+                None,
+                wire_name,
+                value.to_string(),
+            )
+            .expect("valid retry header");
+            assert!(matches!(
+                headers.as_slice(),
+                [TypedHeader::Other(name, HeaderValue::Raw(bytes))]
+                    if *name == expected_name && bytes.as_slice() == value.as_bytes()
+            ));
+        }
+    }
 }
 
 /// Rewrite the host (and port) portion of a SIP URI in a `Contact:`
@@ -3102,9 +3143,13 @@ pub(crate) fn apply_outbound_extras_policy_with_auth(
         "Proxy-Authorization" => rvoip_sip_core::types::header::HeaderName::ProxyAuthorization,
         _ => rvoip_sip_core::types::header::HeaderName::Authorization,
     };
-    validated.push(rvoip_sip_core::types::TypedHeader::Other(
-        header_name,
-        rvoip_sip_core::types::headers::HeaderValue::Raw(auth_header_value.into_bytes()),
-    ));
+    let authorization =
+        rvoip_sip_core::validation::validated_authorization_header(header_name, auth_header_value)
+            .map_err(|_| {
+                crate::errors::SessionError::AuthError(
+                    "outbound SIP authorization header failed wire-safety validation".to_string(),
+                )
+            })?;
+    validated.push(authorization);
     Ok(validated)
 }

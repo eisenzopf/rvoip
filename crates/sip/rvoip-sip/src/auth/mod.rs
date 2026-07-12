@@ -800,7 +800,7 @@ impl SipClientAuth {
         body: Option<&[u8]>,
         transport: &SipTransportSecurityContext,
     ) -> Result<ClientAuthHeader> {
-        match self {
+        let selected = match self {
             SipClientAuth::Digest(credentials) => {
                 let challenge = extract_digest_challenge(challenge_header).ok_or_else(|| {
                     SessionError::AuthError(
@@ -918,7 +918,15 @@ impl SipClientAuth {
                 body,
                 transport,
             ),
-        }
+        }?;
+        rvoip_sip_core::validation::validate_authorization_header_value(&selected.value).map_err(
+            |_| {
+                SessionError::AuthError(
+                    "generated SIP authorization header failed wire-safety validation".to_string(),
+                )
+            },
+        )?;
+        Ok(selected)
     }
 }
 
@@ -3402,6 +3410,20 @@ mod tests {
     use proptest::prelude::*;
     use std::sync::Mutex;
 
+    struct StaticAkaClientResponse(String);
+
+    impl AkaClientProvider for StaticAkaClientResponse {
+        fn authorization(
+            &self,
+            _challenge_header: &str,
+            _method: &str,
+            _request_uri: &str,
+            _nonce_count: u32,
+        ) -> Result<String> {
+            Ok(self.0.clone())
+        }
+    }
+
     struct StaticPasswordVerifier;
 
     #[async_trait::async_trait]
@@ -4745,6 +4767,104 @@ mod tests {
             )
             .expect("explicit cleartext opt-in permits Bearer");
         assert_eq!(cleartext_allowed.value, "Bearer token-123");
+    }
+
+    #[test]
+    fn generated_client_auth_values_cannot_smuggle_header_lines() {
+        let secure = SipTransportSecurityContext::from_transport_name("TLS");
+        let bearer_secret = "bearer-canary\r\nX-Injected: bearer";
+        let bearer_error = SipClientAuth::bearer_token(bearer_secret)
+            .authorization_for_challenge_with_transport_context(
+                r#"Bearer realm="api""#,
+                "INVITE",
+                "sip:bob@example.test",
+                1,
+                None,
+                &secure,
+            )
+            .expect_err("Bearer controls must fail before raw-header insertion");
+        assert!(!bearer_error.to_string().contains(bearer_secret));
+
+        let digest_secret = "alice\r\nX-Injected: digest";
+        let digest_error = SipClientAuth::digest(digest_secret, "secret")
+            .authorization_for_challenge_with_transport_context(
+                r#"Digest realm="pbx", nonce="n1", algorithm=MD5, qop="auth""#,
+                "INVITE",
+                "sip:bob@example.test",
+                1,
+                None,
+                &secure,
+            )
+            .expect_err("Digest identity controls must fail before insertion");
+        assert!(!digest_error.to_string().contains(digest_secret));
+
+        let aka_secret = "Digest username=\"aka\"\r\nX-Injected: aka";
+        let aka_error = SipClientAuth::aka(AkaClientConfig::new(Arc::new(
+            StaticAkaClientResponse(aka_secret.to_string()),
+        )))
+        .authorization_for_challenge_with_transport_context(
+            r#"Digest realm="ims", nonce="n1", algorithm=AKAv1-MD5"#,
+            "INVITE",
+            "sip:bob@example.test",
+            1,
+            None,
+            &secure,
+        )
+        .expect_err("AKA provider controls must fail before insertion");
+        assert!(!aka_error.to_string().contains(aka_secret));
+
+        // Basic encodes caller material before validation. Even hostile input
+        // remains confined to the base64 token and cannot create a new line.
+        let basic = SipClientAuth::basic("alice\r\nX-Injected", "basic\0secret")
+            .authorization_for_challenge_with_transport_context(
+                r#"Basic realm="legacy""#,
+                "INVITE",
+                "sip:bob@example.test",
+                1,
+                None,
+                &secure,
+            )
+            .expect("base64-encoded Basic output is wire-safe");
+        assert!(basic.value.starts_with("Basic "));
+        assert!(!basic.value.chars().any(char::is_control));
+        assert!(!basic.value.contains("X-Injected"));
+    }
+
+    #[test]
+    fn generated_bearer_value_obeys_the_final_wire_size_boundary() {
+        let secure = SipTransportSecurityContext::from_transport_name("TLS");
+        let maximum_token = "a".repeat(
+            rvoip_sip_core::validation::MAX_AUTHORIZATION_HEADER_VALUE_BYTES - "Bearer ".len(),
+        );
+        let maximum = SipClientAuth::bearer_token(maximum_token)
+            .authorization_for_challenge_with_transport_context(
+                r#"Bearer realm="api""#,
+                "INVITE",
+                "sip:bob@example.test",
+                1,
+                None,
+                &secure,
+            )
+            .expect("exact final header boundary remains valid");
+        assert_eq!(
+            maximum.value.len(),
+            rvoip_sip_core::validation::MAX_AUTHORIZATION_HEADER_VALUE_BYTES
+        );
+
+        let oversized_token = "a".repeat(
+            rvoip_sip_core::validation::MAX_AUTHORIZATION_HEADER_VALUE_BYTES - "Bearer ".len() + 1,
+        );
+        let error = SipClientAuth::bearer_token(oversized_token)
+            .authorization_for_challenge_with_transport_context(
+                r#"Bearer realm="api""#,
+                "INVITE",
+                "sip:bob@example.test",
+                1,
+                None,
+                &secure,
+            )
+            .expect_err("oversized final header must fail");
+        assert!(error.to_string().contains("wire-safety validation"));
     }
 
     #[test]

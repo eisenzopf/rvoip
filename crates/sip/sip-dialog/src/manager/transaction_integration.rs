@@ -784,7 +784,7 @@ impl DialogManager {
         contact_override: Option<String>,
     ) -> DialogResult<TransactionKey> {
         use crate::transaction::client::builders::InviteBuilder;
-        use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
+        use rvoip_sip_core::types::header::HeaderName;
         use rvoip_sip_core::types::TypedHeader;
 
         debug!("Resending INVITE with auth for dialog {}", dialog_id);
@@ -884,10 +884,16 @@ impl DialogManager {
                 }
                 _ => HeaderName::Authorization,
             };
-            request.headers.push(TypedHeader::Other(
+            let authorization = rvoip_sip_core::validation::validated_authorization_header(
                 header_name,
-                HeaderValue::Raw(auth_header_value.into_bytes()),
-            ));
+                auth_header_value,
+            )
+            .map_err(|_| {
+                crate::errors::DialogError::protocol_error(
+                    "INVITE authorization failed wire-safety validation",
+                )
+            })?;
+            request.headers.push(authorization);
 
             // SIP_API_DESIGN_2 §7.3 — preserve application-staged extras
             // across the 401/407 → retry hop. The original INVITE's

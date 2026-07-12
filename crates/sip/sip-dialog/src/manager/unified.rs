@@ -708,10 +708,15 @@ impl UnifiedDialogManager {
             // Pre-computed Digest / Bearer authorization. Required by
             // the 401 retry path on SUBSCRIBE refresh.
             if let Some(auth) = authorization {
-                request.headers.push(TypedHeader::Other(
-                    HeaderName::Authorization,
-                    HeaderValue::Raw(auth.into_bytes()),
-                ));
+                request.headers.push(
+                    rvoip_sip_core::validation::validated_authorization_header(
+                        HeaderName::Authorization,
+                        auth,
+                    )
+                    .map_err(|_| {
+                        ApiError::protocol("SUBSCRIBE Authorization failed wire-safety validation")
+                    })?,
+                );
             }
             // SIP_API_DESIGN_2 §5.2 — append application extras after
             // the stack-managed prefix + dedicated setters (Event,
@@ -832,8 +837,7 @@ impl UnifiedDialogManager {
         pre_register_session_id: Option<String>,
         opts: crate::api::unified::InviteRequestOptions,
     ) -> ApiResult<CallHandle> {
-        use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
-        use rvoip_sip_core::types::TypedHeader;
+        use rvoip_sip_core::types::header::HeaderName;
 
         let mut extra_headers = opts.extra_headers;
         if let Some(auth) = opts.precomputed_authorization {
@@ -842,10 +846,13 @@ impl UnifiedDialogManager {
             // auth-retry path emits.
             extra_headers.insert(
                 0,
-                TypedHeader::Other(
+                rvoip_sip_core::validation::validated_authorization_header(
                     HeaderName::Authorization,
-                    HeaderValue::Raw(auth.into_bytes()),
-                ),
+                    auth,
+                )
+                .map_err(|_| {
+                    ApiError::protocol("INVITE Authorization failed wire-safety validation")
+                })?,
             );
         }
 

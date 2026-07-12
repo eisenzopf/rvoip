@@ -1979,8 +1979,7 @@ impl UnifiedDialogApi {
         options: RegisterRequestOptions,
     ) -> ApiResult<Response> {
         use crate::transaction::client::builders::RegisterBuilder;
-        use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
-        use rvoip_sip_core::types::TypedHeader;
+        use rvoip_sip_core::types::header::HeaderName;
 
         // SIP_API_DESIGN_2 §7.1 — `options.refresh` distinguishes the
         // initial REGISTER from an in-dialog refresh per RFC 3261
@@ -2052,18 +2051,26 @@ impl UnifiedDialogApi {
         }
 
         if let Some(auth) = options.authorization {
-            builder = builder.header(TypedHeader::Other(
+            let authorization = rvoip_sip_core::validation::validated_authorization_header(
                 HeaderName::Authorization,
-                HeaderValue::Raw(auth.into_bytes()),
-            ));
+                auth,
+            )
+            .map_err(|_| {
+                ApiError::protocol("REGISTER Authorization failed wire-safety validation")
+            })?;
+            builder = builder.header(authorization);
             debug!("Added Authorization header to REGISTER");
         }
 
         if let Some(auth) = options.proxy_authorization {
-            builder = builder.header(TypedHeader::Other(
+            let authorization = rvoip_sip_core::validation::validated_authorization_header(
                 HeaderName::ProxyAuthorization,
-                HeaderValue::Raw(auth.into_bytes()),
-            ));
+                auth,
+            )
+            .map_err(|_| {
+                ApiError::protocol("REGISTER Proxy-Authorization failed wire-safety validation")
+            })?;
+            builder = builder.header(authorization);
             debug!("Added Proxy-Authorization header to REGISTER");
         }
 
@@ -2634,7 +2641,7 @@ impl UnifiedDialogApi {
         dialog_id: &DialogId,
         opts: ReInviteRequestOptions,
     ) -> ApiResult<TransactionKey> {
-        use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
+        use rvoip_sip_core::types::header::HeaderName;
         use rvoip_sip_core::types::min_se::MinSE;
         use rvoip_sip_core::types::session_expires::SessionExpires;
         use rvoip_sip_core::types::supported::Supported;
@@ -2645,10 +2652,15 @@ impl UnifiedDialogApi {
         // append both after the stack-managed slice.
         let mut extras: Vec<TypedHeader> = opts.extra_headers.clone();
         if let Some(auth) = opts.precomputed_authorization {
-            extras.push(TypedHeader::Other(
-                HeaderName::Authorization,
-                HeaderValue::Raw(auth.into_bytes()),
-            ));
+            extras.push(
+                rvoip_sip_core::validation::validated_authorization_header(
+                    HeaderName::Authorization,
+                    auth,
+                )
+                .map_err(|_| {
+                    ApiError::protocol("re-INVITE Authorization failed wire-safety validation")
+                })?,
+            );
         }
         if opts.session_timer_refresh {
             // RFC 4028 session-timer refresh on re-INVITE. Defaults match
