@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 pub use rvoip_core_traits::adapter::{
     AdapterEvent, AdapterKind, ConnectionHandle, EndReason, InboundConnectionContext,
     InboundContextError, InboundRoutingHint, InboundSignalingMetadata, OriginateRequest,
-    PlaybackHandle, RejectReason, SignatureHeaders, TransferTarget,
+    PlaybackHandle, RejectReason, SignatureHeaders, TransferTarget, MAX_INBOUND_ROUTING_HINT_BYTES,
 };
 
 /// Core-private adapter-to-Orchestrator event envelope.

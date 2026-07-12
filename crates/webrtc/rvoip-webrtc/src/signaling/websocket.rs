@@ -108,7 +108,6 @@ type WsSink<S> = Arc<AsyncMutex<SplitSink<WebSocketStream<S>, Message>>>;
 struct HandshakeMetadata {
     subprotocols: Vec<String>,
     query_token: Option<String>,
-    response_protocol: Option<String>,
 }
 
 /// Accept WebSocket connections and exchange JSON signaling messages.
@@ -233,7 +232,7 @@ where
         }
     };
 
-    let response_protocol = metadata.response_protocol;
+    let response_protocol = select_response_protocol(&metadata.subprotocols, auth);
     let callback = move |_request: &Request,
                          mut response: HandshakeResponse|
           -> std::result::Result<HandshakeResponse, ErrorResponse> {
@@ -326,16 +325,18 @@ fn parse_handshake_metadata(bytes: &[u8]) -> Result<HandshakeMetadata> {
                 .map(str::to_owned)
         })
     });
-    let response_protocol = subprotocols
-        .iter()
-        .find(|value| !value.starts_with("token."))
-        .cloned()
-        .or_else(|| (!subprotocols.is_empty()).then(|| "rvoip.webrtc.v1".to_string()));
     Ok(HandshakeMetadata {
         subprotocols,
         query_token,
-        response_protocol,
     })
+}
+
+fn select_response_protocol(subprotocols: &[String], auth: &dyn WsAuthHook) -> Option<String> {
+    subprotocols
+        .iter()
+        .find(|value| !auth.subprotocol_is_private(value))
+        .cloned()
+        .or_else(|| (!subprotocols.is_empty()).then(|| "rvoip.webrtc.v1".to_string()))
 }
 
 async fn write_auth_rejection<S: AsyncWrite + Unpin>(
@@ -683,7 +684,38 @@ mod tests {
             vec!["rvoip.webrtc.v1", "token.secret"]
         );
         assert_eq!(
-            metadata.response_protocol.as_deref(),
+            select_response_protocol(&metadata.subprotocols, &AnonymousAuth).as_deref(),
+            Some("rvoip.webrtc.v1")
+        );
+    }
+
+    #[test]
+    fn private_auth_and_attachment_subprotocols_are_never_echoed() {
+        struct PrivateHintAuth;
+
+        #[async_trait::async_trait]
+        impl WsAuthHook for PrivateHintAuth {
+            async fn authenticate(
+                &self,
+                _subprotocols: &[String],
+                _query_token: Option<&str>,
+                _peer_addr: SocketAddr,
+            ) -> std::result::Result<AuthContext, AuthRejection> {
+                unreachable!()
+            }
+
+            fn subprotocol_is_private(&self, value: &str) -> bool {
+                value.starts_with("token.") || value.starts_with("bridgefu.attach.")
+            }
+        }
+
+        let requested = vec![
+            "bridgefu.attach.private".into(),
+            "token.private".into(),
+            "rvoip.webrtc.v1".into(),
+        ];
+        assert_eq!(
+            select_response_protocol(&requested, &PrivateHintAuth).as_deref(),
             Some("rvoip.webrtc.v1")
         );
     }

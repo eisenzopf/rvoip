@@ -138,6 +138,7 @@ pub use adapter::{
     AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason,
     InboundConnectionContext, InboundContextError, InboundRoutingHint, InboundSignalingMetadata,
     OriginateRequest, PlaybackHandle, RejectReason, SignatureHeaders, TransferTarget,
+    MAX_INBOUND_ROUTING_HINT_BYTES,
 };
 pub use bridge::{BridgeError, BridgeHandle, BridgeManager};
 pub use broadcast::{
