@@ -12,6 +12,12 @@ categories.workspace = true
 keywords.workspace = true
 description = "MOQT/MSF/LOC broadcast adapter for the rvoip media graph"
 
+[features]
+default = []
+# Never enable in production artifacts. This exposes server-auth-only and
+# certificate-verification-disabled relay client construction for local tests.
+insecure-development = []
+
 [dependencies]
 rvoip-core-traits.workspace = true
 moq-transport.workspace = true
@@ -24,10 +30,12 @@ rustls-native-certs = "0.7"
 async-trait.workspace = true
 bytes.workspace = true
 chrono.workspace = true
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 

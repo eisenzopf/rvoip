@@ -320,9 +320,9 @@ tokio-util = { version = "0.7", features = ["codec", "compat"] }
 metrics = "0.23"
 # Reviewed MOQT draft-19 fork. Keep every moq-rs crate on the same immutable
 # revision; dependency updates are manual and require the compatibility suite.
-moq-transport = { git = "https://github.com/eisenzopf/moq-rs", rev = "f3c29d319766061b013ed683552a26ff8b7e5a2f" }
-moq-native-ietf = { git = "https://github.com/eisenzopf/moq-rs", rev = "f3c29d319766061b013ed683552a26ff8b7e5a2f" }
-moq-relay-ietf = { git = "https://github.com/eisenzopf/moq-rs", rev = "f3c29d319766061b013ed683552a26ff8b7e5a2f" }
+moq-transport = { git = "https://github.com/eisenzopf/moq-rs", rev = "f6159d2daf4e7aa6caccefbaf225070ff55bd869" }
+moq-native-ietf = { git = "https://github.com/eisenzopf/moq-rs", rev = "f6159d2daf4e7aa6caccefbaf225070ff55bd869" }
+moq-relay-ietf = { git = "https://github.com/eisenzopf/moq-rs", rev = "f6159d2daf4e7aa6caccefbaf225070ff55bd869" }
 # rvoip-websocket signaling + media. tokio-tungstenite for the WebSocket
 # transport, webrtc for the co-located PeerConnection media plane.
 # webrtc is pre-1.0 and API-volatile — pinned strictly. Bumping requires

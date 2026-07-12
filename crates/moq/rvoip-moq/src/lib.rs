@@ -24,16 +24,18 @@ pub use compatibility::{
     MoqCompatibility, MoqCompatibilityError, MoqProtocolVersion, LOC_DRAFT, LOC_DRAFT_NUMBER,
     MOQT_DRAFT, MOQT_DRAFT_NUMBER, MSF_DRAFT, MSF_DRAFT_NUMBER, TARGET_MOQT_DRAFT,
 };
-pub use error::MoqError;
+pub use error::{MoqError, MoqRelayFailure};
 pub use loc::{
     validate_opus_20ms_mono, LocAudioObject, LocError, LocOpusPacketizer, LocPacketizedFrame,
     LocProperty, LocTimestampDiscontinuity, LOC_TIMESCALE_PROPERTY, LOC_TIMESTAMP_PROPERTY,
     OPUS_CHANNELS, OPUS_FRAME_DURATION_MS, OPUS_RTP_TIMESTAMP_STEP, OPUS_SAMPLE_RATE,
 };
 pub use namespace::{MoqNamespace, MoqNamespaceError, NamespaceComponent};
+#[cfg(feature = "insecure-development")]
+pub use publisher::MoqRelayDevelopmentMode;
 pub use publisher::{
-    MoqBroadcastPublisher, MoqPublisherConfig, MoqRelayClient, MoqRelayPublication,
-    MoqRelayTlsConfig,
+    MoqBroadcastPublisher, MoqPublisherConfig, MoqRelayClient, MoqRelayConnectionPolicy,
+    MoqRelayHealthIssue, MoqRelayHealthSnapshot, MoqRelayPublication, MoqRelayTlsConfig,
 };
 pub use replay::{
     BoundedMemoryMoqReplayStore, MoqReplayError, MoqSessionId, MoqTokenBinding,
