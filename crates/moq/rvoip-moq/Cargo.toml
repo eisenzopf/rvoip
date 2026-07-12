@@ -44,8 +44,16 @@ sha2.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+jsonwebtoken = "9.3"
+rand.workspace = true
 rcgen.workspace = true
+tempfile = "3.14"
+time = { version = "0.3.47", features = ["std"] }
 tracing-subscriber.workspace = true
+
+[[example]]
+name = "moq_browser_e2e_server"
+required-features = ["relay-runtime"]
 
 [lints]
 workspace = true
