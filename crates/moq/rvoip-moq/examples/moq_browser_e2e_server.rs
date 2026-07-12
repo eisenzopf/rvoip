@@ -439,7 +439,7 @@ async fn main() -> HarnessResult<()> {
     let ready = ReadyDescriptor {
         kind: "rvoip-moq-browser-e2e-ready",
         endpoint: format!(
-            "https://localhost:{}/{namespace}",
+            "https://127.0.0.1:{}/{namespace}",
             subscriber_address.port()
         ),
         namespace: &namespace,
