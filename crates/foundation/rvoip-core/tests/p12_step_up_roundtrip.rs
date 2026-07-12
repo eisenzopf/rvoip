@@ -81,23 +81,21 @@ impl ConnectionAdapter for StepUpAdapter {
         AdapterKind::Substrate
     }
     async fn originate(&self, request: OriginateRequest) -> RvResult<ConnectionHandle> {
-        Ok(ConnectionHandle {
-            connection: Connection {
-                id: ConnectionId::new(),
-                session_id: request.session_id,
-                participant_id: request.participant_id,
-                transport: Transport::Quic,
-                direction: Direction::Outbound,
-                state: ConnectionState::Connecting,
-                capabilities: request.capabilities,
-                negotiated_codecs: NegotiatedCodecs::default(),
-                streams: vec![],
-                messaging_enabled: false,
-                transport_handle: TransportHandle(Arc::new(())),
-                opened_at: Utc::now(),
-                closed_at: None,
-            },
-        })
+        Ok(ConnectionHandle::new(Connection {
+            id: ConnectionId::new(),
+            session_id: request.session_id,
+            participant_id: request.participant_id,
+            transport: Transport::Quic,
+            direction: Direction::Outbound,
+            state: ConnectionState::Connecting,
+            capabilities: request.capabilities,
+            negotiated_codecs: NegotiatedCodecs::default(),
+            streams: vec![],
+            messaging_enabled: false,
+            transport_handle: TransportHandle(Arc::new(())),
+            opened_at: Utc::now(),
+            closed_at: None,
+        }))
     }
     async fn accept(&self, _c: ConnectionId) -> RvResult<()> {
         Ok(())

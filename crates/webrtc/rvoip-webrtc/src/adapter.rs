@@ -2241,7 +2241,7 @@ impl ConnectionAdapter for WebRtcAdapter {
         connection.session_id = request.session_id;
         connection.participant_id = request.participant_id;
 
-        Ok(ConnectionHandle { connection })
+        Ok(ConnectionHandle::new(connection))
     }
 
     async fn activate_outbound(&self, conn: ConnectionId) -> RvoipResult<()> {
@@ -2988,6 +2988,7 @@ mod inbound_hardening_tests {
                 direction: Direction::Outbound,
                 capabilities: adapter.capabilities(),
                 transport: None,
+                context: Default::default(),
             })
             .await
             .expect("outbound route");

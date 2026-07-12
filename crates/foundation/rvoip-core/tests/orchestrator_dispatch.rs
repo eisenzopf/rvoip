@@ -5,8 +5,9 @@ use chrono::{Duration as ChronoDuration, Utc};
 use rvoip_core::adapter::{
     AdapterEvent, AdapterKind, AdapterLifecycleCapabilities, AdapterLifecycleSink,
     AdapterLifecycleSinkSlot, ConnectionAdapter, ConnectionHandle, EndReason,
-    InboundConnectionContext, InboundRoutingHint, InboundSignalingMetadata,
-    OrchestratorAdapterEvent, OriginateRequest, RejectReason, SignatureHeaders, TransferTarget,
+    ExternalConnectionReference, InboundConnectionContext, InboundRoutingHint,
+    InboundSignalingMetadata, OrchestratorAdapterEvent, OriginateContext, OriginateRequest,
+    OutboundActivation, RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::commands::InboundAction;
@@ -44,6 +45,7 @@ struct CallCounts {
     transfer: AtomicUsize,
     dtmf: AtomicUsize,
     activate: AtomicUsize,
+    peer_visible_signaling: AtomicUsize,
     reject_reasons: Mutex<Vec<RejectReason>>,
 }
 
@@ -65,6 +67,9 @@ struct StubAdapter {
     activate_behavior: AtomicUsize,
     activate_emits_connected: AtomicBool,
     activate_barriers: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
+    activation_receipt: Mutex<OutboundActivation>,
+    provisional_receipt: Mutex<Option<OutboundActivation>>,
+    originate_context: Mutex<OriginateContext>,
     transfer_behavior: AtomicUsize,
     next_outbound_id: Mutex<Option<ConnectionId>>,
 }
@@ -137,6 +142,9 @@ impl StubAdapter {
             activate_behavior: AtomicUsize::new(COMMAND_SUCCEED),
             activate_emits_connected: AtomicBool::new(false),
             activate_barriers: Mutex::new(None),
+            activation_receipt: Mutex::new(OutboundActivation::default()),
+            provisional_receipt: Mutex::new(None),
+            originate_context: Mutex::new(OriginateContext::default()),
             transfer_behavior: AtomicUsize::new(COMMAND_SUCCEED),
             next_outbound_id: Mutex::new(None),
         });
@@ -174,6 +182,18 @@ impl StubAdapter {
         *self.activate_barriers.lock().unwrap() =
             Some((Arc::clone(&entered), Arc::clone(&release)));
         (entered, release)
+    }
+
+    fn set_activation_receipt(&self, activation: OutboundActivation) {
+        *self.activation_receipt.lock().unwrap() = activation;
+    }
+
+    fn set_provisional_receipt(&self, activation: OutboundActivation) {
+        *self.provisional_receipt.lock().unwrap() = Some(activation);
+    }
+
+    fn originate_context(&self) -> OriginateContext {
+        self.originate_context.lock().unwrap().clone()
     }
 
     fn set_transfer_behavior(&self, behavior: usize) {
@@ -261,6 +281,7 @@ impl ConnectionAdapter for StubAdapter {
         if self.originate_behavior.load(Ordering::SeqCst) == COMMAND_FAIL {
             return Err(RvoipError::InvalidState("stub originate failure"));
         }
+        *self.originate_context.lock().unwrap() = request.context.clone();
         let conn = Connection {
             id: self
                 .next_outbound_id
@@ -293,10 +314,20 @@ impl ConnectionAdapter for StubAdapter {
                     .await
             );
         }
-        Ok(ConnectionHandle { connection: conn })
+        let mut handle = ConnectionHandle::new(conn);
+        if let Some(provisional) = self.provisional_receipt.lock().unwrap().take() {
+            handle.attach_outbound_activation(provisional);
+        }
+        Ok(handle)
     }
     async fn activate_outbound(&self, conn: ConnectionId) -> Result<()> {
         self.counts.activate.fetch_add(1, Ordering::SeqCst);
+        // This counter models the first peer-visible protocol command. A
+        // staged adapter may allocate local state in `originate`, but only
+        // this activation hook may cross that external side-effect boundary.
+        self.counts
+            .peer_visible_signaling
+            .fetch_add(1, Ordering::SeqCst);
         if self.activate_emits_connected.load(Ordering::SeqCst) {
             self.events
                 .send(
@@ -331,6 +362,13 @@ impl ConnectionAdapter for StubAdapter {
             COMMAND_HANG => std::future::pending().await,
             _ => unreachable!("unknown activation behavior"),
         }
+    }
+    async fn activate_outbound_with_receipt(
+        &self,
+        conn: ConnectionId,
+    ) -> Result<OutboundActivation> {
+        self.activate_outbound(conn).await?;
+        Ok(self.activation_receipt.lock().unwrap().clone())
     }
     async fn accept(&self, conn: ConnectionId) -> Result<()> {
         self.counts.accept.fetch_add(1, Ordering::SeqCst);
@@ -1532,7 +1570,13 @@ fn outbound_request(session_id: SessionId) -> OriginateRequest {
         direction: Direction::Outbound,
         capabilities: CapabilityDescriptor::default(),
         transport: Some(Transport::Sip),
+        context: Default::default(),
     }
+}
+
+#[derive(Debug)]
+struct StubOriginateOptions {
+    attachment_token: String,
 }
 
 #[tokio::test]
@@ -1551,6 +1595,7 @@ async fn prepared_outbound_is_invisible_until_commit_then_activates_once() {
     assert_eq!(prepared.transport(), Transport::Sip);
     assert_eq!(orchestrator.session_of(&connection_id), None);
     assert_eq!(counts.activate.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.peer_visible_signaling.load(Ordering::SeqCst), 0);
     assert!(matches!(
         orchestrator
             .end_connection(connection_id.clone(), EndReason::Normal)
@@ -1567,14 +1612,134 @@ async fn prepared_outbound_is_invisible_until_commit_then_activates_once() {
 
     let handle = prepared.commit().await.unwrap();
     assert_eq!(handle.connection.id, connection_id);
+    assert!(handle.outbound_activation().is_empty());
     assert_eq!(orchestrator.session_of(&connection_id), Some(session_id));
     assert_eq!(counts.activate.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.peer_visible_signaling.load(Ordering::SeqCst), 1);
     assert!(matches!(
         tokio::time::timeout(Duration::from_secs(1), events.recv())
             .await
             .unwrap()
             .unwrap(),
         Event::ConnectionOutbound { connection_id: id, .. } if id == connection_id
+    ));
+}
+
+#[tokio::test]
+async fn prepared_outbound_context_and_receipt_are_typed_redacted_and_commit_scoped() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut operational = orchestrator.install_operational_event_stream(4).unwrap();
+    let (adapter, _, counts) = StubAdapter::new();
+    adapter.set_activate_emits_connected();
+    adapter.set_provisional_receipt(OutboundActivation::with_external_reference(
+        ExternalConnectionReference::new("stub.provisional", "must-never-escape").unwrap(),
+    ));
+    adapter.set_activation_receipt(OutboundActivation::with_external_reference(
+        ExternalConnectionReference::new("stub.connection-id", "committed-external-id").unwrap(),
+    ));
+    orchestrator.register(adapter.clone()).unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+    let request = OriginateRequest::new(
+        session_id,
+        ParticipantId::new(),
+        "sip:private-target@example.invalid",
+        Direction::Outbound,
+        CapabilityDescriptor::default(),
+    )
+    .with_transport(Transport::Sip)
+    .with_context(StubOriginateOptions {
+        attachment_token: "private-attachment-token".into(),
+    });
+
+    let prepared = orchestrator
+        .prepare_outbound_connection(request)
+        .await
+        .unwrap();
+    let observed = adapter.originate_context();
+    assert_eq!(
+        observed
+            .downcast_ref::<StubOriginateOptions>()
+            .unwrap()
+            .attachment_token,
+        "private-attachment-token"
+    );
+    assert!(observed.downcast_ref::<String>().is_none());
+    let prepared_debug = format!("{prepared:?}");
+    assert!(!prepared_debug.contains("private-attachment-token"));
+    assert!(!prepared_debug.contains("must-never-escape"));
+    assert!(!prepared_debug.contains("committed-external-id"));
+
+    let handle = prepared.commit().await.unwrap();
+    assert_eq!(counts.activate.load(Ordering::SeqCst), 1);
+    let connected = operational.recv().await.unwrap();
+    assert_eq!(connected.connection_id, handle.connection.id);
+    assert!(matches!(connected.kind, OperationalEventKind::Connected));
+    let references = handle.outbound_activation().external_references();
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0].kind(), "stub.connection-id");
+    assert_eq!(references[0].expose_secret(), "committed-external-id");
+    assert_ne!(references[0].expose_secret(), "must-never-escape");
+    let handle_debug = format!("{handle:?}");
+    assert!(!handle_debug.contains("must-never-escape"));
+    assert!(!handle_debug.contains("committed-external-id"));
+    assert!(handle_debug.contains("external_reference_count: 1"));
+
+    orchestrator.drain_prepared_outbound_connections().await;
+    assert_eq!(counts.end.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn legacy_outbound_adapter_receives_empty_activation_receipt_by_default() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let (adapter, _, counts) = StubAdapter::new_for_with_capability(Transport::Sip, false);
+    orchestrator.register(adapter).unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+
+    let handle = orchestrator
+        .originate_connection(outbound_request(session_id))
+        .await
+        .unwrap();
+    assert!(handle.outbound_activation().is_empty());
+    assert_eq!(counts.activate.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn legacy_receiver_loss_during_activation_withholds_receipt_and_compensates() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let operational = orchestrator.install_operational_event_stream(4).unwrap();
+    let (adapter, _, counts) = StubAdapter::new_for_with_capability(Transport::Sip, false);
+    let connection_id = ConnectionId::new();
+    adapter.set_next_outbound_id(connection_id.clone());
+    adapter.set_activation_receipt(OutboundActivation::with_external_reference(
+        ExternalConnectionReference::new("stub.connection-id", "must-not-escape").unwrap(),
+    ));
+    let (activation_entered, activation_release) = adapter.install_activate_barriers();
+    orchestrator.register(adapter).unwrap();
+    let session_id = start_voice_session(&orchestrator).await;
+
+    let originate = {
+        let orchestrator = Arc::clone(&orchestrator);
+        tokio::spawn(async move {
+            orchestrator
+                .originate_connection(outbound_request(session_id))
+                .await
+        })
+    };
+    activation_entered.wait().await;
+    drop(operational);
+    activation_release.wait().await;
+
+    let error = originate.await.unwrap().unwrap_err();
+    assert!(matches!(
+        error,
+        RvoipError::InvalidState("authoritative operational event stream is degraded")
+    ));
+    assert!(!format!("{error:?}").contains("must-not-escape"));
+    wait_for_count(&counts.end, 1).await;
+    assert_eq!(orchestrator.session_of(&connection_id), None);
+    assert!(matches!(
+        orchestrator.connection_transport(&connection_id),
+        Err(RvoipError::ConnectionNotFound(_))
     ));
 }
 
@@ -1611,6 +1776,7 @@ async fn prepared_outbound_explicit_abort_and_drop_fail_closed_before_bind() {
     ));
     assert_eq!(orchestrator.session_of(&dropped_id), None);
     assert_eq!(counts.activate.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.peer_visible_signaling.load(Ordering::SeqCst), 0);
     assert!(
         tokio::time::timeout(Duration::from_millis(30), events.recv())
             .await
@@ -3918,6 +4084,7 @@ async fn operational_health_subscription_is_immediate_and_detects_receiver_loss(
                 direction: Direction::Outbound,
                 capabilities: CapabilityDescriptor::default(),
                 transport: Some(Transport::Sip),
+                context: Default::default(),
             })
             .await,
         Err(RvoipError::InvalidState(
@@ -4283,6 +4450,7 @@ async fn receiver_loss_is_sticky_fail_closed_but_terminal_cleanup_converges() {
             direction: Direction::Outbound,
             capabilities: CapabilityDescriptor::default(),
             transport: Some(Transport::Sip),
+            context: Default::default(),
         })
         .await;
     assert!(matches!(

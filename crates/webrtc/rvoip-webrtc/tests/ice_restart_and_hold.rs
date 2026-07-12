@@ -36,6 +36,7 @@ async fn restart_ice_produces_new_ufrag_on_offerer() {
             direction: Direction::Outbound,
             capabilities: server.capabilities(),
             transport: None,
+            context: Default::default(),
         })
         .await
         .expect("originate");
@@ -77,6 +78,7 @@ async fn hold_resume_updates_local_sdp_when_renegotiation_enabled() {
             direction: Direction::Outbound,
             capabilities: server.capabilities(),
             transport: None,
+            context: Default::default(),
         })
         .await
         .expect("originate");

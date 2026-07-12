@@ -98,6 +98,31 @@ review. It must not be submitted upstream without explicit approval.
 
 ## Signaling authentication and lifecycle
 
+### Outbound originate context and activation receipts
+
+`OriginateRequest` now carries an `OriginateContext`. This is an intentional
+pre-1.0 source break for raw struct literals: add
+`context: OriginateContext::default()` or migrate to
+`OriginateRequest::new(...).with_transport(...).with_context(adapter_options)`.
+The context is an opaque, cloneable type-erased value. Transport crates define
+their own options type and recover it with `downcast_ref` or `downcast_arc`;
+core never depends on SIP, WebRTC, Amazon, or provider option types.
+
+`ConnectionHandle` now keeps its activation receipt private, so adapter-owned
+`ConnectionHandle { connection }` literals are also an intentional pre-1.0
+source break. Adapters must return `ConnectionHandle::new(connection)`; only
+core attaches the validated post-activation receipt.
+
+Adapters continue to implement the existing `activate_outbound` hook unless
+they have an external identifier to return. Such adapters override
+`activate_outbound_with_receipt`, perform activation exactly once, and return
+a bounded `OutboundActivation` containing validated, redacted
+`ExternalConnectionReference` values. Core attaches that receipt to the final
+`ConnectionHandle` only after activation and every post-activation liveness,
+ownership, event-stream, and supervisor check succeeds. Debug output and
+tracing omit adapter context, target URI, and external identifier values.
+Existing adapters receive an empty receipt through the compatibility default.
+
 WebRTC signaling now authenticates WS/WSS before the HTTP 101 response and
 uses the same issuer + tenant + subject ownership check for WHIP, WHEP, WS,
 and WSS mutations. Outbound routes that will be exposed through authenticated

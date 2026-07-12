@@ -1061,6 +1061,7 @@ impl AppState {
                 direction: Direction::Outbound,
                 capabilities: CapabilityDescriptor::default(),
                 transport: Some(CoreTransport::Sip),
+                context: Default::default(),
             })
             .await?;
         let employee_connection = handle.connection.id.clone();

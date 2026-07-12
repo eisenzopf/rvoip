@@ -41,6 +41,7 @@ async fn ws_inbound_offer_returns_answer() {
             direction: Direction::Outbound,
             capabilities: offerer.capabilities(),
             transport: None,
+            context: Default::default(),
         })
         .await
         .expect("originate");
@@ -109,6 +110,7 @@ async fn ws_offer_with_connection_id_renegotiates_existing_connection() {
             direction: Direction::Outbound,
             capabilities: offerer.capabilities(),
             transport: None,
+            context: Default::default(),
         })
         .await
         .expect("originate");
@@ -182,6 +184,7 @@ async fn ws_outbound_answer_routes_by_connection_id() {
             direction: Direction::Outbound,
             capabilities: adapter.capabilities(),
             transport: None,
+            context: Default::default(),
         })
         .await
         .expect("originate");

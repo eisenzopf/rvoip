@@ -361,7 +361,7 @@ impl ConnectionAdapter for UctpWtAdapter {
             closed_at: None,
         };
 
-        Ok(ConnectionHandle { connection })
+        Ok(ConnectionHandle::new(connection))
     }
 
     async fn accept(&self, conn: ConnectionId) -> RvoipResult<()> {

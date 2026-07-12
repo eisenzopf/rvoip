@@ -614,6 +614,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         direction: Direction::Outbound,
         capabilities: CapabilityDescriptor::default(),
         transport: Some(Transport::Sip),
+        context: Default::default(),
     };
 
     let sip_originate_result = orch_for_bridge.originate_connection(originate).await;
@@ -1353,6 +1354,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 direction: Direction::Outbound,
                 capabilities: CapabilityDescriptor::default(),
                 transport: Some(Transport::Sip),
+                context: Default::default(),
             };
             orch_for_bridge
                 .originate_connection(req)

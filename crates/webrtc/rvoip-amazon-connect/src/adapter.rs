@@ -710,7 +710,7 @@ impl ConnectionAdapter for AmazonConnectAdapter {
             opened_at: chrono::Utc::now(),
             closed_at: None,
         };
-        Ok(ConnectionHandle { connection })
+        Ok(ConnectionHandle::new(connection))
     }
 
     async fn accept(&self, _conn: ConnectionId) -> RvoipResult<()> {

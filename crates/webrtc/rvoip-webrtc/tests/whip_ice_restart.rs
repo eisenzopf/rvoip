@@ -38,6 +38,7 @@ async fn whip_patch_ice_restart_returns_new_answer() {
             direction: Direction::Outbound,
             capabilities: offerer.capabilities(),
             transport: None,
+            context: Default::default(),
         })
         .await
         .expect("originate");

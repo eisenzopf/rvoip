@@ -408,7 +408,7 @@ impl ConnectionAdapter for UctpQuicAdapter {
             closed_at: None,
         };
 
-        Ok(ConnectionHandle { connection })
+        Ok(ConnectionHandle::new(connection))
     }
 
     async fn accept(&self, conn: ConnectionId) -> RvoipResult<()> {

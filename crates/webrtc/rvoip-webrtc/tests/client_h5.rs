@@ -41,6 +41,7 @@ async fn ws_signaler_send_answer_routes_by_connection_id() {
             direction: rvoip_core::connection::Direction::Outbound,
             capabilities: caps,
             transport: None,
+            context: Default::default(),
         },
     )
     .await

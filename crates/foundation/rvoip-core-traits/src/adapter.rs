@@ -4,7 +4,9 @@ use crate::data::DataMessage;
 use crate::identity::{AuthenticatedPrincipal, IdentityAssurance, Jwk, PrincipalOwnershipKey};
 use crate::ids::{ConnectionId, ParticipantId, PlaybackId, SessionId};
 use crate::stream::QualitySnapshot;
+use std::any::Any;
 use std::fmt;
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::oneshot;
 use zeroize::Zeroize;
@@ -19,6 +21,34 @@ pub const MAX_INBOUND_METADATA_NAME_BYTES: usize = 128;
 pub const MAX_INBOUND_METADATA_VALUE_BYTES: usize = 4_096;
 /// Maximum aggregate UTF-8 size of inbound metadata names and values.
 pub const MAX_INBOUND_METADATA_BYTES: usize = 16 * 1_024;
+/// Maximum number of adapter-owned external identifiers on one activation.
+pub const MAX_EXTERNAL_CONNECTION_REFERENCES: usize = 16;
+/// Maximum UTF-8 size of an external identifier namespace.
+pub const MAX_EXTERNAL_REFERENCE_KIND_BYTES: usize = 64;
+/// Maximum UTF-8 size of one external identifier value.
+pub const MAX_EXTERNAL_REFERENCE_VALUE_BYTES: usize = 4_096;
+
+/// Validation failure for an adapter-owned external connection reference.
+///
+/// Variants deliberately contain no adapter-provided text so formatting an
+/// error cannot disclose identifier values.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum ExternalConnectionReferenceError {
+    #[error("the external reference kind is empty")]
+    EmptyKind,
+    #[error("the external reference kind is too large")]
+    KindTooLarge,
+    #[error("the external reference kind is not a valid token")]
+    InvalidKind,
+    #[error("the external reference value is empty")]
+    EmptyValue,
+    #[error("the external reference value is too large")]
+    ValueTooLarge,
+    #[error("the external reference value contains forbidden control characters")]
+    InvalidValue,
+    #[error("there are too many external connection references")]
+    TooManyReferences,
+}
 
 /// Validation failure for adapter-supplied inbound connection context.
 ///
@@ -309,7 +339,62 @@ pub enum AdapterKind {
     Interop,
 }
 
-#[derive(Clone, Debug)]
+/// Opaque adapter-owned options for one outbound originate operation.
+///
+/// Core transports this value without inspecting it. An adapter defines its
+/// own context type and recovers it with [`Self::downcast_ref`] or
+/// [`Self::downcast_arc`]. The concrete type and value are intentionally
+/// omitted from `Debug`; this type implements neither `Display` nor
+/// serialization.
+#[derive(Clone, Default)]
+pub struct OriginateContext {
+    inner: Option<Arc<dyn Any + Send + Sync>>,
+}
+
+impl OriginateContext {
+    /// Wrap adapter-owned, immutable originate options.
+    pub fn new<T>(value: T) -> Self
+    where
+        T: Any + Send + Sync,
+    {
+        Self {
+            inner: Some(Arc::new(value)),
+        }
+    }
+
+    /// Whether this request carries no adapter-owned options.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_none()
+    }
+
+    /// Borrow the adapter-owned options when their concrete type matches.
+    pub fn downcast_ref<T>(&self) -> Option<&T>
+    where
+        T: Any + Send + Sync,
+    {
+        self.inner.as_deref()?.downcast_ref::<T>()
+    }
+
+    /// Clone the shared adapter-owned options when their concrete type
+    /// matches. A failed downcast does not consume or reveal the context.
+    pub fn downcast_arc<T>(&self) -> Option<Arc<T>>
+    where
+        T: Any + Send + Sync,
+    {
+        Arc::clone(self.inner.as_ref()?).downcast::<T>().ok()
+    }
+}
+
+impl fmt::Debug for OriginateContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OriginateContext")
+            .field("present", &self.inner.is_some())
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct OriginateRequest {
     pub session_id: SessionId,
     pub participant_id: ParticipantId,
@@ -321,11 +406,232 @@ pub struct OriginateRequest {
     /// this transport. When `None`, the "first registered adapter"
     /// fallback applies (single-adapter deployments).
     pub transport: Option<Transport>,
+    /// Opaque, typed options interpreted only by the selected adapter.
+    pub context: OriginateContext,
 }
 
-#[derive(Clone, Debug)]
+impl OriginateRequest {
+    /// Build a transport-neutral outbound request with no adapter context.
+    /// Select a transport with [`Self::with_transport`] when more than one
+    /// adapter is registered.
+    pub fn new(
+        session_id: SessionId,
+        participant_id: ParticipantId,
+        target: impl Into<String>,
+        direction: Direction,
+        capabilities: CapabilityDescriptor,
+    ) -> Self {
+        Self {
+            session_id,
+            participant_id,
+            target: target.into(),
+            direction,
+            capabilities,
+            transport: None,
+            context: OriginateContext::default(),
+        }
+    }
+
+    /// Select the adapter transport for this request.
+    pub fn with_transport(mut self, transport: Transport) -> Self {
+        self.transport = Some(transport);
+        self
+    }
+
+    /// Attach options owned and interpreted by the selected adapter.
+    pub fn with_context<T>(mut self, context: T) -> Self
+    where
+        T: Any + Send + Sync,
+    {
+        self.context = OriginateContext::new(context);
+        self
+    }
+
+    /// Attach an already type-erased adapter context.
+    pub fn with_originate_context(mut self, context: OriginateContext) -> Self {
+        self.context = context;
+        self
+    }
+}
+
+impl fmt::Debug for OriginateRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OriginateRequest")
+            .field("session_id", &self.session_id)
+            .field("participant_id", &self.participant_id)
+            .field("target", &"[redacted]")
+            .field("direction", &self.direction)
+            .field("capabilities", &self.capabilities)
+            .field("transport", &self.transport)
+            .field("context_present", &!self.context.is_empty())
+            .finish()
+    }
+}
+
+/// A stable external identifier learned while activating an outbound route.
+///
+/// The identifier namespace is adapter-owned (for example an adapter may use
+/// `sip.call-id`). Core treats both namespace and value as opaque. The value
+/// is deliberately available only through [`Self::expose_secret`], and
+/// formatting never reveals either component.
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub struct ExternalConnectionReference {
+    kind: Arc<str>,
+    value: Arc<str>,
+}
+
+impl ExternalConnectionReference {
+    pub fn new(
+        kind: impl Into<Arc<str>>,
+        value: impl Into<Arc<str>>,
+    ) -> Result<Self, ExternalConnectionReferenceError> {
+        let kind = kind.into();
+        if kind.is_empty() {
+            return Err(ExternalConnectionReferenceError::EmptyKind);
+        }
+        if kind.len() > MAX_EXTERNAL_REFERENCE_KIND_BYTES {
+            return Err(ExternalConnectionReferenceError::KindTooLarge);
+        }
+        let mut kind_bytes = kind.bytes();
+        if !kind_bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+            || !kind_bytes
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        {
+            return Err(ExternalConnectionReferenceError::InvalidKind);
+        }
+
+        let value = value.into();
+        if value.is_empty() {
+            return Err(ExternalConnectionReferenceError::EmptyValue);
+        }
+        if value.len() > MAX_EXTERNAL_REFERENCE_VALUE_BYTES {
+            return Err(ExternalConnectionReferenceError::ValueTooLarge);
+        }
+        if value.chars().any(char::is_control) {
+            return Err(ExternalConnectionReferenceError::InvalidValue);
+        }
+        Ok(Self { kind, value })
+    }
+
+    /// Adapter-owned identifier namespace. Do not derive routing policy from
+    /// this untrusted string without an exact allowlist.
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    /// Explicitly reveal the external identifier to its durable owner.
+    /// Avoid formatting or logging the returned value.
+    pub fn expose_secret(&self) -> &str {
+        &self.value
+    }
+}
+
+impl fmt::Debug for ExternalConnectionReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ExternalConnectionReference([redacted])")
+    }
+}
+
+/// Adapter receipt produced only after outbound activation succeeds.
+///
+/// A receipt may contain more than one adapter-owned external identifier.
+/// Core retains it unchanged and does not interpret identifier namespaces.
+#[derive(Clone, Default, Eq, PartialEq)]
+pub struct OutboundActivation {
+    external_references: Arc<[ExternalConnectionReference]>,
+}
+
+impl OutboundActivation {
+    pub fn new(
+        external_references: impl IntoIterator<Item = ExternalConnectionReference>,
+    ) -> Result<Self, ExternalConnectionReferenceError> {
+        let mut bounded = Vec::with_capacity(MAX_EXTERNAL_CONNECTION_REFERENCES);
+        for external_reference in external_references {
+            if bounded.len() == MAX_EXTERNAL_CONNECTION_REFERENCES {
+                return Err(ExternalConnectionReferenceError::TooManyReferences);
+            }
+            bounded.push(external_reference);
+        }
+        Ok(Self {
+            external_references: bounded.into(),
+        })
+    }
+
+    pub fn with_external_reference(external_reference: ExternalConnectionReference) -> Self {
+        Self {
+            external_references: Arc::from([external_reference]),
+        }
+    }
+
+    pub fn external_references(&self) -> &[ExternalConnectionReference] {
+        &self.external_references
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.external_references.is_empty()
+    }
+}
+
+impl fmt::Debug for OutboundActivation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OutboundActivation")
+            .field("external_reference_count", &self.external_references.len())
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct ConnectionHandle {
     pub connection: Connection,
+    outbound_activation: OutboundActivation,
+}
+
+impl ConnectionHandle {
+    /// Construct the provisional handle returned by
+    /// `ConnectionAdapter::originate`.
+    pub fn new(connection: Connection) -> Self {
+        Self {
+            connection,
+            outbound_activation: OutboundActivation::default(),
+        }
+    }
+
+    /// Receipt made visible by core only after outbound activation and all
+    /// post-activation liveness checks complete.
+    pub fn outbound_activation(&self) -> &OutboundActivation {
+        &self.outbound_activation
+    }
+
+    /// Core-only activation receipt attachment. This is public because
+    /// `rvoip-core` and `rvoip-core-traits` are separate crates; adapters
+    /// should construct provisional handles with [`Self::new`].
+    #[doc(hidden)]
+    pub fn attach_outbound_activation(&mut self, activation: OutboundActivation) {
+        self.outbound_activation = activation;
+    }
+
+    /// Discard any receipt attached before core has activated the route.
+    #[doc(hidden)]
+    pub fn clear_outbound_activation(&mut self) {
+        self.outbound_activation = OutboundActivation::default();
+    }
+}
+
+impl fmt::Debug for ConnectionHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConnectionHandle")
+            .field("connection", &self.connection)
+            .field(
+                "external_reference_count",
+                &self.outbound_activation.external_references.len(),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -550,6 +856,114 @@ mod tests {
         assert_eq!(
             InboundSignalingMetadata::new([("x-safe", "unsafe\r\nvalue")]).unwrap_err(),
             InboundContextError::InvalidMetadataValue
+        );
+    }
+
+    #[derive(Debug)]
+    struct AdapterOwnedOptions {
+        endpoint: String,
+        bearer: String,
+    }
+
+    #[test]
+    fn originate_context_round_trips_by_type_and_redacts_debug() {
+        let context = OriginateContext::new(AdapterOwnedOptions {
+            endpoint: "https://private.invalid/session".into(),
+            bearer: "private-bearer".into(),
+        });
+        let cloned = context.clone();
+
+        assert_eq!(
+            context
+                .downcast_ref::<AdapterOwnedOptions>()
+                .unwrap()
+                .endpoint,
+            "https://private.invalid/session"
+        );
+        assert!(context.downcast_ref::<String>().is_none());
+        let first = context.downcast_arc::<AdapterOwnedOptions>().unwrap();
+        let second = cloned.downcast_arc::<AdapterOwnedOptions>().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let request = OriginateRequest {
+            session_id: SessionId::new(),
+            participant_id: ParticipantId::new(),
+            target: "sip:private-target@example.invalid".into(),
+            direction: Direction::Outbound,
+            capabilities: CapabilityDescriptor::default(),
+            transport: Some(Transport::Sip),
+            context,
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("private.invalid"));
+        assert!(!debug.contains("private-bearer"));
+        assert!(!debug.contains("AdapterOwnedOptions"));
+        assert!(debug.contains("[redacted]"));
+        assert_eq!(first.bearer, "private-bearer");
+
+        let default_context = OriginateContext::default();
+        assert!(default_context.is_empty());
+        assert!(default_context
+            .downcast_ref::<AdapterOwnedOptions>()
+            .is_none());
+    }
+
+    #[test]
+    fn external_references_are_bounded_and_redacted() {
+        let reference =
+            ExternalConnectionReference::new("sip.call-id", "private-call-id@example.invalid")
+                .unwrap();
+        assert_eq!(reference.kind(), "sip.call-id");
+        assert_eq!(reference.expose_secret(), "private-call-id@example.invalid");
+        let debug = format!("{reference:?}");
+        assert!(!debug.contains("sip.call-id"));
+        assert!(!debug.contains("private-call-id"));
+        assert!(debug.contains("[redacted]"));
+
+        let activation = OutboundActivation::new([reference.clone()]).unwrap();
+        assert_eq!(activation.external_references(), &[reference.clone()]);
+        let debug = format!("{activation:?}");
+        assert!(!debug.contains("sip.call-id"));
+        assert!(!debug.contains("private-call-id"));
+        assert!(debug.contains("external_reference_count: 1"));
+
+        assert_eq!(
+            ExternalConnectionReference::new("", "value").unwrap_err(),
+            ExternalConnectionReferenceError::EmptyKind
+        );
+        assert_eq!(
+            ExternalConnectionReference::new("-invalid", "value").unwrap_err(),
+            ExternalConnectionReferenceError::InvalidKind
+        );
+        assert_eq!(
+            ExternalConnectionReference::new(
+                "x".repeat(MAX_EXTERNAL_REFERENCE_KIND_BYTES + 1),
+                "value"
+            )
+            .unwrap_err(),
+            ExternalConnectionReferenceError::KindTooLarge
+        );
+        assert_eq!(
+            ExternalConnectionReference::new("provider.id", "").unwrap_err(),
+            ExternalConnectionReferenceError::EmptyValue
+        );
+        assert_eq!(
+            ExternalConnectionReference::new(
+                "provider.id",
+                "x".repeat(MAX_EXTERNAL_REFERENCE_VALUE_BYTES + 1)
+            )
+            .unwrap_err(),
+            ExternalConnectionReferenceError::ValueTooLarge
+        );
+        assert_eq!(
+            ExternalConnectionReference::new("provider.id", "unsafe\r\nvalue").unwrap_err(),
+            ExternalConnectionReferenceError::InvalidValue
+        );
+
+        let too_many = std::iter::repeat_n(reference, MAX_EXTERNAL_CONNECTION_REFERENCES + 1);
+        assert_eq!(
+            OutboundActivation::new(too_many).unwrap_err(),
+            ExternalConnectionReferenceError::TooManyReferences
         );
     }
 }

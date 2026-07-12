@@ -667,6 +667,7 @@ async fn whep_post(
             direction: rvoip_core::connection::Direction::Outbound,
             capabilities: state.adapter.capabilities(),
             transport: None,
+            context: Default::default(),
         })
         .await
     {

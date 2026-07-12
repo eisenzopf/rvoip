@@ -11,9 +11,12 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 
 pub use rvoip_core_traits::adapter::{
-    AdapterEvent, AdapterKind, ConnectionHandle, EndReason, InboundConnectionContext,
-    InboundContextError, InboundRoutingHint, InboundSignalingMetadata, OriginateRequest,
-    PlaybackHandle, RejectReason, SignatureHeaders, TransferTarget, MAX_INBOUND_ROUTING_HINT_BYTES,
+    AdapterEvent, AdapterKind, ConnectionHandle, EndReason, ExternalConnectionReference,
+    ExternalConnectionReferenceError, InboundConnectionContext, InboundContextError,
+    InboundRoutingHint, InboundSignalingMetadata, OriginateContext, OriginateRequest,
+    OutboundActivation, PlaybackHandle, RejectReason, SignatureHeaders, TransferTarget,
+    MAX_EXTERNAL_CONNECTION_REFERENCES, MAX_EXTERNAL_REFERENCE_KIND_BYTES,
+    MAX_EXTERNAL_REFERENCE_VALUE_BYTES, MAX_INBOUND_ROUTING_HINT_BYTES,
 };
 
 /// Core-private adapter-to-Orchestrator event envelope.
@@ -83,8 +86,10 @@ pub struct AdapterLifecycleCapabilities {
     /// The adapter installs and uses [`AdapterLifecycleSink`] when its normal
     /// bounded event path cannot deliver a terminal event.
     pub terminal_fallback: bool,
-    /// Outbound routes remain event-dormant after `originate` returns until
-    /// [`ConnectionAdapter::activate_outbound`] is called.
+    /// Outbound routes remain externally dormant after `originate` returns:
+    /// they publish no peer-visible call signaling and release no lifecycle
+    /// event until core calls the outbound activation hook. Local allocation,
+    /// SDP construction, and ICE gathering are allowed during preparation.
     pub staged_outbound_activation: bool,
 }
 
@@ -324,15 +329,18 @@ pub trait ConnectionAdapter: Send + Sync {
     ///
     /// Adapters advertising
     /// [`AdapterLifecycleCapabilities::staged_outbound_activation`] must
-    /// return a live but event-dormant route. They retain operational,
-    /// principal, and terminal events in one bounded FIFO until
-    /// [`Self::activate_outbound`] is called. This ordering lets the
-    /// Orchestrator claim the returned ID and publish its lifecycle before an
-    /// event can refer to it. Core deliberately does not stage events for
-    /// unknown IDs.
+    /// return a live but externally dormant route. `originate` may allocate
+    /// local protocol state, construct SDP, and gather ICE, but it must not
+    /// send a peer-visible call command (for example SIP INVITE or a provider
+    /// originate request). The adapter also retains operational, principal,
+    /// and terminal events in one bounded FIFO until activation. This ordering
+    /// lets the Orchestrator claim and durably bind the returned ID before an
+    /// external call exists or an event can refer to it. Core deliberately
+    /// does not stage events for unknown IDs.
     async fn originate(&self, request: OriginateRequest) -> Result<ConnectionHandle>;
 
-    /// Release events for a successfully claimed outbound route.
+    /// Publish peer-visible signaling and release events for a successfully
+    /// claimed outbound route.
     ///
     /// The default is a no-op for legacy adapters. Implementations that
     /// advertise staged outbound activation must make this operation
@@ -343,6 +351,26 @@ pub trait ConnectionAdapter: Send + Sync {
     /// unknown connection ID.
     async fn activate_outbound(&self, _conn: ConnectionId) -> Result<()> {
         Ok(())
+    }
+
+    /// Activate a claimed outbound route and return its opaque activation
+    /// receipt.
+    ///
+    /// Core calls this hook for both prepared and legacy outbound paths. The
+    /// default preserves existing adapters by delegating to
+    /// [`Self::activate_outbound`] and returning an empty receipt. Adapters
+    /// that own stable external identifiers should override this method,
+    /// perform the activation exactly once, and include those identifiers in
+    /// the returned [`OutboundActivation`]. The override must be idempotent
+    /// and return the same identifiers after a repeated activation. Core
+    /// exposes the receipt only after activation, route liveness, lifecycle,
+    /// and event-stream checks all succeed.
+    async fn activate_outbound_with_receipt(
+        &self,
+        conn: ConnectionId,
+    ) -> Result<OutboundActivation> {
+        self.activate_outbound(conn).await?;
+        Ok(OutboundActivation::default())
     }
     async fn accept(&self, conn: ConnectionId) -> Result<()>;
     async fn reject(&self, conn: ConnectionId, reason: RejectReason) -> Result<()>;

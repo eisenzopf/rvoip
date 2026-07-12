@@ -35,6 +35,7 @@ async fn server_builder_exposes_whip_and_ws_addrs() {
             direction: Direction::Outbound,
             capabilities: offerer.capabilities(),
             transport: None,
+            context: Default::default(),
         })
         .await
         .expect("originate");

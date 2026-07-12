@@ -95,6 +95,7 @@ async fn offer() -> (Arc<WebRtcAdapter>, String) {
             direction: Direction::Outbound,
             capabilities: publisher.capabilities(),
             transport: None,
+            context: Default::default(),
         })
         .await
         .expect("create test offer");

@@ -594,7 +594,7 @@ impl PreparedOutboundConnection {
         let activation_connection_id = connection_id.clone();
         let activation = async move {
             activation_adapter
-                .activate_outbound(activation_connection_id)
+                .activate_outbound_with_receipt(activation_connection_id)
                 .await
         };
         tokio::pin!(activation);
@@ -606,11 +606,14 @@ impl PreparedOutboundConnection {
                 ));
             }
         };
-        if let Err(error) = activation_result {
-            self.claim_committing_abort("outbound activation failed");
-            self.abort_committed_work().await;
-            return Err(error);
-        }
+        let activation = match activation_result {
+            Ok(activation) => activation,
+            Err(error) => {
+                self.claim_committing_abort("outbound activation failed");
+                self.abort_committed_work().await;
+                return Err(error);
+            }
+        };
         if !self.cleanup.adapter.is_connection_live(&connection_id)
             || orchestrator
                 .validate_connection_lifecycles(std::slice::from_ref(&self.cleanup.lifecycle))
@@ -631,7 +634,7 @@ impl PreparedOutboundConnection {
             return Err(error);
         }
 
-        let Some(handle) = self.handle.take() else {
+        let Some(mut handle) = self.handle.take() else {
             self.claim_committing_abort("prepared outbound handle is unavailable");
             self.abort_committed_work().await;
             return Err(RvoipError::InvalidState(
@@ -657,6 +660,7 @@ impl PreparedOutboundConnection {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
+        handle.attach_outbound_activation(activation);
         Ok(handle)
     }
 
@@ -6447,7 +6451,15 @@ impl Orchestrator {
         }
     }
 
-    #[instrument(skip(self, request), fields(target = %request.target, transport = ?request.transport, connection_id))]
+    #[instrument(
+        skip(self, request),
+        fields(
+            transport = ?request.transport,
+            direction = ?request.direction,
+            context_present = !request.context.is_empty(),
+            connection_id
+        )
+    )]
     pub async fn originate_connection(
         &self,
         request: OriginateRequest,
@@ -6477,7 +6489,15 @@ impl Orchestrator {
     /// transport so an application can durably bind that ID. The adapter must
     /// advertise staged outbound activation. The route is aborted on ticket
     /// drop, supervisor loss, or [`Config::outbound_preparation_timeout`].
-    #[instrument(skip(self, request), fields(target = %request.target, transport = ?request.transport, connection_id))]
+    #[instrument(
+        skip(self, request),
+        fields(
+            transport = ?request.transport,
+            direction = ?request.direction,
+            context_present = !request.context.is_empty(),
+            connection_id
+        )
+    )]
     pub async fn prepare_outbound_connection(
         &self,
         request: OriginateRequest,
@@ -6506,7 +6526,10 @@ impl Orchestrator {
         let permit = Arc::clone(&self.prepared_outbound_capacity)
             .try_acquire_owned()
             .map_err(|_| RvoipError::AdmissionRejected("outbound preparation capacity is full"))?;
-        let handle = adapter.originate(request).await?;
+        let mut handle = adapter.originate(request).await?;
+        // Adapters return a provisional handle. Never retain or expose a
+        // receipt populated before core invokes the activation hook.
+        handle.clear_outbound_activation();
         let connection_id = handle.connection.id.clone();
         if handle.connection.transport != transport
             || handle.connection.direction != Direction::Outbound
@@ -6647,7 +6670,8 @@ impl Orchestrator {
         let session_id = request.session_id.clone();
         let participant_id = request.participant_id.clone();
         self.bind_connection_to_session_probe(&session_id)?;
-        let handle = adapter.originate(request).await?;
+        let mut handle = adapter.originate(request).await?;
+        handle.clear_outbound_activation();
         let connection_id = handle.connection.id.clone();
         if handle.connection.transport != transport
             || handle.connection.direction != Direction::Outbound
@@ -6740,26 +6764,32 @@ impl Orchestrator {
                 "outbound session ended during lifecycle commit",
             ));
         }
-        if let Err(error) = adapter.activate_outbound(connection_id.clone()).await {
-            self.rollback_connection_session_binding(&binding);
-            let rolled_back = self.rollback_ticketed_connection(&lifecycle).await;
-            self.cleanup_failed_adapter_route(
-                Arc::clone(&adapter),
-                transport,
-                &connection_id,
-                "outbound activation failed",
-            )
-            .await;
-            if rolled_back {
-                self.emit_core_connection_failure(
-                    connection_id.clone(),
+        let activation = match adapter
+            .activate_outbound_with_receipt(connection_id.clone())
+            .await
+        {
+            Ok(activation) => activation,
+            Err(error) => {
+                self.rollback_connection_session_binding(&binding);
+                let rolled_back = self.rollback_ticketed_connection(&lifecycle).await;
+                self.cleanup_failed_adapter_route(
+                    Arc::clone(&adapter),
                     transport,
-                    "outbound activation failed".into(),
+                    &connection_id,
+                    "outbound activation failed",
                 )
                 .await;
+                if rolled_back {
+                    self.emit_core_connection_failure(
+                        connection_id.clone(),
+                        transport,
+                        "outbound activation failed".into(),
+                    )
+                    .await;
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
         if !adapter.is_connection_live(&connection_id)
             || self
                 .validate_connection_lifecycles(std::slice::from_ref(&lifecycle))
@@ -6785,6 +6815,31 @@ impl Orchestrator {
             }
             return Err(RvoipError::ConnectionNotFound(connection_id));
         }
+
+        // Legacy activation can await external I/O just like prepared
+        // activation. If the authoritative receiver disappears during that
+        // await, no activation receipt or operational handle may escape.
+        if let Err(error) = self.ensure_operational_event_stream_healthy() {
+            self.rollback_connection_session_binding(&binding);
+            let rolled_back = self.rollback_ticketed_connection(&lifecycle).await;
+            self.cleanup_failed_adapter_route(
+                Arc::clone(&adapter),
+                transport,
+                &connection_id,
+                "operational event stream lost during outbound activation",
+            )
+            .await;
+            if rolled_back {
+                self.emit_core_connection_failure(
+                    connection_id,
+                    transport,
+                    "operational event stream lost during outbound activation".into(),
+                )
+                .await;
+            }
+            return Err(error);
+        }
+        handle.attach_outbound_activation(activation);
         Ok(handle)
     }
 

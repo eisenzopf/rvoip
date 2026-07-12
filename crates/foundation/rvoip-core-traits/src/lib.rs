@@ -49,9 +49,12 @@ pub mod ids;
 pub mod stream;
 
 pub use adapter::{
-    InboundConnectionContext, InboundContextError, InboundRoutingHint, InboundSignalingMetadata,
-    MAX_INBOUND_METADATA_BYTES, MAX_INBOUND_METADATA_FIELDS, MAX_INBOUND_METADATA_NAME_BYTES,
-    MAX_INBOUND_METADATA_VALUE_BYTES, MAX_INBOUND_ROUTING_HINT_BYTES,
+    ExternalConnectionReference, ExternalConnectionReferenceError, InboundConnectionContext,
+    InboundContextError, InboundRoutingHint, InboundSignalingMetadata, OriginateContext,
+    OutboundActivation, MAX_EXTERNAL_CONNECTION_REFERENCES, MAX_EXTERNAL_REFERENCE_KIND_BYTES,
+    MAX_EXTERNAL_REFERENCE_VALUE_BYTES, MAX_INBOUND_METADATA_BYTES, MAX_INBOUND_METADATA_FIELDS,
+    MAX_INBOUND_METADATA_NAME_BYTES, MAX_INBOUND_METADATA_VALUE_BYTES,
+    MAX_INBOUND_ROUTING_HINT_BYTES,
 };
 pub use broadcast::{
     BroadcastDescriptor, BroadcastDrainDescriptor, BroadcastDrainReason, BroadcastDrainRequest,
