@@ -157,9 +157,9 @@ async fn application_contract_uses_only_rvoip_owned_models() {
 #[test]
 fn relay_runtime_contract_uses_only_rvoip_owned_models() {
     use rvoip_moq::{
-        MoqRelayDeploymentMode, MoqRelayListenerKind, MoqRelayPublisherBinding,
-        MoqRelayRuntimeLimits, MoqRelayRuntimeSecurity, MoqRelayRuntimeTimeouts,
-        MoqRelayServerTlsConfig, MoqRelayTopology,
+        MoqRelayCertificateBinding, MoqRelayDeploymentMode, MoqRelayListenerKind,
+        MoqRelayPublisherBinding, MoqRelayRuntimeLimits, MoqRelayRuntimeSecurity,
+        MoqRelayRuntimeTimeouts, MoqRelayServerTlsConfig, MoqRelayTopology, MoqRelayTopologyLimits,
     };
 
     let security = MoqRelayRuntimeSecurity::PublisherMutualTls {
@@ -173,6 +173,17 @@ fn relay_runtime_contract_uses_only_rvoip_owned_models() {
         security.listener_kind(),
         MoqRelayListenerKind::PublisherMutualTls
     );
+    let relay_subscriber = MoqRelayRuntimeSecurity::RelaySubscriberMutualTls {
+        bindings: vec![MoqRelayCertificateBinding {
+            certificate_sha256: "cd".repeat(32),
+            scope: "/tenant/broadcast".to_string(),
+        }],
+        max_active_sessions_per_certificate: 4,
+    };
+    assert_eq!(
+        relay_subscriber.listener_kind(),
+        MoqRelayListenerKind::RelaySubscriberMutualTls
+    );
     assert_eq!(
         MoqRelayDeploymentMode::default(),
         MoqRelayDeploymentMode::Embedded
@@ -182,12 +193,17 @@ fn relay_runtime_contract_uses_only_rvoip_owned_models() {
     assert!(MoqRelayServerTlsConfig::default()
         .server_certificates
         .is_empty());
-    let topology = MoqRelayTopology::new(
+    let topology = MoqRelayTopology::with_limits(
         Url::parse("moqt://publisher.internal:443").unwrap(),
         None,
-        64,
+        MoqRelayTopologyLimits {
+            max_namespaces: 64,
+            max_namespace_subscriptions: 8,
+            namespace_update_queue_capacity: 4,
+        },
     )
     .unwrap();
     assert_eq!(topology.coordinated_namespaces(), 0);
+    assert_eq!(topology.namespace_subscriptions(), 0);
     assert!(!format!("{topology:?}").contains("publisher.internal"));
 }

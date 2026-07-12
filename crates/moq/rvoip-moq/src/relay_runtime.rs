@@ -12,9 +12,10 @@ use async_trait::async_trait;
 use futures::FutureExt;
 use moq_relay_ietf::{
     AdmissionDecision, CertificateFingerprintAdmission, Coordinator, CoordinatorError,
-    CoordinatorResult, ListenerSecurityPolicy, Locals, NamespaceOrigin, NamespaceRegistration,
-    Relay, RelayCapacityLimitSet, RelayCapacityLimits, RelayConfig, RelayDiagnostics,
-    RemoteManagerLimits, ScopeInfo, ScopePermissions, SessionAdmission,
+    CoordinatorResult, ListenerSecurityPolicy, Locals, NamespaceInfo, NamespaceOrigin,
+    NamespaceRegistration, NamespaceSubscription, NamespaceUpdate, NamespaceUpdateSender, Relay,
+    RelayCapacityLimitSet, RelayCapacityLimits, RelayConfig, RelayDiagnostics, RemoteManagerLimits,
+    ScopeInfo, ScopePermissions, SessionAdmission,
 };
 use moq_transport::coding::TrackNamespace;
 use tokio::sync::watch;
@@ -42,27 +43,45 @@ pub enum MoqRelayDeploymentMode {
 #[non_exhaustive]
 pub enum MoqRelayListenerKind {
     PublisherMutualTls,
+    RelaySubscriberMutualTls,
     SubscriberWebTransport,
     SubscriberRawQuic,
 }
 
-/// One reviewed publisher certificate-to-scope binding.
+/// One reviewed certificate-to-scope binding for an mTLS listener role.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MoqRelayPublisherBinding {
+pub struct MoqRelayCertificateBinding {
     /// Lower- or upper-case SHA-256 fingerprint of the client leaf certificate.
     pub certificate_sha256: String,
-    /// Exact path scope this certificate may publish, beginning with `/`.
+    /// Exact path scope this certificate may use, beginning with `/`.
+    ///
+    /// The enclosing listener role determines whether the binding grants
+    /// publish-only or subscribe-only access. A binding never grants both.
     pub scope: String,
 }
 
+/// Backward-compatible name for a publisher certificate binding.
+pub type MoqRelayPublisherBinding = MoqRelayCertificateBinding;
+
 /// Production admission posture for one relay listener.
 ///
-/// Publisher and subscriber roles intentionally cannot share a listener: they
-/// require different TLS client-authentication postures. Start separate
+/// Publisher and subscriber capabilities intentionally cannot share a
+/// listener. Token roles require a different TLS posture, while the two mTLS
+/// roles use distinct least-privilege certificate claims. Start separate
 /// runtimes when more than one role is needed.
+#[non_exhaustive]
 pub enum MoqRelayRuntimeSecurity {
     PublisherMutualTls {
-        bindings: Vec<MoqRelayPublisherBinding>,
+        bindings: Vec<MoqRelayCertificateBinding>,
+        max_active_sessions_per_certificate: usize,
+    },
+    /// Subscribe-only raw-QUIC listener for a downstream relay.
+    ///
+    /// This role is intentionally separate from publisher mTLS. Its admitted
+    /// certificates may subscribe and fetch within an exact scope but cannot
+    /// publish into the upstream relay.
+    RelaySubscriberMutualTls {
+        bindings: Vec<MoqRelayCertificateBinding>,
         max_active_sessions_per_certificate: usize,
     },
     SubscriberWebTransport {
@@ -77,6 +96,7 @@ impl MoqRelayRuntimeSecurity {
     pub const fn listener_kind(&self) -> MoqRelayListenerKind {
         match self {
             Self::PublisherMutualTls { .. } => MoqRelayListenerKind::PublisherMutualTls,
+            Self::RelaySubscriberMutualTls { .. } => MoqRelayListenerKind::RelaySubscriberMutualTls,
             Self::SubscriberWebTransport { .. } => MoqRelayListenerKind::SubscriberWebTransport,
             Self::SubscriberRawQuic { .. } => MoqRelayListenerKind::SubscriberRawQuic,
         }
@@ -91,6 +111,17 @@ impl std::fmt::Debug for MoqRelayRuntimeSecurity {
                 max_active_sessions_per_certificate,
             } => formatter
                 .debug_struct("PublisherMutualTls")
+                .field("binding_count", &bindings.len())
+                .field(
+                    "max_active_sessions_per_certificate",
+                    max_active_sessions_per_certificate,
+                )
+                .finish(),
+            Self::RelaySubscriberMutualTls {
+                bindings,
+                max_active_sessions_per_certificate,
+            } => formatter
+                .debug_struct("RelaySubscriberMutualTls")
                 .field("binding_count", &bindings.len())
                 .field(
                     "max_active_sessions_per_certificate",
@@ -121,8 +152,11 @@ pub struct MoqRelayServerTlsConfig {
     pub outbound_client_certificate: Option<PathBuf>,
     /// Private key for `outbound_client_certificate`.
     pub outbound_client_private_key: Option<PathBuf>,
-    /// Explicit roots used to verify inbound publisher client certificates.
-    /// This must be non-empty only for a publisher mTLS listener.
+    /// Explicit roots used to verify inbound publisher or relay-subscriber
+    /// client certificates. This must be non-empty only for an mTLS listener.
+    ///
+    /// The field retains its original publisher-specific name for source
+    /// compatibility; listener authorization remains role-specific.
     pub publisher_client_ca_certificates: Vec<PathBuf>,
 }
 
@@ -145,7 +179,7 @@ impl std::fmt::Debug for MoqRelayServerTlsConfig {
                 &self.outbound_client_private_key.is_some(),
             )
             .field(
-                "publisher_client_ca_count",
+                "mutual_tls_client_ca_count",
                 &self.publisher_client_ca_certificates.len(),
             )
             .finish()
@@ -229,6 +263,51 @@ impl Default for MoqRelayRuntimeLimits {
     }
 }
 
+/// Explicit bounds for the shared namespace-routing topology.
+///
+/// These limits are separate from per-listener request limits because several
+/// role-specific listeners may share one topology.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MoqRelayTopologyLimits {
+    /// Maximum simultaneously registered publisher namespaces.
+    pub max_namespaces: usize,
+    /// Maximum long-lived namespace-prefix subscriptions.
+    pub max_namespace_subscriptions: usize,
+    /// Per-subscription capacity for nonblocking Added/Removed updates.
+    pub namespace_update_queue_capacity: usize,
+}
+
+impl Default for MoqRelayTopologyLimits {
+    fn default() -> Self {
+        Self {
+            max_namespaces: 100_000,
+            max_namespace_subscriptions: 4_096,
+            namespace_update_queue_capacity: 256,
+        }
+    }
+}
+
+impl MoqRelayTopologyLimits {
+    fn with_namespace_limit(max_namespaces: usize) -> Self {
+        Self {
+            max_namespaces,
+            ..Self::default()
+        }
+    }
+
+    fn validate(self) -> Result<Self, MoqRelayRuntimeError> {
+        if self.max_namespaces == 0
+            || self.max_namespace_subscriptions == 0
+            || self.namespace_update_queue_capacity == 0
+        {
+            return Err(MoqRelayRuntimeError::InvalidConfig(
+                "relay topology limits must be greater than zero",
+            ));
+        }
+        Ok(self)
+    }
+}
+
 /// Bounded relay operation and shutdown deadlines.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MoqRelayRuntimeTimeouts {
@@ -294,17 +373,26 @@ impl MoqRelayTopology {
         publisher_socket_addr: Option<SocketAddr>,
         max_namespaces: usize,
     ) -> Result<Self, MoqRelayRuntimeError> {
+        Self::with_limits(
+            publisher_endpoint,
+            publisher_socket_addr,
+            MoqRelayTopologyLimits::with_namespace_limit(max_namespaces),
+        )
+    }
+
+    /// Create a topology with explicit namespace and discovery-stream limits.
+    pub fn with_limits(
+        publisher_endpoint: Url,
+        publisher_socket_addr: Option<SocketAddr>,
+        limits: MoqRelayTopologyLimits,
+    ) -> Result<Self, MoqRelayRuntimeError> {
         validate_authority_endpoint(&publisher_endpoint)?;
-        if max_namespaces == 0 {
-            return Err(MoqRelayRuntimeError::InvalidConfig(
-                "relay topology namespace limit must be greater than zero",
-            ));
-        }
+        let limits = limits.validate()?;
         Ok(Self {
             coordinator: Arc::new(LocalCoordinator::new(
                 publisher_endpoint,
                 publisher_socket_addr,
-                max_namespaces,
+                limits,
             )),
             locals: Locals::new(),
         })
@@ -312,7 +400,12 @@ impl MoqRelayTopology {
 
     /// Aggregate-safe count of namespaces currently registered by publishers.
     pub fn coordinated_namespaces(&self) -> usize {
-        self.coordinator.len()
+        self.coordinator.snapshot().namespaces
+    }
+
+    /// Aggregate-safe count of active namespace-prefix subscriptions.
+    pub fn namespace_subscriptions(&self) -> usize {
+        self.coordinator.snapshot().namespace_subscriptions
     }
 }
 
@@ -321,6 +414,7 @@ impl std::fmt::Debug for MoqRelayTopology {
         formatter
             .debug_struct("MoqRelayTopology")
             .field("coordinated_namespaces", &self.coordinated_namespaces())
+            .field("namespace_subscriptions", &self.namespace_subscriptions())
             .finish_non_exhaustive()
     }
 }
@@ -355,6 +449,7 @@ pub struct MoqRelayRuntimeSnapshot {
     pub principal_capacity_buckets: usize,
     pub scope_capacity_buckets: usize,
     pub coordinated_namespaces: usize,
+    pub namespace_subscriptions: usize,
     pub cached_upstream_connections: usize,
     pub retained_upstream_connections: usize,
     pub retained_upstream_tracks: usize,
@@ -569,6 +664,7 @@ impl MoqRelayRuntime {
     /// Capture bounded aggregate diagnostics from the running relay.
     pub async fn snapshot(&self) -> MoqRelayRuntimeSnapshot {
         let wire = self.inner.diagnostics.snapshot().await;
+        let topology = self.inner.coordinator.snapshot();
         MoqRelayRuntimeSnapshot {
             deployment: self.inner.deployment,
             listener: self.inner.listener,
@@ -577,7 +673,8 @@ impl MoqRelayRuntime {
             active_resource_leases: wire.capacity.active,
             principal_capacity_buckets: wire.capacity.principal_buckets,
             scope_capacity_buckets: wire.capacity.scope_buckets,
-            coordinated_namespaces: self.inner.coordinator.len(),
+            coordinated_namespaces: topology.namespaces,
+            namespace_subscriptions: topology.namespace_subscriptions,
             cached_upstream_connections: wire.remotes.cached_connections,
             retained_upstream_connections: wire.remotes.retained_connections,
             retained_upstream_tracks: wire.remotes.retained_tracks,
@@ -739,6 +836,21 @@ fn validate_config(config: &MoqRelayRuntimeConfig) -> Result<(), MoqRelayRuntime
                 ));
             }
         }
+        MoqRelayRuntimeSecurity::RelaySubscriberMutualTls {
+            bindings,
+            max_active_sessions_per_certificate,
+        } => {
+            if bindings.is_empty() || *max_active_sessions_per_certificate == 0 {
+                return Err(MoqRelayRuntimeError::InvalidConfig(
+                    "relay-subscriber mTLS requires bindings and a positive per-certificate session limit",
+                ));
+            }
+            if config.tls.publisher_client_ca_certificates.is_empty() {
+                return Err(MoqRelayRuntimeError::InvalidConfig(
+                    "relay-subscriber mTLS requires at least one explicit client CA",
+                ));
+            }
+        }
         MoqRelayRuntimeSecurity::SubscriberWebTransport { admission } => {
             if admission.config().subscriber_substrate != MoqRelayAdmissionSubstrate::WebTransport {
                 return Err(MoqRelayRuntimeError::InvalidConfig(
@@ -787,7 +899,8 @@ fn load_tls(
     config: &MoqRelayRuntimeConfig,
 ) -> Result<moq_native_ietf::tls::Config, MoqRelayRuntimeError> {
     let client_auth = match config.security {
-        MoqRelayRuntimeSecurity::PublisherMutualTls { .. } => {
+        MoqRelayRuntimeSecurity::PublisherMutualTls { .. }
+        | MoqRelayRuntimeSecurity::RelaySubscriberMutualTls { .. } => {
             moq_native_ietf::tls::ClientAuthMode::Required
         }
         MoqRelayRuntimeSecurity::SubscriberWebTransport { .. }
@@ -827,6 +940,23 @@ fn admission_for(
             .map_err(|_| MoqRelayRuntimeError::InvalidConfig("invalid publisher mTLS binding"))?;
             Ok((ListenerSecurityPolicy::MutualTlsPublisher, admission))
         }
+        MoqRelayRuntimeSecurity::RelaySubscriberMutualTls {
+            bindings,
+            max_active_sessions_per_certificate,
+        } => {
+            let bindings = bindings
+                .iter()
+                .map(|binding| format!("{}={}", binding.certificate_sha256, binding.scope));
+            let admission =
+                CertificateFingerprintAdmission::new_relay_subscriber_bindings_with_limit(
+                    bindings,
+                    *max_active_sessions_per_certificate,
+                )
+                .map_err(|_| {
+                    MoqRelayRuntimeError::InvalidConfig("invalid relay-subscriber mTLS binding")
+                })?;
+            Ok((ListenerSecurityPolicy::MutualTlsRelaySubscriber, admission))
+        }
         MoqRelayRuntimeSecurity::SubscriberWebTransport { admission } => {
             Ok((ListenerSecurityPolicy::TokenSubscriber, admission.clone()))
         }
@@ -849,8 +979,58 @@ struct LocalOrigin {
     addr: Option<SocketAddr>,
 }
 
+struct LocalNamespaceSubscription {
+    scope: Option<String>,
+    prefix: TrackNamespace,
+    updates: NamespaceUpdateSender,
+}
+
+impl LocalNamespaceSubscription {
+    fn matches(&self, scope: Option<&str>, namespace: &TrackNamespace) -> bool {
+        self.scope.as_deref() == scope
+            && namespace.fields.len() >= self.prefix.fields.len()
+            && self
+                .prefix
+                .fields
+                .iter()
+                .zip(&namespace.fields)
+                .all(|(expected, actual)| expected == actual)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LocalNamespaceUpdateKind {
+    Added,
+    Removed,
+}
+
 struct LocalCoordinatorState {
     namespaces: HashMap<NamespaceKey, LocalOrigin>,
+    namespace_subscriptions: HashMap<u64, LocalNamespaceSubscription>,
+}
+
+impl LocalCoordinatorState {
+    fn notify_namespace_change(
+        &mut self,
+        scope: Option<&str>,
+        namespace: &TrackNamespace,
+        kind: LocalNamespaceUpdateKind,
+    ) {
+        self.namespace_subscriptions.retain(|_, subscription| {
+            if !subscription.matches(scope, namespace) {
+                return true;
+            }
+            let info = NamespaceInfo::new(namespace.clone());
+            let update = match kind {
+                LocalNamespaceUpdateKind::Added => NamespaceUpdate::Added(info),
+                LocalNamespaceUpdateKind::Removed => NamespaceUpdate::Removed(info),
+            };
+            // The fork's bounded sender permanently marks an overflowing
+            // stream failed. Removing it here also releases topology capacity
+            // immediately instead of retaining stale discovery state.
+            subscription.updates.try_send(update).is_ok()
+        });
+    }
 }
 
 struct LocalCoordinator {
@@ -858,33 +1038,45 @@ struct LocalCoordinator {
     advertised_endpoint: Url,
     advertised_socket_addr: Option<SocketAddr>,
     next_registration_id: AtomicU64,
-    max_namespaces: usize,
+    next_subscription_id: AtomicU64,
+    limits: MoqRelayTopologyLimits,
 }
 
 impl LocalCoordinator {
     fn new(
         advertised_endpoint: Url,
         advertised_socket_addr: Option<SocketAddr>,
-        max_namespaces: usize,
+        limits: MoqRelayTopologyLimits,
     ) -> Self {
         Self {
             state: Arc::new(Mutex::new(LocalCoordinatorState {
                 namespaces: HashMap::new(),
+                namespace_subscriptions: HashMap::new(),
             })),
             advertised_endpoint,
             advertised_socket_addr,
             next_registration_id: AtomicU64::new(1),
-            max_namespaces,
+            next_subscription_id: AtomicU64::new(1),
+            limits,
         }
     }
 
-    fn len(&self) -> usize {
-        self.state
+    fn snapshot(&self) -> LocalCoordinatorSnapshot {
+        let state = self
+            .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .namespaces
-            .len()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        LocalCoordinatorSnapshot {
+            namespaces: state.namespaces.len(),
+            namespace_subscriptions: state.namespace_subscriptions.len(),
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LocalCoordinatorSnapshot {
+    namespaces: usize,
+    namespace_subscriptions: usize,
 }
 
 struct LocalRegistration {
@@ -905,7 +1097,27 @@ impl Drop for LocalRegistration {
             .is_some_and(|origin| origin.registration_id == self.registration_id)
         {
             state.namespaces.remove(&self.key);
+            state.notify_namespace_change(
+                self.key.scope.as_deref(),
+                &self.key.namespace,
+                LocalNamespaceUpdateKind::Removed,
+            );
         }
+    }
+}
+
+struct LocalNamespaceSubscriptionRegistration {
+    state: Arc<Mutex<LocalCoordinatorState>>,
+    subscription_id: u64,
+}
+
+impl Drop for LocalNamespaceSubscriptionRegistration {
+    fn drop(&mut self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .namespace_subscriptions
+            .remove(&self.subscription_id);
     }
 }
 
@@ -925,20 +1137,27 @@ impl Coordinator for LocalCoordinator {
         if !path.starts_with('/')
             || path.len() > moq_relay_ietf::AdmissionClaims::MAX_SCOPE_BYTES
             || path.contains(['?', '#'])
-            || (!admission.claims.publish && !admission.claims.subscribe)
+            || (admission.principal.method == moq_relay_ietf::AuthenticationMethod::MutualTls
+                && admission.claims.scope.as_deref() != Some(path))
         {
             return Err(CoordinatorError::from(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "invalid admitted relay scope",
             )));
         }
+        let permissions = match (admission.claims.publish, admission.claims.subscribe) {
+            (true, false) => ScopePermissions::ReadWrite,
+            (false, true) => ScopePermissions::ReadOnly,
+            _ => {
+                return Err(CoordinatorError::from(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "relay admission must grant exactly one listener role",
+                )));
+            }
+        };
         Ok(Some(ScopeInfo {
             scope_id: path.to_owned(),
-            permissions: if admission.claims.publish {
-                ScopePermissions::ReadWrite
-            } else {
-                ScopePermissions::ReadOnly
-            },
+            permissions,
         }))
     }
 
@@ -966,7 +1185,7 @@ impl Coordinator for LocalCoordinator {
         if state.namespaces.contains_key(&key) {
             return Err(CoordinatorError::NamespaceAlreadyRegistered);
         }
-        if state.namespaces.len() >= self.max_namespaces {
+        if state.namespaces.len() >= self.limits.max_namespaces {
             return Err(CoordinatorError::CapacityExhausted {
                 resource: "local_namespaces",
             });
@@ -980,6 +1199,11 @@ impl Coordinator for LocalCoordinator {
                 url,
                 addr: self.advertised_socket_addr,
             },
+        );
+        state.notify_namespace_change(
+            key.scope.as_deref(),
+            &key.namespace,
+            LocalNamespaceUpdateKind::Added,
         );
         drop(state);
         Ok(NamespaceRegistration::new(LocalRegistration {
@@ -998,11 +1222,17 @@ impl Coordinator for LocalCoordinator {
             scope: scope.map(str::to_owned),
             namespace: namespace.clone(),
         };
-        self.state
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .namespaces
-            .remove(&key);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.namespaces.remove(&key).is_some() {
+            state.notify_namespace_change(
+                key.scope.as_deref(),
+                &key.namespace,
+                LocalNamespaceUpdateKind::Removed,
+            );
+        }
         Ok(())
     }
 
@@ -1027,6 +1257,73 @@ impl Coordinator for LocalCoordinator {
             NamespaceOrigin::new(namespace.clone(), origin.url.clone(), origin.addr),
             None,
         ))
+    }
+
+    async fn subscribe_namespace(
+        &self,
+        scope: Option<&str>,
+        prefix: &TrackNamespace,
+    ) -> CoordinatorResult<NamespaceSubscription> {
+        let subscription_id = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
+        let registration = LocalNamespaceSubscriptionRegistration {
+            state: self.state.clone(),
+            subscription_id,
+        };
+        let (mut subscription, updates) = NamespaceSubscription::bounded(
+            Vec::new(),
+            registration,
+            self.limits.namespace_update_queue_capacity,
+        )
+        .map_err(|error| CoordinatorError::Other(error.into()))?;
+
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.namespace_subscriptions.len() >= self.limits.max_namespace_subscriptions {
+            // Drop the subscription only after releasing the mutex because its
+            // RAII registration removes itself through the same mutex.
+            drop(state);
+            drop(subscription);
+            return Err(CoordinatorError::CapacityExhausted {
+                resource: "local_namespace_subscriptions",
+            });
+        }
+
+        let scope = scope.map(str::to_owned);
+        let candidate = LocalNamespaceSubscription {
+            scope,
+            prefix: prefix.clone(),
+            updates,
+        };
+        let mut existing = state
+            .namespaces
+            .keys()
+            .filter(|key| candidate.matches(key.scope.as_deref(), &key.namespace))
+            .map(|key| NamespaceInfo::new(key.namespace.clone()))
+            .collect::<Vec<_>>();
+        existing.sort_by_key(|info| info.namespace.to_utf8_path());
+        subscription.existing_namespaces = existing;
+        state
+            .namespace_subscriptions
+            .insert(subscription_id, candidate);
+        drop(state);
+        Ok(subscription)
+    }
+
+    async fn unsubscribe_namespace(
+        &self,
+        scope: Option<&str>,
+        prefix: &TrackNamespace,
+    ) -> CoordinatorResult<()> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .namespace_subscriptions
+            .retain(|_, subscription| {
+                subscription.scope.as_deref() != scope || subscription.prefix != *prefix
+            });
+        Ok(())
     }
 
     async fn shutdown(&self) -> CoordinatorResult<()> {
@@ -1089,9 +1386,13 @@ mod tests {
     #[test]
     fn defaults_are_bounded_and_protocol_is_explicit() {
         let limits = MoqRelayRuntimeLimits::default();
+        let topology_limits = MoqRelayTopologyLimits::default();
         assert!(limits.max_active_sessions > 0);
         assert!(limits.max_pending_admissions > 0);
         assert!(limits.max_coordinated_namespaces > 0);
+        assert!(topology_limits.max_namespaces > 0);
+        assert!(topology_limits.max_namespace_subscriptions > 0);
+        assert!(topology_limits.namespace_update_queue_capacity > 0);
         assert_eq!(crate::MOQT_NEGOTIATED_PROTOCOL, "moqt-19");
         assert_eq!(MoqProtocolVersion::PINNED.transport, 19);
     }
@@ -1115,14 +1416,18 @@ mod tests {
         let coordinator = LocalCoordinator::new(
             Url::parse("moqt://relay.test:443").unwrap(),
             Some("127.0.0.1:443".parse().unwrap()),
-            1,
+            MoqRelayTopologyLimits {
+                max_namespaces: 1,
+                max_namespace_subscriptions: 2,
+                namespace_update_queue_capacity: 2,
+            },
         );
         let namespace = TrackNamespace::from_utf8_path("tenant/broadcast");
         let registration = coordinator
             .register_namespace(Some("/tenant/broadcast"), &namespace)
             .await
             .unwrap();
-        assert_eq!(coordinator.len(), 1);
+        assert_eq!(coordinator.snapshot().namespaces, 1);
         assert!(coordinator
             .lookup(Some("/other/broadcast"), &namespace)
             .await
@@ -1135,7 +1440,228 @@ mod tests {
             Err(CoordinatorError::CapacityExhausted { .. })
         ));
         drop(registration);
-        assert_eq!(coordinator.len(), 0);
+        assert_eq!(coordinator.snapshot().namespaces, 0);
+    }
+
+    #[tokio::test]
+    async fn namespace_subscriptions_are_scoped_live_and_raii_cleaned() {
+        let coordinator = LocalCoordinator::new(
+            Url::parse("moqt://relay.test:443").unwrap(),
+            None,
+            MoqRelayTopologyLimits {
+                max_namespaces: 4,
+                max_namespace_subscriptions: 2,
+                namespace_update_queue_capacity: 2,
+            },
+        );
+        let namespace = TrackNamespace::from_utf8_path("tenant/broadcast");
+        let cross_scope = TrackNamespace::from_utf8_path("other/broadcast");
+        let registration = coordinator
+            .register_namespace(Some("/tenant/broadcast"), &namespace)
+            .await
+            .unwrap();
+        let _cross_scope_registration = coordinator
+            .register_namespace(Some("/other/broadcast"), &cross_scope)
+            .await
+            .unwrap();
+
+        let prefix = TrackNamespace::from_utf8_path("tenant");
+        let mut subscription = coordinator
+            .subscribe_namespace(Some("/tenant/broadcast"), &prefix)
+            .await
+            .unwrap();
+        assert_eq!(
+            subscription.existing_namespaces,
+            vec![NamespaceInfo::new(namespace.clone())]
+        );
+        assert_eq!(coordinator.snapshot().namespace_subscriptions, 1);
+
+        drop(registration);
+        assert!(matches!(
+            subscription.next_update().await.unwrap(),
+            NamespaceUpdate::Removed(info) if info.namespace == namespace
+        ));
+        let _replacement = coordinator
+            .register_namespace(Some("/tenant/broadcast"), &namespace)
+            .await
+            .unwrap();
+        assert!(matches!(
+            subscription.next_update().await.unwrap(),
+            NamespaceUpdate::Added(info) if info.namespace == namespace
+        ));
+
+        drop(subscription);
+        assert_eq!(coordinator.snapshot().namespace_subscriptions, 0);
+    }
+
+    #[tokio::test]
+    async fn namespace_subscription_capacity_and_overflow_fail_closed() {
+        let coordinator = LocalCoordinator::new(
+            Url::parse("moqt://relay.test:443").unwrap(),
+            None,
+            MoqRelayTopologyLimits {
+                max_namespaces: 2,
+                max_namespace_subscriptions: 1,
+                namespace_update_queue_capacity: 1,
+            },
+        );
+        let namespace = TrackNamespace::from_utf8_path("tenant/broadcast");
+        let prefix = TrackNamespace::from_utf8_path("tenant");
+        let mut subscription = coordinator
+            .subscribe_namespace(Some("/tenant/broadcast"), &prefix)
+            .await
+            .unwrap();
+        assert!(matches!(
+            coordinator
+                .subscribe_namespace(Some("/tenant/broadcast"), &prefix)
+                .await,
+            Err(CoordinatorError::CapacityExhausted {
+                resource: "local_namespace_subscriptions"
+            })
+        ));
+
+        let registration = coordinator
+            .register_namespace(Some("/tenant/broadcast"), &namespace)
+            .await
+            .unwrap();
+        drop(registration);
+        assert_eq!(coordinator.snapshot().namespace_subscriptions, 0);
+        assert!(matches!(
+            subscription.next_update().await,
+            Err(CoordinatorError::CapacityExhausted {
+                resource: "namespace_update_stream"
+            })
+        ));
+    }
+
+    #[test]
+    fn mutual_tls_listener_roles_map_to_distinct_least_privilege_policies() {
+        let binding = MoqRelayCertificateBinding {
+            certificate_sha256: "ab".repeat(32),
+            scope: "/tenant/broadcast".to_string(),
+        };
+        let publisher = MoqRelayRuntimeSecurity::PublisherMutualTls {
+            bindings: vec![binding.clone()],
+            max_active_sessions_per_certificate: 2,
+        };
+        let relay_subscriber = MoqRelayRuntimeSecurity::RelaySubscriberMutualTls {
+            bindings: vec![binding],
+            max_active_sessions_per_certificate: 2,
+        };
+
+        let (publisher_policy, _) = admission_for(&publisher).unwrap();
+        let (relay_policy, _) = admission_for(&relay_subscriber).unwrap();
+        assert_eq!(
+            publisher.listener_kind(),
+            MoqRelayListenerKind::PublisherMutualTls
+        );
+        assert_eq!(
+            relay_subscriber.listener_kind(),
+            MoqRelayListenerKind::RelaySubscriberMutualTls
+        );
+        assert_eq!(publisher_policy, ListenerSecurityPolicy::MutualTlsPublisher);
+        assert_eq!(
+            relay_policy,
+            ListenerSecurityPolicy::MutualTlsRelaySubscriber
+        );
+        assert_ne!(publisher_policy, relay_policy);
+    }
+
+    #[tokio::test]
+    async fn admitted_scope_preserves_role_and_exact_certificate_scope() {
+        let coordinator = LocalCoordinator::new(
+            Url::parse("moqt://relay.test:443").unwrap(),
+            None,
+            MoqRelayTopologyLimits::default(),
+        );
+        let decision = |publish, subscribe, scope: &str| {
+            moq_relay_ietf::AdmissionDecision::new(
+                moq_relay_ietf::AdmissionPrincipal::new(
+                    "certificate-sha256:test",
+                    moq_relay_ietf::AuthenticationMethod::MutualTls,
+                )
+                .unwrap(),
+                moq_relay_ietf::AdmissionClaims {
+                    scope: Some(scope.to_string()),
+                    publish,
+                    subscribe,
+                    expires_at_unix_seconds: None,
+                    token_id: None,
+                },
+            )
+            .unwrap()
+        };
+
+        let publisher = coordinator
+            .resolve_admitted_scope(
+                &decision(true, false, "/tenant/broadcast"),
+                Some("/tenant/broadcast"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let relay_subscriber = coordinator
+            .resolve_admitted_scope(
+                &decision(false, true, "/tenant/broadcast"),
+                Some("/tenant/broadcast"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(publisher.permissions.can_publish());
+        assert!(!relay_subscriber.permissions.can_publish());
+        assert!(relay_subscriber.permissions.can_subscribe());
+        assert!(coordinator
+            .resolve_admitted_scope(
+                &decision(false, true, "/tenant/broadcast"),
+                Some("/other/broadcast"),
+            )
+            .await
+            .is_err());
+        assert!(coordinator
+            .resolve_admitted_scope(
+                &decision(true, true, "/tenant/broadcast"),
+                Some("/tenant/broadcast"),
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn relay_subscriber_runtime_requires_mtls_and_reports_its_role() {
+        let files = TestFiles::new();
+        let mut missing_client_ca = files.tls();
+        missing_client_ca.publisher_client_ca_certificates.clear();
+        let make_config = |tls| MoqRelayRuntimeConfig {
+            deployment: MoqRelayDeploymentMode::Standalone,
+            bind: "127.0.0.1:0".parse().unwrap(),
+            advertised_endpoint: Url::parse("moqt://localhost:4444").unwrap(),
+            advertised_socket_addr: None,
+            tls,
+            security: MoqRelayRuntimeSecurity::RelaySubscriberMutualTls {
+                bindings: vec![MoqRelayCertificateBinding {
+                    certificate_sha256: "cd".repeat(32),
+                    scope: "/tenant/broadcast".to_string(),
+                }],
+                max_active_sessions_per_certificate: 2,
+            },
+            limits: MoqRelayRuntimeLimits::default(),
+            timeouts: MoqRelayRuntimeTimeouts::default(),
+        };
+        assert!(matches!(
+            MoqRelayRuntime::start(make_config(missing_client_ca)),
+            Err(MoqRelayRuntimeError::InvalidConfig(_))
+        ));
+
+        let runtime = MoqRelayRuntime::start(make_config(files.tls())).unwrap();
+        let snapshot = runtime.snapshot().await;
+        assert!(snapshot.ready());
+        assert_eq!(
+            snapshot.listener,
+            MoqRelayListenerKind::RelaySubscriberMutualTls
+        );
+        assert_eq!(snapshot.namespace_subscriptions, 0);
+        runtime.drain(Duration::from_secs(2)).await.unwrap();
     }
 
     #[tokio::test]

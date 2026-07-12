@@ -72,10 +72,11 @@ pub use relay_admission::{
 };
 #[cfg(feature = "relay-runtime")]
 pub use relay_runtime::{
-    MoqRelayDeploymentMode, MoqRelayListenerKind, MoqRelayPublisherBinding, MoqRelayResourceLimits,
-    MoqRelayRuntime, MoqRelayRuntimeConfig, MoqRelayRuntimeError, MoqRelayRuntimeLifecycle,
-    MoqRelayRuntimeLimits, MoqRelayRuntimeSecurity, MoqRelayRuntimeSnapshot,
-    MoqRelayRuntimeTimeouts, MoqRelayServerTlsConfig, MoqRelayTopology,
+    MoqRelayCertificateBinding, MoqRelayDeploymentMode, MoqRelayListenerKind,
+    MoqRelayPublisherBinding, MoqRelayResourceLimits, MoqRelayRuntime, MoqRelayRuntimeConfig,
+    MoqRelayRuntimeError, MoqRelayRuntimeLifecycle, MoqRelayRuntimeLimits, MoqRelayRuntimeSecurity,
+    MoqRelayRuntimeSnapshot, MoqRelayRuntimeTimeouts, MoqRelayServerTlsConfig, MoqRelayTopology,
+    MoqRelayTopologyLimits,
 };
 pub use replay::{
     BoundedMemoryMoqReplayStore, MoqReplayError, MoqSessionId, MoqTokenBinding,
