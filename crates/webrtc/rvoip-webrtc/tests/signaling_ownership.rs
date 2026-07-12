@@ -184,16 +184,22 @@ async fn issuer_tenant_and_subject_all_participate_in_update_delete_ownership() 
 
     let (route_url, connection_id) = create_owned_whip_route(&server, &offer).await;
     match next_event(&mut events).await {
-        AdapterEvent::AuthenticatedInboundConnection {
-            connection,
+        AdapterEvent::InboundConnection { connection } => {
+            assert_eq!(connection.id, connection_id)
+        }
+        other => panic!("expected legacy inbound connection, got {other:?}"),
+    }
+    match next_event(&mut events).await {
+        AdapterEvent::PrincipalAuthenticated {
+            connection_id: authenticated_id,
             principal,
             ..
         } => {
-            assert_eq!(connection.id, connection_id);
+            assert_eq!(authenticated_id, connection_id);
             assert_eq!(principal.issuer.as_deref(), Some("issuer-a"));
             assert_eq!(principal.tenant.as_deref(), Some("tenant-a"));
         }
-        other => panic!("expected atomic authenticated inbound connection, got {other:?}"),
+        other => panic!("expected legacy principal event, got {other:?}"),
     }
 
     let inbound_context =
@@ -438,8 +444,15 @@ async fn websocket_session_hint_becomes_single_take_inbound_context() {
     assert!(answer.is_text());
 
     let connection_id = match next_event(&mut events).await {
-        AdapterEvent::AuthenticatedInboundConnection { connection, .. } => connection.id,
-        other => panic!("expected atomic authenticated inbound connection, got {other:?}"),
+        AdapterEvent::InboundConnection { connection } => connection.id,
+        other => panic!("expected legacy inbound connection, got {other:?}"),
+    };
+    match next_event(&mut events).await {
+        AdapterEvent::PrincipalAuthenticated {
+            connection_id: authenticated_id,
+            ..
+        } => assert_eq!(authenticated_id, connection_id),
+        other => panic!("expected legacy principal event, got {other:?}"),
     };
 
     let context =

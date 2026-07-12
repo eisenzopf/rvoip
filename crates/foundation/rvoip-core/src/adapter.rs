@@ -16,6 +16,29 @@ pub use rvoip_core_traits::adapter::{
     PlaybackHandle, RejectReason, SignatureHeaders, TransferTarget,
 };
 
+/// Core-private adapter-to-Orchestrator event envelope.
+///
+/// This type is public only because [`ConnectionAdapter`] is implemented by
+/// transport crates. Application-facing subscriptions continue to expose
+/// [`AdapterEvent`] and therefore retain its existing source surface.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum OrchestratorAdapterEvent {
+    Public(AdapterEvent),
+    AuthenticatedInboundConnection {
+        connection: crate::connection::Connection,
+        participant_id: String,
+        principal: crate::identity::AuthenticatedPrincipal,
+    },
+}
+
+impl From<AdapterEvent> for OrchestratorAdapterEvent {
+    fn from(event: AdapterEvent) -> Self {
+        Self::Public(event)
+    }
+}
+
 /// Direct fallback for terminal adapter events when the adapter's bounded
 /// event queue is saturated or closed.
 ///
@@ -81,6 +104,82 @@ impl AdapterLifecycleSinkSlot {
             }
         }
     }
+
+    /// Atomic-stream counterpart to [`Self::queue_or_deliver_terminal`].
+    pub async fn queue_or_deliver_orchestrator_terminal(
+        &self,
+        events: &mpsc::Sender<OrchestratorAdapterEvent>,
+        event: AdapterEvent,
+    ) -> TerminalDelivery {
+        match events.try_send(OrchestratorAdapterEvent::Public(event)) {
+            Ok(()) => TerminalDelivery::Queued,
+            Err(mpsc::error::TrySendError::Full(OrchestratorAdapterEvent::Public(event)))
+            | Err(mpsc::error::TrySendError::Closed(OrchestratorAdapterEvent::Public(event))) => {
+                if self.deliver_terminal(event).await {
+                    TerminalDelivery::Fallback
+                } else {
+                    TerminalDelivery::Undeliverable
+                }
+            }
+            Err(mpsc::error::TrySendError::Full(_)) | Err(mpsc::error::TrySendError::Closed(_)) => {
+                debug_assert!(false, "terminal event wrapper changed unexpectedly");
+                TerminalDelivery::Undeliverable
+            }
+        }
+    }
+}
+
+/// Expand atomic authenticated-inbound events into the historical direct
+/// adapter sequence without changing the Orchestrator's source queue.
+///
+/// The input receiver has already accepted the connection and its principal
+/// as one bounded item. This forwarding task preserves event order and awaits
+/// both compatibility events before reading the next source item. It is used
+/// only for explicit direct adapter subscriptions; Orchestrator registration
+/// consumes the unexpanded receiver through
+/// [`ConnectionAdapter::subscribe_orchestrator_events`].
+pub fn legacy_normalized_event_receiver(
+    mut source: mpsc::Receiver<OrchestratorAdapterEvent>,
+    capacity: usize,
+) -> mpsc::Receiver<AdapterEvent> {
+    let (events, receiver) = mpsc::channel(capacity.max(2));
+    tokio::spawn(async move {
+        while let Some(event) = source.recv().await {
+            match event {
+                OrchestratorAdapterEvent::AuthenticatedInboundConnection {
+                    connection,
+                    participant_id,
+                    principal,
+                } => {
+                    let connection_id = connection.id.clone();
+                    if events
+                        .send(AdapterEvent::InboundConnection { connection })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    if events
+                        .send(AdapterEvent::PrincipalAuthenticated {
+                            connection_id,
+                            participant_id,
+                            principal,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                OrchestratorAdapterEvent::Public(event) => {
+                    if events.send(event).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    receiver
 }
 
 /// The cross-transport adapter contract. Every transport-specific crate
@@ -112,6 +211,31 @@ pub trait ConnectionAdapter: Send + Sync {
     /// at most once. The default keeps existing adapters source compatible.
     fn take_inbound_context(&self, _conn: &ConnectionId) -> Option<InboundConnectionContext> {
         None
+    }
+
+    /// Subscribe to the adapter's atomic lifecycle stream for Orchestrator use.
+    ///
+    /// The default preserves source and behavioral compatibility for adapters
+    /// that do not distinguish their public event stream. SIP and WebRTC
+    /// override this method so an authenticated inbound handoff
+    /// remains one bounded queue item on the security-sensitive path while
+    /// their legacy public subscription continues to expand that item into
+    /// `InboundConnection` followed by `PrincipalAuthenticated`.
+    fn subscribe_orchestrator_events(&self) -> mpsc::Receiver<OrchestratorAdapterEvent> {
+        let mut public = self.subscribe_events();
+        let (events, receiver) = mpsc::channel(256);
+        tokio::spawn(async move {
+            while let Some(event) = public.recv().await {
+                if events
+                    .send(OrchestratorAdapterEvent::Public(event))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        receiver
     }
 
     async fn originate(&self, request: OriginateRequest) -> Result<ConnectionHandle>;

@@ -12,7 +12,8 @@
 
 use crate::adapter::{
     AdapterEvent, AdapterLifecycleSink, ConnectionAdapter, ConnectionHandle, EndReason,
-    InboundConnectionContext, OriginateRequest, PlaybackHandle, TransferTarget,
+    InboundConnectionContext, OrchestratorAdapterEvent, OriginateRequest, PlaybackHandle,
+    TransferTarget,
 };
 use crate::bridge::{codec_to_pt, frame_pump, BridgeManager, CrossBridgeHandle};
 use crate::capability::{CapabilityDescriptor, CapabilityIntersection};
@@ -653,7 +654,9 @@ impl Orchestrator {
             orchestrator: Arc::downgrade(self),
             transport,
         }))?;
-        let mut events = adapter.subscribe_events();
+        // The Orchestrator consumes the adapter's atomic lifecycle stream.
+        // Public direct subscribers retain the pre-atomic normalized sequence.
+        let mut events = adapter.subscribe_orchestrator_events();
         self.adapters.insert(transport, adapter);
 
         // Spawn the per-adapter event-normalize loop. Each AdapterEvent is
@@ -661,7 +664,7 @@ impl Orchestrator {
         let me = Arc::clone(self);
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
-                me.handle_adapter_event(transport, event).await;
+                me.handle_orchestrator_adapter_event(transport, event).await;
             }
             debug!(?transport, "adapter event stream ended");
         });
@@ -2336,12 +2339,63 @@ impl Orchestrator {
         let _ = Self::emit_to_channels(&self.events, self.cross_crate_publisher.as_deref(), event);
     }
 
+    async fn handle_orchestrator_adapter_event(
+        &self,
+        transport: Transport,
+        event: OrchestratorAdapterEvent,
+    ) {
+        match event {
+            OrchestratorAdapterEvent::Public(event) => {
+                self.handle_adapter_event(transport, event).await;
+            }
+            OrchestratorAdapterEvent::AuthenticatedInboundConnection {
+                connection,
+                participant_id,
+                principal,
+            } => {
+                if !self.adapter_connection_is_live(transport, &connection.id) {
+                    return;
+                }
+                let inbound_context = self
+                    .adapter(transport)
+                    .ok()
+                    .and_then(|adapter| adapter.take_inbound_context(&connection.id))
+                    .filter(|context| {
+                        connection.transport == transport
+                            && context.connection_id() == &connection.id
+                            && context.transport() == transport
+                    });
+                self.track_connection(&connection.id, transport, inbound_context);
+                self.track_connection_principal(&connection.id, transport, principal.clone());
+                if !self.adapter_connection_is_live(transport, &connection.id) {
+                    self.forget_connection(&connection.id).await;
+                    return;
+                }
+                let at = Utc::now();
+                self.emit(Event::ConnectionInbound {
+                    connection_id: connection.id.clone(),
+                    at,
+                });
+                self.emit(Event::ConnectionAuthenticated {
+                    connection_id: connection.id.clone(),
+                    identity_id: principal.subject.clone(),
+                    participant_id: participant_id.clone(),
+                    assurance: principal.assurance.clone(),
+                    at,
+                });
+                self.emit(Event::ConnectionPrincipalAuthenticated {
+                    connection_id: connection.id,
+                    participant_id,
+                    principal,
+                    at,
+                });
+            }
+        }
+    }
+
     async fn handle_adapter_event(&self, transport: Transport, event: AdapterEvent) {
         let scoped_connection_id = match &event {
-            AdapterEvent::InboundConnection { connection }
-            | AdapterEvent::AuthenticatedInboundConnection { connection, .. } => {
-                Some(&connection.id)
-            }
+            AdapterEvent::InboundConnection { connection } => Some(&connection.id),
             AdapterEvent::Connected { connection_id }
             | AdapterEvent::Authenticated { connection_id, .. }
             | AdapterEvent::PrincipalAuthenticated { connection_id, .. }
@@ -2387,45 +2441,6 @@ impl Orchestrator {
                 self.emit(Event::ConnectionInbound {
                     connection_id: connection.id.clone(),
                     at: Utc::now(),
-                });
-            }
-            AdapterEvent::AuthenticatedInboundConnection {
-                connection,
-                participant_id,
-                principal,
-            } => {
-                let inbound_context = self
-                    .adapter(transport)
-                    .ok()
-                    .and_then(|adapter| adapter.take_inbound_context(&connection.id))
-                    .filter(|context| {
-                        connection.transport == transport
-                            && context.connection_id() == &connection.id
-                            && context.transport() == transport
-                    });
-                self.track_connection(&connection.id, transport, inbound_context);
-                self.track_connection_principal(&connection.id, transport, principal.clone());
-                if !self.adapter_connection_is_live(transport, &connection.id) {
-                    self.forget_connection(&connection.id).await;
-                    return;
-                }
-                let at = Utc::now();
-                self.emit(Event::ConnectionInbound {
-                    connection_id: connection.id.clone(),
-                    at,
-                });
-                self.emit(Event::ConnectionAuthenticated {
-                    connection_id: connection.id.clone(),
-                    identity_id: principal.subject.clone(),
-                    participant_id: participant_id.clone(),
-                    assurance: principal.assurance.clone(),
-                    at,
-                });
-                self.emit(Event::ConnectionPrincipalAuthenticated {
-                    connection_id: connection.id,
-                    participant_id,
-                    principal,
-                    at,
                 });
             }
             AdapterEvent::Connected { connection_id } => {

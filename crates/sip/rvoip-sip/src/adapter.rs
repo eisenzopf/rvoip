@@ -10,13 +10,15 @@
 
 use crate::api::events::Event as ApiEvent;
 use crate::api::unified::{Config as ApiConfig, InboundInviteObservation, UnifiedCoordinator};
+use crate::types::CallState;
 use crate::SessionId;
 use chrono::Utc;
 use dashmap::DashMap;
 use rvoip_core::adapter::{
-    AdapterEvent, AdapterKind, AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter,
-    ConnectionHandle, EndReason, InboundConnectionContext, InboundContextError, InboundRoutingHint,
-    InboundSignalingMetadata, OriginateRequest, RejectReason, SignatureHeaders, TerminalDelivery,
+    legacy_normalized_event_receiver, AdapterEvent, AdapterKind, AdapterLifecycleSink,
+    AdapterLifecycleSinkSlot, ConnectionAdapter, ConnectionHandle, EndReason,
+    InboundConnectionContext, InboundContextError, InboundRoutingHint, InboundSignalingMetadata,
+    OrchestratorAdapterEvent, OriginateRequest, RejectReason, SignatureHeaders, TerminalDelivery,
     TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
@@ -122,28 +124,30 @@ impl SipInboundContextPolicy {
         if observation.principal.is_none() {
             return Ok(None);
         }
-        let Some(request) = observation.request.as_ref() else {
-            return Ok(None);
-        };
-
-        let routing_hint = request
-            .uri()
-            .username()
-            .map(|username| InboundRoutingHint::new(username.to_owned()))
-            .transpose()?;
-
-        let metadata = request
-            .headers
-            .iter()
-            .filter_map(|header| {
-                let name = header.name();
-                self.captures(&name).then(|| {
-                    sip_header_value(header).map(|value| (name.as_str().to_owned(), value))
+        let (routing_hint, metadata) = if let Some(request) = observation.request.as_ref() {
+            let routing_hint = request
+                .uri()
+                .username()
+                .map(|username| InboundRoutingHint::new(username.to_owned()))
+                .transpose()?;
+            let metadata = request
+                .headers
+                .iter()
+                .filter_map(|header| {
+                    let name = header.name();
+                    self.captures(&name).then(|| {
+                        sip_header_value(header).map(|value| (name.as_str().to_owned(), value))
+                    })
                 })
-            })
-            .collect::<Option<Vec<_>>>()
-            .ok_or(InboundContextError::InvalidMetadataValue)?;
-        let metadata = InboundSignalingMetadata::new(metadata)?;
+                .collect::<Option<Vec<_>>>()
+                .ok_or(InboundContextError::InvalidMetadataValue)?;
+            (routing_hint, InboundSignalingMetadata::new(metadata)?)
+        } else {
+            // Authentication remains usable even when a legacy compatibility
+            // event did not retain parseable raw INVITE bytes. The context is
+            // still principal-bound; it simply carries no routing metadata.
+            (None, InboundSignalingMetadata::default())
+        };
 
         Ok(Some(PendingSipInboundContext {
             routing_hint,
@@ -187,7 +191,10 @@ fn sip_inbound_header_is_application_extension(header: &HeaderName) -> bool {
         return false;
     };
     let normalized = name.to_ascii_lowercase();
-    normalized.starts_with("x-")
+    normalized.len() > 2
+        && normalized.starts_with("x-")
+        && normalized != "x-bridgefu"
+        && normalized != "x-rvoip"
         && !normalized.starts_with("x-bridgefu-")
         && !normalized.starts_with("x-rvoip-")
 }
@@ -204,6 +211,49 @@ fn sip_header_value(header: &TypedHeader) -> Option<String> {
     Some(value.trim().to_owned())
 }
 
+fn validate_sip_principal_at(
+    principal: &AuthenticatedPrincipal,
+    now: chrono::DateTime<Utc>,
+) -> std::result::Result<(), InboundContextError> {
+    if principal.tenant.as_deref().is_none_or(str::is_empty) {
+        return Err(InboundContextError::MissingTenant);
+    }
+    if principal.is_expired_at(now) {
+        return Err(InboundContextError::ExpiredPrincipal);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FailedInboundTermination {
+    Reject,
+    Hangup,
+    CleanupOnly,
+}
+
+fn failed_inbound_termination(
+    state: Option<CallState>,
+    fast_auto_accept: bool,
+) -> FailedInboundTermination {
+    let Some(state) = state else {
+        return FailedInboundTermination::CleanupOnly;
+    };
+    if state.is_final() || state == CallState::Terminating {
+        return FailedInboundTermination::CleanupOnly;
+    }
+    if fast_auto_accept {
+        return FailedInboundTermination::Hangup;
+    }
+    if matches!(
+        state,
+        CallState::Idle | CallState::Initiating | CallState::Ringing | CallState::EarlyMedia
+    ) {
+        FailedInboundTermination::Reject
+    } else {
+        FailedInboundTermination::Hangup
+    }
+}
+
 struct PendingSipInboundContext {
     routing_hint: Option<InboundRoutingHint>,
     metadata: InboundSignalingMetadata,
@@ -213,6 +263,7 @@ struct PendingSipInboundObservation {
     observed_at: Instant,
     principal: Option<AuthenticatedPrincipal>,
     context: Option<Box<PendingSipInboundContext>>,
+    context_error: Option<InboundContextError>,
 }
 
 enum SipInboundContextState {
@@ -222,6 +273,7 @@ enum SipInboundContextState {
 
 enum SipInboundBinding {
     Observed(Option<AuthenticatedPrincipal>),
+    Rejected(InboundContextError),
     Missing,
 }
 
@@ -259,6 +311,25 @@ impl SipInboundContextStore {
         principal: Option<AuthenticatedPrincipal>,
         context: Option<PendingSipInboundContext>,
     ) -> bool {
+        self.observe_entry(session_id, principal, context, None)
+    }
+
+    fn observe_rejected(
+        &self,
+        session_id: SessionId,
+        principal: Option<AuthenticatedPrincipal>,
+        error: InboundContextError,
+    ) -> bool {
+        self.observe_entry(session_id, principal, None, Some(error))
+    }
+
+    fn observe_entry(
+        &self,
+        session_id: SessionId,
+        principal: Option<AuthenticatedPrincipal>,
+        context: Option<PendingSipInboundContext>,
+        context_error: Option<InboundContextError>,
+    ) -> bool {
         let now = Instant::now();
         let mut pending = self
             .pending_by_session
@@ -279,6 +350,7 @@ impl SipInboundContextStore {
                 observed_at: now,
                 principal,
                 context: context.map(Box::new),
+                context_error,
             },
         );
         true
@@ -296,37 +368,44 @@ impl SipInboundContextStore {
                 .insert(connection_id.clone(), SipInboundContextState::Consumed);
             return SipInboundBinding::Missing;
         };
-        let principal = pending.principal.clone();
+        let principal = pending.principal;
+        if let Some(error) = pending.context_error {
+            self.by_connection
+                .entry(connection_id.clone())
+                .or_insert(SipInboundContextState::Consumed);
+            return SipInboundBinding::Rejected(error);
+        }
 
-        self.by_connection
-            .entry(connection_id.clone())
-            .or_insert_with(|| match pending {
-                PendingSipInboundObservation {
-                    principal: Some(principal),
-                    context: Some(pending),
-                    ..
-                } => {
-                    let pending = *pending;
-                    match InboundConnectionContext::new(
-                        connection_id.clone(),
-                        Transport::Sip,
-                        &principal,
-                        pending.routing_hint,
-                        pending.metadata,
-                    ) {
-                        Ok(context) => SipInboundContextState::Available(context),
-                        Err(error) => {
-                            warn!(
-                                ?connection_id,
-                                ?error,
-                                "SipAdapter rejected invalid inbound connection context"
-                            );
-                            SipInboundContextState::Consumed
-                        }
+        let state = match (principal.as_ref(), pending.context) {
+            (Some(principal), Some(pending)) => {
+                let pending = *pending;
+                match InboundConnectionContext::new(
+                    connection_id.clone(),
+                    Transport::Sip,
+                    principal,
+                    pending.routing_hint,
+                    pending.metadata,
+                ) {
+                    Ok(context) => SipInboundContextState::Available(context),
+                    Err(error) => {
+                        self.by_connection
+                            .entry(connection_id.clone())
+                            .or_insert(SipInboundContextState::Consumed);
+                        return SipInboundBinding::Rejected(error);
                     }
                 }
-                _ => SipInboundContextState::Consumed,
-            });
+            }
+            (Some(_), None) => {
+                self.by_connection
+                    .entry(connection_id.clone())
+                    .or_insert(SipInboundContextState::Consumed);
+                return SipInboundBinding::Rejected(InboundContextError::InvalidMetadataValue);
+            }
+            (None, _) => SipInboundContextState::Consumed,
+        };
+        self.by_connection
+            .entry(connection_id.clone())
+            .or_insert(state);
         SipInboundBinding::Observed(principal)
     }
 
@@ -402,9 +481,9 @@ pub struct SipAdapter {
     /// SIP api SessionId → rvoip-core ConnectionId. Used by the event
     /// translator task to map outgoing api::Event → AdapterEvent.
     by_session: Arc<DashMap<SessionId, ConnectionId>>,
-    out_tx: mpsc::Sender<AdapterEvent>,
+    out_tx: mpsc::Sender<OrchestratorAdapterEvent>,
     /// Single-take receiver for [`ConnectionAdapter::subscribe_events`].
-    out_rx: StdMutex<Option<mpsc::Receiver<AdapterEvent>>>,
+    out_rx: StdMutex<Option<mpsc::Receiver<OrchestratorAdapterEvent>>>,
     /// Cache of `SipMediaStream` instances. One stream per connection —
     /// the orchestrator-side `frames_in() / frames_out()` channels are
     /// single-take, so caching lets the orchestrator hand the same
@@ -452,20 +531,21 @@ impl SipAdapter {
                 };
                 let session_id = observation.session_id.clone();
                 let principal = observation.principal.clone();
-                let context = match policy.capture(&observation) {
-                    Ok(context) => context,
+                let captured = policy.capture(&observation);
+                let admitted = match captured {
+                    Ok(context) => contexts.observe(session_id, principal, context),
                     Err(error) => {
                         warn!(
                             ?error,
                             "SipAdapter rejected malformed inbound signaling context"
                         );
-                        None
+                        contexts.observe_rejected(session_id, principal, error)
                     }
                 };
                 // First observation wins. Retransmitted/replayed INVITE
                 // notifications cannot replace a context already tied to the
                 // session's authenticated request.
-                if !contexts.observe(session_id, principal, context) {
+                if !admitted {
                     warn!("SipAdapter inbound context admission capacity reached");
                 }
             },
@@ -550,6 +630,31 @@ impl SipAdapter {
         &self.coordinator
     }
 
+    fn take_atomic_events(&self) -> CoreResult<mpsc::Receiver<OrchestratorAdapterEvent>> {
+        self.out_rx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or(RvoipError::InvalidState(
+                "SipAdapter event stream already consumed",
+            ))
+    }
+
+    /// Subscribe directly while retaining the historical authenticated
+    /// inbound sequence (`InboundConnection`, then `PrincipalAuthenticated`).
+    pub fn try_subscribe_events(&self) -> CoreResult<mpsc::Receiver<AdapterEvent>> {
+        self.take_atomic_events()
+            .map(|events| legacy_normalized_event_receiver(events, 512))
+    }
+
+    /// Opt in to the raw one-item authenticated inbound stream used by the
+    /// Orchestrator.
+    pub fn try_subscribe_atomic_events(
+        &self,
+    ) -> CoreResult<mpsc::Receiver<OrchestratorAdapterEvent>> {
+        self.take_atomic_events()
+    }
+
     fn ensure_mapped(&self, session_id: SessionId) -> ConnectionId {
         if let Some(entry) = self.by_session.get(&session_id) {
             return entry.value().clone();
@@ -596,6 +701,78 @@ impl SipAdapter {
             self.inbound_contexts.forget(session_id, &conn_id);
         } else {
             self.inbound_contexts.forget_pending(session_id);
+        }
+    }
+
+    async fn terminate_failed_inbound(
+        &self,
+        session_id: &SessionId,
+        status: u16,
+        reason: &'static str,
+    ) {
+        let state = self
+            .coordinator
+            .session_state(session_id)
+            .await
+            .ok()
+            .map(|session| session.call_state);
+        let action =
+            failed_inbound_termination(state, self.coordinator.fast_auto_accept_incoming_calls());
+
+        // Local visibility and admission state must converge even when the
+        // network transaction or dialog teardown fails. Removing this first
+        // also makes queued non-terminal adapter events fail the live-route
+        // check instead of resurrecting the rejected connection.
+        self.forget(session_id);
+
+        let force_cleanup = match action {
+            FailedInboundTermination::Reject => {
+                match self
+                    .coordinator
+                    .reject(session_id)
+                    .with_status(status)
+                    .with_reason(reason)
+                    .send()
+                    .await
+                {
+                    Ok(()) => false,
+                    Err(reject_error) => {
+                        warn!(
+                            %reject_error,
+                            "SipAdapter failed to reject unpublished inbound route; trying hangup"
+                        );
+                        match self.coordinator.hangup(session_id).await {
+                            Ok(()) => false,
+                            Err(hangup_error) => {
+                                warn!(
+                                    %hangup_error,
+                                    "SipAdapter fallback hangup failed for unpublished inbound route"
+                                );
+                                true
+                            }
+                        }
+                    }
+                }
+            }
+            FailedInboundTermination::Hangup => {
+                if let Err(error) = self.coordinator.hangup(session_id).await {
+                    warn!(%error, "SipAdapter failed to hang up unpublished inbound route");
+                    true
+                } else {
+                    false
+                }
+            }
+            FailedInboundTermination::CleanupOnly => true,
+        };
+
+        if force_cleanup {
+            if let Err(error) = self
+                .coordinator
+                .finalize_local_bye(session_id, reason)
+                .await
+            {
+                warn!(%error, "SipAdapter forced inbound cleanup did not publish terminal state");
+            }
         }
     }
 
@@ -672,6 +849,19 @@ impl SipAdapter {
                 let conn_id = self.ensure_mapped(call_id.clone());
                 let principal = match self.inbound_contexts.bind(&call_id, &conn_id) {
                     SipInboundBinding::Observed(principal) => principal,
+                    SipInboundBinding::Rejected(error) => {
+                        warn!(
+                            ?error,
+                            "SipAdapter rejected invalid authenticated inbound route"
+                        );
+                        self.terminate_failed_inbound(
+                            &call_id,
+                            403,
+                            "Authenticated Signaling Context Rejected",
+                        )
+                        .await;
+                        return;
+                    }
                     SipInboundBinding::Missing => {
                         // Every new inbound call is synchronously observed
                         // before its public event is emitted. A missing entry
@@ -679,47 +869,50 @@ impl SipAdapter {
                         // startup race; fail closed instead of publishing a
                         // route without its authentication state.
                         warn!("SipAdapter rejected inbound route without its observation");
-                        if let Err(error) = self
-                            .coordinator
-                            .reject(&call_id)
-                            .with_status(503)
-                            .with_reason("Signaling Context Unavailable")
-                            .send()
-                            .await
-                        {
-                            warn!(%error, "SipAdapter failed to reject contextless inbound route");
-                        }
+                        self.terminate_failed_inbound(
+                            &call_id,
+                            503,
+                            "Signaling Context Unavailable",
+                        )
+                        .await;
                         return;
                     }
                 };
                 let connection = self
                     .build_connection(conn_id.clone(), Direction::Inbound)
                     .await;
+                if let Some(principal) = principal.as_ref() {
+                    if let Err(error) = validate_sip_principal_at(principal, Utc::now()) {
+                        warn!(
+                            ?error,
+                            "SipAdapter principal expired or became invalid before publication"
+                        );
+                        self.terminate_failed_inbound(
+                            &call_id,
+                            403,
+                            "Authenticated Principal No Longer Active",
+                        )
+                        .await;
+                        return;
+                    }
+                }
                 let adapter_event = if let Some(principal) = principal {
                     self.authenticated_inbound_sessions
                         .insert(call_id.clone(), ());
-                    AdapterEvent::AuthenticatedInboundConnection {
+                    OrchestratorAdapterEvent::AuthenticatedInboundConnection {
                         participant_id: principal.subject.clone(),
                         connection,
                         principal,
                     }
                 } else {
-                    AdapterEvent::InboundConnection { connection }
+                    OrchestratorAdapterEvent::Public(AdapterEvent::InboundConnection { connection })
                 };
                 if !self.send_inbound_event(adapter_event).await {
                     // Keep the consumed tombstone until terminal cleanup so a
                     // replayed IncomingCall cannot recreate the secret.
                     self.inbound_contexts.discard(&conn_id);
-                    if let Err(error) = self
-                        .coordinator
-                        .reject(&call_id)
-                        .with_status(503)
-                        .with_reason("Signaling Event Backpressure")
-                        .send()
-                        .await
-                    {
-                        warn!(%error, "SipAdapter failed to reject undeliverable inbound route");
-                    }
+                    self.terminate_failed_inbound(&call_id, 503, "Signaling Event Backpressure")
+                        .await;
                 }
             }
             ApiEvent::IncomingCallAuthenticated { call_id, principal } => {
@@ -847,7 +1040,10 @@ impl SipAdapter {
     }
 
     fn try_send(&self, event: AdapterEvent) -> bool {
-        if let Err(e) = self.out_tx.try_send(event) {
+        if let Err(e) = self
+            .out_tx
+            .try_send(OrchestratorAdapterEvent::Public(event))
+        {
             warn!(
                 ?e,
                 "SipAdapter event channel full or closed; dropping event"
@@ -858,13 +1054,13 @@ impl SipAdapter {
         }
     }
 
-    async fn send_inbound_event(&self, event: AdapterEvent) -> bool {
+    async fn send_inbound_event(&self, event: OrchestratorAdapterEvent) -> bool {
         Self::send_inbound_event_to(&self.out_tx, event).await
     }
 
     async fn send_inbound_event_to(
-        events: &mpsc::Sender<AdapterEvent>,
-        event: AdapterEvent,
+        events: &mpsc::Sender<OrchestratorAdapterEvent>,
+        event: OrchestratorAdapterEvent,
     ) -> bool {
         match tokio::time::timeout(SIP_INBOUND_EVENT_DELIVERY_TIMEOUT, events.send(event)).await {
             Ok(Ok(())) => true,
@@ -885,11 +1081,13 @@ impl SipAdapter {
 
     async fn deliver_terminal_event_to(
         lifecycle: &AdapterLifecycleSinkSlot,
-        events: &mpsc::Sender<AdapterEvent>,
+        events: &mpsc::Sender<OrchestratorAdapterEvent>,
         event: AdapterEvent,
         source: &'static str,
     ) {
-        let delivery = lifecycle.queue_or_deliver_terminal(events, event).await;
+        let delivery = lifecycle
+            .queue_or_deliver_orchestrator_terminal(events, event)
+            .await;
         if delivery == TerminalDelivery::Undeliverable {
             warn!(source, "SipAdapter terminal event was undeliverable");
         }
@@ -1109,11 +1307,13 @@ impl ConnectionAdapter for SipAdapter {
     }
 
     fn subscribe_events(&self) -> mpsc::Receiver<AdapterEvent> {
-        self.out_rx
-            .lock()
-            .unwrap()
-            .take()
+        self.try_subscribe_events()
             .expect("SipAdapter::subscribe_events already consumed")
+    }
+
+    fn subscribe_orchestrator_events(&self) -> mpsc::Receiver<OrchestratorAdapterEvent> {
+        self.try_subscribe_atomic_events()
+            .expect("SipAdapter atomic event stream already consumed")
     }
 
     fn capabilities(&self) -> CapabilityDescriptor {
@@ -1137,6 +1337,7 @@ impl ConnectionAdapter for SipAdapter {
 #[cfg(test)]
 mod inbound_context_tests {
     use super::*;
+    use crate::state_table::types::Role;
     use rvoip_core::identity::{AuthenticationMethod, IdentityAssurance};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1244,7 +1445,10 @@ mod inbound_context_tests {
             "X-Bridgefu-Tenant-Id",
             "X-Bridgefu-Call-Id",
             "X-Bridgefu-Correlation-Id",
+            "X-Bridgefu",
             "X-Rvoip-Route",
+            "X-Rvoip",
+            "X-",
         ] {
             assert!(
                 matches!(
@@ -1383,6 +1587,87 @@ mod inbound_context_tests {
     }
 
     #[test]
+    fn bind_rejects_tenantless_expired_and_malformed_authenticated_contexts() {
+        let policy = SipInboundContextPolicy::default();
+
+        let tenantless_session = SessionId::new();
+        let tenantless_connection = ConnectionId::new();
+        let tenantless = principal("");
+        let tenantless_observation = observation(
+            tenantless_session.clone(),
+            "tenantless",
+            &[],
+            Some(tenantless.clone()),
+        );
+        let tenantless_context = policy
+            .capture(&tenantless_observation)
+            .expect("capture")
+            .expect("authenticated context");
+        let store = SipInboundContextStore::default();
+        assert!(store.observe(
+            tenantless_session.clone(),
+            Some(tenantless),
+            Some(tenantless_context)
+        ));
+        assert!(matches!(
+            store.bind(&tenantless_session, &tenantless_connection),
+            SipInboundBinding::Rejected(InboundContextError::MissingTenant)
+        ));
+        assert!(store.take(&tenantless_connection).is_none());
+
+        let expired_session = SessionId::new();
+        let expired_connection = ConnectionId::new();
+        let mut expired = principal("tenant-a");
+        expired.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        let expired_observation = observation(
+            expired_session.clone(),
+            "expired",
+            &[],
+            Some(expired.clone()),
+        );
+        let expired_context = policy
+            .capture(&expired_observation)
+            .expect("capture")
+            .expect("authenticated context");
+        assert!(store.observe(
+            expired_session.clone(),
+            Some(expired),
+            Some(expired_context)
+        ));
+        assert!(matches!(
+            store.bind(&expired_session, &expired_connection),
+            SipInboundBinding::Rejected(InboundContextError::ExpiredPrincipal)
+        ));
+
+        let malformed_session = SessionId::new();
+        assert!(store.observe_rejected(
+            malformed_session.clone(),
+            Some(principal("tenant-a")),
+            InboundContextError::RoutingHintTooLarge,
+        ));
+        assert!(matches!(
+            store.bind(&malformed_session, &ConnectionId::new()),
+            SipInboundBinding::Rejected(InboundContextError::RoutingHintTooLarge)
+        ));
+    }
+
+    #[test]
+    fn publication_boundary_deterministically_rechecks_expiry_after_binding() {
+        let expires_at = Utc::now() + chrono::Duration::hours(1);
+        let mut expiring = principal("tenant-a");
+        expiring.expires_at = Some(expires_at);
+        assert!(validate_sip_principal_at(
+            &expiring,
+            expires_at - chrono::Duration::nanoseconds(1)
+        )
+        .is_ok());
+        assert_eq!(
+            validate_sip_principal_at(&expiring, expires_at),
+            Err(InboundContextError::ExpiredPrincipal)
+        );
+    }
+
+    #[test]
     fn pending_observations_are_strictly_bounded_and_expire() {
         let store = SipInboundContextStore::with_pending_limits(2, Duration::from_secs(1));
         let first = SessionId::new();
@@ -1435,14 +1720,14 @@ mod inbound_context_tests {
     async fn authenticated_inbound_event_is_one_bounded_queue_item() {
         let (events_tx, mut events_rx) = mpsc::channel(1);
         events_tx
-            .send(AdapterEvent::Native {
+            .send(OrchestratorAdapterEvent::Public(AdapterEvent::Native {
                 kind: "queue-filler",
                 detail: String::new(),
-            })
+            }))
             .await
             .unwrap();
         let connection_id = ConnectionId::new();
-        let event = AdapterEvent::AuthenticatedInboundConnection {
+        let event = OrchestratorAdapterEvent::AuthenticatedInboundConnection {
             connection: inbound_connection(connection_id.clone()),
             participant_id: "sip-peer".into(),
             principal: principal("tenant-a"),
@@ -1457,11 +1742,13 @@ mod inbound_context_tests {
         );
         assert!(matches!(
             events_rx.recv().await,
-            Some(AdapterEvent::Native { .. })
+            Some(OrchestratorAdapterEvent::Public(
+                AdapterEvent::Native { .. }
+            ))
         ));
         assert!(matches!(
             events_rx.recv().await,
-            Some(AdapterEvent::AuthenticatedInboundConnection { connection, principal, .. })
+            Some(OrchestratorAdapterEvent::AuthenticatedInboundConnection { connection, principal, .. })
                 if connection.id == connection_id && principal.tenant.as_deref() == Some("tenant-a")
         ));
         assert!(send.await.unwrap());
@@ -1481,10 +1768,10 @@ mod inbound_context_tests {
 
         let (events_tx, mut events_rx) = mpsc::channel(1);
         events_tx
-            .send(AdapterEvent::Native {
+            .send(OrchestratorAdapterEvent::Public(AdapterEvent::Native {
                 kind: "queue-filler",
                 detail: String::new(),
-            })
+            }))
             .await
             .unwrap();
         SipAdapter::deliver_terminal_event_to(
@@ -1500,7 +1787,9 @@ mod inbound_context_tests {
         assert_eq!(sink.deliveries.load(Ordering::SeqCst), 1);
         assert!(matches!(
             events_rx.recv().await,
-            Some(AdapterEvent::Native { .. })
+            Some(OrchestratorAdapterEvent::Public(
+                AdapterEvent::Native { .. }
+            ))
         ));
         assert!(matches!(
             events_rx.try_recv(),
@@ -1581,6 +1870,114 @@ mod inbound_context_tests {
         assert!(!adapter
             .authenticated_inbound_sessions
             .contains_key(&session_id));
+
+        drop(adapter);
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
+    }
+
+    #[test]
+    fn failed_inbound_termination_is_state_aware() {
+        assert_eq!(
+            failed_inbound_termination(Some(CallState::Ringing), false),
+            FailedInboundTermination::Reject
+        );
+        assert_eq!(
+            failed_inbound_termination(Some(CallState::Active), false),
+            FailedInboundTermination::Hangup
+        );
+        assert_eq!(
+            failed_inbound_termination(Some(CallState::Ringing), true),
+            FailedInboundTermination::Hangup
+        );
+        assert_eq!(
+            failed_inbound_termination(Some(CallState::Terminated), true),
+            FailedInboundTermination::CleanupOnly
+        );
+    }
+
+    #[tokio::test]
+    async fn saturated_delivery_fast_auto_accept_hangs_up_and_releases_local_capacity() {
+        let config =
+            ApiConfig::local("atomic-fast-cleanup", 0).with_fast_auto_accept_incoming_calls(true);
+        let coordinator = UnifiedCoordinator::new(config).await.expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let session_id = SessionId::new();
+        coordinator
+            .helpers
+            .create_session(
+                session_id.clone(),
+                "sip:bridge@example.test".into(),
+                "sip:caller@example.test".into(),
+                Role::UAS,
+            )
+            .await
+            .expect("session");
+        let mut session = coordinator
+            .session_state(&session_id)
+            .await
+            .expect("session state");
+        session.call_state = CallState::Active;
+        coordinator
+            .update_session_state(session)
+            .await
+            .expect("active state");
+
+        let connection_id = adapter.ensure_mapped(session_id.clone());
+        adapter
+            .authenticated_inbound_sessions
+            .insert(session_id.clone(), ());
+        adapter
+            .inbound_contexts
+            .by_connection
+            .insert(connection_id.clone(), SipInboundContextState::Consumed);
+        for _ in 0..256 {
+            adapter
+                .out_tx
+                .try_send(OrchestratorAdapterEvent::Public(AdapterEvent::Native {
+                    kind: "queue-filler",
+                    detail: String::new(),
+                }))
+                .expect("fill bounded event queue");
+        }
+
+        let delivered = adapter
+            .send_inbound_event(OrchestratorAdapterEvent::AuthenticatedInboundConnection {
+                connection: inbound_connection(connection_id.clone()),
+                participant_id: "sip-peer".into(),
+                principal: principal("tenant-a"),
+            })
+            .await;
+        assert!(!delivered, "saturated queue must reject atomic handoff");
+        adapter
+            .terminate_failed_inbound(&session_id, 503, "test saturated publication")
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !adapter.by_session.contains_key(&session_id)
+                    && !adapter.by_connection.contains_key(&connection_id)
+                    && !adapter
+                        .authenticated_inbound_sessions
+                        .contains_key(&session_id)
+                    && !adapter
+                        .inbound_contexts
+                        .by_connection
+                        .contains_key(&connection_id)
+                    && !adapter.streams_cache.contains_key(&connection_id)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all adapter-owned capacity is released");
+        assert!(coordinator.session_state(&session_id).await.is_err());
 
         drop(adapter);
         coordinator

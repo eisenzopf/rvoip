@@ -11,9 +11,10 @@ use chrono::Utc;
 use dashmap::DashMap;
 use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
 use rvoip_core::adapter::{
-    AdapterEvent, AdapterKind, AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter,
-    ConnectionHandle, EndReason, InboundConnectionContext, InboundContextError, InboundRoutingHint,
-    InboundSignalingMetadata, OriginateRequest, RejectReason, SignatureHeaders, TerminalDelivery,
+    legacy_normalized_event_receiver, AdapterEvent, AdapterKind, AdapterLifecycleSink,
+    AdapterLifecycleSinkSlot, ConnectionAdapter, ConnectionHandle, EndReason,
+    InboundConnectionContext, InboundContextError, InboundRoutingHint, InboundSignalingMetadata,
+    OrchestratorAdapterEvent, OriginateRequest, RejectReason, SignatureHeaders, TerminalDelivery,
     TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
@@ -202,8 +203,8 @@ pub trait FingerprintPolicyHook: Send + Sync {
 pub struct WebRtcAdapter {
     config: WebRtcConfig,
     routes: Arc<DashMap<ConnectionId, Route>>,
-    events_tx: mpsc::Sender<AdapterEvent>,
-    events_rx: StdMutex<Option<mpsc::Receiver<AdapterEvent>>>,
+    events_tx: mpsc::Sender<OrchestratorAdapterEvent>,
+    events_rx: StdMutex<Option<mpsc::Receiver<OrchestratorAdapterEvent>>>,
     lifecycle: AdapterLifecycleSinkSlot,
     /// Cancel for the global reaper task spawned in [`WebRtcAdapter::new`].
     reaper_cancel: Arc<Notify>,
@@ -280,7 +281,7 @@ impl WebRtcAdapter {
 
     fn spawn_quality_emitter(
         routes: Arc<DashMap<ConnectionId, Route>>,
-        events_tx: mpsc::Sender<AdapterEvent>,
+        events_tx: mpsc::Sender<OrchestratorAdapterEvent>,
     ) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -316,10 +317,10 @@ impl WebRtcAdapter {
                         mos: None,
                     };
                     let _ = events_tx
-                        .send(AdapterEvent::Quality {
+                        .send(OrchestratorAdapterEvent::Public(AdapterEvent::Quality {
                             connection_id: conn_id,
                             snapshot,
-                        })
+                        }))
                         .await;
                 }
             }
@@ -598,11 +599,7 @@ impl WebRtcAdapter {
         (total, agg)
     }
 
-    /// Single-take event receiver. Returns `Err(AlreadySubscribed)` on second call
-    /// instead of panicking. The trait method [`ConnectionAdapter::subscribe_events`]
-    /// preserves the original infallible signature by returning a closed receiver
-    /// after the first take.
-    pub fn try_subscribe_events(&self) -> Result<mpsc::Receiver<AdapterEvent>> {
+    fn try_take_atomic_events(&self) -> Result<mpsc::Receiver<OrchestratorAdapterEvent>> {
         match self.events_rx.lock() {
             Ok(mut guard) => guard.take().ok_or(WebRtcError::AlreadySubscribed),
             Err(poisoned) => {
@@ -613,19 +610,42 @@ impl WebRtcAdapter {
         }
     }
 
+    /// Single-take public event receiver preserving the historical authenticated
+    /// inbound sequence (`InboundConnection`, then `PrincipalAuthenticated`).
+    ///
+    /// Returns `Err(AlreadySubscribed)` on a second call. The atomic source item
+    /// is expanded by a bounded forwarding task only after leaving the
+    /// Orchestrator's security-sensitive queue.
+    pub fn try_subscribe_events(&self) -> Result<mpsc::Receiver<AdapterEvent>> {
+        self.try_take_atomic_events()
+            .map(|events| legacy_normalized_event_receiver(events, ADAPTER_EVENT_CAP * 2))
+    }
+
+    /// Opt in to the raw atomic adapter event stream.
+    ///
+    /// This is the stream consumed by `rvoip-core::Orchestrator`; most direct
+    /// callers should use [`Self::try_subscribe_events`] for compatibility.
+    pub fn try_subscribe_atomic_events(&self) -> Result<mpsc::Receiver<OrchestratorAdapterEvent>> {
+        self.try_take_atomic_events()
+    }
+
     fn try_send(&self, event: AdapterEvent) {
-        if self.events_tx.try_send(event).is_err() {
+        if self
+            .events_tx
+            .try_send(OrchestratorAdapterEvent::Public(event))
+            .is_err()
+        {
             warn!("WebRtcAdapter event channel full or closed");
         }
     }
 
-    async fn send_inbound_event(&self, event: AdapterEvent) -> bool {
+    async fn send_inbound_event(&self, event: OrchestratorAdapterEvent) -> bool {
         Self::send_inbound_event_to(&self.events_tx, event).await
     }
 
     async fn send_inbound_event_to(
-        events_tx: &mpsc::Sender<AdapterEvent>,
-        event: AdapterEvent,
+        events_tx: &mpsc::Sender<OrchestratorAdapterEvent>,
+        event: OrchestratorAdapterEvent,
     ) -> bool {
         match tokio::time::timeout(INBOUND_EVENT_DELIVERY_TIMEOUT, events_tx.send(event)).await {
             Ok(Ok(())) => true,
@@ -642,11 +662,13 @@ impl WebRtcAdapter {
 
     async fn deliver_terminal_event(
         lifecycle: &AdapterLifecycleSinkSlot,
-        events_tx: &mpsc::Sender<AdapterEvent>,
+        events_tx: &mpsc::Sender<OrchestratorAdapterEvent>,
         event: AdapterEvent,
         source: &'static str,
     ) {
-        let delivery = lifecycle.queue_or_deliver_terminal(events_tx, event).await;
+        let delivery = lifecycle
+            .queue_or_deliver_orchestrator_terminal(events_tx, event)
+            .await;
         if delivery == TerminalDelivery::Undeliverable {
             warn!(source, "WebRtcAdapter terminal event was undeliverable");
         }
@@ -717,7 +739,7 @@ impl WebRtcAdapter {
         channels: Arc<DashMap<String, Arc<dyn DataChannel>>>,
         pumped: Arc<SyncMutex<HashSet<usize>>>,
         channel_keys: Arc<DashMap<usize, String>>,
-        events_tx: mpsc::Sender<AdapterEvent>,
+        events_tx: mpsc::Sender<OrchestratorAdapterEvent>,
         dropped: Arc<AtomicU64>,
         mut cancel: watch::Receiver<bool>,
     ) -> std::result::Result<bool, String> {
@@ -826,10 +848,10 @@ impl WebRtcAdapter {
                                     frame.is_string,
                                 ) {
                                     Ok(message) => {
-                                        if events_tx.try_send(AdapterEvent::DataMessage {
+                                        if events_tx.try_send(OrchestratorAdapterEvent::Public(AdapterEvent::DataMessage {
                                             connection_id: conn.clone(),
                                             message,
-                                        }).is_err() {
+                                        })).is_err() {
                                             dropped.fetch_add(1, Ordering::Relaxed);
                                             warn!(conn = %conn, label, "WebRTC adapter event queue full; dropping data message");
                                         }
@@ -1038,11 +1060,11 @@ impl WebRtcAdapter {
         tokio::spawn(async move {
             while let Some(event) = dtmf_rx.recv().await {
                 let _ = events_tx
-                    .send(AdapterEvent::Dtmf {
+                    .send(OrchestratorAdapterEvent::Public(AdapterEvent::Dtmf {
                         connection_id: conn_for_dtmf.clone(),
                         digits: event.digit.to_string(),
                         duration_ms: event.duration_ms,
-                    })
+                    }))
                     .await;
             }
         });
@@ -1270,7 +1292,7 @@ impl WebRtcAdapter {
     /// to introspect via `routes()` before GC).
     async fn run_reaper(
         routes: Arc<DashMap<ConnectionId, Route>>,
-        events_tx: mpsc::Sender<AdapterEvent>,
+        events_tx: mpsc::Sender<OrchestratorAdapterEvent>,
         cancel: Arc<Notify>,
         ttl_secs: u64,
         reaped_counter: Arc<AtomicU64>,
@@ -1442,15 +1464,17 @@ impl WebRtcAdapter {
             self.build_connection(conn_id.clone(), Direction::Inbound, negotiated, handle);
         let participant_id = connection.participant_id.clone();
         let delivered = if let Some(principal) = authorization.and_then(|value| value.principal) {
-            self.send_inbound_event(AdapterEvent::AuthenticatedInboundConnection {
+            self.send_inbound_event(OrchestratorAdapterEvent::AuthenticatedInboundConnection {
                 connection,
                 participant_id: participant_id.to_string(),
                 principal,
             })
             .await
         } else {
-            self.send_inbound_event(AdapterEvent::InboundConnection { connection })
-                .await
+            self.send_inbound_event(OrchestratorAdapterEvent::Public(
+                AdapterEvent::InboundConnection { connection },
+            ))
+            .await
         };
         if !delivered {
             if let Some((_, route)) = self.routes.remove(&conn_id) {
@@ -1972,6 +1996,19 @@ impl ConnectionAdapter for WebRtcAdapter {
         }
     }
 
+    fn subscribe_orchestrator_events(&self) -> mpsc::Receiver<OrchestratorAdapterEvent> {
+        match self.try_subscribe_atomic_events() {
+            Ok(receiver) => receiver,
+            Err(_) => {
+                warn!(
+                    "WebRtcAdapter atomic event stream was already consumed; returning closed receiver"
+                );
+                let (_sender, receiver) = mpsc::channel(1);
+                receiver
+            }
+        }
+    }
+
     fn capabilities(&self) -> CapabilityDescriptor {
         self.config.capabilities.clone()
     }
@@ -2226,14 +2263,14 @@ mod inbound_hardening_tests {
     async fn authenticated_inbound_event_is_one_bounded_queue_item() {
         let (events_tx, mut events_rx) = mpsc::channel(1);
         events_tx
-            .send(AdapterEvent::Native {
+            .send(OrchestratorAdapterEvent::Public(AdapterEvent::Native {
                 kind: "queue-filler",
                 detail: String::new(),
-            })
+            }))
             .await
             .unwrap();
         let connection_id = ConnectionId::new();
-        let event = AdapterEvent::AuthenticatedInboundConnection {
+        let event = OrchestratorAdapterEvent::AuthenticatedInboundConnection {
             connection: inbound_connection(connection_id.clone()),
             participant_id: "webrtc-owner".into(),
             principal: principal(Some("tenant-a"), None),
@@ -2248,11 +2285,13 @@ mod inbound_hardening_tests {
         );
         assert!(matches!(
             events_rx.recv().await,
-            Some(AdapterEvent::Native { .. })
+            Some(OrchestratorAdapterEvent::Public(
+                AdapterEvent::Native { .. }
+            ))
         ));
         assert!(matches!(
             events_rx.recv().await,
-            Some(AdapterEvent::AuthenticatedInboundConnection { connection, principal, .. })
+            Some(OrchestratorAdapterEvent::AuthenticatedInboundConnection { connection, principal, .. })
                 if connection.id == connection_id && principal.tenant.as_deref() == Some("tenant-a")
         ));
         assert!(send.await.unwrap());
@@ -2272,10 +2311,10 @@ mod inbound_hardening_tests {
 
         let (events_tx, mut events_rx) = mpsc::channel(1);
         events_tx
-            .send(AdapterEvent::Native {
+            .send(OrchestratorAdapterEvent::Public(AdapterEvent::Native {
                 kind: "queue-filler",
                 detail: String::new(),
-            })
+            }))
             .await
             .unwrap();
         WebRtcAdapter::deliver_terminal_event(
@@ -2291,7 +2330,9 @@ mod inbound_hardening_tests {
         assert_eq!(sink.deliveries.load(Ordering::SeqCst), 1);
         assert!(matches!(
             events_rx.recv().await,
-            Some(AdapterEvent::Native { .. })
+            Some(OrchestratorAdapterEvent::Public(
+                AdapterEvent::Native { .. }
+            ))
         ));
         assert!(matches!(
             events_rx.try_recv(),

@@ -5,7 +5,8 @@ use chrono::Utc;
 use rvoip_core::adapter::{
     AdapterEvent, AdapterKind, AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter,
     ConnectionHandle, EndReason, InboundConnectionContext, InboundRoutingHint,
-    InboundSignalingMetadata, OriginateRequest, RejectReason, SignatureHeaders, TransferTarget,
+    InboundSignalingMetadata, OrchestratorAdapterEvent, OriginateRequest, RejectReason,
+    SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::commands::InboundAction;
@@ -41,14 +42,33 @@ struct CallCounts {
 
 struct StubAdapter {
     counts: Arc<CallCounts>,
-    inbound: Mutex<Option<mpsc::Receiver<AdapterEvent>>>,
+    inbound: Mutex<Option<mpsc::Receiver<OrchestratorAdapterEvent>>>,
     live: Mutex<HashSet<ConnectionId>>,
     inbound_contexts: Mutex<HashMap<ConnectionId, InboundConnectionContext>>,
     lifecycle: AdapterLifecycleSinkSlot,
 }
 
+#[derive(Clone)]
+struct StubEventSender(mpsc::Sender<OrchestratorAdapterEvent>);
+
+impl StubEventSender {
+    async fn send(
+        &self,
+        event: AdapterEvent,
+    ) -> std::result::Result<(), mpsc::error::SendError<OrchestratorAdapterEvent>> {
+        self.0.send(event.into()).await
+    }
+
+    async fn send_atomic(
+        &self,
+        event: OrchestratorAdapterEvent,
+    ) -> std::result::Result<(), mpsc::error::SendError<OrchestratorAdapterEvent>> {
+        self.0.send(event).await
+    }
+}
+
 impl StubAdapter {
-    fn new() -> (Arc<Self>, mpsc::Sender<AdapterEvent>, Arc<CallCounts>) {
+    fn new() -> (Arc<Self>, StubEventSender, Arc<CallCounts>) {
         let (tx, rx) = mpsc::channel(16);
         let counts = Arc::new(CallCounts::default());
         let adapter = Arc::new(Self {
@@ -58,7 +78,7 @@ impl StubAdapter {
             inbound_contexts: Mutex::new(HashMap::new()),
             lifecycle: AdapterLifecycleSinkSlot::default(),
         });
-        (adapter, tx, counts)
+        (adapter, StubEventSender(tx), counts)
     }
 
     fn mark_live(&self, connection_id: ConnectionId) {
@@ -169,6 +189,10 @@ impl ConnectionAdapter for StubAdapter {
         Ok(NegotiatedCodecs::default())
     }
     fn subscribe_events(&self) -> mpsc::Receiver<AdapterEvent> {
+        let (_sender, receiver) = mpsc::channel(1);
+        receiver
+    }
+    fn subscribe_orchestrator_events(&self) -> mpsc::Receiver<OrchestratorAdapterEvent> {
         // Single-consumer: only register() should call this once.
         self.inbound
             .lock()
@@ -255,7 +279,7 @@ async fn atomic_authenticated_inbound_handoff_preserves_legacy_normalized_order(
         .unwrap(),
     );
     adapter_tx
-        .send(AdapterEvent::AuthenticatedInboundConnection {
+        .send_atomic(OrchestratorAdapterEvent::AuthenticatedInboundConnection {
             connection,
             participant_id: "participant-a".into(),
             principal: owner.clone(),

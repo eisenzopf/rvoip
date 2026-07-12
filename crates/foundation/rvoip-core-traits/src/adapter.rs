@@ -369,18 +369,6 @@ pub enum AdapterEvent {
     InboundConnection {
         connection: Connection,
     },
-    /// Atomic authenticated-inbound handoff.
-    ///
-    /// Adapters use this when authentication is already complete before the
-    /// inbound route becomes visible. Keeping the Connection and complete
-    /// principal in one queue item prevents bounded-queue pressure from
-    /// delivering only half of the route's security state. `rvoip-core`
-    /// preserves the legacy normalized event sequence for consumers.
-    AuthenticatedInboundConnection {
-        connection: Connection,
-        participant_id: String,
-        principal: AuthenticatedPrincipal,
-    },
     Connected {
         connection_id: ConnectionId,
     },
