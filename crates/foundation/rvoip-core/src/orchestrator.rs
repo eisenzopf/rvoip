@@ -12,7 +12,7 @@
 
 use crate::adapter::{
     AdapterEvent, AdapterLifecycleSink, ConnectionAdapter, ConnectionHandle, EndReason,
-    OriginateRequest, PlaybackHandle, TransferTarget,
+    InboundConnectionContext, OriginateRequest, PlaybackHandle, TransferTarget,
 };
 use crate::bridge::{codec_to_pt, frame_pump, BridgeManager, CrossBridgeHandle};
 use crate::capability::{CapabilityDescriptor, CapabilityIntersection};
@@ -145,10 +145,11 @@ impl CrossCrateEventPublisher {
 /// Per-connection registration tracked by the orchestrator so subsequent
 /// commands (`end`, `hold`, `transfer`, `send_dtmf`, ...) can route to the
 /// right adapter without the caller re-stating the transport.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct ConnectionEntry {
     transport: Transport,
     principal: Option<AuthenticatedPrincipal>,
+    inbound_context: Option<InboundConnectionContext>,
 }
 
 #[derive(Debug)]
@@ -715,13 +716,82 @@ impl Orchestrator {
             ))
     }
 
-    fn track_connection(&self, conn: &ConnectionId, transport: Transport) {
+    /// Consume the inbound adapter context for `conn` exactly once.
+    ///
+    /// The authenticated caller must own the connection. A failed ownership
+    /// check never consumes the context, so an unrelated tenant cannot race
+    /// the legitimate policy layer. Untaken context is erased with the
+    /// connection route during terminal cleanup.
+    pub fn take_inbound_context(
+        &self,
+        conn: &ConnectionId,
+        principal: &AuthenticatedPrincipal,
+    ) -> Result<Option<InboundConnectionContext>> {
+        if principal.is_expired() {
+            return Err(RvoipError::AdmissionRejected(
+                "inbound context principal is expired",
+            ));
+        }
+
+        let mut entry = self
+            .connections
+            .get_mut(conn)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
+        let registered_principal = entry.principal.as_ref().ok_or(RvoipError::InvalidState(
+            "connection has no authenticated principal",
+        ))?;
+        if registered_principal.is_expired()
+            || !registered_principal.has_same_owner(principal)
+            || registered_principal
+                .tenant
+                .as_deref()
+                .is_none_or(str::is_empty)
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "inbound context principal mismatch",
+            ));
+        }
+
+        if entry.inbound_context.as_ref().is_some_and(|context| {
+            !context.is_bound_to(conn, entry.transport, registered_principal)
+        }) {
+            // A malformed adapter context is fail-closed and cannot be
+            // recovered by retrying with a different principal.
+            entry.inbound_context = None;
+            return Err(RvoipError::AdmissionRejected(
+                "inbound context binding mismatch",
+            ));
+        }
+        Ok(entry.inbound_context.take())
+    }
+
+    fn track_connection(
+        &self,
+        conn: &ConnectionId,
+        transport: Transport,
+        inbound_context: Option<InboundConnectionContext>,
+    ) {
+        let mut inbound_context = inbound_context;
         self.connections
             .entry(conn.clone())
-            .and_modify(|entry| entry.transport = transport)
-            .or_insert(ConnectionEntry {
+            .and_modify(|entry| {
+                entry.transport = transport;
+                if entry.inbound_context.is_none() {
+                    let candidate = inbound_context.take();
+                    entry.inbound_context = match (candidate, entry.principal.as_ref()) {
+                        (Some(context), Some(principal))
+                            if !context.is_bound_to(conn, transport, principal) =>
+                        {
+                            None
+                        }
+                        (candidate, _) => candidate,
+                    };
+                }
+            })
+            .or_insert_with(|| ConnectionEntry {
                 transport,
                 principal: None,
+                inbound_context,
             });
         self.activate_connection_lifecycle(conn);
     }
@@ -742,11 +812,19 @@ impl Orchestrator {
             .entry(conn.clone())
             .and_modify(|entry| {
                 entry.transport = transport;
+                if entry
+                    .inbound_context
+                    .as_ref()
+                    .is_some_and(|context| !context.is_bound_to(conn, transport, &principal))
+                {
+                    entry.inbound_context = None;
+                }
                 entry.principal = Some(principal.clone());
             })
             .or_insert(ConnectionEntry {
                 transport,
                 principal: Some(principal),
+                inbound_context: None,
             });
         self.activate_connection_lifecycle(conn);
     }
@@ -2289,7 +2367,16 @@ impl Orchestrator {
 
         match event {
             AdapterEvent::InboundConnection { connection } => {
-                self.track_connection(&connection.id, transport);
+                let inbound_context = self
+                    .adapter(transport)
+                    .ok()
+                    .and_then(|adapter| adapter.take_inbound_context(&connection.id))
+                    .filter(|context| {
+                        connection.transport == transport
+                            && context.connection_id() == &connection.id
+                            && context.transport() == transport
+                    });
+                self.track_connection(&connection.id, transport, inbound_context);
                 self.emit(Event::ConnectionInbound {
                     connection_id: connection.id.clone(),
                     at: Utc::now(),
@@ -2788,7 +2875,7 @@ impl Orchestrator {
         };
         let adapter = self.adapter(transport)?;
         let handle = adapter.originate(request).await?;
-        self.track_connection(&handle.connection.id, transport);
+        self.track_connection(&handle.connection.id, transport, None);
         self.bind_connection_to_session(&handle.connection.id, &session_id, participant_id)?;
         self.emit(Event::ConnectionOutbound {
             connection_id: handle.connection.id.clone(),

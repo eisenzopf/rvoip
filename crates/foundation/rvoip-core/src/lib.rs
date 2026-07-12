@@ -135,8 +135,9 @@ pub mod vcon;
 pub mod virtual_publisher;
 
 pub use adapter::{
-    AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest,
-    PlaybackHandle, RejectReason, SignatureHeaders, TransferTarget,
+    AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason,
+    InboundConnectionContext, InboundContextError, InboundRoutingHint, InboundSignalingMetadata,
+    OriginateRequest, PlaybackHandle, RejectReason, SignatureHeaders, TransferTarget,
 };
 pub use bridge::{BridgeError, BridgeHandle, BridgeManager};
 pub use broadcast::{

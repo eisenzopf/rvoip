@@ -38,7 +38,7 @@ use axum::{
     Router,
 };
 use dashmap::DashMap;
-use rvoip_core::adapter::ConnectionAdapter;
+use rvoip_core::adapter::{ConnectionAdapter, InboundRoutingHint};
 use rvoip_core::ids::ConnectionId;
 use rvoip_sip_core::sdp::parser::parse_attribute;
 use tokio::net::TcpListener;
@@ -477,9 +477,21 @@ async fn whip_post(
         return (StatusCode::BAD_REQUEST, "empty WHIP offer body").into_response();
     }
 
+    let routing_hint = match InboundRoutingHint::new(tag) {
+        Ok(routing_hint) => routing_hint,
+        Err(_) => {
+            state.adapter.note_signaling_error();
+            return (StatusCode::BAD_REQUEST, "invalid WHIP routing tag").into_response();
+        }
+    };
+
     let conn_id = match state
         .adapter
-        .apply_remote_offer_authorized(&body, auth.route_authorization())
+        .apply_remote_offer_authorized_with_hint(
+            &body,
+            auth.route_authorization(),
+            Some(routing_hint),
+        )
         .await
     {
         Ok(id) => id,

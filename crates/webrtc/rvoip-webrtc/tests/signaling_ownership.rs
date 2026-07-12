@@ -9,7 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use rvoip_auth_core::{AuthenticatedPrincipal, AuthenticationMethod};
-use rvoip_core::adapter::AdapterEvent;
+use rvoip_core::adapter::{AdapterEvent, ConnectionAdapter};
 use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::ConnectionId;
 use rvoip_webrtc::peer::{PeerRole, RvoipPeerConnection};
@@ -50,7 +50,7 @@ impl PrincipalTokenAuth {
         Ok(AuthContext {
             subject: principal.subject.clone(),
             scopes: principal.scopes.clone(),
-            session_hint: None,
+            session_hint: (token == Some("owner")).then(|| "ws-attachment".into()),
             principal: Some(principal),
         })
     }
@@ -189,6 +189,22 @@ async fn issuer_tenant_and_subject_all_participate_in_update_delete_ownership() 
         }
         other => panic!("expected complete principal event, got {other:?}"),
     }
+
+    let inbound_context =
+        ConnectionAdapter::take_inbound_context(server.adapter().as_ref(), &connection_id)
+            .expect("WHIP routing context");
+    assert_eq!(
+        inbound_context
+            .routing_hint()
+            .expect("WHIP tag")
+            .expose_secret(),
+        "ownership"
+    );
+    assert_eq!(inbound_context.transport(), rvoip_core::Transport::WebRtc);
+    assert!(
+        ConnectionAdapter::take_inbound_context(server.adapter().as_ref(), &connection_id)
+            .is_none()
+    );
 
     let retained = server
         .adapter()
@@ -378,6 +394,68 @@ async fn websocket_cannot_mutate_whip_route_owned_by_another_principal() {
     assert!(
         !server.adapter().routes().contains_key(&connection_id),
         "same owner should be authorized across signaling protocols"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn websocket_session_hint_becomes_single_take_inbound_context() {
+    let server = start_server().await;
+    let mut events = server
+        .adapter()
+        .try_subscribe_events()
+        .expect("adapter events");
+    let offer = fresh_offer().await;
+    let ws_address = server.ws_addr().expect("WS address");
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(format!("ws://{ws_address}/?access_token=owner"))
+            .await
+            .expect("authenticated websocket upgrade");
+
+    socket
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "offer",
+                "sdp": offer,
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send offer");
+    let answer = tokio::time::timeout(Duration::from_secs(10), socket.next())
+        .await
+        .expect("answer timeout")
+        .expect("socket open")
+        .expect("answer frame");
+    assert!(answer.is_text());
+
+    let connection_id = match next_event(&mut events).await {
+        AdapterEvent::InboundConnection { connection } => connection.id,
+        other => panic!("expected inbound connection, got {other:?}"),
+    };
+    match next_event(&mut events).await {
+        AdapterEvent::PrincipalAuthenticated {
+            connection_id: authenticated_id,
+            ..
+        } => assert_eq!(authenticated_id, connection_id),
+        other => panic!("expected principal event, got {other:?}"),
+    }
+
+    let context =
+        ConnectionAdapter::take_inbound_context(server.adapter().as_ref(), &connection_id)
+            .expect("WebSocket context");
+    assert_eq!(
+        context
+            .routing_hint()
+            .expect("session hint")
+            .expose_secret(),
+        "ws-attachment"
+    );
+    assert!(
+        ConnectionAdapter::take_inbound_context(server.adapter().as_ref(), &connection_id)
+            .is_none()
     );
 
     server.shutdown().await;

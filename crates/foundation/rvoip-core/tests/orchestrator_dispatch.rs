@@ -4,7 +4,8 @@
 use chrono::Utc;
 use rvoip_core::adapter::{
     AdapterEvent, AdapterKind, AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter,
-    ConnectionHandle, EndReason, OriginateRequest, RejectReason, SignatureHeaders, TransferTarget,
+    ConnectionHandle, EndReason, InboundConnectionContext, InboundRoutingHint,
+    InboundSignalingMetadata, OriginateRequest, RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::commands::InboundAction;
@@ -12,14 +13,19 @@ use rvoip_core::config::Config;
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::error::{Result, RvoipError};
 use rvoip_core::events::Event;
-use rvoip_core::identity::IdentityAssurance;
+use rvoip_core::identity::{
+    AuthenticatedPrincipal, AuthenticationMethod, CredentialKind, IdentityAssurance,
+};
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
 use rvoip_core::message::Message;
 use rvoip_core::orchestrator::Orchestrator;
 use rvoip_core::stream::MediaStream;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Default)]
@@ -37,6 +43,7 @@ struct StubAdapter {
     counts: Arc<CallCounts>,
     inbound: Mutex<Option<mpsc::Receiver<AdapterEvent>>>,
     live: Mutex<HashSet<ConnectionId>>,
+    inbound_contexts: Mutex<HashMap<ConnectionId, InboundConnectionContext>>,
     lifecycle: AdapterLifecycleSinkSlot,
 }
 
@@ -48,6 +55,7 @@ impl StubAdapter {
             counts: counts.clone(),
             inbound: Mutex::new(Some(rx)),
             live: Mutex::new(HashSet::new()),
+            inbound_contexts: Mutex::new(HashMap::new()),
             lifecycle: AdapterLifecycleSinkSlot::default(),
         });
         (adapter, tx, counts)
@@ -59,6 +67,22 @@ impl StubAdapter {
 
     fn mark_ended(&self, connection_id: &ConnectionId) {
         self.live.lock().unwrap().remove(connection_id);
+    }
+
+    fn set_inbound_context(&self, context: InboundConnectionContext) {
+        let connection_id = context.connection_id().clone();
+        self.set_inbound_context_for(connection_id, context);
+    }
+
+    fn set_inbound_context_for(
+        &self,
+        connection_id: ConnectionId,
+        context: InboundConnectionContext,
+    ) {
+        self.inbound_contexts
+            .lock()
+            .unwrap()
+            .insert(connection_id, context);
     }
 
     async fn deliver_terminal(&self, event: AdapterEvent) {
@@ -81,6 +105,9 @@ impl ConnectionAdapter for StubAdapter {
     }
     fn is_connection_live(&self, conn: &ConnectionId) -> bool {
         self.live.lock().unwrap().contains(conn)
+    }
+    fn take_inbound_context(&self, conn: &ConnectionId) -> Option<InboundConnectionContext> {
+        self.inbound_contexts.lock().unwrap().remove(conn)
     }
     async fn originate(&self, request: OriginateRequest) -> Result<ConnectionHandle> {
         let conn = Connection {
@@ -177,6 +204,253 @@ fn fake_inbound_connection() -> Connection {
         opened_at: Utc::now(),
         closed_at: None,
     }
+}
+
+fn authenticated_principal(tenant: &str) -> AuthenticatedPrincipal {
+    AuthenticatedPrincipal {
+        subject: "attachment-owner".into(),
+        tenant: Some(tenant.into()),
+        scopes: vec!["call:attach".into()],
+        issuer: Some("https://issuer.invalid".into()),
+        expires_at: None,
+        method: AuthenticationMethod::Jwt,
+        assurance: IdentityAssurance::Identified {
+            credential_kind: CredentialKind::Oidc,
+        },
+    }
+}
+
+async fn wait_for_connection_principal(orchestrator: &Orchestrator, connection_id: &ConnectionId) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if orchestrator.connection_principal(connection_id).is_ok() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("principal is retained within one second");
+}
+
+#[tokio::test]
+async fn inbound_context_is_owner_bound_single_take_and_erased_on_terminal() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let (adapter, adapter_tx, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+
+    let connection = fake_inbound_connection();
+    let connection_id = connection.id.clone();
+    let owner = authenticated_principal("tenant-a");
+    adapter.mark_live(connection_id.clone());
+    adapter.set_inbound_context(
+        InboundConnectionContext::new(
+            connection_id.clone(),
+            Transport::Sip,
+            &owner,
+            Some(InboundRoutingHint::new("single-use-attachment").unwrap()),
+            InboundSignalingMetadata::new([("x-correlation-id", "opaque-value")]).unwrap(),
+        )
+        .unwrap(),
+    );
+    adapter_tx
+        .send(AdapterEvent::InboundConnection { connection })
+        .await
+        .unwrap();
+    adapter_tx
+        .send(AdapterEvent::PrincipalAuthenticated {
+            connection_id: connection_id.clone(),
+            participant_id: "participant-a".into(),
+            principal: owner.clone(),
+        })
+        .await
+        .unwrap();
+    wait_for_connection_principal(&orchestrator, &connection_id).await;
+
+    let unrelated_tenant = authenticated_principal("tenant-b");
+    assert!(matches!(
+        orchestrator.take_inbound_context(&connection_id, &unrelated_tenant),
+        Err(RvoipError::AdmissionRejected(
+            "inbound context principal mismatch"
+        ))
+    ));
+    assert!(matches!(
+        orchestrator.take_inbound_context(&ConnectionId::new(), &owner),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+
+    let context = orchestrator
+        .take_inbound_context(&connection_id, &owner)
+        .unwrap()
+        .expect("legitimate owner takes retained context");
+    assert_eq!(
+        context.routing_hint().unwrap().expose_secret(),
+        "single-use-attachment"
+    );
+    assert_eq!(
+        context
+            .metadata()
+            .values("x-correlation-id")
+            .collect::<Vec<_>>(),
+        vec!["opaque-value"]
+    );
+    assert!(orchestrator
+        .take_inbound_context(&connection_id, &owner)
+        .unwrap()
+        .is_none());
+
+    // A second connection retains untaken context only until terminal
+    // teardown, after which even its route is no longer observable.
+    let terminal_connection = fake_inbound_connection();
+    let terminal_id = terminal_connection.id.clone();
+    adapter.mark_live(terminal_id.clone());
+    adapter.set_inbound_context(
+        InboundConnectionContext::new(
+            terminal_id.clone(),
+            Transport::Sip,
+            &owner,
+            Some(InboundRoutingHint::new("must-be-erased").unwrap()),
+            InboundSignalingMetadata::default(),
+        )
+        .unwrap(),
+    );
+    adapter_tx
+        .send(AdapterEvent::InboundConnection {
+            connection: terminal_connection,
+        })
+        .await
+        .unwrap();
+    adapter_tx
+        .send(AdapterEvent::PrincipalAuthenticated {
+            connection_id: terminal_id.clone(),
+            participant_id: "participant-b".into(),
+            principal: owner.clone(),
+        })
+        .await
+        .unwrap();
+    wait_for_connection_principal(&orchestrator, &terminal_id).await;
+    adapter.mark_ended(&terminal_id);
+    adapter
+        .deliver_terminal(AdapterEvent::Ended {
+            connection_id: terminal_id.clone(),
+            reason: EndReason::Normal,
+        })
+        .await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if matches!(
+                orchestrator.connection_transport(&terminal_id),
+                Err(RvoipError::ConnectionNotFound(_))
+            ) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        orchestrator.take_inbound_context(&terminal_id, &owner),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn inbound_context_rejects_adapter_binding_mismatches_and_defaults_to_none() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let (adapter, adapter_tx, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let owner = authenticated_principal("tenant-a");
+
+    let wrong_transport_connection = fake_inbound_connection();
+    let wrong_transport_id = wrong_transport_connection.id.clone();
+    adapter.mark_live(wrong_transport_id.clone());
+    adapter.set_inbound_context(
+        InboundConnectionContext::new(
+            wrong_transport_id.clone(),
+            Transport::WebRtc,
+            &owner,
+            Some(InboundRoutingHint::new("wrong-transport").unwrap()),
+            InboundSignalingMetadata::default(),
+        )
+        .unwrap(),
+    );
+    adapter_tx
+        .send(AdapterEvent::InboundConnection {
+            connection: wrong_transport_connection,
+        })
+        .await
+        .unwrap();
+    adapter_tx
+        .send(AdapterEvent::PrincipalAuthenticated {
+            connection_id: wrong_transport_id.clone(),
+            participant_id: "participant-a".into(),
+            principal: owner.clone(),
+        })
+        .await
+        .unwrap();
+    wait_for_connection_principal(&orchestrator, &wrong_transport_id).await;
+    assert!(orchestrator
+        .take_inbound_context(&wrong_transport_id, &owner)
+        .unwrap()
+        .is_none());
+
+    let wrong_connection = fake_inbound_connection();
+    let wrong_connection_id = wrong_connection.id.clone();
+    adapter.mark_live(wrong_connection_id.clone());
+    adapter.set_inbound_context_for(
+        wrong_connection_id.clone(),
+        InboundConnectionContext::new(
+            ConnectionId::new(),
+            Transport::Sip,
+            &owner,
+            Some(InboundRoutingHint::new("wrong-connection").unwrap()),
+            InboundSignalingMetadata::default(),
+        )
+        .unwrap(),
+    );
+    adapter_tx
+        .send(AdapterEvent::InboundConnection {
+            connection: wrong_connection,
+        })
+        .await
+        .unwrap();
+    adapter_tx
+        .send(AdapterEvent::PrincipalAuthenticated {
+            connection_id: wrong_connection_id.clone(),
+            participant_id: "participant-wrong-connection".into(),
+            principal: owner.clone(),
+        })
+        .await
+        .unwrap();
+    wait_for_connection_principal(&orchestrator, &wrong_connection_id).await;
+    assert!(orchestrator
+        .take_inbound_context(&wrong_connection_id, &owner)
+        .unwrap()
+        .is_none());
+
+    let no_context_connection = fake_inbound_connection();
+    let no_context_id = no_context_connection.id.clone();
+    adapter.mark_live(no_context_id.clone());
+    adapter_tx
+        .send(AdapterEvent::InboundConnection {
+            connection: no_context_connection,
+        })
+        .await
+        .unwrap();
+    adapter_tx
+        .send(AdapterEvent::PrincipalAuthenticated {
+            connection_id: no_context_id.clone(),
+            participant_id: "participant-b".into(),
+            principal: owner.clone(),
+        })
+        .await
+        .unwrap();
+    wait_for_connection_principal(&orchestrator, &no_context_id).await;
+    assert!(orchestrator
+        .take_inbound_context(&no_context_id, &owner)
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]

@@ -11,6 +11,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::{stream::SplitSink, SinkExt, StreamExt};
+use rvoip_core::adapter::InboundRoutingHint;
 use rvoip_core::ids::ConnectionId;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -378,6 +379,7 @@ async fn drive_ws_loop<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let routing_hint = auth_context.session_hint.clone();
     let authorization = auth_context.route_authorization();
     let (write, mut read) = ws.split();
     let write: WsSink<S> = Arc::new(AsyncMutex::new(write));
@@ -424,8 +426,15 @@ where
                     .map_err(|error| WebRtcError::Signaling(format!("ws text: {error}")))?,
             )
             .map_err(|error| WebRtcError::Signaling(format!("{error}")))?;
-            let should_close =
-                dispatch_message(&adapter, &write, parsed, &authorization, &mut forwarders).await?;
+            let should_close = dispatch_message(
+                &adapter,
+                &write,
+                parsed,
+                &authorization,
+                routing_hint.as_deref(),
+                &mut forwarders,
+            )
+            .await?;
             if should_close {
                 break;
             }
@@ -451,6 +460,7 @@ async fn dispatch_message<S>(
     write: &WsSink<S>,
     parsed: SignalingMessage,
     authorization: &RouteAuthorization,
+    routing_hint: Option<&str>,
     forwarders: &mut Vec<(ConnectionId, tokio::task::JoinHandle<()>)>,
 ) -> Result<bool>
 where
@@ -459,8 +469,20 @@ where
     match parsed.msg_type.as_str() {
         "offer" => {
             let (conn_id, answer) = if parsed.connection_id.is_empty() {
+                let routing_hint = routing_hint
+                    .map(|value| InboundRoutingHint::new(value.to_owned()))
+                    .transpose()
+                    .map_err(|_| {
+                        WebRtcError::Signaling(
+                            "authenticated WebSocket session hint is invalid".into(),
+                        )
+                    })?;
                 let conn_id = adapter
-                    .apply_remote_offer_authorized(&parsed.sdp, authorization.clone())
+                    .apply_remote_offer_authorized_with_hint(
+                        &parsed.sdp,
+                        authorization.clone(),
+                        routing_hint,
+                    )
                     .await?;
                 let answer = match adapter.local_sdp(&conn_id) {
                     Ok(answer) => answer,

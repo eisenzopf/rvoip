@@ -73,9 +73,11 @@ use rvoip_rtp_core::transport::{
 };
 use rvoip_sip_core::types::sdp::CryptoSuite;
 use rvoip_sip_core::types::{headers::HeaderAccess, headers::HeaderName, Method};
-use rvoip_sip_core::Response;
+use rvoip_sip_core::{Request, Response};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 
@@ -84,6 +86,24 @@ pub use rvoip_media_core::relay::controller::{
 };
 pub use rvoip_rtp_core::{RtpSessionBufferConfig, RtpTransportBufferConfig};
 pub use rvoip_sip_dialog::api::RelUsage;
+
+const MAX_INBOUND_INVITE_OBSERVERS: usize = 16;
+
+/// Parsed, authenticated inbound INVITE material exposed only to internal
+/// adapter observers before the public `IncomingCall` event is published.
+///
+/// This deliberately bypasses `SessionRegistry::pending_incoming_request`,
+/// whose compatibility slot is not keyed by session and therefore is unsafe
+/// for concurrent call routing.
+#[derive(Clone)]
+pub(crate) struct InboundInviteObservation {
+    pub(crate) session_id: SessionId,
+    pub(crate) request: Arc<Request>,
+    pub(crate) principal: Option<rvoip_core_traits::identity::AuthenticatedPrincipal>,
+}
+
+pub(crate) type InboundInviteObserver =
+    Arc<dyn Fn(InboundInviteObservation) + Send + Sync + 'static>;
 
 /// SIP TLS operating mode for signalling transports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2837,6 +2857,12 @@ pub struct UnifiedCoordinator {
     /// constructing an `IncomingCall`.
     pub(crate) session_registry: Arc<SessionRegistry>,
 
+    /// Synchronous adapter observers for parsed inbound INVITEs. Observers run
+    /// before the corresponding public `IncomingCall` event is published so
+    /// an adapter can bind context without a cross-channel ordering race.
+    inbound_invite_observers: StdMutex<HashMap<u64, InboundInviteObserver>>,
+    next_inbound_invite_observer_id: AtomicU64,
+
     /// Default UAC Digest credentials adopted from the most recent REGISTER
     /// when the application did not configure [`Config::credentials`] /
     /// [`Config::auth`]. This lets a registered client authenticate challenged
@@ -2849,6 +2875,53 @@ pub struct UnifiedCoordinator {
 }
 
 impl UnifiedCoordinator {
+    pub(crate) fn add_inbound_invite_observer(
+        &self,
+        observer: InboundInviteObserver,
+    ) -> Result<u64> {
+        let mut observers = self
+            .inbound_invite_observers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if observers.len() >= MAX_INBOUND_INVITE_OBSERVERS {
+            return Err(SessionError::ConfigurationError(
+                "inbound INVITE observer capacity reached".to_string(),
+            ));
+        }
+        let observer_id = self
+            .next_inbound_invite_observer_id
+            .fetch_add(1, Ordering::Relaxed);
+        observers.insert(observer_id, observer);
+        Ok(observer_id)
+    }
+
+    pub(crate) fn remove_inbound_invite_observer(&self, observer_id: u64) {
+        self.inbound_invite_observers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&observer_id);
+    }
+
+    pub(crate) fn notify_inbound_invite_observers(&self, observation: InboundInviteObservation) {
+        let observers = self
+            .inbound_invite_observers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for observer in observers {
+            let observation = observation.clone();
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                observer(observation);
+            }))
+            .is_err()
+            {
+                tracing::warn!("inbound INVITE observer panicked; ignoring observer failure");
+            }
+        }
+    }
+
     /// SIP_API_DESIGN_2 Phase C — read-only access to
     /// [`Config::local_uri`] for builder surfaces that need to
     /// pre-populate the `From` URI when the caller passes `None`.
@@ -3883,6 +3956,8 @@ impl UnifiedCoordinator {
             lifecycle: lifecycle.clone(),
             app_event_publisher: app_event_publisher.clone(),
             session_registry: registry.clone(),
+            inbound_invite_observers: StdMutex::new(HashMap::new()),
+            next_inbound_invite_observer_id: AtomicU64::new(1),
             registered_credentials: std::sync::Mutex::new(None),
         });
 

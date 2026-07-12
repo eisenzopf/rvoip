@@ -1904,9 +1904,21 @@ impl SessionCrossCrateEventHandler {
             if let Some(bytes) = raw_request.as_ref() {
                 match rvoip_sip_core::parse_message(bytes.as_ref()) {
                     Ok(rvoip_sip_core::Message::Request(req)) => {
+                        let req = Arc::new(req);
                         self.registry
-                            .store_pending_incoming_request(Arc::new(req))
+                            .store_pending_incoming_request(Arc::clone(&req))
                             .await;
+                        if let Some(coordinator) =
+                            self.coordinator.get().and_then(|weak| weak.upgrade())
+                        {
+                            coordinator.notify_inbound_invite_observers(
+                                crate::api::unified::InboundInviteObservation {
+                                    session_id: session_id.clone(),
+                                    request: req,
+                                    principal: authenticated_principal.clone(),
+                                },
+                            );
+                        }
                     }
                     Ok(_) => {
                         tracing::warn!(

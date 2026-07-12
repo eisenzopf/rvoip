@@ -11,8 +11,9 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 
 pub use rvoip_core_traits::adapter::{
-    AdapterEvent, AdapterKind, ConnectionHandle, EndReason, OriginateRequest, PlaybackHandle,
-    RejectReason, SignatureHeaders, TransferTarget,
+    AdapterEvent, AdapterKind, ConnectionHandle, EndReason, InboundConnectionContext,
+    InboundContextError, InboundRoutingHint, InboundSignalingMetadata, OriginateRequest,
+    PlaybackHandle, RejectReason, SignatureHeaders, TransferTarget,
 };
 
 /// Direct fallback for terminal adapter events when the adapter's bounded
@@ -102,6 +103,15 @@ pub trait ConnectionAdapter: Send + Sync {
     /// from resurrecting a cleaned connection.
     fn is_connection_live(&self, _conn: &ConnectionId) -> bool {
         true
+    }
+
+    /// Take adapter-owned context captured for one inbound connection.
+    ///
+    /// Implementations must bind the value to the exact connection,
+    /// transport, and authenticated principal that produced it and return it
+    /// at most once. The default keeps existing adapters source compatible.
+    fn take_inbound_context(&self, _conn: &ConnectionId) -> Option<InboundConnectionContext> {
+        None
     }
 
     async fn originate(&self, request: OriginateRequest) -> Result<ConnectionHandle>;

@@ -11,7 +11,8 @@ use chrono::Utc;
 use dashmap::DashMap;
 use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
 use rvoip_core::adapter::{
-    AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest,
+    AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason,
+    InboundConnectionContext, InboundRoutingHint, InboundSignalingMetadata, OriginateRequest,
     RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
@@ -105,6 +106,9 @@ pub struct Route {
     /// authorization record on the route makes ownership transport-neutral:
     /// WHIP, WHEP, WS and WSS all consult the same boundary.
     authorization: Option<RouteAuthorization>,
+    /// Single-use inbound routing context. Cloned `Route` handles share this
+    /// slot; terminal route removal drops an untaken value.
+    inbound_context: Arc<SyncMutex<Option<InboundConnectionContext>>>,
 }
 
 impl Route {
@@ -1291,17 +1295,18 @@ impl WebRtcAdapter {
     /// Handle an inbound SDP offer — creates answerer PC and emits `InboundConnection`.
     #[instrument(skip(self, offer_sdp), fields(sdp_bytes = offer_sdp.len()))]
     pub async fn apply_remote_offer(&self, offer_sdp: &str) -> Result<ConnectionId> {
-        self.apply_remote_offer_inner(offer_sdp, None).await
+        self.apply_remote_offer_inner(offer_sdp, None, None).await
     }
 
     #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
-    pub(crate) async fn apply_remote_offer_authorized(
+    pub(crate) async fn apply_remote_offer_authorized_with_hint(
         &self,
         offer_sdp: &str,
         authorization: RouteAuthorization,
+        routing_hint: Option<InboundRoutingHint>,
     ) -> Result<ConnectionId> {
         authorization.ensure_active()?;
-        self.apply_remote_offer_inner(offer_sdp, Some(authorization))
+        self.apply_remote_offer_inner(offer_sdp, Some(authorization), routing_hint)
             .await
     }
 
@@ -1309,6 +1314,7 @@ impl WebRtcAdapter {
         &self,
         offer_sdp: &str,
         authorization: Option<RouteAuthorization>,
+        routing_hint: Option<InboundRoutingHint>,
     ) -> Result<ConnectionId> {
         let slot = self.reserve_session_slot()?;
         self.metrics_inbound.fetch_add(1, Ordering::Relaxed);
@@ -1326,6 +1332,19 @@ impl WebRtcAdapter {
 
         let cancel = Arc::new(Notify::new());
         let (data_cancel, _) = watch::channel(false);
+        let inbound_context = authorization
+            .as_ref()
+            .and_then(|authorization| authorization.principal.as_ref())
+            .and_then(|principal| {
+                InboundConnectionContext::new(
+                    conn_id.clone(),
+                    Transport::WebRtc,
+                    principal,
+                    routing_hint,
+                    InboundSignalingMetadata::default(),
+                )
+                .ok()
+            });
         let route = Route {
             peer: Arc::clone(&peer),
             streams: Arc::new(DashMap::new()),
@@ -1342,6 +1361,7 @@ impl WebRtcAdapter {
             cancel: Arc::clone(&cancel),
             failed_at: Arc::new(SyncMutex::new(None)),
             authorization: authorization.clone(),
+            inbound_context: Arc::new(SyncMutex::new(inbound_context)),
         };
 
         // Don't seed media stream here — the track-attacher (spawned in
@@ -1549,6 +1569,16 @@ impl ConnectionAdapter for WebRtcAdapter {
         AdapterKind::Interop
     }
 
+    fn is_connection_live(&self, conn: &ConnectionId) -> bool {
+        self.routes.contains_key(conn)
+    }
+
+    fn take_inbound_context(&self, conn: &ConnectionId) -> Option<InboundConnectionContext> {
+        self.routes
+            .get(conn)
+            .and_then(|route| route.inbound_context.lock().take())
+    }
+
     #[instrument(skip(self, request), fields(session = %request.session_id))]
     async fn originate(&self, request: OriginateRequest) -> RvoipResult<ConnectionHandle> {
         let slot = self
@@ -1619,6 +1649,7 @@ impl ConnectionAdapter for WebRtcAdapter {
             cancel: Arc::clone(&cancel),
             failed_at: Arc::new(SyncMutex::new(None)),
             authorization: None,
+            inbound_context: Arc::new(SyncMutex::new(None)),
         };
 
         // Same rationale as `apply_remote_offer`: lazy seeding in `accept()`.

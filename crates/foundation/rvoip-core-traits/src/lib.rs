@@ -48,6 +48,11 @@ pub mod identity;
 pub mod ids;
 pub mod stream;
 
+pub use adapter::{
+    InboundConnectionContext, InboundContextError, InboundRoutingHint, InboundSignalingMetadata,
+    MAX_INBOUND_METADATA_BYTES, MAX_INBOUND_METADATA_FIELDS, MAX_INBOUND_METADATA_NAME_BYTES,
+    MAX_INBOUND_METADATA_VALUE_BYTES, MAX_INBOUND_ROUTING_HINT_BYTES,
+};
 pub use broadcast::{
     BroadcastDescriptor, BroadcastDrainDescriptor, BroadcastDrainReason, BroadcastDrainRequest,
     BroadcastDrainState, BroadcastEndpoint, BroadcastHealthDescriptor, BroadcastHealthIssue,

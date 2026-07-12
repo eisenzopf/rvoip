@@ -502,7 +502,7 @@ pub mod types;
 // ── Primary public API ──────────────────────────────────────────────────────
 
 // Peer types
-pub use adapter::SipAdapter;
+pub use adapter::{SipAdapter, SipInboundContextPolicy, SipInboundContextPolicyError};
 
 pub use api::callback_peer::{
     CallHandler, CallHandlerDecision, CallbackPeer, CallbackPeerBuilder, CallbackPeerControl,
