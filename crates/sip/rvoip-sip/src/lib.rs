@@ -541,7 +541,9 @@ pub use api::headers::view::SipHeaderView;
 pub use api::incoming::{
     IncomingCall, IncomingCallGuard, IncomingRegister, IncomingRequest, IncomingResponse,
 };
-pub use api::trace_redactor::{PassthroughRedactor, RedactionDecision, TraceRedactor};
+pub use api::trace_redactor::{
+    DefaultTraceRedactor, PassthroughRedactor, RedactionDecision, TraceRedactor,
+};
 pub use auth::{
     AAuthValidator, AkaClientConfig, AkaClientProvider, AkaVectorProvider, ApiKeyVerifier,
     AuditFailurePolicy, AuthAuditEvent, AuthAuditOutcome, AuthAuditScheme, AuthAuditSink,

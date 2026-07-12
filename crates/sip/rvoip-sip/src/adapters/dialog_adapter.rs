@@ -154,8 +154,8 @@ pub struct DialogAdapter {
     /// header to the trace sink so PII / carrier tokens can be
     /// scrubbed without affecting the wire form. Populated at
     /// construction from
-    /// [`crate::Config::trace_redaction`]; `None` keeps the legacy
-    /// log-verbatim behaviour. See
+    /// [`crate::Config::trace_redaction`]; `None` resolves to the
+    /// production-safe default policy before construction. See
     /// [`crate::TraceRedactor`] for the policy contract.
     pub(crate) trace_redactor: Option<Arc<dyn crate::api::trace_redactor::TraceRedactor>>,
 }

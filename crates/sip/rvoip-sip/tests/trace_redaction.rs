@@ -11,8 +11,10 @@
 use proptest::prelude::*;
 use rvoip_infra_common::events::cross_crate::{format_sip_trace_message, SipTraceConfig};
 use rvoip_sip::api::trace_redactor::{
-    apply_message_redactor, PassthroughRedactor, RedactionDecision, TraceRedactor,
+    apply_message_redactor, apply_redaction, DefaultTraceRedactor, PassthroughRedactor,
+    RedactionDecision, TraceRedactor,
 };
+use rvoip_sip::Config;
 use rvoip_sip_core::types::header::HeaderName;
 
 #[derive(Debug)]
@@ -67,9 +69,8 @@ fn redactor_strips_authorization_from_trace_payload() {
     assert!(scrubbed.contains("Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-abc"));
 }
 
-/// `PassthroughRedactor` is the configured default for the trace site;
-/// it must be the identity on the message stream so trace output stays
-/// unchanged when no redactor is configured.
+/// `PassthroughRedactor` is an explicit operator/development escape hatch;
+/// when selected it remains the identity on the message stream.
 #[test]
 fn passthrough_redactor_is_identity_on_trace_payload() {
     let raw = concat!(
@@ -83,6 +84,140 @@ fn passthrough_redactor_is_identity_on_trace_payload() {
         out, raw,
         "PassthroughRedactor must not alter the trace payload"
     );
+}
+
+#[test]
+fn production_default_redacts_credentials_and_application_context() {
+    let config = Config::local("trace-default", 0);
+    let redactor = config
+        .trace_redaction
+        .as_ref()
+        .expect("Config defaults to an explicit safe redactor");
+    let raw = concat!(
+        "MESSAGE sip:bob@example.com SIP/2.0\r\n",
+        "Authorization: Bearer credential-secret\r\n",
+        "X-Bridgefu-Context: application-secret\r\n",
+        "Call-ID: operational-call-id\r\n",
+        "\r\n",
+    );
+
+    let scrubbed = apply_message_redactor(redactor.as_ref(), raw);
+    assert!(scrubbed.contains("Authorization: <redacted>"));
+    assert!(scrubbed.contains("X-Bridgefu-Context: <redacted>"));
+    assert!(scrubbed.contains("Call-ID: operational-call-id"));
+    assert!(!scrubbed.contains("credential-secret"));
+    assert!(!scrubbed.contains("application-secret"));
+
+    let custom = HeaderName::Other("X-Context".into());
+    assert_eq!(
+        apply_redaction(None, &custom, "default-secret").as_deref(),
+        Some("<redacted>")
+    );
+}
+
+#[test]
+fn passthrough_requires_explicit_development_configuration() {
+    let config = Config::local("trace-development", 0).trace_passthrough_for_development();
+    assert!(!config.sip_trace.redact_sensitive_headers);
+    let redactor = config.trace_redaction.as_ref().unwrap();
+    let raw = "OPTIONS sip:bob@example.com SIP/2.0\r\nX-Context: visible-by-opt-in\r\n\r\n";
+    assert_eq!(apply_message_redactor(redactor.as_ref(), raw), raw);
+}
+
+#[test]
+fn folded_sensitive_headers_inherit_redaction_for_crlf_and_lf() {
+    for ending in ["\r\n", "\n"] {
+        let raw = format!(
+            "INVITE sip:bob@example.com SIP/2.0{ending}\
+             Authorization: Digest first-secret{ending}\
+             \tsecond-auth-secret{ending}\
+             Proxy-Authorization: Bearer proxy-secret{ending}\
+             \x20proxy-fold-secret{ending}\
+             X-Bridgefu-Context: context-secret{ending}\
+             \tcontext-fold-secret{ending}\
+             Supported: timer,{ending}\
+             \tpath{ending}\
+             {ending}\
+             Authorization: body-value-must-remain{ending}\
+             \tbody-fold-must-remain"
+        );
+
+        let scrubbed = apply_message_redactor(&DefaultTraceRedactor, &raw);
+        assert!(scrubbed.contains("Authorization: <redacted>"));
+        assert!(scrubbed.contains("Proxy-Authorization: <redacted>"));
+        assert!(scrubbed.contains("X-Bridgefu-Context: <redacted>"));
+        assert!(scrubbed.contains(&format!("Supported: timer,{ending}\tpath")));
+        for secret in [
+            "first-secret",
+            "second-auth-secret",
+            "proxy-secret",
+            "proxy-fold-secret",
+            "context-secret",
+            "context-fold-secret",
+        ] {
+            assert!(!scrubbed.contains(secret), "folded secret leaked: {secret}");
+        }
+        assert!(scrubbed.contains("Authorization: body-value-must-remain"));
+        assert!(scrubbed.contains("\tbody-fold-must-remain"));
+        assert!(
+            !scrubbed.ends_with('\n'),
+            "missing final newline was invented"
+        );
+    }
+}
+
+#[derive(Debug)]
+struct FoldPolicy;
+
+impl TraceRedactor for FoldPolicy {
+    fn redact(&self, header: &HeaderName, _value: &str) -> RedactionDecision {
+        match header {
+            HeaderName::Other(name) if name.eq_ignore_ascii_case("X-Drop-Me") => {
+                RedactionDecision::Drop
+            }
+            HeaderName::Other(name) if name.eq_ignore_ascii_case("X-Redact-Me") => {
+                RedactionDecision::Redact("<hidden>".into())
+            }
+            _ => RedactionDecision::Keep,
+        }
+    }
+}
+
+#[test]
+fn folded_keep_redact_drop_and_body_boundary_are_preserved() {
+    for ending in ["\r\n", "\n"] {
+        let raw = format!(
+            "MESSAGE sip:bob@example.com SIP/2.0{ending}\
+             X-Drop-Me: drop-secret{ending}\
+             \tdrop-fold-secret{ending}\
+             X-Redact-Me: redact-secret{ending}\
+             \x20redact-fold-secret{ending}\
+             Supported: timer,{ending}\
+             \tpath{ending}\
+             {ending}\
+             X-Drop-Me: body-drop-value{ending}\
+             \tbody-drop-fold"
+        );
+        let scrubbed = apply_message_redactor(&FoldPolicy, &raw);
+
+        assert!(!scrubbed.contains("X-Drop-Me: drop-secret"));
+        assert!(!scrubbed.contains("drop-fold-secret"));
+        assert!(scrubbed.contains(&format!("X-Redact-Me: <hidden>{ending} <hidden>{ending}")));
+        assert!(!scrubbed.contains("redact-secret"));
+        assert!(!scrubbed.contains("redact-fold-secret"));
+        assert!(scrubbed.contains(&format!("Supported: timer,{ending}\tpath")));
+        assert!(scrubbed.contains("X-Drop-Me: body-drop-value"));
+        assert!(scrubbed.contains("\tbody-drop-fold"));
+        assert!(!scrubbed.ends_with('\n'));
+    }
+}
+
+#[test]
+fn redaction_debug_never_formats_replacement_values() {
+    let decision = RedactionDecision::Redact("debug-secret".into());
+    let debug = format!("{decision:?} {default:?}", default = DefaultTraceRedactor);
+    assert!(!debug.contains("debug-secret"));
+    assert!(debug.contains("Redact([redacted])"));
 }
 
 #[test]

@@ -234,7 +234,7 @@ enum SetupTeardownTimeoutTerminal {
 ///     SipContactMode::RegisteredFlowSymmetric
 /// );
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     /// Local IP address for media
     pub local_ip: IpAddr,
@@ -363,13 +363,18 @@ pub struct Config {
     /// Optional SIP transport-boundary tracing for diagnostics.
     pub sip_trace: crate::api::events::SipTraceConfig,
 
-    /// SIP_API_DESIGN_2 §12.4 — pluggable trace-output redaction. When
-    /// set, every header value passing through the trace sink is run
-    /// through the redactor before logging; the wire form is
-    /// unaffected. `None` (the default) keeps the legacy
-    /// log-verbatim behaviour. See
+    /// SIP_API_DESIGN_2 §12.4 — pluggable trace-output redaction. Every
+    /// header value passing through the trace sink is run through the
+    /// configured policy before logging; the wire form is unaffected.
+    /// `None` selects the production-safe [`DefaultTraceRedactor`]; verbatim
+    /// traces require an explicit [`PassthroughRedactor`] development/operator
+    /// opt-in. See
     /// [`crate::api::trace_redactor::TraceRedactor`] for the policy
-    /// hook contract.
+    /// hook contract and [`Config::trace_passthrough_for_development`] for the
+    /// explicit unsafe override.
+    ///
+    /// [`DefaultTraceRedactor`]: crate::api::trace_redactor::DefaultTraceRedactor
+    /// [`PassthroughRedactor`]: crate::api::trace_redactor::PassthroughRedactor
     pub trace_redaction: Option<std::sync::Arc<dyn crate::api::trace_redactor::TraceRedactor>>,
 
     /// Outbound proxy URI (RFC 3261 §8.1.2). When set, a `Route:
@@ -992,6 +997,121 @@ pub struct Config {
     pub auto_emit_extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
 }
 
+impl std::fmt::Debug for Config {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Config")
+            .field("sip_port", &self.sip_port)
+            .field("media_port_start", &self.media_port_start)
+            .field("media_port_end", &self.media_port_end)
+            .field("media_port_capacity", &self.media_port_capacity)
+            .field("use_100rel", &self.use_100rel)
+            .field("auto_180_ringing", &self.auto_180_ringing)
+            .field("auto_100_trying", &self.auto_100_trying)
+            .field(
+                "fast_auto_accept_incoming_calls",
+                &self.fast_auto_accept_incoming_calls,
+            )
+            .field(
+                "setup_teardown_timeout_secs",
+                &self.setup_teardown_timeout_secs,
+            )
+            .field("session_timer_secs", &self.session_timer_secs)
+            .field("session_timer_min_se", &self.session_timer_min_se)
+            .field("credentials_configured", &self.credentials.is_some())
+            .field("auth_configured", &self.auth.is_some())
+            .field("pai_configured", &self.pai_uri.is_some())
+            .field("sip_trace_enabled", &self.sip_trace.enabled)
+            .field("sip_trace_capacity", &self.sip_trace.capacity)
+            .field(
+                "sip_trace_sensitive_redaction",
+                &self.sip_trace.redact_sensitive_headers,
+            )
+            .field("sip_trace_include_body", &self.sip_trace.include_body)
+            .field(
+                "trace_redaction_configured",
+                &self.trace_redaction.is_some(),
+            )
+            .field(
+                "outbound_proxy_configured",
+                &self.outbound_proxy_uri.is_some(),
+            )
+            .field("sip_outbound_enabled", &self.sip_outbound_enabled)
+            .field("sip_instance_configured", &self.sip_instance.is_some())
+            .field("sip_tls_mode", &self.sip_tls_mode)
+            .field("sip_contact_mode", &self.sip_contact_mode)
+            .field("tls_bind_configured", &self.tls_bind_addr.is_some())
+            .field(
+                "tls_advertised_configured",
+                &self.tls_advertised_addr.is_some(),
+            )
+            .field("contact_uri_configured", &self.contact_uri.is_some())
+            .field("tls_cert_configured", &self.tls_cert_path.is_some())
+            .field("tls_key_configured", &self.tls_key_path.is_some())
+            .field(
+                "tls_client_cert_configured",
+                &self.tls_client_cert_path.is_some(),
+            )
+            .field(
+                "tls_client_key_configured",
+                &self.tls_client_key_path.is_some(),
+            )
+            .field("tls_extra_ca_configured", &self.tls_extra_ca_path.is_some())
+            .field("offer_srtp", &self.offer_srtp)
+            .field("srtp_required", &self.srtp_required)
+            .field("srtp_suite_count", &self.srtp_offered_suites.len())
+            .field(
+                "media_public_address_configured",
+                &self.media_public_addr.is_some(),
+            )
+            .field("media_mode", &self.media_mode)
+            .field("media_session_capacity", &self.media_session_capacity)
+            .field("stun_configured", &self.stun_server.is_some())
+            .field("offered_codec_count", &self.offered_codecs.len())
+            .field(
+                "incoming_call_channel_capacity",
+                &self.incoming_call_channel_capacity,
+            )
+            .field(
+                "state_event_channel_capacity",
+                &self.state_event_channel_capacity,
+            )
+            .field(
+                "sip_transport_channel_capacity",
+                &self.sip_transport_channel_capacity,
+            )
+            .field(
+                "transaction_event_channel_capacity",
+                &self.transaction_event_channel_capacity,
+            )
+            .field(
+                "global_event_channel_capacity",
+                &self.global_event_channel_capacity,
+            )
+            .field("server_call_capacity", &self.server_call_capacity)
+            .field(
+                "server_call_admission_limit",
+                &self.server_call_admission_limit,
+            )
+            .field("sip_udp_diagnostics", &self.sip_udp_diagnostics)
+            .field(
+                "sip_transaction_timing_diagnostics",
+                &self.sip_transaction_timing_diagnostics,
+            )
+            .field(
+                "sip_dialog_timing_diagnostics",
+                &self.sip_dialog_timing_diagnostics,
+            )
+            .field("media_setup_diagnostics", &self.media_setup_diagnostics)
+            .field("cleanup_diagnostics", &self.cleanup_diagnostics)
+            .field(
+                "auto_emit_extra_header_count",
+                &self.auto_emit_extra_headers.len(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 impl Config {
     /// Default RTP media port range start.
     pub const DEFAULT_MEDIA_PORT_START: u16 = DEFAULT_RTP_PORT_RANGE_START;
@@ -1016,6 +1136,20 @@ impl Config {
     /// Default watchdog timeout for setup/teardown states that are waiting on
     /// dialog-core terminal events.
     pub const DEFAULT_SETUP_TEARDOWN_TIMEOUT_SECS: u64 = 120;
+
+    /// Explicitly allow verbatim SIP trace headers and any included bodies for
+    /// controlled development/operator diagnostics.
+    ///
+    /// This disables both the pluggable default policy and the built-in
+    /// sensitive-header/body-key redaction. It can expose credentials, PII,
+    /// application context, and SDP key material. Do not use it in production.
+    pub fn trace_passthrough_for_development(mut self) -> Self {
+        self.trace_redaction = Some(std::sync::Arc::new(
+            crate::api::trace_redactor::PassthroughRedactor,
+        ));
+        self.sip_trace.redact_sensitive_headers = false;
+        self
+    }
 
     /// Create a config for local development/testing on 127.0.0.1.
     ///
@@ -1051,7 +1185,7 @@ impl Config {
             auth: None,
             pai_uri: None,
             sip_trace: crate::api::events::SipTraceConfig::default(),
-            trace_redaction: None,
+            trace_redaction: Some(crate::api::trace_redactor::default_trace_redactor()),
             outbound_proxy_uri: None,
             sip_outbound_enabled: false,
             sip_instance: None,
@@ -1159,7 +1293,7 @@ impl Config {
             auth: None,
             pai_uri: None,
             sip_trace: crate::api::events::SipTraceConfig::default(),
-            trace_redaction: None,
+            trace_redaction: Some(crate::api::trace_redactor::default_trace_redactor()),
             outbound_proxy_uri: None,
             sip_outbound_enabled: false,
             sip_instance: None,
@@ -2684,7 +2818,31 @@ impl Default for Config {
 
 #[cfg(test)]
 mod config_tests {
-    use super::Config;
+    use super::{
+        Config, OobAuthRetry, Registration, RegistrationHandle, RegistrationInfo,
+        RegistrationStatus,
+    };
+    use crate::api::trace_redactor::{RedactionDecision, TraceRedactor};
+    use rvoip_sip_core::types::headers::HeaderName;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    struct CanaryTracePolicy(&'static str);
+
+    impl std::fmt::Debug for CanaryTracePolicy {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_tuple("CanaryTracePolicy")
+                .field(&self.0)
+                .finish()
+        }
+    }
+
+    impl TraceRedactor for CanaryTracePolicy {
+        fn redact(&self, _header: &HeaderName, _value: &str) -> RedactionDecision {
+            RedactionDecision::Keep
+        }
+    }
 
     #[test]
     fn transaction_command_channel_default_is_small_and_configurable() {
@@ -2766,6 +2924,142 @@ mod config_tests {
         assert_eq!(config.active_call_no_media_timeout_secs, 60);
         assert_eq!(config.active_call_media_idle_timeout_secs, 90);
         config.validate().expect("valid media watchdog timeouts");
+    }
+
+    #[test]
+    fn diagnostic_debug_omits_config_auth_routing_and_registration_secrets() {
+        let mut config = Config::local("local-name-secret", 5060);
+        config.local_uri = "sip:local-uri-secret@example.invalid".into();
+        config.state_table_path = Some("state-table-secret".into());
+        config.credentials = Some(crate::types::Credentials::new(
+            "credential-user-secret",
+            "credential-password-secret",
+        ));
+        config.auth = Some(crate::auth::SipClientAuth::bearer_token(
+            "bearer-policy-secret",
+        ));
+        config.pai_uri = Some("sip:pai-secret@example.invalid".into());
+        config.outbound_proxy_uri = Some("sip:proxy-secret@example.invalid".into());
+        config.sip_instance = Some("instance-secret".into());
+        config.contact_uri = Some("sip:contact-secret@example.invalid".into());
+        config.tls_cert_path = Some("/cert/path-secret.pem".into());
+        config.tls_key_path = Some("/key/path-secret.pem".into());
+        config.tls_client_cert_path = Some("/client-cert/path-secret.pem".into());
+        config.tls_client_key_path = Some("/client-key/path-secret.pem".into());
+        config.tls_extra_ca_path = Some("/ca/path-secret.pem".into());
+        config.stun_server = Some("stun-secret.example.invalid".into());
+        config.trace_redaction = Some(Arc::new(CanaryTracePolicy("trace-policy-secret")));
+
+        let config_debug = format!("{config:?}");
+        for secret in [
+            "local-name-secret",
+            "local-uri-secret",
+            "state-table-secret",
+            "credential-user-secret",
+            "credential-password-secret",
+            "bearer-policy-secret",
+            "pai-secret",
+            "proxy-secret",
+            "instance-secret",
+            "contact-secret",
+            "path-secret",
+            "stun-secret",
+            "trace-policy-secret",
+        ] {
+            assert!(
+                !config_debug.contains(secret),
+                "Config Debug leaked {secret}"
+            );
+        }
+        assert!(config_debug.contains("credentials_configured: true"));
+        assert!(config_debug.contains("auth_configured: true"));
+        assert!(config_debug.contains("outbound_proxy_configured: true"));
+        assert!(config_debug.contains("tls_key_configured: true"));
+
+        let retry = OobAuthRetry {
+            header_name: "Authorization-secret".into(),
+            header_value: "header-value-secret".into(),
+            cseq: 7,
+            call_id: Some("call-routing-secret".into()),
+            from_tag: Some("from-tag-secret".into()),
+            nonce: "nonce-secret".into(),
+            stale: true,
+        };
+        let retry_debug = format!("{retry:?}");
+        for secret in [
+            "Authorization-secret",
+            "header-value-secret",
+            "call-routing-secret",
+            "from-tag-secret",
+            "nonce-secret",
+        ] {
+            assert!(!retry_debug.contains(secret), "retry Debug leaked {secret}");
+        }
+        assert!(retry_debug.contains("nonce_configured: true"));
+        assert!(retry_debug.contains("stale: true"));
+
+        let registration = Registration::new(
+            "sip:registrar-secret@example.invalid",
+            "registration-user-secret",
+            "registration-password-secret",
+        )
+        .from_uri("sip:from-secret@example.invalid")
+        .contact_uri("sip:registration-contact-secret@example.invalid");
+        let registration_debug = format!("{registration:?}");
+        for secret in [
+            "registrar-secret",
+            "registration-user-secret",
+            "registration-password-secret",
+            "from-secret",
+            "registration-contact-secret",
+        ] {
+            assert!(
+                !registration_debug.contains(secret),
+                "Registration Debug leaked {secret}"
+            );
+        }
+        assert!(registration_debug.contains("password_configured: true"));
+
+        let session_id = crate::state_table::types::SessionId::new();
+        let session_secret = session_id.to_string();
+        let handle = RegistrationHandle {
+            session_id: session_id.clone(),
+        };
+        assert!(!format!("{handle:?}").contains(&session_secret));
+        let info = RegistrationInfo {
+            session_id,
+            status: RegistrationStatus::Failed,
+            registrar: Some("info-registrar-secret".into()),
+            contact: Some("info-contact-secret".into()),
+            expires_secs: Some(300),
+            next_refresh_in: Some(Duration::from_secs(60)),
+            retry_count: 2,
+            last_failure: Some("failure-detail-secret".into()),
+            accepted_expires_secs: Some(300),
+            registered_at: Some(Instant::now()),
+            next_refresh_at: Some(Instant::now()),
+            service_route: Some(vec!["sip:service-route-secret@example.invalid".into()]),
+            pub_gruu: Some("pub-gruu-secret".into()),
+            temp_gruu: Some("temp-gruu-secret".into()),
+            outbound_flow_active: true,
+        };
+        let info_debug = format!("{info:?}");
+        for secret in [
+            &session_secret,
+            "info-registrar-secret",
+            "info-contact-secret",
+            "failure-detail-secret",
+            "service-route-secret",
+            "pub-gruu-secret",
+            "temp-gruu-secret",
+        ] {
+            assert!(
+                !info_debug.contains(secret),
+                "RegistrationInfo Debug leaked {secret}"
+            );
+        }
+        assert!(info_debug.contains("status: Failed"));
+        assert!(info_debug.contains("service_route_count: 1"));
     }
 }
 
@@ -3644,7 +3938,7 @@ impl UnifiedCoordinator {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct OobAuthRetry {
     header_name: String,
     header_value: String,
@@ -3653,6 +3947,21 @@ struct OobAuthRetry {
     from_tag: Option<String>,
     nonce: String,
     stale: bool,
+}
+
+impl std::fmt::Debug for OobAuthRetry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OobAuthRetry")
+            .field("header_configured", &!self.header_name.is_empty())
+            .field("header_value_configured", &!self.header_value.is_empty())
+            .field("cseq", &self.cseq)
+            .field("call_id_configured", &self.call_id.is_some())
+            .field("from_tag_configured", &self.from_tag.is_some())
+            .field("nonce_configured", &!self.nonce.is_empty())
+            .field("stale", &self.stale)
+            .finish()
+    }
 }
 
 fn ensure_retry_not_challenged(method: Method, response: &Response) -> Result<()> {
@@ -3689,9 +3998,15 @@ impl UnifiedCoordinator {
     /// Create a coordinator with listener authentication installed before the
     /// transaction receive loop starts.
     pub async fn new_with_listener_auth(
-        config: Config,
+        mut config: Config,
         listener_auth_policy: crate::auth::SipListenerAuthPolicy,
     ) -> Result<Arc<Self>> {
+        // Treat an explicitly absent policy as the safe default too. Verbatim
+        // tracing requires `trace_passthrough_for_development` or an explicit
+        // `PassthroughRedactor`; absence is never a credential-leaking mode.
+        if config.trace_redaction.is_none() {
+            config.trace_redaction = Some(crate::api::trace_redactor::default_trace_redactor());
+        }
         config.validate()?;
         listener_auth_policy.validate()?;
         rvoip_sip_transport::diagnostics::set_enabled(config.sip_udp_diagnostics);
@@ -5866,23 +6181,19 @@ impl UnifiedCoordinator {
             })?;
 
         if let Some(owner_id) = sip_trace_owner_id {
-            // SIP_API_DESIGN_2 §12.4 — when a TraceRedactor is configured,
-            // build a closure that walks each rendered SIP message header
-            // line and delegates per-header decisions to the redactor.
+            // SIP_API_DESIGN_2 §12.4 — always install an effective redactor.
+            // Missing configuration resolves to the production-safe default;
+            // verbatim tracing requires an explicit PassthroughRedactor.
             // The transform runs at the trace boundary in
             // SipTraceRuntime::publish; the wire form is unaffected.
+            let redactor = config
+                .trace_redaction
+                .clone()
+                .unwrap_or_else(crate::api::trace_redactor::default_trace_redactor);
             let redactor_fn: Option<rvoip_sip_dialog::transaction::transport::TraceRedactorFn> =
-                config.trace_redaction.as_ref().map(|redactor| {
-                    let redactor = redactor.clone();
-                    let f: rvoip_sip_dialog::transaction::transport::TraceRedactorFn =
-                        Arc::new(move |raw: &str| -> String {
-                            crate::api::trace_redactor::apply_message_redactor(
-                                redactor.as_ref(),
-                                raw,
-                            )
-                        });
-                    f
-                });
+                Some(Arc::new(move |raw: &str| -> String {
+                    crate::api::trace_redactor::apply_message_redactor(redactor.as_ref(), raw)
+                }));
 
             transport_manager.enable_sip_trace_with_redactor(
                 owner_id,
@@ -6496,10 +6807,19 @@ impl UnifiedCoordinator {
 /// [`UnifiedCoordinator::events`] and [`UnifiedCoordinator::events_for_session`].
 /// This handle deliberately does not expose a separate event stream today,
 /// because doing so cleanly would require a per-registration event bus split.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RegistrationHandle {
     /// Session id backing this registration lifecycle.
     pub session_id: SessionId,
+}
+
+impl std::fmt::Debug for RegistrationHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RegistrationHandle")
+            .field("session_id_present", &true)
+            .finish()
+    }
 }
 
 /// Coarse registration lifecycle state.
@@ -6522,7 +6842,7 @@ pub enum RegistrationStatus {
 /// This is a snapshot of the current client-side registration lifecycle. It
 /// combines rvoip-sip state with metadata learned from rvoip-sip-dialog REGISTER
 /// responses.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RegistrationInfo {
     /// Session id backing this registration lifecycle.
     pub session_id: SessionId,
@@ -6556,6 +6876,32 @@ pub struct RegistrationInfo {
     pub outbound_flow_active: bool,
 }
 
+impl std::fmt::Debug for RegistrationInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RegistrationInfo")
+            .field("session_id_present", &true)
+            .field("status", &self.status)
+            .field("registrar_configured", &self.registrar.is_some())
+            .field("contact_configured", &self.contact.is_some())
+            .field("expires_secs", &self.expires_secs)
+            .field("next_refresh_scheduled", &self.next_refresh_in.is_some())
+            .field("retry_count", &self.retry_count)
+            .field("last_failure_present", &self.last_failure.is_some())
+            .field("accepted_expires_secs", &self.accepted_expires_secs)
+            .field("registered", &self.registered_at.is_some())
+            .field("next_refresh_at_present", &self.next_refresh_at.is_some())
+            .field(
+                "service_route_count",
+                &self.service_route.as_ref().map_or(0, Vec::len),
+            )
+            .field("public_gruu_present", &self.pub_gruu.is_some())
+            .field("temporary_gruu_present", &self.temp_gruu.is_some())
+            .field("outbound_flow_active", &self.outbound_flow_active)
+            .finish()
+    }
+}
+
 /// Configuration for SIP registration.
 ///
 /// Use [`Registration::new()`] for the common case where `from_uri` and
@@ -6569,7 +6915,7 @@ pub struct RegistrationInfo {
 /// let reg = Registration::new("sip:registrar.example.com", "alice", "secret123")
 ///     .expires(1800);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Registration {
     /// SIP URI of the registrar server (e.g. `sip:registrar.example.com`)
     pub registrar: String,
@@ -6583,6 +6929,20 @@ pub struct Registration {
     pub from_uri: Option<String>,
     /// Override the Contact URI (defaults to the peer's local_uri)
     pub contact_uri: Option<String>,
+}
+
+impl std::fmt::Debug for Registration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Registration")
+            .field("registrar_configured", &!self.registrar.is_empty())
+            .field("username_configured", &!self.username.is_empty())
+            .field("password_configured", &!self.password.is_empty())
+            .field("expires", &self.expires)
+            .field("from_uri_configured", &self.from_uri.is_some())
+            .field("contact_uri_configured", &self.contact_uri.is_some())
+            .finish()
+    }
 }
 
 impl Registration {
