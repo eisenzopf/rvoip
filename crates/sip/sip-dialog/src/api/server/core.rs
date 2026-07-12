@@ -76,9 +76,11 @@ impl DialogServer {
     /// # Returns
     /// A configured DialogServer ready to start
     pub async fn new(local_address: &str) -> ApiResult<Self> {
-        let addr: SocketAddr = local_address.parse().map_err(|e| ApiError::Configuration {
-            message: format!("Invalid local address '{}': {}", local_address, e),
-        })?;
+        let addr: SocketAddr = local_address
+            .parse()
+            .map_err(|_error| ApiError::Configuration {
+                message: "Invalid local address".to_string(),
+            })?;
 
         let config = ServerConfig::new(addr);
         Self::with_config(config).await
@@ -102,7 +104,9 @@ impl DialogServer {
         // Validate configuration for future use
         config
             .validate()
-            .map_err(|e| ApiError::Configuration { message: e })?;
+            .map_err(|_error| ApiError::Configuration {
+                message: "Invalid server configuration".to_string(),
+            })?;
 
         // Return architectural guidance error
         Err(ApiError::Configuration {
@@ -141,7 +145,9 @@ impl DialogServer {
         // Validate configuration
         config
             .validate()
-            .map_err(|e| ApiError::Configuration { message: e })?;
+            .map_err(|_error| ApiError::Configuration {
+                message: "Invalid server configuration".to_string(),
+            })?;
 
         info!("Creating DialogServer with global transaction events (RECOMMENDED PATTERN)");
 
@@ -153,8 +159,8 @@ impl DialogServer {
                 config.dialog.local_address,
             )
             .await
-            .map_err(|e| ApiError::Internal {
-                message: format!("Failed to create dialog manager with global events: {}", e),
+            .map_err(|_error| ApiError::Internal {
+                message: "Failed to create dialog manager with global events".to_string(),
             })?,
         );
 
@@ -186,7 +192,9 @@ impl DialogServer {
         // Validate configuration
         config
             .validate()
-            .map_err(|e| ApiError::Configuration { message: e })?;
+            .map_err(|_error| ApiError::Configuration {
+                message: "Invalid server configuration".to_string(),
+            })?;
 
         info!("Creating DialogServer with injected dependencies");
         warn!("WARNING: Using old DialogManager::new() pattern - consider upgrading to with_global_events() for better reliability");
@@ -195,8 +203,8 @@ impl DialogServer {
         let dialog_manager = Arc::new(
             DialogManager::new(transaction_manager, config.dialog.local_address)
                 .await
-                .map_err(|e| ApiError::Internal {
-                    message: format!("Failed to create dialog manager: {}", e),
+                .map_err(|_error| ApiError::Internal {
+                    message: "Failed to create dialog manager".to_string(),
                 })?,
         );
 

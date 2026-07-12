@@ -292,43 +292,48 @@ impl From<DialogError> for ApiError {
     fn from(error: DialogError) -> Self {
         match error {
             // Configuration-related errors
-            DialogError::ConfigError { message, .. } => ApiError::Configuration { message },
+            DialogError::ConfigError { .. } => ApiError::Configuration {
+                message: "Invalid configuration".to_string(),
+            },
 
             // Network and transport errors
-            DialogError::NetworkError { message, .. } => ApiError::Network { message },
+            DialogError::NetworkError { .. } => ApiError::Network {
+                message: "Network operation failed".to_string(),
+            },
 
             // SIP protocol errors
-            DialogError::ProtocolError { message, .. } => ApiError::Protocol { message },
-            DialogError::RoutingError { message, .. } => ApiError::Protocol { message },
+            DialogError::ProtocolError { .. } => ApiError::Protocol {
+                message: "SIP protocol operation failed".to_string(),
+            },
+            DialogError::RoutingError { .. } => ApiError::Protocol {
+                message: "SIP routing operation failed".to_string(),
+            },
 
             // Dialog-specific errors
-            DialogError::DialogNotFound { id, .. } => ApiError::Dialog {
-                message: format!("Dialog not found: {}", id),
+            DialogError::DialogNotFound { .. } => ApiError::Dialog {
+                message: "Dialog not found".to_string(),
             },
-            DialogError::InvalidState {
-                expected, actual, ..
-            } => ApiError::Dialog {
-                message: format!(
-                    "Invalid dialog state: expected {}, got {}",
-                    expected, actual
-                ),
+            DialogError::InvalidState { .. } => ApiError::Dialog {
+                message: "Invalid dialog state".to_string(),
             },
-            DialogError::DialogAlreadyExists { id, .. } => ApiError::Dialog {
-                message: format!("Dialog already exists: {}", id),
+            DialogError::DialogAlreadyExists { .. } => ApiError::Dialog {
+                message: "Dialog already exists".to_string(),
             },
 
             // Transaction errors (map to internal for simplicity)
-            DialogError::TransactionError { message, .. } => ApiError::Internal {
-                message: format!("Transaction error: {}", message),
+            DialogError::TransactionError { .. } => ApiError::Internal {
+                message: "Transaction operation failed".to_string(),
             },
 
             // SDP and other internal errors
-            DialogError::SdpError { message, .. } => ApiError::Internal {
-                message: format!("SDP error: {}", message),
+            DialogError::SdpError { .. } => ApiError::Internal {
+                message: "SDP operation failed".to_string(),
             },
-            DialogError::InternalError { message, .. } => ApiError::Internal { message },
-            DialogError::TimeoutError { operation, .. } => ApiError::Internal {
-                message: format!("Timeout error: {}", operation),
+            DialogError::InternalError { .. } => ApiError::Internal {
+                message: "Internal operation failed".to_string(),
+            },
+            DialogError::TimeoutError { .. } => ApiError::Internal {
+                message: "Operation timed out".to_string(),
             },
         }
     }
@@ -336,36 +341,36 @@ impl From<DialogError> for ApiError {
 
 /// Convert from standard io::Error to ApiError
 impl From<std::io::Error> for ApiError {
-    fn from(error: std::io::Error) -> Self {
+    fn from(_error: std::io::Error) -> Self {
         ApiError::Network {
-            message: format!("I/O error: {}", error),
+            message: "I/O operation failed".to_string(),
         }
     }
 }
 
 /// Convert from serialization errors to ApiError
 impl From<serde_json::Error> for ApiError {
-    fn from(error: serde_json::Error) -> Self {
+    fn from(_error: serde_json::Error) -> Self {
         ApiError::Configuration {
-            message: format!("Serialization error: {}", error),
+            message: "Serialization failed".to_string(),
         }
     }
 }
 
 /// Convert from address parsing errors to ApiError
 impl From<std::net::AddrParseError> for ApiError {
-    fn from(error: std::net::AddrParseError) -> Self {
+    fn from(_error: std::net::AddrParseError) -> Self {
         ApiError::Configuration {
-            message: format!("Invalid address: {}", error),
+            message: "Invalid address".to_string(),
         }
     }
 }
 
 /// Convert from URI parsing errors to ApiError
 impl From<http::uri::InvalidUri> for ApiError {
-    fn from(error: http::uri::InvalidUri) -> Self {
+    fn from(_error: http::uri::InvalidUri) -> Self {
         ApiError::Configuration {
-            message: format!("Invalid URI: {}", error),
+            message: "Invalid URI".to_string(),
         }
     }
 }
@@ -415,7 +420,7 @@ mod tests {
         let api_error: ApiError = io_error.into();
 
         match api_error {
-            ApiError::Network { message } => assert!(message.contains("connection refused")),
+            ApiError::Network { message } => assert_eq!(message, "I/O operation failed"),
             _ => panic!("Expected network error"),
         }
     }

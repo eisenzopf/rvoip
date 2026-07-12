@@ -153,6 +153,7 @@ use super::{
     ApiError, ApiResult, DialogStats,
 };
 use crate::config::DialogManagerConfig;
+use crate::diagnostics::safe_log::method_class;
 use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::manager::unified::UnifiedDialogManager;
 
@@ -192,13 +193,28 @@ use crate::manager::unified::UnifiedDialogManager;
 /// - All server capabilities
 /// - Full bidirectional SIP support
 /// - Complete PBX/gateway functionality
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct UnifiedDialogApi {
     /// Underlying unified dialog manager
     manager: Arc<UnifiedDialogManager>,
 
     /// Configuration for this API instance
     config: DialogManagerConfig,
+}
+
+impl fmt::Debug for UnifiedDialogApi {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mode = match &self.config {
+            DialogManagerConfig::Client(_) => "client",
+            DialogManagerConfig::Server(_) => "server",
+            DialogManagerConfig::Hybrid(_) => "hybrid",
+        };
+        formatter
+            .debug_struct("UnifiedDialogApi")
+            .field("manager", &self.manager)
+            .field("mode", &mode)
+            .finish_non_exhaustive()
+    }
 }
 
 fn add_contact_header(response: &mut Response, contact_uri: &str) -> ApiResult<()> {
@@ -210,8 +226,8 @@ fn add_contact_header(response: &mut Response, contact_uri: &str) -> ApiResult<(
     };
     use std::str::FromStr;
 
-    let uri = Uri::from_str(contact_uri).map_err(|e| ApiError::Internal {
-        message: format!("Invalid Contact URI {}: {}", contact_uri, e),
+    let uri = Uri::from_str(contact_uri).map_err(|_error| ApiError::Internal {
+        message: "Invalid Contact URI".to_string(),
     })?;
     response
         .headers
@@ -853,7 +869,7 @@ impl UnifiedDialogApi {
             Arc::new(manager.as_ref().inner_manager().clone()),
         )
         .await
-        .map_err(|e| ApiError::internal(format!("Failed to create event hub: {}", e)))?;
+        .map_err(|_error| ApiError::internal("Failed to create event hub"))?;
 
         // Set the event hub on the dialog manager
         manager
@@ -894,7 +910,7 @@ impl UnifiedDialogApi {
             Arc::new(manager.as_ref().inner_manager().clone()),
         )
         .await
-        .map_err(|e| ApiError::internal(format!("Failed to create event hub: {}", e)))?;
+        .map_err(|_error| ApiError::internal("Failed to create event hub"))?;
 
         // Set the event hub on the dialog manager
         manager
@@ -1462,8 +1478,8 @@ impl UnifiedDialogApi {
         // Build Contact: uri1, uri2, ... as a single header with multiple params.
         let mut params: Vec<ContactParamInfo> = Vec::with_capacity(contacts.len());
         for raw in &contacts {
-            let uri = Uri::from_str(raw).map_err(|e| ApiError::Internal {
-                message: format!("Invalid Contact URI {:?}: {}", raw, e),
+            let uri = Uri::from_str(raw).map_err(|_error| ApiError::Internal {
+                message: "Invalid Contact URI".to_string(),
             })?;
             params.push(ContactParamInfo {
                 address: Address::new(uri),
@@ -1476,8 +1492,7 @@ impl UnifiedDialogApi {
         for hdr in &extra_headers {
             if is_response_stack_managed(&hdr.name()) {
                 warn!(
-                    "Dropping stack-managed header {:?} from redirect extras on session {}",
-                    hdr.name(),
+                    "Dropping stack-managed header from redirect extras on session {}",
                     session_id
                 );
                 continue;
@@ -1486,10 +1501,9 @@ impl UnifiedDialogApi {
         }
 
         info!(
-            "Sending {} redirect response for session {} via transaction {} with {} contact(s), {} extras",
+            "Sending {} redirect response for session {} via transaction with {} contact(s), {} extras",
             status_code,
             session_id,
-            transaction_id,
             contacts.len(),
             extra_headers.len()
         );
@@ -1721,8 +1735,8 @@ impl UnifiedDialogApi {
             .clear_pending_response_transaction(dialog_id, transaction_id);
 
         debug!(
-            "Sending response for dialog {} using transaction {}",
-            dialog_id, transaction_id
+            "Sending response for dialog {} using transaction",
+            dialog_id
         );
 
         let original_request = self
@@ -1731,8 +1745,8 @@ impl UnifiedDialogApi {
             .transaction_manager()
             .original_request(transaction_id)
             .await
-            .map_err(|e| ApiError::Internal {
-                message: format!("Failed to get original request: {}", e),
+            .map_err(|_error| ApiError::Internal {
+                message: "Failed to get original request".to_string(),
             })?;
 
         // Build the response. Only dialog-creating INVITEs need a freshly
@@ -1797,8 +1811,7 @@ impl UnifiedDialogApi {
             for header in &extra_headers {
                 if is_response_stack_managed(&header.name()) {
                     warn!(
-                        "Dropping stack-managed header {:?} from application-staged extras on response for session {}",
-                        header.name(),
+                        "Dropping stack-managed header from application-staged extras on response for session {}",
                         session_id
                     );
                     continue;
@@ -1808,10 +1821,9 @@ impl UnifiedDialogApi {
         }
 
         info!(
-            "Sending {} response for session {} via transaction {} ({} staged extras)",
+            "Sending {} response for session {} via transaction ({} staged extras)",
             status_code,
             session_id,
-            transaction_id,
             extra_headers.len()
         );
 
@@ -1819,15 +1831,15 @@ impl UnifiedDialogApi {
         // This handles UAS dialog confirmation when sending 200 OK to INVITE.
         if let Some(original_request) = original_request.as_ref() {
             use crate::manager::ResponseLifecycle;
-            if let Err(e) = self
+            if let Err(_error) = self
                 .manager
                 .core()
                 .pre_send_response(dialog_id, &response, transaction_id, original_request)
                 .await
             {
                 error!(
-                    "Failed to execute pre_send_response hook for dialog {}: {}",
-                    dialog_id, e
+                    "Failed to execute pre_send_response hook for dialog {}: operation_failed",
+                    dialog_id
                 );
                 // Continue with sending - the error is logged but shouldn't block the response
             }
@@ -2004,8 +2016,7 @@ impl UnifiedDialogApi {
         let cseq = options.cseq.unwrap_or(1);
 
         debug!(
-            "Building REGISTER request to {} (refresh={}, expires={}, cseq={}, auth={}, proxy_auth={}, outbound={}, outbound_proxy={})",
-            options.registrar_uri,
+            "Building REGISTER request (refresh={}, expires={}, cseq={}, auth={}, proxy_auth={}, outbound={}, outbound_proxy={})",
             options.refresh,
             options.expires,
             cseq,
@@ -2018,7 +2029,7 @@ impl UnifiedDialogApi {
         let registrar = options
             .registrar_uri
             .parse::<rvoip_sip_core::Uri>()
-            .map_err(|e| ApiError::protocol(format!("Invalid REGISTER registrar URI: {}", e)))?;
+            .map_err(|_error| ApiError::protocol("Invalid REGISTER registrar URI"))?;
         let destination_uri = options.outbound_proxy_uri.as_ref().unwrap_or(&registrar);
         let local_addr = self.manager.core().local_address_for_uri(destination_uri);
 
@@ -2036,12 +2047,8 @@ impl UnifiedDialogApi {
         }
 
         if let Some(params) = &options.outbound_contact {
-            let contact = build_outbound_contact(&options.contact_uri, params).map_err(|e| {
-                ApiError::protocol(format!(
-                    "Invalid outbound Contact URI {}: {}",
-                    options.contact_uri, e
-                ))
-            })?;
+            let contact = build_outbound_contact(&options.contact_uri, params)
+                .map_err(|_error| ApiError::protocol("Invalid outbound Contact URI"))?;
             builder = builder.contact_header(contact);
         }
 
@@ -2083,16 +2090,11 @@ impl UnifiedDialogApi {
 
         let request = builder
             .build()
-            .map_err(|e| ApiError::protocol(format!("Failed to build REGISTER request: {}", e)))?;
+            .map_err(|_error| ApiError::protocol("Failed to build REGISTER request"))?;
 
         let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(destination_uri)
             .await
-            .ok_or_else(|| {
-                ApiError::protocol(format!(
-                    "Failed to resolve REGISTER destination URI: {}",
-                    destination_uri
-                ))
-            })?;
+            .ok_or_else(|| ApiError::protocol("Failed to resolve REGISTER destination URI"))?;
 
         debug!("Sending REGISTER to {}", destination);
 
@@ -2124,7 +2126,7 @@ impl UnifiedDialogApi {
     ) -> ApiResult<Response> {
         let dest_uri = target_uri
             .parse::<rvoip_sip_core::Uri>()
-            .map_err(|e| ApiError::protocol(format!("Invalid SUBSCRIBE target URI: {}", e)))?;
+            .map_err(|_error| ApiError::protocol("Invalid SUBSCRIBE target URI"))?;
         let local_addr = self.manager.core().local_address_for_uri(&dest_uri);
         let extras_opt = if extra_headers.is_empty() {
             None
@@ -2145,16 +2147,11 @@ impl UnifiedDialogApi {
             local_addr,
             extras_opt,
         )
-        .map_err(|e| ApiError::protocol(format!("Failed to build SUBSCRIBE request: {}", e)))?;
+        .map_err(|_error| ApiError::protocol("Failed to build SUBSCRIBE request"))?;
 
         let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
             .await
-            .ok_or_else(|| {
-                ApiError::protocol(format!(
-                    "Failed to resolve SUBSCRIBE target URI: {}",
-                    target_uri
-                ))
-            })?;
+            .ok_or_else(|| ApiError::protocol("Failed to resolve SUBSCRIBE target URI"))?;
 
         self.send_non_dialog_request(request, destination, std::time::Duration::from_secs(30))
             .await
@@ -2178,7 +2175,7 @@ impl UnifiedDialogApi {
     ) -> ApiResult<Response> {
         let dest_uri = target_uri
             .parse::<rvoip_sip_core::Uri>()
-            .map_err(|e| ApiError::protocol(format!("Invalid MESSAGE target URI: {}", e)))?;
+            .map_err(|_error| ApiError::protocol("Invalid MESSAGE target URI"))?;
         let local_addr = self.manager.core().local_address_for_uri(&dest_uri);
         let extras_opt = if extra_headers.is_empty() {
             None
@@ -2197,16 +2194,11 @@ impl UnifiedDialogApi {
             from_tag,
             extras_opt,
         )
-        .map_err(|e| ApiError::protocol(format!("Failed to build MESSAGE request: {}", e)))?;
+        .map_err(|_error| ApiError::protocol("Failed to build MESSAGE request"))?;
 
         let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
             .await
-            .ok_or_else(|| {
-                ApiError::protocol(format!(
-                    "Failed to resolve MESSAGE target URI: {}",
-                    target_uri
-                ))
-            })?;
+            .ok_or_else(|| ApiError::protocol("Failed to resolve MESSAGE target URI"))?;
 
         self.send_non_dialog_request(request, destination, std::time::Duration::from_secs(10))
             .await
@@ -2245,7 +2237,7 @@ impl UnifiedDialogApi {
             .transaction_manager()
             .create_non_invite_client_transaction(request, destination)
             .await
-            .map_err(|e| ApiError::internal(format!("Failed to create transaction: {}", e)))?;
+            .map_err(|_error| ApiError::internal("Failed to create transaction"))?;
 
         self.manager
             .inner_manager()
@@ -2256,7 +2248,7 @@ impl UnifiedDialogApi {
             .transaction_manager()
             .send_request(&transaction_id)
             .await
-            .map_err(|e| ApiError::internal(format!("Failed to send request: {}", e)))?;
+            .map_err(|_error| ApiError::internal("Failed to send request"))?;
 
         Ok(transaction_id)
     }
@@ -2475,7 +2467,7 @@ impl UnifiedDialogApi {
             },
             extras_opt,
         )
-        .map_err(|e| ApiError::protocol(format!("Failed to build NOTIFY request: {}", e)))?;
+        .map_err(|_error| ApiError::protocol("Failed to build NOTIFY request"))?;
 
         self.send_in_dialog_built_request(dialog_id, Method::Notify, request)
             .await
@@ -2543,7 +2535,7 @@ impl UnifiedDialogApi {
             },
             extras_opt,
         )
-        .map_err(|e| ApiError::protocol(format!("Failed to build INFO request: {}", e)))?;
+        .map_err(|_error| ApiError::protocol("Failed to build INFO request"))?;
         drop(dialog);
 
         self.send_in_dialog_built_request(dialog_id, Method::Info, request)
@@ -2755,7 +2747,7 @@ impl UnifiedDialogApi {
         let dest_uri = opts
             .to_uri
             .parse::<rvoip_sip_core::Uri>()
-            .map_err(|e| ApiError::protocol(format!("Invalid OPTIONS target URI: {}", e)))?;
+            .map_err(|_error| ApiError::protocol("Invalid OPTIONS target URI"))?;
         let local_addr = self.manager.core().local_address_for_uri(&dest_uri);
         let extras_opt = if opts.extra_headers.is_empty() {
             None
@@ -2772,16 +2764,11 @@ impl UnifiedDialogApi {
             opts.from_tag,
             extras_opt,
         )
-        .map_err(|e| ApiError::protocol(format!("Failed to build OPTIONS request: {}", e)))?;
+        .map_err(|_error| ApiError::protocol("Failed to build OPTIONS request"))?;
 
         let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
             .await
-            .ok_or_else(|| {
-                ApiError::protocol(format!(
-                    "Failed to resolve OPTIONS target URI: {}",
-                    opts.to_uri
-                ))
-            })?;
+            .ok_or_else(|| ApiError::protocol("Failed to resolve OPTIONS target URI"))?;
 
         let timeout = opts.timeout.unwrap_or_else(|| Duration::from_secs(8));
         self.send_non_dialog_request(request, destination, timeout)
@@ -3006,15 +2993,15 @@ impl UnifiedDialogApi {
         let (mut transport, transport_rx) =
             TransportManager::new(transport_config)
                 .await
-                .map_err(|e| ApiError::Internal {
-                    message: format!("Failed to create transport manager: {}", e),
+                .map_err(|_error| ApiError::Internal {
+                    message: "Failed to create transport manager".to_string(),
                 })?;
 
         transport
             .initialize()
             .await
-            .map_err(|e| ApiError::Internal {
-                message: format!("Failed to initialize transport: {}", e),
+            .map_err(|_error| ApiError::Internal {
+                message: "Failed to initialize transport".to_string(),
             })?;
 
         // Create transaction manager with global events automatically
@@ -3025,8 +3012,8 @@ impl UnifiedDialogApi {
             Some(10000), // Increased from 100 to handle high concurrent call volumes
         )
         .await
-        .map_err(|e| ApiError::Internal {
-            message: format!("Failed to create transaction manager: {}", e),
+        .map_err(|_error| ApiError::Internal {
+            message: "Failed to create transaction manager".to_string(),
         })?;
 
         // Create the unified dialog API with all components
@@ -3092,7 +3079,7 @@ impl UnifiedDialogApi {
     ) -> ApiResult<Response> {
         debug!(
             "Sending non-dialog {} request to {}",
-            request.method(),
+            method_class(&request.method()),
             destination
         );
 
@@ -3119,9 +3106,7 @@ impl UnifiedDialogApi {
                     .transaction_manager()
                     .create_non_invite_client_transaction(request, destination)
                     .await
-                    .map_err(|e| {
-                        ApiError::internal(format!("Failed to create transaction: {}", e))
-                    })?
+                    .map_err(|_error| ApiError::internal("Failed to create transaction"))?
             }
         };
 
@@ -3131,7 +3116,7 @@ impl UnifiedDialogApi {
             .transaction_manager()
             .send_request(&transaction_id)
             .await
-            .map_err(|e| ApiError::internal(format!("Failed to send request: {}", e)))?;
+            .map_err(|_error| ApiError::internal("Failed to send request"))?;
         self.manager.core().record_outbound_transport_context(
             &transaction_id,
             request_key,
@@ -3146,7 +3131,7 @@ impl UnifiedDialogApi {
             .transaction_manager()
             .wait_for_final_response(&transaction_id, timeout)
             .await
-            .map_err(|e| ApiError::internal(format!("Failed to wait for response: {}", e)))?
+            .map_err(|_error| ApiError::internal("Failed to wait for response"))?
             .ok_or_else(|| ApiError::network(format!("Request timed out after {:?}", timeout)))?;
 
         debug!(

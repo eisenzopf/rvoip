@@ -7,6 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+pub(crate) mod safe_log;
+
 macro_rules! latency_buckets {
     () => {
         [

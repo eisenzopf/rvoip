@@ -118,8 +118,8 @@ impl DialogEventAdapter {
                     // Subscribe to session-to-dialog events
                     let mut receiver = match coordinator.subscribe("session_to_dialog").await {
                         Ok(rx) => rx,
-                        Err(e) => {
-                            error!("Failed to subscribe to session_to_dialog: {}", e);
+                        Err(_error) => {
+                            error!("Failed to subscribe to session_to_dialog");
                             return;
                         }
                     };
@@ -158,15 +158,12 @@ impl DialogEventAdapter {
         // Convert to cross-crate event if applicable
         if let Some(cross_crate_event) = self.convert_dialog_to_cross_crate_event(&event) {
             // Publish cross-crate event
-            if let Err(e) = self
+            if let Err(_error) = self
                 .global_coordinator
                 .publish(Arc::new(cross_crate_event))
                 .await
             {
-                error!(
-                    "Failed to publish cross-crate event from dialog-core: {}",
-                    e
-                );
+                error!("Failed to publish cross-crate event from dialog-core");
             }
         }
 
@@ -215,15 +212,12 @@ impl DialogEventAdapter {
             }
 
             // Publish cross-crate event
-            if let Err(e) = self
+            if let Err(_error) = self
                 .global_coordinator
                 .publish(Arc::new(cross_crate_event))
                 .await
             {
-                error!(
-                    "Failed to publish cross-crate coordination event from dialog-core: {}",
-                    e
-                );
+                error!("Failed to publish cross-crate coordination event from dialog-core");
             }
         }
 

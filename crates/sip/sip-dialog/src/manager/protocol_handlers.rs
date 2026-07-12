@@ -156,8 +156,8 @@ impl ProtocolHandlers for DialogManager {
             .transaction_manager
             .create_server_transaction(request.clone(), source)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to create server transaction for CANCEL: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to create server transaction for CANCEL".to_string(),
             })?;
         let cancel_tx_id = cancel_tx.id().clone();
 
@@ -166,8 +166,8 @@ impl ProtocolHandlers for DialogManager {
             .transaction_manager
             .find_invite_server_transaction_for_cancel(&request)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to find INVITE server transaction for CANCEL: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to find INVITE server transaction for CANCEL".to_string(),
             })?;
 
         let Some(invite_tx_id) = invite_tx_id else {
@@ -179,8 +179,8 @@ impl ProtocolHandlers for DialogManager {
             self.transaction_manager
                 .send_response(&cancel_tx_id, response)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to send 481 response to CANCEL: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to send 481 response to CANCEL".to_string(),
                 })?;
             let _ = self
                 .transaction_manager
@@ -196,8 +196,8 @@ impl ProtocolHandlers for DialogManager {
         self.transaction_manager
             .send_response(&cancel_tx_id, ok)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to send 200 OK to CANCEL: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to send 200 OK to CANCEL".to_string(),
             })?;
         let _ = self
             .transaction_manager
@@ -211,8 +211,8 @@ impl ProtocolHandlers for DialogManager {
             .transaction_manager
             .get_server_transaction_request(&invite_tx_id)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to fetch pending INVITE for 487: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to fetch pending INVITE for 487".to_string(),
             })?;
         let terminated = crate::transaction::utils::response_builders::create_response(
             &original_invite,
@@ -221,18 +221,15 @@ impl ProtocolHandlers for DialogManager {
         self.transaction_manager
             .send_response(&invite_tx_id, terminated)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to send 487 Request Terminated: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to send 487 Request Terminated".to_string(),
             })?;
 
         // Terminate the dialog and notify the session layer.
         self.terminate_dialog_for_tx_and_emit_cancelled(&invite_tx_id, "CANCEL received")
             .await;
 
-        debug!(
-            "CANCEL processed for INVITE server transaction {} (200 CANCEL, 487 INVITE sent)",
-            invite_tx_id
-        );
+        debug!("CANCEL processed for INVITE server transaction (200 CANCEL, 487 INVITE sent)");
         Ok(())
     }
 
@@ -265,8 +262,8 @@ impl ProtocolHandlers for DialogManager {
             .transaction_manager
             .create_server_transaction(request.clone(), source)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to create server transaction for OPTIONS: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to create server transaction for OPTIONS".to_string(),
             })?;
 
         let transaction_id = server_transaction.id().clone();
@@ -340,8 +337,8 @@ impl MethodHandler for DialogManager {
                 .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to create server transaction for INFO: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to create server transaction for INFO".to_string(),
                 })?;
 
             let transaction_id = server_transaction.id().clone();
@@ -364,8 +361,8 @@ impl MethodHandler for DialogManager {
                 .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to create server transaction for INFO: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to create server transaction for INFO".to_string(),
                 })?;
 
             let transaction_id = server_transaction.id().clone();
@@ -377,8 +374,8 @@ impl MethodHandler for DialogManager {
             self.transaction_manager
                 .send_response(&transaction_id, response)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to send 481 response to INFO: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to send 481 response to INFO".to_string(),
                 })?;
 
             debug!("INFO processed with 481 response (no dialog found)");
@@ -396,8 +393,8 @@ impl MethodHandler for DialogManager {
                 .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to create server transaction for REFER: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to create server transaction for REFER".to_string(),
                 })?;
 
             let transaction_id = server_transaction.id().clone();
@@ -460,8 +457,8 @@ impl MethodHandler for DialogManager {
                 .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to create server transaction for REFER: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to create server transaction for REFER".to_string(),
                 })?;
 
             let transaction_id = server_transaction.id().clone();
@@ -473,8 +470,8 @@ impl MethodHandler for DialogManager {
             self.transaction_manager
                 .send_response(&transaction_id, response)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to send 481 response to REFER: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to send 481 response to REFER".to_string(),
                 })?;
 
             debug!("REFER processed with 481 response (no dialog found)");
@@ -505,8 +502,8 @@ impl MethodHandler for DialogManager {
                 .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to create server transaction for SUBSCRIBE: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to create server transaction for SUBSCRIBE".to_string(),
                 })?;
 
             let transaction_id = server_transaction.id().clone();
@@ -515,8 +512,8 @@ impl MethodHandler for DialogManager {
             self.transaction_manager
                 .send_response(&transaction_id, response)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to send SUBSCRIBE response: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to send SUBSCRIBE response".to_string(),
                 })?;
 
             // If a dialog was created, store it
@@ -534,8 +531,8 @@ impl MethodHandler for DialogManager {
                 .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to create server transaction for SUBSCRIBE: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to create server transaction for SUBSCRIBE".to_string(),
                 })?;
 
             let transaction_id = server_transaction.id().clone();
@@ -578,8 +575,8 @@ impl MethodHandler for DialogManager {
                 .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to create server transaction for NOTIFY: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to create server transaction for NOTIFY".to_string(),
                 })?;
 
             let transaction_id = server_transaction.id().clone();
@@ -588,8 +585,8 @@ impl MethodHandler for DialogManager {
             self.transaction_manager
                 .send_response(&transaction_id, response)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to send NOTIFY response: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to send NOTIFY response".to_string(),
                 })?;
 
             debug!("NOTIFY request handled by SubscriptionManager");
@@ -606,8 +603,8 @@ impl MethodHandler for DialogManager {
                 .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to create server transaction for NOTIFY: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to create server transaction for NOTIFY".to_string(),
                 })?;
 
             let transaction_id = server_transaction.id().clone();
@@ -622,8 +619,8 @@ impl MethodHandler for DialogManager {
             self.transaction_manager
                 .send_response(&transaction_id, response)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to send 200 OK to NOTIFY: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to send 200 OK to NOTIFY".to_string(),
                 })?;
 
             debug!("NOTIFY accepted (fallback path) for dialog {}", dialog_id);
@@ -636,8 +633,8 @@ impl MethodHandler for DialogManager {
                 .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to create server transaction for NOTIFY: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to create server transaction for NOTIFY".to_string(),
                 })?;
 
             let transaction_id = server_transaction.id().clone();
@@ -649,8 +646,8 @@ impl MethodHandler for DialogManager {
             self.transaction_manager
                 .send_response(&transaction_id, response)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to send 481 response to NOTIFY: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to send 481 response to NOTIFY".to_string(),
                 })?;
 
             debug!("NOTIFY processed with 481 response (no dialog found)");
@@ -766,8 +763,8 @@ impl DialogManager {
             },
         );
 
-        if let Err(e) = hub.publish_cross_crate_event(event).await {
-            tracing::warn!("Failed to publish NotifyReceived event: {}", e);
+        if let Err(_error) = hub.publish_cross_crate_event(event).await {
+            tracing::warn!("Failed to publish NotifyReceived event");
         }
     }
 }
@@ -800,8 +797,8 @@ impl DialogManager {
         self.transaction_manager
             .send_response(transaction_id, response)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to send OPTIONS response: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to send OPTIONS response".to_string(),
             })?;
 
         debug!("Sent basic OPTIONS response");

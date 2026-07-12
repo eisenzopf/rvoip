@@ -58,7 +58,7 @@ impl DialogServer {
         target_uri: String,
         refer_body: Option<String>,
     ) -> ApiResult<TransactionKey> {
-        debug!("Sending REFER for dialog {} to {}", dialog_id, target_uri);
+        debug!("Sending REFER for dialog {} with target present", dialog_id);
 
         // Build REFER request body with Refer-To header
         let body = if let Some(custom_body) = refer_body {
@@ -92,8 +92,9 @@ impl DialogServer {
         body: Option<String>,
     ) -> ApiResult<TransactionKey> {
         debug!(
-            "Sending NOTIFY for dialog {} with event {}",
-            dialog_id, event
+            "Sending NOTIFY for dialog {} with event value length={}",
+            dialog_id,
+            event.len()
         );
 
         let notify_body = body.map(|b| b.into_bytes().into());

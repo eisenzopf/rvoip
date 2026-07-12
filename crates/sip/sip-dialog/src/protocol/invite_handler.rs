@@ -57,8 +57,8 @@ impl InviteHandler for DialogManager {
             .transaction_manager
             .create_server_transaction(request.clone(), source)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to create server transaction for INVITE: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to create server transaction for INVITE".to_string(),
             })?;
 
         let transaction_id = server_transaction.id().clone();
@@ -292,7 +292,7 @@ impl DialogManager {
         // Extract any SDP from the ACK (though typically ACK doesn't have SDP for 2xx responses)
         let negotiated_sdp = if !request.body().is_empty() {
             let sdp = self.extract_body_string(&request);
-            debug!("ACK contains SDP body: {}", sdp);
+            debug!("ACK contains SDP body bytes={}", sdp.len());
             Some(sdp)
         } else {
             debug!("ACK has no SDP body (normal for 2xx ACK)");

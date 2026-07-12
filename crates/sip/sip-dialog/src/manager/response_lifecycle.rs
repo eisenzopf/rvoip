@@ -38,6 +38,7 @@
 use rvoip_sip_core::{Method, Request, Response};
 use tracing::{debug, info, warn};
 
+use crate::diagnostics::safe_log::method_class;
 use crate::dialog::{DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::manager::core::DialogManager;
@@ -110,7 +111,7 @@ impl ResponseLifecycle for DialogManager {
             "pre_send_response: dialog={}, status={}, method={}",
             dialog_id,
             response.status_code(),
-            original_request.method()
+            method_class(&original_request.method())
         );
 
         if original_request.method() == Method::Invite {
@@ -174,7 +175,7 @@ impl DialogManager {
         // Set local tag if not already set
         if dialog.local_tag.is_none() {
             if let Some(tag) = local_tag {
-                debug!("Setting local tag {} for UAS dialog {}", tag, dialog_id);
+                debug!("Setting local tag for UAS dialog {}", dialog_id);
                 dialog.local_tag = Some(tag.clone());
             } else {
                 warn!("200 OK response missing To tag for dialog {}", dialog_id);
@@ -206,10 +207,7 @@ impl DialogManager {
                     tuple.0, tuple.1, tuple.2
                 );
                 self.dialog_lookup.insert(key.clone(), dialog_id.clone());
-                info!(
-                    "✅ Registered UAS dialog {} in lookup table with key: {}",
-                    dialog_id, key
-                );
+                info!("✅ Registered UAS dialog {} in lookup table", dialog_id);
             } else {
                 warn!(
                     "Dialog {} missing tags after 200 OK - cannot register in lookup table",
@@ -230,8 +228,8 @@ impl DialogManager {
                     previous_state: format!("{:?}", old_state),
                 };
 
-                if let Err(e) = coordinator.send(event).await {
-                    warn!("Failed to send dialog state change event: {}", e);
+                if let Err(_error) = coordinator.send(event).await {
+                    warn!("Failed to send dialog state change event");
                 }
             }
         } else {

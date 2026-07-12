@@ -114,8 +114,10 @@ impl DialogServer {
 
         // TODO: This should use dialog manager's response building capabilities
         debug!(
-            "Call would be rejected for dialog {} with status {} reason: {:?}",
-            dialog_id, status_code, reason
+            "Call would be rejected for dialog {} with status {} reason_present={}",
+            dialog_id,
+            status_code,
+            reason.is_some()
         );
 
         // Update statistics

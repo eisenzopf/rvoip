@@ -386,6 +386,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::diagnostics::safe_log::method_class;
 use crate::transaction::builders::dialog_quick;
 use crate::transaction::{TransactionEvent, TransactionKey, TransactionManager};
 use rvoip_sip_core::{Method, Response, StatusCode, Uri};
@@ -655,9 +656,11 @@ impl DialogClient {
     /// # Returns
     /// A configured DialogClient ready to start
     pub async fn new(local_address: &str) -> ApiResult<Self> {
-        let addr: SocketAddr = local_address.parse().map_err(|e| ApiError::Configuration {
-            message: format!("Invalid local address '{}': {}", local_address, e),
-        })?;
+        let addr: SocketAddr = local_address
+            .parse()
+            .map_err(|_error| ApiError::Configuration {
+                message: "Invalid local address".to_string(),
+            })?;
 
         let config = ClientConfig::new(addr);
         Self::with_config(config).await
@@ -681,7 +684,9 @@ impl DialogClient {
         // Validate configuration for future use
         config
             .validate()
-            .map_err(|e| ApiError::Configuration { message: e })?;
+            .map_err(|_error| ApiError::Configuration {
+                message: "Invalid client configuration".to_string(),
+            })?;
 
         // Return architectural guidance error
         Err(ApiError::Configuration {
@@ -805,7 +810,9 @@ impl DialogClient {
         // Validate configuration
         config
             .validate()
-            .map_err(|e| ApiError::Configuration { message: e })?;
+            .map_err(|_error| ApiError::Configuration {
+                message: "Invalid client configuration".to_string(),
+            })?;
 
         info!("Creating DialogClient with global transaction events (RECOMMENDED PATTERN)");
 
@@ -817,8 +824,8 @@ impl DialogClient {
                 config.dialog.local_address,
             )
             .await
-            .map_err(|e| ApiError::Internal {
-                message: format!("Failed to create dialog manager with global events: {}", e),
+            .map_err(|_error| ApiError::Internal {
+                message: "Failed to create dialog manager with global events".to_string(),
             })?,
         );
 
@@ -934,7 +941,9 @@ impl DialogClient {
         // Validate configuration
         config
             .validate()
-            .map_err(|e| ApiError::Configuration { message: e })?;
+            .map_err(|_error| ApiError::Configuration {
+                message: "Invalid client configuration".to_string(),
+            })?;
 
         info!("Creating DialogClient with injected dependencies");
         warn!("WARNING: Using old DialogManager::new() pattern - consider upgrading to with_global_events() for better reliability");
@@ -943,8 +952,8 @@ impl DialogClient {
         let dialog_manager = Arc::new(
             DialogManager::new(transaction_manager, config.dialog.local_address)
                 .await
-                .map_err(|e| ApiError::Internal {
-                    message: format!("Failed to create dialog manager: {}", e),
+                .map_err(|_error| ApiError::Internal {
+                    message: "Failed to create dialog manager".to_string(),
                 })?,
         );
 
@@ -1109,15 +1118,15 @@ impl DialogClient {
         to_uri: &str,
         sdp_offer: Option<String>,
     ) -> ApiResult<CallHandle> {
-        info!("Making call from {} to {}", from_uri, to_uri);
+        info!("Making call with caller and target URIs present");
 
         // Parse URIs
-        let local_uri: Uri = from_uri.parse().map_err(|e| ApiError::Configuration {
-            message: format!("Invalid from URI '{}': {}", from_uri, e),
+        let local_uri: Uri = from_uri.parse().map_err(|_error| ApiError::Configuration {
+            message: "Invalid caller URI".to_string(),
         })?;
 
-        let remote_uri: Uri = to_uri.parse().map_err(|e| ApiError::Configuration {
-            message: format!("Invalid to URI '{}': {}", to_uri, e),
+        let remote_uri: Uri = to_uri.parse().map_err(|_error| ApiError::Configuration {
+            message: "Invalid target URI".to_string(),
         })?;
 
         // Create outgoing dialog
@@ -1295,15 +1304,15 @@ impl DialogClient {
     /// - `ApiError::Dialog` - Failed to create dialog
     /// - `ApiError::Internal` - Internal dialog manager error
     pub async fn create_dialog(&self, from_uri: &str, to_uri: &str) -> ApiResult<DialogHandle> {
-        debug!("Creating dialog from {} to {}", from_uri, to_uri);
+        debug!("Creating dialog with local and remote URIs present");
 
         // Parse URIs
-        let local_uri: Uri = from_uri.parse().map_err(|e| ApiError::Configuration {
-            message: format!("Invalid from URI '{}': {}", from_uri, e),
+        let local_uri: Uri = from_uri.parse().map_err(|_error| ApiError::Configuration {
+            message: "Invalid caller URI".to_string(),
         })?;
 
-        let remote_uri: Uri = to_uri.parse().map_err(|e| ApiError::Configuration {
-            message: format!("Invalid to URI '{}': {}", to_uri, e),
+        let remote_uri: Uri = to_uri.parse().map_err(|_error| ApiError::Configuration {
+            message: "Invalid target URI".to_string(),
         })?;
 
         // Create outgoing dialog
@@ -1510,7 +1519,11 @@ impl DialogClient {
         method: Method,
         body: Option<bytes::Bytes>,
     ) -> ApiResult<TransactionKey> {
-        debug!("Sending {} request in dialog {}", method, dialog_id);
+        debug!(
+            "Sending {} request in dialog {}",
+            method_class(&method),
+            dialog_id
+        );
 
         self.dialog_manager
             .send_request(dialog_id, method, body)
@@ -1598,7 +1611,7 @@ impl DialogClient {
         transaction_id: &TransactionKey,
         response: Response,
     ) -> ApiResult<()> {
-        debug!("Sending response for transaction {}", transaction_id);
+        debug!("Sending response for transaction");
 
         self.dialog_manager
             .send_response(transaction_id, response)
@@ -1625,8 +1638,8 @@ impl DialogClient {
         body: Option<String>,
     ) -> ApiResult<Response> {
         debug!(
-            "Building response with status {} for transaction {} using Phase 3 functions",
-            status_code, transaction_id
+            "Building response with status {} for transaction using Phase 3 functions",
+            status_code
         );
 
         // Get original request from transaction manager
@@ -1635,8 +1648,8 @@ impl DialogClient {
             .transaction_manager()
             .original_request(transaction_id)
             .await
-            .map_err(|e| ApiError::Internal {
-                message: format!("Failed to get original request: {}", e),
+            .map_err(|_error| ApiError::Internal {
+                message: "Failed to get original request".to_string(),
             })?
             .ok_or_else(|| ApiError::Internal {
                 message: "No original request found for transaction".to_string(),
@@ -1652,13 +1665,13 @@ impl DialogClient {
             body,
             None, // No custom reason
         )
-        .map_err(|e| ApiError::Internal {
-            message: format!("Failed to build response using Phase 3 functions: {}", e),
+        .map_err(|_error| ApiError::Internal {
+            message: "Failed to build response using Phase 3 functions".to_string(),
         })?;
 
         debug!(
-            "Successfully built response with status {} for transaction {} using Phase 3 functions",
-            status_code, transaction_id
+            "Successfully built response with status {} for transaction using Phase 3 functions",
+            status_code
         );
         Ok(response)
     }
@@ -1683,8 +1696,8 @@ impl DialogClient {
         status_code: StatusCode,
         body: Option<String>,
     ) -> ApiResult<Response> {
-        debug!("Building dialog-aware response with status {} for transaction {} in dialog {} using Phase 3 functions",
-               status_code, transaction_id, dialog_id);
+        debug!("Building dialog-aware response with status {} for transaction in dialog {} using Phase 3 functions",
+               status_code, dialog_id);
 
         // Get original request from transaction manager
         let original_request = self
@@ -1692,8 +1705,8 @@ impl DialogClient {
             .transaction_manager()
             .original_request(transaction_id)
             .await
-            .map_err(|e| ApiError::Internal {
-                message: format!("Failed to get original request: {}", e),
+            .map_err(|_error| ApiError::Internal {
+                message: "Failed to get original request".to_string(),
             })?
             .ok_or_else(|| ApiError::Internal {
                 message: "No original request found for transaction".to_string(),
@@ -1709,15 +1722,12 @@ impl DialogClient {
             body,
             None, // No custom reason
         )
-        .map_err(|e| ApiError::Internal {
-            message: format!(
-                "Failed to build dialog response using Phase 3 functions: {}",
-                e
-            ),
+        .map_err(|_error| ApiError::Internal {
+            message: "Failed to build dialog response using Phase 3 functions".to_string(),
         })?;
 
-        debug!("Successfully built dialog-aware response with status {} for transaction {} in dialog {} using Phase 3 functions",
-               status_code, transaction_id, dialog_id);
+        debug!("Successfully built dialog-aware response with status {} for transaction in dialog {} using Phase 3 functions",
+               status_code, dialog_id);
         Ok(response)
     }
 
@@ -1739,10 +1749,7 @@ impl DialogClient {
         status_code: StatusCode,
         reason: Option<String>,
     ) -> ApiResult<()> {
-        debug!(
-            "Sending status response {} for transaction {}",
-            status_code, transaction_id
-        );
+        debug!("Sending status response {} for transaction", status_code);
 
         // Build the response using our build_response method
         let response = self
@@ -1753,8 +1760,8 @@ impl DialogClient {
         self.send_response(transaction_id, response).await?;
 
         debug!(
-            "Successfully sent status response {} for transaction {}",
-            status_code, transaction_id
+            "Successfully sent status response {} for transaction",
+            status_code
         );
         Ok(())
     }
@@ -1795,7 +1802,7 @@ impl DialogClient {
         target_uri: String,
         refer_body: Option<String>,
     ) -> ApiResult<TransactionKey> {
-        info!("Sending REFER for dialog {} to {}", dialog_id, target_uri);
+        info!("Sending REFER for dialog {} with target present", dialog_id);
 
         let body = if let Some(custom_body) = refer_body {
             custom_body
@@ -1825,7 +1832,11 @@ impl DialogClient {
         event: String,
         body: Option<String>,
     ) -> ApiResult<TransactionKey> {
-        info!("Sending NOTIFY for dialog {} event {}", dialog_id, event);
+        info!(
+            "Sending NOTIFY for dialog {} with event value length={}",
+            dialog_id,
+            event.len()
+        );
 
         let notify_body = body.map(|b| bytes::Bytes::from(b));
         self.send_request_in_dialog(dialog_id, Method::Notify, notify_body)

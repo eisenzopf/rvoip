@@ -139,7 +139,7 @@ impl PublishBuilder {
 }
 
 /// Response from a PUBLISH request
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PublishResponse {
     /// SIP status code
     pub status_code: u16,
@@ -149,6 +149,18 @@ pub struct PublishResponse {
 
     /// Granted expiration time
     pub expires: u32,
+}
+
+impl std::fmt::Debug for PublishResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PublishResponse")
+            .field("status_code", &self.status_code)
+            .field("entity_tag_present", &self.entity_tag.is_some())
+            .field("entity_tag_len", &self.entity_tag.as_ref().map(String::len))
+            .field("expires", &self.expires)
+            .finish()
+    }
 }
 
 impl PublishResponse {
@@ -204,7 +216,10 @@ impl PresencePublisher {
         // Update entity-tag for next update
         if let Some(etag) = response.entity_tag {
             self.entity_tag = Some(etag);
-            info!("Presence published, entity-tag: {:?}", self.entity_tag);
+            info!(
+                "Presence published, entity_tag_present={}",
+                self.entity_tag.is_some()
+            );
         }
 
         Ok(())
@@ -267,9 +282,25 @@ impl PresencePublisher {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_publish_builder() {
         // This would need mock transaction manager to test properly
         // For now, just test the builder pattern
+    }
+
+    #[test]
+    fn publish_response_debug_hides_entity_tag() {
+        const SECRET: &str = "publish-tag-secret-canary";
+        let response = PublishResponse {
+            status_code: 200,
+            entity_tag: Some(SECRET.to_string()),
+            expires: 300,
+        };
+        let debug = format!("{response:?}");
+
+        assert!(!debug.contains(SECRET));
+        assert!(debug.contains("entity_tag_present: true"));
     }
 }

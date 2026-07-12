@@ -52,8 +52,8 @@ impl UpdateHandler for DialogManager {
                 .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to create server transaction for UPDATE: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to create server transaction for UPDATE".to_string(),
                 })?;
 
             let transaction_id = server_transaction.id().clone();
@@ -65,8 +65,8 @@ impl UpdateHandler for DialogManager {
             self.transaction_manager
                 .send_response(&transaction_id, response)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to send 481 response to UPDATE: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to send 481 response to UPDATE".to_string(),
                 })?;
 
             debug!("UPDATE processed with 481 response (no dialog found)");
@@ -97,8 +97,8 @@ impl DialogManager {
             .transaction_manager
             .create_server_transaction(request.clone(), source)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to create server transaction for UPDATE: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to create server transaction for UPDATE".to_string(),
             })?;
 
         let transaction_id = server_transaction.id().clone();

@@ -175,15 +175,15 @@ pub fn spawn_refresh_task(
             {
                 Ok(key) => {
                     info!(
-                        "Session refresh UPDATE sent for dialog {} (tx={}); awaiting response",
-                        dialog_for_task, key
+                        "Session refresh UPDATE sent for dialog {}; awaiting response",
+                        dialog_for_task
                     );
                     await_tx_outcome(&manager.transaction_manager, &key, tx_deadline).await
                 }
-                Err(e) => {
+                Err(_error) => {
                     warn!(
-                        "Session refresh UPDATE send failed for dialog {}: {}",
-                        dialog_for_task, e
+                        "Session refresh UPDATE send failed for dialog {}",
+                        dialog_for_task
                     );
                     RefreshOutcome::Transport
                 }
@@ -200,9 +200,8 @@ pub fn spawn_refresh_task(
             }
 
             warn!(
-                "Session refresh UPDATE outcome for dialog {}: {} — falling back to re-INVITE",
-                dialog_for_task,
-                update_outcome.describe(Method::Update)
+                "Session refresh UPDATE failed for dialog {}; falling back to re-INVITE",
+                dialog_for_task
             );
 
             // Attempt 2: re-INVITE fallback.
@@ -212,15 +211,15 @@ pub fn spawn_refresh_task(
             {
                 Ok(key) => {
                     info!(
-                        "Session refresh re-INVITE sent for dialog {} (tx={}); awaiting response",
-                        dialog_for_task, key
+                        "Session refresh re-INVITE sent for dialog {}; awaiting response",
+                        dialog_for_task
                     );
                     await_tx_outcome(&manager.transaction_manager, &key, tx_deadline).await
                 }
-                Err(e) => {
+                Err(_error) => {
                     warn!(
-                        "Session refresh re-INVITE send failed for dialog {}: {}",
-                        dialog_for_task, e
+                        "Session refresh re-INVITE send failed for dialog {}",
+                        dialog_for_task
                     );
                     RefreshOutcome::Transport
                 }
@@ -243,15 +242,15 @@ pub fn spawn_refresh_task(
                 invite_outcome.describe(Method::Invite)
             );
             warn!(
-                "Session refresh failed for dialog {}: {} — sending BYE with Reason",
-                dialog_for_task, failure_reason
+                "Session refresh failed for dialog {}; sending BYE with Reason",
+                dialog_for_task
             );
 
             let reason = Reason::new("SIP", 408, Some("Session expired"));
-            if let Err(e) = manager.send_bye_with_reason(&dialog_for_task, reason).await {
+            if let Err(_error) = manager.send_bye_with_reason(&dialog_for_task, reason).await {
                 warn!(
-                    "Failed to send BYE-with-Reason for dialog {}: {}",
-                    dialog_for_task, e
+                    "Failed to send BYE-with-Reason for dialog {}",
+                    dialog_for_task
                 );
             }
 

@@ -3,7 +3,9 @@
 //! This module contains the main Dialog struct and its implementation,
 //! handling dialog creation, state management, and request/response processing.
 
+use crate::diagnostics::safe_log::method_class;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tracing::debug;
@@ -19,7 +21,7 @@ use super::subscription_state::SubscriptionState;
 use crate::errors::{DialogError, DialogResult};
 
 /// A SIP dialog as defined in RFC 3261
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Dialog {
     /// Unique identifier for this dialog
     pub id: DialogId,
@@ -124,6 +126,39 @@ pub struct Dialog {
     /// negotiated `Session-Expires` header). Only meaningful when
     /// `session_expires_secs.is_some()`.
     pub is_session_refresher: bool,
+}
+
+impl fmt::Debug for Dialog {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Dialog")
+            .field("id", &self.id)
+            .field("state", &self.state)
+            .field("call_id_len", &self.call_id.len())
+            .field("local_uri", &"[redacted]")
+            .field("remote_uri", &"[redacted]")
+            .field("local_tag_present", &self.local_tag.is_some())
+            .field("remote_tag_present", &self.remote_tag.is_some())
+            .field("local_cseq", &self.local_cseq)
+            .field("remote_cseq", &self.remote_cseq)
+            .field("remote_target", &"[redacted]")
+            .field("route_count", &self.route_set.len())
+            .field("is_initiator", &self.is_initiator)
+            .field("last_known_remote_addr", &self.last_known_remote_addr)
+            .field("recovery_attempts", &self.recovery_attempts)
+            .field("recovery_reason_present", &self.recovery_reason.is_some())
+            .field(
+                "subscription_state_present",
+                &self.subscription_state.is_some(),
+            )
+            .field("event_package_present", &self.event_package.is_some())
+            .field("event_id_present", &self.event_id.is_some())
+            .field("refresh_failures", &self.refresh_failures)
+            .field("max_refresh_failures", &self.max_refresh_failures)
+            .field("invite_cseq", &self.invite_cseq)
+            .field("last_rseq_acked", &self.last_rseq_acked)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Dialog {
@@ -251,7 +286,7 @@ impl Dialog {
         if request.method != Method::Invite {
             debug!(
                 "Dialog creation failed: Request method is not INVITE ({})",
-                request.method
+                method_class(&request.method)
             );
             return None;
         }
@@ -668,7 +703,7 @@ impl Dialog {
     /// Updates the remote tag, typically when receiving a response with a to-tag.
     /// This is used during dialog state transitions and response processing.
     pub fn set_remote_tag(&mut self, tag: String) {
-        debug!("Setting remote tag for dialog {}: {}", self.id, tag);
+        debug!("Setting remote tag for dialog {}", self.id);
         self.remote_tag = Some(tag);
     }
 
@@ -763,6 +798,24 @@ mod tests {
         assert_eq!(dialog.call_id, "test-call-id");
         assert_eq!(dialog.state, DialogState::Initial);
         assert!(dialog.is_initiator);
+    }
+
+    #[test]
+    fn dialog_debug_is_metadata_only() {
+        const SECRET: &str = "dialog-debug-secret-canary";
+        let dialog = Dialog::new(
+            SECRET.to_string(),
+            format!("sip:{SECRET}@local.example").parse().unwrap(),
+            format!("sip:{SECRET}@remote.example").parse().unwrap(),
+            Some(SECRET.to_string()),
+            Some(SECRET.to_string()),
+            true,
+        );
+
+        let debug = format!("{dialog:?}");
+        assert!(!debug.contains(SECRET));
+        assert!(debug.contains("local_tag_present: true"));
+        assert!(debug.contains("route_count: 0"));
     }
 
     #[test]

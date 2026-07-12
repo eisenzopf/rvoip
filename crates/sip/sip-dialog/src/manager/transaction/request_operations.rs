@@ -4,6 +4,7 @@
 //! including proper dialog-aware request building using Phase 3 dialog functions.
 
 use tracing::debug;
+use crate::diagnostics::safe_log::method_class;
 
 use super::traits::{TransactionHelpers, TransactionIntegration};
 use crate::dialog::DialogId;
@@ -28,7 +29,7 @@ impl TransactionIntegration for DialogManager {
     ) -> DialogResult<TransactionKey> {
         debug!(
             "Sending {} request for dialog {} using Phase 3 dialog functions",
-            method, dialog_id
+            method_class(&method), dialog_id
         );
 
         // Get dialog context and build the request. Destination is resolved
@@ -112,23 +113,23 @@ impl TransactionIntegration for DialogManager {
                 .create_non_invite_client_transaction(request, destination)
                 .await
         }
-        .map_err(|e| crate::errors::DialogError::TransactionError {
-            message: format!("Failed to create {} transaction: {}", method, e),
+        .map_err(|_error| crate::errors::DialogError::TransactionError {
+            message: format!("Failed to create {} transaction", method_class(&method)),
         })?;
 
         // Associate transaction with dialog BEFORE sending
         self.link_transaction_to_dialog_indexed(&transaction_id, dialog_id);
         debug!(
-            "✅ Associated {} transaction {} with dialog {}",
-            method, transaction_id, dialog_id
+            "✅ Associated {} transaction with dialog {}",
+            method_class(&method), dialog_id
         );
 
         // Send the request using transaction-core
         self.transaction_manager
             .send_request(&transaction_id)
             .await
-            .map_err(|e| crate::errors::DialogError::TransactionError {
-                message: format!("Failed to send request: {}", e),
+            .map_err(|_error| crate::errors::DialogError::TransactionError {
+                message: "Failed to send request".to_string(),
             })?;
         self.record_outbound_transport_context(
             &transaction_id,
@@ -138,8 +139,8 @@ impl TransactionIntegration for DialogManager {
         );
 
         debug!(
-            "Successfully sent {} request for dialog {} (transaction: {}) using Phase 3 dialog functions",
-            method, dialog_id, transaction_id
+            "Successfully sent {} request for dialog {} using Phase 3 dialog functions",
+            method_class(&method), dialog_id
         );
 
         Ok(transaction_id)
@@ -154,23 +155,19 @@ impl TransactionIntegration for DialogManager {
         response: Response,
     ) -> DialogResult<()> {
         debug!(
-            "Sending response {} for transaction {}",
-            response.status_code(),
-            transaction_id
+            "Sending response {} for transaction",
+            response.status_code()
         );
 
         // Use transaction-core to send the response
         self.transaction_manager
             .send_response(transaction_id, response)
             .await
-            .map_err(|e| crate::errors::DialogError::TransactionError {
-                message: format!("Failed to send response: {}", e),
+            .map_err(|_error| crate::errors::DialogError::TransactionError {
+                message: "Failed to send response".to_string(),
             })?;
 
-        debug!(
-            "Successfully sent response for transaction {}",
-            transaction_id
-        );
+        debug!("Successfully sent response for transaction");
         Ok(())
     }
 }
@@ -182,10 +179,7 @@ impl TransactionHelpers for DialogManager {
     /// Creates the mapping between transactions and dialogs for proper message routing.
     fn link_transaction_to_dialog(&self, transaction_id: &TransactionKey, dialog_id: &DialogId) {
         self.link_transaction_to_dialog_indexed(transaction_id, dialog_id);
-        debug!(
-            "Linked transaction {} to dialog {}",
-            transaction_id, dialog_id
-        );
+        debug!("Linked transaction to dialog {}", dialog_id);
     }
 
     /// Create ACK for 2xx response using transaction-core helpers
@@ -204,8 +198,8 @@ impl TransactionHelpers for DialogManager {
             .transaction_manager
             .create_ack_for_2xx(original_invite_tx_id, response)
             .await
-            .map_err(|e| crate::errors::DialogError::TransactionError {
-                message: format!("Failed to create ACK for 2xx using transaction-core: {}", e),
+            .map_err(|_error| crate::errors::DialogError::TransactionError {
+                message: "Failed to create ACK for 2xx using transaction-core".to_string(),
             })?;
 
         debug!("Successfully created ACK for 2xx response");
@@ -516,10 +510,10 @@ impl DialogManager {
                 )
             }
         }
-        .map_err(|e| crate::errors::DialogError::InternalError {
+        .map_err(|_error| crate::errors::DialogError::InternalError {
             message: format!(
-                "Failed to build {} request using Phase 3 dialog functions: {}",
-                method, e
+                "Failed to build {} request using Phase 3 dialog functions",
+                method_class(&method)
             ),
             context: None,
         })?;

@@ -96,10 +96,12 @@
 //! }
 //! ```
 
+use std::fmt;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use super::{ApiError, ApiResult};
+use crate::diagnostics::safe_log::method_class;
 use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::manager::DialogManager;
 use crate::transaction::TransactionKey;
@@ -242,7 +244,11 @@ impl DialogHandle {
     /// # Returns
     /// Transaction key for tracking the request
     pub async fn send_request(&self, method: Method, body: Option<String>) -> ApiResult<String> {
-        debug!("Sending {} request in dialog {}", method, self.dialog_id);
+        debug!(
+            "Sending {} request in dialog {}",
+            method_class(&method),
+            self.dialog_id
+        );
 
         let body_bytes = body.map(|s| bytes::Bytes::from(s));
         let transaction_key = self
@@ -269,7 +275,11 @@ impl DialogHandle {
         method: Method,
         body: Option<bytes::Bytes>,
     ) -> ApiResult<TransactionKey> {
-        debug!("Sending {} request in dialog {}", method, self.dialog_id);
+        debug!(
+            "Sending {} request in dialog {}",
+            method_class(&method),
+            self.dialog_id
+        );
 
         self.dialog_manager
             .send_request(&self.dialog_id, method, body)
@@ -293,8 +303,8 @@ impl DialogHandle {
         response: Response,
     ) -> ApiResult<()> {
         debug!(
-            "Sending response for transaction {} in dialog {}",
-            transaction_id, self.dialog_id
+            "Sending response for transaction in dialog {}",
+            self.dialog_id
         );
 
         self.dialog_manager
@@ -318,8 +328,8 @@ impl DialogHandle {
         refer_body: Option<String>,
     ) -> ApiResult<TransactionKey> {
         info!(
-            "Sending REFER for dialog {} to {}",
-            self.dialog_id, target_uri
+            "Sending REFER for dialog {} with target present",
+            self.dialog_id
         );
 
         let body = if let Some(custom_body) = refer_body {
@@ -339,8 +349,9 @@ impl DialogHandle {
         body: Option<String>,
     ) -> ApiResult<TransactionKey> {
         info!(
-            "Sending NOTIFY for dialog {} event {}",
-            self.dialog_id, event
+            "Sending NOTIFY for dialog {} with event value length={}",
+            self.dialog_id,
+            event.len()
         );
 
         let notify_body = body.map(|b| bytes::Bytes::from(b));
@@ -598,8 +609,8 @@ impl CallHandle {
             .transaction_manager()
             .original_request(&transaction_id)
             .await
-            .map_err(|e| ApiError::Internal {
-                message: format!("Failed to get original INVITE request: {}", e),
+            .map_err(|_error| ApiError::Internal {
+                message: "Failed to get original INVITE request".to_string(),
             })?
             .ok_or_else(|| ApiError::Internal {
                 message: "Original INVITE request not found".to_string(),
@@ -618,11 +629,8 @@ impl CallHandle {
                         &original_request,
                         &contact_uri,
                     )
-                    .map_err(|e| ApiError::Internal {
-                        message: format!(
-                            "Invalid configured local Contact URI {}: {}",
-                            contact_uri, e
-                        ),
+                    .map_err(|_error| ApiError::Internal {
+                        message: "Invalid configured local Contact URI".to_string(),
                     })?
                 } else {
                     response_builders::create_ok_response_with_dialog_info(
@@ -664,8 +672,8 @@ impl CallHandle {
             .dialog_manager
             .send_response(&transaction_id, response)
             .await
-            .map_err(|e| ApiError::Internal {
-                message: format!("Failed to send 200 OK response: {}", e),
+            .map_err(|_error| ApiError::Internal {
+                message: "Failed to send 200 OK response".to_string(),
             })?;
 
         // Update dialog state to Confirmed and set local tag to match the response
@@ -674,19 +682,15 @@ impl CallHandle {
                 .dialog_handle
                 .dialog_manager
                 .get_dialog_mut(self.call_id())
-                .map_err(|e| ApiError::Internal {
-                    message: format!("Failed to get dialog for state update: {}", e),
+                .map_err(|_error| ApiError::Internal {
+                    message: "Failed to get dialog for state update".to_string(),
                 })?;
 
             // CRITICAL FIX: Use the tag from the response we just sent to ensure consistency
             if dialog.local_tag.is_none() {
                 if let Some(response_tag) = response_local_tag {
                     dialog.local_tag = Some(response_tag.clone());
-                    info!(
-                        "Dialog {} local tag set to match response: {}",
-                        self.call_id(),
-                        response_tag
-                    );
+                    info!("Dialog {} local tag set from response", self.call_id());
                 } else {
                     // Fallback: generate tag if response doesn't have one (shouldn't happen)
                     let local_tag = dialog.generate_local_tag();
@@ -697,11 +701,11 @@ impl CallHandle {
 
             // Transition from Early to Confirmed
             debug!(
-                "Dialog {} current state: {:?}, local_tag: {:?}, remote_tag: {:?}",
+                "Dialog {} current state: {:?}, local_tag_present={}, remote_tag_present={}",
                 self.call_id(),
                 dialog.state,
-                dialog.local_tag,
-                dialog.remote_tag
+                dialog.local_tag.is_some(),
+                dialog.remote_tag.is_some()
             );
 
             if dialog.state == crate::dialog::DialogState::Early {
@@ -712,7 +716,7 @@ impl CallHandle {
                 if let Some(tuple) = dialog.dialog_id_tuple() {
                     use crate::manager::utils::DialogUtils;
                     let key = DialogUtils::create_lookup_key(&tuple.0, &tuple.1, &tuple.2);
-                    debug!("Inserting dialog lookup key: {}", key);
+                    debug!("Inserting dialog lookup key");
                     self.dialog_handle
                         .dialog_manager
                         .dialog_lookup
@@ -766,10 +770,10 @@ impl CallHandle {
 
         // TODO: This should send an error response when response API is available
         debug!(
-            "Call {} would be rejected with status {} reason: {:?}",
+            "Call {} would be rejected with status {} reason_present={}",
             self.call_id(),
             status_code,
-            reason
+            reason.is_some()
         );
 
         Ok(())
@@ -825,11 +829,7 @@ impl CallHandle {
     /// # Returns
     /// Success or error
     pub async fn transfer(&self, transfer_target: String) -> ApiResult<()> {
-        info!(
-            "Transferring call {} to {}",
-            self.call_id(),
-            transfer_target
-        );
+        info!("Transferring call {} with target present", self.call_id());
 
         // Use the enhanced dialog handle method
         self.dialog_handle.send_refer(transfer_target, None).await?;
@@ -853,9 +853,8 @@ impl CallHandle {
         refer_body: String,
     ) -> ApiResult<TransactionKey> {
         info!(
-            "Transferring call {} to {} with custom body",
-            self.call_id(),
-            transfer_target
+            "Transferring call {} with target and custom body present",
+            self.call_id()
         );
 
         self.dialog_handle
@@ -875,9 +874,8 @@ impl CallHandle {
     /// Transaction key for the NOTIFY request
     pub async fn notify(&self, event: String, body: Option<String>) -> ApiResult<TransactionKey> {
         info!(
-            "Sending call notification for {} event {}",
-            self.call_id(),
-            event
+            "Sending call notification for {} with event value present",
+            self.call_id()
         );
 
         self.dialog_handle.send_notify(event, body).await
@@ -1008,7 +1006,7 @@ impl CallHandle {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CallInfo {
     /// Call ID (dialog ID)
     pub call_id: DialogId,
@@ -1030,6 +1028,21 @@ pub struct CallInfo {
 
     /// Remote tag
     pub remote_tag: Option<String>,
+}
+
+impl fmt::Debug for CallInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CallInfo")
+            .field("call_id", &self.call_id)
+            .field("state", &self.state)
+            .field("local_uri", &"[redacted]")
+            .field("remote_uri", &"[redacted]")
+            .field("call_id_header_len", &self.call_id_header.len())
+            .field("local_tag_present", &self.local_tag.is_some())
+            .field("remote_tag_present", &self.remote_tag.is_some())
+            .finish()
+    }
 }
 
 /// Dialog events that applications can listen for
@@ -1177,7 +1190,7 @@ pub struct CallInfo {
 ///     }
 /// }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum DialogEvent {
     /// Dialog was created
     Created { dialog_id: DialogId },
@@ -1205,4 +1218,88 @@ pub enum DialogEvent {
         status_code: StatusCode,
         body: Option<String>,
     },
+}
+
+impl fmt::Debug for DialogEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Created { dialog_id } => formatter
+                .debug_struct("Created")
+                .field("dialog_id", dialog_id)
+                .finish(),
+            Self::StateChanged {
+                dialog_id,
+                old_state,
+                new_state,
+            } => formatter
+                .debug_struct("StateChanged")
+                .field("dialog_id", dialog_id)
+                .field("old_state", old_state)
+                .field("new_state", new_state)
+                .finish(),
+            Self::Terminated { dialog_id, reason } => formatter
+                .debug_struct("Terminated")
+                .field("dialog_id", dialog_id)
+                .field("reason_len", &reason.len())
+                .finish(),
+            Self::RequestReceived {
+                dialog_id,
+                method,
+                body,
+            } => formatter
+                .debug_struct("RequestReceived")
+                .field("dialog_id", dialog_id)
+                .field("method", &method_class(method))
+                .field("body_len", &body.as_ref().map(String::len))
+                .finish(),
+            Self::ResponseReceived {
+                dialog_id,
+                status_code,
+                body,
+            } => formatter
+                .debug_struct("ResponseReceived")
+                .field("dialog_id", dialog_id)
+                .field("status_code", status_code)
+                .field("body_len", &body.as_ref().map(String::len))
+                .finish(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod safe_debug_tests {
+    use super::*;
+
+    const SECRET: &str = "api-dialog-debug-secret-canary";
+
+    #[test]
+    fn call_info_debug_hides_sip_identity() {
+        let info = CallInfo {
+            call_id: DialogId::new(),
+            state: DialogState::Confirmed,
+            local_uri: SECRET.to_string(),
+            remote_uri: SECRET.to_string(),
+            call_id_header: SECRET.to_string(),
+            local_tag: Some(SECRET.to_string()),
+            remote_tag: Some(SECRET.to_string()),
+        };
+        let debug = format!("{info:?}");
+
+        assert!(!debug.contains(SECRET));
+        assert!(debug.contains("local_tag_present: true"));
+    }
+
+    #[test]
+    fn api_event_debug_hides_extension_method_and_body() {
+        let event = DialogEvent::RequestReceived {
+            dialog_id: DialogId::new(),
+            method: Method::Extension(SECRET.to_string()),
+            body: Some(SECRET.to_string()),
+        };
+        let debug = format!("{event:?}");
+
+        assert!(!debug.contains(SECRET));
+        assert!(debug.contains("method: \"extension\""));
+        assert!(debug.contains("body_len"));
+    }
 }

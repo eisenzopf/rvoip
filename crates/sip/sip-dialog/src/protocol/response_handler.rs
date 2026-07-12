@@ -122,9 +122,8 @@ impl ResponseHandler for DialogManager {
         transaction_id: TransactionKey,
     ) -> DialogResult<()> {
         debug!(
-            "Processing response {} for transaction {}",
-            response.status_code(),
-            transaction_id
+            "Processing response {} for transaction",
+            response.status_code()
         );
 
         // RFC 3581 NAT discovery — peek at the top Via for
@@ -158,10 +157,7 @@ impl ResponseHandler for DialogManager {
             self.process_response_in_dialog(response, transaction_id, dialog_id)
                 .await
         } else {
-            debug!(
-                "Response for transaction {} has no associated dialog",
-                transaction_id
-            );
+            debug!("Response for transaction has no associated dialog");
             Ok(())
         }
     }
@@ -318,14 +314,10 @@ async fn record_service_route_from_response(manager: &DialogManager, response: &
     let prev = guard.insert(aor_key.clone(), uris.clone());
     if prev.as_ref() != Some(&uris) {
         if uris.is_empty() {
-            info!(
-                "RFC 3608: registrar cleared Service-Route for AoR {}",
-                aor_key
-            );
+            info!("RFC 3608: registrar cleared Service-Route for AoR");
         } else {
             info!(
-                "RFC 3608: Service-Route learned for AoR {} ({} hop(s))",
-                aor_key,
+                "RFC 3608: Service-Route learned for AoR ({} hop(s))",
                 uris.len()
             );
         }
@@ -390,10 +382,9 @@ async fn record_gruu_from_response(manager: &DialogManager, response: &Response)
     let prev = guard.insert(aor_key.clone(), params.clone());
     if prev.as_ref() != Some(&params) {
         info!(
-            "RFC 5627: GRUU learned for AoR {} (pub-gruu={}, temp-gruu={})",
-            aor_key,
-            params.pub_gruu.as_deref().unwrap_or("<none>"),
-            params.temp_gruu.as_deref().unwrap_or("<none>"),
+            "RFC 5627: GRUU learned for AoR (pub_gruu_present={}, temp_gruu_present={})",
+            params.pub_gruu.is_some(),
+            params.temp_gruu.is_some(),
         );
     }
 }
@@ -469,8 +460,7 @@ async fn record_outbound_flow_from_response(
         .await
     else {
         debug!(
-            "RFC 5626: REGISTER 2xx for AoR {} but no stored destination for transaction {}; skipping keep-alive",
-            aor, transaction_id
+            "RFC 5626: REGISTER 2xx for AoR but no stored destination for transaction; skipping keep-alive"
         );
         return;
     };
@@ -478,8 +468,8 @@ async fn record_outbound_flow_from_response(
     let key = (aor.clone(), params.reg_id, params.instance_urn.clone());
     manager.start_outbound_ping(key, dest);
     info!(
-        "RFC 5626: keep-alive ping started for AoR {} (reg-id={}, instance={}) → {}",
-        aor, params.reg_id, params.instance_urn, dest
+        "RFC 5626: keep-alive ping started for AoR (reg-id={}) → {}",
+        params.reg_id, dest
     );
 }
 
@@ -1355,11 +1345,11 @@ impl DialogManager {
                         println!("🚀 RESPONSE HANDLER: This is a 200 OK to INVITE - sending automatic ACK");
 
                         // Create and send ACK for this 2xx response
-                        if let Err(e) = self
+                        if let Err(_error) = self
                             .send_automatic_ack_for_2xx(&transaction_id, &response, &dialog_id)
                             .await
                         {
-                            warn!("Failed to send automatic ACK for 200 OK to INVITE: {}", e);
+                            warn!("Failed to send automatic ACK for 200 OK to INVITE");
                         } else {
                             info!("Successfully sent automatic ACK for 200 OK to INVITE");
 
@@ -1371,7 +1361,7 @@ impl DialogManager {
                                 None
                             };
 
-                            if let Err(e) = self
+                            if let Err(_error) = self
                                 .notify_session_layer(SessionCoordinationEvent::AckSent {
                                     dialog_id: dialog_id.clone(),
                                     transaction_id: transaction_id.clone(),
@@ -1379,7 +1369,7 @@ impl DialogManager {
                                 })
                                 .await
                             {
-                                warn!("Failed to notify session layer of ACK sent: {}", e);
+                                warn!("Failed to notify session layer of ACK sent");
                             }
                         }
                     }

@@ -5,6 +5,7 @@
 //! provisional by its `RAck` header. On a match we stop retransmitting the
 //! 18x and reply 200 OK; on no match we reply 481.
 
+use crate::diagnostics::safe_log::method_class;
 use tracing::{debug, warn};
 
 use rvoip_sip_core::types::rack::RAck;
@@ -41,8 +42,8 @@ impl PrackHandler for DialogManager {
             .transaction_manager
             .create_server_transaction(request.clone(), source)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to create server transaction for PRACK: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to create server transaction for PRACK".to_string(),
             })?;
         let transaction_id = server_tx.id().clone();
 
@@ -75,7 +76,7 @@ impl PrackHandler for DialogManager {
         if !self.try_ack_reliable_provisional(&dialog_id, &rack) {
             debug!(
                 "PRACK with RAck {} {} {} does not match any unacked reliable provisional — sending 481",
-                rack.rseq, rack.cseq, rack.method
+                rack.rseq, rack.cseq, method_class(&rack.method)
             );
             let response = response_builders::create_response(
                 &request,
@@ -84,8 +85,8 @@ impl PrackHandler for DialogManager {
             self.transaction_manager
                 .send_response(&transaction_id, response)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to send 481 to spurious PRACK: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to send 481 to spurious PRACK".to_string(),
                 })?;
             return Ok(());
         }
@@ -99,8 +100,8 @@ impl PrackHandler for DialogManager {
         self.transaction_manager
             .send_response(&transaction_id, response)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to send 200 OK to PRACK: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to send 200 OK to PRACK".to_string(),
             })?;
 
         debug!(

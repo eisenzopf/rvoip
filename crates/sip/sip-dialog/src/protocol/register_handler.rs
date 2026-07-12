@@ -19,6 +19,7 @@
 //! - Supports both registration and de-registration
 //! - Maintains proper SIP transaction handling
 
+use crate::diagnostics::safe_log::method_class;
 use std::net::SocketAddr;
 use tracing::{debug, warn};
 
@@ -66,8 +67,8 @@ impl RegisterHandler for DialogManager {
             .transaction_manager
             .create_server_transaction(request.clone(), source)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to create server transaction for REGISTER: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to create server transaction for REGISTER".to_string(),
             })?;
 
         let transaction_id = server_transaction.id().clone();
@@ -121,8 +122,8 @@ impl RegisterHandler for DialogManager {
 
             // Publish via event hub (global event bus)
             if let Some(hub) = self.event_hub.read().await.as_ref() {
-                if let Err(e) = hub.publish_cross_crate_event(event).await {
-                    warn!("Failed to publish IncomingRegister event: {}", e);
+                if let Err(_error) = hub.publish_cross_crate_event(event).await {
+                    warn!("Failed to publish IncomingRegister event");
                     // Fallback to basic response
                     self.send_basic_register_response(&transaction_id, &request, expires)
                         .await?;
@@ -183,8 +184,8 @@ impl DialogManager {
         self.transaction_manager
             .send_response(transaction_id, response)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to send REGISTER response: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to send REGISTER response".to_string(),
             })?;
 
         debug!("Sent basic REGISTER response with expires {}", expires);
@@ -208,7 +209,11 @@ impl DialogManager {
         use rvoip_sip_core::types::headers::header_value::HeaderValue;
         use rvoip_sip_core::{StatusCode, TypedHeader};
 
-        debug!("Sending REGISTER response: {} {}", status_code, reason);
+        debug!(
+            "Sending REGISTER response: {} reason_present={}",
+            status_code,
+            !reason.is_empty()
+        );
 
         // Get the original request from the transaction
         // The transaction manager stores the original request
@@ -216,8 +221,8 @@ impl DialogManager {
             .transaction_manager
             .original_request(transaction_id)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to get request for transaction: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to get request for transaction".to_string(),
             })?
             .ok_or_else(|| DialogError::TransactionError {
                 message: "No request found for transaction".into(),
@@ -228,15 +233,15 @@ impl DialogManager {
             debug!(
                 "Original request has CSeq: {} {}",
                 cseq.sequence(),
-                cseq.method()
+                method_class(cseq.method())
             );
         } else {
             warn!("⚠️ Original request is missing CSeq header!");
         }
 
         // Parse status code
-        let status = StatusCode::from_u16(status_code).map_err(|e| {
-            DialogError::protocol_error(&format!("Invalid status code {}: {}", status_code, e))
+        let status = StatusCode::from_u16(status_code).map_err(|_error| {
+            DialogError::protocol_error(&format!("Invalid status code {}", status_code))
         })?;
 
         // Build response using response builder
@@ -284,11 +289,15 @@ impl DialogManager {
         self.transaction_manager
             .send_response(transaction_id, response)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to send REGISTER response: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to send REGISTER response".to_string(),
             })?;
 
-        debug!("Sent REGISTER response: {} {}", status_code, reason);
+        debug!(
+            "Sent REGISTER response: {} reason_present={}",
+            status_code,
+            !reason.is_empty()
+        );
         Ok(())
     }
 
@@ -315,9 +324,9 @@ impl DialogManager {
         use rvoip_sip_core::{StatusCode, TypedHeader};
 
         debug!(
-            "Sending REGISTER response (extras): {} {} (service_route={}, path_echo={}, associated_uri={}, extras={})",
+            "Sending REGISTER response (extras): {} reason_present={} (service_route={}, path_echo={}, associated_uri={}, extras={})",
             status_code,
-            reason,
+            !reason.is_empty(),
             service_route.len(),
             path_echo,
             associated_uri.len(),
@@ -329,15 +338,15 @@ impl DialogManager {
             .transaction_manager
             .original_request(transaction_id)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to get request for transaction: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to get request for transaction".to_string(),
             })?
             .ok_or_else(|| DialogError::TransactionError {
                 message: "No request found for transaction".into(),
             })?;
 
-        let status = StatusCode::from_u16(status_code).map_err(|e| {
-            DialogError::protocol_error(&format!("Invalid status code {}: {}", status_code, e))
+        let status = StatusCode::from_u16(status_code).map_err(|_error| {
+            DialogError::protocol_error(&format!("Invalid status code {}", status_code))
         })?;
 
         let mut response =
@@ -434,13 +443,14 @@ impl DialogManager {
         self.transaction_manager
             .send_response(transaction_id, response)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to send REGISTER response: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to send REGISTER response".to_string(),
             })?;
 
         debug!(
-            "Sent REGISTER response (extras): {} {}",
-            status_code, reason
+            "Sent REGISTER response (extras): {} reason_present={}",
+            status_code,
+            !reason.is_empty()
         );
         Ok(())
     }

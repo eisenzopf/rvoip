@@ -16,6 +16,7 @@ use rvoip_infra_common::events::cross_crate::{
 };
 use rvoip_sip_core::Method;
 
+use crate::diagnostics::safe_log::method_class;
 use crate::dialog::{DialogId, DialogState};
 use crate::events::{DialogEvent, SessionCoordinationEvent};
 use crate::manager::DialogManager;
@@ -82,7 +83,7 @@ impl DialogEventHub {
 
     /// Publish a dialog event to the global bus
     pub async fn publish_dialog_event(&self, event: DialogEvent) -> Result<()> {
-        debug!("Publishing dialog event: {:?}", event);
+        debug!("Publishing dialog event");
 
         // Convert to cross-crate event if applicable
         if let Some(cross_crate_event) = self.convert_dialog_to_cross_crate(event) {
@@ -109,7 +110,10 @@ impl DialogEventHub {
         &self,
         event: SessionCoordinationEvent,
     ) -> Result<bool> {
-        debug!("Publishing session coordination event: {:?}", event);
+        debug!(
+            "Publishing session coordination event class={}",
+            session_coordination_event_kind(&event)
+        );
 
         // Convert to cross-crate event
         if let Some(mut cross_crate_event) = self.convert_coordination_to_cross_crate(event.clone())
@@ -168,7 +172,7 @@ impl DialogEventHub {
 
     /// Publish a cross-crate event directly
     pub async fn publish_cross_crate_event(&self, event: RvoipCrossCrateEvent) -> Result<()> {
-        debug!("Publishing cross-crate event directly: {:?}", event);
+        debug!("Publishing cross-crate event directly");
         self.global_coordinator.publish(Arc::new(event)).await?;
         Ok(())
     }
@@ -952,7 +956,8 @@ impl DialogEventHub {
                     None => {
                         warn!(
                             "No session ID found for dialog {:?} in mid-dialog {} request",
-                            dialog_id, method
+                            dialog_id,
+                            method_class(&method)
                         );
                         return None;
                     }
@@ -966,7 +971,8 @@ impl DialogEventHub {
                         };
                         debug!(
                             "Converting ReInvite ({}) to cross-crate event for session {}",
-                            method, session_id
+                            method_class(&method),
+                            session_id
                         );
                         Some(RvoipCrossCrateEvent::DialogToSession(
                             DialogToSessionEvent::ReinviteReceived {
@@ -995,7 +1001,8 @@ impl DialogEventHub {
                     _ => {
                         debug!(
                             "Skipping ReInvite cross-crate conversion for method {:?} (dialog {})",
-                            method, dialog_id
+                            method_class(&method),
+                            dialog_id
                         );
                         None
                     }
@@ -1063,8 +1070,9 @@ impl CrossCrateEventHandler for DialogEventHub {
                             extra_headers,
                         } => {
                             info!(
-                                "📩 Handling SendRegisterResponse via trait: {} {}",
-                                status_code, reason
+                                "📩 Handling SendRegisterResponse via trait: {} reason_present={}",
+                                status_code,
+                                !reason.is_empty()
                             );
                             self.handle_register_response_with_extras(
                                 transaction_id,
@@ -1094,7 +1102,7 @@ impl CrossCrateEventHandler for DialogEventHub {
 
         match event.event_type() {
             "session_to_dialog" => {
-                debug!("Processing session-to-dialog event: {}", event_str);
+                debug!("Processing session-to-dialog event");
 
                 // Handle ReferResponse event
                 if event_str.contains("ReferResponse") {
@@ -1142,7 +1150,7 @@ impl CrossCrateEventHandler for DialogEventHub {
                                             session_id
                                         );
                                     } else {
-                                        warn!("Failed to parse dialog ID: {}", dialog_id);
+                                        warn!("Failed to parse dialog ID");
                                     }
                                 }
                             }
@@ -1177,8 +1185,9 @@ impl DialogEventHub {
         expires: Option<u32>,
     ) -> Result<()> {
         debug!(
-            "Handling SendRegisterResponse: transaction={}, status={} {}",
-            transaction_id, status_code, reason
+            "Handling SendRegisterResponse: status={} reason_present={}",
+            status_code,
+            !reason.is_empty()
         );
 
         // Parse transaction_id to TransactionKey
@@ -1195,10 +1204,7 @@ impl DialogEventHub {
             .await
             .is_err()
         {
-            debug!(
-                "Transaction {} not found in this DialogManager - skipping",
-                transaction_id
-            );
+            debug!("Transaction not found in this DialogManager - skipping");
             return Ok(()); // Not our transaction, skip silently
         }
 
@@ -1215,7 +1221,11 @@ impl DialogEventHub {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to send REGISTER response: {}", e))?;
 
-        info!("✅ Sent REGISTER response: {} {}", status_code, reason);
+        info!(
+            "✅ Sent REGISTER response: {} reason_present={}",
+            status_code,
+            !reason.is_empty()
+        );
         Ok(())
     }
 
@@ -1269,10 +1279,7 @@ impl DialogEventHub {
             .await
             .is_err()
         {
-            debug!(
-                "Transaction {} not found in this DialogManager - skipping",
-                transaction_id
-            );
+            debug!("Transaction not found in this DialogManager - skipping");
             return Ok(());
         }
 
@@ -1294,10 +1301,10 @@ impl DialogEventHub {
             .map_err(|e| anyhow::anyhow!("Failed to send REGISTER response: {}", e))?;
 
         info!(
-            "✅ Sent REGISTER response (with {} extras): {} {}",
+            "✅ Sent REGISTER response (with {} extras): {} reason_present={}",
             extra_headers.len(),
             status_code,
-            reason
+            !reason.is_empty()
         );
         Ok(())
     }
@@ -1327,8 +1334,10 @@ impl DialogEventHub {
             });
 
         info!(
-            "Handling ReferResponse: transaction={}, accept={}, status={} {}",
-            transaction_id, accept, status_code, reason
+            "Handling ReferResponse: accept={}, status={} reason_present={}",
+            accept,
+            status_code,
+            !reason.is_empty()
         );
 
         // Parse transaction_id and send response
@@ -1350,12 +1359,14 @@ impl DialogEventHub {
                         status,
                     );
 
-                    if let Err(e) = self.dialog_manager.send_response(&tx_key, response).await {
-                        error!("Failed to send REFER response: {}", e);
+                    if let Err(_error) = self.dialog_manager.send_response(&tx_key, response).await
+                    {
+                        error!("Failed to send REFER response");
                     } else {
                         info!(
-                            "Successfully sent REFER response: {} {}",
-                            status_code, reason
+                            "Successfully sent REFER response: {} reason_present={}",
+                            status_code,
+                            !reason.is_empty()
                         );
                     }
                 }
@@ -1363,22 +1374,16 @@ impl DialogEventHub {
                     // Demoted to debug — common during test teardown when
                     // the REFER transaction completes before the
                     // ReferResponse event is processed.
-                    debug!(
-                        "No original request found for transaction: {}",
-                        transaction_id
-                    );
+                    debug!("No original request found for transaction");
                 }
-                Err(e) => {
+                Err(_error) => {
                     // Same teardown race as above; surface as debug
                     // rather than error so test logs stay readable.
-                    debug!(
-                        "Failed to get original request for transaction {}: {}",
-                        transaction_id, e
-                    );
+                    debug!("Failed to get original request for transaction");
                 }
             }
         } else {
-            error!("Failed to parse transaction_id: {}", transaction_id);
+            error!("Failed to parse transaction identifier");
         }
 
         Ok(())

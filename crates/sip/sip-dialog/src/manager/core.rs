@@ -20,6 +20,7 @@ use rvoip_sip_core::{Method, Request, Response, Uri};
 use rvoip_sip_transport::transport::TransportType;
 
 use crate::config::DialogManagerConfig;
+use crate::diagnostics::safe_log::method_class;
 use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::events::{DialogEvent, FlowFailureReason, SessionCoordinationEvent};
@@ -840,8 +841,8 @@ impl DialogManager {
         if let Some(resolver) = self.resolver() {
             match resolver.resolve(uri).await {
                 Ok(candidates) => return candidates.into_iter().next().map(|t| t.addr),
-                Err(e) => {
-                    tracing::debug!("Configured resolver returned error: {}", e);
+                Err(_error) => {
+                    tracing::debug!("Configured resolver returned an error");
                     return None;
                 }
             }
@@ -864,8 +865,8 @@ impl DialogManager {
         if let Some(resolver) = self.resolver() {
             match resolver.resolve(uri).await {
                 Ok(candidates) => return candidates,
-                Err(e) => {
-                    tracing::debug!("Configured resolver returned error: {}", e);
+                Err(_error) => {
+                    tracing::debug!("Configured resolver returned an error");
                     return Vec::new();
                 }
             }
@@ -982,26 +983,21 @@ impl DialogManager {
         let status = StatusCode::from_u16(status_u16).unwrap_or(StatusCode::Forbidden);
 
         tracing::info!(
-            "STIR/SHAKEN reject: outcome={:?} → {} {} on transaction {}",
+            "STIR/SHAKEN reject: outcome={:?} → {} {} on transaction",
             outcome,
             status_u16,
-            reason,
-            transaction_id
+            reason
         );
 
         let response =
             SimpleResponseBuilder::response_from_request(&request, status, Some(reason)).build();
 
-        if let Err(e) = self
+        if let Err(_error) = self
             .transaction_manager
             .send_response(&transaction_id, response)
             .await
         {
-            tracing::error!(
-                "Failed to send STIR/SHAKEN reject response on transaction {}: {}",
-                transaction_id,
-                e
-            );
+            tracing::error!("Failed to send STIR/SHAKEN reject response on transaction");
         }
     }
 
@@ -1113,7 +1109,7 @@ impl DialogManager {
             if let Some(flow) = self.outbound_flows.get(&key).map(|e| e.value().clone()) {
                 flow.on_pong().await;
                 tracing::trace!(
-                    flow_key = ?key, src = %source,
+                    src = %source,
                     "RFC 5626 pong received — flow reset to Idle"
                 );
             }
@@ -1138,7 +1134,7 @@ impl DialogManager {
             };
             if flow.mark_failed().await {
                 tracing::info!(
-                    flow_key = ?key, dest = %remote_addr,
+                    dest = %remote_addr,
                     "RFC 5626 connection closed — flow failed"
                 );
                 self.emit_outbound_flow_failed(&flow, FlowFailureReason::ConnectionClosed)
@@ -1559,13 +1555,13 @@ impl DialogManager {
 
         // Find the dialog associated with this transaction
         if let Some(dialog_id) = dialog_id {
-            if let Err(e) = self
+            if let Err(_error) = self
                 .process_transaction_event(&transaction_id, &dialog_id, event)
                 .await
             {
                 error!(
-                    "Failed to process transaction event for dialog {}: {}",
-                    dialog_id, e
+                    "Failed to process transaction event for dialog {}",
+                    dialog_id
                 );
             }
         } else {
@@ -1580,38 +1576,32 @@ impl DialogManager {
                     crate::diagnostics::record_dialog_lookup(started.elapsed());
                 }
                 if let Some(dialog_id) = dialog_id {
-                    if let Err(e) = self
+                    if let Err(_error) = self
                         .process_transaction_event(&transaction_id, &dialog_id, event)
                         .await
                     {
                         error!(
-                            "Failed to process AckReceived event for dialog {}: {}",
-                            dialog_id, e
+                            "Failed to process AckReceived event for dialog {}",
+                            dialog_id
                         );
                     }
                 } else {
                     // Still treat as unassociated event
-                    if let Err(e) = self
+                    if let Err(_error) = self
                         .handle_unassociated_transaction_event(&transaction_id, event)
                         .await
                     {
-                        error!(
-                            "Failed to handle unassociated AckReceived event {}: {}",
-                            transaction_id, e
-                        );
+                        error!("Failed to handle unassociated AckReceived event");
                     }
                 }
             } else {
                 // Event for transaction not associated with any dialog
                 // Check if this is a new incoming INVITE that should create a dialog
-                if let Err(e) = self
+                if let Err(_error) = self
                     .handle_unassociated_transaction_event(&transaction_id, event)
                     .await
                 {
-                    error!(
-                        "Failed to handle unassociated transaction event {}: {}",
-                        transaction_id, e
-                    );
+                    error!("Failed to handle unassociated transaction event");
                 }
             }
         }
@@ -1860,10 +1850,7 @@ impl DialogManager {
                     "🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from {}",
                     source
                 );
-                debug!(
-                    "Processing new incoming INVITE request from transaction {}",
-                    transaction_id
-                );
+                debug!("Processing new incoming INVITE request from transaction");
 
                 // This is a new incoming INVITE - create dialog and process it
                 self.handle_initial_invite(transaction_id.clone(), request, source)
@@ -1877,9 +1864,8 @@ impl DialogManager {
                 request, source, ..
             } => {
                 debug!(
-                    "Processing new incoming {} request from transaction {}",
-                    request.method(),
-                    transaction_id
+                    "Processing new incoming {} request from transaction",
+                    method_class(&request.method())
                 );
 
                 if request.method() == Method::Bye {
@@ -1892,11 +1878,9 @@ impl DialogManager {
                         .transaction_manager
                         .find_invite_server_transaction_for_cancel(&request)
                         .await
-                        .map_err(|e| DialogError::TransactionError {
-                            message: format!(
-                                "Failed to find INVITE server transaction for CANCEL: {}",
-                                e
-                            ),
+                        .map_err(|_error| DialogError::TransactionError {
+                            message: "Failed to find INVITE server transaction for CANCEL"
+                                .to_string(),
                         })?;
 
                     if let Some(invite_tx_id) = invite_tx_id {
@@ -1912,8 +1896,8 @@ impl DialogManager {
                     self.transaction_manager
                         .send_response(transaction_id, response)
                         .await
-                        .map_err(|e| DialogError::TransactionError {
-                            message: format!("Failed to send 481 response to CANCEL: {}", e),
+                        .map_err(|_error| DialogError::TransactionError {
+                            message: "Failed to send 481 response to CANCEL".to_string(),
                         })?;
                     let _ = self
                         .transaction_manager
@@ -1954,17 +1938,17 @@ impl DialogManager {
                 target_transaction_id,
                 ..
             } => {
-                debug!(
-                    "Processing unassociated CANCEL request from transaction {}",
-                    transaction_id
-                );
+                debug!("Processing unassociated CANCEL request from transaction");
                 self.handle_cancel_request_event(transaction_id, &target_transaction_id, request)
                     .await
             }
 
             _ => {
                 // Other unassociated events (responses, timeouts, etc.) - just log them
-                debug!("Received unassociated transaction event: {:?}", event);
+                debug!(
+                    "Received unassociated transaction event class={}",
+                    dialog_event_kind(&event).as_str()
+                );
                 Ok(())
             }
         }
@@ -1983,8 +1967,8 @@ impl DialogManager {
         self.transaction_manager
             .send_response(cancel_tx_id, ok)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to send 200 OK to CANCEL: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to send 200 OK to CANCEL".to_string(),
             })?;
         let _ = self
             .transaction_manager
@@ -1995,8 +1979,8 @@ impl DialogManager {
             .transaction_manager
             .get_server_transaction_request(invite_tx_id)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to fetch pending INVITE for 487: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to fetch pending INVITE for 487".to_string(),
             })?;
         let terminated = crate::transaction::utils::response_builders::create_response(
             &original_invite,
@@ -2005,17 +1989,14 @@ impl DialogManager {
         self.transaction_manager
             .send_response(invite_tx_id, terminated)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to send 487 Request Terminated: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to send 487 Request Terminated".to_string(),
             })?;
 
         self.terminate_dialog_for_tx_and_emit_cancelled(invite_tx_id, "CANCEL received")
             .await;
 
-        debug!(
-            "CANCEL processed for INVITE server transaction {} (200 CANCEL, 487 INVITE sent)",
-            invite_tx_id
-        );
+        debug!("CANCEL processed for INVITE server transaction (200 CANCEL, 487 INVITE sent)");
         Ok(())
     }
 
@@ -2103,10 +2084,10 @@ impl DialogManager {
         // Try event hub first (new global event bus)
         let hub = self.event_hub.read().await.clone();
         if let Some(hub) = hub {
-            if let Err(e) = hub.publish_dialog_event(event.clone()).await {
-                warn!("Failed to publish dialog event to global bus: {}", e);
+            if let Err(_error) = hub.publish_dialog_event(event.clone()).await {
+                warn!("Failed to publish dialog event to global bus");
             } else {
-                debug!("Published dialog event to global bus: {:?}", event);
+                debug!("Published dialog event to global bus");
                 return;
             }
         }
@@ -2114,10 +2095,10 @@ impl DialogManager {
         // Fall back to channel (legacy)
         let sender = self.dialog_event_sender.read().await.clone();
         if let Some(sender) = sender {
-            if let Err(e) = sender.send(event.clone()).await {
-                warn!("Failed to send dialog event to session-core: {}", e);
+            if let Err(_error) = sender.send(event.clone()).await {
+                warn!("Failed to send dialog event to session-core");
             } else {
-                debug!("Emitted dialog event: {:?}", event);
+                debug!("Emitted dialog event");
             }
         }
     }
@@ -2131,19 +2112,16 @@ impl DialogManager {
         let publish_kind = timing_enabled.then(|| session_coordination_event_kind(&event));
         let publish_started = timing_enabled.then(Instant::now);
         trace!(
-            "emit_session_coordination_event called with event: {:?}",
-            event
+            "emit_session_coordination_event called with class={}",
+            session_coordination_event_kind(&event)
         );
 
         // Try event hub first (new global event bus)
         let hub = self.event_hub.read().await.clone();
         if let Some(hub) = hub {
             trace!("Event hub exists, publishing session coordination event");
-            if let Err(e) = hub.publish_session_coordination_event(event.clone()).await {
-                warn!(
-                    "Failed to publish session coordination event to global bus: {}",
-                    e
-                );
+            if let Err(_error) = hub.publish_session_coordination_event(event.clone()).await {
+                warn!("Failed to publish session coordination event to global bus");
             } else {
                 trace!("Published session coordination event to global bus");
                 if let Some(started) = publish_started {
@@ -2162,8 +2140,8 @@ impl DialogManager {
         let sender = self.session_coordinator.read().await.clone();
         if let Some(sender) = sender {
             trace!("Legacy session channel exists, sending event");
-            if let Err(e) = sender.send(event.clone()).await {
-                warn!("Failed to send session coordination event: {}", e);
+            if let Err(_error) = sender.send(event.clone()).await {
+                warn!("Failed to send session coordination event");
             } else {
                 trace!("Emitted session coordination event to legacy channel");
             }
@@ -2199,8 +2177,8 @@ impl DialogManager {
         if let Some(sender) = sender {
             match sender.send(event.clone()).await {
                 Ok(()) => delivered = true,
-                Err(e) => {
-                    warn!("Failed to send session coordination event: {}", e);
+                Err(_error) => {
+                    warn!("Failed to send session coordination event");
                 }
             }
         }
@@ -2218,11 +2196,8 @@ impl DialogManager {
                     // either mapped or not; either way the in-process
                     // delivered flag above is the authoritative signal.
                 }
-                Err(e) => {
-                    warn!(
-                        "Failed to publish session coordination event to global bus: {}",
-                        e
-                    );
+                Err(_error) => {
+                    warn!("Failed to publish session coordination event to global bus");
                 }
             }
         }
@@ -2269,7 +2244,11 @@ impl DialogManager {
     /// * `request` - The SIP request to handle
     /// * `source` - Source address of the request
     async fn handle_request(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
-        debug!("Handling {} request from {}", request.method(), source);
+        debug!(
+            "Handling {} request from {}",
+            method_class(&request.method()),
+            source
+        );
 
         // Dispatch request to appropriate handler based on method
         match request.method() {
@@ -2297,20 +2276,20 @@ impl DialogManager {
                     .transaction_manager
                     .create_server_transaction(request.clone(), source)
                     .await
-                    .map_err(|e| DialogError::TransactionError {
-                        message: format!("Failed to create server transaction for MESSAGE: {}", e),
+                    .map_err(|_error| DialogError::TransactionError {
+                        message: "Failed to create server transaction for MESSAGE".to_string(),
                     })?;
                 let transaction_id = server_transaction.id().clone();
                 let response = crate::transaction::utils::response_builders::create_response(
                     &request,
                     rvoip_sip_core::StatusCode::Ok,
                 );
-                if let Err(e) = self
+                if let Err(_error) = self
                     .transaction_manager
                     .send_response(&transaction_id, response)
                     .await
                 {
-                    debug!("Failed to send 200 OK for MESSAGE: {}", e);
+                    debug!("Failed to send 200 OK for MESSAGE");
                 }
                 Ok(())
             }
@@ -2319,7 +2298,7 @@ impl DialogManager {
                 // for every method we haven't implemented yet (e.g.
                 // PUBLISH); spurious error-level logs make pass output
                 // noisier than the failure they're supposed to flag.
-                debug!("Unsupported SIP method: {}", method);
+                debug!("Unsupported SIP method class={}", method_class(&method));
                 Err(DialogError::protocol_error(&format!(
                     "Unsupported method: {}",
                     method
@@ -2526,15 +2505,12 @@ impl DialogManager {
         transaction_ids.retain(|transaction_id| seen.insert(transaction_id.clone()));
 
         for transaction_id in transaction_ids {
-            if let Err(err) = self
+            if let Err(_error) = self
                 .transaction_manager
                 .terminate_transaction(&transaction_id)
                 .await
             {
-                debug!(
-                    "cleanup_dialog_storage_and_transactions: transaction {} was already gone: {}",
-                    transaction_id, err
-                );
+                debug!("cleanup_dialog_storage_and_transactions: transaction was already gone");
             }
             self.cleanup_transaction_receiver(&transaction_id);
             self.transaction_manager
@@ -2556,10 +2532,7 @@ impl DialogManager {
             .unlink_transaction_from_dialog_indexed(transaction_id)
             .is_some()
         {
-            debug!(
-                "Cleaned up transaction-dialog mapping for completed transaction {}",
-                transaction_id
-            );
+            debug!("Cleaned up transaction-dialog mapping for completed transaction");
         }
     }
 
@@ -2727,10 +2700,7 @@ impl DialogManager {
                 .get(tx_key)
                 .is_some_and(|mapped_dialog_id| mapped_dialog_id.value() == dialog_id)
             {
-                debug!(
-                    "Found INVITE transaction {} for dialog {}",
-                    tx_key, dialog_id
-                );
+                debug!("Found INVITE transaction for dialog {}", dialog_id);
                 return Some(tx_key.clone());
             }
         }
@@ -3128,8 +3098,8 @@ impl DialogManager {
                 },
                 Some(vec![TypedHeader::Reason(reason)]),
             )
-            .map_err(|e| DialogError::InternalError {
-                message: format!("Failed to build BYE request: {}", e),
+            .map_err(|_error| DialogError::InternalError {
+                message: "Failed to build BYE request".to_string(),
                 context: None,
             })?;
 
@@ -3153,21 +3123,21 @@ impl DialogManager {
             .transaction_manager
             .create_non_invite_client_transaction(request, destination)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to create BYE transaction: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to create BYE transaction".to_string(),
             })?;
 
         self.link_transaction_to_dialog_indexed(&transaction_id, dialog_id);
         debug!(
-            "Associated BYE-with-Reason transaction {} with dialog {}",
-            transaction_id, dialog_id
+            "Associated BYE-with-Reason transaction with dialog {}",
+            dialog_id
         );
 
         self.transaction_manager
             .send_request(&transaction_id)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to send BYE: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to send BYE".to_string(),
             })?;
         self.record_outbound_transport_context(
             &transaction_id,
@@ -3241,8 +3211,8 @@ impl DialogManager {
                     Some(template.route_set.clone())
                 },
             )
-            .map_err(|e| DialogError::InternalError {
-                message: format!("Failed to build INFO request: {}", e),
+            .map_err(|_error| DialogError::InternalError {
+                message: "Failed to build INFO request".to_string(),
                 context: None,
             })?;
 
@@ -3266,8 +3236,8 @@ impl DialogManager {
             .transaction_manager
             .create_non_invite_client_transaction(request, destination)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to create INFO transaction: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to create INFO transaction".to_string(),
             })?;
 
         self.link_transaction_to_dialog_indexed(&transaction_id, dialog_id);
@@ -3275,8 +3245,8 @@ impl DialogManager {
         self.transaction_manager
             .send_request(&transaction_id)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to send INFO: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to send INFO".to_string(),
             })?;
         self.record_outbound_transport_context(
             &transaction_id,
@@ -3325,8 +3295,8 @@ impl DialogManager {
         self.transaction_manager
             .send_ack_for_2xx(original_invite_tx_id, response)
             .await
-            .map_err(|e| crate::errors::DialogError::TransactionError {
-                message: format!("Failed to send ACK for 2xx response: {}", e),
+            .map_err(|_error| crate::errors::DialogError::TransactionError {
+                message: "Failed to send ACK for 2xx response".to_string(),
             })?;
 
         debug!(
@@ -3353,8 +3323,8 @@ impl DialogManager {
         self.transaction_manager
             .find_transaction_by_message(message)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to find transaction by message: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to find transaction by message".to_string(),
             })
     }
 }
@@ -3406,16 +3376,16 @@ async fn run_outbound_flow_loop(
                     Ok(()) => {
                         flow.record_ping_sent().await;
                         tracing::trace!(
-                            flow_key = ?flow.key, dest = %flow.destination,
+                            dest = %flow.destination,
                             "RFC 5626 keep-alive ping sent"
                         );
                         let when = tokio::time::Instant::now() + flow.pong_timeout;
                         sleep.as_mut().reset(when);
                         deadline_armed = true;
                     }
-                    Err(e) => {
+                    Err(_error) => {
                         tracing::debug!(
-                            flow_key = ?flow.key, dest = %flow.destination, error = %e,
+                            dest = %flow.destination,
                             "RFC 5626 keep-alive send failed — marking flow failed"
                         );
                         if flow.mark_failed().await {
@@ -3433,7 +3403,7 @@ async fn run_outbound_flow_loop(
                 // it already reset state to `Idle` and we just disarm.
                 if flow.is_pong_overdue().await {
                     tracing::info!(
-                        flow_key = ?flow.key, dest = %flow.destination,
+                        dest = %flow.destination,
                         pong_timeout_ms = flow.pong_timeout.as_millis() as u64,
                         "RFC 5626 pong timeout — marking flow failed"
                     );

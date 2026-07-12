@@ -37,6 +37,7 @@
 use rvoip_sip_core::Request;
 use std::net::SocketAddr;
 
+use crate::diagnostics::safe_log::method_class;
 use crate::errors::DialogResult;
 
 /// Request lifecycle hooks for dialog-creating outbound requests.
@@ -143,7 +144,7 @@ impl RequestLifecycle for crate::manager::DialogManager {
                 tracing::warn!(
                     "PASSporTSigner failed ({:?}) — outbound {} request emitted unsigned",
                     kind,
-                    request.method
+                    method_class(&request.method)
                 );
                 // Degrade open: send unsigned rather than fail the
                 // request. SHAKEN-strict deployments override by

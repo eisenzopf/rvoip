@@ -186,9 +186,8 @@ impl DialogStore for DialogManager {
         {
             if !service_route.is_empty() {
                 debug!(
-                    "RFC 3608 preload: prepending {} Service-Route hop(s) to outbound dialog route_set for AoR {}",
-                    service_route.len(),
-                    aor_key
+                    "RFC 3608 preload: prepending {} Service-Route hop(s) to outbound dialog route_set",
+                    service_route.len()
                 );
                 dialog.route_set = service_route;
             }
@@ -206,13 +205,10 @@ impl DialogStore for DialogManager {
                         call_id: call_id.clone(),
                     },
                 );
-            if let Err(e) = hub.publish_cross_crate_event(event).await {
-                warn!("Failed to publish DialogCreated event: {}", e);
+            if let Err(_error) = hub.publish_cross_crate_event(event).await {
+                warn!("Failed to publish DialogCreated event");
             } else {
-                info!(
-                    "Published DialogCreated event for dialog {} with call-id {}",
-                    dialog_id, call_id
-                );
+                info!("Published DialogCreated event for dialog {}", dialog_id);
             }
         }
 
@@ -301,8 +297,8 @@ impl DialogStore for DialogManager {
                         previous_state: format!("{:?}", previous_state),
                     };
 
-                    if let Err(e) = coordinator.send(event).await {
-                        warn!("Failed to send dialog termination event: {}", e);
+                    if let Err(_error) = coordinator.send(event).await {
+                        warn!("Failed to send dialog termination event");
                     }
                 }
 
@@ -436,8 +432,8 @@ impl DialogStore for DialogManager {
                 previous_state: format!("{:?}", previous_state),
             };
 
-            if let Err(e) = coordinator.send(event).await {
-                warn!("Failed to send dialog state change event: {}", e);
+            if let Err(_error) = coordinator.send(event).await {
+                warn!("Failed to send dialog state change event");
             }
         }
 
@@ -464,15 +460,12 @@ impl DialogLookup for DialogManager {
 
         // First try: Standard lookup with both tags (for confirmed dialogs)
         if let Some(to_tag) = &to_tag {
-            debug!(
-                "Looking for confirmed dialog: Call-ID={}, From-tag={}, To-tag={}",
-                call_id, from_tag, to_tag
-            );
+            debug!("Looking for confirmed dialog with Call-ID and both tags present");
 
             // Try both scenarios: UAC and UAS perspective
             let (key1, key2) = DialogUtils::create_bidirectional_keys(&call_id, &from_tag, &to_tag);
-            debug!("Trying lookup key1 (UAC perspective): {}", key1);
-            debug!("Trying lookup key2 (UAS perspective): {}", key2);
+            debug!("Trying lookup key1 (UAC perspective)");
+            debug!("Trying lookup key2 (UAS perspective)");
 
             if tracing::enabled!(tracing::Level::DEBUG) {
                 debug!(
@@ -480,7 +473,7 @@ impl DialogLookup for DialogManager {
                     self.dialog_lookup.len()
                 );
                 for entry in self.dialog_lookup.iter().take(10) {
-                    debug!("  Lookup key: {} -> dialog: {}", entry.key(), entry.value());
+                    debug!("  Lookup entry -> dialog: {}", entry.value());
                 }
             }
 
@@ -507,10 +500,7 @@ impl DialogLookup for DialogManager {
 
         // Second try: Fallback lookup for early dialogs (only have call-id and from-tag)
         // This is needed for initial INVITEs where we created an early dialog but don't have to-tag yet
-        debug!(
-            "Searching for early dialog: Call-ID={}, From-tag={}, To-tag=None",
-            call_id, from_tag
-        );
+        debug!("Searching for early dialog with Call-ID and From-tag present");
 
         let early_key = DialogUtils::create_early_lookup_key(&call_id, &from_tag);
         if let Some(dialog_id) = self

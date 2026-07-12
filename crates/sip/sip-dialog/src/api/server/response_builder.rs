@@ -26,38 +26,32 @@ impl DialogServer {
     /// Success or error
     pub async fn send_simple_response(
         &self,
-        transaction_id: &TransactionKey,
+        _transaction_id: &TransactionKey,
         status_code: StatusCode,
         _reason: Option<String>,
     ) -> ApiResult<()> {
-        debug!(
-            "Sending simple response {} for transaction {}",
-            status_code, transaction_id
-        );
+        debug!("Sending simple response {} for transaction", status_code);
 
         // For now, delegate to dialog manager's simpler response methods
         // This avoids the complex transaction-core API calls that may not exist
         match status_code {
             StatusCode::Trying => {
-                debug!("Sending 100 Trying for transaction {}", transaction_id);
+                debug!("Sending 100 Trying for transaction");
                 // Simple trying response
                 Ok(())
             }
             StatusCode::Ringing => {
-                debug!("Sending 180 Ringing for transaction {}", transaction_id);
+                debug!("Sending 180 Ringing for transaction");
                 // Simple ringing response
                 Ok(())
             }
             StatusCode::Ok => {
-                debug!("Sending 200 OK for transaction {}", transaction_id);
+                debug!("Sending 200 OK for transaction");
                 // Simple OK response
                 Ok(())
             }
             _ => {
-                debug!(
-                    "Sending {} response for transaction {}",
-                    status_code, transaction_id
-                );
+                debug!("Sending {} response for transaction", status_code);
                 // Generic response
                 Ok(())
             }
@@ -81,10 +75,7 @@ impl DialogServer {
         status_code: StatusCode,
         reason: Option<String>,
     ) -> ApiResult<()> {
-        debug!(
-            "Sending status response {} for transaction {}",
-            status_code, transaction_id
-        );
+        debug!("Sending status response {} for transaction", status_code);
 
         self.send_simple_response(transaction_id, status_code, reason)
             .await
@@ -100,10 +91,7 @@ impl DialogServer {
     /// # Returns
     /// Success or error
     pub async fn send_trying_response(&self, transaction_id: &TransactionKey) -> ApiResult<()> {
-        debug!(
-            "Sending 100 Trying response for transaction {}",
-            transaction_id
-        );
+        debug!("Sending 100 Trying response for transaction");
 
         self.send_simple_response(transaction_id, StatusCode::Trying, None)
             .await
@@ -128,10 +116,7 @@ impl DialogServer {
         early_media_sdp: Option<String>,
         contact_uri: Option<String>,
     ) -> ApiResult<()> {
-        debug!(
-            "Sending 180 Ringing response for transaction {}",
-            transaction_id
-        );
+        debug!("Sending 180 Ringing response for transaction");
 
         // Log optional parameters
         if let Some(dialog_id) = dialog_id {
@@ -141,7 +126,7 @@ impl DialogServer {
             debug!("Ringing response with early media SDP: {} bytes", sdp.len());
         }
         if let Some(ref contact) = contact_uri {
-            debug!("Ringing response with Contact: {}", contact);
+            debug!("Ringing response with Contact length={}", contact.len());
         }
 
         self.send_simple_response(transaction_id, StatusCode::Ringing, None)
@@ -167,19 +152,16 @@ impl DialogServer {
         sdp_answer: String,
         contact_uri: String,
     ) -> ApiResult<()> {
-        debug!(
-            "Sending 200 OK INVITE response for transaction {}",
-            transaction_id
-        );
+        debug!("Sending 200 OK INVITE response for transaction");
 
         // Log parameters
         if let Some(dialog_id) = dialog_id {
             debug!("OK response for dialog {}", dialog_id);
         }
         debug!(
-            "OK response with SDP: {} bytes, Contact: {}",
+            "OK response with SDP: {} bytes, Contact length={}",
             sdp_answer.len(),
-            contact_uri
+            contact_uri.len()
         );
 
         self.send_simple_response(transaction_id, StatusCode::Ok, None)
@@ -204,8 +186,8 @@ impl DialogServer {
         reason: Option<String>,
     ) -> ApiResult<()> {
         debug!(
-            "Sending INVITE error response {} for transaction {}",
-            status_code, transaction_id
+            "Sending INVITE error response {} for transaction",
+            status_code
         );
 
         self.send_simple_response(transaction_id, status_code, reason)

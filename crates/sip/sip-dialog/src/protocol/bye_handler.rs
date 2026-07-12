@@ -105,8 +105,8 @@ impl ByeHandler for DialogManager {
             .transaction_manager
             .create_server_transaction(request.clone(), source)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to create server transaction for BYE: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to create server transaction for BYE".to_string(),
             })?;
 
         let transaction_id = server_transaction.id().clone();
@@ -169,8 +169,8 @@ impl DialogManager {
             self.transaction_manager
                 .send_response(&transaction_id, response)
                 .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to send response to BYE: {}", e),
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to send response to BYE".to_string(),
                 })?;
             if let Some(started) = send_started {
                 diagnostics::record_bye_path_send_response(started.elapsed());
@@ -225,8 +225,8 @@ impl DialogManager {
         self.transaction_manager
             .send_response(&transaction_id, response)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to send 200 OK to BYE: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to send 200 OK to BYE".to_string(),
             })?;
         if let Some(started) = send_started {
             diagnostics::record_bye_path_send_response(started.elapsed());
@@ -287,11 +287,8 @@ impl DialogManager {
         if let Some(started) = started {
             diagnostics::record_bye_path_release_tx(started.elapsed());
         }
-        if let Err(e) = result {
-            warn!(
-                "Failed to release completed BYE server transaction {}: {}",
-                transaction_id, e
-            );
+        if let Err(_error) = result {
+            warn!("Failed to release completed BYE server transaction");
         }
     }
 
