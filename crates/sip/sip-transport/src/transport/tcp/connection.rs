@@ -396,7 +396,7 @@ impl Drop for TcpConnection {
 mod tests {
     use super::*;
     use rvoip_sip_core::builder::{ContentLengthBuilderExt, SimpleRequestBuilder};
-    use rvoip_sip_core::Method;
+    use rvoip_sip_core::{Method, Response, StatusCode};
     use tokio::net::TcpListener;
 
     #[tokio::test]
@@ -469,6 +469,42 @@ mod tests {
         }
 
         // Clean up
+        connection.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn typed_direct_connection_rejects_invalid_reason_before_socket_io() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap().0 });
+        let client = TcpStream::connect(server_addr).await.unwrap();
+        let mut server = accept.await.unwrap();
+        let connection = TcpConnection::from_stream(client, server_addr).unwrap();
+        let message = Message::Response(
+            Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: direct-connection-secret"),
+        );
+
+        let error = connection
+            .send_message(&message)
+            .await
+            .expect_err("typed direct send must fail closed");
+        assert!(matches!(error, Error::ProtocolError(_)));
+        assert!(!error.to_string().contains("direct-connection-secret"));
+        let mut buffer = [0u8; 64];
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                server.read(&mut buffer)
+            )
+            .await
+            .is_err(),
+            "rejected typed direct send must write no bytes",
+        );
+
+        let raw = b"X-Verbatim: direct-raw-retained\r\n";
+        connection.send_raw_bytes(raw).await.unwrap();
+        server.read_exact(&mut buffer[..raw.len()]).await.unwrap();
+        assert_eq!(&buffer[..raw.len()], raw);
         connection.close().await.unwrap();
     }
 

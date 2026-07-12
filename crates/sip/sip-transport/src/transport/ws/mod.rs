@@ -717,7 +717,7 @@ mod tests {
     use super::*;
     use rvoip_sip_core::builder::SimpleRequestBuilder;
     use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
-    use rvoip_sip_core::Method;
+    use rvoip_sip_core::{Method, Response, StatusCode};
     use tokio::time::Duration;
 
     #[cfg(feature = "ws")]
@@ -754,12 +754,17 @@ mod tests {
             HeaderValue::Raw(b"Digest safe\r\nX-Injected: websocket".to_vec()),
         ));
 
-        let error = transport
-            .send_message(Message::Request(request), destination)
-            .await
-            .expect_err("typed WS/WSS send must reject credential injection");
-        assert!(matches!(error, Error::ProtocolError(_)));
-        assert!(!error.to_string().contains("X-Injected"));
+        let invalid_reason =
+            Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: websocket-reason-secret");
+
+        for message in [Message::Request(request), Message::Response(invalid_reason)] {
+            let error = transport
+                .send_message(message, destination)
+                .await
+                .expect_err("typed WS/WSS send must reject unsafe fields");
+            assert!(matches!(error, Error::ProtocolError(_)));
+            assert!(!error.to_string().contains("X-Injected"));
+        }
         transport.close().await.unwrap();
     }
 

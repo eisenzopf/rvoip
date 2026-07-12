@@ -801,7 +801,7 @@ mod auth_boundary_tests {
     use super::*;
     use rvoip_sip_core::builder::SimpleRequestBuilder;
     use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
-    use rvoip_sip_core::{Message, Method};
+    use rvoip_sip_core::{Message, Method, Response, StatusCode};
 
     #[tokio::test]
     async fn typed_tls_send_rejects_auth_before_connect() {
@@ -821,12 +821,17 @@ mod auth_boundary_tests {
             HeaderValue::Raw(b"Digest safe\r\nX-Injected: tls".to_vec()),
         ));
 
-        let error = transport
-            .send_message(Message::Request(request), destination)
-            .await
-            .expect_err("typed TLS send must reject credential injection");
-        assert!(matches!(error, Error::ProtocolError(_)));
-        assert!(!error.to_string().contains("X-Injected"));
+        let invalid_reason =
+            Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: tls-reason-secret");
+
+        for message in [Message::Request(request), Message::Response(invalid_reason)] {
+            let error = transport
+                .send_message(message, destination)
+                .await
+                .expect_err("typed TLS send must reject unsafe fields");
+            assert!(matches!(error, Error::ProtocolError(_)));
+            assert!(!error.to_string().contains("X-Injected"));
+        }
         transport.close().await.unwrap();
     }
 }

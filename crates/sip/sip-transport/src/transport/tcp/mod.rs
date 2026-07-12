@@ -366,7 +366,7 @@ mod tests {
     use super::*;
     use rvoip_sip_core::builder::SimpleRequestBuilder;
     use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
-    use rvoip_sip_core::Method;
+    use rvoip_sip_core::{Method, Response, StatusCode};
     use tokio::time::Duration;
 
     #[tokio::test]
@@ -402,13 +402,18 @@ mod tests {
             HeaderValue::Raw(b"Bearer safe\r\nX-Injected: tcp".to_vec()),
         ));
 
-        let error = transport
-            .send_message(Message::Request(request), destination)
-            .await
-            .expect_err("typed TCP send must reject credential injection");
-        assert!(matches!(error, Error::ProtocolError(_)));
-        assert!(!transport.has_connection_to(destination));
-        assert!(!error.to_string().contains("X-Injected"));
+        let invalid_reason =
+            Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: tcp-reason-secret");
+
+        for message in [Message::Request(request), Message::Response(invalid_reason)] {
+            let error = transport
+                .send_message(message, destination)
+                .await
+                .expect_err("typed TCP send must reject unsafe fields");
+            assert!(matches!(error, Error::ProtocolError(_)));
+            assert!(!transport.has_connection_to(destination));
+            assert!(!error.to_string().contains("X-Injected"));
+        }
         transport.close().await.unwrap();
     }
 

@@ -20,6 +20,16 @@ use crate::{Error, Result};
 /// precomputed-value caller from creating an unbounded SIP header.
 pub const MAX_AUTHORIZATION_HEADER_VALUE_BYTES: usize = 16 * 1024;
 
+/// Maximum encoded size of one application-supplied raw SIP header value.
+///
+/// This matches the stack's existing maximum stream-message size closely
+/// enough to preserve large extension headers while preventing a single raw
+/// field from becoming an unbounded allocation or write.
+pub const MAX_RAW_HEADER_VALUE_BYTES: usize = 64 * 1024;
+
+/// Maximum encoded size of an outbound SIP response reason phrase.
+pub const MAX_RESPONSE_REASON_PHRASE_BYTES: usize = 1024;
+
 fn validation_error(message: impl Into<String>) -> Error {
     Error::ValidationError(message.into())
 }
@@ -30,6 +40,59 @@ fn has_header(headers: &[TypedHeader], name: HeaderName) -> bool {
 
 fn header_count(headers: &[TypedHeader], name: HeaderName) -> usize {
     headers.iter().filter(|h| h.name() == name).count()
+}
+
+fn contains_forbidden_inline_control(value: &str) -> bool {
+    value
+        .chars()
+        .any(|character| character.is_control() && character != '\t')
+}
+
+fn validate_raw_header_value(value: &[u8]) -> Result<()> {
+    if value.len() > MAX_RAW_HEADER_VALUE_BYTES {
+        return Err(validation_error(
+            "SIP raw header value exceeds the size limit",
+        ));
+    }
+    let value = std::str::from_utf8(value)
+        .map_err(|_| validation_error("SIP raw header value is not valid UTF-8"))?;
+    if contains_forbidden_inline_control(value) {
+        return Err(validation_error(
+            "SIP raw header value contains a forbidden control character",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_outbound_header_fields(headers: &[TypedHeader]) -> Result<()> {
+    for header in headers {
+        if let TypedHeader::Other(name, value) = header {
+            if !name.is_valid_wire_name() {
+                return Err(validation_error(
+                    "SIP extension header name is not a valid token",
+                ));
+            }
+            if let HeaderValue::Raw(value) = value {
+                validate_raw_header_value(value)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_response_reason_phrase(response: &Response) -> Result<()> {
+    let reason = response.reason_phrase();
+    if reason.len() > MAX_RESPONSE_REASON_PHRASE_BYTES {
+        return Err(validation_error(
+            "SIP response reason phrase exceeds the size limit",
+        ));
+    }
+    if contains_forbidden_inline_control(reason) {
+        return Err(validation_error(
+            "SIP response reason phrase contains a forbidden control character",
+        ));
+    }
+    Ok(())
 }
 
 /// Parse the only two credential-bearing SIP header names.
@@ -154,6 +217,26 @@ pub fn validate_outbound_authorization_headers(message: &Message) -> Result<()> 
     }
 }
 
+/// Validate every field that a typed transport will serialize.
+///
+/// Explicit raw/verbatim transport APIs do not call this function. Typed sends
+/// use it before route lookup, connection creation, or socket I/O so malformed
+/// extension names, raw values, response reasons, and credential headers cannot
+/// create additional SIP wire lines.
+pub fn validate_typed_outbound_message(message: &Message) -> Result<()> {
+    match message {
+        Message::Request(request) => {
+            validate_outbound_header_fields(&request.headers)?;
+            validate_authorization_headers(&request.headers)
+        }
+        Message::Response(response) => {
+            validate_response_reason_phrase(response)?;
+            validate_outbound_header_fields(&response.headers)?;
+            validate_authorization_headers(&response.headers)
+        }
+    }
+}
+
 fn content_length_value(headers: &[TypedHeader]) -> Result<Option<u32>> {
     headers
         .iter()
@@ -212,6 +295,7 @@ pub fn validate_content_length(headers: &[TypedHeader], body_len: usize) -> Resu
 pub fn validate_wire_request(request: &Request) -> Result<()> {
     let headers = &request.headers;
 
+    validate_outbound_header_fields(headers)?;
     validate_authorization_headers(headers)?;
 
     for (name, label) in [
@@ -287,6 +371,8 @@ pub fn validate_wire_request(request: &Request) -> Result<()> {
 pub fn validate_wire_response(response: &Response) -> Result<()> {
     let headers = &response.headers;
 
+    validate_response_reason_phrase(response)?;
+    validate_outbound_header_fields(headers)?;
     validate_authorization_headers(headers)?;
 
     for (name, label) in [
@@ -484,6 +570,98 @@ mod tests {
             let error = validate_outbound_authorization_headers(&message).unwrap_err();
             assert!(error.to_string().contains("control character"));
             assert!(!error.to_string().contains("X-Injected"));
+        }
+    }
+
+    #[test]
+    fn typed_outbound_validation_rejects_non_token_extension_names_without_echo() {
+        const SECRET: &str = "Bearer malformed-name-secret";
+        for name in [
+            "",
+            " Authorization",
+            "Authorization ",
+            "Authorization\t",
+            "Authorization:injected",
+            "X-Safe\r\nAuthorization",
+            "X-Ünicode",
+        ] {
+            let mut request = valid_request();
+            request.headers.push(TypedHeader::Other(
+                HeaderName::Other(name.into()),
+                HeaderValue::Raw(SECRET.as_bytes().to_vec()),
+            ));
+            let message = Message::Request(request);
+            let error = validate_typed_outbound_message(&message).unwrap_err();
+            assert!(error.to_string().contains("valid token"));
+            if !name.is_empty() {
+                assert!(!error.to_string().contains(name));
+            }
+
+            let debug = format!("{message:?}");
+            if !name.is_empty() {
+                assert!(!debug.contains(name));
+            }
+            assert!(!debug.contains(SECRET));
+            assert!(debug.contains("[invalid header name]"));
+            assert!(debug.contains("[redacted]"));
+        }
+    }
+
+    #[test]
+    fn typed_outbound_raw_values_are_bounded_and_single_line() {
+        for value in [
+            b"safe\r\nX-Injected: yes".to_vec(),
+            b"safe\nX-Injected: yes".to_vec(),
+            b"safe\0tail".to_vec(),
+            b"safe\x7ftail".to_vec(),
+            vec![0xff],
+            vec![b'a'; MAX_RAW_HEADER_VALUE_BYTES + 1],
+        ] {
+            let mut request = valid_request();
+            request.headers.push(TypedHeader::Other(
+                HeaderName::Other("X-Bridgefu-Context".into()),
+                HeaderValue::Raw(value),
+            ));
+            assert!(validate_typed_outbound_message(&Message::Request(request)).is_err());
+        }
+
+        for value in [
+            b"valid extension value".to_vec(),
+            b"valid\tSWS".to_vec(),
+            vec![b'a'; MAX_RAW_HEADER_VALUE_BYTES],
+        ] {
+            let mut request = valid_request();
+            request.headers.push(TypedHeader::Other(
+                HeaderName::Other("X-Bridgefu-Context".into()),
+                HeaderValue::Raw(value),
+            ));
+            validate_typed_outbound_message(&Message::Request(request))
+                .expect("valid extension field boundary");
+        }
+    }
+
+    #[test]
+    fn typed_outbound_response_reasons_are_bounded_and_single_line() {
+        for reason in [
+            "OK\r\nAuthorization: Bearer injected".to_string(),
+            "OK\nX-Injected: yes".to_string(),
+            "OK\0tail".to_string(),
+            "OK\u{85}tail".to_string(),
+            "a".repeat(MAX_RESPONSE_REASON_PHRASE_BYTES + 1),
+        ] {
+            let response = Response::new(StatusCode::Ok).with_reason(reason);
+            assert!(validate_typed_outbound_message(&Message::Response(response)).is_err());
+        }
+
+        for reason in [
+            String::new(),
+            "Everything is Awesome".into(),
+            "valid\treason".into(),
+            "a".repeat(MAX_RESPONSE_REASON_PHRASE_BYTES),
+        ] {
+            let response = Response::new(StatusCode::Ok).with_reason(reason);
+            validate_typed_outbound_message(&Message::Response(response))
+                .expect("valid response reason boundary");
         }
     }
 

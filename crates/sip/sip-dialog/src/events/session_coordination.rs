@@ -4,7 +4,7 @@
 //! coordination. This maintains the proper layer separation where dialog-core
 //! handles SIP protocol operations and session-core handles session logic.
 
-use std::net::SocketAddr;
+use std::{fmt, net::SocketAddr};
 
 use crate::transaction::TransactionKey;
 use rvoip_sip_core::types::refer_to::ReferTo;
@@ -13,7 +13,7 @@ use rvoip_sip_core::{Request, Response, Uri};
 use crate::dialog::DialogId;
 
 /// Events sent from dialog-core to session-core for coordination
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum SessionCoordinationEvent {
     /// Incoming call that needs session creation
     IncomingCall {
@@ -276,6 +276,242 @@ pub enum SessionCoordinationEvent {
     },
 }
 
+impl fmt::Debug for SessionCoordinationEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IncomingCall {
+                dialog_id,
+                transaction_id,
+                request,
+                source,
+            } => formatter
+                .debug_struct("IncomingCall")
+                .field("dialog_id", dialog_id)
+                .field("transaction_id", transaction_id)
+                .field("request_method", &request.method())
+                .field("request_header_count", &request.headers.len())
+                .field("request_body_len", &request.body.len())
+                .field("source", source)
+                .finish(),
+            Self::ReInvite {
+                dialog_id,
+                transaction_id,
+                request,
+            } => formatter
+                .debug_struct("ReInvite")
+                .field("dialog_id", dialog_id)
+                .field("transaction_id", transaction_id)
+                .field("request_method", &request.method())
+                .field("request_header_count", &request.headers.len())
+                .field("request_body_len", &request.body.len())
+                .finish(),
+            Self::CallAnswered {
+                dialog_id,
+                session_answer,
+            } => formatter
+                .debug_struct("CallAnswered")
+                .field("dialog_id", dialog_id)
+                .field("session_answer_present", &!session_answer.is_empty())
+                .field("session_answer_len", &session_answer.len())
+                .finish(),
+            Self::CallRinging { dialog_id } => formatter
+                .debug_struct("CallRinging")
+                .field("dialog_id", dialog_id)
+                .finish(),
+            Self::CallTerminating { dialog_id, reason } => formatter
+                .debug_struct("CallTerminating")
+                .field("dialog_id", dialog_id)
+                .field("reason", &"[redacted]")
+                .field("reason_len", &reason.len())
+                .finish(),
+            Self::ByeReceived { dialog_id } => formatter
+                .debug_struct("ByeReceived")
+                .field("dialog_id", dialog_id)
+                .finish(),
+            Self::CallTerminated { dialog_id, reason } => formatter
+                .debug_struct("CallTerminated")
+                .field("dialog_id", dialog_id)
+                .field("reason", &"[redacted]")
+                .field("reason_len", &reason.len())
+                .finish(),
+            Self::CallCancelled { dialog_id, reason } => formatter
+                .debug_struct("CallCancelled")
+                .field("dialog_id", dialog_id)
+                .field("reason", &"[redacted]")
+                .field("reason_len", &reason.len())
+                .finish(),
+            Self::ResponseReceived {
+                dialog_id,
+                response,
+                transaction_id,
+            } => formatter
+                .debug_struct("ResponseReceived")
+                .field("dialog_id", dialog_id)
+                .field("response_status", &response.status_code())
+                .field("response_header_count", &response.headers.len())
+                .field("response_body_len", &response.body.len())
+                .field("transaction_id", transaction_id)
+                .finish(),
+            Self::RegistrationRequest {
+                transaction_id,
+                from_uri: _,
+                contact_uri: _,
+                expires,
+            } => formatter
+                .debug_struct("RegistrationRequest")
+                .field("transaction_id", transaction_id)
+                .field("from_uri", &"[redacted]")
+                .field("from_uri_present", &true)
+                .field("contact_uri", &"[redacted]")
+                .field("contact_uri_present", &true)
+                .field("expires", expires)
+                .finish(),
+            Self::DialogStateChanged {
+                dialog_id,
+                new_state,
+                previous_state,
+            } => formatter
+                .debug_struct("DialogStateChanged")
+                .field("dialog_id", dialog_id)
+                .field("new_state", &"[redacted]")
+                .field("new_state_len", &new_state.len())
+                .field("previous_state", &"[redacted]")
+                .field("previous_state_len", &previous_state.len())
+                .finish(),
+            Self::EarlyMedia { dialog_id, sdp } => formatter
+                .debug_struct("EarlyMedia")
+                .field("dialog_id", dialog_id)
+                .field("sdp_present", &!sdp.is_empty())
+                .field("sdp_len", &sdp.len())
+                .finish(),
+            Self::CallProgress {
+                dialog_id,
+                status_code,
+                reason_phrase,
+            } => formatter
+                .debug_struct("CallProgress")
+                .field("dialog_id", dialog_id)
+                .field("status_code", status_code)
+                .field("reason_phrase", &"[redacted]")
+                .field("reason_phrase_len", &reason_phrase.len())
+                .finish(),
+            Self::RequestFailed {
+                dialog_id,
+                transaction_id,
+                status_code,
+                reason_phrase,
+                method,
+            } => formatter
+                .debug_struct("RequestFailed")
+                .field("dialog_id", dialog_id)
+                .field("transaction_id", transaction_id)
+                .field("status_code", status_code)
+                .field("reason_phrase", &"[redacted]")
+                .field("reason_phrase_len", &reason_phrase.len())
+                .field("method", &"[redacted]")
+                .field("method_len", &method.len())
+                .finish(),
+            Self::CapabilityQuery {
+                transaction_id,
+                request,
+                source,
+            } => formatter
+                .debug_struct("CapabilityQuery")
+                .field("transaction_id", transaction_id)
+                .field("request_method", &request.method())
+                .field("request_header_count", &request.headers.len())
+                .field("request_body_len", &request.body.len())
+                .field("source", source)
+                .finish(),
+            Self::AckSent {
+                dialog_id,
+                transaction_id,
+                negotiated_sdp,
+            } => formatter
+                .debug_struct("AckSent")
+                .field("dialog_id", dialog_id)
+                .field("transaction_id", transaction_id)
+                .field("negotiated_sdp_present", &negotiated_sdp.is_some())
+                .field(
+                    "negotiated_sdp_len",
+                    &negotiated_sdp.as_ref().map(String::len),
+                )
+                .finish(),
+            Self::AckReceived {
+                dialog_id,
+                transaction_id,
+                negotiated_sdp,
+            } => formatter
+                .debug_struct("AckReceived")
+                .field("dialog_id", dialog_id)
+                .field("transaction_id", transaction_id)
+                .field("negotiated_sdp_present", &negotiated_sdp.is_some())
+                .field(
+                    "negotiated_sdp_len",
+                    &negotiated_sdp.as_ref().map(String::len),
+                )
+                .finish(),
+            Self::SessionRefreshed {
+                dialog_id,
+                expires_secs,
+            } => formatter
+                .debug_struct("SessionRefreshed")
+                .field("dialog_id", dialog_id)
+                .field("expires_secs", expires_secs)
+                .finish(),
+            Self::SessionRefreshFailed { dialog_id, reason } => formatter
+                .debug_struct("SessionRefreshFailed")
+                .field("dialog_id", dialog_id)
+                .field("reason", &"[redacted]")
+                .field("reason_len", &reason.len())
+                .finish(),
+            Self::CleanupConfirmation { dialog_id, layer } => formatter
+                .debug_struct("CleanupConfirmation")
+                .field("dialog_id", dialog_id)
+                .field("layer", &"[redacted]")
+                .field("layer_len", &layer.len())
+                .finish(),
+            Self::TransferRequest {
+                dialog_id,
+                transaction_id,
+                refer_to: _,
+                referred_by,
+                replaces,
+                raw_request,
+            } => formatter
+                .debug_struct("TransferRequest")
+                .field("dialog_id", dialog_id)
+                .field("transaction_id", transaction_id)
+                .field("refer_to", &"[redacted]")
+                .field("refer_to_present", &true)
+                .field("referred_by_present", &referred_by.is_some())
+                .field("referred_by_len", &referred_by.as_ref().map(String::len))
+                .field("replaces_present", &replaces.is_some())
+                .field("replaces_len", &replaces.as_ref().map(String::len))
+                .field("raw_request_present", &raw_request.is_some())
+                .field(
+                    "raw_request_len",
+                    &raw_request.as_ref().map(bytes::Bytes::len),
+                )
+                .finish(),
+            Self::OutboundFlowFailed {
+                aor,
+                reg_id,
+                instance,
+                reason,
+            } => formatter
+                .debug_struct("OutboundFlowFailed")
+                .field("aor", &"[redacted]")
+                .field("aor_len", &aor.len())
+                .field("reg_id", reg_id)
+                .field("instance", &"[redacted]")
+                .field("instance_len", &instance.len())
+                .field("reason", reason)
+                .finish(),
+        }
+    }
+}
+
 /// Cause of an RFC 5626 outbound flow failure, reported alongside
 /// [`SessionCoordinationEvent::OutboundFlowFailed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,4 +526,105 @@ pub enum FlowFailureReason {
     /// Transport-level send on the keep-alive ping itself returned an
     /// unrecoverable error (e.g. socket gone).
     SendError,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use rvoip_sip_core::{
+        types::headers::{HeaderName, HeaderValue, TypedHeader},
+        Method, StatusCode,
+    };
+    use std::str::FromStr;
+
+    fn transaction_key(method: Method) -> TransactionKey {
+        TransactionKey::new("z9hG4bK-debug-canary".into(), method, true)
+    }
+
+    #[test]
+    fn coordination_debug_exposes_only_safe_signaling_metadata() {
+        const URI_SECRET: &str = "coordination-uri-secret.example";
+        const AUTH_SECRET: &str = "Bearer coordination-auth-secret";
+        const BODY_SECRET: &str = "coordination-body-secret";
+        const REASON_SECRET: &str = "coordination-reason-secret";
+        const SDP_SECRET: &str = "v=0 s=coordination-sdp-secret";
+        const RAW_SECRET: &str = "coordination-raw-request-secret";
+        let dialog_id = DialogId::new();
+
+        let mut request = Request::new(
+            Method::Invite,
+            format!("sip:bob@{URI_SECRET}").parse().unwrap(),
+        )
+        .with_body(BODY_SECRET);
+        request.headers.push(TypedHeader::Other(
+            HeaderName::Authorization,
+            HeaderValue::Raw(AUTH_SECRET.as_bytes().to_vec()),
+        ));
+
+        let debug_outputs = [
+            format!(
+                "{:?}",
+                SessionCoordinationEvent::IncomingCall {
+                    dialog_id: dialog_id.clone(),
+                    transaction_id: transaction_key(Method::Invite),
+                    request,
+                    source: "127.0.0.1:5060".parse().unwrap(),
+                }
+            ),
+            format!(
+                "{:?}",
+                SessionCoordinationEvent::ResponseReceived {
+                    dialog_id: dialog_id.clone(),
+                    response: Response::new(StatusCode::Ok)
+                        .with_reason(REASON_SECRET)
+                        .with_body(BODY_SECRET),
+                    transaction_id: transaction_key(Method::Invite),
+                }
+            ),
+            format!(
+                "{:?}",
+                SessionCoordinationEvent::EarlyMedia {
+                    dialog_id: dialog_id.clone(),
+                    sdp: SDP_SECRET.into(),
+                }
+            ),
+            format!(
+                "{:?}",
+                SessionCoordinationEvent::CallTerminating {
+                    dialog_id: dialog_id.clone(),
+                    reason: REASON_SECRET.into(),
+                }
+            ),
+            format!(
+                "{:?}",
+                SessionCoordinationEvent::TransferRequest {
+                    dialog_id,
+                    transaction_id: transaction_key(Method::Refer),
+                    refer_to: ReferTo::from_str(&format!("sip:transfer@{URI_SECRET}")).unwrap(),
+                    referred_by: Some(format!("sip:referrer@{URI_SECRET}")),
+                    replaces: Some(REASON_SECRET.into()),
+                    raw_request: Some(Bytes::from_static(RAW_SECRET.as_bytes())),
+                }
+            ),
+        ];
+
+        for debug in &debug_outputs {
+            for secret in [
+                URI_SECRET,
+                AUTH_SECRET,
+                BODY_SECRET,
+                REASON_SECRET,
+                SDP_SECRET,
+                RAW_SECRET,
+            ] {
+                assert!(!debug.contains(secret));
+            }
+        }
+        assert!(debug_outputs[0].contains("request_header_count"));
+        assert!(debug_outputs[0].contains("request_body_len"));
+        assert!(debug_outputs[1].contains("response_status"));
+        assert!(debug_outputs[2].contains("sdp_len"));
+        assert!(debug_outputs[4].contains("raw_request_len"));
+    }
 }

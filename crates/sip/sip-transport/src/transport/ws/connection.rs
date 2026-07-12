@@ -348,7 +348,9 @@ impl Drop for WebSocketConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rvoip_sip_core::Method;
+    #[cfg(feature = "ws")]
+    use futures_util::StreamExt;
+    use rvoip_sip_core::{Message, Method, Response, StatusCode};
     use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 
     // For testing only: a simplified WebSocketConnection without real WebSocket dependencies
@@ -442,6 +444,52 @@ mod tests {
         // Test closing
         connection.set_closed();
         assert!(connection.is_closed());
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn typed_direct_websocket_rejects_invalid_reason_before_frame_io() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(SipWsStream::Plain(stream))
+                .await
+                .unwrap()
+        });
+        let client = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+        let (client_stream, _) = tokio_tungstenite::client_async(
+            format!("ws://{server_addr}/sip"),
+            SipWsStream::Plain(client),
+        )
+        .await
+        .unwrap();
+        let mut server_stream = server_task.await.unwrap();
+        let (writer, _reader) = client_stream.split();
+        let connection =
+            WebSocketConnection::from_writer(writer, server_addr, false, SIP_WS_SUBPROTOCOL.into());
+        let message = Message::Response(
+            Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: direct-websocket-secret"),
+        );
+
+        let error = connection
+            .send_message(&message)
+            .await
+            .expect_err("typed direct WebSocket send must fail closed");
+        assert!(matches!(error, Error::ProtocolError(_)));
+        assert!(!error.to_string().contains("direct-websocket-secret"));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), server_stream.next())
+                .await
+                .is_err(),
+            "rejected typed direct WebSocket send must emit no frame",
+        );
+
+        let raw = bytes::Bytes::from_static(b"X-Verbatim: websocket-raw-retained\r\n");
+        connection.send_raw_bytes(raw.clone()).await.unwrap();
+        let received = server_stream.next().await.unwrap().unwrap();
+        assert_eq!(received, WsMessage::Binary(raw));
+        connection.close().await.unwrap();
     }
 
     // Test message parsing from WebSocket frames

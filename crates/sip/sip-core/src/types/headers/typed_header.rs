@@ -194,6 +194,11 @@ impl fmt::Debug for TypedHeader {
                 .field(name)
                 .field(&"[redacted]")
                 .finish(),
+            Self::Other(name, _) if !name.is_valid_wire_name() => formatter
+                .debug_tuple("Other")
+                .field(&"[invalid header name]")
+                .field(&"[redacted]")
+                .finish(),
             // Preserve diagnostic visibility for unrelated headers. Debug
             // formatting is intentionally not the wire contract; Display is.
             other => formatter

@@ -905,6 +905,10 @@ impl TransportManager {
 
     /// Sends a message using the appropriate transport
     pub async fn send_message(&self, message: Message, destination: SocketAddr) -> Result<()> {
+        rvoip_sip_core::validation::validate_typed_outbound_message(&message).map_err(|_| {
+            Error::Transport("outbound typed SIP message failed wire-safety validation".into())
+        })?;
+
         // Get the appropriate transport
         let transport = self
             .get_transport_for_destination(destination)
@@ -1101,7 +1105,7 @@ impl<T: rvoip_sip_transport::Transport + ?Sized> TransportCapabilitiesExt for T 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rvoip_sip_core::Method;
+    use rvoip_sip_core::{Method, Response, StatusCode};
     use rvoip_sip_transport::transport::TransportType;
 
     fn dispatch_request(
@@ -1241,6 +1245,30 @@ mod tests {
             "Failed to close transport manager: {:?}",
             result
         );
+    }
+
+    #[tokio::test]
+    async fn dialog_transport_manager_rejects_invalid_reason_before_lookup() {
+        let config = TransportManagerConfig {
+            enable_udp: false,
+            enable_tcp: false,
+            enable_ws: false,
+            enable_tls: false,
+            bind_addresses: Vec::new(),
+            ..Default::default()
+        };
+        let (manager, _rx) = TransportManager::new(config).await.unwrap();
+        let message = Message::Response(
+            Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: dialog-manager-secret"),
+        );
+
+        let error = manager
+            .send_message(message, "127.0.0.1:9".parse().unwrap())
+            .await
+            .expect_err("invalid reason must fail before transport lookup");
+        assert!(matches!(error, Error::Transport(_)));
+        assert!(!error.to_string().contains("dialog-manager-secret"));
+        assert!(!error.to_string().contains("No transport available"));
     }
 
     #[tokio::test]

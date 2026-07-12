@@ -22,10 +22,8 @@ pub use ws::WebSocketTransport;
 /// explicit escape hatch for already-serialized proxy traffic. Errors contain
 /// no credential value.
 pub(crate) fn validate_typed_outbound_message(message: &Message) -> Result<()> {
-    rvoip_sip_core::validation::validate_outbound_authorization_headers(message).map_err(|_| {
-        Error::ProtocolError(
-            "outbound SIP authorization header failed wire-safety validation".to_string(),
-        )
+    rvoip_sip_core::validation::validate_typed_outbound_message(message).map_err(|_| {
+        Error::ProtocolError("outbound typed SIP message failed wire-safety validation".to_string())
     })
 }
 
@@ -96,7 +94,7 @@ pub struct TransportConnectionMetadata {
 }
 
 /// Events emitted by a transport
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum TransportEvent {
     /// A SIP message was received
     MessageReceived {
@@ -175,6 +173,74 @@ pub enum TransportEvent {
 
     /// Transport shutdown complete
     ShutdownComplete,
+}
+
+impl fmt::Debug for TransportEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MessageReceived {
+                message,
+                source,
+                destination,
+                transport_type,
+                raw_bytes,
+                timing,
+                connection_metadata,
+            } => {
+                let mut debug = formatter.debug_struct("MessageReceived");
+                match message {
+                    Message::Request(request) => {
+                        debug
+                            .field("message_kind", &"request")
+                            .field("method", &request.method())
+                            .field("header_count", &request.headers.len())
+                            .field("body_len", &request.body.len());
+                    }
+                    Message::Response(response) => {
+                        debug
+                            .field("message_kind", &"response")
+                            .field("status_code", &response.status_code())
+                            .field("header_count", &response.headers.len())
+                            .field("body_len", &response.body.len());
+                    }
+                }
+                debug
+                    .field("source", source)
+                    .field("destination", destination)
+                    .field("transport_type", transport_type)
+                    .field("raw_bytes_present", &raw_bytes.is_some())
+                    .field("raw_bytes_len", &raw_bytes.as_ref().map(Bytes::len))
+                    .field("timing", timing)
+                    .field("connection_metadata", connection_metadata)
+                    .finish()
+            }
+            Self::Error { error } => formatter
+                .debug_struct("Error")
+                .field("error", error)
+                .finish(),
+            Self::Closed => formatter.write_str("Closed"),
+            Self::KeepAlivePongReceived {
+                source,
+                destination,
+            } => formatter
+                .debug_struct("KeepAlivePongReceived")
+                .field("source", source)
+                .field("destination", destination)
+                .finish(),
+            Self::ConnectionClosed {
+                remote_addr,
+                transport_type,
+            } => formatter
+                .debug_struct("ConnectionClosed")
+                .field("remote_addr", remote_addr)
+                .field("transport_type", transport_type)
+                .finish(),
+            Self::ShutdownRequested => formatter.write_str("ShutdownRequested"),
+            Self::ShutdownReady => formatter.write_str("ShutdownReady"),
+            Self::ShutdownNow => formatter.write_str("ShutdownNow"),
+            Self::ShutdownComplete => formatter.write_str("ShutdownComplete"),
+        }
+    }
 }
 
 /// Represents a transport layer for SIP messages.
@@ -404,6 +470,10 @@ pub fn apply_via_rewrite(bytes: Bytes, rewrite: ViaRewrite) -> Result<Bytes> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rvoip_sip_core::{
+        types::headers::{HeaderName, HeaderValue, TypedHeader},
+        Method, Request, Response, StatusCode,
+    };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -457,5 +527,72 @@ mod tests {
 
         transport.close().await.unwrap();
         assert!(transport.is_closed());
+    }
+
+    #[test]
+    fn message_received_debug_exposes_only_safe_message_metadata() {
+        const URI_SECRET: &str = "uri-secret.example";
+        const AUTH_SECRET: &str = "Bearer transport-event-auth-secret";
+        const SDP_SECRET: &str = "v=0 s=transport-event-sdp-secret";
+        const RAW_SECRET: &str = "raw-wire-secret";
+        const REASON_SECRET: &str = "transport-event-reason-secret";
+        let source = "127.0.0.1:5060".parse().unwrap();
+        let destination = "127.0.0.1:5061".parse().unwrap();
+
+        let mut request = Request::new(
+            Method::Invite,
+            format!("sip:bob@{URI_SECRET}").parse().unwrap(),
+        )
+        .with_body(SDP_SECRET);
+        request.headers.push(TypedHeader::Other(
+            HeaderName::Authorization,
+            HeaderValue::Raw(AUTH_SECRET.as_bytes().to_vec()),
+        ));
+        let request_debug = format!(
+            "{:?}",
+            TransportEvent::MessageReceived {
+                message: Message::Request(request),
+                source,
+                destination,
+                transport_type: TransportType::Tcp,
+                raw_bytes: Some(Bytes::from_static(RAW_SECRET.as_bytes())),
+                timing: None,
+                connection_metadata: None,
+            }
+        );
+
+        let response_debug = format!(
+            "{:?}",
+            TransportEvent::MessageReceived {
+                message: Message::Response(
+                    Response::new(StatusCode::Ok).with_reason(REASON_SECRET),
+                ),
+                source,
+                destination,
+                transport_type: TransportType::Tls,
+                raw_bytes: None,
+                timing: None,
+                connection_metadata: None,
+            }
+        );
+
+        for (debug, secrets) in [
+            (
+                request_debug,
+                [URI_SECRET, AUTH_SECRET, SDP_SECRET, RAW_SECRET],
+            ),
+            (
+                response_debug,
+                [REASON_SECRET, AUTH_SECRET, SDP_SECRET, RAW_SECRET],
+            ),
+        ] {
+            for secret in secrets {
+                assert!(!debug.contains(secret));
+            }
+            assert!(debug.contains("header_count"));
+            assert!(debug.contains("body_len"));
+            assert!(debug.contains("raw_bytes_present"));
+            assert!(debug.contains("raw_bytes_len"));
+        }
     }
 }

@@ -831,7 +831,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typed_send_rejects_auth_injection_but_raw_send_remains_verbatim() {
+    async fn typed_send_rejects_unsafe_fields_but_raw_send_remains_verbatim() {
         let capture = tokio::net::UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("capture bind");
@@ -854,12 +854,26 @@ mod tests {
         response
             .headers
             .push(malicious(HeaderName::Other("PROXY-authorization".into())));
+        let mut malformed_name = SimpleRequestBuilder::new(Method::Options, "sip:example.com")
+            .unwrap()
+            .build();
+        malformed_name.headers.push(TypedHeader::Other(
+            HeaderName::Other("X-Context: injected".into()),
+            HeaderValue::Raw(b"udp-name-secret".to_vec()),
+        ));
+        let invalid_reason =
+            Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: udp-reason-secret");
 
-        for message in [Message::Request(request), Message::Response(response)] {
+        for message in [
+            Message::Request(request),
+            Message::Response(response),
+            Message::Request(malformed_name),
+            Message::Response(invalid_reason),
+        ] {
             let error = transport
                 .send_message(message, destination)
                 .await
-                .expect_err("typed UDP send must reject credential injection");
+                .expect_err("typed UDP send must reject unsafe fields");
             assert!(matches!(error, Error::ProtocolError(_)));
             assert!(!error.to_string().contains("X-Injected"));
         }

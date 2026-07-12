@@ -293,6 +293,12 @@ impl Transport for MultiplexedTransport {
         mut message: Message,
         destination: SocketAddr,
     ) -> TransportResult<()> {
+        rvoip_sip_core::validation::validate_typed_outbound_message(&message).map_err(|_| {
+            TransportError::ProtocolError(
+                "outbound typed SIP message failed wire-safety validation".into(),
+            )
+        })?;
+
         let (mut transport_type, mut transport) = self.pick_transport(&message, destination)?;
 
         // RFC 3261 §18.1.1 — if the URI selected UDP but the request
@@ -755,6 +761,29 @@ mod tests {
             "sip: URI with no transport= must default to UDP"
         );
         assert_eq!(tcp.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn typed_mux_rejects_invalid_fields_before_child_dispatch() {
+        use rvoip_sip_core::{Response, StatusCode};
+
+        let udp = CountingTransport::new("udp");
+        let mut by_flavour: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
+        by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
+        let mux =
+            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
+        let destination = "127.0.0.1:5060".parse().unwrap();
+        let message = Message::Response(
+            Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: mux-secret"),
+        );
+
+        let error = mux
+            .send_message(message, destination)
+            .await
+            .expect_err("multiplexer must reject before child dispatch");
+        assert!(matches!(error, TransportError::ProtocolError(_)));
+        assert!(!error.to_string().contains("mux-secret"));
+        assert_eq!(udp.count(), 0);
     }
 
     #[tokio::test]

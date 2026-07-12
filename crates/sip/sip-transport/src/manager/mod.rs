@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typed_manager_rejects_request_and_response_auth_before_route_lookup() {
+    async fn typed_manager_rejects_unsafe_fields_before_route_lookup() {
         let (manager, _rx) = TransportManager::with_defaults().await.unwrap();
         let destination: SocketAddr = "127.0.0.1:9".parse().unwrap();
         let mut request = SimpleRequestBuilder::new(Method::Options, "sip:example.com")
@@ -334,13 +334,43 @@ mod tests {
                 "PROXY-authorization".into(),
             )));
 
-        for message in [Message::Request(request), Message::Response(response)] {
+        let mut malformed_name = SimpleRequestBuilder::new(Method::Options, "sip:example.com")
+            .unwrap()
+            .build();
+        malformed_name.headers.push(TypedHeader::Other(
+            HeaderName::Other("Authorization ".into()),
+            HeaderValue::Raw(b"Bearer manager-name-secret".to_vec()),
+        ));
+        let mut unsafe_raw = SimpleRequestBuilder::new(Method::Options, "sip:example.com")
+            .unwrap()
+            .build();
+        unsafe_raw.headers.push(TypedHeader::Other(
+            HeaderName::Other("X-Context".into()),
+            HeaderValue::Raw(b"safe\r\nX-Injected: manager-raw-secret".to_vec()),
+        ));
+        let unsafe_reason =
+            Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: manager-reason-secret");
+
+        for message in [
+            Message::Request(request),
+            Message::Response(response),
+            Message::Request(malformed_name),
+            Message::Request(unsafe_raw),
+            Message::Response(unsafe_reason),
+        ] {
             let error = manager
                 .send_message(message, destination)
                 .await
-                .expect_err("credential injection must fail before transport lookup");
+                .expect_err("unsafe typed field must fail before transport lookup");
             assert!(matches!(error, Error::ProtocolError(_)));
-            assert!(!error.to_string().contains("X-Injected"));
+            for secret in [
+                "X-Injected",
+                "manager-name-secret",
+                "manager-raw-secret",
+                "manager-reason-secret",
+            ] {
+                assert!(!error.to_string().contains(secret));
+            }
         }
     }
 }

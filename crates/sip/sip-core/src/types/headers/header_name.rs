@@ -160,6 +160,35 @@ pub enum HeaderName {
 }
 
 impl HeaderName {
+    /// Whether this header name is safe to serialize as an RFC 3261 token.
+    ///
+    /// Known typed names are always canonical tokens. Extension names remain
+    /// caller supplied, so typed transport boundaries must reject whitespace,
+    /// colons, line breaks, and non-ASCII aliases before serialization.
+    pub fn is_valid_wire_name(&self) -> bool {
+        match self {
+            HeaderName::Other(name) => {
+                !name.is_empty()
+                    && name.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric()
+                            || matches!(
+                                byte,
+                                b'-' | b'.'
+                                    | b'!'
+                                    | b'%'
+                                    | b'*'
+                                    | b'_'
+                                    | b'+'
+                                    | b'`'
+                                    | b'\''
+                                    | b'~'
+                            )
+                    })
+            }
+            _ => true,
+        }
+    }
+
     /// Returns the canonical name of the header
     pub fn as_str(&self) -> &str {
         match self {
