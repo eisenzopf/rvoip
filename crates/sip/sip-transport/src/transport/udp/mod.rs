@@ -20,8 +20,8 @@ use tracing::{debug, error, info, trace, warn};
 use crate::diagnostics;
 use crate::error::{Error, Result};
 use crate::transport::{
-    validate_typed_outbound_message, Transport, TransportEvent, TransportReceiveTiming,
-    TransportType,
+    safe_method_label, validate_typed_outbound_message, Transport, TransportEvent,
+    TransportReceiveTiming, TransportType,
 };
 use rvoip_sip_core::Message;
 
@@ -637,7 +637,7 @@ impl Transport for UdpTransport {
         info!(
             "Sending {} message to {}",
             if let Message::Request(ref req) = message {
-                format!("{}", req.method)
+                safe_method_label(&req.method).to_string()
             } else {
                 "response".to_string()
             },

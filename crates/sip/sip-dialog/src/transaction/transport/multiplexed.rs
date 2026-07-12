@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use rvoip_sip_core::{HeaderName, Message, Request, TypedHeader, Uri};
+use rvoip_sip_core::{HeaderName, Message, Method, Request, TypedHeader, Uri};
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{
     error::{Error as TransportError, Result as TransportResult},
@@ -31,6 +31,26 @@ use tracing::{debug, trace, warn};
 
 use super::SipTraceRuntime;
 use rvoip_infra_common::events::cross_crate::SipTraceDirection;
+
+fn safe_method_label(method: &Method) -> &'static str {
+    match method {
+        Method::Invite => "INVITE",
+        Method::Ack => "ACK",
+        Method::Bye => "BYE",
+        Method::Cancel => "CANCEL",
+        Method::Register => "REGISTER",
+        Method::Options => "OPTIONS",
+        Method::Subscribe => "SUBSCRIBE",
+        Method::Notify => "NOTIFY",
+        Method::Update => "UPDATE",
+        Method::Refer => "REFER",
+        Method::Info => "INFO",
+        Method::Message => "MESSAGE",
+        Method::Prack => "PRACK",
+        Method::Publish => "PUBLISH",
+        Method::Extension(_) => "extension",
+    }
+}
 
 /// Returns the URI that determines the next hop for an outbound request:
 /// the first Route URI when present, otherwise the Request-URI. Route
@@ -161,21 +181,21 @@ impl MultiplexedTransport {
                 if let Some(transport) = self.transports.get(&want) {
                     trace!(
                         "MultiplexedTransport: routing {} to {} via URI selection",
-                        request.method(),
+                        safe_method_label(&request.method),
                         want
                     );
                     Ok((want, transport.clone()))
                 } else if want == TransportType::Tls {
                     Err(TransportError::UnsupportedTransport(format!(
                         "{} requires TLS by next-hop URI {}, but no TLS transport is registered",
-                        request.method(),
+                        safe_method_label(&request.method),
                         next_hop_uri_for_request(request)
                     )))
                 } else {
                     debug!(
                         "MultiplexedTransport: no {} transport registered for {}; falling back to default",
                         want,
-                        request.method()
+                        safe_method_label(&request.method)
                     );
                     Ok((self.default.default_transport_type(), self.default.clone()))
                 }
@@ -314,7 +334,7 @@ impl Transport for MultiplexedTransport {
                         Some(tcp) => {
                             debug!(
                                 "MultiplexedTransport: {} is {} bytes (UDP limit {}), failing over to TCP per RFC 3261 §18.1.1",
-                                req.method(), size, limit
+                                safe_method_label(&req.method), size, limit
                             );
                             if let Message::Request(ref mut req_mut) = message {
                                 crate::transaction::utils::set_top_via_protocol(req_mut, "TCP");
@@ -325,7 +345,7 @@ impl Transport for MultiplexedTransport {
                         None => {
                             warn!(
                                 "MultiplexedTransport: {} is {} bytes (UDP limit {}) and no TCP transport is registered; refusing to send",
-                                req.method(), size, limit
+                                safe_method_label(&req.method), size, limit
                             );
                             return Err(TransportError::MessageTooLarge(size));
                         }
@@ -765,6 +785,9 @@ mod tests {
 
     #[tokio::test]
     async fn typed_mux_rejects_invalid_fields_before_child_dispatch() {
+        use rvoip_sip_core::types::call_info::CallInfoValue;
+        use rvoip_sip_core::types::headers::HeaderValue;
+        use rvoip_sip_core::types::param::Param;
         use rvoip_sip_core::{Response, StatusCode};
 
         let udp = CountingTransport::new("udp");
@@ -773,16 +796,40 @@ mod tests {
         let mux =
             MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
         let destination = "127.0.0.1:5060".parse().unwrap();
-        let message = Message::Response(
-            Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: mux-secret"),
+        let mut unsafe_structured = Request::new(Method::Options, Uri::sip("example.test"));
+        unsafe_structured.headers.push(TypedHeader::Other(
+            HeaderName::Other("X-Structured".into()),
+            HeaderValue::CallInfo(vec![CallInfoValue::new(Uri::sip("example.test"))
+                .with_param(Param::Other(
+                    "purpose\r\nX-Injected: mux-structured-secret".into(),
+                    None,
+                ))]),
+        ));
+        let unsafe_uri = Request::new(
+            Method::Options,
+            Uri::custom("sip:bob@example.test\r\nX-Injected: mux-uri-secret"),
         );
 
-        let error = mux
-            .send_message(message, destination)
-            .await
-            .expect_err("multiplexer must reject before child dispatch");
-        assert!(matches!(error, TransportError::ProtocolError(_)));
-        assert!(!error.to_string().contains("mux-secret"));
+        for message in [
+            Message::Response(
+                Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: mux-reason-secret"),
+            ),
+            Message::Request(unsafe_structured),
+            Message::Request(unsafe_uri),
+        ] {
+            let error = mux
+                .send_message(message, destination)
+                .await
+                .expect_err("multiplexer must reject before child dispatch");
+            assert!(matches!(error, TransportError::ProtocolError(_)));
+            for secret in [
+                "mux-reason-secret",
+                "mux-structured-secret",
+                "mux-uri-secret",
+            ] {
+                assert!(!error.to_string().contains(secret));
+            }
+        }
         assert_eq!(udp.count(), 0);
     }
 

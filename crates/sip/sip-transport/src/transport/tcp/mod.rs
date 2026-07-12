@@ -7,7 +7,9 @@ pub use listener::TcpListener;
 pub use pool::{ConnectionPool, PoolConfig};
 
 use crate::error::{Error, Result};
-use crate::transport::{validate_typed_outbound_message, Transport, TransportEvent, TransportType};
+use crate::transport::{
+    safe_method_label, validate_typed_outbound_message, Transport, TransportEvent, TransportType,
+};
 use bytes::Bytes;
 use rvoip_sip_core::Message;
 use std::fmt;
@@ -274,7 +276,7 @@ impl Transport for TcpTransport {
         debug!(
             "Sending {} message to {}",
             if let Message::Request(ref req) = message {
-                format!("{}", req.method)
+                safe_method_label(&req.method).to_string()
             } else {
                 "response".to_string()
             },

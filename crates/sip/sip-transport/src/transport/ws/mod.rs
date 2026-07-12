@@ -7,7 +7,9 @@ pub use listener::WebSocketListener;
 pub(crate) use stream::SipWsStream;
 
 use crate::error::{Error, Result};
-use crate::transport::{validate_typed_outbound_message, Transport, TransportEvent, TransportType};
+use crate::transport::{
+    safe_method_label, validate_typed_outbound_message, Transport, TransportEvent, TransportType,
+};
 use futures_util::StreamExt;
 use rvoip_sip_core::Message;
 use std::collections::HashMap;
@@ -618,7 +620,7 @@ impl Transport for WebSocketTransport {
         debug!(
             "Sending {} message to {}",
             if let Message::Request(ref req) = message {
-                format!("{}", req.method)
+                safe_method_label(&req.method).to_string()
             } else {
                 "response".to_string()
             },

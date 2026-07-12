@@ -8,7 +8,7 @@ use std::{fmt, net::SocketAddr};
 
 use crate::transaction::TransactionKey;
 use rvoip_sip_core::types::refer_to::ReferTo;
-use rvoip_sip_core::{Request, Response, Uri};
+use rvoip_sip_core::{Method, Request, Response, Uri};
 
 use crate::dialog::DialogId;
 
@@ -276,6 +276,38 @@ pub enum SessionCoordinationEvent {
     },
 }
 
+fn safe_method_label(method: &Method) -> &'static str {
+    match method {
+        Method::Invite => "INVITE",
+        Method::Ack => "ACK",
+        Method::Bye => "BYE",
+        Method::Cancel => "CANCEL",
+        Method::Register => "REGISTER",
+        Method::Options => "OPTIONS",
+        Method::Subscribe => "SUBSCRIBE",
+        Method::Notify => "NOTIFY",
+        Method::Update => "UPDATE",
+        Method::Refer => "REFER",
+        Method::Info => "INFO",
+        Method::Message => "MESSAGE",
+        Method::Prack => "PRACK",
+        Method::Publish => "PUBLISH",
+        Method::Extension(_) => "extension",
+    }
+}
+
+struct SafeTransactionKeyDebug<'a>(&'a TransactionKey);
+
+impl fmt::Debug for SafeTransactionKeyDebug<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TransactionKey")
+            .field("method", &safe_method_label(&self.0.method))
+            .field("is_server", &self.0.is_server)
+            .finish_non_exhaustive()
+    }
+}
+
 impl fmt::Debug for SessionCoordinationEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -287,8 +319,8 @@ impl fmt::Debug for SessionCoordinationEvent {
             } => formatter
                 .debug_struct("IncomingCall")
                 .field("dialog_id", dialog_id)
-                .field("transaction_id", transaction_id)
-                .field("request_method", &request.method())
+                .field("transaction_id", &SafeTransactionKeyDebug(transaction_id))
+                .field("request_method", &safe_method_label(&request.method))
                 .field("request_header_count", &request.headers.len())
                 .field("request_body_len", &request.body.len())
                 .field("source", source)
@@ -300,8 +332,8 @@ impl fmt::Debug for SessionCoordinationEvent {
             } => formatter
                 .debug_struct("ReInvite")
                 .field("dialog_id", dialog_id)
-                .field("transaction_id", transaction_id)
-                .field("request_method", &request.method())
+                .field("transaction_id", &SafeTransactionKeyDebug(transaction_id))
+                .field("request_method", &safe_method_label(&request.method))
                 .field("request_header_count", &request.headers.len())
                 .field("request_body_len", &request.body.len())
                 .finish(),
@@ -350,7 +382,7 @@ impl fmt::Debug for SessionCoordinationEvent {
                 .field("response_status", &response.status_code())
                 .field("response_header_count", &response.headers.len())
                 .field("response_body_len", &response.body.len())
-                .field("transaction_id", transaction_id)
+                .field("transaction_id", &SafeTransactionKeyDebug(transaction_id))
                 .finish(),
             Self::RegistrationRequest {
                 transaction_id,
@@ -359,7 +391,7 @@ impl fmt::Debug for SessionCoordinationEvent {
                 expires,
             } => formatter
                 .debug_struct("RegistrationRequest")
-                .field("transaction_id", transaction_id)
+                .field("transaction_id", &SafeTransactionKeyDebug(transaction_id))
                 .field("from_uri", &"[redacted]")
                 .field("from_uri_present", &true)
                 .field("contact_uri", &"[redacted]")
@@ -404,7 +436,7 @@ impl fmt::Debug for SessionCoordinationEvent {
             } => formatter
                 .debug_struct("RequestFailed")
                 .field("dialog_id", dialog_id)
-                .field("transaction_id", transaction_id)
+                .field("transaction_id", &SafeTransactionKeyDebug(transaction_id))
                 .field("status_code", status_code)
                 .field("reason_phrase", &"[redacted]")
                 .field("reason_phrase_len", &reason_phrase.len())
@@ -417,8 +449,8 @@ impl fmt::Debug for SessionCoordinationEvent {
                 source,
             } => formatter
                 .debug_struct("CapabilityQuery")
-                .field("transaction_id", transaction_id)
-                .field("request_method", &request.method())
+                .field("transaction_id", &SafeTransactionKeyDebug(transaction_id))
+                .field("request_method", &safe_method_label(&request.method))
                 .field("request_header_count", &request.headers.len())
                 .field("request_body_len", &request.body.len())
                 .field("source", source)
@@ -430,7 +462,7 @@ impl fmt::Debug for SessionCoordinationEvent {
             } => formatter
                 .debug_struct("AckSent")
                 .field("dialog_id", dialog_id)
-                .field("transaction_id", transaction_id)
+                .field("transaction_id", &SafeTransactionKeyDebug(transaction_id))
                 .field("negotiated_sdp_present", &negotiated_sdp.is_some())
                 .field(
                     "negotiated_sdp_len",
@@ -444,7 +476,7 @@ impl fmt::Debug for SessionCoordinationEvent {
             } => formatter
                 .debug_struct("AckReceived")
                 .field("dialog_id", dialog_id)
-                .field("transaction_id", transaction_id)
+                .field("transaction_id", &SafeTransactionKeyDebug(transaction_id))
                 .field("negotiated_sdp_present", &negotiated_sdp.is_some())
                 .field(
                     "negotiated_sdp_len",
@@ -481,7 +513,7 @@ impl fmt::Debug for SessionCoordinationEvent {
             } => formatter
                 .debug_struct("TransferRequest")
                 .field("dialog_id", dialog_id)
-                .field("transaction_id", transaction_id)
+                .field("transaction_id", &SafeTransactionKeyDebug(transaction_id))
                 .field("refer_to", &"[redacted]")
                 .field("refer_to_present", &true)
                 .field("referred_by_present", &referred_by.is_some())
@@ -550,6 +582,8 @@ mod tests {
         const REASON_SECRET: &str = "coordination-reason-secret";
         const SDP_SECRET: &str = "v=0 s=coordination-sdp-secret";
         const RAW_SECRET: &str = "coordination-raw-request-secret";
+        const METHOD_SECRET: &str = "coordination-extension-method-secret";
+        const BRANCH_SECRET: &str = "z9hG4bK-coordination-branch-secret";
         let dialog_id = DialogId::new();
 
         let mut request = Request::new(
@@ -607,6 +641,22 @@ mod tests {
                     raw_request: Some(Bytes::from_static(RAW_SECRET.as_bytes())),
                 }
             ),
+            format!(
+                "{:?}",
+                SessionCoordinationEvent::IncomingCall {
+                    dialog_id: DialogId::new(),
+                    transaction_id: TransactionKey::new(
+                        BRANCH_SECRET.into(),
+                        Method::Extension(METHOD_SECRET.into()),
+                        true,
+                    ),
+                    request: Request::new(
+                        Method::Extension(METHOD_SECRET.into()),
+                        "sip:example.test".parse().unwrap(),
+                    ),
+                    source: "127.0.0.1:5060".parse().unwrap(),
+                }
+            ),
         ];
 
         for debug in &debug_outputs {
@@ -617,6 +667,8 @@ mod tests {
                 REASON_SECRET,
                 SDP_SECRET,
                 RAW_SECRET,
+                METHOD_SECRET,
+                BRANCH_SECRET,
             ] {
                 assert!(!debug.contains(secret));
             }
@@ -626,5 +678,6 @@ mod tests {
         assert!(debug_outputs[1].contains("response_status"));
         assert!(debug_outputs[2].contains("sdp_len"));
         assert!(debug_outputs[4].contains("raw_request_len"));
+        assert!(debug_outputs[5].contains("extension"));
     }
 }

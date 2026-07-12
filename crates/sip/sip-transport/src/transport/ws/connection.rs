@@ -350,7 +350,9 @@ mod tests {
     use super::*;
     #[cfg(feature = "ws")]
     use futures_util::StreamExt;
-    use rvoip_sip_core::{Message, Method, Response, StatusCode};
+    use rvoip_sip_core::{
+        CallId, Message, Method, Request, Response, StatusCode, TypedHeader, Uri,
+    };
     use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 
     // For testing only: a simplified WebSocketConnection without real WebSocket dependencies
@@ -448,7 +450,7 @@ mod tests {
 
     #[cfg(feature = "ws")]
     #[tokio::test]
-    async fn typed_direct_websocket_rejects_invalid_reason_before_frame_io() {
+    async fn typed_direct_websocket_rejects_unsafe_serialized_fields_before_frame_io() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
         let server_task = tokio::spawn(async move {
@@ -468,16 +470,35 @@ mod tests {
         let (writer, _reader) = client_stream.split();
         let connection =
             WebSocketConnection::from_writer(writer, server_addr, false, SIP_WS_SUBPROTOCOL.into());
-        let message = Message::Response(
-            Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: direct-websocket-secret"),
+        let mut unsafe_header = Request::new(Method::Options, Uri::sip("example.test"));
+        unsafe_header.headers.push(TypedHeader::CallId(CallId::new(
+            "safe\r\nX-Injected: direct-websocket-header-secret",
+        )));
+        let unsafe_uri = Request::new(
+            Method::Options,
+            Uri::custom("sip:bob@example.test\r\nX-Injected: direct-websocket-uri-secret"),
         );
-
-        let error = connection
-            .send_message(&message)
-            .await
-            .expect_err("typed direct WebSocket send must fail closed");
-        assert!(matches!(error, Error::ProtocolError(_)));
-        assert!(!error.to_string().contains("direct-websocket-secret"));
+        for message in [
+            Message::Response(
+                Response::new(StatusCode::Ok)
+                    .with_reason("OK\r\nX-Injected: direct-websocket-reason-secret"),
+            ),
+            Message::Request(unsafe_header),
+            Message::Request(unsafe_uri),
+        ] {
+            let error = connection
+                .send_message(&message)
+                .await
+                .expect_err("typed direct WebSocket send must fail closed");
+            assert!(matches!(error, Error::ProtocolError(_)));
+            for secret in [
+                "direct-websocket-reason-secret",
+                "direct-websocket-header-secret",
+                "direct-websocket-uri-secret",
+            ] {
+                assert!(!error.to_string().contains(secret));
+            }
+        }
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), server_stream.next())
                 .await

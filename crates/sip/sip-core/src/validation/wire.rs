@@ -11,6 +11,7 @@ use crate::types::{
     Method,
 };
 use crate::{Error, Result};
+use std::fmt::{self, Write as _};
 
 /// Maximum encoded size of an outbound `Authorization` or
 /// `Proxy-Authorization` header value.
@@ -27,8 +28,17 @@ pub const MAX_AUTHORIZATION_HEADER_VALUE_BYTES: usize = 16 * 1024;
 /// field from becoming an unbounded allocation or write.
 pub const MAX_RAW_HEADER_VALUE_BYTES: usize = 64 * 1024;
 
+/// Maximum encoded size of one complete typed SIP header line, excluding CRLF.
+///
+/// The small allowance above [`MAX_RAW_HEADER_VALUE_BYTES`] preserves the
+/// existing maximum raw value together with its field name and separator.
+pub const MAX_TYPED_HEADER_LINE_BYTES: usize = MAX_RAW_HEADER_VALUE_BYTES + 1024;
+
 /// Maximum encoded size of an outbound SIP response reason phrase.
 pub const MAX_RESPONSE_REASON_PHRASE_BYTES: usize = 1024;
+
+/// Maximum encoded size of an outbound SIP request start line, excluding CRLF.
+pub const MAX_REQUEST_START_LINE_BYTES: usize = 64 * 1024;
 
 fn validation_error(message: impl Into<String>) -> Error {
     Error::ValidationError(message.into())
@@ -46,6 +56,68 @@ fn contains_forbidden_inline_control(value: &str) -> bool {
     value
         .chars()
         .any(|character| character.is_control() && character != '\t')
+}
+
+fn is_sip_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'-' | b'.' | b'!' | b'%' | b'*' | b'_' | b'+' | b'`' | b'\'' | b'~'
+                )
+        })
+}
+
+/// A formatting sink that retains at most `limit` bytes and stops the formatter
+/// at the first overflow. The overflow flag distinguishes that intentional
+/// stop from an unrelated `Display` failure.
+struct BoundedWireField {
+    rendered: String,
+    limit: usize,
+    overflowed: bool,
+}
+
+impl BoundedWireField {
+    fn new(limit: usize) -> Self {
+        Self {
+            rendered: String::with_capacity(limit.min(1024)),
+            limit,
+            overflowed: false,
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        &self.rendered
+    }
+
+    fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+}
+
+impl fmt::Write for BoundedWireField {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        if self.overflowed {
+            return Err(fmt::Error);
+        }
+
+        let remaining = self.limit.saturating_sub(self.rendered.len());
+        if value.len() <= remaining {
+            self.rendered.push_str(value);
+            return Ok(());
+        }
+
+        // Keep the retained prefix valid UTF-8 even when the byte limit lands
+        // in the middle of a multi-byte scalar value.
+        let mut end = remaining;
+        while end > 0 && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.rendered.push_str(&value[..end]);
+        self.overflowed = true;
+        Err(fmt::Error)
+    }
 }
 
 fn validate_raw_header_value(value: &[u8]) -> Result<()> {
@@ -66,16 +138,125 @@ fn validate_raw_header_value(value: &[u8]) -> Result<()> {
 
 fn validate_outbound_header_fields(headers: &[TypedHeader]) -> Result<()> {
     for header in headers {
+        // Check caller-owned extension names by reference before `name()`
+        // clones them. This keeps even a pathological extension name bounded.
         if let TypedHeader::Other(name, value) = header {
+            if name.as_str().len() > MAX_TYPED_HEADER_LINE_BYTES {
+                return Err(validation_error("SIP header line exceeds the size limit"));
+            }
             if !name.is_valid_wire_name() {
-                return Err(validation_error(
-                    "SIP extension header name is not a valid token",
-                ));
+                return Err(validation_error("SIP header name is not a valid token"));
             }
             if let HeaderValue::Raw(value) = value {
                 validate_raw_header_value(value)?;
             }
         }
+
+        let expected_name = header.name();
+        if !expected_name.is_valid_wire_name() {
+            return Err(validation_error("SIP header name is not a valid token"));
+        }
+
+        // Validate the exact representation Message::to_bytes will append to
+        // the wire. This closes nested structured-value and known-header
+        // bypasses without duplicating every public header type's internals.
+        // The bounded sink avoids allocating the complete caller-owned field.
+        let mut rendered = BoundedWireField::new(MAX_TYPED_HEADER_LINE_BYTES);
+        if write!(&mut rendered, "{header}").is_err() {
+            return if rendered.overflowed() {
+                Err(validation_error("SIP header line exceeds the size limit"))
+            } else {
+                Err(validation_error("SIP typed header could not be rendered"))
+            };
+        }
+        if contains_forbidden_inline_control(rendered.as_str()) {
+            return Err(validation_error(
+                "SIP header line contains a forbidden control character",
+            ));
+        }
+        let Some((rendered_name, _)) = rendered.as_str().split_once(':') else {
+            return Err(validation_error(
+                "SIP typed header did not render a field-name separator",
+            ));
+        };
+        if rendered_name != expected_name.as_str() {
+            return Err(validation_error(
+                "SIP typed header rendered an unexpected field name",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_request_start_line(request: &Request) -> Result<()> {
+    let method = request.method.as_str();
+    if !is_sip_token(method) {
+        return Err(validation_error("SIP request method is not a valid token"));
+    }
+
+    let mut uri = BoundedWireField::new(MAX_REQUEST_START_LINE_BYTES);
+    if write!(&mut uri, "{}", request.uri()).is_err() {
+        return if uri.overflowed() {
+            Err(validation_error(
+                "SIP request start line exceeds the size limit",
+            ))
+        } else {
+            Err(validation_error("SIP request URI could not be rendered"))
+        };
+    }
+    if uri.as_str().is_empty()
+        || uri
+            .as_str()
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(validation_error(
+            "SIP request URI is not a valid start-line component",
+        ));
+    }
+
+    let mut version = BoundedWireField::new(MAX_REQUEST_START_LINE_BYTES);
+    if write!(&mut version, "{}", request.version).is_err() {
+        return if version.overflowed() {
+            Err(validation_error(
+                "SIP request start line exceeds the size limit",
+            ))
+        } else {
+            Err(validation_error(
+                "SIP request version could not be rendered",
+            ))
+        };
+    }
+    if version.as_str().is_empty() || version.as_str().chars().any(char::is_whitespace) {
+        return Err(validation_error(
+            "SIP request version is not a valid start-line component",
+        ));
+    }
+
+    let mut rendered = BoundedWireField::new(MAX_REQUEST_START_LINE_BYTES);
+    if write!(
+        &mut rendered,
+        "{} {} {}",
+        method,
+        uri.as_str(),
+        version.as_str()
+    )
+    .is_err()
+    {
+        return if rendered.overflowed() {
+            Err(validation_error(
+                "SIP request start line exceeds the size limit",
+            ))
+        } else {
+            Err(validation_error(
+                "SIP request start line could not be rendered",
+            ))
+        };
+    }
+    if contains_forbidden_inline_control(rendered.as_str()) {
+        return Err(validation_error(
+            "SIP request start line contains a forbidden control character",
+        ));
     }
     Ok(())
 }
@@ -226,6 +407,7 @@ pub fn validate_outbound_authorization_headers(message: &Message) -> Result<()> 
 pub fn validate_typed_outbound_message(message: &Message) -> Result<()> {
     match message {
         Message::Request(request) => {
+            validate_request_start_line(request)?;
             validate_outbound_header_fields(&request.headers)?;
             validate_authorization_headers(&request.headers)
         }
@@ -295,6 +477,7 @@ pub fn validate_content_length(headers: &[TypedHeader], body_len: usize) -> Resu
 pub fn validate_wire_request(request: &Request) -> Result<()> {
     let headers = &request.headers;
 
+    validate_request_start_line(request)?;
     validate_outbound_header_fields(headers)?;
     validate_authorization_headers(headers)?;
 
@@ -407,7 +590,11 @@ pub fn validate_wire_response(response: &Response) -> Result<()> {
 mod tests {
     use super::*;
     use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
-    use crate::types::{ContentLength, ReferTo, StatusCode};
+    use crate::types::{
+        call_info::{CallInfo, CallInfoValue},
+        param::Param,
+        CallId, ContentLength, Host, ReferTo, Scheme, StatusCode, Subject, Uri,
+    };
     use std::str::FromStr;
 
     fn valid_request() -> Request {
@@ -638,6 +825,131 @@ mod tests {
             validate_typed_outbound_message(&Message::Request(request))
                 .expect("valid extension field boundary");
         }
+    }
+
+    #[test]
+    fn typed_outbound_validation_covers_known_and_nested_structured_header_values() {
+        const SECRET: &str = "typed-structured-field-secret";
+        let call_info = CallInfoValue::new(Uri::sip("example.test")).with_param(Param::Other(
+            format!("purpose\r\nX-Injected: {SECRET}"),
+            None,
+        ));
+
+        for header in [
+            TypedHeader::CallId(CallId::new(format!("safe\r\nX-Injected: {SECRET}"))),
+            TypedHeader::Subject(Subject::new(format!("safe\nX-Injected: {SECRET}"))),
+            TypedHeader::Server(vec![format!("safe\rX-Injected: {SECRET}")]),
+            TypedHeader::Other(
+                HeaderName::Other("X-Structured".into()),
+                HeaderValue::CallInfo(vec![call_info.clone()]),
+            ),
+        ] {
+            let mut request = valid_request();
+            request.headers.push(header);
+            let error = validate_typed_outbound_message(&Message::Request(request)).unwrap_err();
+            assert!(error.to_string().contains("header line"));
+            assert!(!error.to_string().contains(SECRET));
+        }
+    }
+
+    #[test]
+    fn typed_outbound_validation_bounds_structured_header_rendering() {
+        let mut request = valid_request();
+        request.headers.push(TypedHeader::Server(vec![
+            "a".repeat(MAX_TYPED_HEADER_LINE_BYTES + 1)
+        ]));
+
+        let error = validate_typed_outbound_message(&Message::Request(request)).unwrap_err();
+        assert!(error.to_string().contains("header line exceeds"));
+
+        // A long collection must stop at the first overflowing element rather
+        // than formatting the entire caller-owned vector.
+        let mut request = valid_request();
+        request.headers.push(TypedHeader::Server(vec![
+            "a".to_string();
+            MAX_TYPED_HEADER_LINE_BYTES / 2
+        ]));
+        let error = validate_typed_outbound_message(&Message::Request(request)).unwrap_err();
+        assert!(error.to_string().contains("header line exceeds"));
+
+        // Exercise a byte limit that lands inside a multi-byte scalar value.
+        let mut request = valid_request();
+        request.headers.push(TypedHeader::Subject(Subject::new(
+            "🦀".repeat(MAX_TYPED_HEADER_LINE_BYTES / 4 + 1),
+        )));
+        let error = validate_typed_outbound_message(&Message::Request(request)).unwrap_err();
+        assert!(error.to_string().contains("header line exceeds"));
+    }
+
+    #[test]
+    fn typed_outbound_validation_rejects_unsafe_request_start_line_components() {
+        const SECRET: &str = "typed-start-line-secret";
+        let nested_param_uri = Uri::sip("example.test").with_parameter(Param::Other(
+            format!("transport\r\nX-Injected: {SECRET}"),
+            None,
+        ));
+        let nested_domain_uri = Uri::new(
+            Scheme::Sip,
+            Host::domain(format!("example.test\r\nX-Injected: {SECRET}")),
+        );
+
+        for request in [
+            Request::new(
+                Method::Extension(format!("SAFE\r\nX-Injected: {SECRET}")),
+                Uri::sip("example.test"),
+            ),
+            Request::new(
+                Method::Options,
+                Uri::custom(format!("sip:bob@example.test\r\nX-Injected: {SECRET}")),
+            ),
+            Request::new(Method::Options, nested_param_uri),
+            Request::new(Method::Options, nested_domain_uri),
+        ] {
+            let error = validate_typed_outbound_message(&Message::Request(request)).unwrap_err();
+            assert!(error.to_string().contains("request"));
+            assert!(!error.to_string().contains(SECRET));
+        }
+    }
+
+    #[test]
+    fn typed_outbound_validation_bounds_structured_uri_rendering() {
+        for uri in [
+            Uri::custom("a".repeat(MAX_REQUEST_START_LINE_BYTES + 1)),
+            Uri::new(
+                Scheme::Sip,
+                Host::domain("a".repeat(MAX_REQUEST_START_LINE_BYTES + 1)),
+            ),
+        ] {
+            let request = Request::new(Method::Options, uri);
+            let error = validate_typed_outbound_message(&Message::Request(request)).unwrap_err();
+            assert!(error.to_string().contains("start line exceeds"));
+        }
+    }
+
+    #[test]
+    fn typed_outbound_validation_accepts_valid_extensions_tabs_and_call_info() {
+        let call_info = CallInfo::with_value(
+            CallInfoValue::new(Uri::sip("example.test"))
+                .with_param(Param::Other("purpose".into(), Some("icon".into()))),
+        );
+        let mut request = Request::new(
+            Method::Extension("X-BRIDGEFU".into()),
+            Uri::custom("sip:bob@example.test;transport=tcp"),
+        );
+        request
+            .headers
+            .push(TypedHeader::Subject(Subject::new("valid\tSWS")));
+        request.headers.push(TypedHeader::CallInfo(call_info));
+        request.headers.push(TypedHeader::Other(
+            HeaderName::Other("X-Large-Valid".into()),
+            HeaderValue::Raw(vec![b'a'; MAX_RAW_HEADER_VALUE_BYTES]),
+        ));
+
+        validate_typed_outbound_message(&Message::Request(request.clone()))
+            .expect("valid typed extension fields");
+        assert!(Message::Request(request)
+            .to_string()
+            .contains("Call-Info: <sip:example.test>;purpose=icon"));
     }
 
     #[test]

@@ -567,7 +567,7 @@ impl fmt::Display for TypedHeader {
                 write!(f, "{}: {}", HeaderName::AlertInfo, alert_info)
             }
             TypedHeader::CallInfo(call_info) => {
-                write!(f, "{}", call_info)
+                write!(f, "{}: {}", HeaderName::CallInfo, call_info)
             }
             TypedHeader::Event(event_data) => write!(f, "{}: {}", HeaderName::Event, event_data),
             TypedHeader::SubscriptionState(state) => {

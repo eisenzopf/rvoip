@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use crate::error::{Error, Result};
 use bytes::Bytes;
-use rvoip_sip_core::Message;
+use rvoip_sip_core::{Message, Method};
 
 pub mod tcp;
 pub mod tls;
@@ -25,6 +25,27 @@ pub(crate) fn validate_typed_outbound_message(message: &Message) -> Result<()> {
     rvoip_sip_core::validation::validate_typed_outbound_message(message).map_err(|_| {
         Error::ProtocolError("outbound typed SIP message failed wire-safety validation".to_string())
     })
+}
+
+/// Return a log-safe method label without reflecting extension method text.
+pub(crate) fn safe_method_label(method: &Method) -> &'static str {
+    match method {
+        Method::Invite => "INVITE",
+        Method::Ack => "ACK",
+        Method::Bye => "BYE",
+        Method::Cancel => "CANCEL",
+        Method::Register => "REGISTER",
+        Method::Options => "OPTIONS",
+        Method::Subscribe => "SUBSCRIBE",
+        Method::Notify => "NOTIFY",
+        Method::Update => "UPDATE",
+        Method::Refer => "REFER",
+        Method::Info => "INFO",
+        Method::Message => "MESSAGE",
+        Method::Prack => "PRACK",
+        Method::Publish => "PUBLISH",
+        Method::Extension(_) => "extension",
+    }
 }
 
 /// Represents the transport type/protocol
@@ -192,7 +213,7 @@ impl fmt::Debug for TransportEvent {
                     Message::Request(request) => {
                         debug
                             .field("message_kind", &"request")
-                            .field("method", &request.method())
+                            .field("method", &safe_method_label(&request.method))
                             .field("header_count", &request.headers.len())
                             .field("body_len", &request.body.len());
                     }
@@ -536,6 +557,7 @@ mod tests {
         const SDP_SECRET: &str = "v=0 s=transport-event-sdp-secret";
         const RAW_SECRET: &str = "raw-wire-secret";
         const REASON_SECRET: &str = "transport-event-reason-secret";
+        const METHOD_SECRET: &str = "transport-event-extension-secret";
         let source = "127.0.0.1:5060".parse().unwrap();
         let destination = "127.0.0.1:5061".parse().unwrap();
 
@@ -575,6 +597,21 @@ mod tests {
                 connection_metadata: None,
             }
         );
+        let extension_debug = format!(
+            "{:?}",
+            TransportEvent::MessageReceived {
+                message: Message::Request(Request::new(
+                    Method::Extension(METHOD_SECRET.into()),
+                    "sip:example.test".parse().unwrap(),
+                )),
+                source,
+                destination,
+                transport_type: TransportType::Udp,
+                raw_bytes: None,
+                timing: None,
+                connection_metadata: None,
+            }
+        );
 
         for (debug, secrets) in [
             (
@@ -584,6 +621,10 @@ mod tests {
             (
                 response_debug,
                 [REASON_SECRET, AUTH_SECRET, SDP_SECRET, RAW_SECRET],
+            ),
+            (
+                extension_debug,
+                [METHOD_SECRET, AUTH_SECRET, SDP_SECRET, RAW_SECRET],
             ),
         ] {
             for secret in secrets {

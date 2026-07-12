@@ -801,7 +801,7 @@ mod auth_boundary_tests {
     use super::*;
     use rvoip_sip_core::builder::SimpleRequestBuilder;
     use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
-    use rvoip_sip_core::{Message, Method, Response, StatusCode};
+    use rvoip_sip_core::{CallId, Message, Method, Request, Response, StatusCode, Uri};
 
     #[tokio::test]
     async fn typed_tls_send_rejects_auth_before_connect() {
@@ -823,8 +823,21 @@ mod auth_boundary_tests {
 
         let invalid_reason =
             Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: tls-reason-secret");
+        let mut invalid_header = Request::new(Method::Options, Uri::sip("example.test"));
+        invalid_header.headers.push(TypedHeader::CallId(CallId::new(
+            "safe\r\nX-Injected: tls-header-secret",
+        )));
+        let invalid_uri = Request::new(
+            Method::Options,
+            Uri::custom("sips:bob@example.test\r\nX-Injected: tls-uri-secret"),
+        );
 
-        for message in [Message::Request(request), Message::Response(invalid_reason)] {
+        for message in [
+            Message::Request(request),
+            Message::Response(invalid_reason),
+            Message::Request(invalid_header),
+            Message::Request(invalid_uri),
+        ] {
             let error = transport
                 .send_message(message, destination)
                 .await
