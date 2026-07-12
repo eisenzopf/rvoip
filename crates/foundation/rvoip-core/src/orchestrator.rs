@@ -48,7 +48,8 @@ use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
 use rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent;
 use rvoip_media_core::codec::transcoding::Transcoder;
 use rvoip_media_core::processing::format::FormatConverter;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Weak;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
@@ -60,6 +61,9 @@ use tracing::{debug, instrument, warn};
 /// when a coordinator or one of its handlers is slow.
 const CROSS_CRATE_EVENT_QUEUE_CAPACITY: usize = 256;
 const INBOUND_ADMISSION_ADAPTER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+/// Bounds active lifecycle identities plus process-lifetime retired IDs.
+/// Roughly tens of MiB at typical DashMap/UUID overhead per worker.
+const DEFAULT_CONNECTION_ID_BUDGET: usize = 262_144;
 
 #[async_trait::async_trait]
 trait CrossCrateEventSink: Send + Sync {
@@ -156,6 +160,7 @@ struct ConnectionEntry {
     transport: Transport,
     principal: Option<AuthenticatedPrincipal>,
     inbound_context: Option<InboundConnectionContext>,
+    inbound_context_retired: bool,
     inbound_publication: InboundPublicationState,
     deferred_authentication: Option<DeferredAuthentication>,
     deferred_principal_authentication: Option<DeferredPrincipalAuthentication>,
@@ -224,18 +229,33 @@ struct ClaimedInboundRejection {
     connection_id: ConnectionId,
     transport: Transport,
     lifecycle: ConnectionLifecycleTicket,
+    normalized_lifecycle_was_visible: bool,
 }
 
-enum PendingPrincipalUpdate {
-    NotPending,
-    Updated,
+enum PrincipalEventDecision {
+    Handled,
+    Publish,
+    Drop,
     Reject(ClaimedInboundRejection),
+}
+
+enum OperationalEventDecision {
+    Published,
+    Drop,
+    Reject(ClaimedInboundRejection),
+}
+
+enum AtomicPendingUpdate {
+    Handled,
+    Reject(ClaimedInboundRejection),
+    TransportCollision,
 }
 
 #[derive(Debug)]
 struct ConnectionLifecycleState {
     generation: u64,
     active: bool,
+    retired: bool,
 }
 
 #[derive(Clone)]
@@ -339,19 +359,22 @@ pub struct Orchestrator {
     media_graph_inits: Arc<DashMap<ConnectionId, Arc<tokio::sync::Mutex<()>>>>,
     pub admission: Arc<Semaphore>,
     adapters: Arc<DashMap<Transport, Arc<dyn ConnectionAdapter>>>,
-    /// Serializes one-time admission-gate installation with adapter
-    /// registration. No lock guard crosses an await.
-    registration_lock: Mutex<()>,
+    /// Transport reservations for adapter registrations whose callbacks are
+    /// in progress. Trait methods are never called while this lock is held.
+    adapter_registrations: Mutex<HashSet<Transport>>,
     /// Optional fail-closed policy channel installed before any adapter.
     inbound_admission_gate: OnceLock<InboundAdmissionGate>,
     /// Serializes the brief cross-map connection/lifecycle commit windows.
     /// No guard crosses an await; media and steady-state event paths do not
     /// acquire it.
     connection_registry_lock: Mutex<()>,
+    connection_id_budget: AtomicUsize,
     connections: Arc<DashMap<ConnectionId, ConnectionEntry>>,
     /// Generation-checked setup commit barrier. Async setup can do slow work
     /// without holding a mutex, then atomically commit only if every source is
-    /// still on the generation captured before setup began.
+    /// still on the generation captured before setup began. Retired IDs stay
+    /// as process-lifetime tombstones because adapter events do not yet carry
+    /// a route epoch; adapters must therefore generate non-reusable IDs.
     connection_lifecycles: Arc<DashMap<ConnectionId, Arc<Mutex<ConnectionLifecycleState>>>>,
     events: broadcast::Sender<Event>,
     /// Optional bounded cross-crate publication. A single lazily-started FIFO
@@ -657,9 +680,10 @@ impl Orchestrator {
             media_graph_inits: Arc::new(DashMap::new()),
             admission,
             adapters: Arc::new(DashMap::new()),
-            registration_lock: Mutex::new(()),
+            adapter_registrations: Mutex::new(HashSet::new()),
             inbound_admission_gate: OnceLock::new(),
             connection_registry_lock: Mutex::new(()),
+            connection_id_budget: AtomicUsize::new(DEFAULT_CONNECTION_ID_BUDGET),
             connections: Arc::new(DashMap::new()),
             connection_lifecycles: Arc::new(DashMap::new()),
             events,
@@ -704,9 +728,10 @@ impl Orchestrator {
             media_graph_inits: Arc::new(DashMap::new()),
             admission,
             adapters: Arc::new(DashMap::new()),
-            registration_lock: Mutex::new(()),
+            adapter_registrations: Mutex::new(HashSet::new()),
             inbound_admission_gate: OnceLock::new(),
             connection_registry_lock: Mutex::new(()),
+            connection_id_budget: AtomicUsize::new(DEFAULT_CONNECTION_ID_BUDGET),
             connections: Arc::new(DashMap::new()),
             connection_lifecycles: Arc::new(DashMap::new()),
             events,
@@ -740,22 +765,37 @@ impl Orchestrator {
     /// them into rvoip-core [`Event`]s on the orchestrator's broadcast bus.
     /// Returns [`RvoipError::AdapterAlreadyRegistered`] on collision.
     pub fn register(self: &Arc<Self>, adapter: Arc<dyn ConnectionAdapter>) -> Result<()> {
-        let _registration = self
-            .registration_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let transport = adapter.transport();
-        if self.adapters.contains_key(&transport) {
-            return Err(RvoipError::AdapterAlreadyRegistered(transport));
+        {
+            let mut registrations = self
+                .adapter_registrations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.adapters.contains_key(&transport) || !registrations.insert(transport) {
+                return Err(RvoipError::AdapterAlreadyRegistered(transport));
+            }
         }
-        adapter.install_lifecycle_sink(Arc::new(OrchestratorLifecycleSink {
+        if let Err(error) = adapter.install_lifecycle_sink(Arc::new(OrchestratorLifecycleSink {
             orchestrator: Arc::downgrade(self),
             transport,
-        }))?;
+        })) {
+            self.adapter_registrations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&transport);
+            return Err(error);
+        }
         // The Orchestrator consumes the adapter's atomic lifecycle stream.
         // Public direct subscribers retain the pre-atomic normalized sequence.
         let mut events = adapter.subscribe_orchestrator_events();
-        self.adapters.insert(transport, adapter);
+        {
+            let mut registrations = self
+                .adapter_registrations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.adapters.insert(transport, adapter);
+            registrations.remove(&transport);
+        }
 
         // Spawn the per-adapter event-normalize loop. Each AdapterEvent is
         // translated into one or more rvoip-core Events and republished.
@@ -778,6 +818,31 @@ impl Orchestrator {
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<Event> {
         self.events.subscribe()
+    }
+
+    /// Set the process-local budget for active and retired Connection IDs.
+    ///
+    /// Adapter events currently lack a route epoch, so retired IDs are kept
+    /// for the process lifetime and may not be reused. Once this bounded
+    /// registry is full, every unseen ID is rejected and drained fail-closed.
+    /// Call this before the first connection is observed.
+    pub fn configure_connection_id_budget(&self, maximum: usize) -> Result<()> {
+        if maximum == 0 {
+            return Err(RvoipError::InvalidState(
+                "connection ID budget must be non-zero",
+            ));
+        }
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.connection_lifecycles.is_empty() {
+            return Err(RvoipError::InvalidState(
+                "connection ID budget must be configured before first use",
+            ));
+        }
+        self.connection_id_budget.store(maximum, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Install one bounded, fail-closed inbound admission gate.
@@ -807,11 +872,11 @@ impl Orchestrator {
             ));
         }
 
-        let _registration = self
-            .registration_lock
+        let registrations = self
+            .adapter_registrations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !self.adapters.is_empty() {
+        if !self.adapters.is_empty() || !registrations.is_empty() {
             return Err(RvoipError::InvalidState(
                 "inbound admission gate must be installed before adapters",
             ));
@@ -830,6 +895,11 @@ impl Orchestrator {
             .connections
             .get(conn)
             .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
+        if entry.inbound_publication != InboundPublicationState::Published {
+            return Err(RvoipError::AdmissionRejected(
+                "connection is not operational",
+            ));
+        }
         let transport = entry.transport;
         drop(entry);
         self.adapter(transport)
@@ -881,10 +951,7 @@ impl Orchestrator {
             .connections
             .get_mut(conn)
             .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
-        if matches!(
-            entry.inbound_publication,
-            InboundPublicationState::Pending(_) | InboundPublicationState::Rejecting(_)
-        ) {
+        if entry.inbound_publication != InboundPublicationState::Published {
             return Err(RvoipError::AdmissionRejected(
                 "inbound context is reserved by admission policy",
             ));
@@ -910,11 +977,14 @@ impl Orchestrator {
             // A malformed adapter context is fail-closed and cannot be
             // recovered by retrying with a different principal.
             entry.inbound_context = None;
+            entry.inbound_context_retired = true;
             return Err(RvoipError::AdmissionRejected(
                 "inbound context binding mismatch",
             ));
         }
-        Ok(entry.inbound_context.take())
+        let context = entry.inbound_context.take();
+        entry.inbound_context_retired = true;
+        Ok(context)
     }
 
     pub(crate) fn inbound_admission_principal(
@@ -931,7 +1001,7 @@ impl Orchestrator {
         let lifecycle = lifecycle
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !lifecycle.active || lifecycle.generation != lifecycle_generation {
+        if !lifecycle.active || lifecycle.retired || lifecycle.generation != lifecycle_generation {
             return Err(RvoipError::ConnectionNotFound(conn.clone()));
         }
         let entry = self
@@ -967,7 +1037,7 @@ impl Orchestrator {
         let lifecycle = lifecycle
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !lifecycle.active || lifecycle.generation != lifecycle_generation {
+        if !lifecycle.active || lifecycle.retired || lifecycle.generation != lifecycle_generation {
             return Err(RvoipError::ConnectionNotFound(conn.clone()));
         }
         let mut entry = self
@@ -976,6 +1046,7 @@ impl Orchestrator {
             .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
         if entry.transport != transport {
             entry.inbound_context = None;
+            entry.inbound_context_retired = true;
             return Err(RvoipError::AdmissionRejected(
                 "inbound admission transport mismatch",
             ));
@@ -996,11 +1067,14 @@ impl Orchestrator {
                 .is_some_and(|context| !context.is_bound_to(conn, transport, principal))
         {
             entry.inbound_context = None;
+            entry.inbound_context_retired = true;
             return Err(RvoipError::AdmissionRejected(
                 "inbound admission context binding mismatch",
             ));
         }
-        Ok(entry.inbound_context.take())
+        let context = entry.inbound_context.take();
+        entry.inbound_context_retired = true;
+        Ok(context)
     }
 
     fn track_connection(
@@ -1008,37 +1082,44 @@ impl Orchestrator {
         conn: &ConnectionId,
         transport: Transport,
         inbound_context: Option<InboundConnectionContext>,
-    ) {
+    ) -> bool {
         let _registry = self
             .connection_registry_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut inbound_context = inbound_context;
-        self.connections
-            .entry(conn.clone())
-            .and_modify(|entry| {
-                entry.transport = transport;
-                if entry.inbound_context.is_none() {
-                    let candidate = inbound_context.take();
-                    entry.inbound_context = match (candidate, entry.principal.as_ref()) {
-                        (Some(context), Some(principal))
-                            if !context.is_bound_to(conn, transport, principal) =>
-                        {
-                            None
-                        }
-                        (candidate, _) => candidate,
-                    };
-                }
-            })
-            .or_insert_with(|| ConnectionEntry {
-                transport,
-                principal: None,
-                inbound_context,
-                inbound_publication: InboundPublicationState::NotInbound,
-                deferred_authentication: None,
-                deferred_principal_authentication: None,
-            });
-        self.activate_connection_lifecycle(conn);
+        if !self.ensure_connection_lifecycle(conn) {
+            return false;
+        }
+        if let Some(mut entry) = self.connections.get_mut(conn) {
+            if entry.transport != transport {
+                return false;
+            }
+            if !entry.inbound_context_retired && entry.inbound_context.is_none() {
+                entry.inbound_context = match (inbound_context, entry.principal.as_ref()) {
+                    (Some(context), Some(principal))
+                        if !context.is_bound_to(conn, transport, principal) =>
+                    {
+                        entry.inbound_context_retired = true;
+                        None
+                    }
+                    (candidate, _) => candidate,
+                };
+            }
+        } else {
+            self.connections.insert(
+                conn.clone(),
+                ConnectionEntry {
+                    transport,
+                    principal: None,
+                    inbound_context,
+                    inbound_context_retired: false,
+                    inbound_publication: InboundPublicationState::NotInbound,
+                    deferred_authentication: None,
+                    deferred_principal_authentication: None,
+                },
+            );
+        }
+        true
     }
 
     fn adapter_connection_is_live(&self, transport: Transport, conn: &ConnectionId) -> bool {
@@ -1047,38 +1128,92 @@ impl Orchestrator {
             .is_some_and(|adapter| adapter.is_connection_live(conn))
     }
 
+    fn connection_owned_by_other_transport(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+    ) -> bool {
+        self.connections
+            .get(connection_id)
+            .is_some_and(|entry| entry.transport != transport)
+    }
+
+    async fn reject_colliding_adapter_route(
+        &self,
+        transport: Transport,
+        connection_id: ConnectionId,
+    ) {
+        let Ok(adapter) = self.adapter(transport) else {
+            return;
+        };
+        // A colliding adapter may already have retained an attachment token;
+        // drain it without exposing or storing it in the owning core route.
+        let _ = adapter.take_inbound_context(&connection_id);
+        metrics::counter!(
+            "rvoip_core_connection_transport_collision_total",
+            "transport" => format!("{transport:?}")
+        )
+        .increment(1);
+        let _ = tokio::time::timeout(INBOUND_ADMISSION_ADAPTER_CLEANUP_TIMEOUT, async {
+            if adapter
+                .reject(connection_id.clone(), RejectReason::ServerError)
+                .await
+                .is_err()
+            {
+                let _ = adapter
+                    .end(
+                        connection_id,
+                        EndReason::Failed {
+                            detail: "connection ID transport collision".into(),
+                        },
+                    )
+                    .await;
+            }
+        })
+        .await;
+    }
+
     fn track_connection_principal(
         &self,
         conn: &ConnectionId,
         transport: Transport,
         principal: AuthenticatedPrincipal,
-    ) {
+    ) -> bool {
         let _registry = self
             .connection_registry_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.connections
-            .entry(conn.clone())
-            .and_modify(|entry| {
-                entry.transport = transport;
-                if entry
-                    .inbound_context
-                    .as_ref()
-                    .is_some_and(|context| !context.is_bound_to(conn, transport, &principal))
-                {
-                    entry.inbound_context = None;
-                }
-                entry.principal = Some(principal.clone());
-            })
-            .or_insert(ConnectionEntry {
-                transport,
-                principal: Some(principal),
-                inbound_context: None,
-                inbound_publication: InboundPublicationState::NotInbound,
-                deferred_authentication: None,
-                deferred_principal_authentication: None,
-            });
-        self.activate_connection_lifecycle(conn);
+        if !self.ensure_connection_lifecycle(conn) {
+            return false;
+        }
+        if let Some(mut entry) = self.connections.get_mut(conn) {
+            if entry.transport != transport {
+                return false;
+            }
+            if entry
+                .inbound_context
+                .as_ref()
+                .is_some_and(|context| !context.is_bound_to(conn, transport, &principal))
+            {
+                entry.inbound_context = None;
+                entry.inbound_context_retired = true;
+            }
+            entry.principal = Some(principal);
+        } else {
+            self.connections.insert(
+                conn.clone(),
+                ConnectionEntry {
+                    transport,
+                    principal: Some(principal),
+                    inbound_context: None,
+                    inbound_context_retired: false,
+                    inbound_publication: InboundPublicationState::NotInbound,
+                    deferred_authentication: None,
+                    deferred_principal_authentication: None,
+                },
+            );
+        }
+        true
     }
 
     fn mark_connection_inbound(&self, conn: &ConnectionId) -> Result<()> {
@@ -1092,7 +1227,18 @@ impl Orchestrator {
         Ok(())
     }
 
-    fn activate_connection_lifecycle(&self, connection_id: &ConnectionId) {
+    fn ensure_connection_lifecycle(&self, connection_id: &ConnectionId) -> bool {
+        if let Some(state) = self.connection_lifecycles.get(connection_id) {
+            let state = state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            return state.active && !state.retired;
+        }
+        let retained = self.connection_lifecycles.len();
+        if retained >= self.connection_id_budget.load(Ordering::Relaxed) {
+            metrics::counter!("rvoip_core_connection_id_budget_exhausted_total").increment(1);
+            return false;
+        }
         let state = self
             .connection_lifecycles
             .entry(connection_id.clone())
@@ -1100,16 +1246,36 @@ impl Orchestrator {
                 Arc::new(Mutex::new(ConnectionLifecycleState {
                     generation: 1,
                     active: true,
+                    retired: false,
                 }))
             })
             .clone();
-        let mut state = state
+        let state = state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !state.active {
-            state.generation = state.generation.saturating_add(1);
-            state.active = true;
+        state.active && !state.retired
+    }
+
+    fn retire_untracked_connection_id(&self, connection_id: &ConnectionId) {
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.connection_lifecycles.contains_key(connection_id) {
+            return;
         }
+        if self.connection_lifecycles.len() >= self.connection_id_budget.load(Ordering::Relaxed) {
+            metrics::counter!("rvoip_core_connection_id_budget_exhausted_total").increment(1);
+            return;
+        }
+        self.connection_lifecycles.insert(
+            connection_id.clone(),
+            Arc::new(Mutex::new(ConnectionLifecycleState {
+                generation: 1,
+                active: false,
+                retired: true,
+            })),
+        );
     }
 
     fn capture_connection_lifecycles(
@@ -1137,7 +1303,7 @@ impl Orchestrator {
                 let state_guard = state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if !state_guard.active {
+                if !state_guard.active || state_guard.retired {
                     return Err(RvoipError::ConnectionNotFound(connection_id));
                 }
                 state_guard.generation
@@ -1166,6 +1332,7 @@ impl Orchestrator {
             .collect::<Vec<_>>();
         for (ticket, state) in tickets.iter().zip(&guards) {
             if !state.active
+                || state.retired
                 || state.generation != ticket.generation
                 || !self.connections.contains_key(&ticket.connection_id)
             {
@@ -1562,27 +1729,23 @@ impl Orchestrator {
     }
 
     fn begin_connection_teardown(&self, conn: &ConnectionId) -> ForgottenConnection {
-        let (removed, lifecycle_state) = {
+        let removed = {
             let _registry = self
                 .connection_registry_lock
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // Remove the lifecycle identity while registry creation is
-            // serialized. A route that reuses the same externally supplied
-            // connection ID receives a distinct state Arc and generation
-            // boundary instead of inheriting this teardown.
-            let lifecycle_state = self
-                .connection_lifecycles
-                .remove(conn)
-                .map(|(_, state)| state);
-            if let Some(state) = lifecycle_state.as_ref() {
+            // Retain a process-lifetime tombstone. Adapter lifecycle events do
+            // not carry a route epoch, so safely distinguishing a late event
+            // from a reused external ConnectionId is otherwise impossible.
+            if let Some(state) = self.connection_lifecycles.get(conn) {
                 let mut state = state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 state.active = false;
+                state.retired = true;
                 state.generation = state.generation.saturating_add(1);
             }
-            (self.connections.remove(conn), lifecycle_state)
+            self.connections.remove(conn)
         };
         let was_tracked = removed.is_some();
         let normalized_lifecycle_was_visible = removed.is_some_and(|(_, entry)| {
@@ -1594,7 +1757,6 @@ impl Orchestrator {
             )
         });
         self.drop_connection_subscriptions(conn);
-        drop(lifecycle_state);
         ForgottenConnection {
             was_tracked,
             normalized_lifecycle_was_visible,
@@ -1619,7 +1781,10 @@ impl Orchestrator {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !lifecycle.active || lifecycle.generation != claimed.lifecycle.generation {
+            if !lifecycle.active
+                || lifecycle.retired
+                || lifecycle.generation != claimed.lifecycle.generation
+            {
                 return None;
             }
             let removed = self
@@ -1629,13 +1794,8 @@ impl Orchestrator {
                         == InboundPublicationState::Rejecting(claimed.lifecycle.generation)
                 })?;
             lifecycle.active = false;
+            lifecycle.retired = true;
             lifecycle.generation = lifecycle.generation.saturating_add(1);
-            drop(lifecycle);
-            drop(current);
-            self.connection_lifecycles
-                .remove_if(&claimed.connection_id, |_, state| {
-                    Arc::ptr_eq(state, &claimed.lifecycle.state)
-                });
             removed
         };
         debug_assert!(matches!(
@@ -1645,7 +1805,7 @@ impl Orchestrator {
         self.drop_connection_subscriptions(&claimed.connection_id);
         Some(ForgottenConnection {
             was_tracked: true,
-            normalized_lifecycle_was_visible: false,
+            normalized_lifecycle_was_visible: claimed.normalized_lifecycle_was_visible,
         })
     }
 
@@ -2678,14 +2838,14 @@ impl Orchestrator {
     }
 
     fn publish_inbound_if_current(&self, pending: &PendingInboundPublication) -> bool {
+        if !self.adapter_connection_is_live(pending.transport, &pending.connection_id) {
+            return false;
+        }
         let Ok(_lifecycle) =
             self.lock_connection_lifecycles(std::slice::from_ref(&pending.lifecycle))
         else {
             return false;
         };
-        if !self.adapter_connection_is_live(pending.transport, &pending.connection_id) {
-            return false;
-        }
         let Some(mut entry) = self.connections.get_mut(&pending.connection_id) else {
             return false;
         };
@@ -2778,47 +2938,65 @@ impl Orchestrator {
     ) -> bool {
         let transport = claimed.transport;
         let connection_id = claimed.connection_id.clone();
+        let normalized_lifecycle_was_visible = claimed.normalized_lifecycle_was_visible;
         let adapter = self.adapter(transport).ok();
-        let Some(forgotten) = self.begin_claimed_inbound_teardown(&claimed) else {
+        let completed = tokio::time::timeout(INBOUND_ADMISSION_ADAPTER_CLEANUP_TIMEOUT, async {
+            let Some(adapter) = adapter else {
+                return false;
+            };
+            let stopped = if adapter.reject(connection_id.clone(), reason).await.is_ok() {
+                true
+            } else {
+                adapter
+                    .end(
+                        connection_id.clone(),
+                        EndReason::Failed {
+                            detail: "inbound admission rejected".into(),
+                        },
+                    )
+                    .await
+                    .is_ok()
+            };
+            if !stopped {
+                return false;
+            }
+            if let Some(forgotten) = self.begin_claimed_inbound_teardown(&claimed) {
+                let forgotten = self
+                    .finish_connection_teardown(&connection_id, forgotten)
+                    .await;
+                debug_assert!(forgotten.was_tracked);
+                true
+            } else {
+                let lifecycle = claimed
+                    .lifecycle
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                lifecycle.retired && !lifecycle.active
+            }
+        })
+        .await;
+        if !matches!(completed, Ok(true)) {
+            metrics::counter!(
+                "rvoip_core_inbound_admission_cleanup_total",
+                "result" => "quarantined",
+                "transport" => format!("{transport:?}")
+            )
+            .increment(1);
             return false;
-        };
-        let forgotten = self
-            .finish_connection_teardown(&connection_id, forgotten)
-            .await;
-        debug_assert!(forgotten.was_tracked);
+        }
         metrics::counter!(
             "rvoip_core_inbound_admission_total",
             "result" => result,
             "transport" => format!("{transport:?}")
         )
         .increment(1);
-        let Some(adapter) = adapter else {
-            return true;
-        };
-        if !matches!(
-            tokio::time::timeout(
-                INBOUND_ADMISSION_ADAPTER_CLEANUP_TIMEOUT,
-                adapter.reject(connection_id.clone(), reason),
-            )
-            .await,
-            Ok(Ok(()))
-        ) {
-            metrics::counter!(
-                "rvoip_core_inbound_admission_cleanup_total",
-                "result" => "reject_failed",
-                "transport" => format!("{transport:?}")
-            )
-            .increment(1);
-            let _ = tokio::time::timeout(
-                INBOUND_ADMISSION_ADAPTER_CLEANUP_TIMEOUT,
-                adapter.end(
-                    connection_id,
-                    EndReason::Failed {
-                        detail: "inbound admission rejected".into(),
-                    },
-                ),
-            )
-            .await;
+        if normalized_lifecycle_was_visible {
+            self.emit(Event::ConnectionFailed {
+                connection_id,
+                detail: "connection authentication policy rejected".into(),
+                at: Utc::now(),
+            });
         }
         true
     }
@@ -2925,7 +3103,10 @@ impl Orchestrator {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !lifecycle.active || lifecycle.generation != pending.lifecycle.generation {
+            if !lifecycle.active
+                || lifecycle.retired
+                || lifecycle.generation != pending.lifecycle.generation
+            {
                 return;
             }
             let Some(mut entry) = self.connections.get_mut(&pending.connection_id) else {
@@ -3012,6 +3193,7 @@ impl Orchestrator {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !lifecycle.active
+            || lifecycle.retired
             || expected.is_some_and(|expected| expected.generation != lifecycle.generation)
         {
             return None;
@@ -3035,45 +3217,155 @@ impl Orchestrator {
                 generation,
                 state: lifecycle_state,
             },
+            normalized_lifecycle_was_visible: false,
         })
     }
 
-    fn update_pending_inbound_principal(
+    fn decide_operational_adapter_event(
         &self,
         connection_id: &ConnectionId,
         transport: Transport,
-        participant_id: &str,
-        principal: &AuthenticatedPrincipal,
-    ) -> PendingPrincipalUpdate {
+    ) -> OperationalEventDecision {
         let _registry = self
             .connection_registry_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(current) = self.connection_lifecycles.get(connection_id) else {
-            return PendingPrincipalUpdate::NotPending;
+            return OperationalEventDecision::Drop;
         };
         let lifecycle_state = Arc::clone(current.value());
         let lifecycle = lifecycle_state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !lifecycle.active {
-            return PendingPrincipalUpdate::NotPending;
+        if !lifecycle.active || lifecycle.retired {
+            return OperationalEventDecision::Drop;
         }
         let generation = lifecycle.generation;
         let Some(mut entry) = self.connections.get_mut(connection_id) else {
-            return PendingPrincipalUpdate::NotPending;
+            return OperationalEventDecision::Drop;
         };
-        if entry.inbound_publication != InboundPublicationState::Pending(generation) {
-            return PendingPrincipalUpdate::NotPending;
+        if entry.transport != transport {
+            return OperationalEventDecision::Drop;
         }
-        if entry.transport != transport
-            || entry
-                .principal
-                .as_ref()
-                .is_some_and(|current| !current.has_same_owner(principal))
-        {
+        match entry.inbound_publication {
+            InboundPublicationState::Published => OperationalEventDecision::Published,
+            InboundPublicationState::Pending(pending_generation)
+                if pending_generation == generation =>
+            {
+                entry.inbound_publication = InboundPublicationState::Rejecting(generation);
+                OperationalEventDecision::Reject(ClaimedInboundRejection {
+                    connection_id: connection_id.clone(),
+                    transport,
+                    lifecycle: ConnectionLifecycleTicket {
+                        connection_id: connection_id.clone(),
+                        generation,
+                        state: Arc::clone(&lifecycle_state),
+                    },
+                    normalized_lifecycle_was_visible: false,
+                })
+            }
+            InboundPublicationState::NotInbound
+            | InboundPublicationState::Unseen
+            | InboundPublicationState::Pending(_)
+            | InboundPublicationState::Rejecting(_) => OperationalEventDecision::Drop,
+        }
+    }
+
+    fn claim_route_policy_rejection(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+    ) -> Option<ClaimedInboundRejection> {
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let current = self.connection_lifecycles.get(connection_id)?;
+        let lifecycle_state = Arc::clone(current.value());
+        let lifecycle = lifecycle_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !lifecycle.active || lifecycle.retired {
+            return None;
+        }
+        let generation = lifecycle.generation;
+        let mut entry = self.connections.get_mut(connection_id)?;
+        if entry.transport != transport {
+            return None;
+        }
+        let normalized_lifecycle_was_visible = match entry.inbound_publication {
+            InboundPublicationState::Pending(pending_generation)
+                if pending_generation == generation =>
+            {
+                false
+            }
+            InboundPublicationState::Published => true,
+            InboundPublicationState::NotInbound
+            | InboundPublicationState::Unseen
+            | InboundPublicationState::Pending(_)
+            | InboundPublicationState::Rejecting(_) => return None,
+        };
+        entry.inbound_publication = InboundPublicationState::Rejecting(generation);
+        Some(ClaimedInboundRejection {
+            connection_id: connection_id.clone(),
+            transport,
+            lifecycle: ConnectionLifecycleTicket {
+                connection_id: connection_id.clone(),
+                generation,
+                state: Arc::clone(&lifecycle_state),
+            },
+            normalized_lifecycle_was_visible,
+        })
+    }
+
+    fn decide_principal_adapter_event(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+        participant_id: &str,
+        principal: &AuthenticatedPrincipal,
+    ) -> PrincipalEventDecision {
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(current) = self.connection_lifecycles.get(connection_id) else {
+            return PrincipalEventDecision::Drop;
+        };
+        let lifecycle_state = Arc::clone(current.value());
+        let lifecycle = lifecycle_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !lifecycle.active || lifecycle.retired {
+            return PrincipalEventDecision::Drop;
+        }
+        let generation = lifecycle.generation;
+        let Some(mut entry) = self.connections.get_mut(connection_id) else {
+            return PrincipalEventDecision::Drop;
+        };
+        if entry.transport != transport {
+            return PrincipalEventDecision::Drop;
+        }
+        let normalized_lifecycle_was_visible = match entry.inbound_publication {
+            InboundPublicationState::Pending(pending_generation)
+                if pending_generation == generation =>
+            {
+                false
+            }
+            InboundPublicationState::Published => true,
+            InboundPublicationState::NotInbound
+            | InboundPublicationState::Unseen
+            | InboundPublicationState::Pending(_)
+            | InboundPublicationState::Rejecting(_) => return PrincipalEventDecision::Drop,
+        };
+        let tenantless = principal.tenant.as_deref().is_none_or(str::is_empty);
+        let owner_mismatch = entry
+            .principal
+            .as_ref()
+            .is_some_and(|current| !current.has_same_owner(principal));
+        if tenantless || owner_mismatch {
             entry.inbound_publication = InboundPublicationState::Rejecting(generation);
-            return PendingPrincipalUpdate::Reject(ClaimedInboundRejection {
+            return PrincipalEventDecision::Reject(ClaimedInboundRejection {
                 connection_id: connection_id.clone(),
                 transport,
                 lifecycle: ConnectionLifecycleTicket {
@@ -3081,17 +3373,27 @@ impl Orchestrator {
                     generation,
                     state: Arc::clone(&lifecycle_state),
                 },
+                normalized_lifecycle_was_visible,
             });
         }
+        if entry.principal.is_some() {
+            // Freeze the first complete principal for this lifecycle. A
+            // same-owner refresh may change scopes, method, assurance, or
+            // expiry and therefore cannot replace the authorization snapshot
+            // inspected by admission policy.
+            return PrincipalEventDecision::Handled;
+        }
         entry.principal = Some(principal.clone());
-        if entry.deferred_principal_authentication.is_none() {
+        if !normalized_lifecycle_was_visible {
             entry.deferred_principal_authentication = Some(DeferredPrincipalAuthentication {
                 participant_id: participant_id.to_owned(),
                 principal: principal.clone(),
                 at: Utc::now(),
             });
+            PrincipalEventDecision::Handled
+        } else {
+            PrincipalEventDecision::Publish
         }
-        PendingPrincipalUpdate::Updated
     }
 
     async fn handle_orchestrator_adapter_event(
@@ -3111,12 +3413,52 @@ impl Orchestrator {
                 if !self.adapter_connection_is_live(transport, &connection.id) {
                     return;
                 }
+                let malformed = connection.transport != transport
+                    || connection.direction != Direction::Inbound
+                    || principal.tenant.as_deref().is_none_or(str::is_empty);
+                if malformed {
+                    let _ = self
+                        .adapter(transport)
+                        .ok()
+                        .and_then(|adapter| adapter.take_inbound_context(&connection.id));
+                    if let Some(claimed) =
+                        self.claim_route_policy_rejection(&connection.id, transport)
+                    {
+                        self.reject_claimed_unadmitted_connection(
+                            claimed,
+                            RejectReason::ServerError,
+                            "malformed_inbound",
+                        )
+                        .await;
+                    } else {
+                        self.retire_untracked_connection_id(&connection.id);
+                        self.reject_colliding_adapter_route(transport, connection.id)
+                            .await;
+                    }
+                    return;
+                }
+                if self.connection_owned_by_other_transport(&connection.id, transport) {
+                    self.reject_colliding_adapter_route(transport, connection.id)
+                        .await;
+                    return;
+                }
                 let existing_state = self
                     .connections
                     .get(&connection.id)
                     .map(|entry| entry.inbound_publication);
                 let update_pending = existing_state
                     .is_some_and(|state| matches!(state, InboundPublicationState::Pending(_)));
+                let incompatible_existing = existing_state.is_some_and(|state| {
+                    matches!(
+                        state,
+                        InboundPublicationState::NotInbound | InboundPublicationState::Unseen
+                    )
+                });
+                if incompatible_existing {
+                    self.reject_colliding_adapter_route(transport, connection.id)
+                        .await;
+                    return;
+                }
                 let discard_duplicate = existing_state.is_some_and(|state| {
                     matches!(
                         state,
@@ -3142,7 +3484,7 @@ impl Orchestrator {
                             && context.transport() == transport
                     });
                 if update_pending {
-                    let claimed = {
+                    let update = {
                         let _registry = self
                             .connection_registry_lock
                             .lock()
@@ -3154,7 +3496,7 @@ impl Orchestrator {
                         let lifecycle = lifecycle_state
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        if !lifecycle.active {
+                        if !lifecycle.active || lifecycle.retired {
                             return;
                         }
                         let generation = lifecycle.generation;
@@ -3165,15 +3507,16 @@ impl Orchestrator {
                         {
                             return;
                         }
-                        if entry.transport != transport
-                            || entry
-                                .principal
-                                .as_ref()
-                                .is_some_and(|current| !current.has_same_owner(&principal))
+                        if entry.transport != transport {
+                            AtomicPendingUpdate::TransportCollision
+                        } else if entry
+                            .principal
+                            .as_ref()
+                            .is_some_and(|current| !current.has_same_owner(&principal))
                         {
                             entry.inbound_publication =
                                 InboundPublicationState::Rejecting(generation);
-                            Some(ClaimedInboundRejection {
+                            AtomicPendingUpdate::Reject(ClaimedInboundRejection {
                                 connection_id: connection.id.clone(),
                                 transport,
                                 lifecycle: ConnectionLifecycleTicket {
@@ -3181,35 +3524,69 @@ impl Orchestrator {
                                     generation,
                                     state: Arc::clone(&lifecycle_state),
                                 },
+                                normalized_lifecycle_was_visible: false,
                             })
                         } else {
-                            if entry.inbound_context.is_none() {
-                                entry.inbound_context = inbound_context.filter(|context| {
-                                    context.is_bound_to(&connection.id, transport, &principal)
-                                });
+                            if !entry.inbound_context_retired && entry.inbound_context.is_none() {
+                                let context_principal =
+                                    entry.principal.clone().unwrap_or_else(|| principal.clone());
+                                entry.inbound_context = match inbound_context {
+                                    Some(context)
+                                        if context.is_bound_to(
+                                            &connection.id,
+                                            transport,
+                                            &context_principal,
+                                        ) =>
+                                    {
+                                        Some(context)
+                                    }
+                                    Some(_) => {
+                                        entry.inbound_context_retired = true;
+                                        None
+                                    }
+                                    None => None,
+                                };
                             }
-                            entry.principal = Some(principal.clone());
-                            entry.deferred_principal_authentication =
-                                Some(DeferredPrincipalAuthentication {
-                                    participant_id,
-                                    principal,
-                                    at: Utc::now(),
-                                });
-                            None
+                            if entry.principal.is_none() {
+                                entry.principal = Some(principal.clone());
+                                entry.deferred_principal_authentication =
+                                    Some(DeferredPrincipalAuthentication {
+                                        participant_id,
+                                        principal,
+                                        at: Utc::now(),
+                                    });
+                            }
+                            AtomicPendingUpdate::Handled
                         }
                     };
-                    if let Some(claimed) = claimed {
-                        self.reject_claimed_unadmitted_connection(
-                            claimed,
-                            RejectReason::ServerError,
-                            "principal_changed",
-                        )
-                        .await;
+                    match update {
+                        AtomicPendingUpdate::Handled => {}
+                        AtomicPendingUpdate::Reject(claimed) => {
+                            self.reject_claimed_unadmitted_connection(
+                                claimed,
+                                RejectReason::ServerError,
+                                "principal_changed",
+                            )
+                            .await;
+                        }
+                        AtomicPendingUpdate::TransportCollision => {
+                            self.reject_colliding_adapter_route(transport, connection.id)
+                                .await;
+                        }
                     }
                     return;
                 }
-                self.track_connection(&connection.id, transport, inbound_context);
-                self.track_connection_principal(&connection.id, transport, principal.clone());
+                if !self.track_connection(&connection.id, transport, inbound_context)
+                    || !self.track_connection_principal(
+                        &connection.id,
+                        transport,
+                        principal.clone(),
+                    )
+                {
+                    self.reject_colliding_adapter_route(transport, connection.id)
+                        .await;
+                    return;
+                }
                 if self.mark_connection_inbound(&connection.id).is_err() {
                     return;
                 }
@@ -3264,6 +3641,48 @@ impl Orchestrator {
                 );
                 return;
             }
+            let malformed_inbound = matches!(
+                &event,
+                AdapterEvent::InboundConnection { connection }
+                    if connection.transport != transport
+                        || connection.direction != Direction::Inbound
+            );
+            if malformed_inbound {
+                if let Some(claimed) = self.claim_route_policy_rejection(connection_id, transport) {
+                    self.reject_claimed_unadmitted_connection(
+                        claimed,
+                        RejectReason::ServerError,
+                        "malformed_inbound",
+                    )
+                    .await;
+                } else {
+                    self.retire_untracked_connection_id(connection_id);
+                    self.reject_colliding_adapter_route(transport, connection_id.clone())
+                        .await;
+                }
+                return;
+            }
+            if self.connection_owned_by_other_transport(connection_id, transport) {
+                self.reject_colliding_adapter_route(transport, connection_id.clone())
+                    .await;
+                return;
+            }
+            let inbound_collides_with_setup = matches!(
+                &event,
+                AdapterEvent::InboundConnection { .. }
+                    if self.connections.get(connection_id).is_some_and(|entry| {
+                        matches!(
+                            entry.inbound_publication,
+                            InboundPublicationState::NotInbound
+                                | InboundPublicationState::Unseen
+                        )
+                    })
+            );
+            if inbound_collides_with_setup {
+                self.reject_colliding_adapter_route(transport, connection_id.clone())
+                    .await;
+                return;
+            }
             if self.connections.get(connection_id).is_some_and(|entry| {
                 matches!(
                     entry.inbound_publication,
@@ -3298,28 +3717,31 @@ impl Orchestrator {
                         }
                         return;
                     }
+                    if entry.inbound_publication != InboundPublicationState::Published {
+                        return;
+                    }
                 }
                 AdapterEvent::PrincipalAuthenticated {
                     participant_id,
                     principal,
                     ..
-                } => match self.update_pending_inbound_principal(
+                } => match self.decide_principal_adapter_event(
                     connection_id,
                     transport,
                     participant_id,
                     principal,
                 ) {
-                    PendingPrincipalUpdate::Updated => return,
-                    PendingPrincipalUpdate::Reject(claimed) => {
+                    PrincipalEventDecision::Handled | PrincipalEventDecision::Drop => return,
+                    PrincipalEventDecision::Publish => {}
+                    PrincipalEventDecision::Reject(claimed) => {
                         self.reject_claimed_unadmitted_connection(
                             claimed,
                             RejectReason::ServerError,
-                            "principal_changed",
+                            "principal_policy",
                         )
                         .await;
                         return;
                     }
-                    PendingPrincipalUpdate::NotPending => {}
                 },
                 AdapterEvent::Connected { .. }
                 | AdapterEvent::Dtmf { .. }
@@ -3327,16 +3749,18 @@ impl Orchestrator {
                 | AdapterEvent::Message { .. }
                 | AdapterEvent::DataMessage { .. }
                 | AdapterEvent::StepUpResponse { .. } => {
-                    if let Some(claimed) =
-                        self.claim_pending_inbound_rejection(connection_id, transport, None)
-                    {
-                        self.reject_claimed_unadmitted_connection(
-                            claimed,
-                            RejectReason::ServerError,
-                            "event_before_admission",
-                        )
-                        .await;
-                        return;
+                    match self.decide_operational_adapter_event(connection_id, transport) {
+                        OperationalEventDecision::Published => {}
+                        OperationalEventDecision::Drop => return,
+                        OperationalEventDecision::Reject(claimed) => {
+                            self.reject_claimed_unadmitted_connection(
+                                claimed,
+                                RejectReason::ServerError,
+                                "event_before_admission",
+                            )
+                            .await;
+                            return;
+                        }
                     }
                 }
                 AdapterEvent::Ended { .. }
@@ -3357,7 +3781,11 @@ impl Orchestrator {
                             && context.connection_id() == &connection.id
                             && context.transport() == transport
                     });
-                self.track_connection(&connection.id, transport, inbound_context);
+                if !self.track_connection(&connection.id, transport, inbound_context) {
+                    self.reject_colliding_adapter_route(transport, connection.id)
+                        .await;
+                    return;
+                }
                 if self.mark_connection_inbound(&connection.id).is_err() {
                     return;
                 }
@@ -3407,7 +3835,6 @@ impl Orchestrator {
                 participant_id,
                 principal,
             } => {
-                self.track_connection_principal(&connection_id, transport, principal.clone());
                 let at = Utc::now();
                 // Preserve the legacy normalized event for existing
                 // subscribers, then publish the complete principal additively.
@@ -3429,6 +3856,9 @@ impl Orchestrator {
                 connection_id,
                 reason,
             } => {
+                if self.connection_owned_by_other_transport(&connection_id, transport) {
+                    return;
+                }
                 let forgotten = self.forget_connection(&connection_id).await;
                 if forgotten.was_tracked && forgotten.normalized_lifecycle_was_visible {
                     self.emit(Event::ConnectionEnded {
@@ -3442,6 +3872,9 @@ impl Orchestrator {
                 connection_id,
                 detail,
             } => {
+                if self.connection_owned_by_other_transport(&connection_id, transport) {
+                    return;
+                }
                 let forgotten = self.forget_connection(&connection_id).await;
                 if forgotten.was_tracked && forgotten.normalized_lifecycle_was_visible {
                     self.emit(Event::ConnectionFailed {
@@ -3877,7 +4310,40 @@ impl Orchestrator {
         };
         let adapter = self.adapter(transport)?;
         let handle = adapter.originate(request).await?;
-        self.track_connection(&handle.connection.id, transport, None);
+        if handle.connection.transport != transport
+            || handle.connection.direction != Direction::Outbound
+        {
+            self.retire_untracked_connection_id(&handle.connection.id);
+            self.reject_colliding_adapter_route(transport, handle.connection.id.clone())
+                .await;
+            return Err(RvoipError::AdmissionRejected(
+                "originated connection transport or direction mismatch",
+            ));
+        }
+        if !self.track_connection(&handle.connection.id, transport, None) {
+            self.reject_colliding_adapter_route(transport, handle.connection.id.clone())
+                .await;
+            return Err(RvoipError::AdmissionRejected(
+                "connection ID is owned by another transport",
+            ));
+        }
+        let published = self
+            .connections
+            .get_mut(&handle.connection.id)
+            .is_some_and(|mut entry| {
+                if entry.transport != transport {
+                    return false;
+                }
+                entry.inbound_publication = InboundPublicationState::Published;
+                true
+            });
+        if !published {
+            self.reject_colliding_adapter_route(transport, handle.connection.id.clone())
+                .await;
+            return Err(RvoipError::AdmissionRejected(
+                "connection ID transport ownership changed during originate",
+            ));
+        }
         self.bind_connection_to_session(&handle.connection.id, &session_id, participant_id)?;
         self.emit(Event::ConnectionOutbound {
             connection_id: handle.connection.id.clone(),
@@ -4291,6 +4757,9 @@ impl Orchestrator {
                 "recording target has no Connections",
             ));
         }
+        for connection_id in &conns {
+            let _ = self.adapter_for(connection_id)?;
+        }
         let lifecycle_tickets = self.capture_connection_lifecycles(&conns)?;
 
         // V2.B — per-tenant Semaphore admission. When the tenant has
@@ -4464,6 +4933,7 @@ impl Orchestrator {
                 })
                 .ok_or_else(|| RvoipError::SessionNotFound(sid))?,
         };
+        let _ = self.adapter_for(&conn)?;
         let lifecycle_tickets = self.capture_connection_lifecycles(std::slice::from_ref(&conn))?;
 
         let tid = crate::ids::TranscriptionId::new();
@@ -4548,6 +5018,7 @@ impl Orchestrator {
         provider_ref: impl Into<String>,
         config: std::collections::HashMap<String, String>,
     ) -> Result<crate::ids::AiAttachmentId> {
+        let _ = self.adapter_for(&connection_id)?;
         let lifecycle_tickets =
             self.capture_connection_lifecycles(std::slice::from_ref(&connection_id))?;
         // P6 — tenant attribution + AI quota enforcement.
@@ -4796,6 +5267,9 @@ impl Orchestrator {
             return Err(RvoipError::AdmissionRejected(
                 "listener target has no Connections",
             ));
+        }
+        for connection_id in &conns {
+            let _ = self.adapter_for(connection_id)?;
         }
         let lifecycle_tickets = self.capture_connection_lifecycles(&conns)?;
 
@@ -5087,22 +5561,11 @@ impl Orchestrator {
                 "cannot bridge a connection to itself",
             ));
         }
+        let a_adapter = self.adapter_for(&a)?;
+        let b_adapter = self.adapter_for(&b)?;
         let lifecycle_tickets = self.capture_connection_lifecycles(&[a.clone(), b.clone()])?;
         let id = BridgeId::new();
         let reservation = self.reserve_cross_bridge(id.clone(), a.clone(), b.clone())?;
-
-        let a_transport = self
-            .connections
-            .get(&a)
-            .ok_or_else(|| RvoipError::ConnectionNotFound(a.clone()))?
-            .transport;
-        let b_transport = self
-            .connections
-            .get(&b)
-            .ok_or_else(|| RvoipError::ConnectionNotFound(b.clone()))?
-            .transport;
-        let a_adapter = self.adapter(a_transport)?;
-        let b_adapter = self.adapter(b_transport)?;
 
         // Poll both adapters for an audio stream up to the configured
         // deadline. Adapters create streams on connection.ready, so a
@@ -5206,10 +5669,10 @@ impl Orchestrator {
         &self,
         connection_id: ConnectionId,
     ) -> Result<MediaGraphHandle> {
+        let adapter = self.adapter_for(&connection_id)?;
         if let Some(graph) = self.media_graphs.get(&connection_id) {
             return Ok(graph.value().clone());
         }
-        let adapter = self.adapter_for(&connection_id)?;
         let stream = adapter
             .streams(connection_id.clone())
             .await?
@@ -5289,6 +5752,7 @@ impl Orchestrator {
         codec: crate::capability::CodecInfo,
         target: tokio::sync::mpsc::Sender<crate::stream::MediaFrame>,
     ) -> Result<crate::ids::MediaRouteId> {
+        let _ = self.adapter_for(&connection_id)?;
         let lifecycle_tickets =
             self.capture_connection_lifecycles(std::slice::from_ref(&connection_id))?;
         let graph = self.media_graph_for_connection(connection_id).await?;
@@ -5336,6 +5800,7 @@ impl Orchestrator {
             ));
         }
 
+        let _ = self.adapter_for(&source_connection_id)?;
         let lifecycle_tickets =
             self.capture_connection_lifecycles(std::slice::from_ref(&source_connection_id))?;
         let graph = self

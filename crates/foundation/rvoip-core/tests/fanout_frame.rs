@@ -504,7 +504,23 @@ async fn authenticated_adapter_event_emits_connection_authenticated_event() {
         assurance: IdentityAssurance::Anonymous,
     };
 
-    // Adapter emits Authenticated for the new Connection.
+    // Authentication is projected only for a tracked, publicly visible
+    // route; untracked auth events are intentionally fail-closed.
+    events_tx
+        .send(AdapterEvent::InboundConnection {
+            connection: fake_inbound(connid.clone()),
+        })
+        .await
+        .expect("send inbound");
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_millis(500), events.recv())
+            .await
+            .expect("inbound timeout")
+            .expect("event bus closed"),
+        Event::ConnectionInbound { connection_id, .. } if connection_id == connid
+    ));
+
+    // Adapter emits Authenticated for the tracked Connection.
     events_tx
         .send(AdapterEvent::PrincipalAuthenticated {
             connection_id: connid.clone(),
