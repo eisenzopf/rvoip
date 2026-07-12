@@ -181,7 +181,8 @@ pub use media_graph::{
 pub use message::{ContentType, Message, MessageOrigin, MessageRecipients};
 pub use operational_events::{
     OperationalEndReason, OperationalEvent, OperationalEventKind, OperationalEventStreamHealth,
-    OperationalFailureReason, OperationalTransferOutcome, OperationalTransferTarget,
+    OperationalEventStreamHealthSubscription, OperationalFailureReason, OperationalTransferOutcome,
+    OperationalTransferTarget,
 };
 pub use orchestrator::{Orchestrator, PreparedOutboundConnection};
 pub use participant::{Participant, ParticipantKind, ParticipantRole};

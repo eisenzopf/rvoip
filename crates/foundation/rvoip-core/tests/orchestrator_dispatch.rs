@@ -3877,6 +3877,87 @@ async fn operational_stream_installation_is_single_use_and_pre_registration() {
 }
 
 #[tokio::test]
+async fn operational_health_subscription_is_immediate_and_detects_receiver_loss() {
+    let orchestrator = Orchestrator::new(Config::default());
+    assert!(matches!(
+        orchestrator.subscribe_operational_event_stream_health(),
+        Err(RvoipError::InvalidState(
+            "authoritative operational event stream is not installed"
+        ))
+    ));
+
+    let operational = orchestrator.install_operational_event_stream(4).unwrap();
+    let mut health = orchestrator
+        .subscribe_operational_event_stream_health()
+        .unwrap();
+    assert_eq!(
+        health.current(),
+        OperationalEventStreamHealth::Healthy,
+        "subscription exposes the current state without waiting for a change"
+    );
+
+    drop(operational);
+    let changed = tokio::time::timeout(Duration::from_secs(1), health.changed())
+        .await
+        .expect("receiver loss produces a prompt health transition");
+    assert_eq!(changed, OperationalEventStreamHealth::Degraded);
+    assert_eq!(
+        orchestrator
+            .subscribe_operational_event_stream_health()
+            .unwrap()
+            .current(),
+        OperationalEventStreamHealth::Degraded,
+        "degradation remains sticky for new subscribers"
+    );
+    assert!(matches!(
+        orchestrator
+            .originate_connection(OriginateRequest {
+                session_id: SessionId::new(),
+                participant_id: ParticipantId::new(),
+                target: "sip:must-not-originate@example.invalid".into(),
+                direction: Direction::Outbound,
+                capabilities: CapabilityDescriptor::default(),
+                transport: Some(Transport::Sip),
+            })
+            .await,
+        Err(RvoipError::InvalidState(
+            "authoritative operational event stream is degraded"
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn operational_health_subscription_does_not_block_lifecycle_drain() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let operational = orchestrator.install_operational_event_stream(4).unwrap();
+    let mut health = orchestrator
+        .subscribe_operational_event_stream_health()
+        .unwrap();
+    assert_eq!(health.current(), OperationalEventStreamHealth::Healthy);
+    assert_eq!(
+        orchestrator.connection_lifecycle_task_count(),
+        0,
+        "health observation must not create an idle lifecycle task"
+    );
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        orchestrator.drain_connection_lifecycle_tasks(),
+    )
+    .await
+    .expect("an idle health subscription cannot delay lifecycle drain");
+    assert_eq!(orchestrator.connection_lifecycle_task_count(), 0);
+
+    drop(operational);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), health.changed())
+            .await
+            .expect("task-free subscription still detects receiver loss"),
+        OperationalEventStreamHealth::Degraded
+    );
+}
+
+#[tokio::test]
 async fn operational_stream_applies_backpressure_without_losing_more_than_1024_events() {
     const EVENT_COUNT: usize = 1_100;
     let orchestrator = Orchestrator::new(Config::default());

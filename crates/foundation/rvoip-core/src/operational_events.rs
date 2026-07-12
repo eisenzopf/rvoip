@@ -16,9 +16,10 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::adapter::{EndReason, TransferTarget};
 use crate::connection::Transport;
@@ -37,6 +38,84 @@ pub enum OperationalEventStreamHealth {
     /// The receiver was lost or the process-local sequence space was
     /// exhausted. This state is sticky for the process lifetime.
     Degraded,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum OperationalEventStreamFailure {
+    ReceiverLost,
+    DeliveryCancelled,
+    SequenceExhausted,
+    SendFailed,
+}
+
+impl OperationalEventStreamFailure {
+    fn metric_label(self) -> &'static str {
+        match self {
+            Self::ReceiverLost => "receiver_lost",
+            Self::DeliveryCancelled => "delivery_cancelled",
+            Self::SequenceExhausted => "sequence_exhausted",
+            Self::SendFailed => "send_failed",
+        }
+    }
+}
+
+/// Task-free subscription to sticky authoritative-stream health.
+///
+/// [`Self::current`] exposes the initial state immediately. [`Self::changed`]
+/// waits for either a published health transition or loss of the operational
+/// event receiver. Receiver loss is converted to the same sticky `Degraded`
+/// state inline, so subscribing does not create an idle background task that
+/// could outlive core lifecycle drain.
+#[derive(Clone)]
+pub struct OperationalEventStreamHealthSubscription {
+    updates: watch::Receiver<OperationalEventStreamHealth>,
+    receiver_closed: mpsc::Sender<OperationalEvent>,
+    health: Arc<OperationalEventStreamHealthState>,
+}
+
+impl OperationalEventStreamHealthSubscription {
+    /// Return current sticky health without waiting.
+    pub fn current(&self) -> OperationalEventStreamHealth {
+        if self.receiver_closed.is_closed() {
+            self.health
+                .mark_degraded(OperationalEventStreamFailure::ReceiverLost);
+        }
+        self.health.current()
+    }
+
+    /// Wait for degradation and return the new sticky state.
+    ///
+    /// `Degraded` is terminal for this process-local stream. Calling this
+    /// method after observing it therefore returns `Degraded` immediately;
+    /// correctness consumers should stop accepting work at that point.
+    pub async fn changed(&mut self) -> OperationalEventStreamHealth {
+        let current = self.current();
+        if current == OperationalEventStreamHealth::Degraded {
+            self.updates.borrow_and_update();
+            return current;
+        }
+        tokio::select! {
+            changed = self.updates.changed() => {
+                if changed.is_err() {
+                    // The subscription owns the health state, which owns the
+                    // watch sender, so this is unreachable without a future
+                    // implementation error. Fail closed if that invariant is
+                    // ever broken.
+                    self.health.mark_degraded(
+                        OperationalEventStreamFailure::DeliveryCancelled,
+                    );
+                }
+            }
+            () = self.receiver_closed.closed() => {
+                self.health.mark_degraded(
+                    OperationalEventStreamFailure::ReceiverLost,
+                );
+            }
+        }
+        let current = self.health.current();
+        self.updates.borrow_and_update();
+        current
+    }
 }
 
 /// Sanitized terminal disposition. Adapter-owned free-form failure text is
@@ -216,7 +295,12 @@ impl fmt::Debug for OperationalEvent {
 pub(crate) struct OperationalEventStream {
     sender: mpsc::Sender<OperationalEvent>,
     next_sequence: AtomicU64,
+    health: Arc<OperationalEventStreamHealthState>,
+}
+
+struct OperationalEventStreamHealthState {
     degraded: AtomicBool,
+    updates: watch::Sender<OperationalEventStreamHealth>,
 }
 
 pub(crate) struct OperationalSendGuard<'a> {
@@ -233,7 +317,34 @@ impl OperationalSendGuard<'_> {
 impl Drop for OperationalSendGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            self.stream.mark_degraded();
+            self.stream
+                .mark_degraded(OperationalEventStreamFailure::DeliveryCancelled);
+        }
+    }
+}
+
+impl OperationalEventStreamHealthState {
+    fn current(&self) -> OperationalEventStreamHealth {
+        if self.degraded.load(Ordering::Acquire) {
+            OperationalEventStreamHealth::Degraded
+        } else {
+            OperationalEventStreamHealth::Healthy
+        }
+    }
+
+    fn mark_degraded(&self, failure: OperationalEventStreamFailure) {
+        if !self.degraded.swap(true, Ordering::AcqRel) {
+            self.updates
+                .send_replace(OperationalEventStreamHealth::Degraded);
+            metrics::counter!(
+                "rvoip_core_operational_event_stream_failures_total",
+                "reason" => failure.metric_label()
+            )
+            .increment(1);
+            tracing::error!(
+                reason = failure.metric_label(),
+                "authoritative operational event stream degraded; failing closed"
+            );
         }
     }
 }
@@ -241,11 +352,16 @@ impl Drop for OperationalSendGuard<'_> {
 impl OperationalEventStream {
     pub(crate) fn new(capacity: usize) -> (Self, mpsc::Receiver<OperationalEvent>) {
         let (sender, receiver) = mpsc::channel(capacity);
+        let (health_updates, _initial_health) =
+            watch::channel(OperationalEventStreamHealth::Healthy);
         (
             Self {
                 sender,
                 next_sequence: AtomicU64::new(1),
-                degraded: AtomicBool::new(false),
+                health: Arc::new(OperationalEventStreamHealthState {
+                    degraded: AtomicBool::new(false),
+                    updates: health_updates,
+                }),
             },
             receiver,
         )
@@ -253,12 +369,20 @@ impl OperationalEventStream {
 
     pub(crate) fn health(&self) -> OperationalEventStreamHealth {
         if self.sender.is_closed() {
-            self.mark_degraded();
+            self.mark_degraded(OperationalEventStreamFailure::ReceiverLost);
         }
-        if self.degraded.load(Ordering::Acquire) {
-            OperationalEventStreamHealth::Degraded
-        } else {
-            OperationalEventStreamHealth::Healthy
+        self.health.current()
+    }
+
+    pub(crate) fn subscribe_health(&self) -> OperationalEventStreamHealthSubscription {
+        // Detect a receiver that disappeared before this subscriber was
+        // installed. `send_replace` retains the transition, so the returned
+        // subscription always exposes the current sticky value.
+        let _ = self.health();
+        OperationalEventStreamHealthSubscription {
+            updates: self.health.updates.subscribe(),
+            receiver_closed: self.sender.clone(),
+            health: Arc::clone(&self.health),
         }
     }
 
@@ -296,7 +420,7 @@ impl OperationalEventStream {
         let permit = match self.sender.reserve().await {
             Ok(permit) => permit,
             Err(_) => {
-                self.mark_degraded();
+                self.mark_degraded(OperationalEventStreamFailure::SendFailed);
                 return false;
             }
         };
@@ -306,7 +430,7 @@ impl OperationalEventStream {
                     current.checked_add(1)
                 })
         else {
-            self.mark_degraded();
+            self.mark_degraded(OperationalEventStreamFailure::SequenceExhausted);
             return false;
         };
         permit.send(OperationalEvent {
@@ -320,11 +444,8 @@ impl OperationalEventStream {
         true
     }
 
-    pub(crate) fn mark_degraded(&self) {
-        if !self.degraded.swap(true, Ordering::AcqRel) {
-            metrics::counter!("rvoip_core_operational_event_stream_failures_total").increment(1);
-            tracing::error!("authoritative operational event receiver unavailable; failing closed");
-        }
+    pub(crate) fn mark_degraded(&self, failure: OperationalEventStreamFailure) {
+        self.health.mark_degraded(failure);
     }
 }
 
@@ -367,6 +488,12 @@ mod tests {
     async fn cancelled_backpressured_send_marks_stream_degraded() {
         let (stream, _receiver) = OperationalEventStream::new(1);
         let stream = std::sync::Arc::new(stream);
+        let mut health = stream.subscribe_health();
+        assert_eq!(
+            health.current(),
+            OperationalEventStreamHealth::Healthy,
+            "a new subscription exposes current health immediately"
+        );
         assert!(
             stream
                 .send(
@@ -395,7 +522,16 @@ mod tests {
         assert!(!blocked.is_finished());
         blocked.abort();
         assert!(blocked.await.unwrap_err().is_cancelled());
+        let changed = tokio::time::timeout(std::time::Duration::from_secs(1), health.changed())
+            .await
+            .expect("cancellation publishes a health transition");
+        assert_eq!(changed, OperationalEventStreamHealth::Degraded);
         assert_eq!(stream.health(), OperationalEventStreamHealth::Degraded);
+        assert_eq!(
+            stream.subscribe_health().current(),
+            OperationalEventStreamHealth::Degraded,
+            "degradation is retained for later subscribers"
+        );
     }
 
     #[tokio::test]
@@ -417,5 +553,70 @@ mod tests {
         lifecycle.abort();
         assert!(lifecycle.await.unwrap_err().is_cancelled());
         assert_eq!(stream.health(), OperationalEventStreamHealth::Degraded);
+    }
+
+    #[tokio::test]
+    async fn sequence_exhaustion_notifies_health_subscribers() {
+        let (stream, _receiver) = OperationalEventStream::new(1);
+        let mut health = stream.subscribe_health();
+        stream.next_sequence.store(u64::MAX, Ordering::Release);
+
+        assert!(
+            !stream
+                .send(
+                    ConnectionId::new(),
+                    Transport::Sip,
+                    Utc::now(),
+                    OperationalEventKind::Connected,
+                )
+                .await
+        );
+        let changed = tokio::time::timeout(std::time::Duration::from_secs(1), health.changed())
+            .await
+            .expect("sequence exhaustion publishes a health transition");
+        assert_eq!(changed, OperationalEventStreamHealth::Degraded);
+    }
+
+    #[tokio::test]
+    async fn failed_bounded_send_notifies_health_subscribers() {
+        let (stream, mut receiver) = OperationalEventStream::new(1);
+        let stream = Arc::new(stream);
+        let mut health = stream.subscribe_health();
+        assert!(
+            stream
+                .send(
+                    ConnectionId::new(),
+                    Transport::Sip,
+                    Utc::now(),
+                    OperationalEventKind::Connected,
+                )
+                .await
+        );
+
+        let blocked_stream = Arc::clone(&stream);
+        let blocked = tokio::spawn(async move {
+            blocked_stream
+                .send(
+                    ConnectionId::new(),
+                    Transport::Sip,
+                    Utc::now(),
+                    OperationalEventKind::Connected,
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while stream.sender.capacity() != 0 || blocked.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("second send waits for bounded capacity");
+
+        receiver.close();
+        assert!(!blocked.await.expect("sender task completed"));
+        let changed = tokio::time::timeout(std::time::Duration::from_secs(1), health.changed())
+            .await
+            .expect("send failure publishes a health transition");
+        assert_eq!(changed, OperationalEventStreamHealth::Degraded);
     }
 }

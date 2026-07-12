@@ -38,7 +38,8 @@ use crate::media_graph::{
 use crate::message::{ContentType, Message, MessageOrigin, MessageRecipients};
 use crate::operational_events::{
     OperationalEndReason, OperationalEvent, OperationalEventKind, OperationalEventStream,
-    OperationalEventStreamHealth, OperationalFailureReason, OperationalTransferOutcome,
+    OperationalEventStreamFailure, OperationalEventStreamHealth,
+    OperationalEventStreamHealthSubscription, OperationalFailureReason, OperationalTransferOutcome,
     OperationalTransferTarget,
 };
 use crate::participant::{Participant, ParticipantKind, ParticipantRole};
@@ -1943,6 +1944,32 @@ impl Orchestrator {
             .map_or(OperationalEventStreamHealth::NotInstalled, |stream| {
                 stream.health()
             })
+    }
+
+    /// Subscribe to sticky authoritative-stream health transitions.
+    ///
+    /// The returned subscription immediately contains either
+    /// [`OperationalEventStreamHealth::Healthy`] or
+    /// [`OperationalEventStreamHealth::Degraded`]. A retained monitor turns
+    /// loss of the authoritative event receiver into a `Degraded` transition
+    /// when [`OperationalEventStreamHealthSubscription::changed`] is polled,
+    /// even when no event producer is active. Cancellation, sequence
+    /// exhaustion, and send failures publish through the same sticky channel.
+    /// The subscription owns no task and does not affect lifecycle drain.
+    ///
+    /// Subscribing without first installing the operational stream is an
+    /// error: correctness consumers must not silently treat legacy
+    /// observability-only delivery as healthy.
+    pub fn subscribe_operational_event_stream_health(
+        &self,
+    ) -> Result<OperationalEventStreamHealthSubscription> {
+        let stream = self
+            .operational_event_stream
+            .get()
+            .ok_or(RvoipError::InvalidState(
+                "authoritative operational event stream is not installed",
+            ))?;
+        Ok(stream.subscribe_health())
     }
 
     /// Whether an installed authoritative receiver has been irreversibly
@@ -8230,7 +8257,7 @@ impl Orchestrator {
                 }
                 let Some(next_generation) = generation.checked_add(1) else {
                     if let Some(stream) = orchestrator.operational_event_stream.get() {
-                        stream.mark_degraded();
+                        stream.mark_degraded(OperationalEventStreamFailure::SequenceExhausted);
                     }
                     break;
                 };
