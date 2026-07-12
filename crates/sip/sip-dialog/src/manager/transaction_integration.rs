@@ -851,8 +851,10 @@ impl DialogManager {
 
         if let Some((cseq, tx_key)) = best {
             debug!(
-                "Selected latest INVITE transaction {} for dialog {} using CSeq {}",
-                tx_key, dialog_id, cseq
+                transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_key),
+                dialog=%dialog_id,
+                cseq,
+                "Selected latest INVITE transaction for dialog"
             );
             Some(tx_key)
         } else {

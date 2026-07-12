@@ -154,7 +154,11 @@ impl ResponseBuilder {
 
         // Add dialog-specific context if dialog_id is provided
         if let Some(id) = dialog_id {
-            debug!("Building response for dialog: {}", id);
+            debug!(
+                dialog_id_present = true,
+                dialog_id_len = id.len(),
+                "Building response for dialog"
+            );
             // Future enhancement: Could add dialog-specific headers or processing here
         }
 

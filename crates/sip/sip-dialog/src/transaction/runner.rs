@@ -363,7 +363,7 @@ pub async fn run_transaction_loop<D, TH, L>(
                     }
                     Ok(None) => { /* No state change needed */ }
                     Err(e) => {
-                        error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error handling timer '{}' in state {:?}", timer_name, current_state);
+                        error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), timer_class=%crate::transaction::safe_diagnostics::SafeTimerName::new(&timer_name), timer_len=timer_name.len(), state=?current_state, "Error handling timer");
 
                         // Try to send error event with timeout
                         let sender = data.get_tu_event_sender();

@@ -230,7 +230,7 @@ impl TransactionLogic<ServerTransactionData, ServerNonInviteTimerHandles> for Se
                     .await
             }
             _ => {
-                warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), timer_name=%timer_name, "Unknown timer triggered for ServerNonInvite");
+                warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), timer_class=%crate::transaction::safe_diagnostics::SafeTimerName::new(timer_name), timer_len=timer_name.len(), "Unknown timer triggered for ServerNonInvite");
                 Ok(None)
             }
         }

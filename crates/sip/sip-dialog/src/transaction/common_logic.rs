@@ -108,7 +108,7 @@ pub async fn send_timer_triggered_event(
     timer_name: &str,
     events_tx: &mpsc::Sender<TransactionEvent>,
 ) {
-    trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), timer=%timer_name, "Timer triggered event");
+    trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), timer_class=%crate::transaction::safe_diagnostics::SafeTimerName::new(timer_name), timer_len=timer_name.len(), "Timer triggered event");
     let _ = events_tx
         .send(TransactionEvent::TimerTriggered {
             transaction_id: tx_id.clone(),

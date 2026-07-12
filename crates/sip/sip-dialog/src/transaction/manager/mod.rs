@@ -1101,7 +1101,10 @@ impl TransactionManager {
         for entry in self.client_transactions.iter() {
             let key = entry.key();
             let tx = entry.value();
-            increment(&mut client_by_method, key.method().to_string());
+            increment(
+                &mut client_by_method,
+                crate::transaction::safe_diagnostics::SafeMethod::new(key.method()).to_string(),
+            );
             increment(&mut client_by_state, format!("{:?}", tx.state()));
             increment(&mut client_by_kind, tx.kind().to_string());
             increment(
@@ -1117,7 +1120,10 @@ impl TransactionManager {
         for entry in self.server_transactions.iter() {
             let key = entry.key();
             let tx = entry.value();
-            increment(&mut server_by_method, key.method().to_string());
+            increment(
+                &mut server_by_method,
+                crate::transaction::safe_diagnostics::SafeMethod::new(key.method()).to_string(),
+            );
             increment(&mut server_by_state, format!("{:?}", tx.state()));
             increment(&mut server_by_kind, tx.kind().to_string());
             increment(

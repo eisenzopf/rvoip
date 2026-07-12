@@ -142,6 +142,20 @@ fn transport_event_dispatch_queue_capacity(
     capacity.unwrap_or(default_capacity).max(1)
 }
 
+fn transport_event_class(event: &TransportEvent) -> &'static str {
+    match event {
+        TransportEvent::MessageReceived { .. } => "message_received",
+        TransportEvent::Error { .. } => "error",
+        TransportEvent::Closed => "closed",
+        TransportEvent::KeepAlivePongReceived { .. } => "keepalive_pong_received",
+        TransportEvent::ConnectionClosed { .. } => "connection_closed",
+        TransportEvent::ShutdownRequested => "shutdown_requested",
+        TransportEvent::ShutdownReady => "shutdown_ready",
+        TransportEvent::ShutdownNow => "shutdown_now",
+        TransportEvent::ShutdownComplete => "shutdown_complete",
+    }
+}
+
 fn transport_event_route_hash(event: &TransportEvent) -> Option<u64> {
     let TransportEvent::MessageReceived { message, .. } = event else {
         return None;
@@ -880,7 +894,11 @@ impl TransportManager {
             let fallback_dispatch_worker = Arc::new(AtomicUsize::new(0));
 
             while let Some(event) = rx.recv().await {
-                trace!("Received event from {}: {:?}", transport_name, event);
+                trace!(
+                    transport_name_len = transport_name.len(),
+                    event_class = transport_event_class(&event),
+                    "Received transport event"
+                );
                 let mut event = event;
                 mark_transport_manager_forwarded(&mut event, Instant::now());
 

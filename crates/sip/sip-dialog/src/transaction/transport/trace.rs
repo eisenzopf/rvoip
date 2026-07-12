@@ -119,7 +119,10 @@ impl SipTraceRuntime {
                 .publish(Arc::new(RvoipCrossCrateEvent::TransportToSession(event)))
                 .await
             {
-                tracing::warn!("Failed to publish SIP trace event: {}", err);
+                tracing::warn!(
+                    error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&err),
+                    "Failed to publish SIP trace event"
+                );
             }
         });
     }

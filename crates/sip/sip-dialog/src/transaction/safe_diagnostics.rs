@@ -50,6 +50,31 @@ impl fmt::Debug for SafeMethod<'_> {
     }
 }
 
+/// A bounded-cardinality classifier for caller-supplied timer names.
+pub struct SafeTimerName<'a>(&'a str);
+
+impl<'a> SafeTimerName<'a> {
+    pub const fn new(timer_name: &'a str) -> Self {
+        Self(timer_name)
+    }
+}
+
+impl fmt::Display for SafeTimerName<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" => f.write_str(self.0),
+            "100" | "Timer_100" => f.write_str("100"),
+            _ => f.write_str("other"),
+        }
+    }
+}
+
+impl fmt::Debug for SafeTimerName<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
 /// A log-only transaction identity that never renders the Via branch.
 pub struct SafeTransactionKey<'a>(&'a TransactionKey);
 
@@ -479,7 +504,7 @@ mod tests {
 
     use super::*;
 
-    const SECRETS: [&str; 8] = [
+    const SECRETS: [&str; 9] = [
         "branch-secret",
         "EXTENSION-SECRET",
         "uri-secret",
@@ -488,6 +513,7 @@ mod tests {
         "reason-secret",
         "error-secret",
         "header-secret",
+        "timer-name-secret",
     ];
 
     fn assert_redacted(rendered: &str) {
@@ -536,6 +562,7 @@ mod tests {
 
         for rendered in [
             format!("{}", SafeTransactionKey::new(&key)),
+            format!("{}", SafeTimerName::new("timer-name-secret")),
             format!("{:?}", SafeSipMessage::new(&message)),
             format!("{:?}", SafeSipMessage::new(&response_message)),
             format!("{:?}", SafeTransactionCommand::new(&command)),
@@ -548,6 +575,246 @@ mod tests {
         ] {
             assert_redacted(&rendered);
         }
+
+        assert_eq!(SafeTimerName::new("Timer_100").to_string(), "100");
+        assert_eq!(SafeTimerName::new("timer-name-secret").to_string(), "other");
+    }
+
+    /// Extract tracing macro invocations with balanced parentheses. Parentheses
+    /// inside normal string literals are ignored, as are escaped quotes. This is
+    /// intentionally independent of line layout: nested calls may finish before
+    /// a sensitive argument later in the same tracing invocation.
+    fn extract_log_blocks(source: &str) -> Vec<String> {
+        const MARKERS: [&str; 5] = ["trace!(", "debug!(", "info!(", "warn!(", "error!("];
+
+        let mut blocks = Vec::new();
+        let mut cursor = 0;
+        while cursor < source.len() {
+            let next = MARKERS
+                .iter()
+                .filter_map(|marker| source[cursor..].find(marker).map(|offset| (offset, marker)))
+                .min_by_key(|(offset, _)| *offset);
+            let Some((offset, marker)) = next else {
+                break;
+            };
+            let start = cursor + offset;
+            let bytes = source.as_bytes();
+            let mut index = start + marker.len() - 1;
+            let mut depth = 0usize;
+            let mut in_string = false;
+            let mut escaped = false;
+            let mut end = None;
+
+            while index < bytes.len() {
+                let byte = bytes[index];
+                if in_string {
+                    if escaped {
+                        escaped = false;
+                    } else if byte == b'\\' {
+                        escaped = true;
+                    } else if byte == b'"' {
+                        in_string = false;
+                    }
+                } else if byte == b'"' {
+                    in_string = true;
+                } else if byte == b'(' {
+                    depth += 1;
+                } else if byte == b')' {
+                    depth = depth.checked_sub(1).expect("balanced log macro scanner");
+                    if depth == 0 {
+                        end = Some(index + 1);
+                        break;
+                    }
+                }
+                index += 1;
+            }
+
+            let end = end.unwrap_or_else(|| panic!("unterminated tracing macro at byte {start}"));
+            blocks.push(source[start..end].to_string());
+            cursor = end;
+        }
+        blocks
+    }
+
+    fn compact(source: &str) -> String {
+        source
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
+    }
+
+    fn contains_identifier(source: &str, identifier: &str) -> bool {
+        source.match_indices(identifier).any(|(start, _)| {
+            let before = source[..start].chars().next_back();
+            let after = source[start + identifier.len()..].chars().next();
+            let is_identifier =
+                |character: char| character.is_ascii_alphanumeric() || character == '_';
+            before.is_none_or(|character| !is_identifier(character))
+                && after.is_none_or(|character| !is_identifier(character))
+        })
+    }
+
+    /// Returns true only when an expression is rendered as a tracing field or
+    /// format argument. Merely using an expression to compute safe metadata does
+    /// not count as rendering it.
+    fn renders_expression(compact_block: &str, expression: &str) -> bool {
+        let patterns = [
+            format!("=%{expression},"),
+            format!("=%{expression})"),
+            format!("=?{expression},"),
+            format!("=?{expression})"),
+            format!("(%{expression},"),
+            format!("(%{expression})"),
+            format!("(?{expression},"),
+            format!("(?{expression})"),
+            format!(",%{expression},"),
+            format!(",%{expression})"),
+            format!(",?{expression},"),
+            format!(",?{expression})"),
+            format!("({expression},"),
+            format!(",{expression},"),
+            format!(",{expression})"),
+        ];
+        patterns
+            .iter()
+            .any(|pattern| compact_block.contains(pattern))
+    }
+
+    fn scan_log_block(path: &str, block: &str) -> Vec<&'static str> {
+        let compact_block = compact(block);
+        let mut findings = Vec::new();
+        let renders_any = |expressions: &[&str]| {
+            expressions
+                .iter()
+                .any(|expression| renders_expression(&compact_block, expression))
+        };
+
+        if renders_any(&[
+            "tx_id",
+            "tx_id_clone",
+            "tx_id_for_timer",
+            "tx_id_for_task",
+            "tx_key",
+            "transaction_id",
+            "invite_key",
+            "invite_tx_id",
+            "cancel_tx_id",
+            "id_for_logging",
+            "data.id",
+            "self.id",
+            "data.as_ref_key()",
+            "transaction.id()",
+            "tx.id()",
+        ]) {
+            findings.push("transaction_key");
+        }
+
+        if renders_any(&["e", "err", "error"]) {
+            findings.push("error");
+        }
+
+        let references_timer_name = ["timer_name", "timer_name_clone"]
+            .iter()
+            .any(|name| contains_identifier(block, name));
+        if renders_any(&["timer_name", "timer_name_clone"])
+            || (references_timer_name
+                && (!block.contains("SafeTimerName") || !block.contains("timer_len")))
+        {
+            findings.push("timer_name");
+        }
+
+        let typed_dialog_id_allowlist = path.ends_with("manager/transaction_integration.rs")
+            || path.ends_with("transaction/server/reliable_invite.rs");
+        if renders_any(&["dialog_id", "id_for_dialog"]) && !typed_dialog_id_allowlist {
+            findings.push("dialog_id");
+        }
+
+        if renders_any(&[
+            "method",
+            "request.method()",
+            "request.method",
+            "modified_request.method()",
+            "cseq.method",
+            "cseq_header.method",
+            "original_method",
+            "key.method()",
+        ]) {
+            findings.push("method");
+        }
+
+        if renders_any(&[
+            "branch",
+            "received_branch",
+            "expected_branch",
+            "tx_id.branch",
+        ]) {
+            findings.push("branch");
+        }
+
+        if renders_any(&[
+            "uri",
+            "domain",
+            "target_uri",
+            "contact_addr.uri",
+            "request.uri()",
+            "next_hop_uri_for_request",
+        ]) {
+            findings.push("uri");
+        }
+
+        if renders_any(&["via", "top_via"])
+            || block.contains("Via[")
+            || compact_block.contains("top_via=%")
+        {
+            findings.push("via");
+        }
+
+        if renders_any(&["route", "top_route", "next_hop"]) {
+            findings.push("route");
+        }
+
+        if renders_any(&["reason", "response.reason_phrase()"]) {
+            findings.push("reason");
+        }
+
+        if renders_any(&["body", "sdp"]) || block.contains("String::from_utf8_lossy") {
+            findings.push("body");
+        }
+
+        for (expression, finding) in [
+            ("command", "command"),
+            ("message", "message"),
+            ("event", "event"),
+        ] {
+            if renders_expression(&compact_block, expression) {
+                findings.push(finding);
+            }
+        }
+
+        findings
+    }
+
+    fn scan_source(path: &str, source: &str) -> Vec<(&'static str, String)> {
+        extract_log_blocks(source)
+            .into_iter()
+            .flat_map(|block| {
+                scan_log_block(path, &block)
+                    .into_iter()
+                    .map(move |finding| (finding, block.clone()))
+            })
+            .collect()
+    }
+
+    fn scan_retention_source(source: &str) -> Vec<&'static str> {
+        let safe = "SafeMethod::new(key.method()).to_string()";
+        let mut findings = Vec::new();
+        if source.contains("key.method().to_string()") {
+            findings.push("retention_method");
+        }
+        if source.matches(safe).count() < 2 {
+            findings.push("retention_safe_method_missing");
+        }
+        findings
     }
 
     #[test]
@@ -569,112 +836,6 @@ mod tests {
             }
         }
 
-        fn check_log_block(path: &Path, block: &str) {
-            fn contains_identifier(source: &str, identifier: &str) -> bool {
-                source.match_indices(identifier).any(|(start, _)| {
-                    let before = source[..start].chars().next_back();
-                    let after = source[start + identifier.len()..].chars().next();
-                    let is_ident =
-                        |character: char| character.is_ascii_alphanumeric() || character == '_';
-                    before.map_or(true, |character| !is_ident(character))
-                        && after.map_or(true, |character| !is_ident(character))
-                })
-            }
-
-            let key_tokens = [
-                "tx_id",
-                "transaction_id",
-                "invite_key",
-                "invite_tx_id",
-                "cancel_tx_id",
-                "id_for_logging",
-                "data.id",
-                "self.id",
-                "transaction.id()",
-                "tx.id()",
-            ];
-            if key_tokens
-                .iter()
-                .any(|token| contains_identifier(block, token))
-            {
-                assert!(
-                    block.contains("SafeTransactionKey"),
-                    "{} contains an unwrapped transaction key log:\n{}",
-                    path.display(),
-                    block
-                );
-            }
-
-            if block.contains(".method") || block.contains("method,") || block.contains("%method") {
-                assert!(
-                    block.contains("SafeMethod")
-                        || block.contains("safe_method_label")
-                        || block.contains("status"),
-                    "{} contains an unclassified method log:\n{}",
-                    path.display(),
-                    block
-                );
-            }
-
-            for (needle, safe_marker) in [
-                ("?command", "SafeTransactionCommand"),
-                ("?message", "SafeSipMessage"),
-                ("?event", "SafeTransactionEvent"),
-            ] {
-                if block.contains(needle) {
-                    assert!(
-                        block.contains(safe_marker),
-                        "{} contains an unsafe derived diagnostic:\n{}",
-                        path.display(),
-                        block
-                    );
-                }
-            }
-
-            if block.contains("error=%e")
-                || block.contains("error = %e")
-                || block.contains("error=?e")
-                || block.contains("error = ?e")
-                || block.contains(", e\n")
-            {
-                assert!(
-                    block.contains("SafeOpaqueError") || block.contains("SafeTransactionError"),
-                    "{} contains an unclassified error log:\n{}",
-                    path.display(),
-                    block
-                );
-            }
-
-            for forbidden in [
-                "received_branch=?",
-                "expected_branch=%",
-                "Via[",
-                "top_via = %",
-                "uri = %",
-                "top_route = %",
-                "next_hop = %",
-                "domain = %",
-                "reason = %",
-                "String::from_utf8_lossy",
-            ] {
-                assert!(
-                    !block.contains(forbidden),
-                    "{} contains forbidden transaction log form {forbidden}:\n{}",
-                    path.display(),
-                    block
-                );
-            }
-
-            if block.contains("reason_phrase()") {
-                assert!(
-                    block.contains("reason_len"),
-                    "{} renders an untrusted response reason:\n{}",
-                    path.display(),
-                    block
-                );
-            }
-        }
-
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let mut files = Vec::new();
         rust_files(&manifest.join("src/transaction"), &mut files);
@@ -682,36 +843,199 @@ mod tests {
 
         for path in files {
             let source = fs::read_to_string(&path).expect("read Rust source");
-            let mut block = String::new();
-            let mut in_log = false;
-            for line in source.lines() {
-                if !in_log
-                    && ["trace!(", "debug!(", "info!(", "warn!(", "error!("]
-                        .iter()
-                        .any(|marker| line.contains(marker))
-                {
-                    in_log = true;
-                    block.clear();
-                }
-                if in_log {
-                    block.push_str(line);
-                    block.push('\n');
-                    if line.contains(");") {
-                        check_log_block(&path, &block);
-                        in_log = false;
-                    }
-                }
-            }
-            assert!(
-                !in_log,
-                "unterminated tracing macro scan in {}",
-                path.display()
-            );
+            let findings = scan_source(path.to_string_lossy().as_ref(), &source);
+            assert!(findings.is_empty(), "{}: {findings:#?}", path.display());
         }
+
+        let manager = fs::read_to_string(manifest.join("src/transaction/manager/mod.rs"))
+            .expect("read transaction manager source");
+        assert_eq!(scan_retention_source(&manager), Vec::<&str>::new());
 
         let parser = fs::read_to_string(manifest.join("../sip-core/src/parser/message.rs"))
             .expect("read SIP parser source");
         assert!(!parser.contains("String::from_utf8_lossy(e.input)"));
         assert!(parser.contains("remaining_len = e.input.len()"));
+    }
+
+    #[test]
+    fn transaction_log_scanner_rejects_every_sensitive_field_class() {
+        let mutations = [
+            (
+                "transaction/mutant.rs",
+                r#"debug!("tx {}", tx_key);"#,
+                "transaction_key",
+            ),
+            (
+                "transaction/mutant.rs",
+                r#"warn!("failed {}", err);"#,
+                "error",
+            ),
+            (
+                "transaction/mutant.rs",
+                r#"warn!(timer = %timer_name, "timer");"#,
+                "timer_name",
+            ),
+            (
+                "transaction/server/builders.rs",
+                r#"debug!("dialog {}", dialog_id);"#,
+                "dialog_id",
+            ),
+            (
+                "transaction/mutant.rs",
+                r#"warn!(received_branch = ?branch, "bad");"#,
+                "branch",
+            ),
+            (
+                "transaction/mutant.rs",
+                r#"debug!(method = %request.method(), "m");"#,
+                "method",
+            ),
+            (
+                "transaction/mutant.rs",
+                r#"debug!(uri = %request.uri(), "u");"#,
+                "uri",
+            ),
+            (
+                "transaction/mutant.rs",
+                r#"debug!("Via[{}]", via);"#,
+                "via",
+            ),
+            (
+                "transaction/mutant.rs",
+                r#"debug!(route = %route, "r");"#,
+                "route",
+            ),
+            (
+                "transaction/mutant.rs",
+                r#"warn!(reason = %reason, "r");"#,
+                "reason",
+            ),
+            (
+                "transaction/mutant.rs",
+                r#"debug!(body = %body, "b");"#,
+                "body",
+            ),
+            (
+                "transaction/mutant.rs",
+                r#"debug!(?command, "c");"#,
+                "command",
+            ),
+            (
+                "transaction/mutant.rs",
+                r#"debug!(?message, "m");"#,
+                "message",
+            ),
+            (
+                "transaction/mutant.rs",
+                r#"debug!(?event, "e");"#,
+                "event",
+            ),
+            // A nested call ending on an earlier line must not hide the later
+            // unsafe error operand from the balanced macro extractor.
+            (
+                "transaction/mutant.rs",
+                "warn!(\n    state = ?classify(nested(value)),\n    error = %err,\n    \"failed\"\n);",
+                "error",
+            ),
+        ];
+
+        for (path, source, expected) in mutations {
+            let findings = scan_source(path, source);
+            assert!(
+                findings.iter().any(|(finding, _)| *finding == expected),
+                "scanner accepted unsafe {expected} mutation: {source}; findings={findings:#?}"
+            );
+        }
+
+        let assert_spelling_rejected = |expression: &str, expected: &str| {
+            let source = format!(r#"debug!(value = %{expression}, "unsafe");"#);
+            let findings = scan_source("transaction/mutant.rs", &source);
+            assert!(
+                findings.iter().any(|(finding, _)| *finding == expected),
+                "scanner accepted unsafe {expected} spelling {expression}; findings={findings:#?}"
+            );
+        };
+        for expression in [
+            "tx_id",
+            "tx_id_clone",
+            "tx_id_for_timer",
+            "tx_id_for_task",
+            "tx_key",
+            "transaction_id",
+            "invite_key",
+            "invite_tx_id",
+            "cancel_tx_id",
+            "id_for_logging",
+            "data.id",
+            "self.id",
+            "data.as_ref_key()",
+            "transaction.id()",
+            "tx.id()",
+        ] {
+            assert_spelling_rejected(expression, "transaction_key");
+        }
+        for expression in ["e", "err", "error"] {
+            assert_spelling_rejected(expression, "error");
+        }
+        for expression in ["timer_name", "timer_name_clone"] {
+            assert_spelling_rejected(expression, "timer_name");
+        }
+        for expression in [
+            "method",
+            "request.method()",
+            "request.method",
+            "modified_request.method()",
+            "cseq.method",
+            "cseq_header.method",
+            "original_method",
+            "key.method()",
+        ] {
+            assert_spelling_rejected(expression, "method");
+        }
+        for expression in [
+            "uri",
+            "domain",
+            "target_uri",
+            "contact_addr.uri",
+            "request.uri()",
+            "next_hop_uri_for_request",
+        ] {
+            assert_spelling_rejected(expression, "uri");
+        }
+        for (expressions, expected) in [
+            (
+                &[
+                    "branch",
+                    "received_branch",
+                    "expected_branch",
+                    "tx_id.branch",
+                ][..],
+                "branch",
+            ),
+            (&["via", "top_via"][..], "via"),
+            (&["route", "top_route", "next_hop"][..], "route"),
+            (&["reason", "response.reason_phrase()"][..], "reason"),
+            (&["body", "sdp"][..], "body"),
+            (&["dialog_id", "id_for_dialog"][..], "dialog_id"),
+            (&["command"][..], "command"),
+            (&["message"][..], "message"),
+            (&["event"][..], "event"),
+        ] {
+            for expression in expressions {
+                assert_spelling_rejected(expression, expected);
+            }
+        }
+
+        let unsafe_retention = r#"
+            increment(&mut client_by_method, key.method().to_string());
+            increment(&mut server_by_method, SafeMethod::new(key.method()).to_string());
+        "#;
+        assert!(scan_retention_source(unsafe_retention).contains(&"retention_method"));
+    }
+
+    #[test]
+    fn transaction_log_scanner_does_not_treat_bare_id_as_a_transaction_key() {
+        let source = r#"debug!(id = %id, "bounded internal identifier");"#;
+        assert!(scan_source("transaction/mutant.rs", source).is_empty());
     }
 }
