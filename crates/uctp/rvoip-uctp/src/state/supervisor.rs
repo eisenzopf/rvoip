@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::select_all;
-use rvoip_core::adapter::AdapterEvent;
+use rvoip_core::adapter::{AdapterEvent, OrchestratorAdapterEvent};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -28,6 +28,43 @@ pub fn try_deliver_adapter_event(
     let best_effort = matches!(
         &event,
         AdapterEvent::Quality { .. } | AdapterEvent::Native { .. }
+    );
+    match sender.try_send(event) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(_)) if best_effort => {
+            metrics::counter!(
+                "uctp_adapter_events_dropped_total",
+                "transport" => transport,
+                "class" => "best-effort"
+            )
+            .increment(1);
+            true
+        }
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            metrics::counter!(
+                "uctp_adapter_event_backpressure_total",
+                "transport" => transport
+            )
+            .increment(1);
+            false
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+    }
+}
+
+/// Atomic counterpart used by first-party adapters. Authenticated inbound
+/// handoff remains a single queue item; public best-effort events retain the
+/// same loss policy as [`try_deliver_adapter_event`].
+pub fn try_deliver_orchestrator_event(
+    sender: &mpsc::Sender<OrchestratorAdapterEvent>,
+    event: OrchestratorAdapterEvent,
+    transport: &'static str,
+) -> bool {
+    let best_effort = matches!(
+        &event,
+        OrchestratorAdapterEvent::Public(
+            AdapterEvent::Quality { .. } | AdapterEvent::Native { .. }
+        )
     );
     match sender.try_send(event) {
         Ok(()) => true,

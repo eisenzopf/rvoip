@@ -1,6 +1,6 @@
 //! `WebRtcAdapter` — `rvoip_core::ConnectionAdapter` for WebRTC interop.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -8,11 +8,11 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
 use rvoip_core::adapter::{
-    legacy_normalized_event_receiver, AdapterEvent, AdapterKind, AdapterLifecycleSink,
-    AdapterLifecycleSinkSlot, ConnectionAdapter, ConnectionHandle, EndReason,
+    legacy_normalized_event_receiver, AdapterEvent, AdapterKind, AdapterLifecycleCapabilities,
+    AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter, ConnectionHandle, EndReason,
     InboundConnectionContext, InboundContextError, InboundRoutingHint, InboundSignalingMetadata,
     OrchestratorAdapterEvent, OriginateRequest, RejectReason, SignatureHeaders, TerminalDelivery,
     TransferTarget,
@@ -44,6 +44,7 @@ const MAX_DATA_CHANNELS_PER_ROUTE: usize = 64;
 const DATA_CHANNEL_SCAN_INTERVAL: Duration = Duration::from_millis(25);
 const DATA_CHANNEL_OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
 const INBOUND_EVENT_DELIVERY_TIMEOUT: Duration = Duration::from_secs(2);
+const OUTBOUND_EVENT_STAGE_CAPACITY: usize = 64;
 
 /// Background reaper poll interval.
 const REAPER_TICK: Duration = Duration::from_secs(30);
@@ -105,6 +106,10 @@ pub struct Route {
     pub cancel: Arc<Notify>,
     /// Set by the fail watcher when the underlying PC enters `Failed`/`Closed`.
     pub failed_at: Arc<SyncMutex<Option<Instant>>>,
+    /// True only after the inbound atomic handoff or outbound activation has
+    /// crossed the core publication boundary. Pre-publication peer failures
+    /// are cleaned locally and are never emitted as unknown terminal events.
+    core_published: Arc<AtomicBool>,
     /// Signaling identity that owns this network-visible route. Keeping the
     /// authorization record on the route makes ownership transport-neutral:
     /// WHIP, WHEP, WS and WSS all consult the same boundary.
@@ -118,6 +123,29 @@ impl Route {
     fn cancel_tasks(&self) {
         self.cancel.notify_waiters();
         let _ = self.data_cancel.send(true);
+    }
+}
+
+enum OutboundEventStageState {
+    Dormant {
+        events: VecDeque<AdapterEvent>,
+        overflowed: bool,
+    },
+    Activated,
+}
+
+struct OutboundEventStage {
+    state: StdMutex<OutboundEventStageState>,
+}
+
+impl Default for OutboundEventStage {
+    fn default() -> Self {
+        Self {
+            state: StdMutex::new(OutboundEventStageState::Dormant {
+                events: VecDeque::with_capacity(OUTBOUND_EVENT_STAGE_CAPACITY),
+                overflowed: false,
+            }),
+        }
     }
 }
 
@@ -205,6 +233,9 @@ pub struct WebRtcAdapter {
     routes: Arc<DashMap<ConnectionId, Route>>,
     events_tx: mpsc::Sender<OrchestratorAdapterEvent>,
     events_rx: StdMutex<Option<mpsc::Receiver<OrchestratorAdapterEvent>>>,
+    /// Per-outbound-route FIFO. Operational and terminal events remain
+    /// dormant until the orchestrator commits the returned Connection.
+    outbound_event_stages: Arc<DashMap<ConnectionId, Arc<OutboundEventStage>>>,
     lifecycle: AdapterLifecycleSinkSlot,
     /// Cancel for the global reaper task spawned in [`WebRtcAdapter::new`].
     reaper_cancel: Arc<Notify>,
@@ -234,6 +265,7 @@ impl WebRtcAdapter {
             routes: Arc::new(DashMap::new()),
             events_tx,
             events_rx: StdMutex::new(Some(events_rx)),
+            outbound_event_stages: Arc::new(DashMap::new()),
             lifecycle: AdapterLifecycleSinkSlot::default(),
             reaper_cancel: Arc::clone(&reaper_cancel),
             metrics_inbound: Arc::new(AtomicU64::new(0)),
@@ -251,12 +283,14 @@ impl WebRtcAdapter {
         if ttl_secs > 0 {
             let routes = Arc::clone(&adapter.routes);
             let events_tx = adapter.events_tx.clone();
+            let outbound_event_stages = Arc::clone(&adapter.outbound_event_stages);
             let lifecycle = adapter.lifecycle.clone();
             let live = Arc::clone(&adapter.live_sessions);
             tokio::spawn(async move {
                 Self::run_reaper(
                     routes,
                     events_tx,
+                    outbound_event_stages,
                     reaper_cancel,
                     ttl_secs,
                     metrics_reaped,
@@ -274,13 +308,18 @@ impl WebRtcAdapter {
         // `crate::media::stats::spawn_webrtc_stats_collector`. The
         // orchestrator feeds these into its `QualityAggregator` so
         // `Event::SessionEnded` reports include WebRTC-side numbers.
-        Self::spawn_quality_emitter(Arc::clone(&adapter.routes), adapter.events_tx.clone());
+        Self::spawn_quality_emitter(
+            Arc::clone(&adapter.routes),
+            Arc::clone(&adapter.outbound_event_stages),
+            adapter.events_tx.clone(),
+        );
 
         adapter
     }
 
     fn spawn_quality_emitter(
         routes: Arc<DashMap<ConnectionId, Route>>,
+        outbound_event_stages: Arc<DashMap<ConnectionId, Arc<OutboundEventStage>>>,
         events_tx: mpsc::Sender<OrchestratorAdapterEvent>,
     ) {
         tokio::spawn(async move {
@@ -316,12 +355,14 @@ impl WebRtcAdapter {
                         packet_loss_pct: loss_sum / count as f32,
                         mos: None,
                     };
-                    let _ = events_tx
-                        .send(OrchestratorAdapterEvent::Public(AdapterEvent::Quality {
+                    let _ = Self::publish_or_stage_to(
+                        &outbound_event_stages,
+                        &events_tx,
+                        AdapterEvent::Quality {
                             connection_id: conn_id,
                             snapshot,
-                        }))
-                        .await;
+                        },
+                    );
                 }
             }
         });
@@ -629,12 +670,68 @@ impl WebRtcAdapter {
         self.try_take_atomic_events()
     }
 
-    fn try_send(&self, event: AdapterEvent) {
-        if self
-            .events_tx
+    fn adapter_event_connection_id(event: &AdapterEvent) -> Option<&ConnectionId> {
+        match event {
+            AdapterEvent::InboundConnection { connection } => Some(&connection.id),
+            AdapterEvent::Connected { connection_id }
+            | AdapterEvent::Authenticated { connection_id, .. }
+            | AdapterEvent::PrincipalAuthenticated { connection_id, .. }
+            | AdapterEvent::Ended { connection_id, .. }
+            | AdapterEvent::Failed { connection_id, .. }
+            | AdapterEvent::Dtmf { connection_id, .. }
+            | AdapterEvent::Quality { connection_id, .. }
+            | AdapterEvent::Message { connection_id, .. }
+            | AdapterEvent::DataMessage { connection_id, .. }
+            | AdapterEvent::StepUpResponse { connection_id, .. } => Some(connection_id),
+            _ => None,
+        }
+    }
+
+    /// Retain an event while its outbound route is dormant. The original
+    /// event is returned when no dormant stage owns it and normal publication
+    /// should continue.
+    fn stage_outbound_event_to(
+        stages: &DashMap<ConnectionId, Arc<OutboundEventStage>>,
+        event: AdapterEvent,
+    ) -> Option<AdapterEvent> {
+        let Some(connection_id) = Self::adapter_event_connection_id(&event).cloned() else {
+            return Some(event);
+        };
+        let Some(stage) = stages.get(&connection_id) else {
+            return Some(event);
+        };
+        let mut state = stage
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match &mut *state {
+            OutboundEventStageState::Dormant { events, overflowed } => {
+                if events.len() >= OUTBOUND_EVENT_STAGE_CAPACITY {
+                    *overflowed = true;
+                } else {
+                    events.push_back(event);
+                }
+                None
+            }
+            OutboundEventStageState::Activated => Some(event),
+        }
+    }
+
+    fn publish_or_stage_to(
+        stages: &DashMap<ConnectionId, Arc<OutboundEventStage>>,
+        events_tx: &mpsc::Sender<OrchestratorAdapterEvent>,
+        event: AdapterEvent,
+    ) -> bool {
+        let Some(event) = Self::stage_outbound_event_to(stages, event) else {
+            return true;
+        };
+        events_tx
             .try_send(OrchestratorAdapterEvent::Public(event))
-            .is_err()
-        {
+            .is_ok()
+    }
+
+    fn try_send(&self, event: AdapterEvent) {
+        if !Self::publish_or_stage_to(&self.outbound_event_stages, &self.events_tx, event) {
             warn!("WebRtcAdapter event channel full or closed");
         }
     }
@@ -674,6 +771,23 @@ impl WebRtcAdapter {
         }
     }
 
+    async fn deliver_or_stage_terminal_event(
+        lifecycle: &AdapterLifecycleSinkSlot,
+        events_tx: &mpsc::Sender<OrchestratorAdapterEvent>,
+        stages: &DashMap<ConnectionId, Arc<OutboundEventStage>>,
+        event: AdapterEvent,
+        source: &'static str,
+    ) {
+        let connection_id = Self::adapter_event_connection_id(&event).cloned();
+        let Some(event) = Self::stage_outbound_event_to(stages, event) else {
+            return;
+        };
+        Self::deliver_terminal_event(lifecycle, events_tx, event, source).await;
+        if let Some(connection_id) = connection_id {
+            stages.remove(&connection_id);
+        }
+    }
+
     fn spawn_data_message_manager(&self, conn: ConnectionId, route: &Route) {
         if route.data_pump_started.swap(true, Ordering::AcqRel) {
             return;
@@ -684,6 +798,7 @@ impl WebRtcAdapter {
         let pumped = Arc::clone(&route.data_channels_pumped);
         let channel_keys = Arc::clone(&route.data_channel_keys);
         let events_tx = self.events_tx.clone();
+        let outbound_event_stages = Arc::clone(&self.outbound_event_stages);
         let dropped = Arc::clone(&self.metrics_data_dropped);
         let mut cancel = route.data_cancel.subscribe();
         tokio::spawn(async move {
@@ -711,6 +826,7 @@ impl WebRtcAdapter {
                         Arc::clone(&pumped),
                         Arc::clone(&channel_keys),
                         events_tx.clone(),
+                        Arc::clone(&outbound_event_stages),
                         Arc::clone(&dropped),
                         cancel.clone(),
                     )
@@ -740,6 +856,7 @@ impl WebRtcAdapter {
         pumped: Arc<SyncMutex<HashSet<usize>>>,
         channel_keys: Arc<DashMap<usize, String>>,
         events_tx: mpsc::Sender<OrchestratorAdapterEvent>,
+        outbound_event_stages: Arc<DashMap<ConnectionId, Arc<OutboundEventStage>>>,
         dropped: Arc<AtomicU64>,
         mut cancel: watch::Receiver<bool>,
     ) -> std::result::Result<bool, String> {
@@ -848,10 +965,10 @@ impl WebRtcAdapter {
                                     frame.is_string,
                                 ) {
                                     Ok(message) => {
-                                        if events_tx.try_send(OrchestratorAdapterEvent::Public(AdapterEvent::DataMessage {
+                                        if !Self::publish_or_stage_to(&outbound_event_stages, &events_tx, AdapterEvent::DataMessage {
                                             connection_id: conn.clone(),
                                             message,
-                                        })).is_err() {
+                                        }) {
                                             dropped.fetch_add(1, Ordering::Relaxed);
                                             warn!(conn = %conn, label, "WebRTC adapter event queue full; dropping data message");
                                         }
@@ -966,6 +1083,7 @@ impl WebRtcAdapter {
             Arc::clone(&route.data_channels_pumped),
             Arc::clone(&route.data_channel_keys),
             self.events_tx.clone(),
+            Arc::clone(&self.outbound_event_stages),
             Arc::clone(&self.metrics_data_dropped),
             route.data_cancel.subscribe(),
         )
@@ -1056,16 +1174,19 @@ impl WebRtcAdapter {
         let has_remote = remote.is_some();
         let (dtmf_tx, mut dtmf_rx) = mpsc::channel::<crate::media::dtmf::DecodedDtmfEvent>(32);
         let events_tx = self.events_tx.clone();
+        let outbound_event_stages = Arc::clone(&self.outbound_event_stages);
         let conn_for_dtmf = conn.clone();
         tokio::spawn(async move {
             while let Some(event) = dtmf_rx.recv().await {
-                let _ = events_tx
-                    .send(OrchestratorAdapterEvent::Public(AdapterEvent::Dtmf {
+                let _ = Self::publish_or_stage_to(
+                    &outbound_event_stages,
+                    &events_tx,
+                    AdapterEvent::Dtmf {
                         connection_id: conn_for_dtmf.clone(),
                         digits: event.digit.to_string(),
                         duration_ms: event.duration_ms,
-                    }))
-                    .await;
+                    },
+                );
             }
         });
         let media = from_tracks_with_dtmf_events(
@@ -1193,7 +1314,20 @@ impl WebRtcAdapter {
         }
     }
 
-    fn insert_route(&self, conn_id: ConnectionId, route: Route) {
+    fn insert_route(&self, conn_id: ConnectionId, route: Route) -> Result<()> {
+        let peer_track = Arc::clone(&route.peer);
+        let peer_fail = Arc::clone(&route.peer);
+        match self.routes.entry(conn_id.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(route);
+            }
+            Entry::Occupied(_) => {
+                return Err(WebRtcError::Adapter(
+                    "generated WebRTC connection id already exists".into(),
+                ));
+            }
+        }
+
         // Track-attacher: wire the answerer's inbound RTP into each
         // `WebRtcMediaStream`'s frames_in pump once a remote track is
         // observed.
@@ -1217,7 +1351,6 @@ impl WebRtcAdapter {
         // guard makes the call idempotent per stream.
         let routes_track = Arc::clone(&self.routes);
         let conn_track = conn_id.clone();
-        let peer_track = route.peer.clone();
         tokio::spawn(async move {
             use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
             use rvoip_core::stream::StreamKind;
@@ -1258,28 +1391,33 @@ impl WebRtcAdapter {
 
         let routes_fail = Arc::clone(&self.routes);
         let events_fail = self.events_tx.clone();
+        let outbound_stages_fail = Arc::clone(&self.outbound_event_stages);
         let lifecycle_fail = self.lifecycle.clone();
         let live_sessions_fail = Arc::clone(&self.live_sessions);
         let conn_fail = conn_id.clone();
-        let peer_fail = route.peer.clone();
         tokio::spawn(async move {
             peer_fail.wait_failed().await;
             if let Some((_, route)) = routes_fail.remove(&conn_fail) {
                 route.cancel_tasks();
                 Self::release_session_slot_from(&live_sessions_fail);
-                Self::deliver_terminal_event(
-                    &lifecycle_fail,
-                    &events_fail,
-                    AdapterEvent::Failed {
-                        connection_id: conn_fail,
-                        detail: "peer connection failed".into(),
-                    },
-                    "peer-failure",
-                )
-                .await;
+                if outbound_stages_fail.contains_key(&conn_fail)
+                    || route.core_published.load(Ordering::Acquire)
+                {
+                    Self::deliver_or_stage_terminal_event(
+                        &lifecycle_fail,
+                        &events_fail,
+                        &outbound_stages_fail,
+                        AdapterEvent::Failed {
+                            connection_id: conn_fail.clone(),
+                            detail: "peer connection failed".into(),
+                        },
+                        "peer-failure",
+                    )
+                    .await;
+                }
             }
         });
-        self.routes.insert(conn_id, route);
+        Ok(())
     }
 
     // (H1 had two helper functions `spawn_track_attacher` and `spawn_fail_watcher`
@@ -1293,6 +1431,7 @@ impl WebRtcAdapter {
     async fn run_reaper(
         routes: Arc<DashMap<ConnectionId, Route>>,
         events_tx: mpsc::Sender<OrchestratorAdapterEvent>,
+        outbound_event_stages: Arc<DashMap<ConnectionId, Arc<OutboundEventStage>>>,
         cancel: Arc<Notify>,
         ttl_secs: u64,
         reaped_counter: Arc<AtomicU64>,
@@ -1318,18 +1457,24 @@ impl WebRtcAdapter {
             for id in victims {
                 if let Some((_, route)) = routes.remove(&id) {
                     route.cancel_tasks();
-                    let _ = route.peer.close().await;
                     Self::release_session_slot_from(&live_sessions);
-                    Self::deliver_terminal_event(
+                    Self::deliver_or_stage_terminal_event(
                         &lifecycle,
                         &events_tx,
+                        &outbound_event_stages,
                         AdapterEvent::Ended {
-                            connection_id: id,
+                            connection_id: id.clone(),
                             reason: EndReason::Normal,
                         },
                         "session-reaper",
                     )
                     .await;
+                    if tokio::time::timeout(DATA_CHANNEL_OPERATION_TIMEOUT, route.peer.close())
+                        .await
+                        .is_err()
+                    {
+                        warn!(connection_id = %id, "WebRTC reaper peer close timed out");
+                    }
                     reaped_counter.fetch_add(1, Ordering::Relaxed);
                     debug!("session reaper removed idle/failed route");
                 }
@@ -1446,6 +1591,7 @@ impl WebRtcAdapter {
             held: false,
             cancel: Arc::clone(&cancel),
             failed_at: Arc::new(SyncMutex::new(None)),
+            core_published: Arc::new(AtomicBool::new(false)),
             authorization: authorization.clone(),
             inbound_context: Arc::new(SyncMutex::new(inbound_context)),
         };
@@ -1456,7 +1602,7 @@ impl WebRtcAdapter {
         // `accept()` was attempted but interacted badly with webrtc-rs
         // 0.20-alpha's negotiation timing.
 
-        self.insert_route(conn_id.clone(), route);
+        self.insert_route(conn_id.clone(), route)?;
         slot.commit();
 
         let handle = self.make_transport_handle(conn_id.clone(), cancel, data_cancel);
@@ -1486,6 +1632,13 @@ impl WebRtcAdapter {
                 "authenticated inbound event delivery failed".into(),
             ));
         }
+
+        let Some(route) = self.routes.get(&conn_id) else {
+            return Err(WebRtcError::Signaling(
+                "WebRTC route ended during inbound publication".into(),
+            ));
+        };
+        route.core_published.store(true, Ordering::Release);
 
         Ok(conn_id)
     }
@@ -1670,6 +1823,15 @@ impl ConnectionAdapter for WebRtcAdapter {
         AdapterKind::Interop
     }
 
+    fn lifecycle_capabilities(&self) -> AdapterLifecycleCapabilities {
+        AdapterLifecycleCapabilities {
+            authoritative_liveness: true,
+            atomic_inbound_handoff: true,
+            terminal_fallback: true,
+            staged_outbound_activation: true,
+        }
+    }
+
     fn install_lifecycle_sink(&self, sink: Arc<dyn AdapterLifecycleSink>) -> RvoipResult<()> {
         self.lifecycle
             .install(sink)
@@ -1755,13 +1917,28 @@ impl ConnectionAdapter for WebRtcAdapter {
             held: false,
             cancel: Arc::clone(&cancel),
             failed_at: Arc::new(SyncMutex::new(None)),
+            core_published: Arc::new(AtomicBool::new(false)),
             authorization: None,
             inbound_context: Arc::new(SyncMutex::new(None)),
         };
 
         // Same rationale as `apply_remote_offer`: lazy seeding in `accept()`.
-        self.insert_route(conn_id.clone(), route);
+        // Install the dormant stage before the route and its failure watcher
+        // become visible so no pre-commit event can escape to core.
+        self.outbound_event_stages
+            .insert(conn_id.clone(), Arc::new(OutboundEventStage::default()));
+        if let Err(error) = self.insert_route(conn_id.clone(), route) {
+            self.outbound_event_stages.remove(&conn_id);
+            return Err(RvoipError::Adapter(error.to_string()));
+        }
         slot.commit();
+
+        if !self.is_connection_live(&conn_id) {
+            self.outbound_event_stages.remove(&conn_id);
+            return Err(RvoipError::AdmissionRejected(
+                "WebRTC outbound route ended before lifecycle activation",
+            ));
+        }
 
         let handle = self.make_transport_handle(conn_id.clone(), cancel, data_cancel);
         let mut connection =
@@ -1772,8 +1949,53 @@ impl ConnectionAdapter for WebRtcAdapter {
         Ok(ConnectionHandle { connection })
     }
 
+    async fn activate_outbound(&self, conn: ConnectionId) -> RvoipResult<()> {
+        if !self.is_connection_live(&conn) {
+            self.outbound_event_stages.remove(&conn);
+            return Err(RvoipError::ConnectionNotFound(conn));
+        }
+        let stage = self
+            .outbound_event_stages
+            .get(&conn)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
+        let mut state = stage
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match &mut *state {
+            OutboundEventStageState::Activated => return Ok(()),
+            OutboundEventStageState::Dormant { events, overflowed } => {
+                if *overflowed {
+                    events.clear();
+                    return Err(RvoipError::AdmissionRejected(
+                        "WebRTC outbound lifecycle event stage overflowed",
+                    ));
+                }
+                let mut permits = self.events_tx.try_reserve_many(events.len()).map_err(|_| {
+                    RvoipError::AdmissionRejected(
+                        "WebRTC outbound lifecycle event publication was unavailable",
+                    )
+                })?;
+                for (permit, event) in permits.by_ref().zip(events.drain(..)) {
+                    permit.send(OrchestratorAdapterEvent::Public(event));
+                }
+                *state = OutboundEventStageState::Activated;
+            }
+        }
+        drop(state);
+        let Some(route) = self.routes.get(&conn) else {
+            return Err(RvoipError::ConnectionNotFound(conn));
+        };
+        route.core_published.store(true, Ordering::Release);
+        Ok(())
+    }
+
     #[instrument(skip(self), fields(conn = %conn))]
     async fn accept(&self, conn: ConnectionId) -> RvoipResult<()> {
+        if self.outbound_event_stages.contains_key(&conn) {
+            self.activate_outbound(conn.clone()).await?;
+        }
         let route = self
             .route(&conn)
             .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
@@ -1793,42 +2015,54 @@ impl ConnectionAdapter for WebRtcAdapter {
     }
 
     async fn reject(&self, conn: ConnectionId, _reason: RejectReason) -> RvoipResult<()> {
+        self.outbound_event_stages.remove(&conn);
         if let Some((_, route)) = self.routes.remove(&conn) {
             route.cancel_tasks();
-            route.peer.close().await.ok();
             self.release_session_slot();
+            Self::deliver_terminal_event(
+                &self.lifecycle,
+                &self.events_tx,
+                AdapterEvent::Failed {
+                    connection_id: conn.clone(),
+                    detail: "rejected".into(),
+                },
+                "reject",
+            )
+            .await;
+            if tokio::time::timeout(DATA_CHANNEL_OPERATION_TIMEOUT, route.peer.close())
+                .await
+                .is_err()
+            {
+                warn!(connection_id = %conn, "WebRTC rejected peer close timed out");
+            }
         }
-        Self::deliver_terminal_event(
-            &self.lifecycle,
-            &self.events_tx,
-            AdapterEvent::Failed {
-                connection_id: conn,
-                detail: "rejected".into(),
-            },
-            "reject",
-        )
-        .await;
         Ok(())
     }
 
     #[instrument(skip(self), fields(conn = %conn, reason = ?reason))]
     async fn end(&self, conn: ConnectionId, reason: EndReason) -> RvoipResult<()> {
+        self.outbound_event_stages.remove(&conn);
         if let Some((_, route)) = self.routes.remove(&conn) {
             route.cancel_tasks();
-            route.peer.close().await.ok();
             self.release_session_slot();
             info!(conn = %conn, "ended");
+            Self::deliver_terminal_event(
+                &self.lifecycle,
+                &self.events_tx,
+                AdapterEvent::Ended {
+                    connection_id: conn.clone(),
+                    reason,
+                },
+                "end",
+            )
+            .await;
+            if tokio::time::timeout(DATA_CHANNEL_OPERATION_TIMEOUT, route.peer.close())
+                .await
+                .is_err()
+            {
+                warn!(connection_id = %conn, "WebRTC ended peer close timed out");
+            }
         }
-        Self::deliver_terminal_event(
-            &self.lifecycle,
-            &self.events_tx,
-            AdapterEvent::Ended {
-                connection_id: conn,
-                reason,
-            },
-            "end",
-        )
-        .await;
         Ok(())
     }
 
@@ -2351,5 +2585,86 @@ mod inbound_hardening_tests {
         )
         .await;
         assert_eq!(sink.deliveries.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn outbound_events_remain_fifo_and_activation_is_all_or_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let adapter = WebRtcAdapter::new(WebRtcConfig::loopback());
+        let mut events = adapter
+            .try_subscribe_atomic_events()
+            .expect("atomic events");
+        let handle = adapter
+            .originate(OriginateRequest {
+                session_id: rvoip_core::ids::SessionId::new(),
+                participant_id: rvoip_core::ids::ParticipantId::new(),
+                target: String::new(),
+                direction: Direction::Outbound,
+                capabilities: adapter.capabilities(),
+                transport: None,
+            })
+            .await
+            .expect("outbound route");
+        let connection_id = handle.connection.id;
+        adapter
+            .bind_authenticated_principal(
+                &connection_id,
+                "webrtc-owner",
+                principal(Some("tenant-a"), None),
+            )
+            .expect("stage principal");
+        adapter.try_send(AdapterEvent::Dtmf {
+            connection_id: connection_id.clone(),
+            digits: "7".into(),
+            duration_ms: 100,
+        });
+
+        for _ in 0..(ADAPTER_EVENT_CAP - 1) {
+            adapter
+                .events_tx
+                .try_send(OrchestratorAdapterEvent::Public(AdapterEvent::Native {
+                    kind: "queue-filler",
+                    detail: String::new(),
+                }))
+                .expect("fill all but one queue slot");
+        }
+        assert!(adapter
+            .activate_outbound(connection_id.clone())
+            .await
+            .is_err());
+        for _ in 0..(ADAPTER_EVENT_CAP - 1) {
+            assert!(matches!(
+                events.recv().await,
+                Some(OrchestratorAdapterEvent::Public(AdapterEvent::Native {
+                    kind: "queue-filler",
+                    ..
+                }))
+            ));
+        }
+        assert!(matches!(
+            events.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        adapter
+            .activate_outbound(connection_id.clone())
+            .await
+            .expect("retry flushes intact FIFO");
+        assert!(matches!(
+            events.recv().await,
+            Some(OrchestratorAdapterEvent::Public(
+                AdapterEvent::PrincipalAuthenticated { connection_id: id, .. }
+            )) if id == connection_id
+        ));
+        assert!(matches!(
+            events.recv().await,
+            Some(OrchestratorAdapterEvent::Public(AdapterEvent::Dtmf { connection_id: id, digits, .. }))
+                if id == connection_id && digits == "7"
+        ));
+
+        adapter
+            .end(connection_id, EndReason::Normal)
+            .await
+            .expect("cleanup route");
     }
 }

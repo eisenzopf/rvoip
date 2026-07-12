@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use rvoip_auth_core::bearer_stub;
-use rvoip_core::adapter::{AdapterEvent, AdapterKind, ConnectionAdapter};
+use rvoip_core::adapter::{AdapterEvent, AdapterKind, ConnectionAdapter, EndReason};
 use rvoip_core::connection::Transport;
 use rvoip_quic::{UctpQuicAdapter, UctpQuicClient, UctpQuicConfig};
 use rvoip_uctp::envelope::UctpEnvelope;
@@ -76,6 +76,11 @@ async fn adapter_emits_inbound_connection_on_session_invite() {
     // transport() + kind() are real per design doc §4.4.
     assert_eq!(adapter.transport(), Transport::Quic);
     assert_eq!(adapter.kind(), AdapterKind::Substrate);
+    let lifecycle = adapter.lifecycle_capabilities();
+    assert!(lifecycle.authoritative_liveness);
+    assert!(lifecycle.atomic_inbound_handoff);
+    assert!(lifecycle.terminal_fallback);
+    assert!(!lifecycle.staged_outbound_activation);
 
     let mut events = adapter.subscribe_events();
 
@@ -215,7 +220,7 @@ async fn adapter_emits_inbound_connection_on_session_invite() {
 
     let error = adapter
         .send_data_message(
-            core_connection_id,
+            core_connection_id.clone(),
             rvoip_core::DataMessage::reliable(
                 "bridgefu.context.v1",
                 "text/plain",
@@ -225,4 +230,52 @@ async fn adapter_emits_inbound_connection_on_session_invite() {
         .await
         .expect_err("outbound data before connection.offer must fail");
     assert!(error.to_string().contains("not ready"));
+
+    let peer_terminal = UctpEnvelope::new(
+        MessageType::SessionEnd,
+        serde_json::to_value(rvoip_uctp::payloads::session::SessionEnd {
+            by: "part_alice".into(),
+            reason_code: 0,
+            reason: "racing peer terminal".into(),
+        })
+        .expect("terminal payload"),
+    )
+    .with_sid("sess_adapter_test");
+    let (local_end, peer_end) = tokio::join!(
+        adapter.end(core_connection_id.clone(), EndReason::Normal),
+        client.send(peer_terminal),
+    );
+    local_end.expect("local end");
+    peer_end.expect("peer terminal send");
+    assert!(!adapter.is_connection_live(&core_connection_id));
+    let terminal = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(AdapterEvent::Ended { connection_id, .. }) = events.recv().await {
+                break connection_id;
+            }
+        }
+    })
+    .await
+    .expect("terminal event");
+    assert_eq!(terminal, core_connection_id);
+    adapter
+        .end(core_connection_id.clone(), EndReason::Normal)
+        .await
+        .expect("repeated end is idempotent");
+
+    let duplicate = tokio::time::timeout(Duration::from_millis(200), async {
+        loop {
+            if matches!(
+                events.recv().await,
+                Some(AdapterEvent::Ended { connection_id, .. }) if connection_id == core_connection_id
+            ) {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        duplicate.is_err(),
+        "racing terminal must be emitted exactly once"
+    );
 }

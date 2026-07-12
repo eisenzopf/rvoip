@@ -1347,6 +1347,17 @@ impl UctpCoordinator {
         self.refresh_gauges();
     }
 
+    /// Retire one locally-owned Session without waiting for a cooperative peer.
+    ///
+    /// Substrate adapters call this after best-effort transmission of a local
+    /// `session.reject` or `session.end`. Removing the authoritative state
+    /// synchronously prevents a peer that ignores the terminal envelope from
+    /// retaining Session/Connection/subscription capacity indefinitely.
+    /// Repeated calls are idempotent.
+    pub fn retire_local_session(&self, sid: &SessionId) {
+        self.remove_session_resources(sid);
+    }
+
     fn clear_all_resources(&self) {
         let session_ids = self
             .sessions

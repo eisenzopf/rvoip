@@ -26,7 +26,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use chrono::Utc;
 use rvoip_auth_core::bearer_stub;
-use rvoip_core::adapter::ConnectionAdapter;
+use rvoip_core::adapter::{ConnectionAdapter, EndReason};
 use rvoip_core::events::Event;
 use rvoip_core::ids::{ConnectionId, StreamId};
 use rvoip_core::stream::{MediaFrame, MediaStream, StreamKind};
@@ -393,4 +393,54 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
             payload
         );
     }
+
+    // Core owns terminal dispatch. The adapter removes route ownership before
+    // wire teardown, then reports exactly one normalized terminal even if a
+    // late peer terminal races in afterwards.
+    let ended_connection = conn_ids[0].clone();
+    orchestrator
+        .end_connection(ended_connection.clone(), EndReason::Normal)
+        .await
+        .expect("core normal end");
+    assert!(!adapter.is_connection_live(&ended_connection));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if matches!(
+                events.recv().await,
+                Ok(Event::ConnectionEnded { connection_id, .. }) if connection_id == ended_connection
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("one normalized terminal event");
+
+    client_a
+        .send(
+            UctpEnvelope::new(
+                MessageType::SessionEnd,
+                serde_json::to_value(rvoip_uctp::payloads::session::SessionEnd {
+                    by: "part_alice".into(),
+                    reason_code: 0,
+                    reason: "late duplicate".into(),
+                })
+                .expect("serialize peer terminal"),
+            )
+            .with_sid("sess_a"),
+        )
+        .await
+        .expect("send late duplicate terminal");
+    let duplicate = tokio::time::timeout(Duration::from_millis(200), async {
+        loop {
+            if matches!(
+                events.recv().await,
+                Ok(Event::ConnectionEnded { connection_id, .. }) if connection_id == ended_connection
+            ) {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(duplicate.is_err(), "late peer terminal must be suppressed");
 }

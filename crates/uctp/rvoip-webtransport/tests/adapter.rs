@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use rvoip_auth_core::bearer_stub;
-use rvoip_core::adapter::{AdapterEvent, AdapterKind, ConnectionAdapter};
+use rvoip_core::adapter::{AdapterEvent, AdapterKind, ConnectionAdapter, EndReason};
 use rvoip_core::connection::Transport;
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads::{auth, session::SessionInvite};
@@ -75,6 +75,11 @@ async fn wt_adapter_emits_inbound_connection_on_session_invite() {
 
     assert_eq!(adapter.transport(), Transport::WebTransport);
     assert_eq!(adapter.kind(), AdapterKind::Substrate);
+    let lifecycle = adapter.lifecycle_capabilities();
+    assert!(lifecycle.authoritative_liveness);
+    assert!(lifecycle.atomic_inbound_handoff);
+    assert!(lifecycle.terminal_fallback);
+    assert!(!lifecycle.staged_outbound_activation);
 
     let mut events = adapter.subscribe_events();
 
@@ -350,4 +355,24 @@ async fn wt_adapter_emits_inbound_connection_on_session_invite() {
     .expect("DataMessage timeout");
     assert_eq!(received_connection, core_connection_id);
     assert_ne!(received_connection.as_str(), wire_connection_id);
+
+    adapter
+        .end(core_connection_id.clone(), EndReason::Normal)
+        .await
+        .expect("local end");
+    assert!(!adapter.is_connection_live(&core_connection_id));
+    let terminal = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(AdapterEvent::Ended { connection_id, .. }) = events.recv().await {
+                break connection_id;
+            }
+        }
+    })
+    .await
+    .expect("terminal event");
+    assert_eq!(terminal, core_connection_id);
+    adapter
+        .end(core_connection_id, EndReason::Normal)
+        .await
+        .expect("repeated end is idempotent");
 }

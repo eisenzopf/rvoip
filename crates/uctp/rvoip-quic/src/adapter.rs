@@ -12,8 +12,9 @@ use chrono::Utc;
 use dashmap::DashMap;
 use rvoip_auth_core::BearerValidator;
 use rvoip_core::adapter::{
-    AdapterEvent, AdapterKind, AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter,
-    ConnectionHandle, EndReason, OriginateRequest, RejectReason, SignatureHeaders, TransferTarget,
+    legacy_normalized_event_receiver, AdapterEvent, AdapterKind, AdapterLifecycleCapabilities,
+    AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter, ConnectionHandle, EndReason,
+    OrchestratorAdapterEvent, OriginateRequest, RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
@@ -70,6 +71,9 @@ pub(crate) struct Route {
     /// Child of the owning peer's media token. Session/route teardown cancels
     /// it before removing stream registries so concurrent allocations fail.
     pub route_cancel: CancellationToken,
+    /// Authoritative peer coordinator. Local terminal commands retire its
+    /// Session state immediately instead of waiting for a peer acknowledgement.
+    pub coordinator: Arc<rvoip_uctp::state::UctpCoordinator>,
 }
 
 pub struct UctpQuicConfig {
@@ -216,8 +220,9 @@ pub struct UctpQuicAdapter {
     by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
     routes: Arc<DashMap<ConnectionId, Route>>,
     lifecycle_sink: AdapterLifecycleSinkSlot,
+    events_tx: mpsc::Sender<OrchestratorAdapterEvent>,
     _server: Arc<UctpQuicServer>,
-    events_rx: StdMutex<Option<mpsc::Receiver<AdapterEvent>>>,
+    events_rx: StdMutex<Option<mpsc::Receiver<OrchestratorAdapterEvent>>>,
     local_addr: SocketAddr,
     client_endpoint: Option<Arc<quinn::Endpoint>>,
     client_tls: Option<Arc<rustls::ClientConfig>>,
@@ -240,7 +245,7 @@ impl UctpQuicAdapter {
         let server = UctpQuicServer::start(
             config.accept_rx,
             config.bearer_validator,
-            events_tx,
+            events_tx.clone(),
             lifecycle_sink.clone(),
             Arc::clone(&by_connection),
             Arc::clone(&by_uctp_sid),
@@ -259,6 +264,7 @@ impl UctpQuicAdapter {
             by_uctp_sid,
             routes,
             lifecycle_sink,
+            events_tx,
             _server: server,
             events_rx: StdMutex::new(Some(events_rx)),
             local_addr,
@@ -274,6 +280,64 @@ impl UctpQuicAdapter {
     fn route(&self, conn: &ConnectionId) -> Option<Route> {
         self.routes.get(conn).map(|r| r.clone())
     }
+
+    fn take_terminal_route(&self, conn: &ConnectionId) -> Option<Route> {
+        let (_, route) = self.routes.remove(conn)?;
+        self.by_connection.remove(conn);
+        if self
+            .by_uctp_sid
+            .get(&route.sid)
+            .is_some_and(|mapped| mapped.value() == conn)
+        {
+            self.by_uctp_sid.remove(&route.sid);
+        }
+        Some(route)
+    }
+
+    async fn close_terminal_media(route: &Route) {
+        let removed = route.media_router.remove_connection(
+            &rvoip_uctp::substrate::PeerMediaConnectionKey::new(
+                route.core_session_id.clone(),
+                route.core_connection_id.clone(),
+            ),
+        );
+        route.streams.clear();
+        for binding in removed {
+            let _ = binding.stream().clone().close().await;
+        }
+    }
+
+    async fn terminate_route(
+        &self,
+        conn: &ConnectionId,
+        envelope: impl FnOnce(&Route) -> UctpEnvelope,
+        terminal_event: AdapterEvent,
+    ) {
+        let Some(route) = self.take_terminal_route(conn) else {
+            return;
+        };
+        let terminal_envelope = envelope(&route);
+        if route.out_tx.try_send(terminal_envelope).is_err() {
+            warn!(connection_id = %conn, "UCTP QUIC terminal notification was not queued");
+        }
+        route.route_cancel.cancel();
+        route
+            .coordinator
+            .retire_local_session(&SessionId::from_string(route.sid.clone()));
+        let _ = self
+            .lifecycle_sink
+            .queue_or_deliver_orchestrator_terminal(&self.events_tx, terminal_event)
+            .await;
+        if tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            Self::close_terminal_media(&route),
+        )
+        .await
+        .is_err()
+        {
+            warn!(connection_id = %conn, "UCTP QUIC terminal media cleanup timed out");
+        }
+    }
 }
 
 #[async_trait]
@@ -284,6 +348,15 @@ impl ConnectionAdapter for UctpQuicAdapter {
 
     fn kind(&self) -> AdapterKind {
         AdapterKind::Substrate
+    }
+
+    fn lifecycle_capabilities(&self) -> AdapterLifecycleCapabilities {
+        AdapterLifecycleCapabilities {
+            authoritative_liveness: true,
+            atomic_inbound_handoff: true,
+            terminal_fallback: true,
+            staged_outbound_activation: false,
+        }
     }
 
     fn install_lifecycle_sink(&self, sink: Arc<dyn AdapterLifecycleSink>) -> RvoipResult<()> {
@@ -359,47 +432,54 @@ impl ConnectionAdapter for UctpQuicAdapter {
     }
 
     async fn reject(&self, conn: ConnectionId, reason: RejectReason) -> RvoipResult<()> {
-        let route = self
-            .route(&conn)
-            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
         let (code, reason_str) = reject_codes(&reason);
-        let payload = payloads::session::SessionReject {
-            by: "part_local".into(),
-            reason_code: code,
-            reason: reason_str.into(),
-        };
-        let env = UctpEnvelope::new(
-            MessageType::SessionReject,
-            serde_json::to_value(payload).unwrap(),
+        self.terminate_route(
+            &conn,
+            |route| {
+                let payload = payloads::session::SessionReject {
+                    by: "part_local".into(),
+                    reason_code: code,
+                    reason: reason_str.into(),
+                };
+                UctpEnvelope::new(
+                    MessageType::SessionReject,
+                    serde_json::to_value(payload).expect("SessionReject is serializable"),
+                )
+                .with_sid(route.sid.clone())
+            },
+            AdapterEvent::Failed {
+                connection_id: conn.clone(),
+                detail: "session rejected locally".into(),
+            },
         )
-        .with_sid(route.sid);
-        route
-            .out_tx
-            .send(env)
-            .await
-            .map_err(|_| RvoipError::Adapter("peer channel closed".into()))
+        .await;
+        Ok(())
     }
 
     async fn end(&self, conn: ConnectionId, reason: EndReason) -> RvoipResult<()> {
-        let route = self
-            .route(&conn)
-            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
         let (code, reason_str) = end_codes(&reason);
-        let payload = payloads::session::SessionEnd {
-            by: "part_local".into(),
-            reason_code: code,
-            reason: reason_str.into(),
-        };
-        let env = UctpEnvelope::new(
-            MessageType::SessionEnd,
-            serde_json::to_value(payload).unwrap(),
+        let terminal_reason = reason.clone();
+        self.terminate_route(
+            &conn,
+            |route| {
+                let payload = payloads::session::SessionEnd {
+                    by: "part_local".into(),
+                    reason_code: code,
+                    reason: reason_str.into(),
+                };
+                UctpEnvelope::new(
+                    MessageType::SessionEnd,
+                    serde_json::to_value(payload).expect("SessionEnd is serializable"),
+                )
+                .with_sid(route.sid.clone())
+            },
+            AdapterEvent::Ended {
+                connection_id: conn.clone(),
+                reason: terminal_reason,
+            },
         )
-        .with_sid(route.sid);
-        route
-            .out_tx
-            .send(env)
-            .await
-            .map_err(|_| RvoipError::Adapter("peer channel closed".into()))
+        .await;
+        Ok(())
     }
 
     async fn hold(&self, _conn: ConnectionId) -> RvoipResult<()> {
@@ -661,10 +741,22 @@ impl ConnectionAdapter for UctpQuicAdapter {
 
     fn subscribe_events(&self) -> mpsc::Receiver<AdapterEvent> {
         let mut guard = self.events_rx.lock().expect("poisoned");
-        guard.take().unwrap_or_else(|| {
-            warn!(
+        guard
+            .take()
+            .map(|events| legacy_normalized_event_receiver(events, ADAPTER_EVENT_CAP * 2))
+            .unwrap_or_else(|| {
+                warn!(
                 "UctpQuicAdapter::subscribe_events called more than once; returning closed channel"
             );
+                let (_tx, rx) = mpsc::channel(1);
+                rx
+            })
+    }
+
+    fn subscribe_orchestrator_events(&self) -> mpsc::Receiver<OrchestratorAdapterEvent> {
+        let mut guard = self.events_rx.lock().expect("poisoned");
+        guard.take().unwrap_or_else(|| {
+            warn!("UctpQuicAdapter atomic event stream already consumed");
             let (_tx, rx) = mpsc::channel(1);
             rx
         })

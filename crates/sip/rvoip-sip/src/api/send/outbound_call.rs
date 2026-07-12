@@ -106,6 +106,7 @@ pub struct OutboundCallBuilder {
     supported_100rel: bool,
     state: BuilderHeaderState,
     topology_hiding: bool,
+    session_id: Option<CallId>,
 }
 
 impl OutboundCallBuilder {
@@ -131,6 +132,7 @@ impl OutboundCallBuilder {
             supported_100rel: false,
             state: BuilderHeaderState::default(),
             topology_hiding: false,
+            session_id: None,
         }
     }
 
@@ -257,6 +259,17 @@ impl OutboundCallBuilder {
         self
     }
 
+    /// Use a caller-reserved Session identity for this INVITE.
+    ///
+    /// This crate-private seam lets the core adapter install its Connection ID
+    /// and dormant event stage before the state machine can emit a fast answer
+    /// or terminal event. Ordinary API callers continue to receive a generated
+    /// Session ID from [`Self::send`].
+    pub(crate) fn with_reserved_session_id(mut self, session_id: CallId) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+
     /// Send the INVITE.
     ///
     /// Routes through the unified state-machine path: creates the
@@ -324,7 +337,9 @@ impl OutboundCallBuilder {
         // PAI, transfer leg, extra headers land on SessionState before
         // the event enters the machine. The state-table `CreateDialog`
         // action picks them up.
-        let session_id = crate::state_table::SessionId::new();
+        let session_id = self
+            .session_id
+            .unwrap_or_else(crate::state_table::SessionId::new);
         #[cfg(feature = "perf-call-setup-diagnostics")]
         let create_session_started = std::time::Instant::now();
         self.coord

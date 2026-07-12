@@ -1,12 +1,15 @@
 //! Adapter integration: assert `AdapterEvent::InboundConnection` fires
 //! on inbound `session.invite` over WebSocket.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 use rvoip_auth_core::bearer_stub;
-use rvoip_core::adapter::{AdapterEvent, AdapterKind, ConnectionAdapter};
+use rvoip_core::adapter::{AdapterEvent, AdapterKind, ConnectionAdapter, RejectReason};
 use rvoip_core::connection::Transport;
+use rvoip_core::events::Event;
+use rvoip_core::{Config, Orchestrator};
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads::{auth, session::SessionInvite};
 use rvoip_uctp::types::MessageType;
@@ -26,6 +29,11 @@ async fn ws_adapter_emits_inbound_connection_on_session_invite() {
 
     assert_eq!(adapter.transport(), Transport::WebSocket);
     assert_eq!(adapter.kind(), AdapterKind::Substrate);
+    let lifecycle = adapter.lifecycle_capabilities();
+    assert!(lifecycle.authoritative_liveness);
+    assert!(lifecycle.atomic_inbound_handoff);
+    assert!(lifecycle.terminal_fallback);
+    assert!(!lifecycle.staged_outbound_activation);
 
     let mut events = adapter.subscribe_events();
 
@@ -199,4 +207,165 @@ async fn ws_adapter_emits_inbound_connection_on_session_invite() {
     .expect("DataMessage timeout");
     assert_eq!(received_connection, core_connection_id);
     assert_ne!(received_connection.as_str(), wire_connection_id);
+}
+
+#[tokio::test]
+async fn core_reject_retires_route_and_suppresses_late_peer_terminal() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let server_addr = listener.local_addr().expect("local_addr");
+    let adapter = UctpWsAdapter::new(UctpWsConfig::new(listener, bearer_stub()))
+        .await
+        .expect("adapter");
+    let capabilities = adapter.lifecycle_capabilities();
+    assert!(capabilities.authoritative_liveness);
+    assert!(capabilities.atomic_inbound_handoff);
+    assert!(capabilities.terminal_fallback);
+    assert!(!capabilities.staged_outbound_activation);
+
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(1, Duration::from_secs(2))
+        .expect("admission gate");
+    orchestrator
+        .register(adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register first-party adapter");
+    let mut normalized = orchestrator.subscribe_events();
+
+    let url = Url::parse(&format!("ws://{server_addr}")).expect("url");
+    let client = UctpWsClient::connect(&url).await.expect("client connect");
+    let mut inbound = client.take_inbound().expect("take inbound");
+    client
+        .send(UctpEnvelope {
+            v: 1,
+            msg_type: MessageType::AuthHello,
+            id: "reject_hello".into(),
+            ts: Utc::now(),
+            cid: None,
+            sid: None,
+            connid: None,
+            in_reply_to: None,
+            payload: serde_json::to_value(auth::AuthHello {
+                device: auth::Device {
+                    id: "dev_ws_reject".into(),
+                    kind: "browser".into(),
+                    platform: "test".into(),
+                    sdk_version: "test/0.1".into(),
+                },
+                auth_methods: vec!["bearer".into()],
+                capabilities: serde_json::Value::Object(Default::default()),
+            })
+            .expect("hello payload"),
+            signature: None,
+        })
+        .await
+        .expect("send hello");
+    let challenge = tokio::time::timeout(Duration::from_secs(2), inbound.recv())
+        .await
+        .expect("challenge timeout")
+        .expect("challenge");
+    client
+        .send(UctpEnvelope {
+            v: 1,
+            msg_type: MessageType::AuthResponse,
+            id: "reject_response".into(),
+            ts: Utc::now(),
+            cid: None,
+            sid: None,
+            connid: None,
+            in_reply_to: Some(challenge.id),
+            payload: serde_json::to_value(auth::AuthResponse {
+                method: "bearer".into(),
+                credential: "test-token".into(),
+                actor_token: None,
+            })
+            .expect("response payload"),
+            signature: None,
+        })
+        .await
+        .expect("send auth response");
+    let auth_session = tokio::time::timeout(Duration::from_secs(2), inbound.recv())
+        .await
+        .expect("auth session timeout")
+        .expect("auth session");
+    assert_eq!(auth_session.msg_type, MessageType::AuthSession);
+
+    client
+        .send(
+            UctpEnvelope::new(
+                MessageType::SessionInvite,
+                serde_json::to_value(SessionInvite {
+                    from: "part_reject".into(),
+                    to: vec!["part_bridge".into()],
+                    medium: "voice".into(),
+                    intent: "synchronous-engagement".into(),
+                    capabilities_offer: serde_json::Value::Object(Default::default()),
+                })
+                .expect("invite payload"),
+            )
+            .with_sid("sess_ws_reject"),
+        )
+        .await
+        .expect("send invite");
+
+    let admission = tokio::time::timeout(Duration::from_secs(2), admissions.recv())
+        .await
+        .expect("admission timeout")
+        .expect("admission");
+    let connection_id = admission.connection_id().clone();
+    admission
+        .reject(RejectReason::Forbidden)
+        .await
+        .expect("core rejection");
+    assert!(!adapter.is_connection_live(&connection_id));
+
+    let rejection = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let envelope = inbound.recv().await.expect("inbound remains open");
+            if envelope.msg_type == MessageType::SessionReject {
+                break envelope;
+            }
+        }
+    })
+    .await
+    .expect("wire rejection");
+    assert_eq!(rejection.sid.as_deref(), Some("sess_ws_reject"));
+
+    client
+        .send(
+            UctpEnvelope::new(
+                MessageType::SessionEnd,
+                serde_json::to_value(rvoip_uctp::payloads::session::SessionEnd {
+                    by: "part_reject".into(),
+                    reason_code: 0,
+                    reason: "late duplicate".into(),
+                })
+                .expect("terminal payload"),
+            )
+            .with_sid("sess_ws_reject"),
+        )
+        .await
+        .expect("late terminal send");
+    let duplicate = tokio::time::timeout(Duration::from_millis(200), async {
+        loop {
+            match normalized.recv().await {
+                Ok(
+                    Event::ConnectionEnded {
+                        connection_id: id, ..
+                    }
+                    | Event::ConnectionFailed {
+                        connection_id: id, ..
+                    },
+                ) if id == connection_id => {
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::future::pending::<()>().await,
+            }
+        }
+    })
+    .await;
+    assert!(
+        duplicate.is_err(),
+        "rejected pre-publication route must not emit duplicate normalized terminal"
+    );
 }

@@ -29,5 +29,6 @@ pub use subscription::{
 };
 pub use supervisor::{
     spawn_auth_lifecycle_guard, supervise_peer_tasks, supervise_peer_tasks_with_media_cancel,
-    try_deliver_adapter_event, PeerSessionExit, DEFAULT_AUTHENTICATION_DEADLINE,
+    try_deliver_adapter_event, try_deliver_orchestrator_event, PeerSessionExit,
+    DEFAULT_AUTHENTICATION_DEADLINE,
 };

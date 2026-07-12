@@ -24,6 +24,7 @@ rvoip-auth-core.workspace = true
 rvoip-webrtc = { workspace = true, optional = true }
 
 tokio = { workspace = true }
+tokio-util.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 dashmap.workspace = true

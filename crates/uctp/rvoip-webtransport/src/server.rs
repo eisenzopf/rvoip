@@ -11,7 +11,9 @@ use chrono::Utc;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use rvoip_auth_core::BearerValidator;
-use rvoip_core::adapter::{AdapterEvent, AdapterLifecycleSinkSlot, EndReason, TerminalDelivery};
+use rvoip_core::adapter::{
+    AdapterEvent, AdapterLifecycleSinkSlot, EndReason, OrchestratorAdapterEvent, TerminalDelivery,
+};
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
@@ -32,7 +34,7 @@ impl UctpWtServer {
     pub(crate) fn start(
         mut accept_rx: mpsc::Receiver<quinn::Connection>,
         bearer: Arc<dyn BearerValidator>,
-        events_tx: mpsc::Sender<AdapterEvent>,
+        events_tx: mpsc::Sender<OrchestratorAdapterEvent>,
         lifecycle_sink: AdapterLifecycleSinkSlot,
         by_connection: Arc<DashMap<ConnectionId, String>>,
         by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
@@ -314,7 +316,7 @@ async fn close_media_bindings(
 async fn spawn_peer_session(
     conn: quinn::Connection,
     bearer: Arc<dyn BearerValidator>,
-    events_tx: mpsc::Sender<AdapterEvent>,
+    events_tx: mpsc::Sender<OrchestratorAdapterEvent>,
     lifecycle_sink: AdapterLifecycleSinkSlot,
     by_connection: Arc<DashMap<ConnectionId, String>>,
     by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
@@ -508,6 +510,7 @@ async fn spawn_peer_session(
         let media_cancel = media_cancel.clone();
         let resource_bindings = Arc::clone(&resource_bindings);
         let coord_for_translator = Arc::clone(&coord);
+        let lifecycle_for_translator = lifecycle_sink.clone();
         tokio::spawn(async move {
             // Per-peer auth state; consumed by the InboundInvite arm to
             // emit a synthetic `AdapterEvent::Authenticated` carrying
@@ -539,6 +542,35 @@ async fn spawn_peer_session(
                             media_cancel.cancel();
                             break;
                         }
+                        let refresh_targets = routes
+                            .iter()
+                            .filter(|entry| {
+                                entry.value().out_tx.same_channel(&route_out_tx)
+                                    && entry.value().binding.is_owned_by(&principal)
+                            })
+                            .map(|entry| entry.key().clone())
+                            .collect::<Vec<_>>();
+                        let mut refresh_delivery_failed = false;
+                        for connection_id in refresh_targets {
+                            if !rvoip_uctp::state::try_deliver_orchestrator_event(
+                                &events_tx,
+                                OrchestratorAdapterEvent::Public(
+                                    AdapterEvent::PrincipalAuthenticated {
+                                        connection_id,
+                                        participant_id: participant_id.clone(),
+                                        principal: principal.clone(),
+                                    },
+                                ),
+                                "webtransport",
+                            ) {
+                                media_cancel.cancel();
+                                refresh_delivery_failed = true;
+                                break;
+                            }
+                        }
+                        if refresh_delivery_failed {
+                            break;
+                        }
                         latest_auth =
                             Some((identity_id, participant_id, assurance, Some(principal)));
                         Some(AdapterEvent::Native {
@@ -549,6 +581,10 @@ async fn spawn_peer_session(
                     UctpSessionEvent::InboundInvite { sid, from, .. } => {
                         let Some(principal) = coord_for_translator.authenticated_principal() else {
                             warn!(sid = %sid, "authenticated invite missing retained principal; refusing route");
+                            continue;
+                        };
+                        let Some((_, participant_id, _, Some(_))) = latest_auth.clone() else {
+                            warn!(sid = %sid, "authenticated invite missing atomic handoff identity; refusing route");
                             continue;
                         };
                         let core_session_id = match resource_bindings.bind_session(&sid) {
@@ -573,6 +609,7 @@ async fn spawn_peer_session(
                             Route {
                                 sid: sid.to_string(),
                                 core_session_id,
+                                core_connection_id: id.clone(),
                                 binding: rvoip_uctp::adapter_helpers::AuthenticatedConnectionBinding::new(&principal),
                                 out_tx: route_out_tx.clone(),
                                 pending: Arc::clone(&pending),
@@ -580,38 +617,32 @@ async fn spawn_peer_session(
                                 session: session_for_translator.clone(),
                                 media_router: Arc::clone(&media_router),
                                 route_cancel,
+                                coordinator: Arc::clone(&coord_for_translator),
                             },
                         );
-                        if !rvoip_uctp::state::try_deliver_adapter_event(
+                        if !rvoip_uctp::state::try_deliver_orchestrator_event(
                             &events_tx,
-                            AdapterEvent::InboundConnection { connection },
+                            OrchestratorAdapterEvent::AuthenticatedInboundConnection {
+                                connection,
+                                participant_id,
+                                principal,
+                            },
                             "webtransport",
                         ) {
-                            break;
-                        }
-                        if let Some((identity_id, participant_id, assurance, principal)) =
-                            latest_auth.clone()
-                        {
-                            let event = match principal {
-                                Some(principal) => AdapterEvent::PrincipalAuthenticated {
-                                    connection_id: id,
-                                    participant_id,
-                                    principal,
-                                },
-                                None => AdapterEvent::Authenticated {
-                                    connection_id: id,
-                                    identity_id,
-                                    participant_id,
-                                    assurance,
-                                },
-                            };
-                            if !rvoip_uctp::state::try_deliver_adapter_event(
-                                &events_tx,
-                                event,
-                                "webtransport",
-                            ) {
-                                break;
+                            if let Some((_, route)) = routes.remove(&id) {
+                                route.route_cancel.cancel();
+                                let removed = media_router.remove_session(&route.core_session_id);
+                                close_media_bindings(&route, removed).await;
                             }
+                            by_connection.remove(&id);
+                            if by_uctp_sid
+                                .get(sid.as_str())
+                                .is_some_and(|mapped| *mapped == id)
+                            {
+                                by_uctp_sid.remove(sid.as_str());
+                            }
+                            resource_bindings.remove_session(&sid);
+                            break;
                         }
                         None
                     }
@@ -719,10 +750,7 @@ async fn spawn_peer_session(
                                     connection_id: connection_id.clone(),
                                     reason: EndReason::Failed { detail: reason },
                                 };
-                                if events_tx.try_send(terminal).is_err() {
-                                    warn!(%connid, "terminal adapter event backpressured; preserving route for peer cleanup");
-                                    break;
-                                }
+                                let removed_route = routes.remove(&connection_id);
                                 wire_to_core.remove(&connid);
                                 wire_media_bindings.remove(&(sid.clone(), connid.clone()));
                                 resource_bindings.remove_connection(&sid, &connid);
@@ -737,15 +765,28 @@ async fn spawn_peer_session(
                                         by_uctp_sid.remove(&sid);
                                     }
                                 }
-                                if let Some((_, route)) = routes.remove(&connection_id) {
+                                if let Some((_, route)) = removed_route {
                                     route.route_cancel.cancel();
+                                    let _ = lifecycle_for_translator
+                                        .queue_or_deliver_orchestrator_terminal(
+                                            &events_tx, terminal,
+                                        )
+                                        .await;
                                     let connection_key =
                                         rvoip_uctp::substrate::PeerMediaConnectionKey::new(
                                             route.core_session_id.clone(),
                                             connection_id.clone(),
                                         );
                                     let removed = media_router.remove_connection(&connection_key);
-                                    close_media_bindings(&route, removed).await;
+                                    if tokio::time::timeout(
+                                        Duration::from_secs(2),
+                                        close_media_bindings(&route, removed),
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
+                                        warn!(%connection_id, "timed out closing WebTransport route media after terminal delivery");
+                                    }
                                 }
                                 None
                             }
@@ -769,23 +810,33 @@ async fn spawn_peer_session(
                                         EndReason::Normal
                                     },
                                 };
-                                if events_tx.try_send(terminal).is_err() {
-                                    warn!(%sid, "terminal adapter event backpressured; preserving route for peer cleanup");
-                                    break;
-                                }
+                                let removed_route = routes.remove(&connection_id);
                                 wire_to_core.retain(|_, core| core != &connection_id);
                                 wire_media_bindings.retain(|(wire_sid, _), _| wire_sid != &sid);
                                 by_connection.remove(&connection_id);
                                 by_uctp_sid.remove(sid.as_str());
                                 let core_session_id = resource_bindings.core_session(&sid);
                                 resource_bindings.remove_session(&sid);
-                                if let Some((_, route)) = routes.remove(&connection_id) {
+                                if let Some((_, route)) = removed_route {
                                     route.route_cancel.cancel();
+                                    let _ = lifecycle_for_translator
+                                        .queue_or_deliver_orchestrator_terminal(
+                                            &events_tx, terminal,
+                                        )
+                                        .await;
                                     let removed = core_session_id
                                         .as_ref()
                                         .map(|session_id| media_router.remove_session(session_id))
                                         .unwrap_or_default();
-                                    close_media_bindings(&route, removed).await;
+                                    if tokio::time::timeout(
+                                        Duration::from_secs(2),
+                                        close_media_bindings(&route, removed),
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
+                                        warn!(%connection_id, "timed out closing WebTransport Session media after terminal delivery");
+                                    }
                                 }
                                 None
                             }
@@ -924,8 +975,11 @@ async fn spawn_peer_session(
                     }),
                 };
                 if let Some(ev) = adapter_event {
-                    if !rvoip_uctp::state::try_deliver_adapter_event(&events_tx, ev, "webtransport")
-                    {
+                    if !rvoip_uctp::state::try_deliver_orchestrator_event(
+                        &events_tx,
+                        OrchestratorAdapterEvent::Public(ev),
+                        "webtransport",
+                    ) {
                         break;
                     }
                 }
@@ -968,10 +1022,6 @@ async fn spawn_peer_session(
         media_reader.abort();
         let _ = media_reader.await;
     }
-    let media_bindings = media_router.shutdown();
-    for binding in media_bindings {
-        let _ = Arc::clone(binding.stream()).close().await;
-    }
     resource_bindings.clear();
     let stale_routes = routes
         .iter()
@@ -985,9 +1035,10 @@ async fn spawn_peer_session(
                 detail: "webtransport transport closed".into(),
             },
         };
-        if let Some((_, route)) = routes.remove(&connection_id) {
-            route.route_cancel.cancel();
-        }
+        let Some((_, route)) = routes.remove(&connection_id) else {
+            continue;
+        };
+        route.route_cancel.cancel();
         by_connection.remove(&connection_id);
         if by_uctp_sid
             .get(&sid)
@@ -996,7 +1047,7 @@ async fn spawn_peer_session(
             by_uctp_sid.remove(&sid);
         }
         let delivery = lifecycle_sink
-            .queue_or_deliver_terminal(&events_tx, terminal)
+            .queue_or_deliver_orchestrator_terminal(&events_tx, terminal)
             .await;
         metrics::counter!(
             "uctp_terminal_delivery_total",
@@ -1011,6 +1062,11 @@ async fn spawn_peer_session(
         if delivery == TerminalDelivery::Undeliverable {
             warn!(%connection_id, "terminal event undeliverable before adapter registration");
         }
+    }
+    let media_bindings = media_router.shutdown();
+    for binding in media_bindings {
+        let _ = tokio::time::timeout(Duration::from_secs(2), Arc::clone(binding.stream()).close())
+            .await;
     }
     stats_pump.abort();
 

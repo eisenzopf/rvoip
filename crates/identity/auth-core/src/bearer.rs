@@ -253,6 +253,10 @@ impl BearerValidator for StubBearerValidator {
         // wildcard keeps secure protocol defaults usable in examples without
         // weakening any real JWT/JWKS/introspection validator.
         principal.scopes = vec!["*".into()];
+        // Atomic inbound routing is tenant-bound even in local development.
+        // A stable, explicit development tenant keeps the stub usable without
+        // teaching protocol adapters to special-case tenantless principals.
+        principal.tenant = Some("development".into());
         ensure_principal_active(principal)
     }
 }
