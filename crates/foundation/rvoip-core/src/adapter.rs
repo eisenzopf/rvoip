@@ -65,6 +65,44 @@ pub enum TerminalDelivery {
     Undeliverable,
 }
 
+/// Lifecycle guarantees an adapter can provide to the Orchestrator.
+///
+/// All fields default to `false`. This keeps third-party adapter
+/// implementations source compatible while allowing security-sensitive core
+/// features to reject an adapter that cannot satisfy their fail-closed
+/// contract.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AdapterLifecycleCapabilities {
+    /// [`ConnectionAdapter::is_connection_live`] is authoritative for every
+    /// route owned by this adapter.
+    pub authoritative_liveness: bool,
+    /// Authenticated inbound identity and connection creation are delivered
+    /// as one [`OrchestratorAdapterEvent::AuthenticatedInboundConnection`]
+    /// before any operational event for that connection.
+    pub atomic_inbound_handoff: bool,
+    /// The adapter installs and uses [`AdapterLifecycleSink`] when its normal
+    /// bounded event path cannot deliver a terminal event.
+    pub terminal_fallback: bool,
+    /// Outbound routes remain event-dormant after `originate` returns until
+    /// [`ConnectionAdapter::activate_outbound`] is called.
+    pub staged_outbound_activation: bool,
+}
+
+impl AdapterLifecycleCapabilities {
+    /// Capabilities required by the Orchestrator's fail-closed inbound
+    /// admission gate.
+    pub const FAIL_CLOSED_INBOUND: Self = Self {
+        authoritative_liveness: true,
+        atomic_inbound_handoff: true,
+        terminal_fallback: true,
+        staged_outbound_activation: false,
+    };
+
+    pub const fn supports_fail_closed_inbound(self) -> bool {
+        self.authoritative_liveness && self.atomic_inbound_handoff && self.terminal_fallback
+    }
+}
+
 impl AdapterLifecycleSinkSlot {
     pub fn install(
         &self,
@@ -190,6 +228,16 @@ pub trait ConnectionAdapter: Send + Sync {
     fn transport(&self) -> Transport;
     fn kind(&self) -> AdapterKind;
 
+    /// Explicit lifecycle guarantees implemented by this adapter.
+    ///
+    /// The default advertises no guarantees. In particular, overriding only
+    /// one of `install_lifecycle_sink`, `is_connection_live`, or
+    /// `subscribe_orchestrator_events` is not enough to opt into fail-closed
+    /// inbound admission: the adapter must advertise the complete contract.
+    fn lifecycle_capabilities(&self) -> AdapterLifecycleCapabilities {
+        AdapterLifecycleCapabilities::default()
+    }
+
     /// Install the Orchestrator's terminal-event fallback. The default is a
     /// no-op for adapters that cannot overrun their lifecycle event path.
     fn install_lifecycle_sink(&self, _sink: Arc<dyn AdapterLifecycleSink>) -> Result<()> {
@@ -238,7 +286,26 @@ pub trait ConnectionAdapter: Send + Sync {
         receiver
     }
 
+    /// Create an outbound route.
+    ///
+    /// Adapters advertising
+    /// [`AdapterLifecycleCapabilities::staged_outbound_activation`] must
+    /// return a live but event-dormant route. They retain operational,
+    /// principal, and terminal events in one bounded FIFO until
+    /// [`Self::activate_outbound`] is called. This ordering lets the
+    /// Orchestrator claim the returned ID and publish its lifecycle before an
+    /// event can refer to it. Core deliberately does not stage events for
+    /// unknown IDs.
     async fn originate(&self, request: OriginateRequest) -> Result<ConnectionHandle>;
+
+    /// Release events for a successfully claimed outbound route.
+    ///
+    /// The default is a no-op for legacy adapters. Implementations that
+    /// advertise staged outbound activation must make this operation
+    /// idempotent and release retained events in FIFO order.
+    async fn activate_outbound(&self, _conn: ConnectionId) -> Result<()> {
+        Ok(())
+    }
     async fn accept(&self, conn: ConnectionId) -> Result<()>;
     async fn reject(&self, conn: ConnectionId, reason: RejectReason) -> Result<()>;
     async fn end(&self, conn: ConnectionId, reason: EndReason) -> Result<()>;
