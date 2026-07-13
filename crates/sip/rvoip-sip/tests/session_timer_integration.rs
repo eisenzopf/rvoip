@@ -10,6 +10,7 @@
 //! is not currently exposed by the public API.
 
 use std::env;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -28,9 +29,28 @@ fn cargo_bin() -> String {
     env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
 }
 
+fn example_binary(name: &str) -> PathBuf {
+    let test_binary = env::current_exe().expect("current integration-test binary");
+    let debug_dir = test_binary
+        .parent()
+        .and_then(Path::parent)
+        .expect("integration test runs from target/<profile>/deps");
+    let binary = debug_dir
+        .join("examples")
+        .join(format!("{name}{}", env::consts::EXE_SUFFIX));
+    assert!(
+        binary.is_file(),
+        "built example binary is missing: {}",
+        binary.display()
+    );
+    binary
+}
+
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
-    let mut cmd = Command::new(cargo_bin());
-    cmd.args(["run", "--quiet", "-p", "rvoip-sip", "--example", name]);
+    // Build the pair once, then launch the executables directly. Nested
+    // `cargo run` peers can serialize behind Cargo's artifact lock and leave
+    // Alice unable to start before the outer deadline.
+    let mut cmd = Command::new(example_binary(name));
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -89,7 +109,7 @@ fn session_timer_refresh_emits_event() {
 
     let status = match exit {
         Some(s) => s,
-        None => panic!("Alice did not finish within 30s"),
+        None => panic!("Alice did not finish within 45s"),
     };
 
     assert!(

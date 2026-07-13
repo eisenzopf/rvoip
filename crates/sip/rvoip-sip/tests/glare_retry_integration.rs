@@ -12,6 +12,7 @@
 //! drives the hangup at the end.
 
 use std::env;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -30,9 +31,28 @@ fn cargo_bin() -> String {
     env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
 }
 
+fn example_binary(name: &str) -> PathBuf {
+    let test_binary = env::current_exe().expect("current integration-test binary");
+    let debug_dir = test_binary
+        .parent()
+        .and_then(Path::parent)
+        .expect("integration test runs from target/<profile>/deps");
+    let binary = debug_dir
+        .join("examples")
+        .join(format!("{name}{}", env::consts::EXE_SUFFIX));
+    assert!(
+        binary.is_file(),
+        "built example binary is missing: {}",
+        binary.display()
+    );
+    binary
+}
+
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
-    let mut cmd = Command::new(cargo_bin());
-    cmd.args(["run", "--quiet", "-p", "rvoip-sip", "--example", name]);
+    // Both examples are built first. Launching the binaries directly avoids
+    // keeping Bob inside a nested Cargo process that can lock Alice out of
+    // the shared artifact directory.
+    let mut cmd = Command::new(example_binary(name));
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -69,10 +89,8 @@ fn glare_retry_converges_to_on_hold() {
     build_examples();
 
     // Both peers sleep until this wall-clock instant before calling hold().
-    // Use a generous 8 s lead time: `cargo run --quiet` can take a couple
-    // of seconds to resolve dependencies even when the example binary is
-    // pre-built, and Alice additionally needs to establish the call and
-    // reach Active before the glare window opens.
+    // Use a generous 8 s lead time so Alice can establish the call and both
+    // peers can reach Active before the glare window opens on loaded CI.
     let start_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time before epoch")
@@ -108,7 +126,7 @@ fn glare_retry_converges_to_on_hold() {
         }
     };
 
-    let alice_status = alice_status.unwrap_or_else(|| panic!("Alice did not finish within 30s"));
+    let alice_status = alice_status.unwrap_or_else(|| panic!("Alice did not finish within 45s"));
     assert!(
         alice_status.success(),
         "Alice exited with {:?} (expected 0 = saw stable OnHold)",
