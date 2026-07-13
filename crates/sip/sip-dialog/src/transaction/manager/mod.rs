@@ -3599,7 +3599,34 @@ impl TransactionManager {
     pub async fn create_client_transaction_on_route(
         &self,
         request: Request,
+        request_route: TransportRoute,
+    ) -> Result<TransactionKey> {
+        self.create_client_transaction_on_route_inner(request, request_route, None)
+            .await
+    }
+
+    /// Create a client transaction whose Timer B/F cannot outlive a logical
+    /// operation deadline owned by a higher layer. This is intentionally
+    /// crate-private: ordinary transactions continue to use the manager's
+    /// configured timer settings, while retained RFC 3263 INVITE attempts use
+    /// the remaining budget rather than restarting a full Timer B.
+    pub(crate) async fn create_client_transaction_on_route_with_timeout(
+        &self,
+        request: Request,
+        request_route: TransportRoute,
+        transaction_timeout: Duration,
+    ) -> Result<TransactionKey> {
+        let mut timer_settings = self.timer_settings.clone();
+        timer_settings.transaction_timeout = transaction_timeout.max(Duration::from_millis(1));
+        self.create_client_transaction_on_route_inner(request, request_route, Some(timer_settings))
+            .await
+    }
+
+    async fn create_client_transaction_on_route_inner(
+        &self,
+        request: Request,
         mut request_route: TransportRoute,
+        timer_settings_override: Option<TimerSettings>,
     ) -> Result<TransactionKey> {
         crate::transaction::transport::multiplexed::validate_request_route_security(
             &request,
@@ -3728,6 +3755,8 @@ impl TransactionManager {
         }
 
         rvoip_sip_core::validation::validate_wire_request(&modified_request)?;
+        let timer_settings =
+            timer_settings_override.or_else(|| self.timer_settings_for_request(&modified_request));
 
         // Create the appropriate transaction. Returns Arc<dyn ClientTransaction>
         // so the map can shard (DashMap) and call sites can clone the
@@ -3741,7 +3770,7 @@ impl TransactionManager {
                     request_route.clone(),
                     self.transport.clone(),
                     self.events_tx.clone(),
-                    self.timer_settings_for_request(&modified_request),
+                    timer_settings,
                     self.transaction_command_channel_capacity,
                 )?;
                 tracing::trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Created ClientInviteTransaction");
@@ -3761,7 +3790,7 @@ impl TransactionManager {
                     request_route.clone(),
                     self.transport.clone(),
                     self.events_tx.clone(),
-                    self.timer_settings_for_request(&modified_request),
+                    timer_settings,
                     self.transaction_command_channel_capacity,
                 )?;
                 Arc::new(tx)
@@ -3780,7 +3809,7 @@ impl TransactionManager {
                     request_route.clone(),
                     self.transport.clone(),
                     self.events_tx.clone(),
-                    self.timer_settings_for_request(&modified_request),
+                    timer_settings,
                     self.transaction_command_channel_capacity,
                 )?;
                 Arc::new(tx)
@@ -3792,7 +3821,7 @@ impl TransactionManager {
                     request_route.clone(),
                     self.transport.clone(),
                     self.events_tx.clone(),
-                    self.timer_settings_for_request(&modified_request),
+                    timer_settings,
                     self.transaction_command_channel_capacity,
                 )?;
                 Arc::new(tx)

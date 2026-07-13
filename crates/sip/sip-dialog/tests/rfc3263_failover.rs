@@ -10,21 +10,21 @@
 //!    returns the FULL candidate list (not just the first) so callers
 //!    can do §4.3 failover.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rvoip_sip_core::types::headers::HeaderAccess;
-use rvoip_sip_core::{Method, Request, Uri};
+use rvoip_sip_core::{Message, Method, Request, Uri};
 use rvoip_sip_dialog::manager::transaction_integration::CandidateWirePlan;
 use rvoip_sip_dialog::transaction::transport::multiplexed::MultiplexedTransport;
 use rvoip_sip_dialog::transaction::TransactionManager;
 use rvoip_sip_dialog::DialogManager;
 use rvoip_sip_transport::error::Error as TransportError;
 use rvoip_sip_transport::resolver::{ResolvedTarget, Resolver, ResolverError};
-use rvoip_sip_transport::transport::TransportType;
+use rvoip_sip_transport::transport::{TransportEvent, TransportType};
 use rvoip_sip_transport::Transport;
 use tokio::sync::mpsc;
 
@@ -35,11 +35,13 @@ use tokio::sync::mpsc;
 struct ProgrammableTransport {
     local_addr: SocketAddr,
     outcomes: Arc<Mutex<HashMap<SocketAddr, Outcome>>>,
+    method_outcomes: Arc<Mutex<HashMap<(SocketAddr, Method), VecDeque<Outcome>>>>,
     sends: Arc<Mutex<Vec<SocketAddr>>>,
     branches: Arc<Mutex<Vec<Option<String>>>>,
     via_transports: Arc<Mutex<Vec<Option<String>>>>,
     via_sent_by: Arc<Mutex<Vec<Option<String>>>>,
     contacts: Arc<Mutex<Vec<Option<String>>>>,
+    messages: Arc<Mutex<Vec<(Message, SocketAddr)>>>,
 }
 
 /// Programmable per-attempt outcome for the failover tests. `Ok` is
@@ -60,16 +62,30 @@ impl ProgrammableTransport {
         Self {
             local_addr,
             outcomes: Arc::new(Mutex::new(HashMap::new())),
+            method_outcomes: Arc::new(Mutex::new(HashMap::new())),
             sends: Arc::new(Mutex::new(Vec::new())),
             branches: Arc::new(Mutex::new(Vec::new())),
             via_transports: Arc::new(Mutex::new(Vec::new())),
             via_sent_by: Arc::new(Mutex::new(Vec::new())),
             contacts: Arc::new(Mutex::new(Vec::new())),
+            messages: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn program(&self, addr: SocketAddr, outcome: Outcome) {
         self.outcomes.lock().unwrap().insert(addr, outcome);
+    }
+
+    fn program_method_sequence(
+        &self,
+        addr: SocketAddr,
+        method: Method,
+        outcomes: impl IntoIterator<Item = Outcome>,
+    ) {
+        self.method_outcomes
+            .lock()
+            .unwrap()
+            .insert((addr, method), outcomes.into_iter().collect());
     }
 
     fn sends(&self) -> Vec<SocketAddr> {
@@ -91,6 +107,10 @@ impl ProgrammableTransport {
     fn contacts(&self) -> Vec<Option<String>> {
         self.contacts.lock().unwrap().clone()
     }
+
+    fn messages(&self) -> Vec<(Message, SocketAddr)> {
+        self.messages.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
@@ -101,6 +121,10 @@ impl Transport for ProgrammableTransport {
         destination: SocketAddr,
     ) -> Result<(), TransportError> {
         self.sends.lock().unwrap().push(destination);
+        self.messages
+            .lock()
+            .unwrap()
+            .push((message.clone(), destination));
         let branch = match &message {
             rvoip_sip_core::Message::Request(request) => request
                 .first_via()
@@ -123,7 +147,16 @@ impl Transport for ProgrammableTransport {
         self.via_transports.lock().unwrap().push(via_transport);
         self.via_sent_by.lock().unwrap().push(via_sent_by);
         self.contacts.lock().unwrap().push(contact);
-        let outcome = self.outcomes.lock().unwrap().get(&destination).cloned();
+        let method = message.method();
+        let method_outcome = method.and_then(|method| {
+            self.method_outcomes
+                .lock()
+                .unwrap()
+                .get_mut(&(destination, method))
+                .and_then(VecDeque::pop_front)
+        });
+        let outcome =
+            method_outcome.or_else(|| self.outcomes.lock().unwrap().get(&destination).cloned());
         match outcome {
             None | Some(Outcome::Ok) => Ok(()),
             Some(Outcome::RecoverableFail(msg)) => Err(TransportError::ConnectFailed(
@@ -359,6 +392,651 @@ async fn build_manager_with_transport() -> (Arc<DialogManager>, Arc<Programmable
             .expect("DialogManager::new"),
     );
     (manager, transport)
+}
+
+async fn build_event_manager_with_transport() -> (
+    Arc<DialogManager>,
+    Arc<ProgrammableTransport>,
+    mpsc::Sender<TransportEvent>,
+) {
+    let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
+    let transport = Arc::new(ProgrammableTransport::new(local_addr));
+    let (transport_tx, transport_rx) = mpsc::channel(64);
+    let (transaction_manager, event_rx) =
+        TransactionManager::new(transport.clone(), transport_rx, Some(64))
+            .await
+            .expect("TransactionManager::new");
+    let manager = Arc::new(
+        DialogManager::with_global_events(Arc::new(transaction_manager), event_rx, local_addr)
+            .await
+            .expect("DialogManager::with_global_events"),
+    );
+    (manager, transport, transport_tx)
+}
+
+fn requests_sent_as(
+    transport: &ProgrammableTransport,
+    method: Method,
+) -> Vec<(Request, SocketAddr)> {
+    transport
+        .messages()
+        .into_iter()
+        .filter_map(|(message, destination)| match message {
+            Message::Request(request) if request.method() == method => Some((request, destination)),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn wait_for_request_count(
+    transport: &ProgrammableTransport,
+    method: Method,
+    count: usize,
+) -> Vec<(Request, SocketAddr)> {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let requests = requests_sent_as(transport, method.clone());
+            if requests.len() >= count {
+                return requests;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "timed out waiting for {count} {} request(s); messages={:?}",
+            method,
+            transport.messages()
+        )
+    })
+}
+
+async fn send_test_initial_invite(
+    manager: &DialogManager,
+    candidates: Vec<ResolvedTarget>,
+    call_id: &str,
+) -> (
+    rvoip_sip_dialog::dialog::DialogId,
+    rvoip_sip_dialog::transaction::TransactionKey,
+) {
+    use rvoip_sip_core::builder::SimpleRequestBuilder;
+
+    let local_uri: Uri = "sip:alice@127.0.0.1:5060".parse().unwrap();
+    let remote_uri: Uri = "sip:bob@service.example.com".parse().unwrap();
+    let dialog_id = manager
+        .create_outgoing_dialog(local_uri.clone(), remote_uri.clone(), Some(call_id.into()))
+        .await
+        .expect("create outgoing dialog");
+    let local_tag = format!(
+        "local-{}",
+        call_id.replace(|character: char| !character.is_ascii_alphanumeric(), "")
+    );
+    manager
+        .get_dialog_mut(&dialog_id)
+        .expect("dialog")
+        .local_tag = Some(local_tag.clone());
+    let request = SimpleRequestBuilder::new(Method::Invite, &remote_uri.to_string())
+        .unwrap()
+        .from("alice", &local_uri.to_string(), Some(&local_tag))
+        .to("bob", &remote_uri.to_string(), None)
+        .contact("sip:alice@127.0.0.1:5060", None)
+        .call_id(call_id)
+        .cseq(1)
+        .max_forwards(70)
+        .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-pre-plan-template"))
+        .build();
+    let (transaction_id, _) = manager
+        .send_request_with_candidate_wire_plan(
+            request,
+            candidates,
+            Some(&dialog_id),
+            CandidateWirePlan::default(),
+        )
+        .await
+        .expect("send initial invite");
+    (dialog_id, transaction_id)
+}
+
+fn response_for_invite(
+    request: &Request,
+    status: rvoip_sip_core::StatusCode,
+    to_tag: &str,
+    contact: Option<&str>,
+) -> rvoip_sip_core::Response {
+    use rvoip_sip_core::builder::SimpleResponseBuilder;
+
+    let to_uri = request.to().expect("INVITE To").address().uri.to_string();
+    let mut builder = SimpleResponseBuilder::response_from_request(request, status, None).to(
+        "bob",
+        &to_uri,
+        Some(to_tag),
+    );
+    if let Some(contact) = contact {
+        builder = builder.contact(contact, None);
+    }
+    builder.build()
+}
+
+async fn inject_response(
+    transport_tx: &mpsc::Sender<TransportEvent>,
+    response: rvoip_sip_core::Response,
+    source: SocketAddr,
+) {
+    transport_tx
+        .send(TransportEvent::MessageReceived {
+            message: Message::Response(response),
+            source,
+            destination: "127.0.0.1:5060".parse().unwrap(),
+            transport_type: TransportType::Udp,
+            flow_id: None,
+            raw_bytes: None,
+            timing: None,
+            connection_metadata: None,
+        })
+        .await
+        .expect("inject response");
+}
+
+#[tokio::test]
+async fn retained_invite_plan_advances_on_503_then_accepts_second_candidate() {
+    use rvoip_sip_core::StatusCode;
+    use rvoip_sip_dialog::dialog::DialogState;
+
+    let (manager, transport, transport_tx) = build_event_manager_with_transport().await;
+    let first: SocketAddr = "10.0.1.1:5060".parse().unwrap();
+    let second: SocketAddr = "10.0.1.2:5060".parse().unwrap();
+    let (dialog_id, _) = send_test_initial_invite(
+        &manager,
+        vec![
+            ResolvedTarget::immediate(first, TransportType::Udp),
+            ResolvedTarget::immediate(second, TransportType::Udp),
+        ],
+        "retained-plan-503-then-200",
+    )
+    .await;
+    let first_invite = wait_for_request_count(&transport, Method::Invite, 1).await[0]
+        .0
+        .clone();
+
+    inject_response(
+        &transport_tx,
+        response_for_invite(
+            &first_invite,
+            StatusCode::ServiceUnavailable,
+            "first-503",
+            None,
+        ),
+        first,
+    )
+    .await;
+    let invites = wait_for_request_count(&transport, Method::Invite, 2).await;
+    assert_eq!(invites[0].1, first);
+    assert_eq!(invites[1].1, second);
+    assert_ne!(
+        invites[0]
+            .0
+            .first_via()
+            .and_then(|via| via.branch().map(str::to_owned)),
+        invites[1]
+            .0
+            .first_via()
+            .and_then(|via| via.branch().map(str::to_owned)),
+        "a failover attempt must be a fresh client transaction"
+    );
+
+    let acknowledgements_before = requests_sent_as(&transport, Method::Ack).len();
+    inject_response(
+        &transport_tx,
+        response_for_invite(
+            &invites[1].0,
+            StatusCode::Ok,
+            "selected-second",
+            Some("sip:bob@10.0.1.2:5060"),
+        ),
+        second,
+    )
+    .await;
+    wait_for_request_count(&transport, Method::Ack, acknowledgements_before + 1).await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if matches!(
+                manager.get_dialog_state(&dialog_id),
+                Ok(DialogState::Confirmed)
+            ) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("second candidate confirms dialog");
+}
+
+#[tokio::test]
+async fn retained_invite_plan_reports_503_after_candidates_are_exhausted() {
+    use rvoip_sip_core::StatusCode;
+
+    let (manager, transport, transport_tx) = build_event_manager_with_transport().await;
+    let only: SocketAddr = "10.0.1.9:5060".parse().unwrap();
+    send_test_initial_invite(
+        &manager,
+        vec![ResolvedTarget::immediate(only, TransportType::Udp)],
+        "retained-plan-503-exhausted",
+    )
+    .await;
+    let invite = wait_for_request_count(&transport, Method::Invite, 1).await[0]
+        .0
+        .clone();
+    inject_response(
+        &transport_tx,
+        response_for_invite(&invite, StatusCode::ServiceUnavailable, "only-503", None),
+        only,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(requests_sent_as(&transport, Method::Invite).len(), 1);
+}
+
+#[tokio::test]
+async fn duplicate_selected_invite_success_is_reacked_without_fork_bye() {
+    use rvoip_sip_core::StatusCode;
+
+    let (manager, transport, transport_tx) = build_event_manager_with_transport().await;
+    let destination: SocketAddr = "10.0.1.10:5060".parse().unwrap();
+    send_test_initial_invite(
+        &manager,
+        vec![ResolvedTarget::immediate(destination, TransportType::Udp)],
+        "retained-plan-selected-duplicate",
+    )
+    .await;
+    let invite = wait_for_request_count(&transport, Method::Invite, 1).await[0]
+        .0
+        .clone();
+    let success = response_for_invite(
+        &invite,
+        StatusCode::Ok,
+        "selected-duplicate",
+        Some("sip:bob@10.0.1.10:5060"),
+    );
+    inject_response(&transport_tx, success.clone(), destination).await;
+    let first_ack_count = wait_for_request_count(&transport, Method::Ack, 1)
+        .await
+        .len();
+    inject_response(&transport_tx, success, destination).await;
+    wait_for_request_count(&transport, Method::Ack, first_ack_count + 1).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(requests_sent_as(&transport, Method::Bye).is_empty());
+}
+
+#[tokio::test]
+async fn retained_invite_plan_does_not_advance_after_provisional_response() {
+    use rvoip_sip_core::StatusCode;
+
+    let (manager, transport, transport_tx) = build_event_manager_with_transport().await;
+    let first: SocketAddr = "10.0.2.1:5060".parse().unwrap();
+    let second: SocketAddr = "10.0.2.2:5060".parse().unwrap();
+    send_test_initial_invite(
+        &manager,
+        vec![
+            ResolvedTarget::immediate(first, TransportType::Udp),
+            ResolvedTarget::immediate(second, TransportType::Udp),
+        ],
+        "retained-plan-provisional-no-failover",
+    )
+    .await;
+    let first_invite = wait_for_request_count(&transport, Method::Invite, 1).await[0]
+        .0
+        .clone();
+
+    inject_response(
+        &transport_tx,
+        response_for_invite(&first_invite, StatusCode::Ringing, "early", None),
+        first,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    inject_response(
+        &transport_tx,
+        response_for_invite(&first_invite, StatusCode::ServiceUnavailable, "early", None),
+        first,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    assert_eq!(
+        requests_sent_as(&transport, Method::Invite).len(),
+        1,
+        "a provisional response pins the INVITE to its current candidate"
+    );
+}
+
+#[tokio::test]
+async fn retained_invite_plan_does_not_treat_auth_redirect_or_422_as_candidate_failure() {
+    use rvoip_sip_core::StatusCode;
+
+    for (case, status, port) in [
+        ("auth", StatusCode::Unauthorized, 5101),
+        ("redirect", StatusCode::MovedTemporarily, 5102),
+        ("session-timer", StatusCode::SessionIntervalTooSmall, 5103),
+    ] {
+        let (manager, transport, transport_tx) = build_event_manager_with_transport().await;
+        let first = SocketAddr::from(([10, 0, 5, 1], port));
+        let second = SocketAddr::from(([10, 0, 5, 2], port));
+        send_test_initial_invite(
+            &manager,
+            vec![
+                ResolvedTarget::immediate(first, TransportType::Udp),
+                ResolvedTarget::immediate(second, TransportType::Udp),
+            ],
+            &format!("retained-plan-no-candidate-retry-{case}"),
+        )
+        .await;
+        let first_invite = wait_for_request_count(&transport, Method::Invite, 1).await[0]
+            .0
+            .clone();
+        inject_response(
+            &transport_tx,
+            response_for_invite(&first_invite, status, case, None),
+            first,
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+        assert_eq!(
+            requests_sent_as(&transport, Method::Invite).len(),
+            1,
+            "{case} must be handled semantically, not as RFC 3263 candidate failover"
+        );
+    }
+}
+
+#[tokio::test]
+async fn late_success_from_superseded_invite_is_reacked_and_byeed_once() {
+    use rvoip_sip_core::StatusCode;
+
+    let (manager, transport, transport_tx) = build_event_manager_with_transport().await;
+    let first: SocketAddr = "10.0.3.1:5060".parse().unwrap();
+    let second: SocketAddr = "10.0.3.2:5060".parse().unwrap();
+    send_test_initial_invite(
+        &manager,
+        vec![
+            ResolvedTarget::immediate(first, TransportType::Udp),
+            ResolvedTarget::immediate(second, TransportType::Udp),
+        ],
+        "retained-plan-late-fork-cleanup",
+    )
+    .await;
+    let first_invite = wait_for_request_count(&transport, Method::Invite, 1).await[0]
+        .0
+        .clone();
+    inject_response(
+        &transport_tx,
+        response_for_invite(
+            &first_invite,
+            StatusCode::ServiceUnavailable,
+            "first-503",
+            None,
+        ),
+        first,
+    )
+    .await;
+    wait_for_request_count(&transport, Method::Invite, 2).await;
+
+    let late_success = response_for_invite(
+        &first_invite,
+        StatusCode::Ok,
+        "late-fork",
+        Some("sip:bob@10.0.3.1:5060"),
+    );
+    let acknowledgements_before = requests_sent_as(&transport, Method::Ack).len();
+    inject_response(&transport_tx, late_success.clone(), first).await;
+    let byes = wait_for_request_count(&transport, Method::Bye, 1).await;
+    let acknowledgements =
+        wait_for_request_count(&transport, Method::Ack, acknowledgements_before + 1).await;
+    assert_eq!(byes[0].1, first);
+    assert_eq!(byes[0].0.to().and_then(|to| to.tag()), Some("late-fork"));
+
+    inject_response(&transport_tx, late_success, first).await;
+    wait_for_request_count(&transport, Method::Ack, acknowledgements.len() + 1).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        requests_sent_as(&transport, Method::Bye).len(),
+        1,
+        "duplicate late 2xx must be ACKed again without emitting a second BYE"
+    );
+}
+
+#[tokio::test]
+async fn late_fork_bye_resolves_a_contact_with_a_different_dns_authority() {
+    use rvoip_sip_core::StatusCode;
+
+    let (manager, transport, transport_tx) = build_event_manager_with_transport().await;
+    let first: SocketAddr = "10.0.3.31:5060".parse().unwrap();
+    let second: SocketAddr = "10.0.3.32:5060".parse().unwrap();
+    let contact_target: SocketAddr = "10.0.3.33:5090".parse().unwrap();
+    manager.set_resolver(Some(Arc::new(MultiCandResolver::with(vec![
+        ResolvedTarget::immediate(contact_target, TransportType::Udp),
+    ]))));
+    send_test_initial_invite(
+        &manager,
+        vec![
+            ResolvedTarget::immediate(first, TransportType::Udp),
+            ResolvedTarget::immediate(second, TransportType::Udp),
+        ],
+        "retained-plan-late-fork-domain-contact",
+    )
+    .await;
+    let first_invite = wait_for_request_count(&transport, Method::Invite, 1).await[0]
+        .0
+        .clone();
+    inject_response(
+        &transport_tx,
+        response_for_invite(
+            &first_invite,
+            StatusCode::ServiceUnavailable,
+            "first-503",
+            None,
+        ),
+        first,
+    )
+    .await;
+    wait_for_request_count(&transport, Method::Invite, 2).await;
+
+    inject_response(
+        &transport_tx,
+        response_for_invite(
+            &first_invite,
+            StatusCode::Ok,
+            "late-domain-fork",
+            Some("sip:bob@late-fork.example.com:5090"),
+        ),
+        first,
+    )
+    .await;
+    let byes = wait_for_request_count(&transport, Method::Bye, 1).await;
+
+    assert_eq!(byes[0].1, contact_target);
+    assert_eq!(
+        byes[0].0.uri().to_string(),
+        "sip:bob@late-fork.example.com:5090"
+    );
+}
+
+#[tokio::test]
+async fn late_success_with_selected_dialog_tag_is_reacked_without_bye() {
+    use rvoip_sip_core::StatusCode;
+
+    let (manager, transport, transport_tx) = build_event_manager_with_transport().await;
+    let first: SocketAddr = "10.0.3.21:5060".parse().unwrap();
+    let second: SocketAddr = "10.0.3.22:5060".parse().unwrap();
+    send_test_initial_invite(
+        &manager,
+        vec![
+            ResolvedTarget::immediate(first, TransportType::Udp),
+            ResolvedTarget::immediate(second, TransportType::Udp),
+        ],
+        "retained-plan-late-selected-dialog",
+    )
+    .await;
+    let first_invite = wait_for_request_count(&transport, Method::Invite, 1).await[0]
+        .0
+        .clone();
+    inject_response(
+        &transport_tx,
+        response_for_invite(
+            &first_invite,
+            StatusCode::ServiceUnavailable,
+            "first-503",
+            None,
+        ),
+        first,
+    )
+    .await;
+    let invites = wait_for_request_count(&transport, Method::Invite, 2).await;
+    let selected_success = response_for_invite(
+        &invites[1].0,
+        StatusCode::Ok,
+        "same-selected-dialog",
+        Some("sip:bob@10.0.3.22:5060"),
+    );
+    inject_response(&transport_tx, selected_success, second).await;
+    let selected_ack_count = wait_for_request_count(&transport, Method::Ack, 1)
+        .await
+        .len();
+
+    let late_same_dialog = response_for_invite(
+        &first_invite,
+        StatusCode::Ok,
+        "same-selected-dialog",
+        Some("sip:bob@10.0.3.21:5060"),
+    );
+    inject_response(&transport_tx, late_same_dialog, first).await;
+    wait_for_request_count(&transport, Method::Ack, selected_ack_count + 1).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    assert!(
+        requests_sent_as(&transport, Method::Bye).is_empty(),
+        "the remote To tag identifies the selected dialog even when its 2xx arrives on an older transaction"
+    );
+}
+
+#[tokio::test]
+async fn failed_late_fork_ack_blocks_bye_until_retransmitted_success_retries_cleanup() {
+    use rvoip_sip_core::StatusCode;
+
+    let (manager, transport, transport_tx) = build_event_manager_with_transport().await;
+    let first: SocketAddr = "10.0.3.11:5060".parse().unwrap();
+    let second: SocketAddr = "10.0.3.12:5060".parse().unwrap();
+    send_test_initial_invite(
+        &manager,
+        vec![
+            ResolvedTarget::immediate(first, TransportType::Udp),
+            ResolvedTarget::immediate(second, TransportType::Udp),
+        ],
+        "retained-plan-late-fork-ack-retry",
+    )
+    .await;
+    let first_invite = wait_for_request_count(&transport, Method::Invite, 1).await[0]
+        .0
+        .clone();
+    inject_response(
+        &transport_tx,
+        response_for_invite(
+            &first_invite,
+            StatusCode::ServiceUnavailable,
+            "first-503",
+            None,
+        ),
+        first,
+    )
+    .await;
+    wait_for_request_count(&transport, Method::Invite, 2).await;
+    transport.program_method_sequence(
+        first,
+        Method::Ack,
+        [
+            Outcome::RecoverableFail("first late ACK fails".into()),
+            Outcome::Ok,
+        ],
+    );
+
+    let late_success = response_for_invite(
+        &first_invite,
+        StatusCode::Ok,
+        "late-fork-ack-retry",
+        Some("sip:bob@10.0.3.11:5060"),
+    );
+    inject_response(&transport_tx, late_success.clone(), first).await;
+    tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+    assert!(
+        requests_sent_as(&transport, Method::Bye).is_empty(),
+        "a BYE cannot precede the required late-fork ACK"
+    );
+
+    inject_response(&transport_tx, late_success, first).await;
+    let byes = wait_for_request_count(&transport, Method::Bye, 1).await;
+    assert_eq!(byes[0].1, first);
+    assert_eq!(
+        byes[0].0.to().and_then(|to| to.tag()),
+        Some("late-fork-ack-retry")
+    );
+}
+
+#[tokio::test]
+async fn cancel_targets_the_exact_current_failover_attempt() {
+    use rvoip_sip_core::StatusCode;
+
+    let (manager, transport, transport_tx) = build_event_manager_with_transport().await;
+    let first: SocketAddr = "10.0.4.1:5060".parse().unwrap();
+    let second: SocketAddr = "10.0.4.2:5060".parse().unwrap();
+    let (_, original_transaction) = send_test_initial_invite(
+        &manager,
+        vec![
+            ResolvedTarget::immediate(first, TransportType::Udp),
+            ResolvedTarget::immediate(second, TransportType::Udp),
+        ],
+        "retained-plan-cancel-current",
+    )
+    .await;
+    let first_invite = wait_for_request_count(&transport, Method::Invite, 1).await[0]
+        .0
+        .clone();
+    inject_response(
+        &transport_tx,
+        response_for_invite(
+            &first_invite,
+            StatusCode::ServiceUnavailable,
+            "first-503",
+            None,
+        ),
+        first,
+    )
+    .await;
+    let invites = wait_for_request_count(&transport, Method::Invite, 2).await;
+    let current_branch = invites[1]
+        .0
+        .first_via()
+        .and_then(|via| via.branch().map(str::to_owned));
+
+    manager
+        .cancel_invite_transaction_with_dialog(&original_transaction)
+        .await
+        .expect("cancel current failover attempt");
+    let cancels = wait_for_request_count(&transport, Method::Cancel, 1).await;
+
+    assert_eq!(cancels[0].1, second);
+    assert_eq!(
+        cancels[0]
+            .0
+            .first_via()
+            .and_then(|via| via.branch().map(str::to_owned)),
+        current_branch,
+        "CANCEL must use the branch of the serialized current attempt"
+    );
+    assert_eq!(
+        cancels[0].0.cseq().map(|cseq| cseq.seq),
+        invites[1].0.cseq().map(|cseq| cseq.seq)
+    );
 }
 
 #[tokio::test]

@@ -532,7 +532,21 @@ impl ClientInviteLogic {
                 }
             }
             TransactionState::Completed => {
-                if is_failure {
+                if is_success {
+                    // A forked downstream branch can return a 2xx after a
+                    // different branch already produced the non-2xx that put
+                    // this client transaction in Completed. RFC 3261
+                    // §13.2.2.4 requires every such 2xx to reach the TU so it
+                    // can ACK it and terminate any non-selected dialog. Keep
+                    // Timer D/Completed alive for retransmitted non-2xx ACKs.
+                    common_logic::send_success_response_event(
+                        tx_id,
+                        response,
+                        &data.events_tx,
+                        data.remote_addr,
+                    )
+                    .await;
+                } else if is_failure {
                     // Retransmission of final error response, resend ACK
                     debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Received retransmission of error response in Completed state, resending ACK");
 
@@ -1716,5 +1730,58 @@ mod tests {
             assert!(msg.is_request());
             assert_eq!(msg.method(), Some(Method::Ack));
         }
+    }
+
+    #[tokio::test]
+    async fn completed_invite_client_delivers_late_success_to_tu() {
+        let mut setup = setup_test_environment("sip:bob@target.com").await;
+        setup.transaction.initiate().await.expect("initiate failed");
+        setup
+            .mock_transport
+            .wait_for_message_sent(Duration::from_millis(100))
+            .await
+            .unwrap();
+        let _ = setup.mock_transport.get_sent_message().await;
+        let _ = TokioTimeout(Duration::from_millis(100), setup.tu_events_rx.recv()).await;
+
+        let original_request = (*setup.transaction.data.request).clone();
+        let failure_response = build_simple_response(StatusCode::NotFound, &original_request);
+        setup
+            .transaction
+            .process_response(failure_response)
+            .await
+            .expect("failure response");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while setup.transaction.state() != TransactionState::Completed {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("transaction enters Completed");
+
+        let success_response = build_simple_response(StatusCode::Ok, &original_request);
+        setup
+            .transaction
+            .process_response(success_response)
+            .await
+            .expect("late success response");
+
+        let delivered = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(TransactionEvent::SuccessResponse {
+                    transaction_id,
+                    response,
+                    ..
+                }) = setup.tu_events_rx.recv().await
+                {
+                    break (transaction_id, response.status_code());
+                }
+            }
+        })
+        .await
+        .expect("late success reaches TU");
+        assert_eq!(delivered.0, *setup.transaction.id());
+        assert_eq!(delivered.1, StatusCode::Ok.as_u16());
+        assert_eq!(setup.transaction.state(), TransactionState::Completed);
     }
 }

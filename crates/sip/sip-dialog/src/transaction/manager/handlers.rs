@@ -663,6 +663,22 @@ pub(crate) async fn handle_transport_message(
                         let lifecycle = tx.data().get_lifecycle();
                         if !matches!(lifecycle, TransactionLifecycle::Active) {
                             debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), ?lifecycle, "Skipping response processing for non-active transaction");
+                            if tx_id.method() == &Method::Invite && response.status().is_success() {
+                                TransactionManager::broadcast_event(
+                                    TransactionEvent::SuccessResponse {
+                                        transaction_id: tx_id,
+                                        response,
+                                        need_ack: true,
+                                        source,
+                                    },
+                                    events_tx,
+                                    event_subscribers,
+                                    Some(&manager.subscriber_to_transactions),
+                                    Some(&manager.transaction_to_subscribers),
+                                    None,
+                                )
+                                .await;
+                            }
                             return Ok(());
                         }
 
@@ -702,6 +718,28 @@ pub(crate) async fn handle_transport_message(
                             }
                         }
 
+                        return Ok(());
+                    }
+
+                    if tx_id.method() == &Method::Invite && response.status().is_success() {
+                        // Route authentication can succeed from the bounded
+                        // retired-transaction tombstone after the live Arc is
+                        // removed. Forked/retransmitted INVITE 2xx still belong
+                        // to the TU and require ACK handling.
+                        TransactionManager::broadcast_event(
+                            TransactionEvent::SuccessResponse {
+                                transaction_id: tx_id,
+                                response,
+                                need_ack: true,
+                                source,
+                            },
+                            events_tx,
+                            event_subscribers,
+                            Some(&manager.subscriber_to_transactions),
+                            Some(&manager.transaction_to_subscribers),
+                            None,
+                        )
+                        .await;
                         return Ok(());
                     }
 
@@ -1521,19 +1559,28 @@ impl TransactionManager {
                 let lifecycle = transaction.data().get_lifecycle();
                 if !matches!(lifecycle, TransactionLifecycle::Active) {
                     debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), ?lifecycle, "Skipping response processing for non-active transaction");
-                    return Ok(());
-                }
-
-                let dispatch_started = diagnostics::transaction_timing_enabled().then(Instant::now);
-                let process_result = transaction.process_response(response.clone()).await;
-                if let Some(started) = dispatch_started {
-                    diagnostics::record_existing_transaction_dispatch(started.elapsed());
-                }
-                if let Err(e) = process_result {
-                    warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error processing response");
+                    // Preserve the historical suppression of every retired
+                    // response except INVITE 2xx. A late/forked INVITE 2xx
+                    // must reach the TU for ACK/cleanup, while replaying a
+                    // retired provisional or failure response would repeat
+                    // application state transitions.
+                    processed =
+                        !(key.method() == &Method::Invite && response.status().is_success());
                 } else {
-                    debug!("🔍 RESPONSE HANDLER: Successfully processed response in transaction");
-                    processed = true;
+                    let dispatch_started =
+                        diagnostics::transaction_timing_enabled().then(Instant::now);
+                    let process_result = transaction.process_response(response.clone()).await;
+                    if let Some(started) = dispatch_started {
+                        diagnostics::record_existing_transaction_dispatch(started.elapsed());
+                    }
+                    if let Err(e) = process_result {
+                        warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error processing response");
+                    } else {
+                        debug!(
+                            "🔍 RESPONSE HANDLER: Successfully processed response in transaction"
+                        );
+                        processed = true;
+                    }
                 }
             } else {
                 debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "No matching client transaction found for response key");

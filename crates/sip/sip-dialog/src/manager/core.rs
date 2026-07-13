@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -57,6 +57,8 @@ const TERMINATED_BYE_LOOKUP_HARD_MAX_MULTIPLIER: usize = 16;
 const TERMINATED_BYE_PRUNE_INTERVAL: usize = 8_192;
 const MIN_DIALOG_INDEX_CAPACITY: usize = 1024;
 const DEFAULT_DIALOG_EVENT_DISPATCH_WORKERS: usize = 1;
+const MIN_INVITE_FAILOVER_ATTEMPT_CAPACITY: usize = 65_536;
+const INVITE_FAILOVER_ATTEMPT_CAPACITY_MULTIPLIER: usize = 16;
 
 /// Retained dialog-manager state counts used by release-gate leak checks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -68,6 +70,11 @@ pub struct DialogManagerRetentionCounts {
     pub transaction_to_dialog: usize,
     pub transaction_dialog_route_hash: usize,
     pub dialog_invite_transactions: usize,
+    pub invite_failover_plans: usize,
+    pub active_invite_failover_by_dialog: usize,
+    pub invite_failover_attempts: usize,
+    pub invite_failover_plan_reservations: usize,
+    pub invite_failover_attempt_reservations: usize,
     pub dialog_server_transactions: usize,
     pub pending_response_transaction_by_dialog: usize,
     pub session_to_dialog: usize,
@@ -88,6 +95,12 @@ fn terminated_bye_lookup_hard_max(index_capacity: usize) -> usize {
     index_capacity
         .saturating_mul(TERMINATED_BYE_LOOKUP_HARD_MAX_MULTIPLIER)
         .max(MIN_TERMINATED_BYE_LOOKUP_HARD_MAX)
+}
+
+fn invite_failover_attempt_capacity(index_capacity: usize) -> usize {
+    index_capacity
+        .saturating_mul(INVITE_FAILOVER_ATTEMPT_CAPACITY_MULTIPLIER)
+        .max(MIN_INVITE_FAILOVER_ATTEMPT_CAPACITY)
 }
 
 pub(crate) fn outbound_request_key(request: &Request) -> Option<String> {
@@ -367,6 +380,22 @@ pub struct DialogManager {
     /// index for CANCEL and authenticated-INVITE retry handling; callers
     /// should not scan `transaction_to_dialog` to rediscover INVITEs.
     pub(crate) dialog_invite_transactions: Arc<DashMap<DialogId, Vec<TransactionKey>>>,
+
+    /// Active and recently-completed logical initial-INVITE plans. Attempts
+    /// remain indexed for a bounded late-2xx window after a candidate is
+    /// superseded or the logical operation completes.
+    pub(crate) invite_failover_plans: Arc<
+        DashMap<u64, Arc<tokio::sync::Mutex<super::transaction_integration::InviteFailoverPlan>>>,
+    >,
+    pub(crate) active_invite_failover_by_dialog: Arc<DashMap<DialogId, u64>>,
+    pub(crate) invite_failover_attempts:
+        Arc<DashMap<TransactionKey, super::transaction_integration::InviteFailoverAttemptIndex>>,
+    pub(crate) invite_failover_plan_reservations: Arc<AtomicUsize>,
+    pub(crate) invite_failover_attempt_reservations: Arc<AtomicUsize>,
+    pub(crate) next_invite_failover_plan_id: Arc<AtomicU64>,
+    pub(crate) invite_failover_insert_count: Arc<AtomicUsize>,
+    pub(crate) invite_failover_plan_capacity: usize,
+    pub(crate) invite_failover_attempt_capacity: usize,
 
     /// Dialog to server transaction mapping. Session-level response APIs
     /// need this to select the pending UAS transaction without scanning the
@@ -735,6 +764,17 @@ impl DialogManager {
             outbound_transport_by_request_key: Arc::new(DashMap::with_capacity(index_capacity)),
             transaction_dialog_route_hash: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_invite_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
+            invite_failover_plans: Arc::new(DashMap::with_capacity(index_capacity)),
+            active_invite_failover_by_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
+            invite_failover_attempts: Arc::new(DashMap::with_capacity(
+                invite_failover_attempt_capacity(index_capacity),
+            )),
+            invite_failover_plan_reservations: Arc::new(AtomicUsize::new(0)),
+            invite_failover_attempt_reservations: Arc::new(AtomicUsize::new(0)),
+            next_invite_failover_plan_id: Arc::new(AtomicU64::new(1)),
+            invite_failover_insert_count: Arc::new(AtomicUsize::new(0)),
+            invite_failover_plan_capacity: index_capacity,
+            invite_failover_attempt_capacity: invite_failover_attempt_capacity(index_capacity),
             dialog_server_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
             pending_response_transaction_by_dialog: Arc::new(DashMap::with_capacity(
                 index_capacity,
@@ -1348,6 +1388,17 @@ impl DialogManager {
             outbound_transport_by_request_key: Arc::new(DashMap::with_capacity(index_capacity)),
             transaction_dialog_route_hash: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_invite_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
+            invite_failover_plans: Arc::new(DashMap::with_capacity(index_capacity)),
+            active_invite_failover_by_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
+            invite_failover_attempts: Arc::new(DashMap::with_capacity(
+                invite_failover_attempt_capacity(index_capacity),
+            )),
+            invite_failover_plan_reservations: Arc::new(AtomicUsize::new(0)),
+            invite_failover_attempt_reservations: Arc::new(AtomicUsize::new(0)),
+            next_invite_failover_plan_id: Arc::new(AtomicU64::new(1)),
+            invite_failover_insert_count: Arc::new(AtomicUsize::new(0)),
+            invite_failover_plan_capacity: index_capacity,
+            invite_failover_attempt_capacity: invite_failover_attempt_capacity(index_capacity),
             dialog_server_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
             pending_response_transaction_by_dialog: Arc::new(DashMap::with_capacity(
                 index_capacity,
@@ -1471,6 +1522,7 @@ impl DialogManager {
 
                 _ = maintenance_interval.tick() => {
                     self.prune_terminated_bye_lookup();
+                    self.prune_invite_failover_state().await;
                 },
 
                 // Wait for shutdown signal
@@ -1518,6 +1570,7 @@ impl DialogManager {
 
                 _ = maintenance_interval.tick() => {
                     self.prune_terminated_bye_lookup();
+                    self.prune_invite_failover_state().await;
                 }
 
                 _ = self.shutdown_signal.notified() => {
@@ -1633,6 +1686,13 @@ impl DialogManager {
                     .mark_transaction_terminated_indexed(transaction_id);
             }
             _ => {}
+        }
+
+        if matches!(
+            self.handle_invite_failover_event(&event).await,
+            super::transaction_integration::InviteFailoverEventDisposition::Consumed
+        ) {
+            return;
         }
 
         if matches!(
@@ -1814,6 +1874,19 @@ impl DialogManager {
             {
                 server_transactions.push(transaction_id.clone());
             }
+        }
+    }
+
+    pub(crate) fn link_outbound_transaction_to_dialog_indexed(
+        &self,
+        transaction_id: &TransactionKey,
+        dialog_id: &DialogId,
+        request: &Request,
+    ) {
+        self.link_transaction_to_dialog_indexed(transaction_id, dialog_id);
+        if let Some(route_hash) = request_dialog_route_hash(request) {
+            self.transaction_dialog_route_hash
+                .insert(transaction_id.clone(), route_hash);
         }
     }
 
@@ -2515,6 +2588,15 @@ impl DialogManager {
         self.outbound_transport_by_request_key.clear();
         self.transaction_dialog_route_hash.clear();
         self.dialog_invite_transactions.clear();
+        self.invite_failover_plans.clear();
+        self.active_invite_failover_by_dialog.clear();
+        self.invite_failover_attempts.clear();
+        self.invite_failover_plan_reservations
+            .store(0, Ordering::Relaxed);
+        self.invite_failover_attempt_reservations
+            .store(0, Ordering::Relaxed);
+        self.invite_failover_insert_count
+            .store(0, Ordering::Relaxed);
         self.dialog_server_transactions.clear();
         self.pending_response_transaction_by_dialog.clear();
         self.session_to_dialog.clear();
@@ -2570,6 +2652,15 @@ impl DialogManager {
             transaction_to_dialog: self.transaction_to_dialog.len(),
             transaction_dialog_route_hash: self.transaction_dialog_route_hash.len(),
             dialog_invite_transactions: self.dialog_invite_transactions.len(),
+            invite_failover_plans: self.invite_failover_plans.len(),
+            active_invite_failover_by_dialog: self.active_invite_failover_by_dialog.len(),
+            invite_failover_attempts: self.invite_failover_attempts.len(),
+            invite_failover_plan_reservations: self
+                .invite_failover_plan_reservations
+                .load(Ordering::Acquire),
+            invite_failover_attempt_reservations: self
+                .invite_failover_attempt_reservations
+                .load(Ordering::Acquire),
             dialog_server_transactions: self.dialog_server_transactions.len(),
             pending_response_transaction_by_dialog: self
                 .pending_response_transaction_by_dialog
@@ -2721,6 +2812,7 @@ impl DialogManager {
         }
         self.pending_response_transaction_by_dialog
             .remove(dialog_id);
+        self.remove_invite_failover_state_for_dialog(dialog_id);
         if let Some((_, invite_transactions)) = self.dialog_invite_transactions.remove(dialog_id) {
             for transaction_id in invite_transactions {
                 self.transaction_manager
@@ -3728,6 +3820,682 @@ mod outbound_flow_handler_tests {
         assert!(!manager
             .transaction_dialog_route_hash
             .contains_key(&invite_tx));
+    }
+
+    #[tokio::test]
+    async fn retained_invite_attempts_share_route_hash_and_prune_all_indexes() {
+        use crate::manager::transaction_integration::{
+            CandidateWirePlan, InviteFailoverAttempt, InviteFailoverAttemptIndex,
+            InviteFailoverAttemptOutcome, InviteFailoverPlan, InviteFailoverPlanPhase,
+        };
+
+        let (manager, _rx) = make_manager().await;
+        let dialog_id = DialogId::new();
+        let first_transaction =
+            TransactionKey::new("z9hG4bK-retained-first".to_string(), Method::Invite, false);
+        let second_transaction =
+            TransactionKey::new("z9hG4bK-retained-second".to_string(), Method::Invite, false);
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-retained"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("retained-plan-prune")
+            .cseq(1)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-retained-template"))
+            .max_forwards(70)
+            .build();
+
+        manager.link_outbound_transaction_to_dialog_indexed(
+            &first_transaction,
+            &dialog_id,
+            &request,
+        );
+        manager.link_outbound_transaction_to_dialog_indexed(
+            &second_transaction,
+            &dialog_id,
+            &request,
+        );
+        assert_eq!(
+            manager
+                .transaction_dialog_route_hash
+                .get(&first_transaction)
+                .map(|entry| *entry.value()),
+            manager
+                .transaction_dialog_route_hash
+                .get(&second_transaction)
+                .map(|entry| *entry.value()),
+            "all attempts in one logical INVITE must stay on one event shard"
+        );
+
+        let plan_id = 77;
+        manager.invite_failover_plans.insert(
+            plan_id,
+            Arc::new(tokio::sync::Mutex::new(InviteFailoverPlan {
+                id: plan_id,
+                dialog_id: dialog_id.clone(),
+                request,
+                candidates: vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                    dest_addr(5090),
+                    rvoip_sip_transport::transport::TransportType::Udp,
+                )],
+                wire_plan: CandidateWirePlan::default(),
+                next_candidate_index: 1,
+                current_transaction: Some(first_transaction.clone()),
+                current_candidate_index: Some(0),
+                provisional_seen: false,
+                phase: InviteFailoverPlanPhase::Closed,
+                attempts: vec![InviteFailoverAttempt {
+                    transaction_id: first_transaction.clone(),
+                    candidate_index: 0,
+                    outcome: InviteFailoverAttemptOutcome::FinalResponse,
+                }],
+                accepted_transaction: None,
+                accepted_to_tag: None,
+                cleaned_fork_tags: std::collections::HashSet::new(),
+                setup_deadline: Instant::now() + Duration::from_secs(32),
+                expires_at: Instant::now() - Duration::from_millis(1),
+            })),
+        );
+        manager
+            .active_invite_failover_by_dialog
+            .insert(dialog_id.clone(), plan_id);
+        manager.invite_failover_attempts.insert(
+            first_transaction.clone(),
+            InviteFailoverAttemptIndex {
+                plan_id,
+                dialog_id: dialog_id.clone(),
+                candidate_index: 0,
+            },
+        );
+
+        manager.prune_invite_failover_state().await;
+
+        assert!(!manager.invite_failover_plans.contains_key(&plan_id));
+        assert!(!manager
+            .active_invite_failover_by_dialog
+            .contains_key(&dialog_id));
+        assert!(!manager
+            .invite_failover_attempts
+            .contains_key(&first_transaction));
+        assert!(!manager
+            .transaction_to_dialog
+            .contains_key(&first_transaction));
+        assert!(!manager
+            .transaction_dialog_route_hash
+            .contains_key(&first_transaction));
+
+        manager.unlink_transaction_from_dialog_indexed(&second_transaction);
+    }
+
+    #[tokio::test]
+    async fn timer_b_advances_retained_invite_once_and_preserves_attempt_indexes() {
+        use crate::manager::transaction_integration::{
+            CandidateWirePlan, InviteFailoverAttemptOutcome, InviteFailoverPlanPhase,
+        };
+
+        let (manager, _rx) = make_manager().await;
+        let dialog_id = DialogId::new();
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-timeout"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("retained-plan-timer-b")
+            .cseq(1)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-timeout-template"))
+            .max_forwards(70)
+            .build();
+        let (first_transaction, _) = manager
+            .send_request_with_candidate_wire_plan(
+                request,
+                vec![
+                    rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                        dest_addr(5091),
+                        rvoip_sip_transport::transport::TransportType::Udp,
+                    ),
+                    rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                        dest_addr(5092),
+                        rvoip_sip_transport::transport::TransportType::Udp,
+                    ),
+                    rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                        dest_addr(5093),
+                        rvoip_sip_transport::transport::TransportType::Udp,
+                    ),
+                ],
+                Some(&dialog_id),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect("initial retained INVITE");
+        let original_setup_deadline = {
+            let plan_id = *manager
+                .active_invite_failover_by_dialog
+                .get(&dialog_id)
+                .expect("active plan")
+                .value();
+            let plan = manager
+                .invite_failover_plans
+                .get(&plan_id)
+                .expect("retained plan")
+                .value()
+                .clone();
+            let setup_deadline = plan.lock().await.setup_deadline;
+            setup_deadline
+        };
+
+        manager
+            .process_global_transaction_event(TransactionEvent::TransactionTimeout {
+                transaction_id: first_transaction.clone(),
+            })
+            .await;
+        manager
+            .process_global_transaction_event(TransactionEvent::TransactionTimeout {
+                transaction_id: first_transaction.clone(),
+            })
+            .await;
+
+        let plan_id = *manager
+            .active_invite_failover_by_dialog
+            .get(&dialog_id)
+            .expect("plan remains active after failover")
+            .value();
+        let plan = manager
+            .invite_failover_plans
+            .get(&plan_id)
+            .expect("retained plan")
+            .value()
+            .clone();
+        let plan = plan.lock().await;
+        let second_transaction = plan
+            .current_transaction
+            .clone()
+            .expect("second attempt is current");
+        assert_ne!(first_transaction, second_transaction);
+        assert_eq!(plan.attempts.len(), 2);
+        assert_eq!(plan.next_candidate_index, 2);
+        assert_eq!(plan.setup_deadline, original_setup_deadline);
+        assert_eq!(
+            plan.attempts[0].outcome,
+            InviteFailoverAttemptOutcome::TransactionTimeout
+        );
+        assert_eq!(
+            plan.attempts[1].outcome,
+            InviteFailoverAttemptOutcome::Active
+        );
+        drop(plan);
+
+        manager
+            .process_global_transaction_event(TransactionEvent::StateChanged {
+                transaction_id: first_transaction.clone(),
+                previous_state: TransactionState::Calling,
+                new_state: TransactionState::Terminated,
+            })
+            .await;
+        manager
+            .process_global_transaction_event(TransactionEvent::TransactionTerminated {
+                transaction_id: first_transaction.clone(),
+            })
+            .await;
+
+        assert!(manager
+            .invite_failover_attempts
+            .contains_key(&first_transaction));
+        assert!(manager
+            .invite_failover_attempts
+            .contains_key(&second_transaction));
+        assert_eq!(
+            manager
+                .transaction_to_dialog
+                .get(&second_transaction)
+                .map(|entry| entry.value().clone()),
+            Some(dialog_id.clone()),
+            "terminal events from an old attempt cannot unlink the current attempt"
+        );
+        assert_eq!(
+            manager
+                .transaction_dialog_route_hash
+                .get(&first_transaction)
+                .map(|entry| *entry.value()),
+            manager
+                .transaction_dialog_route_hash
+                .get(&second_transaction)
+                .map(|entry| *entry.value())
+        );
+
+        assert_eq!(
+            manager
+                .invite_failover_plan_reservations
+                .load(Ordering::Acquire),
+            1
+        );
+        assert_eq!(
+            manager
+                .invite_failover_attempt_reservations
+                .load(Ordering::Acquire),
+            3
+        );
+        let retained_plan = manager
+            .invite_failover_plans
+            .get(&plan_id)
+            .expect("retained plan before TTL prune")
+            .value()
+            .clone();
+        let mut retained_plan_guard = retained_plan.lock().await;
+        retained_plan_guard.phase = InviteFailoverPlanPhase::Closed;
+        retained_plan_guard.expires_at = Instant::now() - Duration::from_millis(1);
+        manager.prune_invite_failover_state().await;
+        assert!(
+            manager.invite_failover_plans.contains_key(&plan_id),
+            "maintenance must skip a busy plan instead of blocking its event shard"
+        );
+        drop(retained_plan_guard);
+        manager.prune_invite_failover_state().await;
+
+        assert!(!manager.invite_failover_plans.contains_key(&plan_id));
+        assert!(!manager
+            .invite_failover_attempts
+            .contains_key(&first_transaction));
+        assert!(!manager
+            .invite_failover_attempts
+            .contains_key(&second_transaction));
+        assert_eq!(
+            manager
+                .invite_failover_plan_reservations
+                .load(Ordering::Acquire),
+            0
+        );
+        assert_eq!(
+            manager
+                .invite_failover_attempt_reservations
+                .load(Ordering::Acquire),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_and_timer_b_serialize_on_one_exact_current_attempt() {
+        use crate::manager::transaction_integration::{
+            CandidateWirePlan, InviteFailoverAttemptOutcome, InviteFailoverPlanPhase,
+        };
+
+        let (manager, _rx) = make_manager().await;
+        let manager = Arc::new(manager);
+        let dialog_id = DialogId::new();
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-race"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("retained-plan-cancel-timeout-race")
+            .cseq(1)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-race-template"))
+            .max_forwards(70)
+            .build();
+        let (first_transaction, _) = manager
+            .send_request_with_candidate_wire_plan(
+                request,
+                vec![
+                    rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                        dest_addr(5095),
+                        rvoip_sip_transport::transport::TransportType::Udp,
+                    ),
+                    rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                        dest_addr(5096),
+                        rvoip_sip_transport::transport::TransportType::Udp,
+                    ),
+                    rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                        dest_addr(5097),
+                        rvoip_sip_transport::transport::TransportType::Udp,
+                    ),
+                ],
+                Some(&dialog_id),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect("initial race INVITE");
+        let timeout_manager = manager.clone();
+        let timeout_transaction = first_transaction.clone();
+        let cancel_manager = manager.clone();
+        let cancel_transaction = first_transaction.clone();
+
+        let (_, cancel_result) = tokio::join!(
+            async move {
+                timeout_manager
+                    .process_global_transaction_event(TransactionEvent::TransactionTimeout {
+                        transaction_id: timeout_transaction,
+                    })
+                    .await;
+            },
+            async move {
+                cancel_manager
+                    .cancel_invite_transaction_with_dialog(&cancel_transaction)
+                    .await
+            }
+        );
+        cancel_result.expect("serialized CANCEL succeeds");
+
+        let plan_id = manager
+            .invite_failover_attempts
+            .get(&first_transaction)
+            .expect("first attempt remains indexed")
+            .plan_id;
+        let plan = manager
+            .invite_failover_plans
+            .get(&plan_id)
+            .expect("race plan retained")
+            .value()
+            .clone();
+        let plan = plan.lock().await;
+        assert_eq!(plan.phase, InviteFailoverPlanPhase::Cancelled);
+        assert!((1..=2).contains(&plan.attempts.len()));
+        let current_transaction = plan
+            .current_transaction
+            .as_ref()
+            .expect("cancelled current transaction");
+        assert_eq!(
+            plan.attempts
+                .iter()
+                .find(|attempt| &attempt.transaction_id == current_transaction)
+                .expect("current attempt")
+                .outcome,
+            InviteFailoverAttemptOutcome::Cancelled
+        );
+        if plan.attempts.len() == 2 {
+            assert_eq!(
+                plan.attempts[0].outcome,
+                InviteFailoverAttemptOutcome::TransactionTimeout
+            );
+        }
+        drop(plan);
+        assert!(!manager
+            .active_invite_failover_by_dialog
+            .contains_key(&dialog_id));
+
+        // Exercise the opposite serialized outcome explicitly: once CANCEL
+        // owns the plan, a queued Timer-B event cannot create another leg.
+        let cancel_first_dialog = DialogId::new();
+        let cancel_first_request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-cancel-first"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("retained-plan-cancel-first")
+            .cseq(1)
+            .via(
+                "127.0.0.1:5060",
+                "UDP",
+                Some("z9hG4bK-cancel-first-template"),
+            )
+            .max_forwards(70)
+            .build();
+        let (cancel_first_transaction, _) = manager
+            .send_request_with_candidate_wire_plan(
+                cancel_first_request,
+                vec![
+                    rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                        dest_addr(5100),
+                        rvoip_sip_transport::transport::TransportType::Udp,
+                    ),
+                    rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                        dest_addr(5101),
+                        rvoip_sip_transport::transport::TransportType::Udp,
+                    ),
+                ],
+                Some(&cancel_first_dialog),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect("cancel-first INVITE");
+        manager
+            .cancel_invite_transaction_with_dialog(&cancel_first_transaction)
+            .await
+            .expect("cancel wins serialization");
+        manager
+            .process_global_transaction_event(TransactionEvent::TransactionTimeout {
+                transaction_id: cancel_first_transaction.clone(),
+            })
+            .await;
+        let cancel_first_plan_id = manager
+            .invite_failover_attempts
+            .get(&cancel_first_transaction)
+            .expect("cancel-first attempt remains indexed")
+            .plan_id;
+        let cancel_first_plan = manager
+            .invite_failover_plans
+            .get(&cancel_first_plan_id)
+            .expect("cancel-first plan")
+            .value()
+            .clone();
+        let cancel_first_plan = cancel_first_plan.lock().await;
+        assert_eq!(cancel_first_plan.phase, InviteFailoverPlanPhase::Cancelled);
+        assert_eq!(cancel_first_plan.attempts.len(), 1);
+        assert_eq!(
+            cancel_first_plan.attempts[0].outcome,
+            InviteFailoverAttemptOutcome::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_invite_plan_hard_cap_rejects_admission_and_stop_drains_all_state() {
+        use crate::manager::transaction_integration::{
+            CandidateWirePlan, InviteFailoverAttempt, InviteFailoverAttemptIndex,
+            InviteFailoverAttemptOutcome, InviteFailoverPlan, InviteFailoverPlanPhase,
+        };
+
+        let (manager, _rx) = make_manager().await;
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-cap"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("retained-plan-cap")
+            .cseq(1)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-cap-template"))
+            .max_forwards(70)
+            .build();
+        let retained_transaction =
+            TransactionKey::new("z9hG4bK-cap-retained".into(), Method::Invite, false);
+        let retained_dialog = DialogId::new();
+        let now = Instant::now();
+
+        for offset in 0..manager.invite_failover_plan_capacity {
+            let plan_id = offset as u64 + 1;
+            let dialog_id = if offset == 0 {
+                retained_dialog.clone()
+            } else {
+                DialogId::new()
+            };
+            let attempts = if offset == 0 {
+                vec![InviteFailoverAttempt {
+                    transaction_id: retained_transaction.clone(),
+                    candidate_index: 0,
+                    outcome: InviteFailoverAttemptOutcome::Active,
+                }]
+            } else {
+                Vec::new()
+            };
+            manager.invite_failover_plans.insert(
+                plan_id,
+                Arc::new(tokio::sync::Mutex::new(InviteFailoverPlan {
+                    id: plan_id,
+                    dialog_id,
+                    request: request.clone(),
+                    candidates: Vec::new(),
+                    wire_plan: CandidateWirePlan::default(),
+                    next_candidate_index: 0,
+                    current_transaction: (offset == 0).then(|| retained_transaction.clone()),
+                    current_candidate_index: (offset == 0).then_some(0),
+                    provisional_seen: false,
+                    phase: InviteFailoverPlanPhase::Active,
+                    attempts,
+                    accepted_transaction: None,
+                    accepted_to_tag: None,
+                    cleaned_fork_tags: std::collections::HashSet::new(),
+                    setup_deadline: now + Duration::from_secs(32),
+                    expires_at: now + Duration::from_secs(90),
+                })),
+            );
+        }
+        manager
+            .active_invite_failover_by_dialog
+            .insert(retained_dialog.clone(), 1);
+        manager.invite_failover_attempts.insert(
+            retained_transaction.clone(),
+            InviteFailoverAttemptIndex {
+                plan_id: 1,
+                dialog_id: retained_dialog.clone(),
+                candidate_index: 0,
+            },
+        );
+        manager.link_outbound_transaction_to_dialog_indexed(
+            &retained_transaction,
+            &retained_dialog,
+            &request,
+        );
+
+        let admission_dialog = DialogId::new();
+        let rejected = manager
+            .send_request_with_candidate_wire_plan(
+                request.clone(),
+                vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                    dest_addr(5098),
+                    rvoip_sip_transport::transport::TransportType::Udp,
+                )],
+                Some(&admission_dialog),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect_err("hard plan cap rejects new setup");
+        assert_eq!(rejected.diagnostic_class(), "transaction");
+
+        manager.invite_failover_plans.clear();
+        manager.active_invite_failover_by_dialog.clear();
+        let oversized_candidates = vec![
+            rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                dest_addr(5099),
+                rvoip_sip_transport::transport::TransportType::Udp,
+            );
+            manager.invite_failover_attempt_capacity + 1
+        ];
+        let attempt_rejected = manager
+            .send_request_with_candidate_wire_plan(
+                request,
+                oversized_candidates,
+                Some(&admission_dialog),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect_err("hard attempt reservation cap rejects new setup");
+        assert_eq!(attempt_rejected.diagnostic_class(), "transaction");
+
+        manager.stop().await.expect("manager stop");
+        assert!(manager.invite_failover_plans.is_empty());
+        assert!(manager.active_invite_failover_by_dialog.is_empty());
+        assert!(manager.invite_failover_attempts.is_empty());
+        assert_eq!(
+            manager
+                .invite_failover_plan_reservations
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            manager
+                .invite_failover_attempt_reservations
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert!(manager.transaction_to_dialog.is_empty());
+        assert!(manager.transaction_dialog_route_hash.is_empty());
+        let retention = manager.retention_counts();
+        assert_eq!(retention.invite_failover_plans, 0);
+        assert_eq!(retention.active_invite_failover_by_dialog, 0);
+        assert_eq!(retention.invite_failover_attempts, 0);
+        assert_eq!(retention.invite_failover_plan_reservations, 0);
+        assert_eq!(retention.invite_failover_attempt_reservations, 0);
+    }
+
+    #[tokio::test]
+    async fn duplicate_selected_invite_success_is_reacked_without_duplicate_answer_event() {
+        use crate::manager::transaction_integration::CandidateWirePlan;
+
+        let (manager, mut session_events) = make_manager().await;
+        let mut dialog = Dialog::new(
+            "retained-selected-duplicate".to_string(),
+            "sip:alice@example.com".parse().unwrap(),
+            "sip:bob@example.com".parse().unwrap(),
+            Some("alice-selected".to_string()),
+            None,
+            true,
+        );
+        dialog.state = DialogState::Early;
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-selected"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("retained-selected-duplicate")
+            .cseq(1)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-selected-template"))
+            .max_forwards(70)
+            .build();
+        let (transaction_id, _) = manager
+            .send_request_with_candidate_wire_plan(
+                request,
+                vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                    dest_addr(5094),
+                    rvoip_sip_transport::transport::TransportType::Udp,
+                )],
+                Some(&dialog_id),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect("send selected INVITE");
+        let sent_request = manager
+            .transaction_manager
+            .original_request(&transaction_id)
+            .await
+            .expect("request lookup")
+            .expect("request retained");
+        let response = SimpleResponseBuilder::response_from_request(
+            &sent_request,
+            rvoip_sip_core::StatusCode::Ok,
+            None,
+        )
+        .to("Bob", "sip:bob@example.com", Some("bob-selected"))
+        .contact("sip:bob@127.0.0.1:5094", None)
+        .body(bytes::Bytes::from_static(b"v=0\r\n"))
+        .build();
+        let event = TransactionEvent::SuccessResponse {
+            transaction_id: transaction_id.clone(),
+            response: response.clone(),
+            need_ack: true,
+            source: dest_addr(5094),
+        };
+
+        manager.process_global_transaction_event(event).await;
+        manager
+            .process_global_transaction_event(TransactionEvent::SuccessResponse {
+                transaction_id,
+                response,
+                need_ack: true,
+                source: dest_addr(5094),
+            })
+            .await;
+
+        let mut answer_events = 0;
+        while let Ok(event) = session_events.try_recv() {
+            if matches!(event, SessionCoordinationEvent::CallAnswered { .. }) {
+                answer_events += 1;
+            }
+        }
+        assert_eq!(answer_events, 1);
+        assert_eq!(
+            manager.get_dialog_state(&dialog_id).expect("dialog state"),
+            DialogState::Confirmed
+        );
     }
 
     #[tokio::test]
