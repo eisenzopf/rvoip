@@ -15,15 +15,15 @@ authentication:
 The provider lazily creates one shared single-node connection manager or one
 shared cluster topology connection and reuses it across cloned providers and
 commands. Every constructor applies finite connection, response, retry, and
-whole-operation limits. The defaults are available from
+per-command operation limits. The defaults are available from
 `RedisAuthRuntimeConfig::default`; deployments can supply reviewed limits with
 `from_config_with_runtime` or `from_cluster_config_with_runtime`.
 
 `redis://` and certificate-verified `rediss://` URLs are supported for both
 single-node and cluster seeds. All cluster seeds must use compatible TLS and
-authentication settings. Native roots are the default. Private deployments can
-provide a PEM trust bundle and optional PEM client identity through
-`RedisAuthTlsConfig` and the additive `from_config_with_tls` or
+authentication settings. Bundled public Web PKI roots are the default.
+Private deployments can provide a PEM trust bundle and optional PEM client
+identity through `RedisAuthTlsConfig` and the additive `from_config_with_tls` or
 `from_cluster_config_with_tls` constructors. Certificate, credential, and
 private-key bytes are never included in provider TLS `Debug` output.
 

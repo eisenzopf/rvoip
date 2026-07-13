@@ -204,12 +204,12 @@ impl fmt::Debug for RedisAuthTlsConfig {
 }
 
 impl RedisAuthTlsConfig {
-    /// Use native trust roots and no client certificate.
+    /// Use the bundled public Web PKI roots and no client certificate.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Replace native roots with a PEM-encoded trust anchor bundle.
+    /// Replace the bundled roots with a PEM-encoded trust anchor bundle.
     pub fn with_root_certificate_pem(mut self, certificate: impl Into<Vec<u8>>) -> Self {
         self.root_certificate_pem = Some(certificate.into());
         self
@@ -270,7 +270,7 @@ pub struct RedisAuthRuntimeConfig {
     pub connection_timeout: Duration,
     /// Maximum time awaiting one Redis response.
     pub response_timeout: Duration,
-    /// Maximum wall-clock time for connection acquisition plus one command.
+    /// Maximum wall-clock time for one connection initialization or command.
     pub operation_timeout: Duration,
     /// Maximum reconnect or cluster retry count.
     pub retry_attempts: u32,
