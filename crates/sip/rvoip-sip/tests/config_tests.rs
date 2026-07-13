@@ -4,7 +4,7 @@
 
 use rvoip_sip::{
     Config, MediaMode, MediaSessionControllerConfig, PerformanceConfig, RtpSessionBufferConfig,
-    RtpTransportBufferConfig, SipContactMode, SipTlsMode,
+    RtpTransportBufferConfig, SessionError, SipContactMode, SipTlsMode,
 };
 use rvoip_sip_transport::UdpParseDispatch;
 use std::net::{IpAddr, SocketAddr};
@@ -247,7 +247,11 @@ fn test_config_profile_rejects_invalid_capacity() {
     let err = Config::local("alice", 5060)
         .try_with_performance_config(PerformanceConfig::pbx_media_server(0))
         .unwrap_err();
-    assert!(err.to_string().contains("capacity"));
+    let SessionError::ConfigError(detail) = &err else {
+        panic!("expected typed ConfigError, got {err:?}");
+    };
+    assert!(detail.contains("capacity"));
+    assert!(!err.to_string().contains(detail));
 }
 
 #[test]

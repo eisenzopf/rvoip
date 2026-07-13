@@ -5,12 +5,21 @@
 use rvoip_sip::api::unified::{Config, SipContactMode, SipTlsMode, UnifiedCoordinator};
 use rvoip_sip::state_table::types::SessionId;
 use rvoip_sip::types::CallState;
+use rvoip_sip::SessionError;
 use rvoip_sip_core::builder::SimpleRequestBuilder;
 use rvoip_sip_core::types::{ContentLength, HeaderName, TypedHeader};
 use rvoip_sip_core::{parse_message, Message, Method};
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
+
+fn config_error_detail(error: &SessionError) -> &str {
+    let SessionError::ConfigError(detail) = error else {
+        panic!("expected typed ConfigError, got {error:?}");
+    };
+    assert!(!error.to_string().contains(detail));
+    detail
+}
 
 /// Create a test configuration with unique ports.
 ///
@@ -61,7 +70,7 @@ fn reachable_tls_client_only_requires_explicit_contact_uri() {
         .validate()
         .expect_err("ClientOnly reachable Contact needs explicit Contact");
     assert!(
-        err.to_string().contains("contact_uri"),
+        config_error_detail(&err).contains("contact_uri"),
         "unexpected validation error: {err}"
     );
 }
@@ -76,7 +85,7 @@ fn rfc5626_registered_flow_requires_outbound_and_instance() {
         .validate()
         .expect_err("RFC5626 mode must require sip_outbound_enabled");
     assert!(
-        err.to_string().contains("sip_outbound_enabled"),
+        config_error_detail(&err).contains("sip_outbound_enabled"),
         "unexpected validation error: {err}"
     );
 
@@ -85,7 +94,7 @@ fn rfc5626_registered_flow_requires_outbound_and_instance() {
         .validate()
         .expect_err("RFC5626 mode must require sip_instance");
     assert!(
-        err.to_string().contains("sip_instance"),
+        config_error_detail(&err).contains("sip_instance"),
         "unexpected validation error: {err}"
     );
 
