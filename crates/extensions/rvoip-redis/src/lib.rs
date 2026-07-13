@@ -125,7 +125,17 @@ return {1, 0}
 
 const RATE_LIMIT_COMPLETE_SCRIPT: &str = r#"
 local value = redis.call("HGET", KEYS[5], ARGV[1])
-if not value then return 0 end
+local expires = redis.call("ZSCORE", KEYS[6], ARGV[1])
+if not value or not expires then
+    redis.call("HDEL", KEYS[5], ARGV[1])
+    redis.call("ZREM", KEYS[6], ARGV[1])
+    return 0
+end
+if tonumber(expires) <= tonumber(ARGV[3]) then
+    redis.call("HDEL", KEYS[5], ARGV[1])
+    redis.call("ZREM", KEYS[6], ARGV[1])
+    return 0
+end
 
 redis.call("HDEL", KEYS[5], ARGV[1])
 redis.call("ZREM", KEYS[6], ARGV[1])
@@ -1413,6 +1423,7 @@ impl AuthRateLimiter for RedisAuthProvider {
         reservation: &AuthAttemptReservation,
         outcome: &AuthAuditOutcome,
     ) -> Result<(), CredentialAuthError> {
+        let now = unix_seconds(SystemTime::now())?;
         let mut connection = self.connection().await.map_credential_error()?;
         let success = i32::from(matches!(outcome, AuthAuditOutcome::Success));
         let completion: i32 = redis::Script::new(RATE_LIMIT_COMPLETE_SCRIPT)
@@ -1424,6 +1435,7 @@ impl AuthRateLimiter for RedisAuthProvider {
             .key(self.rate_reservation_expiry_key())
             .arg(reservation.opaque_id())
             .arg(success)
+            .arg(now)
             .invoke_async(&mut connection)
             .await
             .map_credential_error()?;

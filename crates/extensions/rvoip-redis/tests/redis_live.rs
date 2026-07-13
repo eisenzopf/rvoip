@@ -530,6 +530,99 @@ async fn rate_limiter_bounds_incomplete_reservations_under_concurrency() {
 }
 
 #[tokio::test]
+async fn expired_completion_cannot_release_a_newer_peer_or_subject_cohort() {
+    let Ok(redis_url) = std::env::var("RVOIP_REDIS_URL") else {
+        return;
+    };
+    let namespace = format!(
+        "rvoip:test:rate-stale-completion:{}",
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let limits = RedisAuthRateLimitLimits {
+        peer_cohorts: 512,
+        subject_cohorts: 512,
+        reservations: 512,
+    };
+    let provider_with_window = |window| {
+        RedisAuthProvider::from_config(
+            RedisAuthConfig::new(redis_url.clone())
+                .with_namespace(namespace.clone())
+                .with_rate_limit_window(window)
+                .with_max_failures_per_window(1),
+        )
+        .unwrap()
+        .with_auth_rate_limit_limits(limits)
+        .unwrap()
+    };
+    let target_provider = provider_with_window(Duration::from_secs(3));
+    let filler_provider = provider_with_window(Duration::from_secs(1));
+    target_provider.clear_namespace_for_tests().await.unwrap();
+
+    let target_key = AuthRateLimitKey::new(AuthRateLimitKind::Digest)
+        .with_subject("target-subject")
+        .with_realm("tenant-a")
+        .with_peer("198.51.100.200");
+    let AuthAttemptAdmission::Reserved(stale) = target_provider
+        .reserve_auth_attempt(&target_key)
+        .await
+        .unwrap()
+    else {
+        panic!("target reservation must be admitted");
+    };
+
+    // More than one cleanup batch expires before the target. This leaves the
+    // target's reservation record behind while a new cohort with the same
+    // peer/subject is admitted, reproducing the dangerous stale-completion
+    // ordering deterministically.
+    let mut fillers = Vec::new();
+    for index in 0..300 {
+        let provider = filler_provider.clone();
+        fillers.push(tokio::spawn(async move {
+            let key = AuthRateLimitKey::new(AuthRateLimitKind::Digest)
+                .with_subject(format!("filler-subject-{index}"))
+                .with_realm("tenant-a")
+                .with_peer(format!("198.51.{}.{}", 101 + index / 250, index % 250));
+            provider.reserve_auth_attempt(&key).await.unwrap()
+        }));
+    }
+    for filler in fillers {
+        assert!(matches!(
+            filler.await.unwrap(),
+            AuthAttemptAdmission::Reserved(_)
+        ));
+    }
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    let AuthAttemptAdmission::Reserved(current) = target_provider
+        .reserve_auth_attempt(&target_key)
+        .await
+        .unwrap()
+    else {
+        panic!("expired target cohort must admit a new reservation");
+    };
+    target_provider
+        .complete_auth_attempt(&stale, &AuthAuditOutcome::Success)
+        .await
+        .unwrap();
+    assert!(matches!(
+        target_provider
+            .reserve_auth_attempt(&target_key)
+            .await
+            .unwrap(),
+        AuthAttemptAdmission::Denied { .. }
+    ));
+    target_provider
+        .complete_auth_attempt(&current, &AuthAuditOutcome::Success)
+        .await
+        .unwrap();
+
+    target_provider.clear_namespace_for_tests().await.unwrap();
+}
+
+#[tokio::test]
 async fn rate_limiter_denies_after_configured_failures() {
     let Some(provider) = live_provider("rate_limit") else {
         return;
