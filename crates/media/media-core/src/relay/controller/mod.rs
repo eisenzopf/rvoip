@@ -1576,10 +1576,8 @@ impl MediaSessionController {
                                         "media_core.audio.rx.audio_frame.samples_vec",
                                         samples.capacity() * std::mem::size_of::<i16>(),
                                     );
-                                    let audio_frame = AudioFrame::new(
-                                        samples, 8000, 1,
-                                        0, // timestamp behaviour preserved from codec decode path
-                                    );
+                                    let audio_frame =
+                                        AudioFrame::new(samples, 8000, 1, packet.header.timestamp);
 
                                     // Use try_send to avoid blocking the RTP event handler
                                     match sender.try_send(audio_frame) {

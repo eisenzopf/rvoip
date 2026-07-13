@@ -6,6 +6,9 @@
 mod tests {
     use super::super::*;
     use crate::types::{DialogId, MediaDirection, MediaSessionId};
+    use bytes::Bytes;
+    use rvoip_rtp_core::packet::RtpPacket;
+    use rvoip_rtp_core::session::RtpSessionEvent;
     use rvoip_rtp_core::transport::AllocationStrategy;
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
@@ -108,6 +111,38 @@ mod tests {
             .await
             .expect("dtmf receiver should close");
         assert!(closed.is_none());
+    }
+
+    #[tokio::test]
+    async fn decoded_audio_callback_preserves_rtp_timestamp() {
+        let controller = MediaSessionController::new();
+        let dialog_id = DialogId::new("rtp-timestamp-dialog");
+        let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel(1);
+        controller
+            .set_audio_frame_callback(dialog_id.clone(), audio_tx)
+            .await
+            .expect("set audio callback");
+
+        let (rtp_tx, rtp_rx) = tokio::sync::broadcast::channel(1);
+        controller.spawn_rtp_event_handler(dialog_id, rtp_rx, 0);
+        let timestamp = 0xf123_4567;
+        rtp_tx
+            .send(RtpSessionEvent::PacketReceived(
+                RtpPacket::new_with_payload(
+                    0,
+                    7,
+                    timestamp,
+                    0x5256_4f49,
+                    Bytes::from(vec![0xff; 160]),
+                ),
+            ))
+            .expect("send RTP event");
+
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(1), audio_rx.recv())
+            .await
+            .expect("decoded frame timeout")
+            .expect("decoded frame");
+        assert_eq!(frame.timestamp, timestamp);
     }
 
     #[tokio::test]
