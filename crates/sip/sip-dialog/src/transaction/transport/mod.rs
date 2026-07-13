@@ -274,6 +274,24 @@ async fn forward_control_event(
     }
 }
 
+/// Forward a best-effort transport diagnostic without consuming lifecycle
+/// capacity or applying message backpressure. Errors describe already-dropped
+/// input; losing one under pressure must not terminate an otherwise healthy
+/// transport bridge.
+fn forward_diagnostic_event(
+    event_tx: &mpsc::Sender<TransportEvent>,
+    event: TransportEvent,
+) -> bool {
+    match event_tx.try_send(event) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) => {
+            trace!("Dropping transport diagnostic under event backpressure");
+            true
+        }
+        Err(TrySendError::Closed(_)) => false,
+    }
+}
+
 async fn dispatch_transport_event(
     event: TransportEvent,
     dispatch_senders: &Arc<Vec<mpsc::Sender<TransportEvent>>>,
@@ -980,6 +998,13 @@ impl TransportManager {
                 let mut event = event;
                 mark_transport_manager_forwarded(&mut event, Instant::now());
 
+                if matches!(&event, TransportEvent::Error { .. }) {
+                    if !forward_diagnostic_event(&self.event_tx, event) {
+                        break;
+                    }
+                    continue;
+                }
+
                 if rvoip_sip_transport::transport::is_control_event(&event) {
                     if !forward_control_event(&self.control_event_tx, event).await {
                         break;
@@ -1355,6 +1380,38 @@ mod tests {
             .unwrap();
         assert!(manager.take_control_event_receiver().await.is_some());
         assert!(manager.take_control_event_receiver().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn saturated_diagnostic_lane_drops_error_without_closing_bridge() {
+        let (events, mut receiver) = mpsc::channel(1);
+        assert!(forward_diagnostic_event(
+            &events,
+            TransportEvent::Error {
+                error: "first malformed datagram".into(),
+            },
+        ));
+        assert!(forward_diagnostic_event(
+            &events,
+            TransportEvent::Error {
+                error: "dropped malformed datagram".into(),
+            },
+        ));
+
+        assert!(matches!(
+            receiver.recv().await,
+            Some(TransportEvent::Error { .. })
+        ));
+        assert!(forward_diagnostic_event(
+            &events,
+            TransportEvent::Error {
+                error: "later diagnostic".into(),
+            },
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(TransportEvent::Error { .. })
+        ));
     }
 
     #[tokio::test]

@@ -359,7 +359,16 @@ pub enum TransportEvent {
 /// Whether an event belongs on the reserved lifecycle/control lane rather
 /// than the bounded SIP message lane.
 pub const fn is_control_event(event: &TransportEvent) -> bool {
-    !matches!(event, TransportEvent::MessageReceived { .. })
+    matches!(
+        event,
+        TransportEvent::Closed
+            | TransportEvent::KeepAlivePongReceived { .. }
+            | TransportEvent::ConnectionClosed { .. }
+            | TransportEvent::ShutdownRequested
+            | TransportEvent::ShutdownReady
+            | TransportEvent::ShutdownNow
+            | TransportEvent::ShutdownComplete
+    )
 }
 
 /// Emit lifecycle state without allowing a saturated consumer to pin a socket
@@ -480,6 +489,20 @@ mod diagnostic_safety_tests {
             panic!("expected error event");
         };
         assert_eq!(error, SECRET, "functional error payload must be retained");
+    }
+
+    #[test]
+    fn diagnostic_errors_do_not_consume_reserved_lifecycle_capacity() {
+        assert!(!is_control_event(&TransportEvent::Error {
+            error: "malformed datagram".into(),
+        }));
+        assert!(is_control_event(&TransportEvent::Closed));
+        assert!(is_control_event(&TransportEvent::ConnectionClosed {
+            remote_addr: "127.0.0.1:5060".parse().unwrap(),
+            transport_type: TransportType::Tcp,
+            flow_id: None,
+        }));
+        assert!(is_control_event(&TransportEvent::ShutdownNow));
     }
 }
 

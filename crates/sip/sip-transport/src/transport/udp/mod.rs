@@ -589,7 +589,11 @@ async fn process_udp_datagram(
         }
         Err(e) => {
             diagnostics::record_udp_parse_failed();
-            warn!("Error parsing SIP message: {}", e);
+            debug!(
+                error_class = "malformed-sip-datagram",
+                error_bytes = e.to_string().len(),
+                "Discarding malformed SIP UDP datagram"
+            );
             TransportEvent::Error {
                 error: format!("Error parsing SIP message: {}", e),
             }
@@ -598,6 +602,12 @@ async fn process_udp_datagram(
 
     match events_tx.try_send(event) {
         Ok(()) => {}
+        Err(TrySendError::Full(TransportEvent::Error { .. })) => {
+            // Parse diagnostics are lossy by design. They must never occupy
+            // the reserved lifecycle lane or backpressure UDP parsing so a
+            // malformed-datagram flood cannot suppress later valid SIP.
+            trace!("Dropping UDP parse diagnostic under event backpressure");
+        }
         Err(TrySendError::Full(event)) => {
             let started = Instant::now();
             if let Err(e) = events_tx.send(event).await {
