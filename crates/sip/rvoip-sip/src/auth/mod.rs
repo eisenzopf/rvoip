@@ -4328,6 +4328,7 @@ mod tests {
             &self,
             _username: &str,
             _nonce: &str,
+            _cnonce: &str,
             _nonce_count: u32,
         ) -> std::result::Result<bool, CredentialAuthError> {
             Err(CredentialAuthError::Unavailable(
@@ -4399,16 +4400,11 @@ mod tests {
             &self,
             username: &str,
             nonce: &str,
+            cnonce: &str,
             nonce_count: u32,
         ) -> std::result::Result<bool, CredentialAuthError> {
-            self.accept_client_nonce_count(
-                username,
-                nonce,
-                "legacy-client-sequence",
-                nonce_count,
-                SystemTime::now(),
-            )
-            .await
+            self.accept_client_nonce_count(username, nonce, cnonce, nonce_count, SystemTime::now())
+                .await
         }
 
         async fn admit_nonce(

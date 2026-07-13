@@ -249,7 +249,7 @@ pub trait DigestReplayStore: Send + Sync {
         now: SystemTime,
     ) -> Result<DigestNonceStatus, CredentialAuthError>;
 
-    /// Atomically accept a nonce-count for the legacy `(username, nonce)` key.
+    /// Atomically accept a nonce-count for `(username, nonce, cnonce)`.
     ///
     /// New validators must call [`Self::accept_client_nonce_count`] so clients
     /// sharing an admitted nonce retain independent monotonic sequences.
@@ -257,6 +257,7 @@ pub trait DigestReplayStore: Send + Sync {
         &self,
         username: &str,
         nonce: &str,
+        cnonce: &str,
         nonce_count: u32,
     ) -> Result<bool, CredentialAuthError>;
 

@@ -135,6 +135,77 @@ async fn configured_tenant_bridge_rejects_tenantless_signed_token() {
 }
 
 #[tokio::test]
+async fn configured_tenant_bridge_rejects_differently_tenant_bound_signed_token() {
+    let seeded = seed_users_core().await;
+    let mut claims = seeded
+        .service
+        .jwt_issuer()
+        .validate_access_token(&seeded.access_token)
+        .unwrap();
+    claims.tenant_id = Some("tenant-other".to_string());
+    let other_tenant = encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(b"bridge-test-secret"),
+    )
+    .unwrap();
+    let provider = UsersCoreAuthProvider::shared(Arc::new(seeded.service));
+
+    let result = BearerValidator::validate_principal(provider.as_ref(), &other_tenant).await;
+    assert!(
+        matches!(result, Err(BearerAuthError::Invalid(ref message)) if message.contains("tenant")),
+        "configured tenant bridge must reject a token bound to another tenant: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn tenantless_bridge_accepts_only_tenantless_signed_tokens() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("tenantless-exact-match.db");
+    let mut config = create_test_config(format!("sqlite://{}?mode=rwc", db_path.display()));
+    config.jwt.tenant_id = None;
+    let service = init(config).await.unwrap();
+    let user = service
+        .create_user(CreateUserRequest {
+            username: "tenantless-alice".to_string(),
+            password: "SecurePass2024".to_string(),
+            email: Some("tenantless-alice@example.com".to_string()),
+            display_name: Some("Tenantless Alice".to_string()),
+            roles: vec!["user".to_string()],
+        })
+        .await
+        .unwrap();
+    let auth = service
+        .authenticate_password("tenantless-alice", "SecurePass2024")
+        .await
+        .unwrap();
+    let mut tenant_bound_claims = service
+        .jwt_issuer()
+        .validate_access_token(&auth.access_token)
+        .unwrap();
+    tenant_bound_claims.tenant_id = Some("tenant-injected".to_string());
+    let tenant_bound = encode(
+        &Header::default(),
+        &tenant_bound_claims,
+        &EncodingKey::from_secret(b"bridge-test-secret"),
+    )
+    .unwrap();
+    let provider = UsersCoreAuthProvider::shared(Arc::new(service));
+
+    let accepted = BearerValidator::validate_principal(provider.as_ref(), &auth.access_token)
+        .await
+        .unwrap();
+    assert_eq!(accepted.subject, user.id);
+    assert_eq!(accepted.tenant, None);
+
+    let rejected = BearerValidator::validate_principal(provider.as_ref(), &tenant_bound).await;
+    assert!(
+        matches!(rejected, Err(BearerAuthError::Invalid(ref message)) if message.contains("tenant")),
+        "tenantless bridge must reject a signed token with an injected tenant: {rejected:?}"
+    );
+}
+
+#[tokio::test]
 async fn users_core_provider_rejects_inactive_users_across_auth_traits() {
     let seeded = seed_users_core().await;
     seeded

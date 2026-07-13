@@ -12,10 +12,12 @@ mod moq;
 #[cfg(feature = "moq")]
 pub use moq::{RedisMoqSessionLeaseConfig, RedisMoqSessionLeaseStore};
 
+use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use redis::AsyncCommands;
+use redis::aio::ConnectionLike;
+use redis::{AsyncCommands, Cmd, RedisFuture, Value};
 use rvoip_auth_core::{
     AuthAuditOutcome, AuthRateLimitKey, AuthRateLimitVerdict, AuthRateLimiter, CredentialAuthError,
     DigestNonceStatus, DigestReplayStore, TokenRevocationChecker, TokenRevocationContext,
@@ -34,10 +36,28 @@ pub enum RedisAuthError {
     /// A configured duration was too large for Redis second-granularity TTLs.
     #[error("duration is too large for redis ttl seconds")]
     DurationTooLarge,
+
+    /// Redis Cluster construction requires at least one discovery endpoint.
+    #[error("Redis Cluster requires at least one seed URL")]
+    NoClusterSeeds,
+
+    /// Namespace-wide fixture cleanup is not safe through a cluster-routed
+    /// connection because the matching keys may reside on multiple nodes.
+    #[error("namespace cleanup is only supported in single-node Redis mode")]
+    ClusterNamespaceCleanupUnsupported,
+}
+
+/// Redis deployment mode used by [`RedisAuthProvider`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedisAuthConnectionMode {
+    /// A single Redis server addressed by [`RedisAuthConfig::redis_url`].
+    SingleNode,
+    /// Redis Cluster discovered from one or more seed URLs.
+    Cluster,
 }
 
 /// Configuration for Redis-backed auth provider state.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RedisAuthConfig {
     /// Redis connection URL, such as `redis://127.0.0.1:6379`.
     pub redis_url: String,
@@ -60,6 +80,21 @@ pub struct RedisAuthConfig {
     pub rate_limit_window: Duration,
     /// Maximum failed attempts accepted in one rate-limit window.
     pub max_failures_per_window: u32,
+}
+
+impl fmt::Debug for RedisAuthConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RedisAuthConfig")
+            .field("redis_url", &"<redacted>")
+            .field("namespace", &self.namespace)
+            .field("nonce_stale_retention", &self.nonce_stale_retention)
+            .field("nonce_count_ttl", &self.nonce_count_ttl)
+            .field("token_revocation_ttl", &self.token_revocation_ttl)
+            .field("rate_limit_window", &self.rate_limit_window)
+            .field("max_failures_per_window", &self.max_failures_per_window)
+            .finish()
+    }
 }
 
 /// Fair cardinality limits for one Redis Digest tenant namespace.
@@ -161,11 +196,69 @@ impl RedisAuthConfig {
 }
 
 /// Redis-backed auth provider for shared enterprise auth state.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RedisAuthProvider {
-    client: redis::Client,
+    client: RedisAuthClient,
     config: RedisAuthConfig,
     digest_limits: RedisDigestReplayLimits,
+}
+
+#[derive(Clone)]
+enum RedisAuthClient {
+    SingleNode(redis::Client),
+    Cluster(redis::cluster::ClusterClient),
+}
+
+enum RedisAuthConnection {
+    SingleNode(redis::aio::MultiplexedConnection),
+    Cluster(redis::cluster_async::ClusterConnection),
+}
+
+impl ConnectionLike for RedisAuthConnection {
+    fn req_packed_command<'a>(&'a mut self, command: &'a Cmd) -> RedisFuture<'a, Value> {
+        match self {
+            Self::SingleNode(connection) => connection.req_packed_command(command),
+            Self::Cluster(connection) => connection.req_packed_command(command),
+        }
+    }
+
+    fn req_packed_commands<'a>(
+        &'a mut self,
+        pipeline: &'a redis::Pipeline,
+        offset: usize,
+        count: usize,
+    ) -> RedisFuture<'a, Vec<Value>> {
+        match self {
+            Self::SingleNode(connection) => connection.req_packed_commands(pipeline, offset, count),
+            Self::Cluster(connection) => connection.req_packed_commands(pipeline, offset, count),
+        }
+    }
+
+    fn get_db(&self) -> i64 {
+        match self {
+            Self::SingleNode(connection) => connection.get_db(),
+            Self::Cluster(connection) => connection.get_db(),
+        }
+    }
+}
+
+impl fmt::Debug for RedisAuthProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RedisAuthProvider")
+            .field("connection_mode", &self.connection_mode())
+            .field("namespace", &self.config.namespace)
+            .field("nonce_stale_retention", &self.config.nonce_stale_retention)
+            .field("nonce_count_ttl", &self.config.nonce_count_ttl)
+            .field("token_revocation_ttl", &self.config.token_revocation_ttl)
+            .field("rate_limit_window", &self.config.rate_limit_window)
+            .field(
+                "max_failures_per_window",
+                &self.config.max_failures_per_window,
+            )
+            .field("digest_limits", &self.digest_limits)
+            .finish()
+    }
 }
 
 impl RedisAuthProvider {
@@ -178,7 +271,52 @@ impl RedisAuthProvider {
     pub fn from_config(config: RedisAuthConfig) -> Result<Self, RedisAuthError> {
         let client = redis::Client::open(config.redis_url.as_str())?;
         Ok(Self {
-            client,
+            client: RedisAuthClient::SingleNode(client),
+            config,
+            digest_limits: RedisDigestReplayLimits::default(),
+        })
+    }
+
+    /// Create a Redis Cluster provider from seed URLs and default settings.
+    ///
+    /// The existing [`Self::new`] constructor remains the single-node path.
+    /// Seed URLs must use compatible authentication and TLS settings, as
+    /// required by `redis::cluster::ClusterClient`.
+    pub fn new_cluster<I, S>(seed_urls: I) -> Result<Self, RedisAuthError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let seed_urls = seed_urls.into_iter().map(Into::into).collect::<Vec<_>>();
+        let first_seed = seed_urls
+            .first()
+            .cloned()
+            .ok_or(RedisAuthError::NoClusterSeeds)?;
+        Self::from_cluster_config(RedisAuthConfig::new(first_seed), seed_urls)
+    }
+
+    /// Create a Redis Cluster provider from explicit auth-state settings and
+    /// seed URLs.
+    ///
+    /// `config.redis_url` is replaced with the first seed URL so callers that
+    /// inspect the compatibility field do not observe an unrelated endpoint.
+    pub fn from_cluster_config<I, S>(
+        mut config: RedisAuthConfig,
+        seed_urls: I,
+    ) -> Result<Self, RedisAuthError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let seed_urls = seed_urls.into_iter().map(Into::into).collect::<Vec<_>>();
+        let first_seed = seed_urls
+            .first()
+            .cloned()
+            .ok_or(RedisAuthError::NoClusterSeeds)?;
+        let client = redis::cluster::ClusterClient::new(seed_urls)?;
+        config.redis_url = first_seed;
+        Ok(Self {
+            client: RedisAuthClient::Cluster(client),
             config,
             digest_limits: RedisDigestReplayLimits::default(),
         })
@@ -187,6 +325,14 @@ impl RedisAuthProvider {
     /// Return this provider's configuration.
     pub fn config(&self) -> &RedisAuthConfig {
         &self.config
+    }
+
+    /// Return whether this provider connects to one server or Redis Cluster.
+    pub fn connection_mode(&self) -> RedisAuthConnectionMode {
+        match &self.client {
+            RedisAuthClient::SingleNode(_) => RedisAuthConnectionMode::SingleNode,
+            RedisAuthClient::Cluster(_) => RedisAuthConnectionMode::Cluster,
+        }
     }
 
     /// Apply explicit fair limits to this provider's Digest namespace.
@@ -228,6 +374,9 @@ impl RedisAuthProvider {
     ///
     /// This helper is intended for local fixtures and integration tests.
     pub async fn clear_namespace_for_tests(&self) -> Result<(), RedisAuthError> {
+        if self.connection_mode() == RedisAuthConnectionMode::Cluster {
+            return Err(RedisAuthError::ClusterNamespaceCleanupUnsupported);
+        }
         let mut connection = self.connection().await?;
         let pattern = format!("{}:*", self.config.namespace);
         let keys: Vec<String> = redis::cmd("KEYS")
@@ -254,8 +403,17 @@ impl RedisAuthProvider {
         Ok(())
     }
 
-    async fn connection(&self) -> Result<redis::aio::MultiplexedConnection, redis::RedisError> {
-        self.client.get_multiplexed_async_connection().await
+    async fn connection(&self) -> Result<RedisAuthConnection, redis::RedisError> {
+        match &self.client {
+            RedisAuthClient::SingleNode(client) => client
+                .get_multiplexed_async_connection()
+                .await
+                .map(RedisAuthConnection::SingleNode),
+            RedisAuthClient::Cluster(client) => client
+                .get_async_connection()
+                .await
+                .map(RedisAuthConnection::Cluster),
+        }
     }
 
     fn digest_pool_prefix(&self) -> String {
@@ -458,16 +616,11 @@ impl DigestReplayStore for RedisAuthProvider {
         &self,
         username: &str,
         nonce: &str,
+        cnonce: &str,
         nonce_count: u32,
     ) -> Result<bool, CredentialAuthError> {
-        self.accept_client_nonce_count(
-            username,
-            nonce,
-            "legacy-client-sequence",
-            nonce_count,
-            SystemTime::now(),
-        )
-        .await
+        self.accept_client_nonce_count(username, nonce, cnonce, nonce_count, SystemTime::now())
+            .await
     }
 
     async fn accept_client_nonce_count(
@@ -754,6 +907,53 @@ fn digest_key(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn existing_constructors_remain_single_node() {
+        let provider = RedisAuthProvider::new("redis://127.0.0.1:6379").unwrap();
+        assert_eq!(
+            provider.connection_mode(),
+            RedisAuthConnectionMode::SingleNode
+        );
+        assert_eq!(provider.config().redis_url, "redis://127.0.0.1:6379");
+    }
+
+    #[test]
+    fn cluster_construction_is_explicit_and_preserves_auth_settings() {
+        let provider = RedisAuthProvider::from_cluster_config(
+            RedisAuthConfig::new("redis://ignored.invalid:6379").with_namespace("tenant-a"),
+            [
+                "redis://127.0.0.1:7000",
+                "redis://127.0.0.1:7001",
+                "redis://127.0.0.1:7002",
+            ],
+        )
+        .unwrap();
+        assert_eq!(provider.connection_mode(), RedisAuthConnectionMode::Cluster);
+        assert_eq!(provider.config().redis_url, "redis://127.0.0.1:7000");
+        assert_eq!(provider.config().namespace, "tenant-a");
+    }
+
+    #[test]
+    fn cluster_construction_rejects_an_empty_seed_set() {
+        let result = RedisAuthProvider::new_cluster(Vec::<String>::new());
+        assert!(matches!(result, Err(RedisAuthError::NoClusterSeeds)));
+    }
+
+    #[test]
+    fn provider_debug_redacts_redis_credentials() {
+        let config = RedisAuthConfig::new("redis://alice:secret@example.invalid:6379");
+        let config_debug = format!("{config:?}");
+        assert!(!config_debug.contains("alice"));
+        assert!(!config_debug.contains("secret"));
+        assert!(!config_debug.contains("example.invalid"));
+
+        let provider = RedisAuthProvider::from_config(config).unwrap();
+        let debug = format!("{provider:?}");
+        assert!(!debug.contains("alice"));
+        assert!(!debug.contains("secret"));
+        assert!(!debug.contains("example.invalid"));
+    }
 
     #[test]
     fn digest_limit_validation_rejects_zero_and_inverted_limits() {

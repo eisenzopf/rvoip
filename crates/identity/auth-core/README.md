@@ -49,7 +49,7 @@ rvoip-auth-core = "0.2.2"
 ## Clustered SIP Digest replay migration
 
 Existing `DigestReplayStore` implementations remain source compatible through
-the original `record_nonce`, `nonce_status`, and `(username, nonce)`
+the original `record_nonce`, `nonce_status`, and `(username, nonce, cnonce)`
 `accept_nonce_count` methods. Secure clustered listeners additionally call two
 additive methods:
 

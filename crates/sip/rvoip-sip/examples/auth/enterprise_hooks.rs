@@ -225,16 +225,11 @@ impl DigestReplayStore for MemoryDigestReplayStore {
         &self,
         username: &str,
         nonce: &str,
+        cnonce: &str,
         nonce_count: u32,
     ) -> std::result::Result<bool, CredentialAuthError> {
-        self.accept_client_nonce_count(
-            username,
-            nonce,
-            "legacy-client-sequence",
-            nonce_count,
-            SystemTime::now(),
-        )
-        .await
+        self.accept_client_nonce_count(username, nonce, cnonce, nonce_count, SystemTime::now())
+            .await
     }
 
     async fn admit_nonce(

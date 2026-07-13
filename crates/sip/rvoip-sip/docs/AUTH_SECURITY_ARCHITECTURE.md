@@ -125,7 +125,7 @@ Single-process in-memory replay tracking is acceptable only for standalone
 UAS deployments. Multi-process or multi-node deployments need shared state for:
 
 - Digest issued nonces and nonce expiry;
-- nonce-count monotonicity per `(username, nonce)`;
+- nonce-count monotonicity per `(username, nonce, cnonce)`;
 - JWT access-token revocation;
 - API-key disablement;
 - rate-limit counters;

@@ -109,12 +109,10 @@ impl BearerValidator for UsersCoreAuthProvider {
         token: &str,
     ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
         let principal = self.jwt_validator.validate_principal(token).await?;
-        if let Some(expected) = self.expected_tenant.as_deref() {
-            if principal.tenant.as_deref() != Some(expected) {
-                return Err(BearerAuthError::Invalid(
-                    "users-core bearer token tenant does not match issuer binding".to_string(),
-                ));
-            }
+        if principal.tenant.as_deref() != self.expected_tenant.as_deref() {
+            return Err(BearerAuthError::Invalid(
+                "users-core bearer token tenant does not match issuer binding".to_string(),
+            ));
         }
         self.ensure_assurance_user_active(&principal.assurance)
             .await?;
