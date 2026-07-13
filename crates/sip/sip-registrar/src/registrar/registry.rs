@@ -140,7 +140,8 @@ impl UserRegistry {
 
         let expires_at = Utc::now() + Duration::seconds(expires as i64);
         contact.expires = expires_at;
-        let contact_uri = contact.uri.clone();
+        let contact_present = !contact.uri.is_empty();
+        let contact_bytes = contact.uri.len();
         let user_id = aor
             .as_ref()
             .map(|aor| aor.user().to_string())
@@ -163,13 +164,27 @@ impl UserRegistry {
             self.users.insert(key.to_string(), registration);
         }
 
-        info!("Registration {} updated with contact {}", key, contact_uri);
+        info!(
+            stage = "binding-update",
+            operation = "register",
+            identity_present = !key.is_empty(),
+            identity_bytes = key.len(),
+            contact_present,
+            contact_bytes,
+            "Registration binding updated"
+        );
         Ok(())
     }
 
     pub async fn unregister(&self, key: &str) -> Result<()> {
         if self.users.remove(key).is_some() {
-            info!("Registration {} removed", key);
+            info!(
+                stage = "binding-update",
+                operation = "unregister",
+                identity_present = !key.is_empty(),
+                identity_bytes = key.len(),
+                "Registration binding removed"
+            );
             Ok(())
         } else {
             Err(RegistrarError::UserNotFound(key.to_string()))
@@ -195,7 +210,13 @@ impl UserRegistry {
         if entry.contacts.is_empty() {
             drop(entry);
             self.users.remove(key);
-            info!("Registration {} removed (no contacts remaining)", key);
+            info!(
+                stage = "binding-update",
+                operation = "remove-last-contact",
+                identity_present = !key.is_empty(),
+                identity_bytes = key.len(),
+                "Registration binding removed"
+            );
         } else {
             entry.expires = latest_expiry(&entry.contacts);
         }
@@ -231,7 +252,14 @@ impl UserRegistry {
         contact.expires = expires_at;
         entry.expires = latest_expiry(&entry.contacts);
 
-        debug!("Refreshed registration for {}:{}", key, contact_uri);
+        debug!(
+            stage = "binding-refresh",
+            identity_present = !key.is_empty(),
+            identity_bytes = key.len(),
+            contact_present = !contact_uri.is_empty(),
+            contact_bytes = contact_uri.len(),
+            "Registration binding refreshed"
+        );
         Ok(())
     }
 
@@ -312,7 +340,12 @@ impl UserRegistry {
             }
 
             if should_remove && self.users.remove(&key).is_some() {
-                warn!("Registration expired for {}", key);
+                warn!(
+                    stage = "binding-expiry",
+                    identity_present = !key.is_empty(),
+                    identity_bytes = key.len(),
+                    "Registration binding expired"
+                );
                 expired_users.push(key);
             }
         }
@@ -455,6 +488,39 @@ mod tests {
             reg_id: None,
             flow_id: None,
             reachability: ContactReachability::Unknown,
+        }
+    }
+
+    #[test]
+    fn registry_logs_only_structural_binding_metadata() {
+        let source = include_str!("registry.rs");
+
+        for fragments in [
+            ["Registration {} updated", " with contact {}"],
+            ["Registration {}", " removed"],
+            ["Refreshed registration", " for {}:{}"],
+            ["Registration expired", " for {}"],
+        ] {
+            let forbidden = fragments.concat();
+            assert!(
+                !source.contains(&forbidden),
+                "registry regained value-bearing diagnostic: {forbidden}"
+            );
+        }
+
+        for required in [
+            "stage = \"binding-update\"",
+            "stage = \"binding-refresh\"",
+            "stage = \"binding-expiry\"",
+            "identity_present",
+            "identity_bytes",
+            "contact_present",
+            "contact_bytes",
+        ] {
+            assert!(
+                source.contains(required),
+                "registry diagnostic lost structural field: {required}"
+            );
         }
     }
 

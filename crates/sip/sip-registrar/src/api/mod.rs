@@ -299,7 +299,13 @@ impl RegistrarService {
         })
         .await;
 
-        info!("User {} registered", user_id);
+        info!(
+            stage = "registration-update",
+            operation = "register",
+            user_present = !user_id.is_empty(),
+            user_bytes = user_id.len(),
+            "Registrar operation completed"
+        );
         Ok(())
     }
 
@@ -351,7 +357,13 @@ impl RegistrarService {
         })
         .await;
 
-        info!("User {} unregistered", user_id);
+        info!(
+            stage = "registration-update",
+            operation = "unregister",
+            user_present = !user_id.is_empty(),
+            user_bytes = user_id.len(),
+            "Registrar operation completed"
+        );
         Ok(())
     }
 
@@ -482,9 +494,11 @@ impl RegistrarService {
         .await;
 
         debug!(
-            "Presence updated for {} ({} watchers notified)",
-            user_id,
-            notified.len()
+            stage = "presence-update",
+            user_present = !user_id.is_empty(),
+            user_bytes = user_id.len(),
+            watchers_notified = notified.len(),
+            "Presence operation completed"
         );
         Ok(())
     }
@@ -515,7 +529,14 @@ impl RegistrarService {
         })
         .await;
 
-        debug!("{} subscribed to {}'s presence", subscriber, target);
+        debug!(
+            stage = "presence-subscribe",
+            subscriber_present = !subscriber.is_empty(),
+            subscriber_bytes = subscriber.len(),
+            target_present = !target.is_empty(),
+            target_bytes = target.len(),
+            "Presence subscription created"
+        );
         Ok(subscription_id)
     }
 
@@ -611,7 +632,12 @@ impl RegistrarService {
             }
         }
 
-        debug!("Auto buddy list set up for {}", user_id);
+        debug!(
+            stage = "buddy-list-setup",
+            user_present = !user_id.is_empty(),
+            user_bytes = user_id.len(),
+            "Automatic buddy-list setup completed"
+        );
         Ok(())
     }
 
@@ -622,8 +648,12 @@ impl RegistrarService {
     {
         if let Some(bus) = &self.event_bus {
             let publisher = bus.create_publisher::<E>();
-            if let Err(e) = publisher.publish(event).await {
-                warn!("Failed to publish event: {:?}", e);
+            if publisher.publish(event).await.is_err() {
+                warn!(
+                    stage = "event-publish",
+                    event_type = std::any::type_name::<E>(),
+                    "Registrar event publication failed"
+                );
             }
         }
     }
@@ -698,6 +728,45 @@ mod diagnostic_source_tests {
             assert!(
                 authenticate_source.contains(required),
                 "REGISTER authentication log lost structural field: {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn registrar_api_logs_do_not_render_identity_or_event_errors() {
+        let source = include_str!("mod.rs");
+
+        for fragments in [
+            ["User {}", " registered"],
+            ["User {}", " unregistered"],
+            ["Presence updated for {}", "watchers notified"],
+            ["{} subscribed to {}", "presence"],
+            ["Auto buddy list set up ", "for {}"],
+            ["Failed to publish ", "event: {:?}"],
+        ] {
+            let forbidden = fragments.concat();
+            assert!(
+                !source.contains(&forbidden),
+                "registrar API regained value-bearing diagnostic: {forbidden}"
+            );
+        }
+
+        for required in [
+            "stage = \"registration-update\"",
+            "stage = \"presence-update\"",
+            "stage = \"presence-subscribe\"",
+            "stage = \"buddy-list-setup\"",
+            "stage = \"event-publish\"",
+            "user_present",
+            "user_bytes",
+            "subscriber_present",
+            "subscriber_bytes",
+            "target_present",
+            "target_bytes",
+        ] {
+            assert!(
+                source.contains(required),
+                "registrar API diagnostic lost structural field: {required}"
             );
         }
     }
