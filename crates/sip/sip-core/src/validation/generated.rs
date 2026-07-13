@@ -5,8 +5,6 @@
 //! messages to catch builder regressions, while production send paths use the
 //! cheaper wire validator.
 
-use std::collections::HashMap;
-
 use crate::parser::message::{parse_message_with_mode, ParseMode};
 use crate::types::headers::HeaderAccess;
 use crate::types::{
@@ -33,23 +31,6 @@ pub fn validate_generated_message(message: &Message) -> Result<Message> {
 /// Validate a generated SIP request and return its strict-parsed copy.
 pub fn validate_generated_request(request: &Request) -> Result<Request> {
     validate_wire_request(request)?;
-    validate_duplicate_singletons(
-        &request.headers,
-        &[
-            HeaderName::From,
-            HeaderName::To,
-            HeaderName::CallId,
-            HeaderName::CSeq,
-            HeaderName::MaxForwards,
-            HeaderName::ContentLength,
-            HeaderName::ContentType,
-            HeaderName::Expires,
-            HeaderName::Event,
-            HeaderName::SubscriptionState,
-            HeaderName::RAck,
-        ],
-        "request",
-    )?;
 
     let parsed = strict_roundtrip(Message::Request(request.clone()))?;
     let Message::Request(parsed_request) = parsed else {
@@ -179,13 +160,13 @@ fn validate_duplicate_singletons(
     singleton_headers: &[HeaderName],
     message_kind: &str,
 ) -> Result<()> {
-    let mut counts: HashMap<HeaderName, usize> = HashMap::new();
-    for header in headers {
-        *counts.entry(header.name()).or_default() += 1;
-    }
-
     for name in singleton_headers {
-        if counts.get(name).copied().unwrap_or(0) > 1 {
+        if headers
+            .iter()
+            .filter(|header| header.name().wire_eq(name))
+            .count()
+            > 1
+        {
             return Err(validation_error(format!(
                 "generated SIP {} has duplicate singleton {} header",
                 message_kind, name

@@ -21,7 +21,7 @@ use crate::protocol::response_handler::response_has_auth_challenge;
 use crate::transaction::builders::dialog_quick;
 use crate::transaction::dialog::{request_builder_from_dialog_template, DialogRequestTemplate};
 use crate::transaction::{TransactionEvent, TransactionKey, TransactionState};
-use rvoip_sip_core::{Method, Request, Response};
+use rvoip_sip_core::{HeaderName, HeaderValue, Method, Request, Response, TypedHeader};
 use std::net::SocketAddr;
 use tracing::{debug, error, info, warn};
 
@@ -38,6 +38,87 @@ fn safe_method_operation_failure(
         "operation={operation}; method={}; error_class={error_class}",
         crate::transaction::safe_diagnostics::SafeMethod::new(method)
     )
+}
+
+/// Validated caller-controlled portion of an initial INVITE.
+///
+/// Contact is planned separately because `InviteBuilder` owns the one stack
+/// Contact slot. All remaining fields retain their caller-supplied order and
+/// multiplicity and are appended only after stack policy headers exist.
+struct InitialInviteHeaderPlan {
+    contact_uri: Option<String>,
+    appended: Vec<TypedHeader>,
+}
+
+fn contact_uri_from_initial_header(header: &TypedHeader) -> Option<String> {
+    use rvoip_sip_core::types::contact::ContactValue;
+
+    match header {
+        TypedHeader::Contact(contact) if contact.0.len() == 1 => match &contact.0[0] {
+            ContactValue::Params(values) if values.len() == 1 => {
+                Some(values[0].address.uri.to_string())
+            }
+            _ => None,
+        },
+        TypedHeader::Other(_, HeaderValue::Contact(ContactValue::Params(values)))
+            if values.len() == 1 =>
+        {
+            Some(values[0].address.uri.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn plan_initial_invite_headers(
+    contact_override: Option<String>,
+    headers: Vec<TypedHeader>,
+) -> DialogResult<InitialInviteHeaderPlan> {
+    let mut caller_contact = None;
+    let mut appended = Vec::with_capacity(headers.len());
+
+    for header in headers {
+        if header.name().wire_eq(&HeaderName::Contact) {
+            if caller_contact.is_some() {
+                return Err(crate::errors::DialogError::protocol_error(
+                    "initial INVITE contains multiple Contact headers",
+                ));
+            }
+            caller_contact = Some(contact_uri_from_initial_header(&header).ok_or_else(|| {
+                crate::errors::DialogError::protocol_error(
+                    "initial INVITE Contact must contain one structured address",
+                )
+            })?);
+        } else {
+            appended.push(header);
+        }
+    }
+
+    if contact_override.is_some() && caller_contact.is_some() {
+        return Err(crate::errors::DialogError::protocol_error(
+            "initial INVITE Contact override collides with an extra Contact header",
+        ));
+    }
+
+    Ok(InitialInviteHeaderPlan {
+        contact_uri: contact_override.or(caller_contact),
+        appended,
+    })
+}
+
+fn append_validated_initial_invite_headers(
+    request: &mut Request,
+    authorization: Option<TypedHeader>,
+    headers: Vec<TypedHeader>,
+) -> DialogResult<()> {
+    if let Some(authorization) = authorization {
+        request.headers.push(authorization);
+    }
+    request.headers.extend(headers);
+    rvoip_sip_core::validation::validate_wire_request(request).map_err(|_| {
+        crate::errors::DialogError::protocol_error(
+            "initial INVITE failed final wire-safety validation",
+        )
+    })
 }
 
 /// Detect a reliable provisional response per RFC 3262.
@@ -726,6 +807,7 @@ impl DialogManager {
 #[cfg(test)]
 mod outward_error_redaction_tests {
     use super::*;
+    use std::str::FromStr;
 
     const LOWER_ERROR_SECRET: &str = "lower-builder-parser-secret";
     const EXTENSION_METHOD_SECRET: &str = "extension-method-secret";
@@ -792,6 +874,83 @@ mod outward_error_redaction_tests {
             production.matches("e.to_string()").count(),
             1,
             "the sole lower error string conversion is the existing internal benign-termination classifier"
+        );
+    }
+
+    fn application_header(name: &str, value: &str) -> TypedHeader {
+        TypedHeader::Other(
+            HeaderName::Other(name.to_string()),
+            HeaderValue::Raw(value.as_bytes().to_vec()),
+        )
+    }
+
+    fn valid_initial_invite() -> Request {
+        crate::transaction::client::builders::InviteBuilder::new()
+            .from_detailed(Some("Alice"), "sip:alice@example.test", Some("from-tag"))
+            .to_detailed(Some("Bob"), "sip:bob@example.test", None)
+            .call_id("call-id@example.test")
+            .cseq(1)
+            .request_uri("sip:bob@example.test")
+            .local_address("127.0.0.1:5060".parse().unwrap())
+            .contact("sip:alice@127.0.0.1:5060")
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn initial_invite_plan_preserves_application_order_and_duplicates() {
+        let headers = vec![
+            application_header("X-Order", "first"),
+            application_header("X-Other", "middle"),
+            application_header("x-order", "second"),
+        ];
+        let plan = plan_initial_invite_headers(None, headers).unwrap();
+        assert_eq!(plan.appended.len(), 3);
+
+        let mut request = valid_initial_invite();
+        append_validated_initial_invite_headers(&mut request, None, plan.appended).unwrap();
+        let values = request
+            .headers
+            .iter()
+            .filter_map(|header| match header {
+                TypedHeader::Other(name, HeaderValue::Raw(value))
+                    if name.wire_eq(&HeaderName::Other("X-Order".into())) =>
+                {
+                    Some(String::from_utf8(value.clone()).unwrap())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, ["first", "second"]);
+    }
+
+    #[test]
+    fn initial_invite_plan_rejects_contact_aliases_and_collisions() {
+        let raw_alias = application_header("m", "<sip:raw@example.test>");
+        assert!(plan_initial_invite_headers(None, vec![raw_alias]).is_err());
+
+        let contact = rvoip_sip_core::types::Contact::from_str("<sip:typed@example.test>").unwrap();
+        assert!(plan_initial_invite_headers(
+            Some("sip:override@example.test".into()),
+            vec![TypedHeader::Contact(contact.clone())],
+        )
+        .is_err());
+        assert!(plan_initial_invite_headers(
+            None,
+            vec![
+                TypedHeader::Contact(contact.clone()),
+                TypedHeader::Contact(contact),
+            ],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn final_initial_invite_append_rejects_singleton_alias_before_send() {
+        let mut request = valid_initial_invite();
+        let duplicate = application_header("i", "other-call-id@example.test");
+        assert!(
+            append_validated_initial_invite_headers(&mut request, None, vec![duplicate],).is_err()
         );
     }
 }
@@ -882,7 +1041,29 @@ impl DialogManager {
         contact_override: Option<String>,
     ) -> DialogResult<TransactionKey> {
         use crate::transaction::client::builders::InviteBuilder;
-        use rvoip_sip_core::types::TypedHeader;
+
+        // Validate generated Digest/AKA/Bearer material and caller headers
+        // before mutating dialog CSeq state, resolving DNS, allocating a
+        // transaction, or touching a transport.
+        let header_name = rvoip_sip_core::validation::authorization_header_name(auth_header_name)
+            .map_err(|_| {
+            crate::errors::DialogError::protocol_error(
+                "unsupported INVITE authorization header name",
+            )
+        })?;
+        let authorization = rvoip_sip_core::validation::validated_authorization_header(
+            header_name,
+            auth_header_value,
+        )
+        .map_err(|_| {
+            crate::errors::DialogError::protocol_error(
+                "INVITE authorization failed wire-safety validation",
+            )
+        })?;
+        let InitialInviteHeaderPlan {
+            contact_uri,
+            appended,
+        } = plan_initial_invite_headers(contact_override, extras)?;
 
         debug!("Resending INVITE with auth for dialog {}", dialog_id);
 
@@ -933,21 +1114,7 @@ impl DialogManager {
                 invite_builder = invite_builder.add_route(route.clone());
             }
 
-            // Contact precedence mirrors the initial-INVITE path so the retry
-            // wire form matches: structured override wins, else a Contact
-            // smuggled through `extras`, else the local UA binding. Partition
-            // any Contact out of `extras` so it is never appended twice
-            // (InviteBuilder emits exactly one).
-            let (caller_contact, extras): (Vec<TypedHeader>, Vec<TypedHeader>) = extras
-                .into_iter()
-                .partition(|h| matches!(h, TypedHeader::Contact(_)));
-            let override_contact_uri = contact_override.or_else(|| {
-                caller_contact.into_iter().find_map(|h| match h {
-                    TypedHeader::Contact(c) => c.address().map(|addr| addr.uri.to_string()),
-                    _ => None,
-                })
-            });
-            if let Some(uri) = override_contact_uri {
+            if let Some(uri) = contact_uri {
                 invite_builder = invite_builder.contact(uri);
             } else if let Some(contact) = self.local_contact_uri() {
                 invite_builder = invite_builder.contact(contact);
@@ -971,36 +1138,12 @@ impl DialogManager {
                 inject_session_timer_headers(&mut request, secs, min_se);
             }
 
-            // Attach the digest authorization header. Use TypedHeader::Other
-            // with Raw bytes so we don't have to round-trip through a typed
-            // Authorization parser — the server only needs to read the string.
-            let header_name = rvoip_sip_core::validation::authorization_header_name(
-                auth_header_name,
-            )
-            .map_err(|_| {
-                crate::errors::DialogError::protocol_error(
-                    "unsupported INVITE authorization header name",
-                )
-            })?;
-            let authorization = rvoip_sip_core::validation::validated_authorization_header(
-                header_name,
-                auth_header_value,
-            )
-            .map_err(|_| {
-                crate::errors::DialogError::protocol_error(
-                    "INVITE authorization failed wire-safety validation",
-                )
-            })?;
-            request.headers.push(authorization);
-
             // SIP_API_DESIGN_2 §7.3 — preserve application-staged extras
             // across the 401/407 → retry hop. The original INVITE's
             // extras live in `pending_invite_options` on session-core's
             // SessionState; the caller forwards them here so the retry
             // wire form matches the initial send.
-            for extra in extras {
-                request.headers.push(extra);
-            }
+            append_validated_initial_invite_headers(&mut request, Some(authorization), appended)?;
 
             let candidates = self
                 .resolve_uri_to_candidates(
@@ -1156,7 +1299,10 @@ impl DialogManager {
     /// rather than calling this directly; this method is the layer that
     /// actually puts the bytes on the wire.
     ///
-    /// `extra_headers` is appended verbatim — typical contents:
+    /// `extra_headers` is validated and appended in exact caller order after
+    /// stack-managed fields. Repeatable application fields retain duplicates;
+    /// singleton collisions and unstructured Contact aliases are rejected.
+    /// Typical contents:
     /// - `TypedHeader::PAssertedIdentity(...)` (RFC 3325) for trunk identity
     /// - `TypedHeader::PPreferredIdentity(...)` (RFC 3325) for asserted-identity preference
     /// - any other carrier-specific headers (`P-Charging-Vector`, etc.) the
@@ -1171,9 +1317,18 @@ impl DialogManager {
     ) -> DialogResult<TransactionKey> {
         use crate::transaction::client::builders::InviteBuilder;
 
+        // Plan all caller-controlled headers before dialog mutation or route
+        // resolution. A Contact alias cannot bypass the builder's one Contact
+        // slot, and an explicit override cannot silently discard another
+        // caller-supplied Contact.
+        let InitialInviteHeaderPlan {
+            contact_uri,
+            appended,
+        } = plan_initial_invite_headers(contact_override, extra_headers)?;
+
         debug!(
             "Sending initial INVITE with {} extra header(s) for dialog {}",
-            extra_headers.len(),
+            appended.len(),
             dialog_id
         );
 
@@ -1219,28 +1374,7 @@ impl DialogManager {
                 invite_builder = invite_builder.add_route(route.clone());
             }
 
-            // SIP_API_DESIGN_2 §7.2 — Contact override precedence: a structured
-            // `contact_override` (Phase B `InviteRequestOptions.contact_uri`)
-            // wins; otherwise the legacy partition of a Contact smuggled
-            // through `extra_headers` (e.g. a B2BUA rewriting the upstream
-            // Contact); otherwise the local UA binding. InviteBuilder always
-            // emits exactly one Contact, so any caller-supplied Contact must be
-            // fed through the typed `.contact(...)` setter, never appended.
-            let (caller_contact, extra_headers): (
-                Vec<rvoip_sip_core::types::TypedHeader>,
-                Vec<rvoip_sip_core::types::TypedHeader>,
-            ) = extra_headers
-                .into_iter()
-                .partition(|h| matches!(h, rvoip_sip_core::types::TypedHeader::Contact(_)));
-            let override_contact_uri = contact_override.or_else(|| {
-                caller_contact.into_iter().find_map(|h| match h {
-                    rvoip_sip_core::types::TypedHeader::Contact(c) => {
-                        c.address().map(|addr| addr.uri.to_string())
-                    }
-                    _ => None,
-                })
-            });
-            if let Some(uri) = override_contact_uri {
+            if let Some(uri) = contact_uri {
                 invite_builder = invite_builder.contact(uri);
             } else if let Some(contact) = self.local_contact_uri() {
                 invite_builder = invite_builder.contact(contact);
@@ -1248,10 +1382,6 @@ impl DialogManager {
 
             if let Some(sdp_content) = body_string {
                 invite_builder = invite_builder.with_sdp(sdp_content);
-            }
-
-            for hdr in extra_headers {
-                invite_builder = invite_builder.header(hdr);
             }
 
             let mut request = invite_builder.build().map_err(|_error| {
@@ -1270,6 +1400,8 @@ impl DialogManager {
             if let Some((secs, min_se)) = self.config_session_timer_settings() {
                 inject_session_timer_headers(&mut request, secs, min_se);
             }
+
+            append_validated_initial_invite_headers(&mut request, None, appended)?;
 
             let candidates = self
                 .resolve_uri_to_candidates(

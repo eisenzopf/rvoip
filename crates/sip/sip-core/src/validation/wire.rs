@@ -55,6 +55,55 @@ fn header_count(headers: &[TypedHeader], name: HeaderName) -> usize {
         .count()
 }
 
+const REQUEST_SINGLETON_HEADERS: &[(HeaderName, &str)] = &[
+    (HeaderName::From, "From"),
+    (HeaderName::To, "To"),
+    (HeaderName::CallId, "Call-ID"),
+    (HeaderName::CSeq, "CSeq"),
+    (HeaderName::MaxForwards, "Max-Forwards"),
+    (HeaderName::ContentLength, "Content-Length"),
+    (HeaderName::ContentType, "Content-Type"),
+    (HeaderName::Expires, "Expires"),
+    (HeaderName::Event, "Event"),
+    (HeaderName::SubscriptionState, "Subscription-State"),
+    (HeaderName::RAck, "RAck"),
+];
+
+const RESPONSE_SINGLETON_HEADERS: &[(HeaderName, &str)] = &[
+    (HeaderName::From, "From"),
+    (HeaderName::To, "To"),
+    (HeaderName::CallId, "Call-ID"),
+    (HeaderName::CSeq, "CSeq"),
+    (HeaderName::ContentLength, "Content-Length"),
+    (HeaderName::ContentType, "Content-Type"),
+    (HeaderName::Expires, "Expires"),
+    (HeaderName::MinExpires, "Min-Expires"),
+    (HeaderName::RSeq, "RSeq"),
+];
+
+fn validate_singleton_header_duplicates(
+    headers: &[TypedHeader],
+    singletons: &[(HeaderName, &str)],
+    message_kind: &str,
+) -> Result<()> {
+    for (name, label) in singletons {
+        if header_count(headers, name.clone()) > 1 {
+            return Err(validation_error(format!(
+                "SIP {message_kind} must not contain duplicate {label} headers"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_request_singleton_headers(headers: &[TypedHeader]) -> Result<()> {
+    validate_singleton_header_duplicates(headers, REQUEST_SINGLETON_HEADERS, "request")
+}
+
+fn validate_response_singleton_headers(headers: &[TypedHeader]) -> Result<()> {
+    validate_singleton_header_duplicates(headers, RESPONSE_SINGLETON_HEADERS, "response")
+}
+
 fn contains_forbidden_inline_control(value: &str) -> bool {
     value
         .chars()
@@ -189,26 +238,6 @@ fn validate_outbound_header_fields(headers: &[TypedHeader]) -> Result<()> {
         }
     }
 
-    // These fields are emitted once by this stack's typed dialog/transaction path. Count by
-    // semantic wire identity so `Other("i")` cannot bypass a typed `CallId`, and reject at the
-    // final typed transport boundary before any packet is written. Via, Route, and Record-Route
-    // are intentionally absent: their ordered multiplicity is part of SIP routing semantics.
-    for (name, label) in [
-        (HeaderName::From, "From"),
-        (HeaderName::To, "To"),
-        (HeaderName::CallId, "Call-ID"),
-        (HeaderName::CSeq, "CSeq"),
-        (HeaderName::MaxForwards, "Max-Forwards"),
-        (HeaderName::ContentLength, "Content-Length"),
-        (HeaderName::ContentType, "Content-Type"),
-    ] {
-        let count = header_count(headers, name);
-        if count > 1 {
-            return Err(validation_error(format!(
-                "SIP message must not contain duplicate {label} headers"
-            )));
-        }
-    }
     Ok(())
 }
 
@@ -433,11 +462,13 @@ pub fn validate_typed_outbound_message(message: &Message) -> Result<()> {
         Message::Request(request) => {
             validate_request_start_line(request)?;
             validate_outbound_header_fields(&request.headers)?;
+            validate_request_singleton_headers(&request.headers)?;
             validate_authorization_headers(&request.headers)
         }
         Message::Response(response) => {
             validate_response_reason_phrase(response)?;
             validate_outbound_header_fields(&response.headers)?;
+            validate_response_singleton_headers(&response.headers)?;
             validate_authorization_headers(&response.headers)
         }
     }
@@ -506,6 +537,7 @@ pub fn validate_wire_request(request: &Request) -> Result<()> {
 
     validate_request_start_line(request)?;
     validate_outbound_header_fields(headers)?;
+    validate_request_singleton_headers(headers)?;
     validate_authorization_headers(headers)?;
 
     if !has_header(headers, HeaderName::Via) {
@@ -595,6 +627,7 @@ pub fn validate_wire_response(response: &Response) -> Result<()> {
 
     validate_response_reason_phrase(response)?;
     validate_outbound_header_fields(headers)?;
+    validate_response_singleton_headers(headers)?;
     validate_authorization_headers(headers)?;
 
     if !has_header(headers, HeaderName::Via) {
@@ -692,6 +725,32 @@ mod tests {
                 HeaderName::Other(alias.into()),
                 HeaderValue::Raw(value.as_bytes().to_vec()),
             ));
+            let error = validate_wire_request(&request).unwrap_err();
+            assert_validation_detail(&error, label);
+            assert_validation_detail(&error, "duplicate");
+        }
+    }
+
+    #[test]
+    fn request_only_singletons_are_enforced_by_semantic_wire_name() {
+        for (first_name, alias, value, label) in [
+            ("Expires", "eXpIrEs", "60", "Expires"),
+            ("Event", "eVeNt", "dialog", "Event"),
+            (
+                "Subscription-State",
+                "subscription-state",
+                "active",
+                "Subscription-State",
+            ),
+            ("RAck", "rAcK", "1 1 INVITE", "RAck"),
+        ] {
+            let mut request = valid_request();
+            for name in [first_name, alias] {
+                request.headers.push(TypedHeader::Other(
+                    HeaderName::Other(name.into()),
+                    HeaderValue::Raw(value.as_bytes().to_vec()),
+                ));
+            }
             let error = validate_wire_request(&request).unwrap_err();
             assert_validation_detail(&error, label);
             assert_validation_detail(&error, "duplicate");
