@@ -390,6 +390,19 @@ impl SipOutboundRoute {
         (state.wire, state.remote_terminal_seen)
     }
 
+    fn is_publicly_live(&self) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        matches!(
+            state.phase,
+            SipOutboundRoutePhase::Prepared
+                | SipOutboundRoutePhase::Activating
+                | SipOutboundRoutePhase::Active
+        ) && !*self.cancel.borrow()
+    }
+
     fn seal_cleanup_event(&self) -> Option<AdapterEvent> {
         let mut state = self
             .state
@@ -2184,7 +2197,16 @@ impl ConnectionAdapter for SipAdapter {
     }
 
     fn is_connection_live(&self, conn: &ConnectionId) -> bool {
-        self.by_connection.contains_key(conn)
+        let _mapping = self
+            .mapping_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.by_connection.contains_key(conn) {
+            return false;
+        }
+        self.outbound_routes
+            .get(conn)
+            .is_none_or(|route| route.is_publicly_live())
     }
 
     fn take_inbound_context(&self, conn: &ConnectionId) -> Option<InboundConnectionContext> {
@@ -3819,6 +3841,7 @@ mod inbound_context_tests {
             Err(SipActivationFailure::EventOverflow)
         ));
         route.request_cleanup(None);
+        assert!(!route.is_publicly_live());
         assert!(matches!(
             route.seal_cleanup_event(),
             Some(AdapterEvent::Ended { connection_id: id, .. }) if id == connection_id
