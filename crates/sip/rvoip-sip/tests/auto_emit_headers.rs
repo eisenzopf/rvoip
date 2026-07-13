@@ -14,14 +14,15 @@
 
 use std::time::Duration;
 
-use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer};
-use rvoip_sip::api::events::Event;
-use rvoip_sip::api::incoming::IncomingCall;
-use rvoip_sip::api::stream_peer::EventReceiver;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
-use rvoip_sip::{SipTraceConfig, SipTraceDirection};
+use rvoip_sip::CallState;
+use rvoip_sip_core::parser::parse_message;
+use rvoip_sip_core::prelude::{Message, Method, StatusCode};
 use rvoip_sip_core::types::header::HeaderName;
-use rvoip_sip_core::types::headers::{HeaderValue, TypedHeader};
+use rvoip_sip_core::types::headers::{HeaderAccess, HeaderValue, TypedHeader};
+use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
+use tokio::net::UdpSocket;
+use tokio::sync::oneshot;
 
 const PAIR: (u16, u16) = (17600, 17601);
 const AUTO_HEADER_NAME: &str = "X-AutoEmit";
@@ -29,12 +30,6 @@ const AUTO_HEADER_VALUE: &str = "operator-trace";
 
 fn cfg_with_auto_emit(name: &str, port: u16) -> Config {
     let mut c = Config::local(name, port);
-    c.sip_trace = SipTraceConfig {
-        enabled: true,
-        redact_sensitive_headers: false,
-        include_body: false,
-        ..SipTraceConfig::default()
-    };
     c.auto_emit_extra_headers = vec![TypedHeader::Other(
         HeaderName::Other(AUTO_HEADER_NAME.to_string()),
         HeaderValue::Raw(AUTO_HEADER_VALUE.as_bytes().to_vec()),
@@ -42,73 +37,74 @@ fn cfg_with_auto_emit(name: &str, port: u16) -> Config {
     c
 }
 
-fn cfg(name: &str, port: u16) -> Config {
-    let mut c = Config::local(name, port);
-    c.sip_trace = SipTraceConfig {
-        enabled: true,
-        redact_sensitive_headers: false,
-        include_body: false,
-        ..SipTraceConfig::default()
-    };
-    c
-}
-
-struct AutoAccept;
-#[async_trait::async_trait]
-impl CallHandler for AutoAccept {
-    async fn on_incoming_call(&self, call: IncomingCall) -> CallHandlerDecision {
-        let _ = call.accept().await;
-        CallHandlerDecision::Accept
-    }
-}
-
-async fn wait_for_inbound_method(
-    events: &mut EventReceiver,
-    method_prefix: &str,
-    timeout: Duration,
-) -> Option<String> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return None;
-        }
-        match tokio::time::timeout(remaining, events.next()).await {
-            Err(_) | Ok(None) => return None,
-            Ok(Some(Event::SipTrace(trace))) => {
-                if trace.direction == SipTraceDirection::Inbound
-                    && trace.start_line.starts_with(method_prefix)
-                {
-                    return Some(trace.raw_message);
-                }
-            }
-            Ok(Some(_)) => continue,
-        }
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn config_auto_emit_extra_headers_stamps_legacy_bye() {
     let _ = tracing_subscriber::fmt::try_init();
     let (alice_port, bob_port) = PAIR;
 
-    // Bob auto-accepts; no auto-emit headers on his side.
-    let bob = CallbackPeer::new(AutoAccept, cfg("bob-ae", bob_port))
+    // A raw capture UAS keeps the assertion independent of trace redaction.
+    // It establishes one dialog, then reports the parsed BYE header value from
+    // the actual datagram before answering 200.
+    let uas = UdpSocket::bind(("127.0.0.1", bob_port))
         .await
-        .expect("bob");
-    let bob_coord = bob.coordinator().clone();
-    let bob_shutdown = bob.shutdown_handle();
-    let bob_task = tokio::spawn(async move {
-        let _ = bob.run().await;
+        .expect("capture UAS bind");
+    let (bye_tx, bye_rx) = oneshot::channel();
+    let uas_task = tokio::spawn(async move {
+        let mut bye_tx = Some(bye_tx);
+        let mut packet = vec![0u8; 8_192];
+        loop {
+            let (bytes, peer) = uas.recv_from(&mut packet).await.expect("UAS receive");
+            let Message::Request(request) =
+                parse_message(&packet[..bytes]).expect("parse captured request")
+            else {
+                continue;
+            };
+            match request.method() {
+                Method::Invite => {
+                    let mut response = create_response(&request, StatusCode::Ok);
+                    if let Some(TypedHeader::To(to)) = response
+                        .headers
+                        .iter_mut()
+                        .find(|header| matches!(header, TypedHeader::To(_)))
+                    {
+                        to.set_tag("auto-emit-capture-uas");
+                    }
+                    response.headers.push(TypedHeader::Other(
+                        HeaderName::Contact,
+                        HeaderValue::Raw(format!("<sip:bob@127.0.0.1:{bob_port}>").into_bytes()),
+                    ));
+                    uas.send_to(&Message::Response(response).to_bytes(), peer)
+                        .await
+                        .expect("send INVITE response");
+                }
+                Method::Ack => {}
+                Method::Bye => {
+                    if let Some(sender) = bye_tx.take() {
+                        let _ = sender
+                            .send(request.raw_header_value(&HeaderName::Other(
+                                AUTO_HEADER_NAME.to_string(),
+                            )));
+                    }
+                    let response = create_response(&request, StatusCode::Ok);
+                    uas.send_to(&Message::Response(response).to_bytes(), peer)
+                        .await
+                        .expect("send BYE response");
+                    return;
+                }
+                _ => {
+                    let response = create_response(&request, StatusCode::Ok);
+                    uas.send_to(&Message::Response(response).to_bytes(), peer)
+                        .await
+                        .expect("send generic response");
+                }
+            }
+        }
     });
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let mut bob_events = bob_coord.events().await.expect("bob events");
 
     // Alice carries the auto-emit header.
     let alice = UnifiedCoordinator::new(cfg_with_auto_emit("alice-ae", alice_port))
         .await
         .expect("alice");
-    let mut alice_events = alice.events().await.expect("alice events");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Establish a call.
@@ -119,41 +115,30 @@ async fn config_auto_emit_extra_headers_stamps_legacy_bye() {
         .await
         .expect("invite");
 
-    // Wait for Alice to see CallAnswered before hanging up.
-    let mut answered = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
-    while !answered && tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_millis(500), alice_events.next()).await {
-            Ok(Some(Event::CallAnswered { call_id, .. })) if call_id == session_id => {
-                answered = true;
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if matches!(alice.get_state(&session_id).await, Ok(CallState::Active)) {
+                return;
             }
-            _ => {}
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
-    }
-    assert!(answered, "alice never saw CallAnswered");
-
-    // Drain any inbound INVITE bob has logged so the next inbound
-    // trace we wait on is unambiguously the BYE.
-    let _ = wait_for_inbound_method(&mut bob_events, "INVITE", Duration::from_millis(500)).await;
+    })
+    .await
+    .expect("alice never reached Active");
 
     // Trigger BYE via the legacy hangup path (no pending_bye_options
     // staged — exactly the path the auto-emit fallback targets).
     alice.hangup(&session_id).await.expect("hangup");
 
-    let bye_trace = wait_for_inbound_method(&mut bob_events, "BYE", Duration::from_secs(8))
+    let captured_value = tokio::time::timeout(Duration::from_secs(8), bye_rx)
         .await
-        .expect("bob did not see inbound BYE trace");
+        .expect("capture UAS did not receive BYE")
+        .expect("capture UAS sender ended");
+    assert_eq!(captured_value.as_deref(), Some(AUTO_HEADER_VALUE));
 
-    assert!(
-        bye_trace.contains(AUTO_HEADER_NAME),
-        "BYE on wire missing `{AUTO_HEADER_NAME}`; trace:\n{bye_trace}"
-    );
-    assert!(
-        bye_trace.contains(AUTO_HEADER_VALUE),
-        "BYE on wire missing auto-emit value `{AUTO_HEADER_VALUE}`; trace:\n{bye_trace}"
-    );
-
-    bob_shutdown.shutdown();
-    let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    uas_task.await.expect("capture UAS task");
+    alice
+        .shutdown_gracefully(Some(Duration::from_secs(1)))
+        .await
+        .expect("alice shutdown");
 }

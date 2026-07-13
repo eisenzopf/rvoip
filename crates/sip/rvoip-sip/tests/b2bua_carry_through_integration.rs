@@ -49,12 +49,15 @@ use rvoip_sip::HeaderName;
 use rvoip_sip_core::types::call_id::CallId as CallIdHdr;
 use rvoip_sip_core::types::headers::{HeaderValue, TypedHeader};
 use rvoip_sip_core::types::max_forwards::MaxForwards;
-use rvoip_sip_core::types::{CSeq, Method, Request, Uri};
+use rvoip_sip_core::types::{CSeq, Method, Request, StatusCode, Uri};
+use rvoip_sip_core::{parse_message, Message};
+use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
+use tokio::net::UdpSocket;
 
 mod support;
 
 use rvoip_sip::api::unified::Config;
-use support::{receiver_config, wait_for_inbound_method};
+use support::receiver_config;
 
 const PAIR_B2BUA: (u16, u16) = (16400, 16410);
 
@@ -69,6 +72,35 @@ fn b2bua_receiver_config(name: &str, port: u16) -> Config {
     cfg.media_port_start = 30000;
     cfg.media_port_end = 31000;
     cfg
+}
+
+async fn capture_invite_and_reject(socket: &UdpSocket, timeout: Duration) -> String {
+    tokio::time::timeout(timeout, async {
+        let mut packet = vec![0u8; 16_384];
+        loop {
+            let (bytes, peer) = socket
+                .recv_from(&mut packet)
+                .await
+                .expect("capture receive");
+            let wire = String::from_utf8(packet[..bytes].to_vec()).expect("SIP request text");
+            let Message::Request(request) =
+                parse_message(&packet[..bytes]).expect("parse captured SIP request")
+            else {
+                continue;
+            };
+            if request.method() != Method::Invite {
+                continue;
+            }
+            let response = create_response(&request, StatusCode::ServiceUnavailable);
+            socket
+                .send_to(&Message::Response(response).to_bytes(), peer)
+                .await
+                .expect("send capture response");
+            return wire;
+        }
+    })
+    .await
+    .expect("capture UAS did not receive INVITE")
 }
 
 // PAI values use alphanumeric users (no `+`) so the URI-percent-encoding
@@ -159,11 +191,9 @@ async fn b2bua_carry_through_runs_strip_and_rewrite_end_to_end() {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let (alice_port, bob_port) = PAIR_B2BUA;
 
-    let bob = UnifiedCoordinator::new(b2bua_receiver_config("bob", bob_port))
+    let bob = UdpSocket::bind(("127.0.0.1", bob_port))
         .await
-        .expect("bob coordinator");
-    let mut bob_events = bob.events().await.expect("bob events");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+        .expect("bob capture UAS");
 
     let alice = UnifiedCoordinator::new(b2bua_receiver_config("alice", alice_port))
         .await
@@ -262,7 +292,7 @@ async fn b2bua_carry_through_runs_strip_and_rewrite_end_to_end() {
     }
     let pai_staged: Vec<&String> = staged
         .iter()
-        .filter(|(n, _)| n == &HeaderName::Other("P-Asserted-Identity".to_string()))
+        .filter(|(name, _)| name.as_str().eq_ignore_ascii_case("P-Asserted-Identity"))
         .map(|(_, v)| v)
         .collect();
     assert_eq!(
@@ -276,13 +306,10 @@ async fn b2bua_carry_through_runs_strip_and_rewrite_end_to_end() {
         pai_staged[0]
     );
 
-    // Dispatch — bob's inbound trace captures the wire output.
+    // Dispatch — the raw capture UAS inspects the actual datagram, independent
+    // of the production-safe trace redactor.
     let _call_id = builder.send().await.expect("invite().send()");
-
-    let trace = wait_for_inbound_method(&mut bob_events, "INVITE", Duration::from_secs(8))
-        .await
-        .expect("bob did not see inbound INVITE trace");
-    let wire = &trace.raw_message;
+    let wire = capture_invite_and_reject(&bob, Duration::from_secs(8)).await;
 
     // Application carry-through visible on the wire.
     assert!(
@@ -328,7 +355,6 @@ async fn b2bua_carry_through_runs_strip_and_rewrite_end_to_end() {
         "upstream Via sent-by must NOT leak; wire =\n{wire}"
     );
 
-    bob.terminate_current_session().await.ok();
     alice.terminate_current_session().await.ok();
     tokio::time::sleep(Duration::from_millis(150)).await;
 }
@@ -351,11 +377,9 @@ async fn b2bua_carry_through_drives_real_incoming_call() {
 
     // bob (downstream UAS) — captures the outbound INVITE wire from
     // the b2bua middle.
-    let bob = UnifiedCoordinator::new(b2bua_receiver_config("bob-e2e", PAIR_B2BUA_E2E_BOB_PORT))
+    let bob = UdpSocket::bind(("127.0.0.1", PAIR_B2BUA_E2E_BOB_PORT))
         .await
-        .expect("bob coordinator");
-    let mut bob_events = bob.events().await.expect("bob events");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+        .expect("bob capture UAS");
 
     // b2bua (middle) — its CallHandler reads each IncomingCall and
     // drives the outbound INVITE using `with_headers_from(&call, ...)`.
@@ -444,10 +468,7 @@ async fn b2bua_carry_through_drives_real_incoming_call() {
     // the outbound leg synchronously inside `on_incoming_call`, so the
     // outbound INVITE lands shortly after alice's INVITE reaches the
     // middle.
-    let trace = wait_for_inbound_method(&mut bob_events, "INVITE", Duration::from_secs(10))
-        .await
-        .expect("bob did not see inbound B2BUA INVITE");
-    let wire = &trace.raw_message;
+    let wire = capture_invite_and_reject(&bob, Duration::from_secs(10)).await;
 
     // Application carry-through visible on the wire (b2bua middle re-emitted).
     assert!(
@@ -501,7 +522,6 @@ async fn b2bua_carry_through_drives_real_incoming_call() {
 
     middle_shutdown.shutdown();
     let _ = tokio::time::timeout(Duration::from_secs(2), middle_task).await;
-    let _ = bob.terminate_current_session().await;
     let _ = alice.terminate_current_session().await;
     let _ = outbound_coord.terminate_current_session().await;
     tokio::time::sleep(Duration::from_millis(200)).await;
