@@ -18,28 +18,30 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::Mutex as SyncMutex;
 use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
-use tracing::{debug, info, instrument, warn};
+use tracing::{info, instrument, warn};
 
 use rvoip_core::adapter::{
     AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest,
     RejectReason, SignatureHeaders, TransferTarget,
 };
-use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
+use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::connection::Transport;
 use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::identity::IdentityAssurance;
-use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
+use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId};
 use rvoip_core::message::Message;
 use rvoip_core::stream::MediaStream;
 
-use rvoip_webrtc::media::{from_tracks_with_dtmf_events, WebRtcMediaStream};
-use rvoip_webrtc::{PeerRole, RvoipPeerConnection, WebRtcConfig};
+use rvoip_webrtc::WebRtcConfig;
 
 use crate::config::ConnectConfig;
 use crate::control::{ConnectContactStarter, StartContactRequest, StopContactRequest};
 use crate::errors::ConnectError;
+use crate::media::{
+    ChimeWebRtcMediaConnector, ConnectMediaCloseOutcome, ConnectMediaConnectOptions,
+    ConnectMediaConnector, ConnectMediaSession, ConnectMediaTerminalCause,
+};
 use crate::originate::{AmazonConnectOriginateContext, ConnectProfileId};
-use crate::signaling::ChimeSignalingClient;
 
 /// Event channel depth (mirrors rvoip-webrtc's `ADAPTER_EVENT_CAP`).
 pub const ADAPTER_EVENT_CAP: usize = 256;
@@ -79,13 +81,9 @@ impl fmt::Debug for ContactTarget {
 /// session, and the bridged media stream(s).
 #[derive(Clone)]
 struct Route {
-    peer: Arc<RvoipPeerConnection>,
-    /// Owns the signaling websocket + keepalive; taken and shut down on `end`.
-    chime: Arc<SyncMutex<Option<crate::signaling::ChimeSession>>>,
-    streams: Arc<DashMap<StreamId, Arc<WebRtcMediaStream>>>,
-    negotiated: NegotiatedCodecs,
+    /// Injectable session owns Chime, WebRTC, streams, and media lifecycle.
+    media: Arc<dyn ConnectMediaSession>,
     cancel: Arc<Notify>,
-    failed_at: Arc<SyncMutex<Option<Instant>>>,
     /// Control-plane ownership retained until teardown.
     stop_request: StopContactRequest,
     /// Exact account/region starter selected for both Start and Stop.
@@ -281,6 +279,7 @@ pub struct AmazonConnectAdapterBuilder {
     config: ConnectConfig,
     legacy_starter: Arc<dyn ConnectContactStarter>,
     profiles: BTreeMap<ConnectProfileId, Arc<dyn ConnectContactStarter>>,
+    media_connector: Arc<dyn ConnectMediaConnector>,
 }
 
 impl AmazonConnectAdapterBuilder {
@@ -292,7 +291,22 @@ impl AmazonConnectAdapterBuilder {
             config,
             legacy_starter: starter,
             profiles,
+            media_connector: Arc::new(ChimeWebRtcMediaConnector),
         }
+    }
+
+    /// Replace the production Chime+rvoip-WebRTC connector. This seam is
+    /// intended for hermetic lifecycle tests and specialized media policy;
+    /// the frozen constructor continues to install the production connector.
+    pub fn set_media_connector(&mut self, connector: Arc<dyn ConnectMediaConnector>) -> &mut Self {
+        self.media_connector = connector;
+        self
+    }
+
+    /// Consuming builder-style media connector replacement.
+    pub fn with_media_connector(mut self, connector: Arc<dyn ConnectMediaConnector>) -> Self {
+        self.set_media_connector(connector);
+        self
     }
 
     /// Register another exact profile. Duplicate IDs fail closed rather than
@@ -324,7 +338,12 @@ impl AmazonConnectAdapterBuilder {
 
     /// Build one adapter with a single profile resolver.
     pub fn build(self) -> Arc<AmazonConnectAdapter> {
-        AmazonConnectAdapter::from_parts(self.config, self.legacy_starter, self.profiles)
+        AmazonConnectAdapter::from_parts(
+            self.config,
+            self.legacy_starter,
+            self.profiles,
+            self.media_connector,
+        )
     }
 }
 
@@ -345,6 +364,7 @@ pub struct AmazonConnectAdapter {
     webrtc: WebRtcConfig,
     starter: Arc<dyn ConnectContactStarter>,
     profiles: BTreeMap<ConnectProfileId, Arc<dyn ConnectContactStarter>>,
+    media_connector: Arc<dyn ConnectMediaConnector>,
     routes: Arc<DashMap<ConnectionId, Route>>,
     events_tx: mpsc::Sender<AdapterEvent>,
     events_rx: SyncMutex<Option<mpsc::Receiver<AdapterEvent>>>,
@@ -375,6 +395,7 @@ impl AmazonConnectAdapter {
         config: ConnectConfig,
         starter: Arc<dyn ConnectContactStarter>,
         profiles: BTreeMap<ConnectProfileId, Arc<dyn ConnectContactStarter>>,
+        media_connector: Arc<dyn ConnectMediaConnector>,
     ) -> Arc<Self> {
         let (events_tx, events_rx) = mpsc::channel(ADAPTER_EVENT_CAP);
         // Full-gather (trickle off) so the SUBSCRIBE frame carries a complete
@@ -388,6 +409,7 @@ impl AmazonConnectAdapter {
             webrtc,
             starter,
             profiles,
+            media_connector,
             routes: Arc::new(DashMap::new()),
             events_tx,
             events_rx: SyncMutex::new(Some(events_rx)),
@@ -457,13 +479,7 @@ impl AmazonConnectAdapter {
     /// the connection is unknown. Used by the batteries-included server to
     /// bridge a freshly-originated contact.
     pub fn streams_for(&self, conn: &ConnectionId) -> Option<Vec<Arc<dyn MediaStream>>> {
-        self.routes.get(conn).map(|route| {
-            route
-                .streams
-                .iter()
-                .map(|e| Arc::clone(e.value()) as Arc<dyn MediaStream>)
-                .collect()
-        })
+        self.routes.get(conn).map(|route| route.media.streams())
     }
 
     /// Snapshot of runtime counters.
@@ -680,61 +696,37 @@ impl AmazonConnectAdapter {
         info!("started Amazon Connect WebRTC contact");
 
         let outcome = async {
-            // 2. Chime signaling JOIN → JOIN_ACK (yields TURN credentials).
-            let join =
-                ChimeSignalingClient::join(&connection_data, self.config.signaling_timeout).await?;
-
-            // 3. Build the offerer peer connection seeded with the meeting's TURN
-            //    servers, then generate the SDP offer.
-            let mut webrtc = self.webrtc.clone();
-            let mut ice = webrtc.ice_servers.clone();
-            ice.extend(join.ice_servers());
-            webrtc.ice_servers = ice;
-
-            let peer = RvoipPeerConnection::new(&webrtc, PeerRole::Offerer).await?;
-            peer.add_local_audio_track().await?;
-            let offer_sdp = peer.create_offer_and_gather().await?;
-
-            // 4. SUBSCRIBE(offer) → SUBSCRIBE_ACK(answer); session keeps the socket.
-            let (answer_sdp, mut session) = join
-                .subscribe(
-                    offer_sdp,
-                    self.config.signaling_timeout,
-                    self.config.keepalive_interval,
+            // The injectable media seam owns Chime signaling, rvoip WebRTC,
+            // media streams, terminal supervision, and bounded close.
+            let media = self
+                .media_connector
+                .connect(
+                    &connection_data,
+                    ConnectMediaConnectOptions {
+                        webrtc: self.webrtc.clone(),
+                        signaling_timeout: self.config.signaling_timeout,
+                        media_connect_timeout: self.config.media_connect_timeout,
+                        keepalive_interval: self.config.keepalive_interval,
+                    },
                 )
                 .await?;
-            // Take the "Chime ended on its own" signal so we can surface a
-            // reverse-direction `Ended` (e.g. agent hangup) before storing the session.
-            let chime_ended = session.take_ended_signal();
-            peer.set_remote_answer(&answer_sdp).await?;
-
-            // 5. Wait for DTLS/ICE to come up.
-            peer.wait_connected(self.config.media_connect_timeout)
-                .await?;
-
-            // 6. Seed the bridgeable audio media stream.
             let conn_id = ConnectionId::new();
-            let negotiated = NegotiatedCodecs::default();
+            let negotiated = media.negotiated_codecs();
             let cancel = Arc::new(Notify::new());
             let Some(stop_request) = cleanup.request() else {
+                media.abort();
                 return Err(ConnectError::Control(
                     "started contact cleanup ownership was lost".into(),
                 ));
             };
             let route = Route {
-                peer: Arc::clone(&peer),
-                chime: Arc::new(SyncMutex::new(Some(session))),
-                streams: Arc::new(DashMap::new()),
-                negotiated: negotiated.clone(),
+                media,
                 cancel: Arc::clone(&cancel),
-                failed_at: Arc::new(SyncMutex::new(None)),
                 stop_request,
                 starter,
                 cleanup_permit,
             };
-            self.seed_media_stream(&conn_id, &route).await;
-            self.spawn_fail_watcher(conn_id.clone(), &route);
-            self.spawn_chime_end_watcher(conn_id.clone(), chime_ended, Arc::clone(&cancel));
+            self.spawn_media_watchers(conn_id.clone(), &route);
             self.routes.insert(conn_id.clone(), route);
             let _route_owns_cleanup = cleanup.disarm();
             if let Some(observer) = observer.as_ref() {
@@ -760,99 +752,65 @@ impl AmazonConnectAdapter {
         }
     }
 
-    /// Build the audio `WebRtcMediaStream` (outbound from our mic track,
-    /// inbound from the agent's track). Inbound DTMF is surfaced as
-    /// `AdapterEvent::Dtmf`.
-    async fn seed_media_stream(&self, conn: &ConnectionId, route: &Route) {
-        let codec = route.negotiated.audio.clone().unwrap_or_else(opus_codec);
-        let Some(local) = route.peer.local_audio_track() else {
-            debug!(conn = %conn, "no local audio track; media stream not seeded");
-            return;
-        };
-        let Some(local_ssrc) = route.peer.local_audio_ssrc() else {
-            return;
-        };
-        let payload_type = payload_type_for_audio_codec(&codec);
-        let remote = route
-            .peer
-            .wait_remote_track(Duration::from_millis(500))
-            .await;
-
-        let (dtmf_tx, mut dtmf_rx) =
-            mpsc::channel::<rvoip_webrtc::media::dtmf::DecodedDtmfEvent>(32);
-        let events_tx = self.events_tx.clone();
-        let conn_for_dtmf = conn.clone();
-        tokio::spawn(async move {
-            while let Some(event) = dtmf_rx.recv().await {
-                let _ = events_tx
-                    .send(AdapterEvent::Dtmf {
-                        connection_id: conn_for_dtmf.clone(),
-                        digits: event.digit.to_string(),
-                        duration_ms: event.duration_ms,
-                    })
-                    .await;
-            }
-        });
-
-        let stream_id = StreamId::new();
-        let media = from_tracks_with_dtmf_events(
-            stream_id.clone(),
-            codec,
-            local,
-            local_ssrc,
-            payload_type,
-            remote,
-            Some(dtmf_tx),
-        );
-        route.streams.insert(stream_id, media);
-    }
-
-    /// Watch for peer-connection failure and surface it as `AdapterEvent::Failed`.
-    fn spawn_fail_watcher(&self, conn: ConnectionId, route: &Route) {
-        let peer = Arc::clone(&route.peer);
-        let failed_at = Arc::clone(&route.failed_at);
+    /// Forward the media seam's typed terminal and inbound DTMF events through
+    /// the legacy adapter event contract. Retained task ownership lands in 5d;
+    /// route cancellation still terminates both compatibility watchers.
+    fn spawn_media_watchers(&self, conn: ConnectionId, route: &Route) {
+        let mut terminal = route.media.subscribe_terminal();
         let cancel = Arc::clone(&route.cancel);
         let events_tx = self.events_tx.clone();
+        let terminal_conn = conn.clone();
         tokio::spawn(async move {
-            tokio::select! {
-                _ = cancel.notified() => {}
-                _ = peer.wait_failed() => {
-                    *failed_at.lock() = Some(Instant::now());
-                    let _ = events_tx
-                        .send(AdapterEvent::Failed {
-                            connection_id: conn,
-                            detail: "chime peer connection failed".into(),
-                        })
-                        .await;
+            loop {
+                tokio::select! {
+                    _ = cancel.notified() => return,
+                    changed = terminal.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        let Some(cause) = *terminal.borrow_and_update() else {
+                            continue;
+                        };
+                        let event = match cause {
+                            ConnectMediaTerminalCause::RemoteEnded
+                            | ConnectMediaTerminalCause::TransportClosed => {
+                                AdapterEvent::Ended {
+                                    connection_id: terminal_conn,
+                                    reason: EndReason::Normal,
+                                }
+                            }
+                            ConnectMediaTerminalCause::RemoteError { .. }
+                            | ConnectMediaTerminalCause::TransportError
+                            | ConnectMediaTerminalCause::PeerFailed => AdapterEvent::Failed {
+                                connection_id: terminal_conn,
+                                detail: "Amazon media session failed".into(),
+                            },
+                        };
+                        let _ = events_tx.send(event).await;
+                        return;
+                    }
                 }
             }
         });
-    }
 
-    /// Watch for the Chime signaling session ending on its own (agent hangup /
-    /// socket close) and surface it as `AdapterEvent::Ended` so the bridge can
-    /// hang up the far (e.g. SIP) leg. The `ended_rx` resolves to `Err` when we
-    /// tore down locally (sender dropped), in which case we stay quiet.
-    fn spawn_chime_end_watcher(
-        &self,
-        conn: ConnectionId,
-        ended_rx: Option<tokio::sync::oneshot::Receiver<()>>,
-        cancel: Arc<Notify>,
-    ) {
-        let Some(ended_rx) = ended_rx else { return };
+        let Some(mut dtmf_rx) = route.media.take_dtmf_events() else {
+            return;
+        };
+        let cancel = Arc::clone(&route.cancel);
         let events_tx = self.events_tx.clone();
         tokio::spawn(async move {
-            tokio::select! {
-                _ = cancel.notified() => {}
-                r = ended_rx => {
-                    if r.is_ok() {
-                        info!(conn = %conn, "chime/agent leg ended; surfacing Ended");
-                        let _ = events_tx
-                            .send(AdapterEvent::Ended {
-                                connection_id: conn,
-                                reason: EndReason::Normal,
-                            })
-                            .await;
+            loop {
+                tokio::select! {
+                    _ = cancel.notified() => return,
+                    event = dtmf_rx.recv() => {
+                        let Some(event) = event else { return };
+                        if events_tx.send(AdapterEvent::Dtmf {
+                            connection_id: conn.clone(),
+                            digits: event.digit.to_string(),
+                            duration_ms: event.duration_ms,
+                        }).await.is_err() {
+                            return;
+                        }
                     }
                 }
             }
@@ -875,13 +833,31 @@ impl AmazonConnectAdapter {
     async fn teardown(&self, conn: &ConnectionId) -> crate::errors::Result<()> {
         if let Some((_, route)) = self.routes.remove(conn) {
             route.cancel.notify_waiters();
-            // Take the session out from under the (non-Send) parking_lot guard
-            // before awaiting, so the future stays Send.
-            let session = route.chime.lock().take();
-            if let Some(session) = session {
-                session.shutdown().await;
+            let now = Instant::now();
+            let deadline = now
+                .checked_add(self.config.signaling_timeout)
+                .unwrap_or(now);
+            match tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                route.media.close_until(deadline),
+            )
+            .await
+            {
+                Ok(Ok(ConnectMediaCloseOutcome::Graceful)) => {}
+                Ok(Ok(ConnectMediaCloseOutcome::DeadlineAborted)) => {
+                    warn!("Amazon media close reached its absolute deadline");
+                }
+                Ok(Err(error)) => {
+                    warn!(
+                        error_class = ?error.classification(),
+                        "Amazon media close failed"
+                    );
+                }
+                Err(_) => {
+                    route.media.abort();
+                    warn!("Amazon media connector exceeded its absolute close deadline");
+                }
             }
-            route.peer.close().await.ok();
             if let Err(error) =
                 stop_contact_with_retry(&route.starter, route.stop_request.clone()).await
             {
@@ -947,8 +923,8 @@ impl ConnectionAdapter for AmazonConnectAdapter {
     async fn hold(&self, conn: ConnectionId) -> RvoipResult<()> {
         let route = self.route(&conn).map_err(RvoipError::from)?;
         route
-            .peer
-            .hold_audio()
+            .media
+            .hold()
             .await
             .map_err(|e| RvoipError::Adapter(format!("hold: {e}")))
     }
@@ -956,8 +932,8 @@ impl ConnectionAdapter for AmazonConnectAdapter {
     async fn resume(&self, conn: ConnectionId) -> RvoipResult<()> {
         let route = self.route(&conn).map_err(RvoipError::from)?;
         route
-            .peer
-            .resume_audio()
+            .media
+            .resume()
             .await
             .map_err(|e| RvoipError::Adapter(format!("resume: {e}")))
     }
@@ -970,11 +946,7 @@ impl ConnectionAdapter for AmazonConnectAdapter {
 
     async fn streams(&self, conn: ConnectionId) -> RvoipResult<Vec<Arc<dyn MediaStream>>> {
         let route = self.route(&conn).map_err(RvoipError::from)?;
-        Ok(route
-            .streams
-            .iter()
-            .map(|e| Arc::clone(e.value()) as Arc<dyn MediaStream>)
-            .collect())
+        Ok(route.media.streams())
     }
 
     async fn send_dtmf(
@@ -984,7 +956,9 @@ impl ConnectionAdapter for AmazonConnectAdapter {
         duration_ms: u32,
     ) -> RvoipResult<()> {
         let route = self.route(&conn).map_err(RvoipError::from)?;
-        rvoip_webrtc::media::dtmf::send_dtmf(&route.peer, digits, duration_ms)
+        route
+            .media
+            .send_dtmf(digits, duration_ms)
             .await
             .map_err(|e| RvoipError::Adapter(format!("send_dtmf: {e}")))
     }
@@ -1043,7 +1017,137 @@ mod tests {
     };
     use rvoip_core::connection::Direction;
     use std::future::pending;
-    use tokio::sync::oneshot;
+    use tokio::sync::{oneshot, watch};
+
+    #[derive(Default)]
+    struct MockMediaCalls {
+        holds: AtomicUsize,
+        resumes: AtomicUsize,
+        dtmfs: AtomicUsize,
+        closes: AtomicUsize,
+        aborts: AtomicUsize,
+    }
+
+    struct MockMediaSession {
+        calls: Arc<MockMediaCalls>,
+        terminal_tx: watch::Sender<Option<ConnectMediaTerminalCause>>,
+        terminal_rx: watch::Receiver<Option<ConnectMediaTerminalCause>>,
+        dtmf_tx: mpsc::Sender<crate::media::ConnectMediaDtmfEvent>,
+        dtmf_rx: SyncMutex<Option<mpsc::Receiver<crate::media::ConnectMediaDtmfEvent>>>,
+        close_outcome: ConnectMediaCloseOutcome,
+        block_close: bool,
+    }
+
+    impl MockMediaSession {
+        fn new() -> Arc<Self> {
+            let (terminal_tx, terminal_rx) = watch::channel(None);
+            let (dtmf_tx, dtmf_rx) = mpsc::channel(4);
+            Arc::new(Self {
+                calls: Arc::new(MockMediaCalls::default()),
+                terminal_tx,
+                terminal_rx,
+                dtmf_tx,
+                dtmf_rx: SyncMutex::new(Some(dtmf_rx)),
+                close_outcome: ConnectMediaCloseOutcome::Graceful,
+                block_close: false,
+            })
+        }
+
+        fn blocking_close() -> Arc<Self> {
+            let mut session = Self::new();
+            Arc::get_mut(&mut session)
+                .expect("new mock session is unique")
+                .block_close = true;
+            session
+        }
+
+        fn terminal(&self, cause: ConnectMediaTerminalCause) {
+            let _ = self.terminal_tx.send(Some(cause));
+        }
+    }
+
+    #[async_trait]
+    impl ConnectMediaSession for MockMediaSession {
+        fn negotiated_codecs(&self) -> NegotiatedCodecs {
+            NegotiatedCodecs::default()
+        }
+
+        fn streams(&self) -> Vec<Arc<dyn MediaStream>> {
+            Vec::new()
+        }
+
+        fn take_dtmf_events(&self) -> Option<mpsc::Receiver<crate::media::ConnectMediaDtmfEvent>> {
+            self.dtmf_rx.lock().take()
+        }
+
+        fn subscribe_terminal(&self) -> watch::Receiver<Option<ConnectMediaTerminalCause>> {
+            self.terminal_rx.clone()
+        }
+
+        fn health(&self) -> crate::media::ConnectMediaHealth {
+            crate::media::ConnectMediaHealth {
+                peer_connected: true,
+                signaling_running: true,
+                last_signaling_activity_ago: Duration::ZERO,
+                last_pong_ago: None,
+                terminal: *self.terminal_rx.borrow(),
+            }
+        }
+
+        async fn hold(&self) -> crate::errors::Result<()> {
+            self.calls.holds.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn resume(&self) -> crate::errors::Result<()> {
+            self.calls.resumes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn send_dtmf(&self, _digits: &str, _duration_ms: u32) -> crate::errors::Result<()> {
+            self.calls.dtmfs.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn close_until(
+            &self,
+            _deadline: Instant,
+        ) -> crate::errors::Result<ConnectMediaCloseOutcome> {
+            self.calls.closes.fetch_add(1, Ordering::SeqCst);
+            if self.block_close {
+                pending::<()>().await;
+            }
+            Ok(self.close_outcome)
+        }
+
+        fn abort(&self) {
+            self.calls.aborts.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct MockMediaConnector {
+        session: Arc<MockMediaSession>,
+        connects: AtomicUsize,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl ConnectMediaConnector for MockMediaConnector {
+        async fn connect(
+            &self,
+            _connection: &ConnectionData,
+            _options: ConnectMediaConnectOptions,
+        ) -> crate::errors::Result<Arc<dyn ConnectMediaSession>> {
+            self.connects.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                return Err(ConnectError::Signaling(
+                    "mock connector secret detail".into(),
+                ));
+            }
+            let session: Arc<dyn ConnectMediaSession> = self.session.clone();
+            Ok(session)
+        }
+    }
 
     struct StopRecordingStarter {
         signaling_url: String,
@@ -1295,6 +1399,27 @@ mod tests {
         config.default_display_name = "config-default".into();
         let adapter = AmazonConnectAdapter::new(config, starter.clone());
         (adapter, starter)
+    }
+
+    fn route_with_mock_media(
+        adapter: &Arc<AmazonConnectAdapter>,
+        media: Arc<MockMediaSession>,
+        starter: Arc<dyn ConnectContactStarter>,
+    ) -> Route {
+        Route {
+            media,
+            cancel: Arc::new(Notify::new()),
+            stop_request: StopContactRequest {
+                instance_id: "instance".into(),
+                contact_id: "contact".into(),
+            },
+            starter,
+            cleanup_permit: Arc::new(
+                Arc::clone(&adapter.cleanup_slots)
+                    .try_acquire_owned()
+                    .expect("cleanup capacity"),
+            ),
+        }
     }
 
     #[tokio::test]
@@ -1642,6 +1767,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn injectable_media_session_drives_legacy_controls_and_cleanup() {
+        let (stopped_tx, mut stopped_rx) = mpsc::unbounded_channel();
+        let starter = Arc::new(StopRecordingStarter {
+            signaling_url: "wss://not-used.example.test/control".into(),
+            stopped: stopped_tx,
+        });
+        let media = MockMediaSession::new();
+        let connector = Arc::new(MockMediaConnector {
+            session: media.clone(),
+            connects: AtomicUsize::new(0),
+            fail: false,
+        });
+        let connector_trait: Arc<dyn ConnectMediaConnector> = connector.clone();
+        let adapter =
+            AmazonConnectAdapter::builder(ConnectConfig::new("instance", "flow"), starter)
+                .with_media_connector(connector_trait)
+                .build();
+        let mut events = adapter.subscribe_events();
+
+        let conn = adapter
+            .originate_contact(BTreeMap::new(), None, None)
+            .await
+            .expect("mock media connection succeeds");
+        assert_eq!(connector.connects.load(Ordering::SeqCst), 1);
+        assert!(adapter.streams_for(&conn).expect("route exists").is_empty());
+        assert!(matches!(
+            events.recv().await,
+            Some(AdapterEvent::Connected { .. })
+        ));
+
+        adapter.hold(conn.clone()).await.expect("hold via seam");
+        adapter.resume(conn.clone()).await.expect("resume via seam");
+        adapter
+            .send_dtmf(conn.clone(), "5", 100)
+            .await
+            .expect("DTMF via seam");
+        assert_eq!(media.calls.holds.load(Ordering::SeqCst), 1);
+        assert_eq!(media.calls.resumes.load(Ordering::SeqCst), 1);
+        assert_eq!(media.calls.dtmfs.load(Ordering::SeqCst), 1);
+        media
+            .dtmf_tx
+            .send(crate::media::ConnectMediaDtmfEvent {
+                digit: '#',
+                duration_ms: 120,
+            })
+            .await
+            .expect("inbound DTMF watcher is alive");
+        assert!(matches!(
+            events.recv().await,
+            Some(AdapterEvent::Dtmf {
+                digits,
+                duration_ms: 120,
+                ..
+            }) if digits == "#"
+        ));
+
+        adapter
+            .end(conn, EndReason::Normal)
+            .await
+            .expect("bounded close and StopContact succeed");
+        assert_eq!(media.calls.closes.load(Ordering::SeqCst), 1);
+        let stopped = stopped_rx.recv().await.expect("StopContact request");
+        assert_eq!(stopped.contact_id, "owned-contact");
+    }
+
+    #[tokio::test]
+    async fn media_connector_failure_stops_contact_and_redacts_detail() {
+        let (stopped_tx, mut stopped_rx) = mpsc::unbounded_channel();
+        let starter = Arc::new(StopRecordingStarter {
+            signaling_url: "wss://not-used.example.test/control".into(),
+            stopped: stopped_tx,
+        });
+        let connector = Arc::new(MockMediaConnector {
+            session: MockMediaSession::new(),
+            connects: AtomicUsize::new(0),
+            fail: true,
+        });
+        let connector_trait: Arc<dyn ConnectMediaConnector> = connector.clone();
+        let adapter =
+            AmazonConnectAdapter::builder(ConnectConfig::new("instance", "flow"), starter)
+                .with_media_connector(connector_trait)
+                .build();
+
+        let error = adapter
+            .originate_contact(BTreeMap::new(), None, None)
+            .await
+            .expect_err("mock connector fails");
+        assert_eq!(connector.connects.load(Ordering::SeqCst), 1);
+        assert!(!format!("{error:?} {error}").contains("mock connector secret detail"));
+        assert_eq!(
+            stopped_rx
+                .recv()
+                .await
+                .expect("compensating StopContact")
+                .contact_id,
+            "owned-contact"
+        );
+        assert_eq!(adapter.metrics().active_sessions, 0);
+    }
+
+    #[tokio::test]
+    async fn adapter_enforces_close_deadline_and_continues_contact_cleanup() {
+        let (stopped_tx, mut stopped_rx) = mpsc::unbounded_channel();
+        let starter = Arc::new(StopRecordingStarter {
+            signaling_url: "wss://not-used.example.test/control".into(),
+            stopped: stopped_tx,
+        });
+        let media = MockMediaSession::blocking_close();
+        let connector = Arc::new(MockMediaConnector {
+            session: media.clone(),
+            connects: AtomicUsize::new(0),
+            fail: false,
+        });
+        let connector_trait: Arc<dyn ConnectMediaConnector> = connector;
+        let mut config = ConnectConfig::new("instance", "flow");
+        config.signaling_timeout = Duration::from_millis(20);
+        let adapter = AmazonConnectAdapter::builder(config, starter)
+            .with_media_connector(connector_trait)
+            .build();
+        let conn = adapter
+            .originate_contact(BTreeMap::new(), None, None)
+            .await
+            .expect("mock media connects");
+
+        tokio::time::timeout(Duration::from_secs(1), adapter.end(conn, EndReason::Normal))
+            .await
+            .expect("adapter enforces connector close deadline")
+            .expect("StopContact still succeeds");
+        assert_eq!(media.calls.closes.load(Ordering::SeqCst), 1);
+        assert_eq!(media.calls.aborts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            stopped_rx
+                .recv()
+                .await
+                .expect("StopContact after abort")
+                .contact_id,
+            "owned-contact"
+        );
+    }
+
+    #[tokio::test]
     async fn active_route_teardown_retains_failed_stop_until_retry_succeeds() {
         let default_starter = Arc::new(CountingStarter::default());
         let starter = Arc::new(RecoveringStopStarter {
@@ -1652,9 +1918,7 @@ mod tests {
             ConnectConfig::new("instance", "flow"),
             default_starter.clone(),
         );
-        let peer = RvoipPeerConnection::new(&WebRtcConfig::default(), PeerRole::Offerer)
-            .await
-            .expect("test peer");
+        let media = MockMediaSession::new();
         let conn = ConnectionId::new();
         let permit = Arc::new(
             Arc::clone(&adapter.cleanup_slots)
@@ -1664,12 +1928,8 @@ mod tests {
         adapter.routes.insert(
             conn.clone(),
             Route {
-                peer,
-                chime: Arc::new(SyncMutex::new(None)),
-                streams: Arc::new(DashMap::new()),
-                negotiated: NegotiatedCodecs::default(),
+                media: media.clone(),
                 cancel: Arc::new(Notify::new()),
-                failed_at: Arc::new(SyncMutex::new(None)),
                 stop_request: StopContactRequest {
                     instance_id: "instance".into(),
                     contact_id: "active-pending-contact".into(),
@@ -1686,6 +1946,7 @@ mod tests {
         );
         assert_eq!(default_starter.stops.load(Ordering::SeqCst), 0);
         assert_eq!(adapter.pending_cleanup_count(), 1);
+        assert_eq!(media.calls.closes.load(Ordering::SeqCst), 1);
 
         assert!(adapter
             .retry_pending_cleanup("active-pending-contact")
@@ -1700,18 +1961,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_chime_end_surfaces_adapter_ended_event() {
-        let (adapter, _starter) = adapter_with_capture();
+    async fn typed_remote_media_end_surfaces_adapter_ended_event() {
+        let (adapter, starter) = adapter_with_capture();
         let mut events = adapter.subscribe_events();
         let conn = ConnectionId::new();
-        let (remote_ended_tx, remote_ended_rx) = oneshot::channel();
-
-        adapter.spawn_chime_end_watcher(
-            conn.clone(),
-            Some(remote_ended_rx),
-            Arc::new(Notify::new()),
-        );
-        remote_ended_tx.send(()).expect("watcher is alive");
+        let media = MockMediaSession::new();
+        let starter: Arc<dyn ConnectContactStarter> = starter;
+        let route = route_with_mock_media(&adapter, media.clone(), starter);
+        adapter.spawn_media_watchers(conn.clone(), &route);
+        media.terminal(ConnectMediaTerminalCause::RemoteEnded);
 
         let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
             .await
@@ -1730,19 +1988,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_cancellation_suppresses_remote_ended_event() {
-        let (adapter, _starter) = adapter_with_capture();
+    async fn typed_media_error_surfaces_adapter_failed_event_without_detail() {
+        let (adapter, starter) = adapter_with_capture();
         let mut events = adapter.subscribe_events();
-        let cancel = Arc::new(Notify::new());
-        let (remote_ended_tx, remote_ended_rx) = oneshot::channel::<()>();
+        let conn = ConnectionId::new();
+        let media = MockMediaSession::new();
+        let starter: Arc<dyn ConnectContactStarter> = starter;
+        let route = route_with_mock_media(&adapter, media.clone(), starter);
+        adapter.spawn_media_watchers(conn.clone(), &route);
+        media.terminal(ConnectMediaTerminalCause::RemoteError { status: Some(503) });
 
-        adapter.spawn_chime_end_watcher(
-            ConnectionId::new(),
-            Some(remote_ended_rx),
-            Arc::clone(&cancel),
-        );
-        cancel.notify_one();
-        drop(remote_ended_tx);
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("Failed event timeout")
+            .expect("adapter event stream remains open");
+        match event {
+            AdapterEvent::Failed {
+                connection_id,
+                detail,
+            } => {
+                assert_eq!(connection_id, conn);
+                assert_eq!(detail, "Amazon media session failed");
+            }
+            other => panic!("expected remote Failed event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_cancellation_suppresses_remote_ended_event() {
+        let (adapter, starter) = adapter_with_capture();
+        let mut events = adapter.subscribe_events();
+        let media = MockMediaSession::new();
+        let starter: Arc<dyn ConnectContactStarter> = starter;
+        let route = route_with_mock_media(&adapter, media.clone(), starter);
+        adapter.spawn_media_watchers(ConnectionId::new(), &route);
+        tokio::task::yield_now().await;
+        route.cancel.notify_waiters();
+        tokio::task::yield_now().await;
+        media.terminal(ConnectMediaTerminalCause::RemoteEnded);
 
         assert!(
             tokio::time::timeout(Duration::from_millis(50), events.recv())
@@ -1750,28 +2033,5 @@ mod tests {
                 .is_err(),
             "local teardown must not loop back as a remote Ended event"
         );
-    }
-}
-
-/// Default Opus codec descriptor (Chime audio is Opus).
-fn opus_codec() -> CodecInfo {
-    CodecInfo {
-        name: "opus".into(),
-        clock_rate_hz: 48000,
-        channels: 2,
-        fmtp: None,
-    }
-}
-
-/// Map a negotiated audio codec to its RTP payload type (matches the codec
-/// table rvoip-webrtc's media engine registers).
-fn payload_type_for_audio_codec(codec: &CodecInfo) -> u8 {
-    let name = codec.name.to_ascii_lowercase();
-    if name.contains("pcmu") {
-        0
-    } else if name.contains("pcma") {
-        8
-    } else {
-        111 // Opus
     }
 }

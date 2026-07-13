@@ -33,11 +33,9 @@ use rvoip_webrtc::{PeerRole, RvoipPeerConnection, WebRtcConfig};
 
 #[tokio::main]
 async fn main() {
-    // Install a subscriber so library `tracing` logs surface — in particular the
-    // `rvoip_amazon_connect::chime_wire` target streams each JOIN/SUBSCRIBE/etc.
-    // frame as base64 when run with `RUST_LOG=...chime_wire=trace` (see
-    // tools/run-probe.sh). Stage banners + frame dumps still go to stdout via
-    // println!, independent of the log level.
+    // Install a subscriber so metadata-only library diagnostics surface. Wire
+    // logs contain frame type and size, never payload/SDP/ICE. Exact base64 is
+    // available only through the owner-invoked `--dump-frames` path below.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

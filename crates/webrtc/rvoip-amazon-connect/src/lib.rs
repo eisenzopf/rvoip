@@ -25,6 +25,7 @@ pub mod config;
 pub mod control;
 pub mod errors;
 pub mod mapping;
+pub mod media;
 pub mod originate;
 pub mod signaling;
 
@@ -43,6 +44,11 @@ pub use control::{
 };
 pub use errors::{ConnectError, ConnectErrorClass, Result};
 pub use mapping::{AttributeMapping, MappedAttributes, UnmappedPolicy, MAX_ATTRIBUTE_BYTES};
+pub use media::{
+    ChimeWebRtcMediaConnector, ConnectMediaCloseOutcome, ConnectMediaConnectOptions,
+    ConnectMediaConnector, ConnectMediaDtmfEvent, ConnectMediaHealth, ConnectMediaSession,
+    ConnectMediaTerminalCause,
+};
 pub use originate::{
     AmazonConnectOriginateContext, AmazonConnectOriginateContextError, AmazonConnectTarget,
     ConnectClientToken, ConnectProfileId, DEFAULT_CONNECT_PROFILE_ID, MAX_CONNECT_ATTRIBUTE_COUNT,
