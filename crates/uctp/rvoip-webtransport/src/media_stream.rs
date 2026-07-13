@@ -21,6 +21,7 @@ use rvoip_uctp::substrate::datagram::{
     pack_rtp_datagram, unpack_rtp_datagram, RtpDatagram, RtpMediaPayload,
 };
 use rvoip_uctp::substrate::{PeerMediaRegistration, PeerMediaRouteKey, PeerMediaRouter};
+use rvoip_uctp::CorrelationIdDiagnostic;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace_span, warn};
@@ -135,7 +136,7 @@ impl WebTransportDatagramMediaStream {
                         "reason" => "send-failed"
                     )
                     .increment(1);
-                    debug!(error = %e, stream = %stream_id_for_pump, "rvoip-webtransport: send_datagram failed");
+                    debug!(error = %e, stream = ?CorrelationIdDiagnostic::new(stream_id_for_pump.as_str()), "rvoip-webtransport: send_datagram failed");
                     if matches!(
                         e,
                         web_transport_quinn::SessionError::ConnectionError(_)

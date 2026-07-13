@@ -19,7 +19,7 @@ use crate::substrate::correlation::Pending;
 
 use crate::envelope::UctpEnvelope;
 use crate::errors::{Result, UctpError};
-use crate::ids::{ConnectionId, EnvelopeId, SessionId};
+use crate::ids::{ConnectionId, CorrelationIdDiagnostic, EnvelopeId, SessionId};
 use crate::payloads;
 use crate::types::MessageType;
 use rvoip_auth_core::{
@@ -1756,7 +1756,7 @@ impl UctpCoordinator {
 
         let span = info_span!(
             "uctp.session.invite",
-            sid = %sid,
+            sid = ?CorrelationIdDiagnostic::new(sid.as_str()),
             sender_present = !payload.from.is_empty(),
             transport = %self.transport,
         );
@@ -1787,7 +1787,7 @@ impl UctpCoordinator {
         if self.sessions.contains_key(&sid) {
             debug!(
                 transport = %self.transport,
-                sid = %sid,
+                sid = ?CorrelationIdDiagnostic::new(sid.as_str()),
                 "uctp.coordinator: ignoring duplicate session.invite"
             );
             return Ok(());
@@ -1822,7 +1822,7 @@ impl UctpCoordinator {
             if let Err(error) = bindings.bind_session(&sid) {
                 warn!(
                     transport = %self.transport,
-                    wire_sid = %sid,
+                    wire_sid = ?CorrelationIdDiagnostic::new(sid.as_str()),
                     code = error.code,
                     reason_present = !error.reason.is_empty(),
                     reason_bytes = error.reason.len(),
@@ -2058,8 +2058,8 @@ impl UctpCoordinator {
                 // `connections` at end-of-call.
                 let lifetime_span = info_span!(
                     "uctp.connection.lifetime",
-                    connid = %connid,
-                    sid = ?env.sid,
+                    connid = ?CorrelationIdDiagnostic::new(connid.as_str()),
+                    sid = ?CorrelationIdDiagnostic::optional(env.sid.as_deref()),
                     transport = %self.transport,
                 );
                 let _lifetime_enter = lifetime_span.clone().entered();
@@ -2068,7 +2068,7 @@ impl UctpCoordinator {
                 // this handler does no awaits, so `.entered()` is safe.
                 let _span = info_span!(
                     "uctp.connection.negotiate",
-                    connid = %connid,
+                    connid = ?CorrelationIdDiagnostic::new(connid.as_str()),
                     transport = %self.transport,
                 )
                 .entered();

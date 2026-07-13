@@ -13,6 +13,46 @@ pub use rvoip_core::ids::{
     ConnectionId, ConversationId, IdentityId, MessageId, ParticipantId, SessionId, StreamId,
 };
 
+/// Metadata-only diagnostic view of a wire or core correlation identifier.
+///
+/// Correlation identifiers remain available through their normal typed and
+/// serialized forms for routing. Logging code should construct this view
+/// instead of recording the identifier itself so peer-controlled values,
+/// including control characters, cannot cross the diagnostic boundary.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct CorrelationIdDiagnostic {
+    present: bool,
+    bytes: usize,
+}
+
+impl CorrelationIdDiagnostic {
+    /// Describe a required identifier without retaining its value.
+    pub fn new(value: &str) -> Self {
+        Self {
+            present: !value.is_empty(),
+            bytes: value.len(),
+        }
+    }
+
+    /// Describe an optional identifier without retaining its value.
+    pub fn optional(value: Option<&str>) -> Self {
+        Self {
+            present: value.is_some(),
+            bytes: value.map(str::len).unwrap_or_default(),
+        }
+    }
+}
+
+impl fmt::Debug for CorrelationIdDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CorrelationIdDiagnostic")
+            .field("present", &self.present)
+            .field("bytes", &self.bytes)
+            .finish()
+    }
+}
+
 /// Maximum UTF-8 byte length accepted for a wire envelope identifier.
 /// Envelope IDs are ASCII by grammar, so this is also the character bound.
 pub const MAX_ENVELOPE_ID_BYTES: usize = 128;
@@ -147,5 +187,25 @@ mod tests {
         let boundary = format!("env_{}", "a".repeat(MAX_ENVELOPE_ID_BYTES - 4));
         assert_eq!(boundary.len(), MAX_ENVELOPE_ID_BYTES);
         assert!(validate_envelope_id(&boundary).is_ok());
+    }
+
+    #[test]
+    fn correlation_id_diagnostics_never_retain_malicious_values() {
+        const CANARY: &str = "uctp-correlation-canary\r\nAuthorization: exposed";
+
+        for diagnostic in [
+            CorrelationIdDiagnostic::new(CANARY),
+            CorrelationIdDiagnostic::optional(Some(CANARY)),
+        ] {
+            let rendered = format!("{diagnostic:?}");
+            assert!(!rendered.contains(CANARY));
+            assert!(!rendered.contains("Authorization: exposed"));
+            assert!(rendered.contains("present: true"));
+            assert!(rendered.contains(&format!("bytes: {}", CANARY.len())));
+        }
+
+        let missing = format!("{:?}", CorrelationIdDiagnostic::optional(None));
+        assert!(missing.contains("present: false"));
+        assert!(missing.contains("bytes: 0"));
     }
 }

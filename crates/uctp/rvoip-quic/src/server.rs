@@ -27,6 +27,7 @@ use rvoip_uctp::substrate::{
     envelope_reader, envelope_writer, PeerMediaConnectionKey, PeerMediaFanoutKey,
     PeerMediaRegistration, PeerMediaRouteKey, PeerMediaRouter,
 };
+use rvoip_uctp::CorrelationIdDiagnostic;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -566,17 +567,17 @@ async fn spawn_peer_session(
                     }
                     UctpSessionEvent::InboundInvite { sid, from, .. } => {
                         let Some(principal) = coord_for_translator.authenticated_principal() else {
-                            warn!(sid = %sid, "authenticated invite missing retained principal; refusing route");
+                            warn!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "authenticated invite missing retained principal; refusing route");
                             continue;
                         };
                         let Some((_, participant_id, _, Some(_))) = latest_auth.clone() else {
-                            warn!(sid = %sid, "authenticated invite missing atomic handoff identity; refusing route");
+                            warn!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "authenticated invite missing atomic handoff identity; refusing route");
                             continue;
                         };
                         let core_session_id = match resource_bindings.bind_session(&sid) {
                             Ok(session_id) => session_id,
                             Err(error) => {
-                                warn!(%sid, %error, "rvoip-quic: refusing unauthorized Session binding");
+                                warn!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), %error, "rvoip-quic: refusing unauthorized Session binding");
                                 let rejection = UctpEnvelope::new(
                                     rvoip_uctp::types::MessageType::SessionReject,
                                     serde_json::to_value(
@@ -714,7 +715,7 @@ async fn spawn_peer_session(
                                         .await
                                         .is_err()
                                         {
-                                            warn!(%connection_id, "timed out closing QUIC route media after terminal delivery");
+                                            warn!(connection_id = ?CorrelationIdDiagnostic::new(connection_id.as_str()), "timed out closing QUIC route media after terminal delivery");
                                         }
                                     }
                                     None
@@ -756,7 +757,7 @@ async fn spawn_peer_session(
                                     .await
                                     .is_err()
                                     {
-                                        warn!(%connection_id, "timed out closing QUIC Session media after terminal delivery");
+                                        warn!(connection_id = ?CorrelationIdDiagnostic::new(connection_id.as_str()), "timed out closing QUIC Session media after terminal delivery");
                                     }
                                 } else if let Some(core_session_id) = core_session_id {
                                     let removed = media_router.remove_session(&core_session_id);
@@ -786,7 +787,12 @@ async fn spawn_peer_session(
                                         .get(&(sid.clone(), connid.clone()))
                                     {
                                         Some(existing) if existing != &core_connection_id => {
-                                            warn!(wire_connid = %connid, existing_core = %existing, attempted_core = %core_connection_id, "wire connection ID already belongs to another route");
+                                            warn!(
+                                                wire_connid = ?CorrelationIdDiagnostic::new(connid.as_str()),
+                                                existing_core = ?CorrelationIdDiagnostic::new(existing.as_str()),
+                                                attempted_core = ?CorrelationIdDiagnostic::new(core_connection_id.as_str()),
+                                                "wire connection ID already belongs to another route"
+                                            );
                                             Some(AdapterEvent::Native {
                                                 kind: "uctp.connection_binding_rejected",
                                                 detail: connid.to_string(),
@@ -813,7 +819,7 @@ async fn spawn_peer_session(
                                                 Err(error) => {
                                                     resource_bindings
                                                         .remove_connection(&sid, &connid);
-                                                    warn!(wire_connid = %connid, error = %error, "refusing UCTP connection binding");
+                                                    warn!(wire_connid = ?CorrelationIdDiagnostic::new(connid.as_str()), error = %error, "refusing UCTP connection binding");
                                                     Some(AdapterEvent::Native {
                                                         kind: "uctp.connection_binding_rejected",
                                                         detail: connid.to_string(),
@@ -821,7 +827,7 @@ async fn spawn_peer_session(
                                                 }
                                             },
                                             Err(error) => {
-                                                warn!(wire_connid = %connid, error = %error, "refusing UCTP connection binding");
+                                                warn!(wire_connid = ?CorrelationIdDiagnostic::new(connid.as_str()), error = %error, "refusing UCTP connection binding");
                                                 Some(AdapterEvent::Native {
                                                     kind: "uctp.connection_binding_rejected",
                                                     detail: connid.to_string(),
@@ -1011,13 +1017,13 @@ async fn spawn_peer_session(
         )
         .increment(1);
         if delivery == TerminalDelivery::Undeliverable {
-            warn!(%connection_id, "terminal event undeliverable before adapter registration");
+            warn!(connection_id = ?CorrelationIdDiagnostic::new(connection_id.as_str()), "terminal event undeliverable before adapter registration");
         }
         if tokio::time::timeout(Duration::from_secs(2), close_route_media(&route))
             .await
             .is_err()
         {
-            warn!(%connection_id, "timed out closing QUIC route media after terminal delivery");
+            warn!(connection_id = ?CorrelationIdDiagnostic::new(connection_id.as_str()), "timed out closing QUIC route media after terminal delivery");
         }
     }
     let media_bindings = media_router.shutdown();

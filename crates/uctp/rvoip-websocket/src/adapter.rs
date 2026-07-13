@@ -30,6 +30,7 @@ use rvoip_core::{DataMessage, DataReliability};
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads;
 use rvoip_uctp::types::MessageType;
+use rvoip_uctp::CorrelationIdDiagnostic;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -251,7 +252,7 @@ impl UctpWsAdapter {
         };
         let terminal_envelope = envelope(&route);
         if route.out_tx.try_send(terminal_envelope).is_err() {
-            warn!(connection_id = %conn, "UCTP WebSocket terminal notification was not queued");
+            warn!(connection_id = ?CorrelationIdDiagnostic::new(conn.as_str()), "UCTP WebSocket terminal notification was not queued");
         }
         route.route_cancel.cancel();
         route
@@ -268,7 +269,7 @@ impl UctpWsAdapter {
         .await
         .is_err()
         {
-            warn!(connection_id = %conn, "UCTP WebSocket terminal media cleanup timed out");
+            warn!(connection_id = ?CorrelationIdDiagnostic::new(conn.as_str()), "UCTP WebSocket terminal media cleanup timed out");
         }
     }
 

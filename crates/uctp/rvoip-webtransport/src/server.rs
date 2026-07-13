@@ -24,6 +24,7 @@ use crate::media_stream::WebTransportDatagramMediaStream;
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::state::{UctpCoordinator, UctpSessionEvent, ENVELOPE_CHANNEL_CAP};
 use rvoip_uctp::substrate::{envelope_reader, envelope_writer};
+use rvoip_uctp::CorrelationIdDiagnostic;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -580,17 +581,17 @@ async fn spawn_peer_session(
                     }
                     UctpSessionEvent::InboundInvite { sid, from, .. } => {
                         let Some(principal) = coord_for_translator.authenticated_principal() else {
-                            warn!(sid = %sid, "authenticated invite missing retained principal; refusing route");
+                            warn!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "authenticated invite missing retained principal; refusing route");
                             continue;
                         };
                         let Some((_, participant_id, _, Some(_))) = latest_auth.clone() else {
-                            warn!(sid = %sid, "authenticated invite missing atomic handoff identity; refusing route");
+                            warn!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "authenticated invite missing atomic handoff identity; refusing route");
                             continue;
                         };
                         let core_session_id = match resource_bindings.bind_session(&sid) {
                             Ok(core_session_id) => core_session_id,
                             Err(error) => {
-                                warn!(wire_sid = %sid, %error, "refusing unauthorized Session binding");
+                                warn!(wire_sid = ?CorrelationIdDiagnostic::new(sid.as_str()), %error, "refusing unauthorized Session binding");
                                 continue;
                             }
                         };
@@ -785,7 +786,7 @@ async fn spawn_peer_session(
                                     .await
                                     .is_err()
                                     {
-                                        warn!(%connection_id, "timed out closing WebTransport route media after terminal delivery");
+                                        warn!(connection_id = ?CorrelationIdDiagnostic::new(connection_id.as_str()), "timed out closing WebTransport route media after terminal delivery");
                                     }
                                 }
                                 None
@@ -835,7 +836,7 @@ async fn spawn_peer_session(
                                     .await
                                     .is_err()
                                     {
-                                        warn!(%connection_id, "timed out closing WebTransport Session media after terminal delivery");
+                                        warn!(connection_id = ?CorrelationIdDiagnostic::new(connection_id.as_str()), "timed out closing WebTransport Session media after terminal delivery");
                                     }
                                 }
                                 None
@@ -861,7 +862,12 @@ async fn spawn_peer_session(
                                 match binding {
                                     Some(binding) => match wire_to_core.get(&connid) {
                                         Some(existing) if existing != &core_connection_id => {
-                                            warn!(wire_connid = %connid, existing_core = %existing, attempted_core = %core_connection_id, "wire connection ID already belongs to another route");
+                                            warn!(
+                                                wire_connid = ?CorrelationIdDiagnostic::new(connid.as_str()),
+                                                existing_core = ?CorrelationIdDiagnostic::new(existing.as_str()),
+                                                attempted_core = ?CorrelationIdDiagnostic::new(core_connection_id.as_str()),
+                                                "wire connection ID already belongs to another route"
+                                            );
                                             Some(AdapterEvent::Native {
                                                 kind: "uctp.connection_binding_rejected",
                                                 detail: connid.to_string(),
@@ -891,7 +897,7 @@ async fn spawn_peer_session(
                                                     Err(error) => {
                                                         resource_bindings
                                                             .remove_connection(&sid, &connid);
-                                                        warn!(wire_connid = %connid, error = %error, "refusing UCTP connection binding");
+                                                        warn!(wire_connid = ?CorrelationIdDiagnostic::new(connid.as_str()), error = %error, "refusing UCTP connection binding");
                                                         Some(AdapterEvent::Native {
                                                             kind:
                                                                 "uctp.connection_binding_rejected",
@@ -900,7 +906,7 @@ async fn spawn_peer_session(
                                                     }
                                                 },
                                                 Err(error) => {
-                                                    warn!(wire_connid = %connid, %error, "refusing wire-to-core Connection binding");
+                                                    warn!(wire_connid = ?CorrelationIdDiagnostic::new(connid.as_str()), %error, "refusing wire-to-core Connection binding");
                                                     Some(AdapterEvent::Native {
                                                         kind: "uctp.connection_binding_rejected",
                                                         detail: connid.to_string(),
@@ -1060,7 +1066,7 @@ async fn spawn_peer_session(
         )
         .increment(1);
         if delivery == TerminalDelivery::Undeliverable {
-            warn!(%connection_id, "terminal event undeliverable before adapter registration");
+            warn!(connection_id = ?CorrelationIdDiagnostic::new(connection_id.as_str()), "terminal event undeliverable before adapter registration");
         }
     }
     let media_bindings = media_router.shutdown();

@@ -12,6 +12,7 @@ use chrono::Utc;
 use rvoip_auth_core::bearer_stub;
 use rvoip_core::adapter::{AdapterEvent, AdapterKind, ConnectionAdapter, EndReason};
 use rvoip_core::connection::Transport;
+use rvoip_core::error::RvoipError;
 use rvoip_quic::{UctpQuicAdapter, UctpQuicClient, UctpQuicConfig};
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads::{auth, session::SessionInvite};
@@ -229,7 +230,11 @@ async fn adapter_emits_inbound_connection_on_session_invite() {
         )
         .await
         .expect_err("outbound data before connection.offer must fail");
-    assert!(error.to_string().contains("not ready"));
+    let RvoipError::Adapter(detail) = &error else {
+        panic!("expected typed adapter error, got {error:?}");
+    };
+    assert!(detail.contains("not ready"));
+    assert!(!error.to_string().contains(detail));
 
     let peer_terminal = UctpEnvelope::new(
         MessageType::SessionEnd,

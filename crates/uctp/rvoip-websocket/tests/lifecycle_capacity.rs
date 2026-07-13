@@ -7,11 +7,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rvoip_auth_core::bearer_stub;
-use rvoip_core::adapter::{AdapterEvent, AdapterLifecycleSink, ConnectionAdapter};
+use rvoip_core::adapter::{
+    AdapterEvent, AdapterLifecycleSink, ConnectionAdapter, OrchestratorAdapterEvent,
+};
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads::{
     auth,
     connection::{ConnectionOffer, StreamOffer},
+    control::DtmfSend,
     session::SessionInvite,
 };
 use rvoip_uctp::types::MessageType;
@@ -110,10 +113,12 @@ async fn full_adapter_event_queue_releases_permit_for_second_peer() {
     adapter
         .install_lifecycle_sink(sink.clone())
         .expect("install lifecycle sink");
-    // Hold the sole receiver without draining it after route setup. Quality
-    // events below fill this real adapter queue; terminal delivery must use
-    // the direct lifecycle sink and still release the connection semaphore.
-    let mut events = adapter.subscribe_events();
+    // Hold the sole atomic receiver without draining it after route setup.
+    // Quality events below fill the real adapter queue directly; terminal
+    // delivery must use the lifecycle sink and still release the connection
+    // semaphore. The legacy subscription adds a second normalization queue and
+    // therefore cannot prove saturation of this source queue deterministically.
+    let mut events = adapter.subscribe_orchestrator_events();
 
     let url = Url::parse(&format!("ws://{server_addr}")).expect("WebSocket URL");
     let first = UctpWsClient::connect(&url)
@@ -145,7 +150,7 @@ async fn full_adapter_event_queue_releases_permit_for_second_peer() {
             .await
             .expect("inbound adapter event timeout")
             .expect("adapter event channel closed");
-        if let AdapterEvent::InboundConnection { connection } = event {
+        if let OrchestratorAdapterEvent::AuthenticatedInboundConnection { connection, .. } = event {
             break connection.id;
         }
     };
@@ -205,21 +210,29 @@ async fn full_adapter_event_queue_releases_permit_for_second_peer() {
     first
         .send(
             UctpEnvelope::new(
-                MessageType::ConnectionEnd,
-                serde_json::json!({"reason_code": 0, "reason": "test-complete"}),
+                MessageType::DtmfSend,
+                serde_json::to_value(DtmfSend {
+                    digits: "1".into(),
+                    duration_ms: 100,
+                    method: "rfc4733".into(),
+                })
+                .expect("encode critical event"),
             )
             .with_sid(sid)
             .with_connid(wire_connid),
         )
         .await
-        .expect("send connection end");
+        .expect("send critical event");
 
     tokio::time::timeout(Duration::from_secs(5), sink.notified.notified())
         .await
         .expect("terminal fallback was not invoked");
     assert_eq!(sink.terminals.load(Ordering::Acquire), 1);
 
-    // Drain signaling replies until the first server-side WebSocket closes.
+    // A critical adapter event cannot enter the saturated source queue, so the
+    // event pump exits. Prove the supervisor closes the physical peer and
+    // releases its admission permit after delivering the stale-route terminal
+    // through the lifecycle fallback.
     tokio::time::timeout(Duration::from_secs(5), async {
         while first_inbound.recv().await.is_some() {}
     })

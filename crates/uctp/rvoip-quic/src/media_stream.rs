@@ -22,6 +22,7 @@ use rvoip_uctp::substrate::{
     pack_rtp_datagram, unpack_rtp_datagram, PeerMediaRegistration, PeerMediaRouteKey,
     PeerMediaRouter, RtpDatagram, RtpMediaPayload,
 };
+use rvoip_uctp::CorrelationIdDiagnostic;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace_span, warn};
@@ -146,7 +147,7 @@ impl QuicDatagramMediaStream {
                         "reason" => "send-failed"
                     )
                     .increment(1);
-                    debug!(error = %e, stream = %stream_id_for_pump, "rvoip-quic: send_datagram failed");
+                    debug!(error = %e, stream = ?CorrelationIdDiagnostic::new(stream_id_for_pump.as_str()), "rvoip-quic: send_datagram failed");
                     if matches!(e, quinn::SendDatagramError::ConnectionLost(_)) {
                         session_cancel.cancel();
                         break;

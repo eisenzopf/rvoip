@@ -12,7 +12,7 @@ use rvoip_uctp::state::{ResourceBindingError, SubscriptionOutcome, UctpScopePoli
 use rvoip_uctp::substrate::{
     MediaDatagram, PeerMediaRouteKey, PeerMediaRouterError, RtpDatagram, RtpMediaPayload,
 };
-use rvoip_uctp::{MessageType, SubstrateError, UctpEnvelope, UctpError};
+use rvoip_uctp::{CorrelationIdDiagnostic, MessageType, SubstrateError, UctpEnvelope, UctpError};
 
 const CANARY: &str = "uctp-credential-malicious-canary\r\nAuthorization: exposed";
 
@@ -137,6 +137,81 @@ fn coordinator_never_logs_raw_auth_provider_errors() {
     );
     assert!(source.contains("error_class = \"credential-validation\""));
     assert!(source.contains("error_class = \"resource-binding-authorization\""));
+}
+
+#[test]
+fn every_uctp_substrate_uses_metadata_only_correlation_diagnostics() {
+    let rendered = format!("{:?}", CorrelationIdDiagnostic::new(CANARY));
+    assert!(!rendered.contains(CANARY));
+    assert!(!rendered.contains("Authorization: exposed"));
+    assert!(rendered.contains("present: true"));
+    assert!(rendered.contains(&format!("bytes: {}", CANARY.len())));
+
+    let sources = [
+        (
+            "rvoip-uctp coordinator",
+            include_str!("../src/state/coordinator.rs"),
+        ),
+        (
+            "rvoip-quic server",
+            include_str!("../../rvoip-quic/src/server.rs"),
+        ),
+        (
+            "rvoip-quic adapter",
+            include_str!("../../rvoip-quic/src/adapter.rs"),
+        ),
+        (
+            "rvoip-quic media stream",
+            include_str!("../../rvoip-quic/src/media_stream.rs"),
+        ),
+        (
+            "rvoip-webtransport server",
+            include_str!("../../rvoip-webtransport/src/server.rs"),
+        ),
+        (
+            "rvoip-webtransport adapter",
+            include_str!("../../rvoip-webtransport/src/adapter.rs"),
+        ),
+        (
+            "rvoip-webtransport media stream",
+            include_str!("../../rvoip-webtransport/src/media_stream.rs"),
+        ),
+        (
+            "rvoip-websocket server",
+            include_str!("../../rvoip-websocket/src/server.rs"),
+        ),
+        (
+            "rvoip-websocket adapter",
+            include_str!("../../rvoip-websocket/src/adapter.rs"),
+        ),
+    ];
+    let forbidden = [
+        "%sid",
+        "?sid",
+        "%conn",
+        "?conn",
+        "%core_connection_id",
+        "?core_connection_id",
+        "%existing",
+        "?existing",
+        "%stream_id",
+        "?stream_id",
+        "?env.sid",
+        "?env.connid",
+    ];
+
+    for (name, source) in sources {
+        for fragment in forbidden {
+            assert!(
+                !source.contains(fragment),
+                "{name} regained raw correlation diagnostic fragment {fragment:?}"
+            );
+        }
+        assert!(
+            source.contains("CorrelationIdDiagnostic::"),
+            "{name} must keep correlation fields behind the metadata-only wrapper"
+        );
+    }
 }
 
 #[test]

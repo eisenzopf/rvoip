@@ -15,6 +15,7 @@ use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, 
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId};
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::state::{UctpCoordinator, UctpSessionEvent, ENVELOPE_CHANNEL_CAP};
+use rvoip_uctp::CorrelationIdDiagnostic;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -424,11 +425,11 @@ async fn spawn_peer_session<S>(
                     }
                     UctpSessionEvent::InboundInvite { sid, from, .. } => {
                         let Some(principal) = coord_for_translator.authenticated_principal() else {
-                            warn!(sid = %sid, "authenticated invite missing retained principal; refusing route");
+                            warn!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "authenticated invite missing retained principal; refusing route");
                             continue;
                         };
                         let Some((_, participant_id, _, Some(_))) = latest_auth.clone() else {
-                            warn!(sid = %sid, "authenticated invite missing atomic handoff identity; refusing route");
+                            warn!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "authenticated invite missing atomic handoff identity; refusing route");
                             continue;
                         };
                         let (id, connection) = build_connection(sid.clone(), from);
@@ -670,7 +671,12 @@ async fn spawn_peer_session<S>(
                                 match binding {
                                     Some(binding) => match wire_to_core.get(&connid) {
                                         Some(existing) if existing != &core_connection_id => {
-                                            warn!(wire_connid = %connid, existing_core = %existing, attempted_core = %core_connection_id, "wire connection ID already belongs to another route");
+                                            warn!(
+                                                wire_connid = ?CorrelationIdDiagnostic::new(connid.as_str()),
+                                                existing_core = ?CorrelationIdDiagnostic::new(existing.as_str()),
+                                                attempted_core = ?CorrelationIdDiagnostic::new(core_connection_id.as_str()),
+                                                "wire connection ID already belongs to another route"
+                                            );
                                             Some(AdapterEvent::Native {
                                                 kind: "uctp.connection_binding_rejected",
                                                 detail: connid.to_string(),
@@ -688,7 +694,7 @@ async fn spawn_peer_session<S>(
                                                 })
                                             }
                                             Err(error) => {
-                                                warn!(wire_connid = %connid, error = %error, "refusing UCTP connection binding");
+                                                warn!(wire_connid = ?CorrelationIdDiagnostic::new(connid.as_str()), error = %error, "refusing UCTP connection binding");
                                                 Some(AdapterEvent::Native {
                                                     kind: "uctp.connection_binding_rejected",
                                                     detail: connid.to_string(),
@@ -822,7 +828,7 @@ async fn spawn_peer_session<S>(
         )
         .increment(1);
         if delivery == TerminalDelivery::Undeliverable {
-            warn!(%connection_id, "terminal event undeliverable before adapter registration");
+            warn!(connection_id = ?CorrelationIdDiagnostic::new(connection_id.as_str()), "terminal event undeliverable before adapter registration");
         }
         #[cfg(feature = "media-webrtc")]
         if let Some(bridge) = bridge {
@@ -830,7 +836,7 @@ async fn spawn_peer_session<S>(
                 .await
                 .is_err()
             {
-                warn!(%connection_id, "timed out closing WebRTC media bridge during peer drain");
+                warn!(connection_id = ?CorrelationIdDiagnostic::new(connection_id.as_str()), "timed out closing WebRTC media bridge during peer drain");
             }
         }
     }
@@ -882,7 +888,7 @@ async fn intercept_connection_offer(
         // queue isn't reachable from here without a route lookup, so
         // we just drop the interception path; the bridge_for variant
         // still works for tests that need precise timing.
-        warn!(sid = %sid, "rvoip-websocket: connection.offer arrived before route was registered");
+        warn!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "rvoip-websocket: connection.offer arrived before route was registered");
         return;
     };
     let Some(route) = routes.get(&connid).map(|r| r.clone()) else {
@@ -914,7 +920,7 @@ async fn intercept_connection_offer(
         }
     } else {
         *route.pending_offer.lock() = Some(setup);
-        debug!(sid = %sid, "rvoip-websocket: queued connection.offer SDP; bridge not ready");
+        debug!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "rvoip-websocket: queued connection.offer SDP; bridge not ready");
     }
 
     // Autonomously emit a connection.answer. The payload's
@@ -1140,7 +1146,7 @@ fn spawn_trickle_ice_pump_with_cancel(
                         result = out_tx.send(env) => result,
                     };
                     if sent.is_err() {
-                        debug!(sid = %sid, "rvoip-websocket: trickle ICE: outbound closed; exiting pump");
+                        debug!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "rvoip-websocket: trickle ICE: outbound closed; exiting pump");
                         return;
                     }
                 }
@@ -1164,7 +1170,7 @@ fn spawn_trickle_ice_pump_with_cancel(
                         _ = route_cancel.cancelled() => return,
                         result = out_tx.send(env) => result,
                     };
-                    debug!(sid = %sid, "rvoip-websocket: trickle ICE: gathering complete; pump exiting");
+                    debug!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "rvoip-websocket: trickle ICE: gathering complete; pump exiting");
                     return;
                 }
             }

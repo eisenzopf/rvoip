@@ -27,6 +27,7 @@ use rvoip_core::{DataMessage, DataReliability};
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads;
 use rvoip_uctp::types::MessageType;
+use rvoip_uctp::CorrelationIdDiagnostic;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -318,7 +319,7 @@ impl UctpQuicAdapter {
         };
         let terminal_envelope = envelope(&route);
         if route.out_tx.try_send(terminal_envelope).is_err() {
-            warn!(connection_id = %conn, "UCTP QUIC terminal notification was not queued");
+            warn!(connection_id = ?CorrelationIdDiagnostic::new(conn.as_str()), "UCTP QUIC terminal notification was not queued");
         }
         route.route_cancel.cancel();
         route
@@ -335,7 +336,7 @@ impl UctpQuicAdapter {
         .await
         .is_err()
         {
-            warn!(connection_id = %conn, "UCTP QUIC terminal media cleanup timed out");
+            warn!(connection_id = ?CorrelationIdDiagnostic::new(conn.as_str()), "UCTP QUIC terminal media cleanup timed out");
         }
     }
 }
