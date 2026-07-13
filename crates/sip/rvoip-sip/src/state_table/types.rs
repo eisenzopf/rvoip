@@ -150,7 +150,7 @@ pub enum Role {
 }
 
 /// Event types that trigger transitions
-#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Hash, Eq, PartialEq, Serialize, Deserialize, strum::IntoStaticStr)]
 pub enum EventType {
     // User-initiated events
     MakeCall {
@@ -394,6 +394,13 @@ pub enum EventType {
     SendOutboundRegister,
 }
 
+impl std::fmt::Debug for EventType {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variant: &'static str = self.into();
+        formatter.write_str(variant)
+    }
+}
+
 impl EventType {
     /// Normalize the event for state table lookups by removing runtime-specific field values.
     /// This allows the state table to match on event type rather than exact field values.
@@ -514,7 +521,7 @@ pub struct Transition {
 }
 
 /// Guards that must be satisfied for a transition
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, strum::IntoStaticStr)]
 pub enum Guard {
     HasLocalSDP,
     HasRemoteSDP,
@@ -535,6 +542,13 @@ pub enum Guard {
     Custom(String),
 }
 
+impl std::fmt::Debug for Guard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variant: &'static str = self.into();
+        formatter.write_str(variant)
+    }
+}
+
 /// Actions to execute during a transition.
 ///
 /// `strum::VariantNames` reflects the variant names so the YAML loader's
@@ -542,7 +556,7 @@ pub enum Guard {
 /// `tests::action_variants_have_parse_mapping`) can prove every variant is
 /// reachable from at least one YAML action name. This catches drift when a
 /// new variant is added without a matching `parse_action_by_name` case.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::VariantNames)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, strum::VariantNames, strum::IntoStaticStr)]
 pub enum Action {
     // Dialog actions
     CreateDialog,
@@ -766,6 +780,13 @@ pub enum Action {
     Custom(String),
 }
 
+impl std::fmt::Debug for Action {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variant: &'static str = self.into();
+        formatter.write_str(variant)
+    }
+}
+
 /// Conditions that track readiness
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Condition {
@@ -810,7 +831,7 @@ impl ConditionUpdates {
 }
 
 /// Event templates for publishing
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, strum::IntoStaticStr)]
 pub enum EventTemplate {
     StateChanged,
     SessionCreated,
@@ -825,6 +846,13 @@ pub enum EventTemplate {
     MediaNegotiated,
     MediaSessionReady,
     Custom(String),
+}
+
+impl std::fmt::Debug for EventTemplate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variant: &'static str = self.into();
+        formatter.write_str(variant)
+    }
 }
 
 /// States that must always have exit transitions if used

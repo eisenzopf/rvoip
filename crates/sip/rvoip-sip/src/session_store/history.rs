@@ -302,7 +302,7 @@ impl Default for HistoryConfig {
 }
 
 /// Record of a single state transition
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct TransitionRecord {
     /// When the transition occurred (milliseconds since UNIX epoch)
     #[serde(skip, default = "Instant::now")]
@@ -340,7 +340,7 @@ pub struct TransitionRecord {
 }
 
 /// Result of guard evaluation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GuardResult {
     pub guard: Guard,
     pub passed: bool,
@@ -348,12 +348,142 @@ pub struct GuardResult {
 }
 
 /// Record of action execution
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct ActionRecord {
     pub action: Action,
     pub success: bool,
     pub execution_time_us: u64,
     pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SerializableTransitionRecord<'a> {
+    timestamp_ms: u64,
+    sequence: u64,
+    from_state: CallState,
+    event: &'a EventType,
+    to_state: Option<CallState>,
+    guards_evaluated: &'a [GuardResult],
+    actions_executed: &'a [ActionRecord],
+    events_published: &'a [EventTemplate],
+    duration_ms: u64,
+    errors: &'a [String],
+}
+
+impl Serialize for TransitionRecord {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut safe = self.clone();
+        sanitize_transition_record(&mut safe);
+        SerializableTransitionRecord {
+            timestamp_ms: safe.timestamp_ms,
+            sequence: safe.sequence,
+            from_state: safe.from_state,
+            event: &safe.event,
+            to_state: safe.to_state,
+            guards_evaluated: &safe.guards_evaluated,
+            actions_executed: &safe.actions_executed,
+            events_published: &safe.events_published,
+            duration_ms: safe.duration_ms,
+            errors: &safe.errors,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl std::fmt::Debug for TransitionRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut safe = self.clone();
+        sanitize_transition_record(&mut safe);
+        formatter
+            .debug_struct("TransitionRecord")
+            .field("timestamp_ms", &safe.timestamp_ms)
+            .field("sequence", &safe.sequence)
+            .field("from_state", &safe.from_state)
+            .field("event", &safe.event)
+            .field("to_state", &safe.to_state)
+            .field("guards_evaluated", &safe.guards_evaluated)
+            .field("actions_executed", &safe.actions_executed)
+            .field("events_published", &safe.events_published)
+            .field("duration_ms", &safe.duration_ms)
+            .field("errors", &safe.errors)
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
+struct SerializableGuardResult<'a> {
+    guard: &'a Guard,
+    passed: bool,
+    evaluation_time_us: u64,
+}
+
+impl Serialize for GuardResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let safe_guard = history_guard_snapshot(&self.guard);
+        SerializableGuardResult {
+            guard: &safe_guard,
+            passed: self.passed,
+            evaluation_time_us: self.evaluation_time_us,
+        }
+        .serialize(serializer)
+    }
+}
+
+#[derive(Serialize)]
+struct SerializableActionRecord<'a> {
+    action: &'a Action,
+    success: bool,
+    execution_time_us: u64,
+    error: Option<&'a str>,
+}
+
+impl Serialize for ActionRecord {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let safe_action = history_action_snapshot(&self.action);
+        let safe_error = self.error.as_ref().map(|_| {
+            if is_auth_action(&safe_action) {
+                REDACTED_AUTH_ACTION_ERROR
+            } else {
+                REDACTED_ACTION_ERROR
+            }
+        });
+        SerializableActionRecord {
+            action: &safe_action,
+            success: self.success,
+            execution_time_us: self.execution_time_us,
+            error: safe_error,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl std::fmt::Debug for ActionRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let safe_action = history_action_snapshot(&self.action);
+        let safe_error = self.error.as_ref().map(|_| {
+            if is_auth_action(&safe_action) {
+                REDACTED_AUTH_ACTION_ERROR
+            } else {
+                REDACTED_ACTION_ERROR
+            }
+        });
+        formatter
+            .debug_struct("ActionRecord")
+            .field("action", &safe_action)
+            .field("success", &self.success)
+            .field("execution_time_us", &self.execution_time_us)
+            .field("error", &safe_error)
+            .finish()
+    }
 }
 
 /// Session history with ring buffer
@@ -495,7 +625,7 @@ impl SessionHistory {
             csv.push_str(&format!(
                 "{},{},{},{},{},{},{}\n",
                 t.sequence,
-                t.timestamp.elapsed().as_millis(),
+                t.timestamp_ms,
                 csv_escape(&from_state),
                 csv_escape(&event),
                 csv_escape(&to_state),
@@ -737,7 +867,6 @@ mod tests {
             history.export_csv(),
         ] {
             assert!(rendered.contains("AuthRequired"));
-            assert!(rendered.contains("extension"));
             for secret in [CHALLENGE_SECRET, REALM_SECRET, METHOD_SECRET, ERROR_SECRET] {
                 assert!(
                     !rendered.contains(secret),
@@ -878,12 +1007,17 @@ mod tests {
             let live = event.clone();
             let snapshot = history_event_snapshot(&event);
             assert_eq!(event, live, "snapshot mutated live event");
-            let rendered = format!("{snapshot:?}");
-            assert!(rendered.contains("metadata") || rendered.contains("extension"));
-            assert!(!rendered.contains(SECRET), "event leaked: {rendered}");
+            let debug = format!("{snapshot:?}");
+            let serialized = serde_json::to_string(&snapshot).expect("serialize history snapshot");
+            assert!(serialized.contains("metadata") || serialized.contains("extension"));
+            assert!(!debug.contains(SECRET), "event debug leaked: {debug}");
             assert!(
-                !rendered.contains("Bearer hidden"),
-                "event leaked: {rendered}"
+                !serialized.contains(SECRET),
+                "event serialization leaked: {serialized}"
+            );
+            assert!(
+                !serialized.contains("Bearer hidden"),
+                "event leaked: {serialized}"
             );
         }
 
@@ -971,7 +1105,7 @@ mod tests {
         }
         let csv = history.export_csv();
         assert_eq!(csv.lines().count(), 2, "CSV record escaped into extra rows");
-        assert!(csv.contains("\"\"metadata"));
+        assert!(csv.contains(",1,Ringing,IncomingCall,Terminating,"));
     }
 
     #[test]
@@ -980,6 +1114,54 @@ mod tests {
         assert_eq!(csv_escape("a,b"), "\"a,b\"");
         assert_eq!(csv_escape("a\"b"), "\"a\"\"b\"");
         assert_eq!(csv_escape("a\r\nb"), "\"a\r\nb\"");
+    }
+
+    #[test]
+    fn public_history_records_are_safe_before_insertion() {
+        const SECRET: &str = "pre-insertion-history-secret-canary";
+        let record = TransitionRecord {
+            timestamp: Instant::now(),
+            timestamp_ms: 7,
+            sequence: 9,
+            from_state: CallState::Initiating,
+            event: EventType::AuthRequired {
+                status_code: 401,
+                challenge: format!("Digest realm=\"{SECRET}\", nonce=\"{SECRET}\""),
+                method: SECRET.to_string(),
+            },
+            to_state: Some(CallState::Authenticating),
+            guards_evaluated: vec![GuardResult {
+                guard: Guard::Custom(SECRET.to_string()),
+                passed: false,
+                evaluation_time_us: 3,
+            }],
+            actions_executed: vec![ActionRecord {
+                action: Action::Custom(SECRET.to_string()),
+                success: false,
+                execution_time_us: 4,
+                error: Some(SECRET.to_string()),
+            }],
+            events_published: vec![EventTemplate::Custom(SECRET.to_string())],
+            duration_ms: 5,
+            errors: vec![SECRET.to_string()],
+        };
+
+        for diagnostic in [
+            format!("{record:?}"),
+            serde_json::to_string(&record).expect("serialize transition record"),
+            format!("{:?}", record.actions_executed[0]),
+            serde_json::to_string(&record.actions_executed[0]).expect("serialize action record"),
+            serde_json::to_string(&record.guards_evaluated[0]).expect("serialize guard result"),
+        ] {
+            assert!(
+                !diagnostic.contains(SECRET),
+                "diagnostic leaked: {diagnostic}"
+            );
+        }
+        assert_eq!(format!("{:?}", record.event), "AuthRequired");
+        assert_eq!(format!("{:?}", record.actions_executed[0].action), "Custom");
+        assert_eq!(format!("{:?}", record.guards_evaluated[0].guard), "Custom");
+        assert_eq!(format!("{:?}", record.events_published[0]), "Custom");
     }
 
     #[test]
