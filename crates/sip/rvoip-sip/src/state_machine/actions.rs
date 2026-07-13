@@ -2181,12 +2181,13 @@ pub(crate) async fn execute_action(
                 );
 
             // Get global coordinator from dialog adapter
-            if let Err(e) = dialog_adapter
+            if dialog_adapter
                 .global_coordinator
                 .publish(Arc::new(event))
                 .await
+                .is_err()
             {
-                error!("Failed to publish ReferResponse event: {}", e);
+                error!("Failed to publish ReferResponse event (class=coordination)");
             } else {
                 debug!("Published ReferResponse (202 Accepted) event to dialog-core");
             }
@@ -2202,14 +2203,12 @@ pub(crate) async fn execute_action(
             // the acceptance ack of the implicit subscription, not a
             // dialog-progress NOTIFY, so it has no linkage dependency.
             debug!("SendRefer100Trying on session {}", session.session_id);
-            if let Err(e) = dialog_adapter
+            if dialog_adapter
                 .send_refer_notify(&session.session_id, 100, "Trying")
                 .await
+                .is_err()
             {
-                warn!(
-                    "Failed to send 100 Trying NOTIFY on session {}: {}",
-                    session.session_id, e
-                );
+                warn!(session = %session.session_id, "Failed to send 100 Trying NOTIFY");
             }
         }
 
@@ -2219,14 +2218,12 @@ pub(crate) async fn execute_action(
                     "SendTransferNotifyRinging: leg {} -> transferor {}",
                     session.session_id, transferor
                 );
-                if let Err(e) = dialog_adapter
+                if dialog_adapter
                     .send_refer_notify(&transferor, 180, "Ringing")
                     .await
+                    .is_err()
                 {
-                    warn!(
-                        "Failed to send 180 Ringing NOTIFY to transferor {}: {}",
-                        transferor, e
-                    );
+                    warn!(transferor = %transferor, "Failed to send 180 Ringing NOTIFY");
                 }
                 publish_transfer_event(
                     dialog_adapter,
@@ -2260,14 +2257,12 @@ pub(crate) async fn execute_action(
                     "SendTransferNotifySuccess: leg {} -> transferor {}",
                     session.session_id, transferor
                 );
-                if let Err(e) = dialog_adapter
+                if dialog_adapter
                     .send_refer_notify(&transferor, 200, "OK")
                     .await
+                    .is_err()
                 {
-                    warn!(
-                        "Failed to send 200 OK NOTIFY to transferor {}: {}",
-                        transferor, e
-                    );
+                    warn!(transferor = %transferor, "Failed to send 200 OK NOTIFY");
                 }
                 publish_transfer_event(
                     dialog_adapter,
@@ -2320,13 +2315,15 @@ pub(crate) async fn execute_action(
                     "SendTransferNotifyFailure: leg {} -> transferor {} ({} {})",
                     session.session_id, transferor, status_code, reason
                 );
-                if let Err(e) = dialog_adapter
+                if dialog_adapter
                     .send_refer_notify(&transferor, status_code, &reason)
                     .await
+                    .is_err()
                 {
                     warn!(
-                        "Failed to send {} {} NOTIFY to transferor {}: {}",
-                        status_code, reason, transferor, e
+                        status_code,
+                        transferor = %transferor,
+                        "Failed to send transfer-failure NOTIFY"
                     );
                 }
                 publish_transfer_event(
@@ -2941,8 +2938,8 @@ fn publish_transfer_event(dialog_adapter: &Arc<DialogAdapter>, api_event: Event)
     let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
     let coordinator = dialog_adapter.global_coordinator.clone();
     tokio::spawn(async move {
-        if let Err(e) = coordinator.publish(wrapped).await {
-            tracing::warn!("Failed to publish Transfer* event: {}", e);
+        if coordinator.publish(wrapped).await.is_err() {
+            tracing::warn!("Failed to publish Transfer* event (class=coordination)");
         }
     });
 }

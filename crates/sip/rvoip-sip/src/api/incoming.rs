@@ -343,14 +343,15 @@ impl IncomingCall {
         let call_id = self.call_id.clone();
         let reason = reason.to_string();
         tokio::spawn(async move {
-            if let Err(e) = coordinator
+            if coordinator
                 .reject(&call_id)
                 .with_status(status)
                 .with_reason(reason)
                 .send()
                 .await
+                .is_err()
             {
-                tracing::warn!("[IncomingCall] reject failed for {}: {}", call_id, e);
+                tracing::warn!(call_id = %call_id, "[IncomingCall] reject failed");
             }
         });
     }
@@ -581,18 +582,15 @@ impl Drop for IncomingCall {
             call_id
         );
         tokio::spawn(async move {
-            if let Err(e) = coordinator
+            if coordinator
                 .reject(&call_id)
                 .with_status(500)
                 .with_reason("Server Internal Error")
                 .send()
                 .await
+                .is_err()
             {
-                tracing::error!(
-                    "[IncomingCall] panic-path reject failed for {}: {}",
-                    call_id,
-                    e
-                );
+                tracing::error!(call_id = %call_id, "[IncomingCall] panic-path reject failed");
             }
         });
     }
