@@ -2,7 +2,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket as StdUdpSocket};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Once};
+use std::sync::Once;
 use std::time::Duration;
 
 use ipnet::IpNet;

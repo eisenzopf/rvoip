@@ -74,10 +74,11 @@ pub use introspection::OAuth2IntrospectionValidator;
 pub use jwks::{JwksJwtValidator, DEFAULT_JWKS_CACHE_TTL};
 pub use jwt::JwtValidator;
 pub use providers::{
-    ApiKeyVerifier, AuthAuditEvent, AuthAuditOutcome, AuthAuditScheme, AuthAuditSink,
-    AuthFailureReason, AuthRateLimitKey, AuthRateLimitKind, AuthRateLimitVerdict, AuthRateLimiter,
-    CredentialAuthError, DigestNonceStatus, DigestReplayStore, DigestSecret, DigestSecretProvider,
-    PasswordVerifier, TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
+    ApiKeyVerifier, AuthAttemptAdmission, AuthAttemptReservation, AuthAuditEvent, AuthAuditOutcome,
+    AuthAuditScheme, AuthAuditSink, AuthFailureReason, AuthRateLimitKey, AuthRateLimitKind,
+    AuthRateLimitVerdict, AuthRateLimiter, CredentialAuthError, DigestNonceStatus,
+    DigestReplayStore, DigestSecret, DigestSecretProvider, PasswordVerifier,
+    TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
 pub use sig9421::{
     EnvelopeSignature, KeyResolver, Sig9421Error, Sig9421Verifier, StaticKeyResolver,

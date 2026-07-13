@@ -1,11 +1,13 @@
 use std::time::{Duration, SystemTime};
 
 use rvoip_auth_core::{
-    AuthAuditOutcome, AuthFailureReason, AuthRateLimitKey, AuthRateLimitKind, AuthRateLimitVerdict,
-    AuthRateLimiter, DigestNonceStatus, DigestReplayStore, TokenRevocationChecker,
-    TokenRevocationContext, TokenRevocationStatus,
+    AuthAttemptAdmission, AuthAuditOutcome, AuthFailureReason, AuthRateLimitKey, AuthRateLimitKind,
+    AuthRateLimiter, CredentialAuthError, DigestNonceStatus, DigestReplayStore,
+    TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
-use rvoip_redis::{RedisAuthConfig, RedisAuthProvider, RedisDigestReplayLimits};
+use rvoip_redis::{
+    RedisAuthConfig, RedisAuthProvider, RedisAuthRateLimitLimits, RedisDigestReplayLimits,
+};
 
 fn live_provider(test_name: &str) -> Option<RedisAuthProvider> {
     let redis_url = std::env::var("RVOIP_REDIS_URL").ok()?;
@@ -14,19 +16,21 @@ fn live_provider(test_name: &str) -> Option<RedisAuthProvider> {
         test_name,
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .ok()?
+            .expect("system clock must be after the Unix epoch")
             .as_nanos()
     );
-    RedisAuthProvider::from_config(
-        RedisAuthConfig::new(redis_url)
-            .with_namespace(namespace)
-            .with_nonce_stale_retention(Duration::from_secs(60))
-            .with_nonce_count_ttl(Duration::from_secs(60))
-            .with_token_revocation_ttl(Duration::from_secs(60))
-            .with_rate_limit_window(Duration::from_secs(60))
-            .with_max_failures_per_window(2),
+    Some(
+        RedisAuthProvider::from_config(
+            RedisAuthConfig::new(redis_url)
+                .with_namespace(namespace)
+                .with_nonce_stale_retention(Duration::from_secs(60))
+                .with_nonce_count_ttl(Duration::from_secs(60))
+                .with_token_revocation_ttl(Duration::from_secs(60))
+                .with_rate_limit_window(Duration::from_secs(60))
+                .with_max_failures_per_window(2),
+        )
+        .expect("RVOIP_REDIS_URL must construct a Redis auth provider"),
     )
-    .ok()
 }
 
 #[tokio::test]
@@ -276,7 +280,7 @@ async fn token_revocation_checker_round_trips_against_redis() {
 }
 
 #[tokio::test]
-async fn rate_limiter_concurrent_failures_deny_until_success_resets() {
+async fn rate_limiter_concurrent_reservations_are_atomic_and_idempotent() {
     let Some(provider) = live_provider("rate_limit_concurrent") else {
         return;
     };
@@ -286,40 +290,237 @@ async fn rate_limiter_concurrent_failures_deny_until_success_resets() {
         .with_subject("alice")
         .with_realm("pbx.example.test")
         .with_peer("198.51.100.10");
-    assert_eq!(
-        provider.check_auth_attempt(&key).await.unwrap(),
-        AuthRateLimitVerdict::Allowed
-    );
-
     let mut tasks = Vec::new();
     for _ in 0..8 {
         let provider = provider.clone();
         let key = key.clone();
         tasks.push(tokio::spawn(async move {
-            provider
-                .record_auth_result(
-                    &key,
-                    &AuthAuditOutcome::Failure(AuthFailureReason::InvalidCredential),
-                )
-                .await
-                .unwrap()
+            provider.reserve_auth_attempt(&key).await.unwrap()
         }));
     }
+    let mut reservations = Vec::new();
+    let mut denied = 0;
     for task in tasks {
-        task.await.unwrap();
+        match task.await.unwrap() {
+            AuthAttemptAdmission::Reserved(reservation) => reservations.push(reservation),
+            AuthAttemptAdmission::Denied { .. } => denied += 1,
+        }
+    }
+    assert_eq!(reservations.len(), 2);
+    assert_eq!(denied, 6);
+    for reservation in &reservations {
+        provider
+            .complete_auth_attempt(
+                reservation,
+                &AuthAuditOutcome::Failure(AuthFailureReason::InvalidCredential),
+            )
+            .await
+            .unwrap();
+        provider
+            .complete_auth_attempt(
+                reservation,
+                &AuthAuditOutcome::Failure(AuthFailureReason::InvalidCredential),
+            )
+            .await
+            .unwrap();
     }
     assert!(matches!(
-        provider.check_auth_attempt(&key).await.unwrap(),
-        AuthRateLimitVerdict::Denied { .. }
+        provider.reserve_auth_attempt(&key).await.unwrap(),
+        AuthAttemptAdmission::Denied { .. }
     ));
 
+    let success_key = AuthRateLimitKey::new(AuthRateLimitKind::SipRegister)
+        .with_subject("successful-user")
+        .with_realm("pbx.example.test")
+        .with_peer("198.51.100.11");
+    let AuthAttemptAdmission::Reserved(success) =
+        provider.reserve_auth_attempt(&success_key).await.unwrap()
+    else {
+        panic!("fresh peer and subject must reserve capacity");
+    };
     provider
-        .record_auth_result(&key, &AuthAuditOutcome::Success)
+        .complete_auth_attempt(&success, &AuthAuditOutcome::Success)
         .await
         .unwrap();
+    provider
+        .complete_auth_attempt(&success, &AuthAuditOutcome::Success)
+        .await
+        .unwrap();
+    assert!(matches!(
+        provider.reserve_auth_attempt(&success_key).await.unwrap(),
+        AuthAttemptAdmission::Reserved(_)
+    ));
+
+    assert!(matches!(
+        provider.check_auth_attempt(&key).await,
+        Err(CredentialAuthError::PolicyRejected(_))
+    ));
+
+    provider.clear_namespace_for_tests().await.unwrap();
+}
+
+#[tokio::test]
+async fn rate_limiter_aggregates_peers_and_subjects_without_cross_release() {
+    let Some(provider) = live_provider("rate_limit_aggregates") else {
+        return;
+    };
+    provider.clear_namespace_for_tests().await.unwrap();
+
+    let peer_key = |subject: &str| {
+        AuthRateLimitKey::new(AuthRateLimitKind::SipRegister)
+            .with_subject(subject)
+            .with_realm("pbx.example.test")
+            .with_peer("198.51.100.20")
+    };
+    let AuthAttemptAdmission::Reserved(peer_failure) = provider
+        .reserve_auth_attempt(&peer_key("alice"))
+        .await
+        .unwrap()
+    else {
+        panic!("first peer aggregate attempt must reserve");
+    };
+    provider
+        .complete_auth_attempt(
+            &peer_failure,
+            &AuthAuditOutcome::Failure(AuthFailureReason::InvalidCredential),
+        )
+        .await
+        .unwrap();
+    let AuthAttemptAdmission::Reserved(peer_success) = provider
+        .reserve_auth_attempt(&peer_key("bob"))
+        .await
+        .unwrap()
+    else {
+        panic!("second peer aggregate attempt must reserve");
+    };
+    provider
+        .complete_auth_attempt(&peer_success, &AuthAuditOutcome::Success)
+        .await
+        .unwrap();
+    let AuthAttemptAdmission::Reserved(peer_second_failure) = provider
+        .reserve_auth_attempt(&peer_key("carol"))
+        .await
+        .unwrap()
+    else {
+        panic!("success must release only its own peer reservation");
+    };
+    provider
+        .complete_auth_attempt(
+            &peer_second_failure,
+            &AuthAuditOutcome::Failure(AuthFailureReason::InvalidCredential),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        provider
+            .reserve_auth_attempt(&peer_key("rotated-user"))
+            .await
+            .unwrap(),
+        AuthAttemptAdmission::Denied { .. }
+    ));
+
+    let subject_key = |peer: &str| {
+        AuthRateLimitKey::new(AuthRateLimitKind::Digest)
+            .with_subject("shared-subject")
+            .with_realm("pbx.example.test")
+            .with_peer(peer)
+    };
+    for peer in ["198.51.100.30", "198.51.100.31"] {
+        let AuthAttemptAdmission::Reserved(reservation) = provider
+            .reserve_auth_attempt(&subject_key(peer))
+            .await
+            .unwrap()
+        else {
+            panic!("first two subject aggregate attempts must reserve");
+        };
+        provider
+            .complete_auth_attempt(
+                &reservation,
+                &AuthAuditOutcome::Failure(AuthFailureReason::InvalidCredential),
+            )
+            .await
+            .unwrap();
+    }
+    assert!(matches!(
+        provider
+            .reserve_auth_attempt(&subject_key("198.51.100.32"))
+            .await
+            .unwrap(),
+        AuthAttemptAdmission::Denied { .. }
+    ));
+
+    provider.clear_namespace_for_tests().await.unwrap();
+}
+
+#[tokio::test]
+async fn rate_limiter_bounds_incomplete_reservations_under_concurrency() {
+    let Ok(redis_url) = std::env::var("RVOIP_REDIS_URL") else {
+        return;
+    };
+    let namespace = format!(
+        "rvoip:test:rate-reservations:{}",
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let provider = RedisAuthProvider::from_config(
+        RedisAuthConfig::new(redis_url)
+            .with_namespace(namespace)
+            .with_rate_limit_window(Duration::from_secs(60))
+            .with_max_failures_per_window(100),
+    )
+    .unwrap()
+    .with_auth_rate_limit_limits(RedisAuthRateLimitLimits {
+        peer_cohorts: 16,
+        subject_cohorts: 16,
+        reservations: 2,
+    })
+    .unwrap();
+    provider.clear_namespace_for_tests().await.unwrap();
+
+    let mut tasks = Vec::new();
+    for index in 0..16 {
+        let provider = provider.clone();
+        tasks.push(tokio::spawn(async move {
+            let key = AuthRateLimitKey::new(AuthRateLimitKind::BearerToken)
+                .with_subject(format!("subject-{index}"))
+                .with_realm("tenant-a")
+                .with_peer(format!("198.51.100.{index}"));
+            provider.reserve_auth_attempt(&key).await.unwrap()
+        }));
+    }
+    let mut reservations = Vec::new();
+    let mut denied = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            AuthAttemptAdmission::Reserved(reservation) => reservations.push(reservation),
+            AuthAttemptAdmission::Denied { .. } => denied += 1,
+        }
+    }
+    assert_eq!(reservations.len(), 2);
+    assert_eq!(denied, 14);
     assert_eq!(
-        provider.check_auth_attempt(&key).await.unwrap(),
-        AuthRateLimitVerdict::Allowed
+        provider
+            .auth_rate_limit_cardinality()
+            .await
+            .unwrap()
+            .reservations,
+        2
+    );
+    for reservation in reservations {
+        provider
+            .complete_auth_attempt(&reservation, &AuthAuditOutcome::Success)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        provider
+            .auth_rate_limit_cardinality()
+            .await
+            .unwrap()
+            .reservations,
+        0
     );
 
     provider.clear_namespace_for_tests().await.unwrap();
@@ -337,37 +538,76 @@ async fn rate_limiter_denies_after_configured_failures() {
         .with_realm("pbx.example.test")
         .with_peer("198.51.100.10");
 
-    assert_eq!(
-        provider.check_auth_attempt(&key).await.unwrap(),
-        AuthRateLimitVerdict::Allowed
-    );
-    provider
-        .record_auth_result(
-            &key,
-            &AuthAuditOutcome::Failure(AuthFailureReason::InvalidCredential),
-        )
-        .await
-        .unwrap();
-    provider
-        .record_auth_result(
-            &key,
-            &AuthAuditOutcome::Failure(AuthFailureReason::InvalidCredential),
-        )
-        .await
-        .unwrap();
+    for _ in 0..2 {
+        let AuthAttemptAdmission::Reserved(reservation) =
+            provider.reserve_auth_attempt(&key).await.unwrap()
+        else {
+            panic!("first two attempts must reserve capacity");
+        };
+        provider
+            .complete_auth_attempt(
+                &reservation,
+                &AuthAuditOutcome::Failure(AuthFailureReason::InvalidCredential),
+            )
+            .await
+            .unwrap();
+    }
     assert!(matches!(
-        provider.check_auth_attempt(&key).await.unwrap(),
-        AuthRateLimitVerdict::Denied { .. }
+        provider.reserve_auth_attempt(&key).await.unwrap(),
+        AuthAttemptAdmission::Denied { .. }
     ));
 
-    provider
-        .record_auth_result(&key, &AuthAuditOutcome::Success)
-        .await
-        .unwrap();
-    assert_eq!(
-        provider.check_auth_attempt(&key).await.unwrap(),
-        AuthRateLimitVerdict::Allowed
-    );
+    provider.clear_namespace_for_tests().await.unwrap();
+}
 
+#[tokio::test]
+async fn rate_limiter_bounds_rotating_peer_and_subject_cohorts() {
+    let Ok(redis_url) = std::env::var("RVOIP_REDIS_URL") else {
+        return;
+    };
+    let namespace = format!(
+        "rvoip:test:rate-cardinality:{}",
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let provider = RedisAuthProvider::from_config(
+        RedisAuthConfig::new(redis_url)
+            .with_namespace(namespace)
+            .with_rate_limit_window(Duration::from_secs(60))
+            .with_max_failures_per_window(100),
+    )
+    .unwrap()
+    .with_auth_rate_limit_limits(RedisAuthRateLimitLimits {
+        peer_cohorts: 3,
+        subject_cohorts: 4,
+        reservations: 8,
+    })
+    .unwrap();
+    provider.clear_namespace_for_tests().await.unwrap();
+
+    for index in 0..128 {
+        let key = AuthRateLimitKey::new(AuthRateLimitKind::SipRegister)
+            .with_subject(format!("rotating-user-{index}"))
+            .with_realm("pbx.example.test")
+            .with_peer(format!("198.51.100.{}", index % 250));
+        if let AuthAttemptAdmission::Reserved(reservation) =
+            provider.reserve_auth_attempt(&key).await.unwrap()
+        {
+            provider
+                .complete_auth_attempt(
+                    &reservation,
+                    &AuthAuditOutcome::Failure(AuthFailureReason::InvalidCredential),
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    let cardinality = provider.auth_rate_limit_cardinality().await.unwrap();
+    assert!(cardinality.peer_cohorts <= 3, "{cardinality:?}");
+    assert!(cardinality.subject_cohorts <= 4, "{cardinality:?}");
+    assert_eq!(cardinality.reservations, 0, "{cardinality:?}");
     provider.clear_namespace_for_tests().await.unwrap();
 }

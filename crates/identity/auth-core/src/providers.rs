@@ -249,7 +249,7 @@ pub trait DigestReplayStore: Send + Sync {
         now: SystemTime,
     ) -> Result<DigestNonceStatus, CredentialAuthError>;
 
-    /// Atomically accept a nonce-count for `(username, nonce, cnonce)`.
+    /// Atomically accept a nonce-count for the legacy `(username, nonce)` key.
     ///
     /// New validators must call [`Self::accept_client_nonce_count`] so clients
     /// sharing an admitted nonce retain independent monotonic sequences.
@@ -257,7 +257,6 @@ pub trait DigestReplayStore: Send + Sync {
         &self,
         username: &str,
         nonce: &str,
-        cnonce: &str,
         nonce_count: u32,
     ) -> Result<bool, CredentialAuthError>;
 
@@ -602,6 +601,61 @@ pub enum AuthRateLimitVerdict {
     },
 }
 
+/// Opaque handle for one atomically admitted authentication attempt.
+///
+/// Callers must return this handle exactly once through
+/// [`AuthRateLimiter::complete_auth_attempt`]. Providers use it to avoid
+/// double-counting the same attempt and to release successful reservations
+/// without releasing unrelated peer failures. Providers must issue an
+/// unpredictable identifier that is unique among their live reservations.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AuthAttemptReservation {
+    opaque_id: String,
+}
+
+impl AuthAttemptReservation {
+    /// Construct a provider-owned opaque reservation handle.
+    pub fn new(opaque_id: impl Into<String>) -> Result<Self, CredentialAuthError> {
+        let opaque_id = opaque_id.into();
+        if opaque_id.is_empty()
+            || opaque_id.len() > 128
+            || opaque_id.trim() != opaque_id
+            || opaque_id.chars().any(char::is_control)
+        {
+            return Err(CredentialAuthError::PolicyRejected(
+                "invalid auth-attempt reservation identifier".to_string(),
+            ));
+        }
+        Ok(Self { opaque_id })
+    }
+
+    /// Return the provider-owned identifier for completion.
+    pub fn opaque_id(&self) -> &str {
+        &self.opaque_id
+    }
+}
+
+impl fmt::Debug for AuthAttemptReservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthAttemptReservation")
+            .field("opaque_id_len", &self.opaque_id.len())
+            .finish()
+    }
+}
+
+/// Atomic authentication-attempt admission result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthAttemptAdmission {
+    /// Capacity was reserved and credential validation may proceed.
+    Reserved(AuthAttemptReservation),
+    /// The aggregate peer or subject cohort is at capacity.
+    Denied {
+        /// Suggested retry delay when known.
+        retry_after: Option<Duration>,
+    },
+}
+
 /// Provider contract for rate-limit and lockout policy.
 #[async_trait]
 pub trait AuthRateLimiter: Send + Sync {
@@ -617,4 +671,33 @@ pub trait AuthRateLimiter: Send + Sync {
         key: &AuthRateLimitKey,
         outcome: &AuthAuditOutcome,
     ) -> Result<(), CredentialAuthError>;
+
+    /// Atomically reserve capacity before credential validation.
+    ///
+    /// The default fails closed so legacy providers remain source compatible
+    /// without preserving the check-then-record race. Secure callers use this
+    /// method instead of [`Self::check_auth_attempt`].
+    async fn reserve_auth_attempt(
+        &self,
+        _key: &AuthRateLimitKey,
+    ) -> Result<AuthAttemptAdmission, CredentialAuthError> {
+        Err(CredentialAuthError::PolicyRejected(
+            "atomic auth-attempt admission is not implemented".to_string(),
+        ))
+    }
+
+    /// Complete a previously reserved attempt exactly once.
+    ///
+    /// Successful attempts release their own reserved capacity; failed
+    /// attempts retain one count through the provider's fixed window. The
+    /// default fails closed for legacy implementations.
+    async fn complete_auth_attempt(
+        &self,
+        _reservation: &AuthAttemptReservation,
+        _outcome: &AuthAuditOutcome,
+    ) -> Result<(), CredentialAuthError> {
+        Err(CredentialAuthError::PolicyRejected(
+            "atomic auth-attempt completion is not implemented".to_string(),
+        ))
+    }
 }

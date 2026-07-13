@@ -49,7 +49,7 @@ rvoip-auth-core = "0.2.2"
 ## Clustered SIP Digest replay migration
 
 Existing `DigestReplayStore` implementations remain source compatible through
-the original `record_nonce`, `nonce_status`, and `(username, nonce, cnonce)`
+the original `record_nonce`, `nonce_status`, and `(username, nonce)`
 `accept_nonce_count` methods. Secure clustered listeners additionally call two
 additive methods:
 
@@ -62,6 +62,22 @@ Their default implementations deliberately return `PolicyRejected`. A legacy
 store therefore compiles but fails closed when selected for a secure clustered
 listener until it implements the new contract. Use `RedisAuthProvider` as the
 first-party implementation and configure one namespace/provider per tenant.
+
+## Atomic authentication-attempt admission
+
+Secure callers reserve an authentication attempt with
+`AuthRateLimiter::reserve_auth_attempt` before checking a credential, then
+return the opaque handle exactly once with `complete_auth_attempt`. A failed
+attempt retains one count for the provider's window; a successful attempt
+releases only its own reservation. This closes the race in the legacy
+check-then-record pair and prevents one successful request from clearing an
+unrelated failure.
+
+The original `check_auth_attempt` and `record_auth_result` methods remain in
+the trait so existing implementations still compile. The additive atomic
+methods deliberately fail closed by default. A limiter selected by a secure
+SIP listener must implement both methods or use the first-party
+`RedisAuthProvider` implementation.
 
 ## License
 

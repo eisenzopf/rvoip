@@ -4,7 +4,7 @@
 //! UAS authentication:
 //!
 //! - redacted audit events through `AuthAuditSink`;
-//! - rate-limit / lockout checks through `AuthRateLimiter`;
+//! - atomic rate-limit / lockout admission through `AuthRateLimiter`;
 //! - shared SIP Digest nonce and nonce-count replay state through
 //!   `DigestReplayStore`.
 //!
@@ -18,6 +18,7 @@
 //!   cargo run -p rvoip-sip --example auth_enterprise_hooks
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -25,16 +26,16 @@ use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 
 use rvoip_sip::{
-    AuthAuditEvent, AuthAuditOutcome, AuthAuditSink, AuthRateLimitKey, AuthRateLimitVerdict,
-    AuthRateLimiter, CredentialAuthError, DigestAlgorithm, DigestAuth, DigestAuthenticator,
-    DigestNonceStatus, DigestReplayStore, DigestSecret, DigestSecretProvider, SipAuthDecision,
-    SipAuthScheme, SipAuthService, SipAuthSource,
+    AuthAttemptAdmission, AuthAttemptReservation, AuthAuditEvent, AuthAuditOutcome, AuthAuditSink,
+    AuthRateLimitKey, AuthRateLimitVerdict, AuthRateLimiter, CredentialAuthError, DigestAlgorithm,
+    DigestAuth, DigestAuthenticator, DigestNonceStatus, DigestReplayStore, DigestSecret,
+    DigestSecretProvider, SipAuthDecision, SipAuthScheme, SipAuthService, SipAuthSource,
 };
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let audit = Arc::new(PrintAuditSink);
-    let rate_limiter = Arc::new(AllowingRateLimiter);
+    let rate_limiter = Arc::new(AllowingRateLimiter::default());
     let replay_store = Arc::new(MemoryDigestReplayStore::default());
 
     let mut auth = SipAuthService::new()
@@ -139,7 +140,10 @@ impl AuthAuditSink for PrintAuditSink {
     }
 }
 
-struct AllowingRateLimiter;
+#[derive(Default)]
+struct AllowingRateLimiter {
+    next_reservation: AtomicU64,
+}
 
 #[async_trait]
 impl AuthRateLimiter for AllowingRateLimiter {
@@ -160,6 +164,29 @@ impl AuthRateLimiter for AllowingRateLimiter {
         outcome: &AuthAuditOutcome,
     ) -> std::result::Result<(), CredentialAuthError> {
         println!("[rate-limit] outcome={outcome:?}");
+        Ok(())
+    }
+
+    async fn reserve_auth_attempt(
+        &self,
+        key: &AuthRateLimitKey,
+    ) -> std::result::Result<AuthAttemptAdmission, CredentialAuthError> {
+        println!(
+            "[rate-limit] reserve kind={:?} subject={:?} realm={:?}",
+            key.kind, key.subject, key.realm
+        );
+        let sequence = self.next_reservation.fetch_add(1, Ordering::Relaxed);
+        Ok(AuthAttemptAdmission::Reserved(AuthAttemptReservation::new(
+            format!("example-reservation-{sequence}"),
+        )?))
+    }
+
+    async fn complete_auth_attempt(
+        &self,
+        _reservation: &AuthAttemptReservation,
+        outcome: &AuthAuditOutcome,
+    ) -> std::result::Result<(), CredentialAuthError> {
+        println!("[rate-limit] complete outcome={outcome:?}");
         Ok(())
     }
 }
@@ -225,11 +252,16 @@ impl DigestReplayStore for MemoryDigestReplayStore {
         &self,
         username: &str,
         nonce: &str,
-        cnonce: &str,
         nonce_count: u32,
     ) -> std::result::Result<bool, CredentialAuthError> {
-        self.accept_client_nonce_count(username, nonce, cnonce, nonce_count, SystemTime::now())
-            .await
+        self.accept_client_nonce_count(
+            username,
+            nonce,
+            "legacy-client-sequence",
+            nonce_count,
+            SystemTime::now(),
+        )
+        .await
     }
 
     async fn admit_nonce(

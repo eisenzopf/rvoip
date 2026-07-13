@@ -239,13 +239,14 @@ use crate::types::Credentials;
 
 // Re-export digest authentication from auth-core.
 pub use rvoip_auth_core::{
-    AAuthValidator, ApiKeyVerifier, AuthAuditEvent, AuthAuditOutcome, AuthAuditScheme,
-    AuthAuditSink, AuthFailureReason, AuthRateLimitKey, AuthRateLimitKind, AuthRateLimitVerdict,
-    AuthRateLimiter, BearerAuthError, BearerValidator, CredentialAuthError, DigestAlgorithm,
-    DigestAuthenticator, DigestChallenge, DigestChallengeDetails, DigestClient as DigestAuth,
-    DigestComputed, DigestNonceStatus, DigestReplayStore, DigestResponse, DigestSecret,
-    DigestSecretProvider, JwksJwtValidator, JwtValidator, OAuth2IntrospectionValidator,
-    PasswordVerifier, TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
+    AAuthValidator, ApiKeyVerifier, AuthAttemptAdmission, AuthAttemptReservation, AuthAuditEvent,
+    AuthAuditOutcome, AuthAuditScheme, AuthAuditSink, AuthFailureReason, AuthRateLimitKey,
+    AuthRateLimitKind, AuthRateLimitVerdict, AuthRateLimiter, BearerAuthError, BearerValidator,
+    CredentialAuthError, DigestAlgorithm, DigestAuthenticator, DigestChallenge,
+    DigestChallengeDetails, DigestClient as DigestAuth, DigestComputed, DigestNonceStatus,
+    DigestReplayStore, DigestResponse, DigestSecret, DigestSecretProvider, JwksJwtValidator,
+    JwtValidator, OAuth2IntrospectionValidator, PasswordVerifier, TokenRevocationChecker,
+    TokenRevocationContext, TokenRevocationStatus,
 };
 
 const MAX_LOCAL_DIGEST_NONCES: usize = 4_096;
@@ -891,6 +892,12 @@ enum AuthAttemptScheme {
     Aka,
     Unknown,
     Missing,
+}
+
+enum SipRateLimitAdmission {
+    Unmanaged,
+    Reserved(AuthAttemptReservation),
+    Denied,
 }
 
 impl AuthAttemptScheme {
@@ -2019,8 +2026,8 @@ impl SipAuthService {
         let attempt = auth_attempt_scheme(authorization);
         let rate_key = self.rate_limit_key(attempt, authorization, method, context);
 
-        let verdict = match self.check_rate_limit(&rate_key).await {
-            Ok(verdict) => verdict,
+        let rate_admission = match self.reserve_rate_limit(&rate_key).await {
+            Ok(admission) => admission,
             Err(error) => {
                 let outcome = AuthAuditOutcome::Failure(AuthFailureReason::ProviderUnavailable);
                 self.audit_attempt(attempt, outcome, authorization, source, method, context)
@@ -2032,55 +2039,60 @@ impl SipAuthService {
             }
         };
 
-        match verdict {
-            AuthRateLimitVerdict::Allowed => {}
-            AuthRateLimitVerdict::Denied { .. } => {
+        let reservation = match rate_admission {
+            SipRateLimitAdmission::Unmanaged => None,
+            SipRateLimitAdmission::Reserved(reservation) => Some(reservation),
+            SipRateLimitAdmission::Denied => {
                 let outcome = AuthAuditOutcome::Failure(AuthFailureReason::PolicyRejected);
-                self.record_rate_result_or_audit_unavailable(
-                    &rate_key,
-                    &outcome,
-                    attempt,
-                    authorization,
-                    source,
-                    method,
-                    context,
-                )
-                .await?;
                 self.audit_attempt(attempt, outcome, authorization, source, method, context)
                     .await?;
                 return self.rejected_async(source).await;
             }
-        }
+        };
 
-        let auth_result = match authorization {
-            None => Ok((
-                self.rejected_async(source).await?,
-                Some(AuthFailureReason::MissingCredential),
-            )),
-            Some(authorization) => {
-                let trimmed = authorization.trim();
-                match attempt {
-                    AuthAttemptScheme::Digest => {
-                        if !self.policy.scheme_allowed(SipAuthScheme::Digest) {
-                            Ok((
-                                self.rejected_async(source).await?,
-                                Some(AuthFailureReason::PolicyRejected),
-                            ))
-                        } else if self.policy.require_digest_replay_store
-                            && self.digest_replay_store.is_none()
-                        {
-                            Ok((
-                                self.rejected_async(source).await?,
-                                Some(AuthFailureReason::PolicyRejected),
-                            ))
-                        } else if let Ok(response) =
-                            DigestAuthenticator::parse_authorization(trimmed)
-                        {
-                            if !self.policy.digest_algorithm_allowed(response.algorithm) {
+        // Keep every fallible challenge/provider operation inside this block.
+        // Once admission has returned a reservation, no `?` may escape the
+        // function before the completion path below consumes that handle.
+        let auth_result = async {
+            match authorization {
+                None => Ok((
+                    self.rejected_async(source).await?,
+                    Some(AuthFailureReason::MissingCredential),
+                )),
+                Some(authorization) => {
+                    let trimmed = authorization.trim();
+                    match attempt {
+                        AuthAttemptScheme::Digest => {
+                            if !self.policy.scheme_allowed(SipAuthScheme::Digest) {
                                 Ok((
                                     self.rejected_async(source).await?,
                                     Some(AuthFailureReason::PolicyRejected),
                                 ))
+                            } else if self.policy.require_digest_replay_store
+                                && self.digest_replay_store.is_none()
+                            {
+                                Ok((
+                                    self.rejected_async(source).await?,
+                                    Some(AuthFailureReason::PolicyRejected),
+                                ))
+                            } else if let Ok(response) =
+                                DigestAuthenticator::parse_authorization(trimmed)
+                            {
+                                if !self.policy.digest_algorithm_allowed(response.algorithm) {
+                                    Ok((
+                                        self.rejected_async(source).await?,
+                                        Some(AuthFailureReason::PolicyRejected),
+                                    ))
+                                } else {
+                                    self.authenticate_digest_with_reason(
+                                        trimmed,
+                                        method,
+                                        request_uri,
+                                        body,
+                                        source,
+                                    )
+                                    .await
+                                }
                             } else {
                                 self.authenticate_digest_with_reason(
                                     trimmed,
@@ -2091,85 +2103,77 @@ impl SipAuthService {
                                 )
                                 .await
                             }
-                        } else {
-                            self.authenticate_digest_with_reason(
-                                trimmed,
-                                method,
-                                request_uri,
-                                body,
-                                source,
-                            )
-                            .await
                         }
-                    }
-                    AuthAttemptScheme::Bearer => {
-                        if !self.policy.scheme_allowed(SipAuthScheme::Bearer) {
-                            Ok((
-                                self.rejected_async(source).await?,
-                                Some(AuthFailureReason::PolicyRejected),
-                            ))
-                        } else if !transport.is_secure() && !self.allow_bearer_over_cleartext {
-                            Ok((
-                                self.rejected_async(source).await?,
-                                Some(AuthFailureReason::PolicyRejected),
-                            ))
-                        } else {
-                            match self.authenticate_bearer_with_reason(trimmed, source).await {
-                                Ok((decision, reason, principal)) => {
-                                    *principal_out = principal;
-                                    Ok((decision, reason))
+                        AuthAttemptScheme::Bearer => {
+                            if !self.policy.scheme_allowed(SipAuthScheme::Bearer) {
+                                Ok((
+                                    self.rejected_async(source).await?,
+                                    Some(AuthFailureReason::PolicyRejected),
+                                ))
+                            } else if !transport.is_secure() && !self.allow_bearer_over_cleartext {
+                                Ok((
+                                    self.rejected_async(source).await?,
+                                    Some(AuthFailureReason::PolicyRejected),
+                                ))
+                            } else {
+                                match self.authenticate_bearer_with_reason(trimmed, source).await {
+                                    Ok((decision, reason, principal)) => {
+                                        *principal_out = principal;
+                                        Ok((decision, reason))
+                                    }
+                                    Err(error) => Err(error),
                                 }
-                                Err(error) => Err(error),
                             }
                         }
-                    }
-                    AuthAttemptScheme::Basic => {
-                        if !self.policy.scheme_allowed(SipAuthScheme::Basic) {
-                            Ok((
-                                self.rejected_async(source).await?,
-                                Some(AuthFailureReason::PolicyRejected),
-                            ))
-                        } else if !transport.is_secure() && !self.allow_basic_over_cleartext {
-                            Ok((
-                                self.rejected_async(source).await?,
-                                Some(AuthFailureReason::PolicyRejected),
-                            ))
-                        } else {
-                            self.authenticate_basic_with_reason(trimmed, source, transport)
+                        AuthAttemptScheme::Basic => {
+                            if !self.policy.scheme_allowed(SipAuthScheme::Basic) {
+                                Ok((
+                                    self.rejected_async(source).await?,
+                                    Some(AuthFailureReason::PolicyRejected),
+                                ))
+                            } else if !transport.is_secure() && !self.allow_basic_over_cleartext {
+                                Ok((
+                                    self.rejected_async(source).await?,
+                                    Some(AuthFailureReason::PolicyRejected),
+                                ))
+                            } else {
+                                self.authenticate_basic_with_reason(trimmed, source, transport)
+                                    .await
+                            }
+                        }
+                        AuthAttemptScheme::Aka => {
+                            if !self.policy.scheme_allowed(SipAuthScheme::Aka) {
+                                Ok((
+                                    self.rejected_async(source).await?,
+                                    Some(AuthFailureReason::PolicyRejected),
+                                ))
+                            } else {
+                                self.authenticate_aka_with_reason(
+                                    trimmed,
+                                    method,
+                                    request_uri,
+                                    body,
+                                    source,
+                                )
                                 .await
+                            }
                         }
+                        AuthAttemptScheme::Unknown | AuthAttemptScheme::Missing => Ok((
+                            self.rejected_async(source).await?,
+                            Some(AuthFailureReason::UnsupportedScheme),
+                        )),
                     }
-                    AuthAttemptScheme::Aka => {
-                        if !self.policy.scheme_allowed(SipAuthScheme::Aka) {
-                            Ok((
-                                self.rejected_async(source).await?,
-                                Some(AuthFailureReason::PolicyRejected),
-                            ))
-                        } else {
-                            self.authenticate_aka_with_reason(
-                                trimmed,
-                                method,
-                                request_uri,
-                                body,
-                                source,
-                            )
-                            .await
-                        }
-                    }
-                    AuthAttemptScheme::Unknown | AuthAttemptScheme::Missing => Ok((
-                        self.rejected_async(source).await?,
-                        Some(AuthFailureReason::UnsupportedScheme),
-                    )),
                 }
             }
-        };
+        }
+        .await;
 
         let (result, failure_reason) = match auth_result {
             Ok(result) => result,
             Err(err) => {
                 let outcome = AuthAuditOutcome::Failure(AuthFailureReason::ProviderUnavailable);
-                self.record_rate_result_or_audit_unavailable(
-                    &rate_key,
+                self.complete_rate_reservation_or_audit_unavailable(
+                    reservation.as_ref(),
                     &outcome,
                     attempt,
                     authorization,
@@ -2185,8 +2189,8 @@ impl SipAuthService {
         };
 
         let outcome = auth_outcome_for_decision(&result, failure_reason);
-        self.record_rate_result_or_audit_unavailable(
-            &rate_key,
+        self.complete_rate_reservation_or_audit_unavailable(
+            reservation.as_ref(),
             &outcome,
             attempt,
             authorization,
@@ -2226,19 +2230,24 @@ impl SipAuthService {
         key
     }
 
-    async fn check_rate_limit(
+    async fn reserve_rate_limit(
         &self,
         key: &AuthRateLimitKey,
-    ) -> std::result::Result<AuthRateLimitVerdict, CredentialAuthError> {
+    ) -> std::result::Result<SipRateLimitAdmission, CredentialAuthError> {
         let Some(rate_limiter) = &self.rate_limiter else {
-            return Ok(AuthRateLimitVerdict::Allowed);
+            return Ok(SipRateLimitAdmission::Unmanaged);
         };
-        rate_limiter.check_auth_attempt(key).await
+        Ok(match rate_limiter.reserve_auth_attempt(key).await? {
+            AuthAttemptAdmission::Reserved(reservation) => {
+                SipRateLimitAdmission::Reserved(reservation)
+            }
+            AuthAttemptAdmission::Denied { .. } => SipRateLimitAdmission::Denied,
+        })
     }
 
-    async fn record_rate_result_or_audit_unavailable(
+    async fn complete_rate_reservation_or_audit_unavailable(
         &self,
-        key: &AuthRateLimitKey,
+        reservation: Option<&AuthAttemptReservation>,
         outcome: &AuthAuditOutcome,
         attempt: AuthAttemptScheme,
         authorization: Option<&str>,
@@ -2249,7 +2258,16 @@ impl SipAuthService {
         let Some(rate_limiter) = &self.rate_limiter else {
             return Ok(());
         };
-        if let Err(error) = rate_limiter.record_auth_result(key, outcome).await {
+        let Some(reservation) = reservation else {
+            return Err(redacted_auth_failure(
+                AuthFailureStage::RateLimitRecord,
+                "missing auth-attempt reservation",
+            ));
+        };
+        if let Err(error) = rate_limiter
+            .complete_auth_attempt(reservation, outcome)
+            .await
+        {
             let provider_outcome =
                 AuthAuditOutcome::Failure(AuthFailureReason::ProviderUnavailable);
             self.audit_attempt(
@@ -4229,6 +4247,40 @@ mod tests {
             self.results.lock().unwrap().push(outcome.clone());
             Ok(())
         }
+
+        async fn reserve_auth_attempt(
+            &self,
+            key: &AuthRateLimitKey,
+        ) -> std::result::Result<AuthAttemptAdmission, CredentialAuthError> {
+            if self.fail_check {
+                return Err(CredentialAuthError::Unavailable(
+                    LOWER_ERROR_CANARY.to_string(),
+                ));
+            }
+            self.checked.lock().unwrap().push(key.clone());
+            Ok(match self.verdict.clone() {
+                AuthRateLimitVerdict::Allowed => AuthAttemptAdmission::Reserved(
+                    AuthAttemptReservation::new("sip-test-reservation")?,
+                ),
+                AuthRateLimitVerdict::Denied { retry_after } => {
+                    AuthAttemptAdmission::Denied { retry_after }
+                }
+            })
+        }
+
+        async fn complete_auth_attempt(
+            &self,
+            _reservation: &AuthAttemptReservation,
+            outcome: &AuthAuditOutcome,
+        ) -> std::result::Result<(), CredentialAuthError> {
+            if self.fail_record {
+                return Err(CredentialAuthError::Unavailable(
+                    LOWER_ERROR_CANARY.to_string(),
+                ));
+            }
+            self.results.lock().unwrap().push(outcome.clone());
+            Ok(())
+        }
     }
 
     struct UnavailableBearer;
@@ -4328,7 +4380,6 @@ mod tests {
             &self,
             _username: &str,
             _nonce: &str,
-            _cnonce: &str,
             _nonce_count: u32,
         ) -> std::result::Result<bool, CredentialAuthError> {
             Err(CredentialAuthError::Unavailable(
@@ -4400,11 +4451,16 @@ mod tests {
             &self,
             username: &str,
             nonce: &str,
-            cnonce: &str,
             nonce_count: u32,
         ) -> std::result::Result<bool, CredentialAuthError> {
-            self.accept_client_nonce_count(username, nonce, cnonce, nonce_count, SystemTime::now())
-                .await
+            self.accept_client_nonce_count(
+                username,
+                nonce,
+                "legacy-client-sequence",
+                nonce_count,
+                SystemTime::now(),
+            )
+            .await
         }
 
         async fn admit_nonce(
@@ -5473,7 +5529,38 @@ mod tests {
         );
         assert_eq!(
             limiter.results(),
-            vec![AuthAuditOutcome::Failure(AuthFailureReason::PolicyRejected)]
+            Vec::<AuthAuditOutcome>::new(),
+            "a denied admission has no reservation to complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn sip_auth_service_completes_reservation_when_challenge_creation_fails() {
+        let limiter = TestRateLimiter::allow();
+        let service = SipAuthService::new()
+            .with_digest_provider("example.test", Arc::new(StaticDigestProvider))
+            .with_digest_replay_store(Arc::new(FailingDigestReplayStore))
+            .with_rate_limiter(limiter.clone().into_arc());
+
+        let error = service
+            .authenticate_authorization(
+                None,
+                "OPTIONS",
+                "sip:bob@example.test",
+                None,
+                SipAuthSource::Origin,
+                false,
+            )
+            .await
+            .expect_err("replay-store challenge failure must fail closed");
+
+        assert_auth_stage(&error, AuthFailureStage::ReplayNonceRecord);
+        assert_eq!(
+            limiter.results(),
+            vec![AuthAuditOutcome::Failure(
+                AuthFailureReason::ProviderUnavailable
+            )],
+            "the reserved attempt must be completed on every error path"
         );
     }
 

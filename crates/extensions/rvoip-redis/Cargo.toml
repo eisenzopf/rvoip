@@ -19,11 +19,13 @@ moq = ["dep:rvoip-moq"]
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }
-redis = { version = "0.27", default-features = false, features = ["cluster-async", "script", "tokio-comp"] }
+redis = { version = "0.27", default-features = false, features = ["cluster-async", "connection-manager", "script", "tls-rustls-webpki-roots", "tokio-rustls-comp"] }
 rvoip-auth-core.workspace = true
 rvoip-moq = { workspace = true, optional = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
+uuid.workspace = true
 
 [dev-dependencies]
 rvoip-core-traits.workspace = true

@@ -626,6 +626,16 @@ Redis-backed contracts:
 - `TokenRevocationChecker` for revoked token ids;
 - `AuthRateLimiter` for fail-closed rate-limit/lockout policy.
 
+Secure SIP authentication uses the additive atomic limiter contract. Implement
+`reserve_auth_attempt` to reserve peer and subject capacity before credential
+validation, and `complete_auth_attempt` to consume that reservation after the
+result is known. A failed attempt retains one count; success must release only
+the supplied reservation. The legacy `check_auth_attempt`/
+`record_auth_result` pair remains source-compatible but is not called by the
+secure listener because the gap between those calls permits concurrent
+over-admission. The additive methods fail closed by default, so migrate custom
+limiters before enabling them on a listener.
+
 ### Audit Export
 
 Use `rvoip-audit` when auth events need to leave the process.

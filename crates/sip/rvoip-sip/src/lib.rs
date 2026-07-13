@@ -557,17 +557,17 @@ pub use api::trace_redactor::{
 };
 pub use auth::{
     AAuthValidator, AkaClientConfig, AkaClientProvider, AkaVectorProvider, ApiKeyVerifier,
-    AuditFailurePolicy, AuthAuditEvent, AuthAuditOutcome, AuthAuditScheme, AuthAuditSink,
-    AuthDecision, AuthFailureReason, AuthIdentity, AuthRateLimitKey, AuthRateLimitKind,
-    AuthRateLimitVerdict, AuthRateLimiter, BearerAuthError, BearerValidator, ClientAuthHeader,
-    CredentialAuthError, DigestAlgorithm, DigestAuth, DigestAuthenticator, DigestChallenge,
-    DigestChallengeDetails, DigestComputed, DigestNonceStatus, DigestReplayStore, DigestResponse,
-    DigestSecret, DigestSecretProvider, JwksJwtValidator, JwtValidator,
-    OAuth2IntrospectionValidator, PasswordVerifier, SipAuthChallenge, SipAuthContext,
-    SipAuthDecision, SipAuthPolicy, SipAuthScheme, SipAuthService, SipAuthSource, SipClientAuth,
-    SipDigestAuthService, SipIncomingAuthenticator, SipListenerAuthPolicy,
-    SipPrincipalAuthDecision, SipTransportSecurityContext, TokenRevocationChecker,
-    TokenRevocationContext, TokenRevocationStatus,
+    AuditFailurePolicy, AuthAttemptAdmission, AuthAttemptReservation, AuthAuditEvent,
+    AuthAuditOutcome, AuthAuditScheme, AuthAuditSink, AuthDecision, AuthFailureReason,
+    AuthIdentity, AuthRateLimitKey, AuthRateLimitKind, AuthRateLimitVerdict, AuthRateLimiter,
+    BearerAuthError, BearerValidator, ClientAuthHeader, CredentialAuthError, DigestAlgorithm,
+    DigestAuth, DigestAuthenticator, DigestChallenge, DigestChallengeDetails, DigestComputed,
+    DigestNonceStatus, DigestReplayStore, DigestResponse, DigestSecret, DigestSecretProvider,
+    JwksJwtValidator, JwtValidator, OAuth2IntrospectionValidator, PasswordVerifier,
+    SipAuthChallenge, SipAuthContext, SipAuthDecision, SipAuthPolicy, SipAuthScheme,
+    SipAuthService, SipAuthSource, SipClientAuth, SipDigestAuthService, SipIncomingAuthenticator,
+    SipListenerAuthPolicy, SipPrincipalAuthDecision, SipTransportSecurityContext,
+    TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
 pub use rvoip_media_core::performance::pool::PoolConfig as MediaPoolConfig;
 pub use rvoip_media_core::types::AudioFrame;
