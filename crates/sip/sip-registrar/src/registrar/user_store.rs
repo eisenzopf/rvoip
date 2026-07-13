@@ -1,6 +1,7 @@
 //! User credential storage for SIP registration authentication
 //!
-//! Simple in-memory user database for storing and retrieving user credentials.
+//! Simple in-memory user database for storing Digest HA1 verifiers and
+//! non-secret user metadata. Plaintext credentials are never recoverable.
 //! In production, this should be backed by a persistent database.
 
 use crate::error::{RegistrarError, Result};
@@ -43,6 +44,45 @@ impl fmt::Debug for UserCredentials {
             .finish()
     }
 }
+
+/// Non-secret metadata retained for a provisioned Digest user.
+#[derive(Clone, PartialEq, Eq)]
+pub struct UserCredentialMetadata {
+    pub username: String,
+    pub realm: String,
+    pub display_name: Option<String>,
+}
+
+impl fmt::Debug for UserCredentialMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UserCredentialMetadata")
+            .field("username_present", &!self.username.is_empty())
+            .field("username_bytes", &self.username.len())
+            .field("realm_present", &!self.realm.is_empty())
+            .field("realm_bytes", &self.realm.len())
+            .field("display_name_present", &self.display_name.is_some())
+            .finish()
+    }
+}
+
+/// Explicit migration error for the pre-HA1 plaintext retrieval API.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PlaintextCredentialUnavailable;
+
+impl fmt::Display for PlaintextCredentialUnavailable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("plaintext credentials are not retained")
+    }
+}
+
+impl fmt::Debug for PlaintextCredentialUnavailable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PlaintextCredentialUnavailable")
+    }
+}
+
+impl std::error::Error for PlaintextCredentialUnavailable {}
 
 #[derive(Clone)]
 struct StoredUserCredentials {
@@ -154,24 +194,41 @@ impl UserStore {
         Ok(())
     }
 
-    /// Plaintext passwords are deliberately not recoverable from this store.
-    #[deprecated(note = "UserStore retains HA1 verifiers; use get_digest_secret")]
-    pub fn get_password(&self, username: &str) -> Option<String> {
-        let _ = username;
-        None
+    /// Compatibility migration boundary for the removed plaintext store.
+    ///
+    /// Existing users return an explicit error instead of silently looking
+    /// absent. Missing users remain `Ok(None)`. New code must use
+    /// [`Self::get_digest_secret`] for authentication.
+    #[deprecated(note = "plaintext is not retained; migrate authentication to get_digest_secret")]
+    pub fn get_password(
+        &self,
+        username: &str,
+    ) -> std::result::Result<Option<String>, PlaintextCredentialUnavailable> {
+        if self.user_exists(username) {
+            Err(PlaintextCredentialUnavailable)
+        } else {
+            Ok(None)
+        }
     }
 
-    /// Return non-secret credential metadata.
+    /// Return non-secret metadata for a provisioned user.
+    pub fn get_user_metadata(&self, username: &str) -> Option<UserCredentialMetadata> {
+        self.users
+            .get(username)
+            .map(|entry| UserCredentialMetadata {
+                username: entry.username.clone(),
+                realm: entry.realm.clone(),
+                display_name: entry.display_name.clone(),
+            })
+    }
+
+    /// Deprecated alias whose return type deliberately contains no password.
     ///
-    /// The compatibility `password` field is always empty because plaintext
-    /// password recovery would defeat the store's security boundary.
-    pub fn get_credentials(&self, username: &str) -> Option<UserCredentials> {
-        self.users.get(username).map(|entry| UserCredentials {
-            username: entry.username.clone(),
-            password: String::new(),
-            realm: entry.realm.clone(),
-            display_name: entry.display_name.clone(),
-        })
+    /// This is a source-visible migration boundary rather than the previous
+    /// false compatibility behavior of returning an empty password.
+    #[deprecated(note = "use get_user_metadata; plaintext credentials are not retained")]
+    pub fn get_credentials(&self, username: &str) -> Option<UserCredentialMetadata> {
+        self.get_user_metadata(username)
     }
 
     /// Return the algorithm-appropriate HA1 verifier for Digest validation.
@@ -258,8 +315,16 @@ mod tests {
             store.get_digest_secret("alice", "test.realm", DigestAlgorithm::MD5),
             Some(DigestSecret::Ha1(_))
         ));
-        let metadata = store.get_credentials("alice").unwrap();
-        assert!(metadata.password.is_empty());
+        let metadata = store.get_user_metadata("alice").unwrap();
+        assert_eq!(metadata.username, "alice");
+        assert_eq!(metadata.realm, "test.realm");
+
+        #[allow(deprecated)]
+        let plaintext = store.get_password("alice");
+        assert_eq!(plaintext, Err(PlaintextCredentialUnavailable));
+        #[allow(deprecated)]
+        let missing = store.get_password("missing");
+        assert_eq!(missing, Ok(None));
     }
 
     #[test]

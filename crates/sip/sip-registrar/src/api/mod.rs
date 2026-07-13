@@ -29,6 +29,7 @@ const MAX_REGISTER_AUTHORIZATION_BYTES: usize = 8 * 1024;
 struct IssuedDigestNonce {
     realm: String,
     algorithm: rvoip_auth_core::DigestAlgorithm,
+    qop: Option<Vec<String>>,
     opaque: Option<String>,
     expires_at: Instant,
     retain_until: Instant,
@@ -49,6 +50,20 @@ enum IssuedNonceStatus {
 impl RegisterDigestReplayState {
     fn sweep(&mut self, now: Instant) {
         self.nonces.retain(|_, issued| issued.retain_until > now);
+        let retained_nonces: HashSet<&str> = self.nonces.keys().map(String::as_str).collect();
+        self.nonce_counts
+            .retain(|(_, nonce), _| retained_nonces.contains(nonce.as_str()));
+    }
+
+    /// Reclaim only expired challenges when admission is under pressure.
+    /// Active challenges are never evicted: a client must be able to complete
+    /// the proof it was just asked to compute even during unauthenticated
+    /// challenge churn.
+    fn reclaim_expired_for_admission(&mut self, now: Instant) {
+        if self.nonces.len() < MAX_REGISTER_DIGEST_NONCES {
+            return;
+        }
+        self.nonces.retain(|_, issued| issued.expires_at > now);
         let retained_nonces: HashSet<&str> = self.nonces.keys().map(String::as_str).collect();
         self.nonce_counts
             .retain(|(_, nonce), _| retained_nonces.contains(nonce.as_str()));
@@ -386,34 +401,45 @@ impl RegistrarService {
             .auth
             .as_ref()
             .expect("digest challenges require configured authentication");
-        let challenge = auth.generate_challenge();
+        let mut challenge = auth.generate_challenge();
         let now = Instant::now();
         if let Some(replay) = &self.digest_replay {
             let mut replay = replay
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             replay.sweep(now);
+            replay.reclaim_expired_for_admission(now);
             if replay.nonces.len() >= MAX_REGISTER_DIGEST_NONCES {
-                if let Some(oldest) = replay
+                if let Some((nonce, issued)) = replay
                     .nonces
                     .iter()
-                    .min_by_key(|(_, nonce)| nonce.expires_at)
-                    .map(|(nonce, _)| nonce.clone())
+                    .max_by_key(|(_, issued)| issued.expires_at)
+                    .map(|(nonce, issued)| (nonce.clone(), issued.clone()))
                 {
-                    replay.nonces.remove(&oldest);
-                    replay.nonce_counts.retain(|(_, nonce), _| nonce != &oldest);
+                    // Admission is saturated with active challenges. Reuse a
+                    // still-valid challenge instead of evicting one and
+                    // invalidating an in-flight legitimate proof.
+                    challenge = rvoip_auth_core::DigestChallenge {
+                        realm: issued.realm,
+                        nonce,
+                        algorithm: issued.algorithm,
+                        qop: issued.qop,
+                        opaque: issued.opaque,
+                    };
                 }
+            } else {
+                replay.nonces.insert(
+                    challenge.nonce.clone(),
+                    IssuedDigestNonce {
+                        realm: challenge.realm.clone(),
+                        algorithm: challenge.algorithm,
+                        qop: challenge.qop.clone(),
+                        opaque: challenge.opaque.clone(),
+                        expires_at: now + REGISTER_DIGEST_NONCE_TTL,
+                        retain_until: now + REGISTER_DIGEST_NONCE_RETENTION,
+                    },
+                );
             }
-            replay.nonces.insert(
-                challenge.nonce.clone(),
-                IssuedDigestNonce {
-                    realm: challenge.realm.clone(),
-                    algorithm: challenge.algorithm,
-                    opaque: challenge.opaque.clone(),
-                    expires_at: now + REGISTER_DIGEST_NONCE_TTL,
-                    retain_until: now + REGISTER_DIGEST_NONCE_RETENTION,
-                },
-            );
         }
         auth.format_www_authenticate_with_stale(&challenge, stale)
     }
@@ -987,6 +1013,52 @@ mod digest_replay_tests {
                 .await
                 .unwrap()
                 .0
+        );
+    }
+
+    #[tokio::test]
+    async fn challenge_churn_never_evicts_an_active_legitimate_nonce() {
+        let uri = "sip:registrar.test";
+        let (service, legitimate) = service_and_challenge().await;
+        let now = Instant::now();
+        let replay = service.digest_replay.as_ref().unwrap();
+        {
+            let mut replay = replay.lock().unwrap();
+            for index in 0..(MAX_REGISTER_DIGEST_NONCES - 1) {
+                replay.nonces.insert(
+                    format!("attacker-{index}"),
+                    IssuedDigestNonce {
+                        realm: legitimate.realm.clone(),
+                        algorithm: legitimate.algorithm,
+                        qop: legitimate.qop.clone(),
+                        opaque: Some(format!("opaque-{index}")),
+                        expires_at: now + REGISTER_DIGEST_NONCE_TTL,
+                        retain_until: now + REGISTER_DIGEST_NONCE_RETENTION,
+                    },
+                );
+            }
+            assert_eq!(replay.nonces.len(), MAX_REGISTER_DIGEST_NONCES);
+        }
+
+        for _ in 0..32 {
+            let challenge = service.issue_register_digest_challenge(false);
+            assert!(!challenge.is_empty());
+        }
+
+        {
+            let replay = replay.lock().unwrap();
+            assert_eq!(replay.nonces.len(), MAX_REGISTER_DIGEST_NONCES);
+            assert!(replay.nonces.contains_key(&legitimate.nonce));
+        }
+
+        let proof = authorization(&legitimate, uri, 1);
+        assert!(
+            service
+                .authenticate_register("alice", Some(&proof), "REGISTER", uri)
+                .await
+                .unwrap()
+                .0,
+            "a legitimate proof must survive unauthenticated challenge churn"
         );
     }
 

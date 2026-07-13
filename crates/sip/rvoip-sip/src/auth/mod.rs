@@ -217,7 +217,7 @@ mod listener;
 
 pub use listener::SipListenerAuthPolicy;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
@@ -248,6 +248,51 @@ pub use rvoip_auth_core::{
 
 const MAX_LOCAL_DIGEST_NONCES: usize = 4_096;
 const MAX_LOCAL_DIGEST_NONCE_COUNTS: usize = 16_384;
+
+fn admit_local_digest_nonce(
+    nonces: &RwLock<HashMap<String, Instant>>,
+    nonce_counts: &RwLock<HashMap<(String, String), u32>>,
+    requested_nonce: &str,
+    nonce_ttl: Duration,
+) -> String {
+    let now = Instant::now();
+    let expires_at = now.checked_add(nonce_ttl).unwrap_or(now);
+    let mut nonces = nonces
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let expired = nonces
+        .iter()
+        .filter(|(_, expires_at)| **expires_at <= now)
+        .map(|(nonce, _)| nonce.clone())
+        .collect::<HashSet<_>>();
+    if !expired.is_empty() {
+        nonces.retain(|nonce, _| !expired.contains(nonce));
+    }
+
+    let admitted = if nonces.len() >= MAX_LOCAL_DIGEST_NONCES {
+        // Never evict an active challenge. Reuse one until expiry so a peer
+        // that already received it can still complete authentication under
+        // unauthenticated challenge churn.
+        nonces
+            .iter()
+            .max_by_key(|(_, expires_at)| **expires_at)
+            .map(|(nonce, _)| nonce.clone())
+            .unwrap_or_else(|| requested_nonce.to_string())
+    } else {
+        nonces.insert(requested_nonce.to_string(), expires_at);
+        requested_nonce.to_string()
+    };
+    drop(nonces);
+
+    if !expired.is_empty() {
+        nonce_counts
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|(_, nonce), _| !expired.contains(nonce));
+    }
+    admitted
+}
 
 fn digest_nonce_count(response: &DigestResponse) -> Option<u32> {
     if !matches!(response.qop.as_deref(), Some("auth") | Some("auth-int")) {
@@ -2820,13 +2865,18 @@ impl DigestProviderAuthStore {
     }
 
     fn challenge(&self) -> DigestChallenge {
-        let challenge = self.authenticator.generate_challenge();
-        self.record_nonce_local(&challenge.nonce);
+        let mut challenge = self.authenticator.generate_challenge();
+        challenge.nonce = admit_local_digest_nonce(
+            self.nonces.as_ref(),
+            self.nonce_counts.as_ref(),
+            &challenge.nonce,
+            self.nonce_ttl,
+        );
         challenge
     }
 
     async fn challenge_async(&self) -> Result<DigestChallenge> {
-        let challenge = self.authenticator.generate_challenge();
+        let mut challenge = self.authenticator.generate_challenge();
         if let Some(replay_store) = &self.replay_store {
             replay_store
                 .record_nonce(&challenge.nonce, system_time_after(self.nonce_ttl))
@@ -2835,38 +2885,14 @@ impl DigestProviderAuthStore {
                     redacted_auth_failure(AuthFailureStage::ReplayNonceRecord, error)
                 })?;
         } else {
-            self.record_nonce_local(&challenge.nonce);
+            challenge.nonce = admit_local_digest_nonce(
+                self.nonces.as_ref(),
+                self.nonce_counts.as_ref(),
+                &challenge.nonce,
+                self.nonce_ttl,
+            );
         }
         Ok(challenge)
-    }
-
-    fn record_nonce_local(&self, nonce: &str) {
-        let expires_at = Instant::now()
-            .checked_add(self.nonce_ttl)
-            .unwrap_or_else(Instant::now);
-        let mut nonces = self
-            .nonces
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let evicted = if nonces.len() >= MAX_LOCAL_DIGEST_NONCES {
-            nonces
-                .iter()
-                .min_by_key(|(_, expires_at)| **expires_at)
-                .map(|(nonce, _)| nonce.clone())
-        } else {
-            None
-        };
-        if let Some(evicted) = &evicted {
-            nonces.remove(evicted);
-        }
-        nonces.insert(nonce.to_string(), expires_at);
-        drop(nonces);
-        if let Some(evicted) = evicted {
-            self.nonce_counts
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .retain(|(_, nonce), _| nonce != &evicted);
-        }
     }
 
     fn www_authenticate(&self, challenge: &DigestChallenge) -> String {
@@ -3609,33 +3635,13 @@ impl SipDigestAuthService {
 
     /// Generate a fresh digest challenge.
     pub fn challenge(&self) -> DigestChallenge {
-        let challenge = self.authenticator.generate_challenge();
-        let expires_at = Instant::now()
-            .checked_add(self.nonce_ttl)
-            .unwrap_or_else(Instant::now);
-        let mut nonces = self
-            .nonces
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let evicted = if nonces.len() >= MAX_LOCAL_DIGEST_NONCES {
-            nonces
-                .iter()
-                .min_by_key(|(_, expires_at)| **expires_at)
-                .map(|(nonce, _)| nonce.clone())
-        } else {
-            None
-        };
-        if let Some(evicted) = &evicted {
-            nonces.remove(evicted);
-        }
-        nonces.insert(challenge.nonce.clone(), expires_at);
-        drop(nonces);
-        if let Some(evicted) = evicted {
-            self.nonce_counts
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .retain(|(_, nonce), _| nonce != &evicted);
-        }
+        let mut challenge = self.authenticator.generate_challenge();
+        challenge.nonce = admit_local_digest_nonce(
+            self.nonces.as_ref(),
+            self.nonce_counts.as_ref(),
+            &challenge.nonce,
+            self.nonce_ttl,
+        );
         challenge
     }
 
@@ -4556,19 +4562,35 @@ mod tests {
     }
 
     #[test]
-    fn sip_digest_auth_service_bounds_local_nonce_state() {
+    fn sip_digest_auth_service_bounds_local_nonce_state_without_active_eviction() {
         let service = SipDigestAuthService::new("example.test");
-        for _ in 0..=MAX_LOCAL_DIGEST_NONCES {
+        service.add_user("alice", "secret");
+        let legitimate = service.challenge();
+        for _ in 0..(MAX_LOCAL_DIGEST_NONCES + 32) {
             service.challenge();
         }
-        assert!(
-            service
-                .nonces
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .len()
-                <= MAX_LOCAL_DIGEST_NONCES
+        let nonces = service
+            .nonces
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(nonces.len(), MAX_LOCAL_DIGEST_NONCES);
+        assert!(nonces.contains_key(&legitimate.nonce));
+        drop(nonces);
+
+        let authorization = authorization_for(
+            "alice",
+            "secret",
+            &legitimate,
+            "OPTIONS",
+            "sip:bob@example.test",
+            None,
         );
+        assert!(matches!(
+            service
+                .validate_authorization(&authorization, "OPTIONS", "sip:bob@example.test", None)
+                .expect("legitimate proof after challenge churn"),
+            AuthDecision::Authorized { .. }
+        ));
     }
 
     #[test]

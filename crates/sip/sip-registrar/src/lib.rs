@@ -8,6 +8,9 @@
 //! - Presence state management (PUBLISH)
 //! - Subscription handling (SUBSCRIBE/NOTIFY)
 //! - Automatic buddy lists for registered users
+//!
+//! See `MIGRATION_0_3.md` when migrating code that previously retrieved
+//! plaintext credentials from `UserStore`.
 
 pub mod api;
 pub mod error;
@@ -25,7 +28,9 @@ pub use identity::{
     CredentialProvider, ExternalIdentity, IdentityProvider, IdentitySyncService,
     InMemoryIdentityProvider,
 };
-pub use registrar::{Registrar, UserCredentials, UserStore};
+pub use registrar::{
+    PlaintextCredentialUnavailable, Registrar, UserCredentialMetadata, UserCredentials, UserStore,
+};
 pub use types::{
     AddressOfRecord, BasicStatus, ContactInfo, ContactReachability, ExtendedStatus, PresenceState,
     PresenceStatus, RegistrarConfig, Subscription, SubscriptionState, Transport, UserRegistration,

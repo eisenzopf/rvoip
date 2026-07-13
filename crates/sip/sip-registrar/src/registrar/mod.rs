@@ -15,7 +15,9 @@ pub mod user_store;
 pub use location::LocationService;
 pub use manager::RegistrationManager;
 pub use registry::{RegistryConfig, UserRegistry};
-pub use user_store::{UserCredentials, UserStore};
+pub use user_store::{
+    PlaintextCredentialUnavailable, UserCredentialMetadata, UserCredentials, UserStore,
+};
 
 /// Main registrar interface combining registration, lookup, and expiry.
 pub struct Registrar {
