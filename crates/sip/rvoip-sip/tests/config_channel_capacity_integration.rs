@@ -2,9 +2,22 @@ use std::time::Duration;
 
 use rvoip_sip::{
     cleanup_diag, Config, MediaSessionControllerConfig, RtpSessionBufferConfig,
-    RtpTransportBufferConfig, UnifiedCoordinator,
+    RtpTransportBufferConfig, SessionError, UnifiedCoordinator,
 };
 use serial_test::serial;
+
+fn config_error_detail(error: &SessionError) -> &str {
+    let SessionError::ConfigError(detail) = error else {
+        panic!("expected typed ConfigError, got {error:?}");
+    };
+    let rendered = error.to_string();
+    assert!(
+        !rendered.contains(detail),
+        "ConfigError Display must remain redacted"
+    );
+    assert!(rendered.contains("redacted"));
+    detail
+}
 
 #[test]
 fn incoming_call_channel_capacity_defaults_to_1000() {
@@ -319,8 +332,7 @@ fn media_port_capacity_overflow_is_rejected() {
         .validate()
         .expect_err("overflowing RTP media port capacity must fail");
     assert!(
-        err.to_string()
-            .contains("below requested media_port_capacity"),
+        config_error_detail(&err).contains("below requested media_port_capacity"),
         "unexpected validation error: {err}"
     );
 }
@@ -332,8 +344,7 @@ fn zero_incoming_call_channel_capacity_is_rejected() {
 
     let err = config.validate().expect_err("zero capacity must fail");
     assert!(
-        err.to_string()
-            .contains("incoming_call_channel_capacity must be at least 1"),
+        config_error_detail(&err).contains("incoming_call_channel_capacity must be at least 1"),
         "unexpected validation error: {err}"
     );
 }
@@ -345,8 +356,7 @@ fn zero_media_session_capacity_is_rejected_when_set() {
 
     let err = config.validate().expect_err("zero capacity must fail");
     assert!(
-        err.to_string()
-            .contains("media_session_capacity must be at least 1"),
+        config_error_detail(&err).contains("media_session_capacity must be at least 1"),
         "unexpected validation error: {err}"
     );
 }
@@ -358,8 +368,7 @@ fn zero_media_port_capacity_is_rejected_when_set() {
 
     let err = config.validate().expect_err("zero capacity must fail");
     assert!(
-        err.to_string()
-            .contains("media_port_capacity must be at least 1"),
+        config_error_detail(&err).contains("media_port_capacity must be at least 1"),
         "unexpected validation error: {err}"
     );
 }
@@ -373,8 +382,7 @@ fn invalid_rtp_session_buffer_config_is_rejected() {
         .validate()
         .expect_err("zero RTP sender capacity must fail");
     assert!(
-        err.to_string()
-            .contains("rtp_session_buffer_config.sender_channel_capacity"),
+        config_error_detail(&err).contains("rtp_session_buffer_config.sender_channel_capacity"),
         "unexpected validation error: {err}"
     );
 }
@@ -388,8 +396,7 @@ fn invalid_rtp_transport_buffer_config_is_rejected() {
         .validate()
         .expect_err("zero RTCP receive buffer must fail");
     assert!(
-        err.to_string()
-            .contains("rtp_transport_buffer_config.rtcp_recv_buffer_size"),
+        config_error_detail(&err).contains("rtp_transport_buffer_config.rtcp_recv_buffer_size"),
         "unexpected validation error: {err}"
     );
 }
@@ -403,8 +410,7 @@ fn invalid_media_session_controller_buffer_config_is_rejected() {
         .validate()
         .expect_err("zero media RTP buffer size must fail");
     assert!(
-        err.to_string()
-            .contains("media_session_controller_config.rtp_buffer_size"),
+        config_error_detail(&err).contains("media_session_controller_config.rtp_buffer_size"),
         "unexpected validation error: {err}"
     );
 
@@ -418,7 +424,7 @@ fn invalid_media_session_controller_buffer_config_is_rejected() {
         .validate()
         .expect_err("zero audio frame size must fail");
     assert!(
-        err.to_string()
+        config_error_detail(&err)
             .contains("media_session_controller_config.audio_frame_pool.samples_per_frame"),
         "unexpected validation error: {err}"
     );
@@ -433,7 +439,7 @@ fn invalid_media_session_controller_buffer_config_is_rejected() {
         .validate()
         .expect_err("initial media RTP pool count above max must fail");
     assert!(
-        err.to_string()
+        config_error_detail(&err)
             .contains("rtp_buffer_initial_count must be <= rtp_buffer_max_count"),
         "unexpected validation error: {err}"
     );
@@ -446,8 +452,7 @@ fn zero_state_event_channel_capacity_is_rejected() {
 
     let err = config.validate().expect_err("zero capacity must fail");
     assert!(
-        err.to_string()
-            .contains("state_event_channel_capacity must be at least 1"),
+        config_error_detail(&err).contains("state_event_channel_capacity must be at least 1"),
         "unexpected validation error: {err}"
     );
 }
@@ -459,8 +464,7 @@ fn zero_sip_transport_channel_capacity_is_rejected() {
 
     let err = config.validate().expect_err("zero capacity must fail");
     assert!(
-        err.to_string()
-            .contains("sip_transport_channel_capacity must be at least 1"),
+        config_error_detail(&err).contains("sip_transport_channel_capacity must be at least 1"),
         "unexpected validation error: {err}"
     );
 }
@@ -472,7 +476,7 @@ fn zero_sip_transport_dispatch_config_is_rejected_when_set() {
 
     let err = config.validate().expect_err("zero workers must fail");
     assert!(
-        err.to_string()
+        config_error_detail(&err)
             .contains("sip_transport_dispatch_workers must be at least 1 when set"),
         "unexpected validation error: {err}"
     );
@@ -482,7 +486,7 @@ fn zero_sip_transport_dispatch_config_is_rejected_when_set() {
 
     let err = config.validate().expect_err("zero capacity must fail");
     assert!(
-        err.to_string()
+        config_error_detail(&err)
             .contains("sip_transport_dispatch_queue_capacity must be at least 1 when set"),
         "unexpected validation error: {err}"
     );
@@ -495,8 +499,7 @@ fn zero_transaction_event_channel_capacity_is_rejected() {
 
     let err = config.validate().expect_err("zero capacity must fail");
     assert!(
-        err.to_string()
-            .contains("transaction_event_channel_capacity must be at least 1"),
+        config_error_detail(&err).contains("transaction_event_channel_capacity must be at least 1"),
         "unexpected validation error: {err}"
     );
 }
@@ -508,7 +511,7 @@ fn zero_transaction_dispatch_config_is_rejected_when_set() {
 
     let err = config.validate().expect_err("zero workers must fail");
     assert!(
-        err.to_string()
+        config_error_detail(&err)
             .contains("sip_transaction_dispatch_workers must be at least 1 when set"),
         "unexpected validation error: {err}"
     );
@@ -518,7 +521,7 @@ fn zero_transaction_dispatch_config_is_rejected_when_set() {
 
     let err = config.validate().expect_err("zero capacity must fail");
     assert!(
-        err.to_string()
+        config_error_detail(&err)
             .contains("sip_transaction_dispatch_queue_capacity must be at least 1 when set"),
         "unexpected validation error: {err}"
     );
@@ -528,7 +531,7 @@ fn zero_transaction_dispatch_config_is_rejected_when_set() {
 
     let err = config.validate().expect_err("zero burst max must fail");
     assert!(
-        err.to_string()
+        config_error_detail(&err)
             .contains("sip_transaction_dispatch_priority_burst_max must be at least 1 when set"),
         "unexpected validation error: {err}"
     );
@@ -540,7 +543,7 @@ fn zero_transaction_dispatch_config_is_rejected_when_set() {
         .validate()
         .expect_err("zero retransmit budget must fail");
     assert!(
-        err.to_string()
+        config_error_detail(&err)
             .contains("sip_invite_2xx_retransmit_max_due_per_tick must be at least 1 when set"),
         "unexpected validation error: {err}"
     );
@@ -553,7 +556,7 @@ fn zero_dialog_dispatch_config_is_rejected_when_set() {
 
     let err = config.validate().expect_err("zero workers must fail");
     assert!(
-        err.to_string()
+        config_error_detail(&err)
             .contains("sip_dialog_dispatch_workers must be at least 1 when set"),
         "unexpected validation error: {err}"
     );
@@ -563,7 +566,7 @@ fn zero_dialog_dispatch_config_is_rejected_when_set() {
 
     let err = config.validate().expect_err("zero capacity must fail");
     assert!(
-        err.to_string()
+        config_error_detail(&err)
             .contains("sip_dialog_dispatch_queue_capacity must be at least 1 when set"),
         "unexpected validation error: {err}"
     );
@@ -576,8 +579,7 @@ fn zero_global_event_channel_capacity_is_rejected() {
 
     let err = config.validate().expect_err("zero capacity must fail");
     assert!(
-        err.to_string()
-            .contains("global_event_channel_capacity must be at least 1"),
+        config_error_detail(&err).contains("global_event_channel_capacity must be at least 1"),
         "unexpected validation error: {err}"
     );
 }
@@ -591,8 +593,7 @@ fn zero_sip_udp_socket_buffers_are_rejected_when_set() {
         .validate()
         .expect_err("zero receive buffer must fail");
     assert!(
-        err.to_string()
-            .contains("sip_udp_recv_buffer_size must be at least 1 when set"),
+        config_error_detail(&err).contains("sip_udp_recv_buffer_size must be at least 1 when set"),
         "unexpected validation error: {err}"
     );
 
@@ -601,8 +602,7 @@ fn zero_sip_udp_socket_buffers_are_rejected_when_set() {
 
     let err = config.validate().expect_err("zero send buffer must fail");
     assert!(
-        err.to_string()
-            .contains("sip_udp_send_buffer_size must be at least 1 when set"),
+        config_error_detail(&err).contains("sip_udp_send_buffer_size must be at least 1 when set"),
         "unexpected validation error: {err}"
     );
 }
@@ -614,8 +614,7 @@ fn zero_session_event_dispatcher_workers_is_rejected() {
 
     let err = config.validate().expect_err("zero capacity must fail");
     assert!(
-        err.to_string()
-            .contains("session_event_dispatcher_workers must be at least 1"),
+        config_error_detail(&err).contains("session_event_dispatcher_workers must be at least 1"),
         "unexpected validation error: {err}"
     );
 }
@@ -627,7 +626,7 @@ fn zero_session_event_dispatcher_channel_capacity_is_rejected() {
 
     let err = config.validate().expect_err("zero capacity must fail");
     assert!(
-        err.to_string()
+        config_error_detail(&err)
             .contains("session_event_dispatcher_channel_capacity must be at least 1"),
         "unexpected validation error: {err}"
     );
@@ -640,8 +639,7 @@ fn zero_server_call_capacity_is_rejected_when_set() {
 
     let err = config.validate().expect_err("zero capacity must fail");
     assert!(
-        err.to_string()
-            .contains("server_call_capacity must be at least 1 when set"),
+        config_error_detail(&err).contains("server_call_capacity must be at least 1 when set"),
         "unexpected validation error: {err}"
     );
 }
@@ -653,7 +651,7 @@ fn zero_server_call_admission_limit_is_rejected_when_set() {
 
     let err = config.validate().expect_err("zero limit must fail");
     assert!(
-        err.to_string()
+        config_error_detail(&err)
             .contains("server_call_admission_limit must be at least 1 when set"),
         "unexpected validation error: {err}"
     );
@@ -666,7 +664,7 @@ fn zero_server_overload_retry_after_is_rejected_when_set() {
 
     let err = config.validate().expect_err("zero retry-after must fail");
     assert!(
-        err.to_string()
+        config_error_detail(&err)
             .contains("server_overload_retry_after_secs must be at least 1 when set"),
         "unexpected validation error: {err}"
     );
@@ -682,7 +680,7 @@ fn invalid_server_call_admission_soft_limit_is_rejected() {
         .validate()
         .expect_err("soft limit above hard must fail");
     assert!(
-        err.to_string().contains("server_call_admission_soft_limit"),
+        config_error_detail(&err).contains("server_call_admission_soft_limit"),
         "unexpected validation error: {err}"
     );
 }
@@ -694,7 +692,7 @@ fn zero_server_call_admission_pacing_delay_is_rejected_when_set() {
 
     let err = config.validate().expect_err("zero pacing delay must fail");
     assert!(
-        err.to_string()
+        config_error_detail(&err)
             .contains("server_call_admission_pacing_delay_ms must be at least 1 when set"),
         "unexpected validation error: {err}"
     );
@@ -709,8 +707,7 @@ fn unsupported_beta_media_codec_advertisement_is_rejected() {
         .validate()
         .expect_err("unsupported Opus advertisement must fail beta validation");
     assert!(
-        err.to_string()
-            .contains("payload type 111 is not beta-supported for full media"),
+        config_error_detail(&err).contains("payload type 111 is not beta-supported for full media"),
         "unexpected validation error: {err}"
     );
 }
@@ -724,8 +721,7 @@ fn comfort_noise_payload_requires_comfort_noise_flag() {
         .validate()
         .expect_err("CN without comfort_noise_enabled must fail");
     assert!(
-        err.to_string()
-            .contains("payload type 13 requires comfort_noise_enabled=true"),
+        config_error_detail(&err).contains("payload type 13 requires comfort_noise_enabled=true"),
         "unexpected validation error: {err}"
     );
 
@@ -742,8 +738,7 @@ fn beta_media_codec_set_requires_real_audio_codec() {
         .validate()
         .expect_err("DTMF-only codec set must fail");
     assert!(
-        err.to_string()
-            .contains("offered_codecs must include PCMU (0) or PCMA (8)"),
+        config_error_detail(&err).contains("offered_codecs must include PCMU (0) or PCMA (8)"),
         "unexpected validation error: {err}"
     );
 }
@@ -757,8 +752,7 @@ fn duplicate_payload_types_are_rejected() {
         .validate()
         .expect_err("duplicate codec payload types must fail");
     assert!(
-        err.to_string()
-            .contains("offered_codecs contains duplicate payload type 8"),
+        config_error_detail(&err).contains("offered_codecs contains duplicate payload type 8"),
         "unexpected validation error: {err}"
     );
 }
@@ -773,8 +767,7 @@ fn mandatory_srtp_requires_srtp_offer() {
         .validate()
         .expect_err("mandatory SRTP without offer_srtp must fail");
     assert!(
-        err.to_string()
-            .contains("srtp_required=true requires offer_srtp=true"),
+        config_error_detail(&err).contains("srtp_required=true requires offer_srtp=true"),
         "unexpected validation error: {err}"
     );
 }
@@ -789,7 +782,7 @@ fn srtp_offer_requires_at_least_one_suite() {
         .validate()
         .expect_err("SRTP offer without suites must fail");
     assert!(
-        err.to_string()
+        config_error_detail(&err)
             .contains("offer_srtp=true requires at least one srtp_offered_suites entry"),
         "unexpected validation error: {err}"
     );
