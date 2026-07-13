@@ -502,8 +502,7 @@ impl TransactionManager {
 
         self.request_transaction_runner_stop(tx_id);
 
-        if let Some((_, client_transaction)) = self.client_transactions.remove(tx_id) {
-            self.retire_client_transaction(tx_id, &client_transaction);
+        if self.retire_and_remove_client_transaction(tx_id).await {
             terminated = true;
         }
         if !terminated && self.server_transactions.remove(tx_id).is_some() {
@@ -512,7 +511,8 @@ impl TransactionManager {
         }
         self.terminated_transactions.remove(tx_id);
         if !terminated || tx_id.is_server() {
-            self.transaction_destinations.remove(tx_id);
+            self.transaction_destinations
+                .remove_if(tx_id, |_, state| state.is_active());
         }
         self.pending_inbound_bytes.remove(tx_id);
         self.pending_inbound_inserted_at.remove(tx_id);
@@ -659,7 +659,8 @@ impl TransactionManager {
                 .iter()
                 .filter(|entry| {
                     let k = entry.key();
-                    !self.client_transactions.contains_key(k)
+                    entry.value().is_active()
+                        && !self.client_transactions.contains_key(k)
                         && !self.server_transactions.contains_key(k)
                 })
                 .map(|entry| entry.key().clone())
@@ -667,7 +668,8 @@ impl TransactionManager {
             debug!("Found {} orphaned destination entries", orphaned_keys.len());
             for key in orphaned_keys {
                 debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Removing orphaned destination entry");
-                self.transaction_destinations.remove(&key);
+                self.transaction_destinations
+                    .remove_if(&key, |_, state| state.is_active());
             }
         }
 
@@ -724,8 +726,7 @@ impl TransactionManager {
             if remove_client {
                 self.request_transaction_runner_stop(&key);
                 debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Removing terminated client transaction");
-                if let Some((_, client_transaction)) = self.client_transactions.remove(&key) {
-                    self.retire_client_transaction(&key, &client_transaction);
+                if self.retire_and_remove_client_transaction(&key).await {
                     removed = true;
                 }
             }
@@ -745,7 +746,8 @@ impl TransactionManager {
 
             if removed {
                 if key.is_server() {
-                    self.transaction_destinations.remove(&key);
+                    self.transaction_destinations
+                        .remove_if(&key, |_, state| state.is_active());
                 }
                 self.pending_inbound_bytes.remove(&key);
                 self.pending_inbound_inserted_at.remove(&key);

@@ -8,9 +8,9 @@ mod tests {
     use super::super::RFC3261_BRANCH_MAGIC_COOKIE;
     use super::super::{
         recv_transaction_dispatch_event, transaction_dispatch_lane,
-        transaction_dispatch_worker_index, transaction_ingress_kind, Invite2xxDueEntry,
-        Invite2xxResponseCacheEntry, QueuedTransactionDispatch, TransactionDispatchLane,
-        TransactionIngressKind, TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
+        transaction_dispatch_worker_index, transaction_ingress_kind, ClientResponseRouteState,
+        Invite2xxDueEntry, Invite2xxResponseCacheEntry, QueuedTransactionDispatch,
+        TransactionDispatchLane, TransactionIngressKind, TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
     };
     use crate::transaction::client::builders::{ByeBuilder, InviteBuilder, RegisterBuilder};
     use crate::transaction::client::ClientInviteTransaction;
@@ -35,7 +35,7 @@ mod tests {
     use rvoip_sip_core::types::Contact;
     use rvoip_sip_core::types::ContactParamInfo;
     use rvoip_sip_transport::transport::TransportType;
-    use rvoip_sip_transport::{Transport, TransportEvent};
+    use rvoip_sip_transport::{Transport, TransportEvent, TransportFlowId, TransportRoute};
     use std::net::SocketAddr;
     use std::str::FromStr;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -167,6 +167,106 @@ mod tests {
         }
     }
 
+    /// Stream transport that binds every initial request to `original_flow`
+    /// while advertising `later_flow` from the legacy address resolver. Tests
+    /// use it to prove response authentication never adopts a co-addressed
+    /// replacement connection after retirement.
+    #[derive(Debug, Clone)]
+    struct ExactFlowMockTransport {
+        local_addr: SocketAddr,
+        original_flow: TransportFlowId,
+        later_flow: TransportFlowId,
+        sent_messages: Arc<Mutex<Vec<(Message, TransportRoute)>>>,
+        resolve_calls: Arc<AtomicUsize>,
+    }
+
+    impl ExactFlowMockTransport {
+        fn new(original_flow: TransportFlowId, later_flow: TransportFlowId) -> Self {
+            Self {
+                local_addr: "127.0.0.1:5060".parse().unwrap(),
+                original_flow,
+                later_flow,
+                sent_messages: Arc::new(Mutex::new(Vec::new())),
+                resolve_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        async fn sent_routes(&self) -> Vec<TransportRoute> {
+            self.sent_messages
+                .lock()
+                .await
+                .iter()
+                .map(|(_, route)| route.clone())
+                .collect()
+        }
+
+        fn resolve_calls(&self) -> usize {
+            self.resolve_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for ExactFlowMockTransport {
+        fn local_addr(&self) -> std::result::Result<SocketAddr, rvoip_sip_transport::Error> {
+            Ok(self.local_addr)
+        }
+
+        async fn send_message(
+            &self,
+            message: Message,
+            destination: SocketAddr,
+        ) -> std::result::Result<(), rvoip_sip_transport::Error> {
+            self.sent_messages
+                .lock()
+                .await
+                .push((message, TransportRoute::new(destination)));
+            Ok(())
+        }
+
+        async fn send_message_via(
+            &self,
+            message: Message,
+            route: TransportRoute,
+        ) -> std::result::Result<(), rvoip_sip_transport::Error> {
+            if route.flow_id != Some(self.original_flow) {
+                return Err(rvoip_sip_transport::Error::InvalidState(
+                    "test stream send did not preserve the original flow".into(),
+                ));
+            }
+            self.sent_messages.lock().await.push((message, route));
+            Ok(())
+        }
+
+        async fn prepare_message_route(
+            &self,
+            _message: &Message,
+            mut route: TransportRoute,
+        ) -> std::result::Result<TransportRoute, rvoip_sip_transport::Error> {
+            route.flow_id = Some(self.original_flow);
+            Ok(route)
+        }
+
+        async fn resolve_flow_id_for_route(
+            &self,
+            _route: &TransportRoute,
+        ) -> Option<TransportFlowId> {
+            self.resolve_calls.fetch_add(1, Ordering::SeqCst);
+            Some(self.later_flow)
+        }
+
+        async fn close(&self) -> std::result::Result<(), rvoip_sip_transport::Error> {
+            Ok(())
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+
+        fn supports_tcp(&self) -> bool {
+            true
+        }
+    }
+
     /// Helper to create a simple INVITE request for testing
     fn create_test_invite() -> std::result::Result<Request, Box<dyn std::error::Error>> {
         let builder = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")?;
@@ -180,6 +280,24 @@ mod tests {
             .via("127.0.0.1:5060", "UDP", Some("z9hG4bK.originalbranchvalue"))
             .max_forwards(70)
             .build())
+    }
+
+    fn create_test_invite_with_identity(
+        call_id: &str,
+        branch: &str,
+        via_transport: &str,
+    ) -> std::result::Result<Request, Box<dyn std::error::Error>> {
+        Ok(
+            SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")?
+                .from("Alice", "sip:alice@example.com", Some("alice-tag"))
+                .to("Bob", "sip:bob@example.com", None)
+                .contact("sip:alice@127.0.0.1:5060", None)
+                .call_id(call_id)
+                .cseq(101)
+                .via("127.0.0.1:5060", via_transport, Some(branch))
+                .max_forwards(70)
+                .build(),
+        )
     }
 
     fn create_test_ack() -> std::result::Result<Request, Box<dyn std::error::Error>> {
@@ -225,6 +343,23 @@ mod tests {
             destination: "127.0.0.1:5061".parse().unwrap(),
             transport_type: TransportType::Udp,
             flow_id: None,
+            raw_bytes: None,
+            timing: None,
+            connection_metadata: None,
+        }
+    }
+
+    fn dispatch_stream_event_from(
+        message: Message,
+        source: SocketAddr,
+        flow_id: TransportFlowId,
+    ) -> TransportEvent {
+        TransportEvent::MessageReceived {
+            message,
+            source,
+            destination: "127.0.0.1:5061".parse().unwrap(),
+            transport_type: TransportType::Tcp,
+            flow_id: Some(flow_id),
             raw_bytes: None,
             timing: None,
             connection_metadata: None,
@@ -2226,6 +2361,253 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_route_retirement_has_no_unknown_authentication_window() -> Result<()> {
+        use rvoip_sip_core::builder::SimpleResponseBuilder;
+
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, mut events) =
+            TransactionManager::new(transport, transport_rx, Some(16)).await?;
+        let destination: SocketAddr = "192.0.2.27:5060".parse().unwrap();
+        let request = create_test_invite_with_identity(
+            "retirement-barrier-call",
+            "z9hG4bK.retirement-barrier",
+            "UDP",
+        )
+        .map_err(|error| Error::Other(error.to_string()))?;
+        let transaction = manager
+            .create_client_transaction_on_route(
+                request.clone(),
+                TransportRoute::new(destination).with_transport_type(TransportType::Udp),
+            )
+            .await?;
+        manager.send_request(&transaction).await?;
+        while events.try_recv().is_ok() {}
+
+        let transitioned = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        manager.install_retired_client_transition_test_gate(
+            transaction.clone(),
+            transitioned.clone(),
+            release.clone(),
+        );
+        let termination = {
+            let manager = manager.clone();
+            let transaction = transaction.clone();
+            tokio::spawn(async move { manager.terminate_transaction(&transaction).await })
+        };
+
+        tokio::time::timeout(Duration::from_secs(1), transitioned.notified())
+            .await
+            .expect("retirement transition did not reach barrier");
+        assert!(
+            manager.client_transactions.contains_key(&transaction),
+            "live Arc must remain published until the route becomes Retired"
+        );
+        assert!(matches!(
+            manager
+                .transaction_destinations
+                .get(&transaction)
+                .map(|entry| entry.value().clone()),
+            Some(ClientResponseRouteState::Retired(_))
+        ));
+
+        let response =
+            SimpleResponseBuilder::response_from_request(&request, StatusCode::Ok, Some("OK"))
+                .to("Bob", "sip:bob@example.com", Some("retirement-race-tag"))
+                .build();
+        manager
+            .handle_transport_event(dispatch_event_from(
+                Message::Response(response),
+                destination,
+            ))
+            .await?;
+
+        let outcome = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                match events.recv().await {
+                    Some(TransactionEvent::SuccessResponse { transaction_id, .. })
+                        if transaction_id == transaction =>
+                    {
+                        return "success"
+                    }
+                    Some(TransactionEvent::StrayResponse { .. }) => return "stray",
+                    Some(_) => continue,
+                    None => return "closed",
+                }
+            }
+        })
+        .await;
+
+        release.notify_one();
+        manager.clear_retired_client_transition_test_gate();
+        termination
+            .await
+            .expect("termination task panicked")
+            .expect("termination failed");
+        assert_eq!(
+            outcome.expect("authenticated late response was not delivered"),
+            "success",
+            "response authentication observed a transient unknown route"
+        );
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retired_stream_invite_accepts_original_f1_and_rejects_coaddressed_f2() -> Result<()> {
+        use rvoip_sip_core::builder::SimpleResponseBuilder;
+
+        let (original_flow, later_flow) = two_live_tcp_flow_ids().await;
+        assert_ne!(original_flow, later_flow);
+        let transport = Arc::new(ExactFlowMockTransport::new(original_flow, later_flow));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, mut events) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+        let destination: SocketAddr = "192.0.2.28:5060".parse().unwrap();
+        let request = create_test_invite_with_identity(
+            "retired-stream-flow-call",
+            "z9hG4bK.retired-stream-flow",
+            "TCP",
+        )
+        .map_err(|error| Error::Other(error.to_string()))?;
+        let transaction = manager
+            .create_client_transaction_on_route(
+                request.clone(),
+                TransportRoute::new(destination).with_transport_type(TransportType::Tcp),
+            )
+            .await?;
+        manager.send_request(&transaction).await?;
+        manager.terminate_transaction(&transaction).await?;
+        while events.try_recv().is_ok() {}
+
+        let response =
+            SimpleResponseBuilder::response_from_request(&request, StatusCode::Ok, Some("OK"))
+                .to("Bob", "sip:bob@example.com", Some("retired-stream-tag"))
+                .build();
+        manager
+            .handle_transport_event(dispatch_stream_event_from(
+                Message::Response(response.clone()),
+                destination,
+                later_flow,
+            ))
+            .await?;
+        let wrong_flow_deadline = tokio::time::Instant::now() + Duration::from_millis(75);
+        loop {
+            let remaining =
+                wrong_flow_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, events.recv()).await {
+                Ok(Some(TransactionEvent::SuccessResponse { transaction_id, .. }))
+                    if transaction_id == transaction =>
+                {
+                    panic!("co-addressed replacement flow authenticated a retired response")
+                }
+                Ok(Some(TransactionEvent::StrayResponse { .. })) => {
+                    panic!("known retired route was reported as stray")
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => break,
+            }
+        }
+
+        manager
+            .handle_transport_event(dispatch_stream_event_from(
+                Message::Response(response),
+                destination,
+                original_flow,
+            ))
+            .await?;
+        tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                if matches!(
+                    events.recv().await,
+                    Some(TransactionEvent::SuccessResponse {
+                        ref transaction_id, ..
+                    }) if transaction_id == &transaction
+                ) {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("original stream flow response was not delivered");
+        assert_eq!(
+            transport.resolve_calls(),
+            0,
+            "response authentication must not resolve a replacement flow by address"
+        );
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retirement_retains_client_data_exact_route_for_late_ack() -> Result<()> {
+        use rvoip_sip_core::builder::SimpleResponseBuilder;
+
+        let (original_flow, later_flow) = two_live_tcp_flow_ids().await;
+        let transport = Arc::new(ExactFlowMockTransport::new(original_flow, later_flow));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, _events) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+        let destination: SocketAddr = "192.0.2.29:5060".parse().unwrap();
+        let request = create_test_invite_with_identity(
+            "retained-exact-route-call",
+            "z9hG4bK.retained-exact-route",
+            "TCP",
+        )
+        .map_err(|error| Error::Other(error.to_string()))?;
+        let transaction = manager
+            .create_client_transaction_on_route(
+                request.clone(),
+                TransportRoute::new(destination).with_transport_type(TransportType::Tcp),
+            )
+            .await?;
+        manager.send_request(&transaction).await?;
+
+        // Corrupt only the compatibility index. Retirement must source the
+        // tombstone from ClientTransactionData::request_route, which retains
+        // the pre-write F1 binding.
+        let mut state = manager
+            .transaction_destinations
+            .get_mut(&transaction)
+            .expect("active response route");
+        let indexed = state.route().clone();
+        *state = ClientResponseRouteState::Active(indexed.with_flow_id(later_flow));
+        drop(state);
+
+        manager.terminate_transaction(&transaction).await?;
+        let retained = manager
+            .transaction_route(&transaction)
+            .await
+            .expect("retained exact route");
+        assert_eq!(retained.flow_id, Some(original_flow));
+
+        let response =
+            SimpleResponseBuilder::response_from_request(&request, StatusCode::Ok, Some("OK"))
+                .to("Bob", "sip:bob@example.com", Some("retained-ack-tag"))
+                .build();
+        manager.send_ack_for_2xx(&transaction, &response).await?;
+        assert_eq!(
+            transport
+                .sent_routes()
+                .await
+                .last()
+                .and_then(|route| route.flow_id),
+            Some(original_flow),
+            "late ACK did not reuse the retained original flow"
+        );
+        assert_eq!(transport.resolve_calls(), 0);
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn retired_invite_accepts_only_route_authenticated_late_2xx_and_can_ack() -> Result<()> {
         use rvoip_sip_core::builder::SimpleResponseBuilder;
 
@@ -2342,11 +2724,15 @@ mod tests {
         manager.send_request(&transaction).await?;
         manager.terminate_transaction(&transaction).await?;
 
-        manager
-            .retired_client_transactions
+        let mut state = manager
+            .transaction_destinations
             .get_mut(&transaction)
-            .expect("retired transaction")
-            .expires_at = Instant::now() - Duration::from_millis(1);
+            .expect("retired transaction");
+        let ClientResponseRouteState::Retired(retired) = state.value_mut() else {
+            panic!("transaction route was not retired");
+        };
+        retired.expires_at = Instant::now() - Duration::from_millis(1);
+        drop(state);
         assert_eq!(manager.retired_client_transaction_count(), 0);
         assert!(manager.transaction_route(&transaction).await.is_none());
         assert!(manager.original_request(&transaction).await.is_err());

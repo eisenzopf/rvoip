@@ -270,6 +270,49 @@ struct RetiredClientTransaction {
     expires_at: Instant,
 }
 
+/// One linearizable response-route record for the complete lifetime of a
+/// client transaction. Keeping active and retained routes in the same DashMap
+/// entry prevents cleanup from exposing a transient "unknown transaction"
+/// window between removing the live route and publishing its tombstone.
+#[derive(Clone)]
+enum ClientResponseRouteState {
+    Active(TransportRoute),
+    Retired(RetiredClientTransaction),
+}
+
+impl ClientResponseRouteState {
+    fn route(&self) -> &TransportRoute {
+        match self {
+            Self::Active(route) => route,
+            Self::Retired(retired) => &retired.route,
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        matches!(self, Self::Active(_))
+    }
+
+    fn retired(&self) -> Option<&RetiredClientTransaction> {
+        match self {
+            Self::Active(_) => None,
+            Self::Retired(retired) => Some(retired),
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct RetiredClientTransitionTestGate {
+    transaction_id: TransactionKey,
+    transitioned: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+static RETIRED_CLIENT_TRANSITION_TEST_GATE: std::sync::LazyLock<
+    std::sync::Mutex<Option<RetiredClientTransitionTestGate>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
 #[derive(Clone)]
 struct InboundPrincipalBinding {
     principal: AuthenticatedPrincipal,
@@ -451,13 +494,11 @@ pub struct TransactionManager {
     invite_2xx_response_due_queue: Arc<std::sync::Mutex<BinaryHeap<Invite2xxDueEntry>>>,
     invite_2xx_response_due_sequence: Arc<AtomicU64>,
     terminated_cleanup_tx: Option<mpsc::Sender<TerminatedCleanupItem>>,
-    /// Client transaction routes, including authority and the exact response
-    /// flow once one has been observed.
-    transaction_destinations: Arc<DashMap<TransactionKey, TransportRoute>>,
-    /// Bounded, expiring INVITE request/route tombstones. These authenticate
-    /// late forked or retransmitted 2xx responses after transaction cleanup
-    /// and provide the request template needed to ACK them.
-    retired_client_transactions: Arc<DashMap<TransactionKey, RetiredClientTransaction>>,
+    /// Client response routes transition atomically from active to a bounded,
+    /// expiring INVITE tombstone. Retired entries authenticate late forked or
+    /// retransmitted 2xx responses and retain the request template needed to
+    /// ACK them without keeping the transaction runner alive.
+    transaction_destinations: Arc<DashMap<TransactionKey, ClientResponseRouteState>>,
     retired_client_transaction_capacity: usize,
     retired_client_transaction_insert_count: Arc<AtomicUsize>,
     /// Event sender
@@ -1132,7 +1173,11 @@ impl TransactionManager {
             server_invite_dialog_keys_by_tx: self.server_invite_dialog_keys_by_tx.len(),
             invite_2xx_response_cache: self.invite_2xx_response_cache.len(),
             invite_2xx_response_due_queue,
-            transaction_destinations: self.transaction_destinations.len(),
+            transaction_destinations: self
+                .transaction_destinations
+                .iter()
+                .filter(|entry| entry.value().is_active())
+                .count(),
             event_subscribers: self.event_subscribers.load().len(),
             subscriber_to_transactions: self.subscriber_to_transactions.len(),
             transaction_to_subscribers: self.transaction_to_subscribers.len(),
@@ -1149,7 +1194,7 @@ impl TransactionManager {
     /// literals of that compatibility type.
     pub fn retired_client_transaction_count(&self) -> usize {
         self.prune_retired_client_transactions();
-        self.retired_client_transactions.len()
+        self.retired_client_transaction_count_unpruned()
     }
 
     /// Return retained transaction breakdowns for perf diagnostics.
@@ -1210,7 +1255,7 @@ impl TransactionManager {
             "server_by_state": server_by_state,
             "server_by_kind": server_by_kind,
             "server_by_lifecycle": server_by_lifecycle,
-            "retired_client_transactions": self.retired_client_transactions.len(),
+            "retired_client_transactions": self.retired_client_transaction_count_unpruned(),
         })
     }
 
@@ -1423,9 +1468,6 @@ impl TransactionManager {
             invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
             terminated_cleanup_tx: Some(terminated_cleanup_tx),
             transaction_destinations,
-            retired_client_transactions: Arc::new(DashMap::with_capacity(
-                retired_client_transaction_capacity(index_capacity),
-            )),
             retired_client_transaction_capacity: retired_client_transaction_capacity(
                 index_capacity,
             ),
@@ -1574,9 +1616,6 @@ impl TransactionManager {
             invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
             terminated_cleanup_tx: Some(terminated_cleanup_tx),
             transaction_destinations,
-            retired_client_transactions: Arc::new(DashMap::with_capacity(
-                retired_client_transaction_capacity(index_capacity),
-            )),
             retired_client_transaction_capacity: retired_client_transaction_capacity(
                 index_capacity,
             ),
@@ -1834,9 +1873,6 @@ impl TransactionManager {
             invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
             terminated_cleanup_tx: Some(terminated_cleanup_tx),
             transaction_destinations,
-            retired_client_transactions: Arc::new(DashMap::with_capacity(
-                retired_client_transaction_capacity(index_capacity),
-            )),
             retired_client_transaction_capacity: retired_client_transaction_capacity(
                 index_capacity,
             ),
@@ -1962,9 +1998,6 @@ impl TransactionManager {
             invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
             terminated_cleanup_tx: None,
             transaction_destinations,
-            retired_client_transactions: Arc::new(DashMap::with_capacity(
-                retired_client_transaction_capacity(index_capacity),
-            )),
             retired_client_transaction_capacity: retired_client_transaction_capacity(
                 index_capacity,
             ),
@@ -2070,9 +2103,6 @@ impl TransactionManager {
             timer_settings,
             running,
             transaction_destinations,
-            retired_client_transactions: Arc::new(DashMap::with_capacity(
-                retired_client_transaction_capacity(index_capacity),
-            )),
             retired_client_transaction_capacity: retired_client_transaction_capacity(
                 index_capacity,
             ),
@@ -2194,8 +2224,10 @@ impl TransactionManager {
             // events so an immediate peer close cannot erase the identity we
             // need to authenticate that response.
             let bound_route = client_tx.data().request_route.lock().await.clone();
-            if let Some(mut route) = self.transaction_destinations.get_mut(transaction_id) {
-                *route = bound_route;
+            if let Some(mut state) = self.transaction_destinations.get_mut(transaction_id) {
+                if matches!(state.value(), ClientResponseRouteState::Active(_)) {
+                    *state = ClientResponseRouteState::Active(bound_route);
+                }
             }
 
             let current_state = tx.state();
@@ -2719,9 +2751,8 @@ impl TransactionManager {
         &self,
         transaction_id: &TransactionKey,
     ) -> Option<SocketAddr> {
-        self.transaction_destinations
-            .get(transaction_id)
-            .map(|route| route.destination)
+        self.client_response_route_state(transaction_id)
+            .map(|state| state.route().destination)
     }
 
     /// Return the authority- and flow-bearing route used by a client transaction.
@@ -2729,42 +2760,51 @@ impl TransactionManager {
         &self,
         transaction_id: &TransactionKey,
     ) -> Option<TransportRoute> {
-        if let Some(route) = self
+        self.client_response_route_state(transaction_id)
+            .map(|state| state.route().clone())
+    }
+
+    fn client_response_route_state(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Option<ClientResponseRouteState> {
+        let state = self
             .transaction_destinations
             .get(transaction_id)
-            .map(|route| route.value().clone())
+            .map(|entry| entry.value().clone())?;
+        if state
+            .retired()
+            .is_some_and(|retired| retired.expires_at <= Instant::now())
         {
-            return Some(route);
+            self.transaction_destinations
+                .remove_if(transaction_id, |_, current| {
+                    current
+                        .retired()
+                        .is_some_and(|retired| retired.expires_at <= Instant::now())
+                });
+            return None;
         }
-
-        self.retired_client_transaction(transaction_id)
-            .map(|retired| retired.route)
+        Some(state)
     }
 
     fn retired_client_transaction(
         &self,
         transaction_id: &TransactionKey,
     ) -> Option<RetiredClientTransaction> {
-        let retired = self
-            .retired_client_transactions
-            .get(transaction_id)
-            .map(|entry| entry.value().clone())?;
-        if retired.expires_at <= Instant::now() {
-            self.retired_client_transactions.remove(transaction_id);
-            return None;
-        }
-        Some(retired)
+        self.client_response_route_state(transaction_id)
+            .and_then(|state| state.retired().cloned())
     }
 
-    fn retire_client_transaction(
+    /// Replace the active route in-place with a tombstone built from the
+    /// transaction's exact post-send route. The live transaction Arc remains
+    /// published until this transition completes, so response authentication
+    /// always observes either Active or Retired for a successfully sent
+    /// INVITE.
+    async fn retire_client_transaction(
         &self,
         transaction_id: &TransactionKey,
         transaction: &ArcClientTransaction,
-    ) {
-        let Some((_, route)) = self.transaction_destinations.remove(transaction_id) else {
-            return;
-        };
-
+    ) -> bool {
         // Only INVITE can legitimately produce dialog-forming 2xx responses
         // after its client transaction has terminated. Other methods discard
         // their route immediately instead of broadening the retained surface.
@@ -2772,26 +2812,98 @@ impl TransactionManager {
             || transaction_id.method() != &Method::Invite
             || !transaction.data().initial_send_succeeded()
         {
-            return;
+            self.transaction_destinations
+                .remove_if(transaction_id, |_, state| state.is_active());
+            return false;
         }
 
-        self.retired_client_transactions.insert(
-            transaction_id.clone(),
-            RetiredClientTransaction {
-                request: transaction.data().request.as_ref().clone(),
-                route,
-                expires_at: Instant::now() + RETIRED_CLIENT_TRANSACTION_TTL,
-            },
-        );
+        let exact_route = transaction.data().request_route.lock().await.clone();
+        let mut transitioned = false;
+        if let Some(mut state) = self.transaction_destinations.get_mut(transaction_id) {
+            if state.is_active() {
+                *state = ClientResponseRouteState::Retired(RetiredClientTransaction {
+                    request: transaction.data().request.as_ref().clone(),
+                    route: exact_route,
+                    expires_at: Instant::now() + RETIRED_CLIENT_TRANSACTION_TTL,
+                });
+                transitioned = true;
+            }
+        }
+        transitioned
+    }
+
+    async fn retire_and_remove_client_transaction(&self, transaction_id: &TransactionKey) -> bool {
+        let Some(transaction) = self
+            .client_transactions
+            .get(transaction_id)
+            .map(|entry| entry.value().clone())
+        else {
+            return false;
+        };
+
+        let transitioned = self
+            .retire_client_transaction(transaction_id, &transaction)
+            .await;
+
+        #[cfg(test)]
+        if transitioned {
+            let gate = RETIRED_CLIENT_TRANSITION_TEST_GATE
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .filter(|gate| gate.transaction_id == *transaction_id);
+            if let Some(gate) = gate {
+                gate.transitioned.notify_one();
+                gate.release.notified().await;
+            }
+        }
+
+        let removed = self
+            .client_transactions
+            .remove_if(transaction_id, |_, current| {
+                Arc::ptr_eq(current, &transaction)
+            })
+            .is_some();
+
+        if !transitioned {
+            return removed;
+        }
+
         let inserts = self
             .retired_client_transaction_insert_count
             .fetch_add(1, Ordering::Relaxed)
             + 1;
         if inserts % 1024 == 0
-            || self.retired_client_transactions.len() > self.retired_client_transaction_capacity
+            || self.retired_client_transaction_count_unpruned()
+                > self.retired_client_transaction_capacity
         {
             self.prune_retired_client_transactions();
         }
+        removed
+    }
+
+    #[cfg(test)]
+    fn install_retired_client_transition_test_gate(
+        &self,
+        transaction_id: TransactionKey,
+        transitioned: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) {
+        *RETIRED_CLIENT_TRANSITION_TEST_GATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(RetiredClientTransitionTestGate {
+                transaction_id,
+                transitioned,
+                release,
+            });
+    }
+
+    #[cfg(test)]
+    fn clear_retired_client_transition_test_gate(&self) {
+        *RETIRED_CLIENT_TRANSITION_TEST_GATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
     /// Subscribe to events from all transactions.
@@ -3064,7 +3176,6 @@ impl TransactionManager {
             queue.clear();
         }
         self.transaction_destinations.clear();
-        self.retired_client_transactions.clear();
         self.pending_inbound_bytes.clear();
         self.pending_inbound_inserted_at.clear();
         self.pending_inbound_transport.clear();
@@ -3340,8 +3451,10 @@ impl TransactionManager {
         let mut terminated = false;
         self.request_transaction_runner_stop(transaction_id);
 
-        if let Some((_, client_transaction)) = self.client_transactions.remove(transaction_id) {
-            self.retire_client_transaction(transaction_id, &client_transaction);
+        if self
+            .retire_and_remove_client_transaction(transaction_id)
+            .await
+        {
             debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Removed terminated client transaction");
             terminated = true;
         }
@@ -3356,7 +3469,7 @@ impl TransactionManager {
         if (transaction_id.is_server() || !terminated)
             && self
                 .transaction_destinations
-                .remove(transaction_id)
+                .remove_if(transaction_id, |_, state| state.is_active())
                 .is_some()
         {
             debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Removed transaction from destinations map");
@@ -3837,7 +3950,7 @@ impl TransactionManager {
         // Store the transaction + complete request route.
         self.client_transactions.insert(key.clone(), transaction);
         self.transaction_destinations
-            .insert(key.clone(), request_route);
+            .insert(key.clone(), ClientResponseRouteState::Active(request_route));
 
         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Created client transaction");
 
@@ -4538,39 +4651,63 @@ impl TransactionManager {
     }
 
     fn prune_retired_client_transactions(&self) {
-        if self.retired_client_transactions.is_empty() {
+        if self.transaction_destinations.is_empty() {
             return;
         }
 
         let now = Instant::now();
         let expired: Vec<TransactionKey> = self
-            .retired_client_transactions
+            .transaction_destinations
             .iter()
-            .filter(|entry| entry.value().expires_at <= now)
+            .filter(|entry| {
+                entry
+                    .value()
+                    .retired()
+                    .is_some_and(|retired| retired.expires_at <= now)
+            })
             .map(|entry| entry.key().clone())
             .collect();
         for key in expired {
-            self.retired_client_transactions
-                .remove_if(&key, |_, retired| retired.expires_at <= now);
+            self.transaction_destinations.remove_if(&key, |_, state| {
+                state
+                    .retired()
+                    .is_some_and(|retired| retired.expires_at <= now)
+            });
         }
 
-        let len = self.retired_client_transactions.len();
+        let mut oldest: Vec<(TransactionKey, Instant)> = self
+            .transaction_destinations
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .value()
+                    .retired()
+                    .map(|retired| (entry.key().clone(), retired.expires_at))
+            })
+            .collect();
+        let len = oldest.len();
         if len <= self.retired_client_transaction_capacity {
             return;
         }
 
-        let mut oldest: Vec<(TransactionKey, Instant)> = self
-            .retired_client_transactions
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().expires_at))
-            .collect();
         oldest.sort_by_key(|(_, expires_at)| *expires_at);
-        for (key, _) in oldest
+        for (key, expires_at) in oldest
             .into_iter()
             .take(len.saturating_sub(self.retired_client_transaction_capacity))
         {
-            self.retired_client_transactions.remove(&key);
+            self.transaction_destinations.remove_if(&key, |_, state| {
+                state
+                    .retired()
+                    .is_some_and(|retired| retired.expires_at == expires_at)
+            });
         }
+    }
+
+    fn retired_client_transaction_count_unpruned(&self) -> usize {
+        self.transaction_destinations
+            .iter()
+            .filter(|entry| entry.value().retired().is_some())
+            .count()
     }
 
     fn prune_closed_event_subscribers_now(&self) {
@@ -4967,15 +5104,12 @@ impl TransactionManager {
 
         // CANCEL uses the complete INVITE route, including resolver-selected
         // transport/authority and the established opaque flow.
-        let request_route = match self.transaction_destinations.get(invite_tx_id) {
-            Some(entry) => entry.value().clone(),
-            None => {
-                return Err(Error::Other(format!(
-                    "No transport route found for transaction {}",
-                    invite_tx_id
-                )));
-            }
-        };
+        let request_route = self.transaction_route(invite_tx_id).await.ok_or_else(|| {
+            Error::Other(format!(
+                "No transport route found for transaction {}",
+                invite_tx_id
+            ))
+        })?;
 
         // Create a transaction for the CANCEL request
         let cancel_tx_id = self
@@ -5167,7 +5301,7 @@ impl fmt::Debug for TransactionManager {
             .field("transaction_destinations", &"Arc<Mutex<HashMap<...>>>")
             .field(
                 "retired_client_transactions",
-                &self.retired_client_transactions.len(),
+                &self.retired_client_transaction_count_unpruned(),
             )
             .field("events_tx", &self.events_tx) // Sender might be Debug
             .field("event_subscribers", &"Arc<Mutex<Vec<Sender>>>")

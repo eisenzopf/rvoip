@@ -49,7 +49,6 @@ fn bind_client_response_route(
     source: SocketAddr,
     transport_type: TransportType,
     ingress_flow_id: Option<TransportFlowId>,
-    resolved_expected_flow_id: Option<TransportFlowId>,
 ) -> Option<TransportRoute> {
     if expected.destination != source || expected.transport_type != Some(transport_type) {
         return None;
@@ -64,7 +63,10 @@ fn bind_client_response_route(
             bound.flow_id = None;
         }
         TransportType::Tcp | TransportType::Tls | TransportType::Ws | TransportType::Wss => {
-            let expected_flow_id = expected.flow_id.or(resolved_expected_flow_id)?;
+            // A stream response is authenticated only by the opaque flow that
+            // carried the original request. Resolving by address here could
+            // bind a retired transaction to a later co-addressed connection.
+            let expected_flow_id = expected.flow_id?;
             if ingress_flow_id != Some(expected_flow_id) {
                 return None;
             }
@@ -93,83 +95,60 @@ impl TransactionManager {
         transport_type: TransportType,
         ingress_flow_id: Option<TransportFlowId>,
     ) -> ClientResponseRouteAuthentication {
-        let mut expected = if let Some(route) = self
-            .transaction_destinations
+        // The transaction's initial write may have selected a concrete stream
+        // flow after the initial route entry was populated. Snapshot that
+        // route before taking the DashMap shard and then make exactly one
+        // authorization decision against the authoritative Active/Retired
+        // state below.
+        let sent_route = if let Some(client) = self
+            .client_transactions
             .get(transaction_id)
-            .map(|entry| entry.value().clone())
+            .map(|transaction| transaction.value().clone())
         {
-            route
-        } else if let Some(retired) = self.retired_client_transaction(transaction_id) {
-            retired.route
+            Some(client.data().request_route.lock().await.clone())
         } else {
+            None
+        };
+
+        let Some(mut state) = self.transaction_destinations.get_mut(transaction_id) else {
             return ClientResponseRouteAuthentication::UnknownTransaction;
         };
 
-        // The transaction's initial write may have selected a concrete stream
-        // flow after the route index was first populated. Prefer that exact
-        // route before authenticating the response.
-        if expected.flow_id.is_none() {
-            if let Some(client) = self
-                .client_transactions
-                .get(transaction_id)
-                .map(|transaction| transaction.value().clone())
-            {
-                let sent_route = client.data().request_route.lock().await.clone();
-                if sent_route.destination == expected.destination
-                    && sent_route.transport_type == expected.transport_type
-                    && sent_route.authority == expected.authority
-                    && sent_route.flow_id.is_some()
-                {
-                    expected = sent_route;
+        let expected = match state.value() {
+            super::ClientResponseRouteState::Active(indexed_route) => sent_route
+                .filter(|sent_route| {
+                    sent_route.destination == indexed_route.destination
+                        && sent_route.transport_type == indexed_route.transport_type
+                        && sent_route.authority == indexed_route.authority
+                        && sent_route.flow_id.is_some()
+                })
+                .unwrap_or_else(|| indexed_route.clone()),
+            super::ClientResponseRouteState::Retired(retired) => {
+                if retired.expires_at <= Instant::now() {
+                    drop(state);
+                    self.transaction_destinations
+                        .remove_if(transaction_id, |_, current| {
+                            current
+                                .retired()
+                                .is_some_and(|retired| retired.expires_at <= Instant::now())
+                        });
+                    return ClientResponseRouteAuthentication::UnknownTransaction;
                 }
+                retired.route.clone()
             }
-        }
+        };
 
-        let resolved_expected_flow_id = self.transport.resolve_flow_id_for_route(&expected).await;
-        let Some(bound) = bind_client_response_route(
-            &expected,
-            source,
-            transport_type,
-            ingress_flow_id,
-            resolved_expected_flow_id,
-        ) else {
+        let Some(bound) =
+            bind_client_response_route(&expected, source, transport_type, ingress_flow_id)
+        else {
             return ClientResponseRouteAuthentication::Rejected;
         };
 
-        if let Some(mut current) = self.transaction_destinations.get_mut(transaction_id) {
-            if current.value() != &expected && current.value() != &bound {
-                return ClientResponseRouteAuthentication::Rejected;
-            }
-            *current = bound;
-            return ClientResponseRouteAuthentication::Authenticated;
+        match state.value_mut() {
+            super::ClientResponseRouteState::Active(route) => *route = bound,
+            super::ClientResponseRouteState::Retired(retired) => retired.route = bound,
         }
-
-        if let Some(mut retired) = self.retired_client_transactions.get_mut(transaction_id) {
-            if retired.expires_at <= Instant::now() {
-                drop(retired);
-                self.retired_client_transactions.remove(transaction_id);
-                return ClientResponseRouteAuthentication::UnknownTransaction;
-            }
-            if retired.route != expected && retired.route != bound {
-                return ClientResponseRouteAuthentication::Rejected;
-            }
-            retired.route = bound;
-            return ClientResponseRouteAuthentication::Authenticated;
-        }
-
-        // The transaction may have been retired concurrently between the
-        // active lookup and the first tombstone update. Re-read once without
-        // recursively growing the async future.
-        if let Some(mut retired) = self.retired_client_transactions.get_mut(transaction_id) {
-            if retired.expires_at > Instant::now()
-                && (retired.route == expected || retired.route == bound)
-            {
-                retired.route = bound;
-                return ClientResponseRouteAuthentication::Authenticated;
-            }
-        }
-
-        ClientResponseRouteAuthentication::UnknownTransaction
+        ClientResponseRouteAuthentication::Authenticated
     }
 }
 
