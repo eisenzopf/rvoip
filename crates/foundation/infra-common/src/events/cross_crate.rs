@@ -408,9 +408,11 @@ pub struct SipTraceEvent {
 
 impl fmt::Debug for SipTraceEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let safe_start_line = redact_sip_trace_start_line(&self.start_line);
         formatter
             .debug_struct("SipTraceEvent")
             .field("direction", &self.direction)
+            .field("start_line", &safe_start_line)
             .field("original_len", &self.original_len)
             .field("raw_message_bytes", &self.raw_message.len())
             .field("truncated", &self.truncated)
