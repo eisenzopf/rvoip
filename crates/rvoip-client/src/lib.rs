@@ -1117,7 +1117,10 @@ mod tests {
                 break connection;
             }
         };
-        assert_eq!(inbound.session_id, *session.session_id());
+        let canonical_session_id = inbound.session_id.to_string();
+        let wire_session_id = session.session_id().to_string();
+        assert_ne!(canonical_session_id, wire_session_id);
+        assert!(canonical_session_id.ends_with(&format!(":{wire_session_id}")));
 
         session.end().await.expect("end");
     }

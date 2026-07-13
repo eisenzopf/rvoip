@@ -3061,18 +3061,10 @@ mod tests {
             println!("Error: {:?}", err);
             match err {
                 Error::TransportError { source, .. } => {
-                    // The TransportErrorWrapper contains a string representation of the error
-                    // Check if the string contains any of our expected error patterns
+                    // The public transport boundary deliberately retains only a
+                    // fixed error class, never the simulated lower error text.
                     let error_str = source.0;
-                    assert!(
-                        error_str.contains("ConnectionFailed")
-                            || error_str.contains("connection failed")
-                            || error_str.contains("Simulated network failure")
-                            || error_str.contains("Transaction terminated")
-                            || error_str.contains("transport error"),
-                        "Expected connection failed error, got: {}",
-                        error_str
-                    );
+                    assert_eq!(error_str, "transport protocol error");
                 }
                 _ => panic!("Unexpected error type: {:?}", err),
             }

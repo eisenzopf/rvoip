@@ -525,7 +525,7 @@ mod tests {
         );
         assert_eq!(
             format!("{violation:?}"),
-            "HeaderPolicyViolation { method: Invite, header: CallId, reason: StackManaged }"
+            "HeaderPolicyViolation { method: Invite, header: HeaderName(\"Call-ID\"), reason: StackManaged }"
         );
     }
 
