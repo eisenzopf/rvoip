@@ -732,9 +732,10 @@ mod tests {
     }
 
     #[test]
-    fn test_complete_message_without_content_length_has_an_empty_body() {
-        // Datagram and transport-neutral complete-message parsing retain the
-        // RFC 3261 compatibility rule that an absent length means no body.
+    fn test_complete_message_without_content_length_uses_packet_boundary() {
+        // Complete-message parsing has a packet/frame boundary and, per RFC
+        // 3261 section 18.3, treats the suffix as the message body when
+        // Content-Length is absent.
         let input = b"INVITE sip:bob@biloxi.com SIP/2.0\r\n\
                      Via: SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds\r\n\
                      To: Bob <sip:bob@biloxi.com>\r\n\
@@ -746,22 +747,24 @@ mod tests {
 
         let (remainder, message) = full_message_parser(input, ParseMode::Lenient)
             .expect("complete-message parser accepts an omitted length");
-        assert_eq!(remainder, b"This content should be ignored");
+        assert!(remainder.is_empty());
         let Message::Request(request) = message else {
             panic!("request expected");
         };
-        assert!(request.body().is_empty());
+        assert_eq!(request.body(), b"This content should be ignored");
 
         let parsed = parse_message(input).expect("public complete-message parser");
         let Message::Request(request) = parsed else {
             panic!("request expected");
         };
-        assert!(request.body().is_empty());
+        assert_eq!(request.body(), b"This content should be ignored");
 
-        assert!(
-            parse_message_with_mode(input, ParseMode::Strict).is_err(),
-            "strict complete-message parsing rejects bytes beyond the zero-byte body"
-        );
+        let parsed = parse_message_with_mode(input, ParseMode::Strict)
+            .expect("strict complete-message parser uses the same packet boundary");
+        let Message::Request(request) = parsed else {
+            panic!("request expected");
+        };
+        assert_eq!(request.body(), b"This content should be ignored");
     }
 
     #[test]
