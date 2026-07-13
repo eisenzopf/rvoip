@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use http::HeaderValue;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 #[cfg(feature = "ws")]
@@ -228,13 +228,38 @@ impl WebSocketListener {
         WebSocketConnection,
         SplitStream<WebSocketStream<SipWsStream>>,
     )> {
-        // Accept a TCP connection
-        let (stream, peer_addr) = self
-            .listener
+        let (stream, peer_addr) = self.accept_tcp().await?;
+        self.upgrade_tcp(stream, peer_addr).await
+    }
+
+    /// Accept one TCP socket without performing TLS or HTTP/WebSocket work.
+    ///
+    /// `WebSocketTransport` uses this split boundary so a slow peer cannot hold
+    /// the only listener accept loop while it waits for a ClientHello or HTTP
+    /// upgrade request.
+    #[cfg(feature = "ws")]
+    pub(crate) async fn accept_tcp(&self) -> Result<(TcpStream, SocketAddr)> {
+        self.listener
             .accept()
             .await
-            .map_err(|e| Error::ReceiveFailed(e))?;
+            .map_err(|error| Error::ReceiveFailed(error))
+    }
 
+    /// Complete the WSS TLS handshake, when enabled, and the RFC 7118 HTTP
+    /// upgrade on an already accepted TCP socket.
+    ///
+    /// Callers must apply a deadline and admission limit around this entire
+    /// future. Keeping both phases here preserves the verified TLS metadata and
+    /// exact `sip` subprotocol boundary.
+    #[cfg(feature = "ws")]
+    pub(crate) async fn upgrade_tcp(
+        &self,
+        stream: TcpStream,
+        peer_addr: SocketAddr,
+    ) -> Result<(
+        WebSocketConnection,
+        SplitStream<WebSocketStream<SipWsStream>>,
+    )> {
         debug!("Accepted TCP connection for WebSocket from {}", peer_addr);
 
         // For WSS, run the TLS handshake on the freshly accepted TCP

@@ -6,11 +6,13 @@ use crate::error::{Error, Result};
 use bytes::Bytes;
 use rvoip_sip_core::{Message, Method};
 
+mod runtime;
 pub mod tcp;
 pub mod tls;
 pub mod udp;
 pub mod ws;
 
+pub use runtime::HandshakeAdmissionConfig;
 pub use tcp::TcpTransport;
 pub use tls::TlsTransport;
 pub use udp::{UdpParseConfig, UdpParseDispatch, UdpSocketOptions, UdpTransport};

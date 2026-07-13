@@ -26,7 +26,8 @@ pub use transport::tls::{
 pub use transport::udp::{UdpParseConfig, UdpParseDispatch, UdpSocketOptions, UdpTransport};
 pub use transport::ws::WebSocketTransport;
 pub use transport::{
-    TlsPeerIdentity, Transport, TransportConnectionMetadata, TransportEvent, TransportReceiveTiming,
+    HandshakeAdmissionConfig, TlsPeerIdentity, Transport, TransportConnectionMetadata,
+    TransportEvent, TransportReceiveTiming,
 };
 
 // Simplified helper functions
@@ -48,9 +49,10 @@ pub async fn bind_tcp(
 pub mod prelude {
     pub use crate::{
         bind_tcp, bind_udp, events::TransportEventAdapter, factory::TransportFactory,
-        manager::TransportManager, Error, Result, TcpTransport, TlsClientAuthMode, TlsClientConfig,
-        TlsPeerIdentity, TlsServerClientAuthConfig, TlsTransport, Transport,
-        TransportConnectionMetadata, TransportEvent, TransportReceiveTiming, UdpParseDispatch,
-        UdpSocketOptions, UdpTransport, WebSocketTransport,
+        manager::TransportManager, Error, HandshakeAdmissionConfig, Result, TcpTransport,
+        TlsClientAuthMode, TlsClientConfig, TlsPeerIdentity, TlsServerClientAuthConfig,
+        TlsTransport, Transport, TransportConnectionMetadata, TransportEvent,
+        TransportReceiveTiming, UdpParseDispatch, UdpSocketOptions, UdpTransport,
+        WebSocketTransport,
     };
 }

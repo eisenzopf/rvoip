@@ -4,7 +4,7 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
@@ -13,7 +13,7 @@ use rvoip_sip_core::types::uri::Host;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio_rustls::rustls::{
     self,
     pki_types::{CertificateDer, PrivateKeyDer, ServerName},
@@ -33,8 +33,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::error::{Error, Result};
 use crate::transport::{
-    validate_typed_outbound_message, TlsPeerIdentity, Transport, TransportConnectionMetadata,
-    TransportEvent, TransportType,
+    runtime::TransportTaskSet, validate_typed_outbound_message, HandshakeAdmissionConfig,
+    TlsPeerIdentity, Transport, TransportConnectionMetadata, TransportEvent, TransportType,
 };
 
 /// Builder-friendly TLS client configuration. Mirrors the knobs we
@@ -159,6 +159,17 @@ pub struct TlsTransport {
 
     /// Closed flag. Once set, `connect()` and `send_message` short-circuit.
     closed: Arc<AtomicBool>,
+
+    /// Owns listener, handshake, reader, and writer tasks so `close()` can
+    /// deterministically cancel and join all transport activity.
+    tasks: Arc<TransportTaskSet>,
+
+    /// Serializes complete close/drain operations, including connection-map
+    /// cleanup after managed tasks have stopped.
+    close_gate: Arc<Mutex<()>>,
+
+    /// Inbound unauthenticated TLS handshake admission policy.
+    handshake_admission: HandshakeAdmissionConfig,
 }
 
 impl fmt::Debug for TlsTransport {
@@ -169,6 +180,7 @@ impl fmt::Debug for TlsTransport {
             .field("has_acceptor", &self.acceptor.is_some())
             .field("connections", &self.connections)
             .field("closed", &self.closed)
+            .field("handshake_admission", &self.handshake_admission)
             .finish()
     }
 }
@@ -183,12 +195,33 @@ impl TlsTransport {
         key_path: &Path,
         event_tx: Option<mpsc::Sender<TransportEvent>>,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
-        Self::bind_with_client_config(
+        Self::bind_with_handshake_config(
+            local_addr,
+            cert_path,
+            key_path,
+            event_tx,
+            HandshakeAdmissionConfig::default(),
+        )
+        .await
+    }
+
+    /// Bind with explicit admission for inbound unauthenticated TLS
+    /// handshakes. Outbound certificate validation keeps its existing policy.
+    pub async fn bind_with_handshake_config(
+        local_addr: SocketAddr,
+        cert_path: &Path,
+        key_path: &Path,
+        event_tx: Option<mpsc::Sender<TransportEvent>>,
+        handshake_admission: HandshakeAdmissionConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_configs_and_handshake(
             local_addr,
             cert_path,
             key_path,
             event_tx,
             TlsClientConfig::default(),
+            TlsServerClientAuthConfig::default(),
+            handshake_admission,
         )
         .await
     }
@@ -223,6 +256,29 @@ impl TlsTransport {
         client_cfg: TlsClientConfig,
         server_client_auth: TlsServerClientAuthConfig,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_configs_and_handshake(
+            local_addr,
+            cert_path,
+            key_path,
+            event_tx,
+            client_cfg,
+            server_client_auth,
+            HandshakeAdmissionConfig::default(),
+        )
+        .await
+    }
+
+    /// Bind a bidirectional TLS transport with explicit client/server TLS
+    /// policies and inbound handshake admission.
+    pub async fn bind_with_configs_and_handshake(
+        local_addr: SocketAddr,
+        cert_path: &Path,
+        key_path: &Path,
+        event_tx: Option<mpsc::Sender<TransportEvent>>,
+        client_cfg: TlsClientConfig,
+        server_client_auth: TlsServerClientAuthConfig,
+        handshake_admission: HandshakeAdmissionConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         Self::bind_with_role_and_configs(
             local_addr,
             cert_path,
@@ -231,6 +287,7 @@ impl TlsTransport {
             client_cfg,
             server_client_auth,
             TlsRole::ClientAndServer,
+            handshake_admission,
         )
         .await
     }
@@ -253,6 +310,7 @@ impl TlsTransport {
             client_cfg,
             TlsServerClientAuthConfig::default(),
             TlsRole::ServerOnly,
+            HandshakeAdmissionConfig::default(),
         )
         .await
     }
@@ -274,6 +332,31 @@ impl TlsTransport {
             TlsClientConfig::default(),
             server_client_auth,
             TlsRole::ServerOnly,
+            HandshakeAdmissionConfig::default(),
+        )
+        .await
+    }
+
+    /// Bind a server-only TLS listener with explicit client/server TLS policy
+    /// and inbound handshake admission.
+    pub async fn bind_server_only_with_configs_and_handshake(
+        local_addr: SocketAddr,
+        cert_path: &Path,
+        key_path: &Path,
+        event_tx: Option<mpsc::Sender<TransportEvent>>,
+        client_cfg: TlsClientConfig,
+        server_client_auth: TlsServerClientAuthConfig,
+        handshake_admission: HandshakeAdmissionConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_role_and_configs(
+            local_addr,
+            cert_path,
+            key_path,
+            event_tx,
+            client_cfg,
+            server_client_auth,
+            TlsRole::ServerOnly,
+            handshake_admission,
         )
         .await
     }
@@ -286,7 +369,9 @@ impl TlsTransport {
         client_cfg: TlsClientConfig,
         server_client_auth: TlsServerClientAuthConfig,
         role: TlsRole,
+        handshake_admission: HandshakeAdmissionConfig,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        let handshake_admission = handshake_admission.validate("TLS")?;
         // Server-side config (for incoming TLS connections).
         let server_config = build_server_config(cert_path, key_path, &server_client_auth, "TLS")?;
         let acceptor = TlsAcceptor::from(Arc::new(server_config));
@@ -314,6 +399,7 @@ impl TlsTransport {
             "TLS transport listening"
         );
 
+        let tasks = TransportTaskSet::new();
         let transport = Self {
             role,
             local_addr: actual_addr,
@@ -322,18 +408,28 @@ impl TlsTransport {
             connections: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             event_tx: Some(tx),
             closed: Arc::new(AtomicBool::new(false)),
+            tasks: tasks.clone(),
+            close_gate: Arc::new(Mutex::new(())),
+            handshake_admission,
         };
 
-        tokio::spawn(Self::accept_loop(
-            listener,
-            actual_addr,
-            transport
-                .acceptor
-                .clone()
-                .expect("TLS listener mode must have an acceptor"),
-            transport.connections.clone(),
-            transport.event_tx.clone().unwrap(),
-        ));
+        let started = tasks
+            .spawn(Self::accept_loop(
+                listener,
+                actual_addr,
+                transport
+                    .acceptor
+                    .clone()
+                    .expect("TLS listener mode must have an acceptor"),
+                transport.connections.clone(),
+                transport.event_tx.clone().unwrap(),
+                Arc::downgrade(&tasks),
+                handshake_admission,
+            ))
+            .await;
+        if started.is_none() {
+            return Err(Error::TransportClosed);
+        }
 
         Ok((transport, rx))
     }
@@ -375,6 +471,9 @@ impl TlsTransport {
                 connections: Arc::new(tokio::sync::Mutex::new(Vec::new())),
                 event_tx: Some(tx),
                 closed: Arc::new(AtomicBool::new(false)),
+                tasks: TransportTaskSet::new(),
+                close_gate: Arc::new(Mutex::new(())),
+                handshake_admission: HandshakeAdmissionConfig::default(),
             },
             rx,
         ))
@@ -387,8 +486,15 @@ impl TlsTransport {
         acceptor: TlsAcceptor,
         connections: Arc<tokio::sync::Mutex<Vec<(SocketAddr, mpsc::Sender<Bytes>)>>>,
         event_tx: mpsc::Sender<TransportEvent>,
+        weak_tasks: Weak<TransportTaskSet>,
+        handshake_admission: HandshakeAdmissionConfig,
     ) {
+        let semaphore = Arc::new(Semaphore::new(handshake_admission.max_concurrent));
         loop {
+            let permit = match semaphore.clone().acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => break,
+            };
             match listener.accept().await {
                 Ok((stream, remote_addr)) => {
                     debug!("New TCP connection from {}", remote_addr);
@@ -396,43 +502,74 @@ impl TlsTransport {
                     let connections = connections.clone();
                     let event_tx = event_tx.clone();
                     let local_addr = addr;
+                    let weak_tasks_for_connection = weak_tasks.clone();
+                    let Some(tasks) = weak_tasks.upgrade() else {
+                        break;
+                    };
 
-                    tokio::spawn(async move {
-                        match acceptor.accept(stream).await {
-                            Ok(tls_stream) => {
-                                debug!("TLS handshake with {} successful", remote_addr);
-                                let connection_metadata = verified_peer_metadata(
-                                    tls_stream.get_ref().1.peer_certificates(),
-                                );
-                                Self::handle_connection(
-                                    tls_stream,
-                                    remote_addr,
-                                    local_addr,
-                                    connections,
-                                    event_tx,
-                                    connection_metadata,
-                                )
-                                .await;
+                    let _ = tasks
+                        .spawn(async move {
+                            match tokio::time::timeout(
+                                handshake_admission.timeout,
+                                acceptor.accept(stream),
+                            )
+                            .await
+                            {
+                                Ok(Ok(tls_stream)) => {
+                                    // Established sessions do not consume scarce
+                                    // unauthenticated handshake admission.
+                                    drop(permit);
+                                    debug!("TLS handshake with {} successful", remote_addr);
+                                    let connection_metadata = verified_peer_metadata(
+                                        tls_stream.get_ref().1.peer_certificates(),
+                                    );
+                                    if weak_tasks_for_connection
+                                        .upgrade()
+                                        .is_none_or(|tasks| tasks.is_closing())
+                                    {
+                                        return;
+                                    }
+                                    Self::handle_connection(
+                                        tls_stream,
+                                        remote_addr,
+                                        local_addr,
+                                        connections,
+                                        event_tx,
+                                        connection_metadata,
+                                        weak_tasks_for_connection,
+                                    )
+                                    .await;
+                                }
+                                Ok(Err(error)) => {
+                                    drop(permit);
+                                    // Warn, not error: a failed inbound
+                                    // handshake is recoverable and usually
+                                    // benign (misconfigured peer, expired
+                                    // cert, port probe). The accept loop
+                                    // resumes on the next iteration. Real
+                                    // operators still see this at default
+                                    // log levels; CI test output doesn't
+                                    // look like a regression.
+                                    warn!(
+                                        destination = %remote_addr,
+                                        error_class = tls_runtime_failure_class(&error),
+                                        "TLS handshake failed"
+                                    );
+                                }
+                                Err(_) => {
+                                    drop(permit);
+                                    warn!(
+                                        destination = %remote_addr,
+                                        timeout_ms = handshake_admission.timeout.as_millis(),
+                                        "TLS handshake timed out"
+                                    );
+                                }
                             }
-                            Err(error) => {
-                                // Warn, not error: a failed inbound
-                                // handshake is recoverable and usually
-                                // benign (misconfigured peer, expired
-                                // cert, port probe). The accept loop
-                                // resumes on the next iteration. Real
-                                // operators still see this at default
-                                // log levels; CI test output doesn't
-                                // look like a regression.
-                                warn!(
-                                    destination = %remote_addr,
-                                    error_class = tls_runtime_failure_class(&error),
-                                    "TLS handshake failed"
-                                );
-                            }
-                        }
-                    });
+                        })
+                        .await;
                 }
                 Err(e) => {
+                    drop(permit);
                     error!("Failed to accept TCP connection: {}", e);
                 }
             }
@@ -450,29 +587,39 @@ impl TlsTransport {
         connections: Arc<tokio::sync::Mutex<Vec<(SocketAddr, mpsc::Sender<Bytes>)>>>,
         event_tx: mpsc::Sender<TransportEvent>,
         connection_metadata: Option<TransportConnectionMetadata>,
+        weak_tasks: Weak<TransportTaskSet>,
     ) where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
         let (mut reader, mut writer) = tokio::io::split(tls_stream);
         let (tx, mut rx) = mpsc::channel::<Bytes>(100);
 
+        let Some(tasks) = weak_tasks.upgrade() else {
+            return;
+        };
+        let Some(write_task) = tasks
+            .spawn(async move {
+                while let Some(data) = rx.recv().await {
+                    if let Err(e) = writer.write_all(&data).await {
+                        error!("Failed to write to TLS stream: {}", e);
+                        break;
+                    }
+                    if let Err(e) = writer.flush().await {
+                        error!("Failed to flush TLS stream: {}", e);
+                        break;
+                    }
+                }
+            })
+            .await
+        else {
+            return;
+        };
+        drop(tasks);
+
         {
             let mut connections_guard = connections.lock().await;
             connections_guard.push((remote_addr, tx.clone()));
         }
-
-        let write_task = tokio::spawn(async move {
-            while let Some(data) = rx.recv().await {
-                if let Err(e) = writer.write_all(&data).await {
-                    error!("Failed to write to TLS stream: {}", e);
-                    break;
-                }
-                if let Err(e) = writer.flush().await {
-                    error!("Failed to flush TLS stream: {}", e);
-                    break;
-                }
-            }
-        });
 
         // Buffered read loop with RFC 3261 §18.3 Content-Length framing,
         // plus RFC 5626 §3.5.1 keep-alive frame detection at buffer
@@ -689,20 +836,25 @@ impl TlsTransport {
             .ok_or_else(|| Error::TlsHandshakeFailed("TLS transport has no event sender".into()))?;
         let local_addr = self.local_addr;
 
-        // Spawn the same generic read/write loop used for inbound
-        // connections; it registers the connection in the registry as
-        // its first action so a subsequent `send_to_addr` finds it.
-        tokio::spawn(async move {
-            Self::handle_connection(
+        // Register the same managed read/write loop used for inbound
+        // connections. Shutdown owns and joins this task as well.
+        let weak_tasks = Arc::downgrade(&self.tasks);
+        if self
+            .tasks
+            .spawn(Self::handle_connection(
                 tls_stream,
                 remote_addr,
                 local_addr,
                 connections,
                 event_tx,
                 None,
-            )
-            .await;
-        });
+                weak_tasks,
+            ))
+            .await
+            .is_none()
+        {
+            return Err(Error::TransportClosed);
+        }
 
         // Wait briefly for the spawned task to register the connection
         // before we return; otherwise a back-to-back
@@ -801,7 +953,10 @@ impl Transport for TlsTransport {
     }
 
     async fn close(&self) -> Result<()> {
+        let _close_guard = self.close_gate.lock().await;
         self.closed.store(true, Ordering::SeqCst);
+        self.tasks.close().await;
+        self.connections.lock().await.clear();
         Ok(())
     }
 
