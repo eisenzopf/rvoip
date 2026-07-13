@@ -124,7 +124,12 @@ pub enum SessionError {
     TransferFailed(String),
 
     /// Authentication failed or could not be completed.
-    #[error("Authentication error: {0}")]
+    ///
+    /// The retained string remains matchable for compatibility, but only
+    /// library-owned fixed diagnostic classes are rendered by `Display` or
+    /// `Debug`. Arbitrary provider/application strings render as a fixed
+    /// redacted class.
+    #[error("Authentication error: {}", AuthErrorDiagnostic(.0))]
     AuthError(String),
 
     /// An outbound INVITE challenge could not be converted into a safe
@@ -266,7 +271,10 @@ impl fmt::Debug for SessionError {
                 .debug_tuple("TransferFailed")
                 .field(value)
                 .finish(),
-            Self::AuthError(value) => formatter.debug_tuple("AuthError").field(value).finish(),
+            Self::AuthError(value) => formatter
+                .debug_tuple("AuthError")
+                .field(&AuthErrorDiagnostic(value))
+                .finish(),
             Self::InviteAuthConstructionFailed => {
                 formatter.write_str("InviteAuthConstructionFailed")
             }
@@ -309,6 +317,105 @@ pub(crate) enum OutboundAuthOperation {
     Invite,
     Request,
     Register,
+}
+
+/// Fixed authentication dependency stage retained in outward diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AuthFailureStage {
+    CorePrimitive,
+    AkaClientProvider,
+    PrincipalProjection,
+    RateLimitCheck,
+    RateLimitRecord,
+    AuditSink,
+    BearerValidator,
+    BasicVerifier,
+    AkaVectorProvider,
+    DigestSecretProvider,
+    ReplayNonceRecord,
+    ReplayNonceStatus,
+    ReplayNonceCount,
+}
+
+impl AuthFailureStage {
+    const ALL: [Self; 13] = [
+        Self::CorePrimitive,
+        Self::AkaClientProvider,
+        Self::PrincipalProjection,
+        Self::RateLimitCheck,
+        Self::RateLimitRecord,
+        Self::AuditSink,
+        Self::BearerValidator,
+        Self::BasicVerifier,
+        Self::AkaVectorProvider,
+        Self::DigestSecretProvider,
+        Self::ReplayNonceRecord,
+        Self::ReplayNonceStatus,
+        Self::ReplayNonceCount,
+    ];
+
+    pub(crate) const fn message(self) -> &'static str {
+        match self {
+            Self::CorePrimitive => "authentication failed (stage=core-primitive)",
+            Self::AkaClientProvider => "authentication failed (stage=aka-client-provider)",
+            Self::PrincipalProjection => "authentication failed (stage=principal-projection)",
+            Self::RateLimitCheck => "authentication failed (stage=rate-limit-check)",
+            Self::RateLimitRecord => "authentication failed (stage=rate-limit-record)",
+            Self::AuditSink => "authentication failed (stage=audit-sink)",
+            Self::BearerValidator => "authentication failed (stage=bearer-validator)",
+            Self::BasicVerifier => "authentication failed (stage=basic-verifier)",
+            Self::AkaVectorProvider => "authentication failed (stage=aka-vector-provider)",
+            Self::DigestSecretProvider => "authentication failed (stage=digest-secret-provider)",
+            Self::ReplayNonceRecord => "authentication failed (stage=replay-nonce-record)",
+            Self::ReplayNonceStatus => "authentication failed (stage=replay-nonce-status)",
+            Self::ReplayNonceCount => "authentication failed (stage=replay-nonce-count)",
+        }
+    }
+}
+
+/// Collapse a provider, validator, or shared-store failure without retaining
+/// its arbitrary diagnostic string in the session error.
+pub(crate) fn redacted_auth_failure<E>(stage: AuthFailureStage, _source: E) -> SessionError {
+    SessionError::AuthError(stage.message().to_string())
+}
+
+struct AuthErrorDiagnostic<'a>(&'a str);
+
+impl fmt::Display for AuthErrorDiagnostic<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(safe_auth_error_message(self.0))
+    }
+}
+
+impl fmt::Debug for AuthErrorDiagnostic<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(safe_auth_error_message(self.0), formatter)
+    }
+}
+
+fn safe_auth_error_message(value: &str) -> &str {
+    if AuthFailureStage::ALL
+        .iter()
+        .any(|stage| stage.message() == value)
+        || matches!(
+            value,
+            "Digest credentials cannot answer a non-Digest challenge"
+                | "Bearer token cannot answer a non-Bearer challenge"
+                | "Bearer authentication over cleartext SIP is disabled"
+                | "Bearer token cannot be empty"
+                | "Basic credentials cannot answer a non-Basic challenge"
+                | "Basic authentication over cleartext SIP is disabled"
+                | "AKA credentials cannot answer a non-AKA challenge"
+                | "generated SIP authorization header failed wire-safety validation"
+                | "no configured auth option can answer the challenge"
+                | "unsupported outbound SIP authorization header name"
+                | "outbound SIP authorization header failed wire-safety validation"
+        )
+    {
+        value
+    } else {
+        "authentication failed (stage=opaque-source)"
+    }
 }
 
 /// Collapse a lower challenge parser, Digest algorithm, or authentication
@@ -364,7 +471,7 @@ impl From<Box<dyn std::error::Error + Send + Sync>> for SessionError {
 
 impl From<rvoip_auth_core::AuthError> for SessionError {
     fn from(err: rvoip_auth_core::AuthError) -> Self {
-        SessionError::AuthError(err.to_string())
+        redacted_auth_failure(AuthFailureStage::CorePrimitive, err)
     }
 }
 
@@ -458,6 +565,59 @@ mod method_diagnostic_tests {
 }
 
 #[cfg(test)]
+mod auth_error_diagnostic_tests {
+    use super::*;
+
+    const SOURCE_CANARY: &str = "provider-secret\r\nX-Auth-Canary: exposed";
+
+    #[test]
+    fn arbitrary_public_auth_error_value_is_matchable_but_never_rendered() {
+        let error = SessionError::AuthError(SOURCE_CANARY.to_string());
+        assert_eq!(
+            error.to_string(),
+            "Authentication error: authentication failed (stage=opaque-source)"
+        );
+        assert_eq!(
+            format!("{error:?}"),
+            "AuthError(\"authentication failed (stage=opaque-source)\")"
+        );
+        assert!(!error.to_string().contains(SOURCE_CANARY));
+        assert!(!format!("{error:?}").contains(SOURCE_CANARY));
+        match error {
+            SessionError::AuthError(value) => assert_eq!(value, SOURCE_CANARY),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_core_conversion_discards_lower_diagnostic_content() {
+        let error = SessionError::from(rvoip_auth_core::AuthError::ProviderError(
+            SOURCE_CANARY.to_string(),
+        ));
+        assert_eq!(
+            error.to_string(),
+            "Authentication error: authentication failed (stage=core-primitive)"
+        );
+        assert!(!error.to_string().contains(SOURCE_CANARY));
+        assert!(!format!("{error:?}").contains(SOURCE_CANARY));
+        assert!(matches!(
+            error,
+            SessionError::AuthError(value)
+                if value == AuthFailureStage::CorePrimitive.message()
+        ));
+    }
+
+    #[test]
+    fn fixed_library_auth_policy_messages_remain_actionable() {
+        let error = SessionError::AuthError(
+            "Basic authentication over cleartext SIP is disabled".to_string(),
+        );
+        assert!(error.to_string().contains("cleartext SIP"));
+        assert!(format!("{error:?}").contains("cleartext SIP"));
+    }
+}
+
+#[cfg(test)]
 mod outbound_auth_redaction_tests {
     use super::*;
     use crate::auth::{
@@ -509,7 +669,8 @@ mod outbound_auth_redaction_tests {
                 &SipTransportSecurityContext::from_transport_name("TLS"),
             )
             .expect_err("unsupported peer algorithm must fail");
-        assert!(lower.to_string().contains(ALGORITHM_SECRET));
+        assert!(!lower.to_string().contains(ALGORITHM_SECRET));
+        assert!(lower.to_string().contains("stage=core-primitive"));
 
         assert_redacted(
             redacted_outbound_auth_error(OutboundAuthOperation::Invite, lower),
@@ -529,7 +690,8 @@ mod outbound_auth_redaction_tests {
                 &SipTransportSecurityContext::from_transport_name("TLS"),
             )
             .expect_err("provider failure must fail auth construction");
-        assert!(lower.to_string().contains(PROVIDER_SECRET));
+        assert!(!lower.to_string().contains(PROVIDER_SECRET));
+        assert!(lower.to_string().contains("stage=aka-client-provider"));
 
         assert_redacted(
             redacted_outbound_auth_error(OutboundAuthOperation::Invite, lower),

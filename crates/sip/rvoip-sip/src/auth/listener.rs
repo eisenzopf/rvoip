@@ -15,6 +15,7 @@ use rvoip_sip_dialog::transaction::{
 };
 use rvoip_sip_transport::transport::TransportType;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
 /// Disabled-by-default policy enforced before a new SIP request reaches the
@@ -25,12 +26,24 @@ use std::sync::Arc;
 /// its source IP belongs to an explicitly trusted CIDR with a principal, or
 /// its `Authorization` header is accepted by the configured
 /// [`SipAuthService`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct SipListenerAuthPolicy {
     enabled: bool,
     auth_service: Option<SipAuthService>,
     trusted_sources: Vec<(IpNet, AuthenticatedPrincipal)>,
     mtls_principals: HashMap<String, AuthenticatedPrincipal>,
+}
+
+impl fmt::Debug for SipListenerAuthPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SipListenerAuthPolicy")
+            .field("enabled", &self.enabled)
+            .field("auth_service_configured", &self.auth_service.is_some())
+            .field("trusted_source_count", &self.trusted_sources.len())
+            .field("mtls_principal_count", &self.mtls_principals.len())
+            .finish()
+    }
 }
 
 impl SipListenerAuthPolicy {
@@ -343,6 +356,43 @@ mod tests {
             .is_none());
     }
 
+    #[test]
+    fn listener_policy_debug_omits_mapped_principals_selectors_and_auth_config() {
+        const PRINCIPAL_CANARY: &str = "mapped-principal-secret-canary";
+        const FINGERPRINT_CANARY: &str = "fingerprint-secret-canary";
+        let mut mapped = principal(PRINCIPAL_CANARY, AuthenticationMethod::ApiKey);
+        mapped.tenant = Some(format!("tenant-{PRINCIPAL_CANARY}"));
+        mapped.issuer = Some(format!("issuer-{PRINCIPAL_CANARY}"));
+        mapped.scopes = vec![format!("scope-{PRINCIPAL_CANARY}")];
+
+        let policy = SipListenerAuthPolicy::authenticated(SipAuthService::digest(PRINCIPAL_CANARY))
+            .with_trusted_cidr("192.0.2.0/24".parse().expect("CIDR"), mapped.clone())
+            .with_verified_mtls_peer(FINGERPRINT_CANARY, mapped.clone());
+
+        let rendered = format!("{policy:?}");
+        assert_eq!(
+            rendered,
+            "SipListenerAuthPolicy { enabled: true, auth_service_configured: true, trusted_source_count: 1, mtls_principal_count: 1 }"
+        );
+        for canary in [PRINCIPAL_CANARY, FINGERPRINT_CANARY, "192.0.2.0/24"] {
+            assert!(
+                !rendered.contains(canary),
+                "listener auth policy leaked mapped identity data: {rendered}"
+            );
+        }
+
+        // Diagnostic hardening must not alter selector or principal behavior.
+        assert_eq!(policy.trusted_sources[0].1.subject, PRINCIPAL_CANARY);
+        assert_eq!(
+            policy
+                .mtls_principals
+                .get(&FINGERPRINT_CANARY.to_ascii_lowercase())
+                .expect("mapped mTLS principal")
+                .subject,
+            PRINCIPAL_CANARY
+        );
+    }
+
     #[tokio::test]
     async fn trusted_cidr_requires_match_and_uses_explicit_principal() {
         let expected = principal("trusted-gateway", AuthenticationMethod::ApiKey);
@@ -477,9 +527,21 @@ mod tests {
         ));
     }
 
-    #[derive(Debug)]
     struct FullPrincipalBearerValidator {
         principal: AuthenticatedPrincipal,
+    }
+
+    impl fmt::Debug for FullPrincipalBearerValidator {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_struct("FullPrincipalBearerValidator")
+                .field("method", &self.principal.method)
+                .field("assurance", &self.principal.assurance.kind())
+                .field("tenant_present", &self.principal.tenant.is_some())
+                .field("issuer_present", &self.principal.issuer.is_some())
+                .field("scope_count", &self.principal.scopes.len())
+                .finish()
+        }
     }
 
     #[async_trait]

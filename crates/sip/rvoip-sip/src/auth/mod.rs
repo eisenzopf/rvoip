@@ -230,7 +230,7 @@ use rvoip_core_traits::identity::{
     AuthenticatedPrincipal, AuthenticationMethod, CredentialKind, IdentityAssurance,
 };
 
-use crate::errors::{Result, SessionError};
+use crate::errors::{redacted_auth_failure, AuthFailureStage, Result, SessionError};
 use crate::types::Credentials;
 
 // Re-export digest authentication from auth-core.
@@ -252,7 +252,7 @@ pub use rvoip_auth_core::{
 /// `Proxy-Authorization`. SDP is only relevant to Digest when
 /// `qop=auth-int` hashes the request body.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum SipAuthScheme {
     /// SIP Digest authentication.
     Digest,
@@ -281,7 +281,7 @@ pub enum SipAuthSource {
 /// validators commonly populate [`subject`](Self::subject) and
 /// [`scopes`](Self::scopes). AKA providers decide which identity fields they
 /// can assert from the vector infrastructure they integrate with.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AuthIdentity {
     /// Scheme that authenticated the peer.
     pub scheme: SipAuthScheme,
@@ -349,6 +349,21 @@ pub struct SipAuthChallenge {
 /// rendered by an authentication result container.
 struct SipAuthSchemeDiagnostic<'a>(&'a SipAuthScheme);
 
+impl fmt::Debug for SipAuthScheme {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Digest => formatter.write_str("Digest"),
+            Self::Bearer => formatter.write_str("Bearer"),
+            Self::Basic => formatter.write_str("Basic"),
+            Self::Aka => formatter.write_str("Aka"),
+            Self::Other(value) => formatter
+                .debug_struct("Other")
+                .field("value_len", &value.len())
+                .finish(),
+        }
+    }
+}
+
 impl fmt::Debug for SipAuthSchemeDiagnostic<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, formatter)
@@ -380,6 +395,12 @@ impl fmt::Debug for AuthIdentityDiagnostic<'_> {
             .field("realm_present", &self.0.realm.is_some())
             .field("scope_count", &self.0.scopes.len())
             .finish()
+    }
+}
+
+impl fmt::Debug for AuthIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&AuthIdentityDiagnostic(self), formatter)
     }
 }
 
@@ -531,6 +552,131 @@ mod auth_container_diagnostic_tests {
         assert!(rendered.contains("principal_scope_count: 1"));
         assert_no_auth_canaries(&rendered);
     }
+
+    #[test]
+    fn direct_scheme_and_identity_debug_are_metadata_only() {
+        let scheme = SipAuthScheme::Other(SCHEME_CANARY.to_string());
+        let scheme_debug = format!("{scheme:?}");
+        assert_eq!(
+            scheme_debug,
+            format!("Other {{ value_len: {} }}", SCHEME_CANARY.len())
+        );
+        assert_no_auth_canaries(&scheme_debug);
+
+        let identity = malicious_identity();
+        let identity_debug = format!("{identity:?}");
+        assert!(identity_debug.starts_with("AuthIdentity"));
+        assert!(identity_debug.contains("scheme: other"));
+        assert!(identity_debug.contains("realm_present: true"));
+        assert!(identity_debug.contains("scope_count: 1"));
+        assert_no_auth_canaries(&identity_debug);
+
+        assert_eq!(identity.username.as_deref(), Some(IDENTITY_CANARY));
+        assert_eq!(identity.scheme, SipAuthScheme::Other(SCHEME_CANARY.into()));
+    }
+
+    #[test]
+    fn auth_context_policy_and_transport_debug_expose_only_shape() {
+        let context = SipAuthContext::new()
+            .with_peer(IDENTITY_CANARY)
+            .with_metadata("identity-key", IDENTITY_CANARY);
+        let context_debug = format!("{context:?}");
+        assert_eq!(
+            context_debug,
+            "SipAuthContext { peer_present: true, metadata_entry_count: 1 }"
+        );
+        assert_no_auth_canaries(&context_debug);
+
+        let policy = SipAuthPolicy::new().allow_only([
+            SipAuthScheme::Digest,
+            SipAuthScheme::Other(SCHEME_CANARY.to_string()),
+        ]);
+        let policy_debug = format!("{policy:?}");
+        assert!(policy_debug.starts_with("SipAuthPolicy"));
+        assert!(policy_debug.contains("enabled_scheme_count: 2"));
+        assert_no_auth_canaries(&policy_debug);
+
+        let transport = SipTransportSecurityContext::from_transport_name(IDENTITY_CANARY)
+            .with_addrs(IDENTITY_CANARY, IDENTITY_CANARY);
+        let transport_debug = format!("{transport:?}");
+        assert_eq!(
+            transport_debug,
+            "SipTransportSecurityContext { transport_present: true, local_addr_present: true, remote_addr_present: true, secure: false }"
+        );
+        assert_no_auth_canaries(&transport_debug);
+    }
+
+    #[test]
+    fn client_header_and_service_debug_omit_auth_material_and_configuration_values() {
+        let header = ClientAuthHeader {
+            value: CHALLENGE_CANARY.to_string(),
+            scheme: SipAuthScheme::Other(SCHEME_CANARY.to_string()),
+            digest_challenge: None,
+            stale: true,
+        };
+        let header_debug = format!("{header:?}");
+        assert!(header_debug.starts_with("ClientAuthHeader"));
+        assert!(header_debug.contains("value_present: true"));
+        assert!(header_debug.contains(&format!("value_len: {}", CHALLENGE_CANARY.len())));
+        assert!(header_debug.contains("scheme: other"));
+        assert_no_auth_canaries(&header_debug);
+        assert_eq!(header.value, CHALLENGE_CANARY);
+
+        let policy =
+            SipAuthPolicy::new().allow_only([SipAuthScheme::Other(SCHEME_CANARY.to_string())]);
+        let service = SipAuthService::digest(IDENTITY_CANARY)
+            .with_policy(policy)
+            .with_bearer_scope(format!("scope-{IDENTITY_CANARY}"))
+            .with_required_bearer_scope(format!("required-{IDENTITY_CANARY}"))
+            .with_basic_realm(format!("basic-{IDENTITY_CANARY}"));
+        let service_debug = format!("{service:?}");
+        assert!(service_debug.starts_with("SipAuthService"));
+        assert!(service_debug.contains("bearer_scope_present: true"));
+        assert!(service_debug.contains("required_bearer_scope_present: true"));
+        assert!(service_debug.contains("basic: true"));
+        assert_no_auth_canaries(&service_debug);
+
+        let digest_service = SipDigestAuthService::new(IDENTITY_CANARY);
+        digest_service.add_user(IDENTITY_CANARY, CHALLENGE_CANARY);
+        let digest_debug = format!("{digest_service:?}");
+        assert!(digest_debug.starts_with("SipDigestAuthService"));
+        assert!(digest_debug.contains("realm_present: true"));
+        assert!(digest_debug.contains("user_count: 1"));
+        assert_no_auth_canaries(&digest_debug);
+    }
+
+    #[test]
+    fn digest_compatibility_decision_debug_omits_identity_realm_and_challenge() {
+        let authorized = AuthDecision::Authorized {
+            username: IDENTITY_CANARY.to_string(),
+            realm: CHALLENGE_CANARY.to_string(),
+        };
+        let authorized_debug = format!("{authorized:?}");
+        assert_eq!(
+            authorized_debug,
+            "Authorized { username_present: true, realm_present: true }"
+        );
+        assert_no_auth_canaries(&authorized_debug);
+
+        let service = SipDigestAuthService::new(CHALLENGE_CANARY);
+        let challenge = service.challenge();
+        let rejected = AuthDecision::Rejected {
+            www_authenticate: service.www_authenticate(&challenge),
+            challenge,
+        };
+        let rejected_debug = format!("{rejected:?}");
+        assert!(rejected_debug.starts_with("Rejected"));
+        assert!(rejected_debug.contains("challenge_present: true"));
+        assert_no_auth_canaries(&rejected_debug);
+
+        match authorized {
+            AuthDecision::Authorized { username, realm } => {
+                assert_eq!(username, IDENTITY_CANARY);
+                assert_eq!(realm, CHALLENGE_CANARY);
+            }
+            other => panic!("unexpected decision: {other:?}"),
+        }
+    }
 }
 
 /// Non-secret context supplied to UAS-side authentication.
@@ -538,12 +684,22 @@ mod auth_container_diagnostic_tests {
 /// Context values are used for rate-limit keys and redacted audit events. Do
 /// not put passwords, bearer tokens, API keys, HA1 values, full JWTs, or raw
 /// Authorization headers in [`metadata`](Self::metadata).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct SipAuthContext {
     /// Source peer, IP, connection id, or deployment-specific peer handle.
     pub peer: Option<String>,
     /// Additional non-secret metadata to attach to audit/rate-limit events.
     pub metadata: BTreeMap<String, String>,
+}
+
+impl fmt::Debug for SipAuthContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SipAuthContext")
+            .field("peer_present", &self.peer.is_some())
+            .field("metadata_entry_count", &self.metadata.len())
+            .finish()
+    }
 }
 
 impl SipAuthContext {
@@ -611,7 +767,7 @@ impl AuthAttemptScheme {
 /// This policy is additive to provider configuration. Providers answer
 /// credentials; policy decides which schemes and transport/security posture are
 /// acceptable before provider validation is trusted.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SipAuthPolicy {
     enabled_schemes: Option<Vec<SipAuthScheme>>,
     minimum_digest_algorithm: Option<DigestAlgorithm>,
@@ -619,6 +775,35 @@ pub struct SipAuthPolicy {
     allow_bearer_over_cleartext: bool,
     require_digest_replay_store: bool,
     audit_failure_policy: AuditFailurePolicy,
+}
+
+impl fmt::Debug for SipAuthPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SipAuthPolicy")
+            .field(
+                "enabled_scheme_count",
+                &self.enabled_schemes.as_ref().map_or(0, Vec::len),
+            )
+            .field(
+                "minimum_digest_algorithm_present",
+                &self.minimum_digest_algorithm.is_some(),
+            )
+            .field(
+                "allow_basic_over_cleartext",
+                &self.allow_basic_over_cleartext,
+            )
+            .field(
+                "allow_bearer_over_cleartext",
+                &self.allow_bearer_over_cleartext,
+            )
+            .field(
+                "require_digest_replay_store",
+                &self.require_digest_replay_store,
+            )
+            .field("audit_failure_policy", &self.audit_failure_policy)
+            .finish()
+    }
 }
 
 impl SipAuthPolicy {
@@ -701,7 +886,7 @@ impl Default for SipAuthPolicy {
 /// Prefer values derived from the actual receiving/sending transport. The
 /// `from_request_uri_hint` constructor exists only as a compatibility fallback
 /// until every event path carries transport metadata.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct SipTransportSecurityContext {
     /// Transport flavor, for example `UDP`, `TCP`, `TLS`, `WS`, or `WSS`.
     pub transport: Option<String>,
@@ -712,6 +897,18 @@ pub struct SipTransportSecurityContext {
     /// Whether the transport is protected for sending credentials such as
     /// Basic passwords or Bearer tokens.
     pub secure: bool,
+}
+
+impl fmt::Debug for SipTransportSecurityContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SipTransportSecurityContext")
+            .field("transport_present", &self.transport.is_some())
+            .field("local_addr_present", &self.local_addr.is_some())
+            .field("remote_addr_present", &self.remote_addr.is_some())
+            .field("secure", &self.secure)
+            .finish()
+    }
 }
 
 impl SipTransportSecurityContext {
@@ -1091,8 +1288,11 @@ impl SipClientAuth {
                         "AKA credentials cannot answer a non-AKA challenge".to_string(),
                     ));
                 }
-                let response =
-                    config.respond(challenge_header, method, request_uri, nonce_count)?;
+                let response = config
+                    .respond(challenge_header, method, request_uri, nonce_count)
+                    .map_err(|error| {
+                        redacted_auth_failure(AuthFailureStage::AkaClientProvider, error)
+                    })?;
                 Ok(ClientAuthHeader {
                     value: response,
                     scheme: SipAuthScheme::Aka,
@@ -1144,8 +1344,9 @@ impl std::fmt::Debug for ClientAuthHeader {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ClientAuthHeader")
-            .field("value", &"[redacted]")
-            .field("scheme", &self.scheme)
+            .field("value_present", &!self.value.is_empty())
+            .field("value_len", &self.value.len())
+            .field("scheme", &SipAuthSchemeDiagnostic(&self.scheme))
             .field("has_digest_challenge", &self.digest_challenge.is_some())
             .field("stale", &self.stale)
             .finish()
@@ -1638,10 +1839,7 @@ impl SipAuthService {
                 let principal = principal
                     .or_else(|| principal_from_sip_auth_identity(&identity))
                     .ok_or_else(|| {
-                        SessionError::AuthError(format!(
-                            "listener authentication scheme {:?} cannot produce a canonical principal",
-                            identity.scheme
-                        ))
+                        redacted_auth_failure(AuthFailureStage::PrincipalProjection, ())
                     })?;
                 Ok(SipPrincipalAuthDecision::Authorized {
                     identity,
@@ -1670,13 +1868,14 @@ impl SipAuthService {
 
         let verdict = match self.check_rate_limit(&rate_key).await {
             Ok(verdict) => verdict,
-            Err(err) => {
+            Err(error) => {
                 let outcome = AuthAuditOutcome::Failure(AuthFailureReason::ProviderUnavailable);
                 self.audit_attempt(attempt, outcome, authorization, source, method, context)
                     .await?;
-                return Err(SessionError::AuthError(format!(
-                    "auth rate limiter unavailable: {err}"
-                )));
+                return Err(redacted_auth_failure(
+                    AuthFailureStage::RateLimitCheck,
+                    error,
+                ));
             }
         };
 
@@ -1897,7 +2096,7 @@ impl SipAuthService {
         let Some(rate_limiter) = &self.rate_limiter else {
             return Ok(());
         };
-        if let Err(err) = rate_limiter.record_auth_result(key, outcome).await {
+        if let Err(error) = rate_limiter.record_auth_result(key, outcome).await {
             let provider_outcome =
                 AuthAuditOutcome::Failure(AuthFailureReason::ProviderUnavailable);
             self.audit_attempt(
@@ -1909,9 +2108,10 @@ impl SipAuthService {
                 context,
             )
             .await?;
-            return Err(SessionError::AuthError(format!(
-                "auth rate limiter unavailable: {err}"
-            )));
+            return Err(redacted_auth_failure(
+                AuthFailureStage::RateLimitRecord,
+                error,
+            ));
         }
         Ok(())
     }
@@ -1954,13 +2154,11 @@ impl SipAuthService {
 
         match sink.record_auth_event(event).await {
             Ok(()) => Ok(()),
-            Err(err) if self.audit_failure_policy == AuditFailurePolicy::FailOpen => {
-                let _ = err;
+            Err(error) if self.audit_failure_policy == AuditFailurePolicy::FailOpen => {
+                let _ = error;
                 Ok(())
             }
-            Err(err) => Err(SessionError::AuthError(format!(
-                "auth audit sink unavailable: {err}"
-            ))),
+            Err(error) => Err(redacted_auth_failure(AuthFailureStage::AuditSink, error)),
         }
     }
 
@@ -2257,9 +2455,10 @@ impl SipAuthService {
                 Some(AuthFailureReason::InvalidCredential),
                 None,
             )),
-            Err(BearerAuthError::Unavailable(err)) => Err(SessionError::AuthError(format!(
-                "Bearer validator unavailable: {err}"
-            ))),
+            Err(BearerAuthError::Unavailable(error)) => Err(redacted_auth_failure(
+                AuthFailureStage::BearerValidator,
+                error,
+            )),
         }
     }
 
@@ -2329,7 +2528,10 @@ impl SipAuthService {
                     self.rejected_async(source).await?,
                     Some(AuthFailureReason::PolicyRejected),
                 )),
-                Err(err) => Err(SessionError::AuthError(err.to_string())),
+                Err(error) => Err(redacted_auth_failure(
+                    AuthFailureStage::BasicVerifier,
+                    error,
+                )),
             };
         }
         let valid = {
@@ -2374,7 +2576,8 @@ impl SipAuthService {
         };
         match aka
             .validate(authorization, method, request_uri, body)
-            .await?
+            .await
+            .map_err(|error| redacted_auth_failure(AuthFailureStage::AkaVectorProvider, error))?
         {
             Some(mut identity) => {
                 identity.scheme = SipAuthScheme::Aka;
@@ -2505,10 +2708,13 @@ impl std::fmt::Debug for SipAuthService {
             .field("digest", &self.digest.is_some())
             .field("digest_provider", &self.digest_provider.is_some())
             .field("bearer", &self.bearer.is_some())
-            .field("bearer_realm", &self.bearer_realm)
-            .field("bearer_scope", &self.bearer_scope)
-            .field("required_bearer_scope", &self.required_bearer_scope)
-            .field("basic", &self.basic.as_ref().map(|b| &b.realm))
+            .field("bearer_realm_present", &self.bearer_realm.is_some())
+            .field("bearer_scope_present", &self.bearer_scope.is_some())
+            .field(
+                "required_bearer_scope_present",
+                &self.required_bearer_scope.is_some(),
+            )
+            .field("basic", &self.basic.is_some())
             .field("aka", &self.aka.is_some())
             .field(
                 "allow_bearer_over_cleartext",
@@ -2573,7 +2779,9 @@ impl DigestProviderAuthStore {
             replay_store
                 .record_nonce(&challenge.nonce, system_time_after(self.nonce_ttl))
                 .await
-                .map_err(|err| SessionError::AuthError(err.to_string()))?;
+                .map_err(|error| {
+                    redacted_auth_failure(AuthFailureStage::ReplayNonceRecord, error)
+                })?;
         } else {
             self.record_nonce_local(&challenge.nonce);
         }
@@ -2638,7 +2846,12 @@ impl DigestProviderAuthStore {
                     .rejected_with_reason(AuthFailureReason::PolicyRejected)
                     .await
             }
-            Err(err) => return Err(SessionError::AuthError(err.to_string())),
+            Err(error) => {
+                return Err(redacted_auth_failure(
+                    AuthFailureStage::DigestSecretProvider,
+                    error,
+                ))
+            }
         };
 
         let valid = match self
@@ -2740,7 +2953,7 @@ impl DigestProviderAuthStore {
         match replay_store
             .nonce_status(nonce, SystemTime::now())
             .await
-            .map_err(|err| SessionError::AuthError(err.to_string()))?
+            .map_err(|error| redacted_auth_failure(AuthFailureStage::ReplayNonceStatus, error))?
         {
             DigestNonceStatus::Active => Ok(NonceStatus::Active),
             DigestNonceStatus::Expired => Ok(NonceStatus::Expired),
@@ -2775,7 +2988,7 @@ impl DigestProviderAuthStore {
             replay_store
                 .accept_nonce_count(&response.username, &response.nonce, nc)
                 .await
-                .map_err(|err| SessionError::AuthError(err.to_string()))?
+                .map_err(|error| redacted_auth_failure(AuthFailureStage::ReplayNonceCount, error))?
         } else {
             self.accept_nonce_count(response)
         };
@@ -3007,7 +3220,7 @@ async fn accept_nonce_count_with_replay_store(
     replay_store
         .accept_nonce_count(&response.username, &response.nonce, nc)
         .await
-        .map_err(|err| SessionError::AuthError(err.to_string()))
+        .map_err(|error| redacted_auth_failure(AuthFailureStage::ReplayNonceCount, error))
 }
 
 fn bearer_challenge_value(
@@ -3190,7 +3403,7 @@ fn select_composite_client_auth(
 
 /// Result of evaluating inbound SIP Digest authentication with
 /// [`SipDigestAuthService`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum AuthDecision {
     /// The inbound request carried a valid digest response.
     Authorized {
@@ -3206,6 +3419,27 @@ pub enum AuthDecision {
         /// Formatted `WWW-Authenticate` header value.
         www_authenticate: String,
     },
+}
+
+impl fmt::Debug for AuthDecision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Authorized { username, realm } => formatter
+                .debug_struct("Authorized")
+                .field("username_present", &!username.is_empty())
+                .field("realm_present", &!realm.is_empty())
+                .finish(),
+            Self::Rejected {
+                challenge,
+                www_authenticate,
+            } => formatter
+                .debug_struct("Rejected")
+                .field("challenge_present", &!challenge.nonce.is_empty())
+                .field("www_authenticate_present", &!www_authenticate.is_empty())
+                .field("www_authenticate_len", &www_authenticate.len())
+                .finish(),
+        }
+    }
 }
 
 /// UAS-side SIP Digest authentication facade.
@@ -3287,7 +3521,7 @@ impl SipDigestAuthService {
         replay_store
             .record_nonce(&challenge.nonce, system_time_after(self.nonce_ttl))
             .await
-            .map_err(|err| SessionError::AuthError(err.to_string()))?;
+            .map_err(|error| redacted_auth_failure(AuthFailureStage::ReplayNonceRecord, error))?;
         Ok(challenge)
     }
 
@@ -3455,7 +3689,7 @@ impl SipDigestAuthService {
         match replay_store
             .nonce_status(&response.nonce, SystemTime::now())
             .await
-            .map_err(|err| SessionError::AuthError(err.to_string()))?
+            .map_err(|error| redacted_auth_failure(AuthFailureStage::ReplayNonceStatus, error))?
         {
             DigestNonceStatus::Active => {}
             DigestNonceStatus::Expired => {
@@ -3587,7 +3821,7 @@ impl std::fmt::Debug for SipDigestAuthService {
             .map(|nonces| nonces.len())
             .unwrap_or_default();
         f.debug_struct("SipDigestAuthService")
-            .field("authenticator", &self.authenticator)
+            .field("realm_present", &!self.realm.is_empty())
             .field("user_count", &user_count)
             .field("nonce_count", &nonce_count)
             .field("nonce_ttl", &self.nonce_ttl)
@@ -3600,6 +3834,21 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use std::sync::Mutex;
+
+    const LOWER_ERROR_CANARY: &str = "lower-auth-secret\r\nX-Auth-Canary: exposed";
+
+    fn assert_auth_stage(error: &SessionError, stage: AuthFailureStage) {
+        assert_eq!(
+            error.to_string(),
+            format!("Authentication error: {}", stage.message())
+        );
+        assert!(!error.to_string().contains(LOWER_ERROR_CANARY));
+        assert!(!format!("{error:?}").contains(LOWER_ERROR_CANARY));
+        assert!(matches!(
+            error,
+            SessionError::AuthError(value) if value == stage.message()
+        ));
+    }
 
     struct StaticAkaClientResponse(String);
 
@@ -3617,6 +3866,8 @@ mod tests {
 
     struct StaticPasswordVerifier;
 
+    struct FailingPasswordVerifier;
+
     #[async_trait::async_trait]
     impl PasswordVerifier for StaticPasswordVerifier {
         async fn verify_password(
@@ -3632,7 +3883,22 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl PasswordVerifier for FailingPasswordVerifier {
+        async fn verify_password(
+            &self,
+            _username: &str,
+            _password: &str,
+        ) -> std::result::Result<IdentityAssurance, CredentialAuthError> {
+            Err(CredentialAuthError::Unavailable(
+                LOWER_ERROR_CANARY.to_string(),
+            ))
+        }
+    }
+
     struct StaticDigestProvider;
+
+    struct FailingDigestProvider;
 
     #[async_trait::async_trait]
     impl DigestSecretProvider for StaticDigestProvider {
@@ -3647,6 +3913,20 @@ mod tests {
             } else {
                 Ok(None)
             }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DigestSecretProvider for FailingDigestProvider {
+        async fn lookup_digest_secret(
+            &self,
+            _username: &str,
+            _realm: &str,
+            _algorithm: DigestAlgorithm,
+        ) -> std::result::Result<Option<DigestSecret>, CredentialAuthError> {
+            Err(CredentialAuthError::Unavailable(
+                LOWER_ERROR_CANARY.to_string(),
+            ))
         }
     }
 
@@ -3673,7 +3953,9 @@ mod tests {
             event: AuthAuditEvent,
         ) -> std::result::Result<(), CredentialAuthError> {
             if self.fail {
-                return Err(CredentialAuthError::Unavailable("audit down".to_string()));
+                return Err(CredentialAuthError::Unavailable(
+                    LOWER_ERROR_CANARY.to_string(),
+                ));
             }
             self.events.lock().unwrap().push(event);
             Ok(())
@@ -3719,6 +4001,13 @@ mod tests {
             }
         }
 
+        fn fail_record() -> Self {
+            Self {
+                fail_record: true,
+                ..Self::allow()
+            }
+        }
+
         fn into_arc(self) -> Arc<dyn AuthRateLimiter> {
             Arc::new(self)
         }
@@ -3736,7 +4025,7 @@ mod tests {
         ) -> std::result::Result<AuthRateLimitVerdict, CredentialAuthError> {
             if self.fail_check {
                 return Err(CredentialAuthError::Unavailable(
-                    "rate limiter down".to_string(),
+                    LOWER_ERROR_CANARY.to_string(),
                 ));
             }
             self.checked.lock().unwrap().push(key.clone());
@@ -3750,7 +4039,7 @@ mod tests {
         ) -> std::result::Result<(), CredentialAuthError> {
             if self.fail_record {
                 return Err(CredentialAuthError::Unavailable(
-                    "rate limiter record down".to_string(),
+                    LOWER_ERROR_CANARY.to_string(),
                 ));
             }
             self.results.lock().unwrap().push(outcome.clone());
@@ -3793,7 +4082,30 @@ mod tests {
             &self,
             _token: &str,
         ) -> std::result::Result<IdentityAssurance, BearerAuthError> {
-            Err(BearerAuthError::Unavailable("idp down".to_string()))
+            Err(BearerAuthError::Unavailable(LOWER_ERROR_CANARY.to_string()))
+        }
+    }
+
+    struct FailingAkaVectorProvider;
+
+    #[async_trait::async_trait]
+    impl AkaVectorProvider for FailingAkaVectorProvider {
+        async fn validate(
+            &self,
+            _authorization: &str,
+            _method: &str,
+            _request_uri: &str,
+            _body: Option<&[u8]>,
+        ) -> Result<Option<AuthIdentity>> {
+            Err(SessionError::AuthError(LOWER_ERROR_CANARY.to_string()))
+        }
+
+        fn challenge(&self, source: SipAuthSource) -> SipAuthChallenge {
+            SipAuthChallenge {
+                scheme: SipAuthScheme::Aka,
+                value: "Digest algorithm=AKAv1-MD5".to_string(),
+                source,
+            }
         }
     }
 
@@ -3802,6 +4114,42 @@ mod tests {
         nonces: Mutex<HashMap<String, SystemTime>>,
         nonce_counts: Mutex<HashMap<(String, String), u32>>,
         force_expired: Mutex<bool>,
+    }
+
+    struct FailingDigestReplayStore;
+
+    #[async_trait::async_trait]
+    impl DigestReplayStore for FailingDigestReplayStore {
+        async fn record_nonce(
+            &self,
+            _nonce: &str,
+            _expires_at: SystemTime,
+        ) -> std::result::Result<(), CredentialAuthError> {
+            Err(CredentialAuthError::Unavailable(
+                LOWER_ERROR_CANARY.to_string(),
+            ))
+        }
+
+        async fn nonce_status(
+            &self,
+            _nonce: &str,
+            _now: SystemTime,
+        ) -> std::result::Result<DigestNonceStatus, CredentialAuthError> {
+            Err(CredentialAuthError::Unavailable(
+                LOWER_ERROR_CANARY.to_string(),
+            ))
+        }
+
+        async fn accept_nonce_count(
+            &self,
+            _username: &str,
+            _nonce: &str,
+            _nonce_count: u32,
+        ) -> std::result::Result<bool, CredentialAuthError> {
+            Err(CredentialAuthError::Unavailable(
+                LOWER_ERROR_CANARY.to_string(),
+            ))
+        }
     }
 
     impl MemoryDigestReplayStore {
@@ -4663,7 +5011,7 @@ mod tests {
             .await
             .expect_err("rate limiter failure should fail closed");
 
-        assert!(matches!(err, SessionError::AuthError(_)));
+        assert_auth_stage(&err, AuthFailureStage::RateLimitCheck);
         assert_eq!(
             sink.events()[0].outcome,
             AuthAuditOutcome::Failure(AuthFailureReason::ProviderUnavailable)
@@ -4689,11 +5037,156 @@ mod tests {
             .await
             .expect_err("provider failure should return error");
 
-        assert!(matches!(err, SessionError::AuthError(_)));
+        assert_auth_stage(&err, AuthFailureStage::BearerValidator);
         assert_eq!(
             sink.events()[0].outcome,
             AuthAuditOutcome::Failure(AuthFailureReason::ProviderUnavailable)
         );
+    }
+
+    #[tokio::test]
+    async fn audit_and_rate_result_failures_expose_only_fixed_stages() {
+        let token = BASE64_STANDARD.encode("alice:secret");
+        let mut rate_service = SipAuthService::new()
+            .with_basic_realm("legacy")
+            .allow_basic_over_cleartext(true)
+            .with_rate_limiter(TestRateLimiter::fail_record().into_arc());
+        rate_service.add_basic_user("alice", "secret");
+        let rate_error = rate_service
+            .authenticate_authorization(
+                Some(&format!("Basic {token}")),
+                "OPTIONS",
+                "sip:bob@example.test",
+                None,
+                SipAuthSource::Origin,
+                false,
+            )
+            .await
+            .expect_err("rate result failure");
+        assert_auth_stage(&rate_error, AuthFailureStage::RateLimitRecord);
+
+        let sink = RecordingAuditSink {
+            fail: true,
+            ..RecordingAuditSink::default()
+        };
+        let mut audit_service = SipAuthService::new()
+            .with_basic_realm("legacy")
+            .allow_basic_over_cleartext(true)
+            .with_audit_sink(sink.into_arc())
+            .with_audit_failure_policy(AuditFailurePolicy::FailClosed);
+        audit_service.add_basic_user("alice", "secret");
+        let audit_error = audit_service
+            .authenticate_authorization(
+                Some(&format!("Basic {token}")),
+                "OPTIONS",
+                "sip:bob@example.test",
+                None,
+                SipAuthSource::Origin,
+                false,
+            )
+            .await
+            .expect_err("audit sink failure");
+        assert_auth_stage(&audit_error, AuthFailureStage::AuditSink);
+    }
+
+    #[tokio::test]
+    async fn verifier_digest_aka_and_replay_failures_expose_only_fixed_stages() {
+        let token = BASE64_STANDARD.encode("alice:secret");
+        let basic_service = SipAuthService::new()
+            .with_basic_verifier("legacy", Arc::new(FailingPasswordVerifier))
+            .allow_basic_over_cleartext(true);
+        let basic_error = basic_service
+            .authenticate_authorization(
+                Some(&format!("Basic {token}")),
+                "OPTIONS",
+                "sip:bob@example.test",
+                None,
+                SipAuthSource::Origin,
+                false,
+            )
+            .await
+            .expect_err("password verifier failure");
+        assert_auth_stage(&basic_error, AuthFailureStage::BasicVerifier);
+
+        let digest_service = SipAuthService::new()
+            .with_digest_provider("example.test", Arc::new(FailingDigestProvider));
+        let digest_challenge = digest_service
+            .challenges(SipAuthSource::Origin)
+            .into_iter()
+            .find(|challenge| challenge.scheme == SipAuthScheme::Digest)
+            .and_then(|challenge| DigestAuthenticator::parse_challenge(&challenge.value).ok())
+            .expect("Digest challenge");
+        let digest_authorization = authorization_for(
+            "alice",
+            "secret",
+            &digest_challenge,
+            "OPTIONS",
+            "sip:bob@example.test",
+            None,
+        );
+        let digest_error = digest_service
+            .authenticate_authorization(
+                Some(&digest_authorization),
+                "OPTIONS",
+                "sip:bob@example.test",
+                None,
+                SipAuthSource::Origin,
+                false,
+            )
+            .await
+            .expect_err("Digest provider failure");
+        assert_auth_stage(&digest_error, AuthFailureStage::DigestSecretProvider);
+
+        let aka_service =
+            SipAuthService::new().with_aka_provider(Arc::new(FailingAkaVectorProvider));
+        let aka_error = aka_service
+            .authenticate_aka_with_reason(
+                "Digest algorithm=AKAv1-MD5",
+                "INVITE",
+                "sip:bob@example.test",
+                None,
+                SipAuthSource::Origin,
+            )
+            .await
+            .expect_err("AKA vector provider failure");
+        assert_auth_stage(&aka_error, AuthFailureStage::AkaVectorProvider);
+
+        let replay_store: Arc<dyn DigestReplayStore> = Arc::new(FailingDigestReplayStore);
+        let compatibility_service = SipDigestAuthService::new("example.test");
+        let record_error = compatibility_service
+            .challenge_with_replay_store(replay_store.clone())
+            .await
+            .expect_err("replay nonce record failure");
+        assert_auth_stage(&record_error, AuthFailureStage::ReplayNonceRecord);
+
+        compatibility_service.add_user("alice", "secret");
+        let challenge = compatibility_service.challenge();
+        let authorization = authorization_for(
+            "alice",
+            "secret",
+            &challenge,
+            "OPTIONS",
+            "sip:bob@example.test",
+            None,
+        );
+        let status_error = compatibility_service
+            .validate_authorization_with_replay_store(
+                &authorization,
+                "OPTIONS",
+                "sip:bob@example.test",
+                None,
+                replay_store.clone(),
+            )
+            .await
+            .expect_err("replay nonce status failure");
+        assert_auth_stage(&status_error, AuthFailureStage::ReplayNonceStatus);
+
+        let response = DigestAuthenticator::parse_authorization(&authorization)
+            .expect("parse Digest authorization");
+        let count_error = accept_nonce_count_with_replay_store(&response, replay_store.as_ref())
+            .await
+            .expect_err("replay nonce-count failure");
+        assert_auth_stage(&count_error, AuthFailureStage::ReplayNonceCount);
     }
 
     #[tokio::test]
@@ -5237,10 +5730,6 @@ mod tests {
             )
             .expect_err("malformed-only Digest challenge must fail");
 
-        assert!(
-            format!("{err:?}").contains("Invalid digest challenge")
-                || format!("{err:?}").contains("nonce"),
-            "unexpected error for malformed Digest challenge: {err:?}"
-        );
+        assert_auth_stage(&err, AuthFailureStage::CorePrimitive);
     }
 }
