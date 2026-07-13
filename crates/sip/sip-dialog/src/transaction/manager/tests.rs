@@ -2607,6 +2607,109 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn retired_route_count_tracks_concurrent_retire_prune_expiry_and_shutdown() -> Result<()>
+    {
+        const TRANSACTIONS: usize = 48;
+        const RETIRED_CAP: usize = 8;
+
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(128);
+        let (mut manager, mut events) =
+            TransactionManager::new(transport, transport_rx, Some(512)).await?;
+        manager.retired_client_transaction_capacity = RETIRED_CAP;
+        let destination: SocketAddr = "192.0.2.30:5060".parse().unwrap();
+        let mut transactions = Vec::with_capacity(TRANSACTIONS);
+
+        for index in 0..TRANSACTIONS {
+            let request = create_test_invite_with_identity(
+                &format!("retired-count-{index}"),
+                &format!("z9hG4bK.retired-count-{index}"),
+                "UDP",
+            )
+            .map_err(|error| Error::Other(error.to_string()))?;
+            let transaction = manager
+                .create_client_transaction_on_route(
+                    request,
+                    TransportRoute::new(destination).with_transport_type(TransportType::Udp),
+                )
+                .await?;
+            manager.send_request(&transaction).await?;
+            transactions.push(transaction);
+            while events.try_recv().is_ok() {}
+        }
+
+        let mut retirements = Vec::with_capacity(TRANSACTIONS);
+        for transaction in transactions {
+            let manager = manager.clone();
+            retirements.push(tokio::spawn(async move {
+                manager.terminate_transaction(&transaction).await
+            }));
+        }
+        for retirement in retirements {
+            retirement
+                .await
+                .expect("retirement task panicked")
+                .expect("retirement failed");
+        }
+
+        let actual_retired = manager
+            .transaction_destinations
+            .iter()
+            .filter(|entry| entry.value().retired().is_some())
+            .count();
+        assert!(actual_retired <= RETIRED_CAP);
+        assert_eq!(
+            manager
+                .retired_client_transaction_count
+                .load(Ordering::Acquire),
+            actual_retired
+        );
+        assert_eq!(manager.retention_counts().transaction_destinations, 0);
+        assert_eq!(manager.retired_client_transaction_count(), actual_retired);
+
+        for mut entry in manager.transaction_destinations.iter_mut() {
+            if let ClientResponseRouteState::Retired(retired) = entry.value_mut() {
+                retired.expires_at = Instant::now() - Duration::from_millis(1);
+            }
+        }
+
+        let participants = 5;
+        let start = Arc::new(tokio::sync::Barrier::new(participants));
+        let mut maintenance = Vec::new();
+        for _ in 0..participants - 1 {
+            let manager = manager.clone();
+            let start = start.clone();
+            maintenance.push(tokio::spawn(async move {
+                start.wait().await;
+                manager.retired_client_transaction_count()
+            }));
+        }
+        let shutdown = {
+            let manager = manager.clone();
+            let start = start.clone();
+            tokio::spawn(async move {
+                start.wait().await;
+                manager.shutdown().await;
+            })
+        };
+
+        for task in maintenance {
+            task.await.expect("retention maintenance task panicked");
+        }
+        shutdown.await.expect("shutdown task panicked");
+
+        assert!(manager.transaction_destinations.is_empty());
+        assert_eq!(
+            manager
+                .retired_client_transaction_count
+                .load(Ordering::Acquire),
+            0
+        );
+        assert_eq!(manager.retired_client_transaction_count(), 0);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn retired_invite_accepts_only_route_authenticated_late_2xx_and_can_ack() -> Result<()> {
         use rvoip_sip_core::builder::SimpleResponseBuilder;

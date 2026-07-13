@@ -500,6 +500,7 @@ pub struct TransactionManager {
     /// ACK them without keeping the transaction runner alive.
     transaction_destinations: Arc<DashMap<TransactionKey, ClientResponseRouteState>>,
     retired_client_transaction_capacity: usize,
+    retired_client_transaction_count: Arc<AtomicUsize>,
     retired_client_transaction_insert_count: Arc<AtomicUsize>,
     /// Event sender
     events_tx: mpsc::Sender<TransactionEvent>,
@@ -1471,6 +1472,7 @@ impl TransactionManager {
             retired_client_transaction_capacity: retired_client_transaction_capacity(
                 index_capacity,
             ),
+            retired_client_transaction_count: Arc::new(AtomicUsize::new(0)),
             retired_client_transaction_insert_count: Arc::new(AtomicUsize::new(0)),
             events_tx,
             event_subscribers,
@@ -1619,6 +1621,7 @@ impl TransactionManager {
             retired_client_transaction_capacity: retired_client_transaction_capacity(
                 index_capacity,
             ),
+            retired_client_transaction_count: Arc::new(AtomicUsize::new(0)),
             retired_client_transaction_insert_count: Arc::new(AtomicUsize::new(0)),
             events_tx,
             event_subscribers,
@@ -1876,6 +1879,7 @@ impl TransactionManager {
             retired_client_transaction_capacity: retired_client_transaction_capacity(
                 index_capacity,
             ),
+            retired_client_transaction_count: Arc::new(AtomicUsize::new(0)),
             retired_client_transaction_insert_count: Arc::new(AtomicUsize::new(0)),
             events_tx,
             event_subscribers,
@@ -2001,6 +2005,7 @@ impl TransactionManager {
             retired_client_transaction_capacity: retired_client_transaction_capacity(
                 index_capacity,
             ),
+            retired_client_transaction_count: Arc::new(AtomicUsize::new(0)),
             retired_client_transaction_insert_count: Arc::new(AtomicUsize::new(0)),
             events_tx,
             event_subscribers,
@@ -2106,6 +2111,7 @@ impl TransactionManager {
             retired_client_transaction_capacity: retired_client_transaction_capacity(
                 index_capacity,
             ),
+            retired_client_transaction_count: Arc::new(AtomicUsize::new(0)),
             retired_client_transaction_insert_count: Arc::new(AtomicUsize::new(0)),
             subscriber_to_transactions,
             transaction_to_subscribers,
@@ -2776,12 +2782,17 @@ impl TransactionManager {
             .retired()
             .is_some_and(|retired| retired.expires_at <= Instant::now())
         {
-            self.transaction_destinations
+            if self
+                .transaction_destinations
                 .remove_if(transaction_id, |_, current| {
                     current
                         .retired()
                         .is_some_and(|retired| retired.expires_at <= Instant::now())
-                });
+                })
+                .is_some()
+            {
+                self.decrement_retired_client_transaction_count();
+            }
             return None;
         }
         Some(state)
@@ -2826,6 +2837,8 @@ impl TransactionManager {
                     route: exact_route,
                     expires_at: Instant::now() + RETIRED_CLIENT_TRANSACTION_TTL,
                 });
+                self.retired_client_transaction_count
+                    .fetch_add(1, Ordering::AcqRel);
                 transitioned = true;
             }
         }
@@ -2874,7 +2887,9 @@ impl TransactionManager {
             .fetch_add(1, Ordering::Relaxed)
             + 1;
         if inserts % 1024 == 0
-            || self.retired_client_transaction_count_unpruned()
+            || self
+                .retired_client_transaction_count
+                .load(Ordering::Acquire)
                 > self.retired_client_transaction_capacity
         {
             self.prune_retired_client_transactions();
@@ -3176,6 +3191,8 @@ impl TransactionManager {
             queue.clear();
         }
         self.transaction_destinations.clear();
+        self.retired_client_transaction_count
+            .store(0, Ordering::Release);
         self.pending_inbound_bytes.clear();
         self.pending_inbound_inserted_at.clear();
         self.pending_inbound_transport.clear();
@@ -3949,8 +3966,13 @@ impl TransactionManager {
 
         // Store the transaction + complete request route.
         self.client_transactions.insert(key.clone(), transaction);
-        self.transaction_destinations
-            .insert(key.clone(), ClientResponseRouteState::Active(request_route));
+        if self
+            .transaction_destinations
+            .insert(key.clone(), ClientResponseRouteState::Active(request_route))
+            .is_some_and(|previous| previous.retired().is_some())
+        {
+            self.decrement_retired_client_transaction_count();
+        }
 
         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Created client transaction");
 
@@ -4668,11 +4690,17 @@ impl TransactionManager {
             .map(|entry| entry.key().clone())
             .collect();
         for key in expired {
-            self.transaction_destinations.remove_if(&key, |_, state| {
-                state
-                    .retired()
-                    .is_some_and(|retired| retired.expires_at <= now)
-            });
+            if self
+                .transaction_destinations
+                .remove_if(&key, |_, state| {
+                    state
+                        .retired()
+                        .is_some_and(|retired| retired.expires_at <= now)
+                })
+                .is_some()
+            {
+                self.decrement_retired_client_transaction_count();
+            }
         }
 
         let mut oldest: Vec<(TransactionKey, Instant)> = self
@@ -4695,19 +4723,31 @@ impl TransactionManager {
             .into_iter()
             .take(len.saturating_sub(self.retired_client_transaction_capacity))
         {
-            self.transaction_destinations.remove_if(&key, |_, state| {
-                state
-                    .retired()
-                    .is_some_and(|retired| retired.expires_at == expires_at)
-            });
+            if self
+                .transaction_destinations
+                .remove_if(&key, |_, state| {
+                    state
+                        .retired()
+                        .is_some_and(|retired| retired.expires_at == expires_at)
+                })
+                .is_some()
+            {
+                self.decrement_retired_client_transaction_count();
+            }
         }
     }
 
     fn retired_client_transaction_count_unpruned(&self) -> usize {
-        self.transaction_destinations
-            .iter()
-            .filter(|entry| entry.value().retired().is_some())
-            .count()
+        self.retired_client_transaction_count
+            .load(Ordering::Acquire)
+    }
+
+    fn decrement_retired_client_transaction_count(&self) {
+        let _ = self.retired_client_transaction_count.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |count| Some(count.saturating_sub(1)),
+        );
     }
 
     fn prune_closed_event_subscribers_now(&self) {

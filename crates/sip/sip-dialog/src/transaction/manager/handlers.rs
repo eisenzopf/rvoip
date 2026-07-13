@@ -126,12 +126,17 @@ impl TransactionManager {
             super::ClientResponseRouteState::Retired(retired) => {
                 if retired.expires_at <= Instant::now() {
                     drop(state);
-                    self.transaction_destinations
+                    if self
+                        .transaction_destinations
                         .remove_if(transaction_id, |_, current| {
                             current
                                 .retired()
                                 .is_some_and(|retired| retired.expires_at <= Instant::now())
-                        });
+                        })
+                        .is_some()
+                    {
+                        self.decrement_retired_client_transaction_count();
+                    }
                     return ClientResponseRouteAuthentication::UnknownTransaction;
                 }
                 retired.route.clone()
