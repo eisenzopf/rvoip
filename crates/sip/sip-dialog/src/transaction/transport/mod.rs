@@ -84,6 +84,10 @@ pub struct TransportManagerConfig {
     pub tls_client_cert_path: Option<String>,
     /// Optional client private key for mutual TLS.
     pub tls_client_key_path: Option<String>,
+    /// Inbound TLS client-certificate verification policy. This is separate
+    /// from `tls_client_cert_path`, which is the certificate presented by
+    /// this endpoint when it acts as an outbound TLS client.
+    pub tls_server_client_auth: rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig,
     /// **Dev only.** When `true`, server certificates are accepted
     /// without identity verification. The TLS handshake still runs
     /// end-to-end (encrypted), but a malicious peer can MITM. Required
@@ -124,6 +128,8 @@ impl Default for TransportManagerConfig {
             tls_extra_ca_path: None,
             tls_client_cert_path: None,
             tls_client_key_path: None,
+            tls_server_client_auth:
+                rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::default(),
             tls_insecure_skip_verify: false,
         }
     }
@@ -647,21 +653,24 @@ impl TransportManager {
                         Error::Transport("TLS enabled but tls_key_path is missing".into())
                     })?;
                     let result = if self.config.tls_role == TlsRole::ServerOnly {
-                        TlsTransport::bind_server_only_with_client_config(
+                        TlsTransport::bind_server_only_with_configs_and_handshake(
                             bind_addr,
                             Path::new(cert_path),
                             Path::new(key_path),
                             Some(self.event_tx.clone()),
                             client_cfg,
+                            self.config.tls_server_client_auth.clone(),
+                            rvoip_sip_transport::transport::HandshakeAdmissionConfig::default(),
                         )
                         .await
                     } else {
-                        TlsTransport::bind_with_client_config(
+                        TlsTransport::bind_with_configs(
                             bind_addr,
                             Path::new(cert_path),
                             Path::new(key_path),
                             Some(self.event_tx.clone()),
                             client_cfg,
+                            self.config.tls_server_client_auth.clone(),
                         )
                         .await
                     };
@@ -735,14 +744,45 @@ impl TransportManager {
         };
 
         #[cfg(feature = "ws")]
-        let result = WebSocketTransport::bind(
-            bind_addr,
-            secure,
-            _cert_path,
-            _key_path,
-            Some(self.config.default_channel_capacity),
-        )
-        .await;
+        let result = if secure {
+            let client_tls = rvoip_sip_transport::transport::tls::TlsClientConfig {
+                extra_ca_path: self
+                    .config
+                    .tls_extra_ca_path
+                    .as_ref()
+                    .map(std::path::PathBuf::from),
+                insecure_skip_verify: self.config.tls_insecure_skip_verify,
+                client_cert_path: self
+                    .config
+                    .tls_client_cert_path
+                    .as_ref()
+                    .map(std::path::PathBuf::from),
+                client_key_path: self
+                    .config
+                    .tls_client_key_path
+                    .as_ref()
+                    .map(std::path::PathBuf::from),
+            };
+            WebSocketTransport::bind_with_tls_configs(
+                bind_addr,
+                true,
+                _cert_path,
+                _key_path,
+                Some(self.config.default_channel_capacity),
+                Some(client_tls),
+                self.config.tls_server_client_auth.clone(),
+            )
+            .await
+        } else {
+            WebSocketTransport::bind(
+                bind_addr,
+                false,
+                None,
+                None,
+                Some(self.config.default_channel_capacity),
+            )
+            .await
+        };
 
         #[cfg(not(feature = "ws"))]
         let result: Result<(WebSocketTransport, mpsc::Receiver<TransportEvent>)> =

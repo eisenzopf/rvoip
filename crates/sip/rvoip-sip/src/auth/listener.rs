@@ -29,6 +29,12 @@ use std::sync::Arc;
 #[derive(Clone, Default)]
 pub struct SipListenerAuthPolicy {
     enabled: bool,
+    /// Ownership namespace for every principal admitted by this listener.
+    ///
+    /// `None` is valid only while admission is disabled. It is intentionally
+    /// retained in the representation so pre-tenant builder calls remain
+    /// source compatible but fail closed during validation and admission.
+    tenant: Option<String>,
     auth_service: Option<SipAuthService>,
     trusted_sources: Vec<(IpNet, AuthenticatedPrincipal)>,
     mtls_principals: HashMap<String, AuthenticatedPrincipal>,
@@ -39,6 +45,7 @@ impl fmt::Debug for SipListenerAuthPolicy {
         formatter
             .debug_struct("SipListenerAuthPolicy")
             .field("enabled", &self.enabled)
+            .field("tenant_configured", &self.tenant.is_some())
             .field("auth_service_configured", &self.auth_service.is_some())
             .field("trusted_source_count", &self.trusted_sources.len())
             .field("mtls_principal_count", &self.mtls_principals.len())
@@ -52,24 +59,81 @@ impl SipListenerAuthPolicy {
         Self::default()
     }
 
-    /// Require credentials accepted by an existing Digest/Bearer
+    /// Legacy builder for credentials accepted by an existing Digest/Bearer
     /// [`SipAuthService`].
+    ///
+    /// An enabled tenantless policy fails closed. Complete migration with
+    /// [`Self::with_tenant`] or prefer [`Self::authenticated_for_tenant`].
     pub fn authenticated(auth_service: SipAuthService) -> Self {
         Self {
             enabled: true,
+            tenant: None,
             auth_service: Some(auth_service),
             trusted_sources: Vec::new(),
             mtls_principals: HashMap::new(),
         }
     }
 
-    /// Enable this policy without header authentication. Add at least one
-    /// trusted CIDR or mTLS identity before coordinator startup.
+    /// Legacy builder that enables this policy without header authentication.
+    ///
+    /// Add a tenant with [`Self::with_tenant`] plus at least one trusted CIDR
+    /// or mTLS identity before coordinator startup, or prefer
+    /// [`Self::enabled_for_tenant`]. A tenantless enabled policy fails closed.
     pub fn enabled() -> Self {
         Self {
             enabled: true,
             ..Self::default()
         }
+    }
+
+    /// Require credentials and bind every accepted identity to one tenant.
+    ///
+    /// This is the production replacement for [`Self::authenticated`]. The
+    /// tenant is validated immediately: it must be 1–128 characters, already
+    /// trimmed, and contain no control characters.
+    pub fn authenticated_for_tenant(
+        tenant: impl Into<String>,
+        auth_service: SipAuthService,
+    ) -> crate::errors::Result<Self> {
+        Ok(Self {
+            enabled: true,
+            tenant: Some(validated_listener_tenant(tenant.into())?),
+            auth_service: Some(auth_service),
+            trusted_sources: Vec::new(),
+            mtls_principals: HashMap::new(),
+        })
+    }
+
+    /// Enable a tenant-bound policy for trusted-CIDR and/or mTLS mappings.
+    ///
+    /// At least one mechanism must still be added before coordinator startup.
+    pub fn enabled_for_tenant(tenant: impl Into<String>) -> crate::errors::Result<Self> {
+        Ok(Self {
+            enabled: true,
+            tenant: Some(validated_listener_tenant(tenant.into())?),
+            ..Self::default()
+        })
+    }
+
+    /// Migrate a legacy enabled policy to an explicit tenant namespace.
+    ///
+    /// This method is additive so existing builder chains can migrate without
+    /// changing how authentication mechanisms are assembled. Static mappings
+    /// are checked by [`Self::validate`] before a listener is opened.
+    pub fn with_tenant(mut self, tenant: impl Into<String>) -> crate::errors::Result<Self> {
+        self.tenant = Some(validated_listener_tenant(tenant.into())?);
+        Ok(self)
+    }
+
+    /// The configured listener tenant, if admission is tenant-bound.
+    pub fn tenant(&self) -> Option<&str> {
+        self.tenant.as_deref()
+    }
+
+    /// Whether this policy contains certificate-fingerprint mappings and
+    /// therefore requires transport-level client-certificate verification.
+    pub fn has_verified_mtls_peers(&self) -> bool {
+        !self.mtls_principals.is_empty()
     }
 
     /// Add Digest/Bearer header authentication as an accepted mechanism.
@@ -119,6 +183,13 @@ impl SipListenerAuthPolicy {
         if !self.enabled {
             return Ok(());
         }
+        let tenant = self.tenant.as_deref().ok_or_else(|| {
+            crate::errors::SessionError::ConfigError(
+                "enabled SIP listener auth policy requires an explicit tenant; migrate with SipListenerAuthPolicy::authenticated_for_tenant, enabled_for_tenant, or with_tenant"
+                    .to_string(),
+            )
+        })?;
+        validate_listener_tenant(tenant)?;
         if self.auth_service.is_none()
             && self.trusted_sources.is_empty()
             && self.mtls_principals.is_empty()
@@ -129,6 +200,7 @@ impl SipListenerAuthPolicy {
         }
         for (_, principal) in &self.trusted_sources {
             validate_static_principal(principal, "trusted CIDR")?;
+            validate_static_principal_tenant(principal, tenant, "trusted CIDR")?;
         }
         for (fingerprint, principal) in &self.mtls_principals {
             if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -139,6 +211,7 @@ impl SipListenerAuthPolicy {
                 ));
             }
             validate_static_principal(principal, "mTLS fingerprint")?;
+            validate_static_principal_tenant(principal, tenant, "mTLS fingerprint")?;
         }
         Ok(())
     }
@@ -194,6 +267,30 @@ impl SipListenerAuthPolicy {
         }
         SipRequestAuthorization::Rejected(rejection)
     }
+
+    fn tenant_bound_static_principal(
+        &self,
+        principal: AuthenticatedPrincipal,
+    ) -> Option<AuthenticatedPrincipal> {
+        let tenant = self.tenant.as_deref()?;
+        (principal.tenant.as_deref() == Some(tenant)).then_some(principal)
+    }
+
+    fn tenant_bound_header_principal(
+        &self,
+        mut principal: AuthenticatedPrincipal,
+    ) -> Option<AuthenticatedPrincipal> {
+        let tenant = self.tenant.as_deref()?;
+        match principal.tenant.as_deref() {
+            Some(principal_tenant) if principal_tenant == tenant => Some(principal),
+            Some(_) => None,
+            None if principal.method == AuthenticationMethod::SipDigest => {
+                principal.tenant = Some(tenant.to_string());
+                Some(principal)
+            }
+            None => None,
+        }
+    }
 }
 
 #[async_trait]
@@ -210,6 +307,13 @@ impl SipRequestIngressAuthorizer for SipListenerAuthPolicy {
             );
         }
 
+        if self.tenant.is_none() {
+            return SipRequestAuthorization::Rejected(
+                SipRequestRejection::new(StatusCode::ServerInternalError)
+                    .with_reason("SIP listener tenant is not configured"),
+            );
+        }
+
         if let Some(principal) = self
             .mapped_transport_principal(context)
             .or_else(|| self.trusted_source_principal(context))
@@ -220,7 +324,13 @@ impl SipRequestIngressAuthorizer for SipListenerAuthPolicy {
                         .with_reason("configured SIP listener principal is expired"),
                 );
             }
-            return SipRequestAuthorization::Authorized { principal };
+            return match self.tenant_bound_static_principal(principal) {
+                Some(principal) => SipRequestAuthorization::Authorized { principal },
+                None => SipRequestAuthorization::Rejected(
+                    SipRequestRejection::new(StatusCode::Forbidden)
+                        .with_reason("SIP listener principal tenant is not authorized"),
+                ),
+            };
         }
 
         let Some(auth_service) = &self.auth_service else {
@@ -261,7 +371,13 @@ impl SipRequestIngressAuthorizer for SipListenerAuthPolicy {
             Ok(SipPrincipalAuthDecision::Authorized { principal, .. })
                 if !principal.is_expired() =>
             {
-                SipRequestAuthorization::Authorized { principal }
+                match self.tenant_bound_header_principal(principal) {
+                    Some(principal) => SipRequestAuthorization::Authorized { principal },
+                    None => SipRequestAuthorization::Rejected(
+                        SipRequestRejection::new(StatusCode::Forbidden)
+                            .with_reason("SIP listener principal tenant is not authorized"),
+                    ),
+                }
             }
             Ok(SipPrincipalAuthDecision::Authorized { .. }) => SipRequestAuthorization::Rejected(
                 SipRequestRejection::new(StatusCode::Unauthorized)
@@ -278,6 +394,25 @@ impl SipRequestIngressAuthorizer for SipListenerAuthPolicy {
     }
 }
 
+fn validated_listener_tenant(tenant: String) -> crate::errors::Result<String> {
+    validate_listener_tenant(&tenant)?;
+    Ok(tenant)
+}
+
+fn validate_listener_tenant(tenant: &str) -> crate::errors::Result<()> {
+    let character_count = tenant.chars().count();
+    if !(1..=128).contains(&character_count)
+        || tenant.trim() != tenant
+        || tenant.chars().any(char::is_control)
+    {
+        return Err(crate::errors::SessionError::ConfigError(
+            "SIP listener tenant must be 1-128 characters, already trimmed, and contain no control characters"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_static_principal(
     principal: &AuthenticatedPrincipal,
     mechanism: &str,
@@ -290,6 +425,19 @@ fn validate_static_principal(
     if principal.is_expired() {
         return Err(crate::errors::SessionError::ConfigError(format!(
             "{mechanism} principal is already expired"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_static_principal_tenant(
+    principal: &AuthenticatedPrincipal,
+    tenant: &str,
+    mechanism: &str,
+) -> crate::errors::Result<()> {
+    if principal.tenant.as_deref() != Some(tenant) {
+        return Err(crate::errors::SessionError::ConfigError(format!(
+            "{mechanism} principal tenant must exactly match the SIP listener tenant"
         )));
     }
     Ok(())
@@ -351,9 +499,63 @@ mod tests {
 
     #[test]
     fn disabled_policy_does_not_install_an_authorizer() {
-        assert!(SipListenerAuthPolicy::disabled()
-            .into_authorizer()
-            .is_none());
+        let policy = SipListenerAuthPolicy::disabled();
+        policy
+            .validate()
+            .expect("disabled policy remains compatible");
+        assert!(policy.into_authorizer().is_none());
+    }
+
+    #[test]
+    fn enabled_legacy_policy_requires_explicit_tenant_migration() {
+        let legacy = SipListenerAuthPolicy::authenticated(
+            SipAuthService::digest("listener").with_digest_user("alice", "secret"),
+        );
+        let error = legacy
+            .validate()
+            .expect_err("tenantless enabled policy must fail closed");
+        assert!(matches!(
+            error,
+            crate::errors::SessionError::ConfigError(ref detail)
+                if detail.contains("explicit tenant")
+        ));
+
+        let migrated = legacy
+            .with_tenant("tenant-a")
+            .expect("valid migration tenant");
+        migrated.validate().expect("migrated policy");
+    }
+
+    #[test]
+    fn tenant_construction_rejects_ambiguous_or_malformed_values() {
+        for tenant in ["", " tenant-a", "tenant-a ", "tenant\na", "tenant\u{0000}a"] {
+            assert!(SipListenerAuthPolicy::enabled_for_tenant(tenant).is_err());
+        }
+        assert!(SipListenerAuthPolicy::enabled_for_tenant("x".repeat(129)).is_err());
+
+        let max = "é".repeat(128);
+        let policy = SipListenerAuthPolicy::enabled_for_tenant(max.clone())
+            .expect("limit is measured in characters");
+        assert_eq!(policy.tenant(), Some(max.as_str()));
+    }
+
+    #[tokio::test]
+    async fn tenantless_enabled_policy_also_fails_closed_without_startup_validation() {
+        let policy = SipListenerAuthPolicy::enabled().with_trusted_cidr(
+            IpNet::from_str("192.0.2.0/24").unwrap(),
+            principal("trusted-gateway", AuthenticationMethod::ApiKey),
+        );
+        let decision = policy
+            .authorize(
+                &invite(None),
+                &context("192.0.2.42:5060", TransportType::Udp),
+            )
+            .await;
+        assert!(matches!(
+            decision,
+            SipRequestAuthorization::Rejected(ref rejection)
+                if rejection.status == StatusCode::ServerInternalError
+        ));
     }
 
     #[test]
@@ -361,18 +563,23 @@ mod tests {
         const PRINCIPAL_CANARY: &str = "mapped-principal-secret-canary";
         const FINGERPRINT_CANARY: &str = "fingerprint-secret-canary";
         let mut mapped = principal(PRINCIPAL_CANARY, AuthenticationMethod::ApiKey);
-        mapped.tenant = Some(format!("tenant-{PRINCIPAL_CANARY}"));
+        let mapped_tenant = format!("tenant-{PRINCIPAL_CANARY}");
+        mapped.tenant = Some(mapped_tenant.clone());
         mapped.issuer = Some(format!("issuer-{PRINCIPAL_CANARY}"));
         mapped.scopes = vec![format!("scope-{PRINCIPAL_CANARY}")];
 
-        let policy = SipListenerAuthPolicy::authenticated(SipAuthService::digest(PRINCIPAL_CANARY))
-            .with_trusted_cidr("192.0.2.0/24".parse().expect("CIDR"), mapped.clone())
-            .with_verified_mtls_peer(FINGERPRINT_CANARY, mapped.clone());
+        let policy = SipListenerAuthPolicy::authenticated_for_tenant(
+            mapped_tenant,
+            SipAuthService::digest(PRINCIPAL_CANARY),
+        )
+        .expect("tenant-bound policy")
+        .with_trusted_cidr("192.0.2.0/24".parse().expect("CIDR"), mapped.clone())
+        .with_verified_mtls_peer(FINGERPRINT_CANARY, mapped.clone());
 
         let rendered = format!("{policy:?}");
         assert_eq!(
             rendered,
-            "SipListenerAuthPolicy { enabled: true, auth_service_configured: true, trusted_source_count: 1, mtls_principal_count: 1 }"
+            "SipListenerAuthPolicy { enabled: true, tenant_configured: true, auth_service_configured: true, trusted_source_count: 1, mtls_principal_count: 1 }"
         );
         for canary in [PRINCIPAL_CANARY, FINGERPRINT_CANARY, "192.0.2.0/24"] {
             assert!(
@@ -396,7 +603,8 @@ mod tests {
     #[tokio::test]
     async fn trusted_cidr_requires_match_and_uses_explicit_principal() {
         let expected = principal("trusted-gateway", AuthenticationMethod::ApiKey);
-        let policy = SipListenerAuthPolicy::enabled()
+        let policy = SipListenerAuthPolicy::enabled_for_tenant("tenant-a")
+            .expect("tenant-bound policy")
             .with_trusted_cidr(IpNet::from_str("192.0.2.0/24").unwrap(), expected.clone());
 
         let accepted = policy
@@ -425,10 +633,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trusted_cidr_principal_must_exactly_match_listener_tenant() {
+        for tenant in [None, Some("tenant-b".to_string())] {
+            let mut mapped = principal("trusted-gateway", AuthenticationMethod::ApiKey);
+            mapped.tenant = tenant;
+            let policy = SipListenerAuthPolicy::enabled_for_tenant("tenant-a")
+                .expect("tenant-bound policy")
+                .with_trusted_cidr(IpNet::from_str("192.0.2.0/24").unwrap(), mapped);
+            assert!(policy.validate().is_err());
+            let decision = policy
+                .authorize(
+                    &invite(None),
+                    &context("192.0.2.42:5060", TransportType::Udp),
+                )
+                .await;
+            assert!(matches!(
+                decision,
+                SipRequestAuthorization::Rejected(ref rejection)
+                    if rejection.status == StatusCode::Forbidden
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn mtls_mapping_only_accepts_transport_verified_fingerprint() {
         let fingerprint = "ab".repeat(32);
         let expected = principal("mtls-gateway", AuthenticationMethod::Bearer);
-        let policy = SipListenerAuthPolicy::enabled()
+        let policy = SipListenerAuthPolicy::enabled_for_tenant("tenant-a")
+            .expect("tenant-bound policy")
             .with_verified_mtls_peer(fingerprint.clone(), expected.clone());
         let metadata = TransportConnectionMetadata {
             tls_peer_identity: TlsPeerIdentity {
@@ -483,6 +715,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mtls_principal_must_exactly_match_listener_tenant() {
+        let fingerprint = "cd".repeat(32);
+        let mut mapped = principal("mtls-gateway", AuthenticationMethod::Bearer);
+        mapped.tenant = Some("tenant-b".to_string());
+        let policy = SipListenerAuthPolicy::enabled_for_tenant("tenant-a")
+            .expect("tenant-bound policy")
+            .with_verified_mtls_peer(fingerprint.clone(), mapped);
+        assert!(policy.validate().is_err());
+
+        let metadata = TransportConnectionMetadata {
+            tls_peer_identity: TlsPeerIdentity {
+                leaf_certificate_sha256: fingerprint,
+                presented_chain_len: 1,
+            },
+        };
+        let decision = policy
+            .authorize(
+                &invite(None),
+                &context("192.0.2.42:5061", TransportType::Tls).with_connection_metadata(metadata),
+            )
+            .await;
+        assert!(matches!(
+            decision,
+            SipRequestAuthorization::Rejected(ref rejection)
+                if rejection.status == StatusCode::Forbidden
+        ));
+    }
+
+    #[tokio::test]
     async fn digest_header_auth_produces_canonical_principal() {
         let service = SipAuthService::digest("listener")
             .with_digest_user("alice", "correct horse battery staple");
@@ -510,7 +771,8 @@ mod tests {
             "sip:bob@example.test",
             &computed,
         );
-        let policy = SipListenerAuthPolicy::authenticated(service);
+        let policy = SipListenerAuthPolicy::authenticated_for_tenant("tenant-a", service)
+            .expect("tenant-bound policy");
 
         let decision = policy
             .authorize(
@@ -522,6 +784,7 @@ mod tests {
             decision,
             SipRequestAuthorization::Authorized { principal }
                 if principal.subject == "alice"
+                    && principal.tenant.as_deref() == Some("tenant-a")
                     && principal.method == AuthenticationMethod::SipDigest
                     && principal.issuer.as_deref() == Some("sip-digest:listener")
         ));
@@ -588,7 +851,8 @@ mod tests {
                 principal: expected.clone(),
             }),
         );
-        let policy = SipListenerAuthPolicy::authenticated(service);
+        let policy = SipListenerAuthPolicy::authenticated_for_tenant("tenant-42", service)
+            .expect("tenant-bound policy");
 
         let decision = policy
             .authorize(
@@ -606,10 +870,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bearer_principal_requires_exact_listener_tenant() {
+        for tenant in [None, Some("tenant-b".to_string())] {
+            let mut candidate = principal("bearer-user", AuthenticationMethod::Jwt);
+            candidate.tenant = tenant;
+            let service = SipAuthService::new().with_bearer_validator(
+                "listener",
+                Arc::new(FullPrincipalBearerValidator {
+                    principal: candidate,
+                }),
+            );
+            let policy = SipListenerAuthPolicy::authenticated_for_tenant("tenant-a", service)
+                .expect("tenant-bound policy");
+            let decision = policy
+                .authorize(
+                    &invite(Some("Bearer valid-token")),
+                    &context("192.0.2.42:5061", TransportType::Tls),
+                )
+                .await;
+            assert!(matches!(
+                decision,
+                SipRequestAuthorization::Rejected(ref rejection)
+                    if rejection.status == StatusCode::Forbidden
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn missing_header_is_challenged_and_never_authorized() {
-        let policy = SipListenerAuthPolicy::authenticated(
+        let policy = SipListenerAuthPolicy::authenticated_for_tenant(
+            "tenant-a",
             SipAuthService::digest("listener").with_digest_user("alice", "secret"),
-        );
+        )
+        .expect("tenant-bound policy");
         let decision = policy
             .authorize(
                 &invite(None),

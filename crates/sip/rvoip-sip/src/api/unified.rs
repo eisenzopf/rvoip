@@ -512,6 +512,15 @@ pub struct Config {
     /// the system root store. Default: `None` (system roots only).
     pub tls_extra_ca_path: Option<std::path::PathBuf>,
 
+    /// Inbound SIP TLS client-certificate verification policy.
+    ///
+    /// This controls certificates presented by peers connecting to this
+    /// listener. It is independent from [`Config::tls_client_cert_path`],
+    /// which controls the certificate this endpoint presents on outbound
+    /// connections. The default is disabled. Tenant-bound mTLS listener
+    /// mappings require `Optional` or `Required` with an explicit client CA.
+    pub tls_server_client_auth: rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig,
+
     /// **Dev only.** When `true`, server certs are accepted without
     /// identity verification. Required for self-signed test certs. The
     /// TLS handshake still runs end-to-end (encrypted), but a malicious
@@ -1057,6 +1066,10 @@ impl std::fmt::Debug for Config {
                 &self.tls_client_key_path.is_some(),
             )
             .field("tls_extra_ca_configured", &self.tls_extra_ca_path.is_some())
+            .field(
+                "tls_server_client_auth_mode",
+                &self.tls_server_client_auth.mode,
+            )
             .field("offer_srtp", &self.offer_srtp)
             .field("srtp_required", &self.srtp_required)
             .field("srtp_suite_count", &self.srtp_offered_suites.len())
@@ -1203,6 +1216,8 @@ impl Config {
             tls_client_cert_path: None,
             tls_client_key_path: None,
             tls_extra_ca_path: None,
+            tls_server_client_auth:
+                rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::default(),
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
@@ -1311,6 +1326,8 @@ impl Config {
             tls_client_cert_path: None,
             tls_client_key_path: None,
             tls_extra_ca_path: None,
+            tls_server_client_auth:
+                rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::default(),
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
@@ -2259,6 +2276,47 @@ impl Config {
         self
     }
 
+    /// Configure how the inbound SIP TLS listener verifies client
+    /// certificates.
+    ///
+    /// `Optional` and `Required` policies must name a PEM client-CA bundle;
+    /// [`Config::validate`] rejects incomplete configurations. Use this with
+    /// a tenant-bound [`crate::SipListenerAuthPolicy`] mTLS fingerprint map.
+    pub fn with_tls_server_client_auth(
+        mut self,
+        policy: rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig,
+    ) -> Self {
+        self.tls_server_client_auth = policy;
+        self
+    }
+
+    /// Require every inbound SIP TLS peer to present a certificate chaining
+    /// to `client_ca_path`.
+    pub fn require_tls_client_certificate(
+        self,
+        client_ca_path: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.with_tls_server_client_auth(
+            rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::required(
+                client_ca_path,
+            ),
+        )
+    }
+
+    /// Verify an inbound SIP TLS client certificate when one is presented,
+    /// while allowing peers without a certificate to use another configured
+    /// listener authentication mechanism.
+    pub fn verify_optional_tls_client_certificate(
+        self,
+        client_ca_path: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.with_tls_server_client_auth(
+            rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::optional(
+                client_ca_path,
+            ),
+        )
+    }
+
     /// Configure SIP TLS for RFC 5626 registered-flow reuse.
     ///
     /// No TLS listener certificate/key is required because inbound requests
@@ -2312,6 +2370,31 @@ impl Config {
     /// ```
     pub fn validate(&self) -> Result<()> {
         let effective_tls_mode = self.effective_tls_mode();
+
+        let tls_client_auth_enabled = self.tls_server_client_auth.mode
+            != rvoip_sip_transport::transport::tls::TlsClientAuthMode::Disabled;
+        if tls_client_auth_enabled {
+            if !matches!(
+                effective_tls_mode,
+                SipTlsMode::ServerOnly | SipTlsMode::ClientAndServer
+            ) {
+                return Err(SessionError::ConfigError(
+                    "inbound TLS client-certificate authentication requires a SIP TLS listener"
+                        .to_string(),
+                ));
+            }
+            if self
+                .tls_server_client_auth
+                .client_ca_path
+                .as_deref()
+                .is_none_or(|path| path.as_os_str().is_empty())
+            {
+                return Err(SessionError::ConfigError(
+                    "inbound TLS client-certificate authentication requires an explicit client CA bundle"
+                        .to_string(),
+                ));
+            }
+        }
 
         if self.tls_cert_path.is_some() ^ self.tls_key_path.is_some() {
             return Err(SessionError::ConfigError(
@@ -2855,6 +2938,56 @@ mod config_tests {
     }
 
     #[test]
+    fn inbound_tls_client_auth_is_disabled_by_default_and_validated_when_enabled() {
+        use rvoip_sip_transport::transport::tls::{TlsClientAuthMode, TlsServerClientAuthConfig};
+
+        let default = Config::local("alice", 5060);
+        assert_eq!(
+            default.tls_server_client_auth.mode,
+            TlsClientAuthMode::Disabled
+        );
+
+        let no_listener = Config::local("alice", 5060)
+            .require_tls_client_certificate("client-ca.pem")
+            .validate()
+            .expect_err("client auth without a TLS listener must fail");
+        assert!(matches!(
+            no_listener,
+            SessionError::ConfigError(ref detail) if detail.contains("requires a SIP TLS listener")
+        ));
+
+        let missing_ca = Config::local("alice", 5060)
+            .tls_reachable_contact(
+                "127.0.0.1:5061".parse().unwrap(),
+                "server.pem",
+                "server-key.pem",
+            )
+            .with_tls_server_client_auth(TlsServerClientAuthConfig {
+                mode: TlsClientAuthMode::Required,
+                client_ca_path: None,
+            })
+            .validate()
+            .expect_err("enabled client auth without a CA must fail");
+        assert!(matches!(
+            missing_ca,
+            SessionError::ConfigError(ref detail) if detail.contains("client CA bundle")
+        ));
+
+        let valid = Config::local("alice", 5060)
+            .tls_reachable_contact(
+                "127.0.0.1:5061".parse().unwrap(),
+                "server.pem",
+                "server-key.pem",
+            )
+            .verify_optional_tls_client_certificate("client-ca.pem");
+        valid.validate().expect("complete inbound client auth");
+        assert_eq!(
+            valid.tls_server_client_auth.mode,
+            TlsClientAuthMode::Optional
+        );
+    }
+
+    #[test]
     fn transaction_command_channel_capacity_rejects_zero() {
         let error = Config::local("alice", 5060)
             .with_sip_transaction_command_channel_capacity(0)
@@ -2947,6 +3080,10 @@ mod config_tests {
         config.tls_client_cert_path = Some("/client-cert/path-secret.pem".into());
         config.tls_client_key_path = Some("/client-key/path-secret.pem".into());
         config.tls_extra_ca_path = Some("/ca/path-secret.pem".into());
+        config.tls_server_client_auth =
+            rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::required(
+                "/client-ca/path-secret.pem",
+            );
         config.stun_server = Some("stun-secret.example.invalid".into());
         config.trace_redaction = Some(Arc::new(CanaryTracePolicy("trace-policy-secret")));
 
@@ -2975,6 +3112,7 @@ mod config_tests {
         assert!(config_debug.contains("auth_configured: true"));
         assert!(config_debug.contains("outbound_proxy_configured: true"));
         assert!(config_debug.contains("tls_key_configured: true"));
+        assert!(config_debug.contains("tls_server_client_auth_mode: Required"));
 
         let retry = OobAuthRetry {
             header_name: "Authorization-secret".into(),
@@ -4026,6 +4164,15 @@ impl UnifiedCoordinator {
         }
         config.validate()?;
         listener_auth_policy.validate()?;
+        if listener_auth_policy.has_verified_mtls_peers()
+            && config.tls_server_client_auth.mode
+                == rvoip_sip_transport::transport::tls::TlsClientAuthMode::Disabled
+        {
+            return Err(SessionError::ConfigError(
+                "SIP listener mTLS fingerprint mappings require transport-level TLS client-certificate verification"
+                    .to_string(),
+            ));
+        }
         rvoip_sip_transport::diagnostics::set_enabled(config.sip_udp_diagnostics);
         rvoip_sip_dialog::diagnostics::set_enabled(config.sip_udp_diagnostics);
         rvoip_sip_dialog::diagnostics::set_transaction_timing_enabled(
@@ -6155,6 +6302,7 @@ impl UnifiedCoordinator {
                 .tls_client_key_path
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
+            tls_server_client_auth: config.tls_server_client_auth.clone(),
             tls_extra_ca_path: config
                 .tls_extra_ca_path
                 .as_ref()

@@ -129,14 +129,30 @@ and WSS mutations. Outbound routes that will be exposed through authenticated
 signaling must call `WebRtcAdapter::bind_authenticated_principal` first.
 Route cleanup removes ownership and background ICE/keepalive tasks atomically.
 
-SIP applications can construct `SipListenerAuthPolicy` with Digest/Bearer,
-explicit trusted-CIDR principals, and/or verified mTLS fingerprint mappings,
-then use `UnifiedCoordinator::new_with_listener_auth` or
-`SipAdapter::from_config_with_listener_auth`. TLS/WSS listeners configure
-`TlsServerClientAuthConfig::optional` or `required` with an explicit client CA.
-The default remains disabled for compatibility. Enabled policies run at the
-transaction boundary before dialog or application dispatch; ACK, CANCEL, and
-retransmissions must match the accepted INVITE's transport binding.
+SIP applications construct a tenant-bound `SipListenerAuthPolicy` with
+`authenticated_for_tenant`, `enabled_for_tenant`, or the additive
+`with_tenant` migration helper, then add Digest/Bearer, explicit trusted-CIDR
+principals, and/or verified mTLS fingerprint mappings. Pass the policy to
+`UnifiedCoordinator::new_with_listener_auth` or
+`SipAdapter::from_config_with_listener_auth`.
+
+The disabled default remains source compatible. A legacy `authenticated(...)`
+or `enabled()` policy that admits traffic without subsequently calling
+`with_tenant(...)` now fails closed during startup validation and direct
+admission. Tenant identifiers must be 1–128 characters, already trimmed, and
+contain no control characters. Generated Digest principals acquire the
+listener tenant; Bearer validators and caller-supplied trusted-CIDR/mTLS
+principals must return that exact tenant themselves. A missing or different
+tenant is rejected rather than overwritten.
+
+For mTLS, configure the real SIP TLS listener with
+`Config::require_tls_client_certificate(client_ca)` or
+`Config::verify_optional_tls_client_certificate(client_ca)`. A fingerprint
+mapping with transport-level client-certificate verification disabled is a
+startup error; an unverified caller-supplied fingerprint is never accepted.
+Enabled policies run at the transaction boundary before dialog or application
+dispatch; ACK, CANCEL, and retransmissions must match the accepted INVITE's
+transport binding.
 
 UCTP production defaults now require command scopes, retain full principals,
 bound replies and Connection resources to their authenticated owner, enforce
