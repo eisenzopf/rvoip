@@ -1605,12 +1605,59 @@ impl TryFrom<&Header> for TypedHeader {
             )),
         })();
 
-        parse_result.map_err(|_| {
-            Error::ParseError(format!(
-                "SIP typed-header conversion failed (class=invalid-value, value_bytes={})",
-                value_bytes.len()
-            ))
-        })
+        parse_result.map_err(|error| redact_typed_header_conversion_error(error, value_bytes.len()))
+    }
+}
+
+/// Preserve the parser's public error taxonomy while preventing raw header
+/// values from crossing the typed-conversion boundary in diagnostics.
+fn redact_typed_header_conversion_error(error: Error, value_bytes: usize) -> Error {
+    let detail = |class: &str| {
+        format!("SIP typed-header conversion failed (class={class}, value_bytes={value_bytes})")
+    };
+
+    match error {
+        Error::InvalidMethod => Error::InvalidMethod,
+        Error::InvalidHeader(_) => Error::InvalidHeader(detail("invalid-header")),
+        Error::InvalidUri(_) => Error::InvalidUri(detail("invalid-uri")),
+        Error::InvalidVersion => Error::InvalidVersion,
+        Error::InvalidStatusCode(status) => Error::InvalidStatusCode(status),
+        Error::InvalidFormat(_) => Error::InvalidFormat(detail("invalid-format")),
+        Error::ParserWithLocation { line, column, .. } => Error::ParserWithLocation {
+            line,
+            column,
+            message: detail("parser-with-location"),
+        },
+        Error::Parser(_) => Error::Parser(detail("parser")),
+        Error::ParseError(_) => Error::ParseError(detail("parse-error")),
+        Error::ContentLengthMismatch { expected, actual } => {
+            Error::ContentLengthMismatch { expected, actual }
+        }
+        Error::MissingHeader(_) => Error::MissingHeader(detail("missing-header")),
+        Error::UnsupportedMediaType(_) => {
+            Error::UnsupportedMediaType(detail("unsupported-media-type"))
+        }
+        Error::MalformedUriComponent { .. } => Error::MalformedUriComponent {
+            component: "typed-header-value".to_string(),
+            message: detail("malformed-uri-component"),
+        },
+        Error::SdpError(_) => Error::SdpError(detail("sdp-error")),
+        Error::SdpParsingError(_) => Error::SdpParsingError(detail("sdp-parsing-error")),
+        Error::SdpValidationError(_) => Error::SdpValidationError(detail("sdp-validation-error")),
+        Error::ValidationError(_) => Error::ValidationError(detail("validation-error")),
+        Error::Transport(_) => Error::Transport(detail("transport")),
+        Error::IncompleteParse(_) => Error::IncompleteParse(detail("incomplete-parse")),
+        Error::IoError(_) => Error::IoError(detail("io-error")),
+        Error::LineTooLong(length) => Error::LineTooLong(length),
+        Error::TooManyHeaders(count) => Error::TooManyHeaders(count),
+        Error::BodyTooLarge(length) => Error::BodyTooLarge(length),
+        Error::Other(_) => Error::Other(detail("other")),
+        Error::InvalidInput(_) => Error::InvalidInput(detail("invalid-input")),
+        Error::SdpFormatError(_) => Error::SdpFormatError(detail("sdp-format-error")),
+        // Utf8Error carries offsets only, never the rejected input bytes.
+        Error::Utf8Error(error) => Error::Utf8Error(error),
+        Error::InternalError(_) => Error::InternalError(detail("internal-error")),
+        Error::BuilderError(_) => Error::BuilderError(detail("builder-error")),
     }
 }
 
@@ -1667,36 +1714,81 @@ mod tests {
     }
 
     #[test]
-    fn conversion_errors_report_only_fixed_class_and_value_extent() {
+    fn malformed_parser_headers_preserve_parse_error_and_redact_values() {
         for (name, value, secret) in [
             (
                 HeaderName::Authorization,
-                b"\xffauthorization-secret".as_slice(),
+                b"Digest username=authorization-secret, response=\"unterminated".as_slice(),
                 "authorization-secret",
             ),
             (
                 HeaderName::ProxyAuthorization,
-                b"\xffproxy-authorization-secret".as_slice(),
+                b"Digest username=proxy-authorization-secret, response=\"unterminated".as_slice(),
                 "proxy-authorization-secret",
             ),
             (
-                HeaderName::ContentDisposition,
-                b"\xffcontent-disposition-secret".as_slice(),
-                "content-disposition-secret",
+                HeaderName::Path,
+                b"<sip:path-secret@example.com".as_slice(),
+                "path-secret",
             ),
             (
-                HeaderName::Warning,
-                b"\xffarbitrary-warning-secret".as_slice(),
-                "arbitrary-warning-secret",
+                HeaderName::ServiceRoute,
+                b"<sip:service-route-secret@example.com".as_slice(),
+                "service-route-secret",
+            ),
+            (
+                HeaderName::Accept,
+                b"application/accept-secret;=invalid".as_slice(),
+                "accept-secret",
             ),
         ] {
             let header = Header::new(name, HeaderValue::Raw(value.to_vec()));
             let error = TypedHeader::try_from(header)
                 .expect_err("malformed sensitive header must fail typed conversion");
+            assert!(matches!(error, Error::ParseError(_)));
             let rendered = format!("{error:?} {error}");
             assert!(!rendered.contains(secret));
-            assert!(rendered.contains("class=invalid-value"));
+            assert!(rendered.contains("class=parse-error"));
             assert!(rendered.contains(&format!("value_bytes={}", value.len())));
         }
+    }
+
+    #[test]
+    fn invalid_utf8_path_headers_preserve_invalid_header_and_redact_values() {
+        for (name, value, secret) in [
+            (
+                HeaderName::Path,
+                b"\xffpath-invalid-header-secret".as_slice(),
+                "path-invalid-header-secret",
+            ),
+            (
+                HeaderName::ServiceRoute,
+                b"\xffservice-route-invalid-header-secret".as_slice(),
+                "service-route-invalid-header-secret",
+            ),
+        ] {
+            let header = Header::new(name, HeaderValue::Raw(value.to_vec()));
+            let error = TypedHeader::try_from(header)
+                .expect_err("invalid UTF-8 route header must fail typed conversion");
+            assert!(matches!(error, Error::InvalidHeader(_)));
+            let rendered = format!("{error:?} {error}");
+            assert!(!rendered.contains(secret));
+            assert!(rendered.contains("class=invalid-header"));
+            assert!(rendered.contains(&format!("value_bytes={}", value.len())));
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_accept_preserves_utf8_error_without_exposing_input() {
+        const SECRET: &str = "accept-utf8-secret";
+        let value = [b"\xff".as_slice(), SECRET.as_bytes()].concat();
+        let header = Header::new(HeaderName::Accept, HeaderValue::Raw(value));
+        let error = TypedHeader::try_from(header)
+            .expect_err("invalid UTF-8 Accept must fail typed conversion");
+
+        assert!(matches!(error, Error::Utf8Error(_)));
+        let rendered = format!("{error:?} {error}");
+        assert!(!rendered.contains(SECRET));
+        assert!(rendered.contains("Invalid UTF-8"));
     }
 }

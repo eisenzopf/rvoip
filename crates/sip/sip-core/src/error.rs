@@ -266,9 +266,12 @@ impl From<nom::Err<NomError<Vec<u8>>>> for Error {
                 error.code,
                 error.input.len()
             )),
-            nom::Err::Incomplete(needed) => {
-                Error::IncompleteParse(format!("SIP parser needs more input (needed={needed:?})"))
-            }
+            // Preserve the public conversion contract from before diagnostic
+            // hardening: byte-oriented nom errors, including Incomplete, map
+            // to ParseError. Do not include nom's input in the diagnostic.
+            nom::Err::Incomplete(needed) => Error::ParseError(format!(
+                "SIP parser rejected owned input (class=Incomplete, needed={needed:?})"
+            )),
         }
     }
 }
@@ -280,9 +283,12 @@ fn nom_byte_error(err: nom::Err<NomError<&[u8]>>) -> Error {
             error.code,
             error.input.len()
         )),
-        nom::Err::Incomplete(needed) => {
-            Error::IncompleteParse(format!("SIP parser needs more input (needed={needed:?})"))
-        }
+        // Preserve the public conversion contract from before diagnostic
+        // hardening: byte-oriented nom errors, including Incomplete, map to
+        // ParseError. Incomplete carries no input buffer to report.
+        nom::Err::Incomplete(needed) => Error::ParseError(format!(
+            "SIP parser rejected input (class=Incomplete, needed={needed:?})"
+        )),
     }
 }
 
@@ -314,6 +320,21 @@ mod diagnostic_safety_tests {
             assert!(!rendered.contains("username=alice"));
             assert!(rendered.contains(&format!("remaining_bytes={}", SECRET.len())));
             assert!(rendered.contains("Verify"));
+        }
+    }
+
+    #[test]
+    fn byte_nom_incomplete_preserves_parse_error_variant() {
+        let borrowed = Error::from(nom::Err::<NomError<&[u8]>>::Incomplete(nom::Needed::new(7)));
+        let owned = Error::from(nom::Err::<NomError<Vec<u8>>>::Incomplete(nom::Needed::new(
+            11,
+        )));
+
+        for error in [borrowed, owned] {
+            assert!(matches!(error, Error::ParseError(_)));
+            let rendered = format!("{error:?} {error}");
+            assert!(rendered.contains("class=Incomplete"));
+            assert!(!rendered.contains("IncompleteParse"));
         }
     }
 
