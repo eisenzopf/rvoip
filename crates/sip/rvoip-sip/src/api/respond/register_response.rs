@@ -390,8 +390,8 @@ impl RegisterResponseBuilder {
             .global_coordinator
             .publish(std::sync::Arc::new(event))
             .await
-            .map_err(|e| {
-                SessionError::DialogError(format!("Failed to publish REGISTER response: {}", e))
+            .map_err(|_error| {
+                SessionError::DialogError("failed to publish REGISTER response".to_string())
             })?;
 
         Ok(())
@@ -401,7 +401,7 @@ impl RegisterResponseBuilder {
 /// SIP_API_DESIGN_2 Phase D — wire-format snapshot of every field a
 /// `RegisterResponseBuilder` would publish. Returned by
 /// `build_event_fields()` for test inspection.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RegisterResponseEventFields {
     /// Transaction the response belongs to.
     pub transaction_id: String,
@@ -426,6 +426,25 @@ pub struct RegisterResponseEventFields {
     pub associated_uri: Vec<String>,
     /// Application-staged extra headers, as `(name, value)` wire pairs.
     pub extra_headers: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for RegisterResponseEventFields {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RegisterResponseEventFields")
+            .field("transaction_bytes", &self.transaction_id.len())
+            .field("status_code", &self.status_code)
+            .field("reason_bytes", &self.reason.len())
+            .field("challenge_present", &self.www_authenticate.is_some())
+            .field("contact_present", &self.contact.is_some())
+            .field("expires", &self.expires)
+            .field("min_expires", &self.min_expires)
+            .field("service_route_count", &self.service_route.len())
+            .field("path_echo", &self.path_echo)
+            .field("associated_uri_count", &self.associated_uri.len())
+            .field("extra_header_count", &self.extra_headers.len())
+            .finish()
+    }
 }
 
 impl SipRequestOptions for RegisterResponseBuilder {

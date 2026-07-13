@@ -4,6 +4,7 @@
 //! SIP events (like REFER) manually instead of relying on automatic processing.
 
 use crate::state_table::types::SessionId;
+use std::fmt;
 
 // ===== Callback Function Types =====
 
@@ -22,7 +23,7 @@ pub type OnCallAnsweredCallback = Box<dyn Fn(CallAnsweredEvent) + Send + Sync>;
 // ===== Event Structures =====
 
 /// Event data for REFER requests
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ReferEvent {
     /// The URI to transfer to (from Refer-To header)
     pub refer_to: String,
@@ -32,8 +33,19 @@ pub struct ReferEvent {
     pub replaces: Option<String>,
 }
 
+impl fmt::Debug for ReferEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReferEvent")
+            .field("refer_to_bytes", &self.refer_to.len())
+            .field("referred_by_present", &self.referred_by.is_some())
+            .field("replaces_present", &self.replaces.is_some())
+            .finish()
+    }
+}
+
 /// Event data for incoming calls
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct IncomingCallEvent {
     /// Who is calling (From header)
     pub from: String,
@@ -43,8 +55,20 @@ pub struct IncomingCallEvent {
     pub sdp: Option<String>,
 }
 
+impl fmt::Debug for IncomingCallEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IncomingCallEvent")
+            .field("from_bytes", &self.from.len())
+            .field("to_bytes", &self.to.len())
+            .field("sdp_present", &self.sdp.is_some())
+            .field("sdp_bytes", &self.sdp.as_ref().map_or(0, String::len))
+            .finish()
+    }
+}
+
 /// Event data for call termination
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CallTerminatedEvent {
     /// Session that was terminated
     pub session_id: SessionId,
@@ -52,8 +76,18 @@ pub struct CallTerminatedEvent {
     pub reason: String,
 }
 
+impl fmt::Debug for CallTerminatedEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CallTerminatedEvent")
+            .field("session_id", &self.session_id)
+            .field("reason_bytes", &self.reason.len())
+            .finish()
+    }
+}
+
 /// Event data for call answered
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CallAnsweredEvent {
     /// Session that was answered
     pub session_id: SessionId,
@@ -61,10 +95,21 @@ pub struct CallAnsweredEvent {
     pub sdp: Option<String>,
 }
 
+impl fmt::Debug for CallAnsweredEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CallAnsweredEvent")
+            .field("session_id", &self.session_id)
+            .field("sdp_present", &self.sdp.is_some())
+            .field("sdp_bytes", &self.sdp.as_ref().map_or(0, String::len))
+            .finish()
+    }
+}
+
 // ===== Callback Results =====
 
 /// Result returned by callbacks to control state machine behavior
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum CallbackResult {
     /// Accept the event and continue with default state machine behavior
     Accept,
@@ -72,6 +117,20 @@ pub enum CallbackResult {
     Reject(u16, String),
     /// Callback has handled the event completely, skip default actions
     Handle,
+}
+
+impl fmt::Debug for CallbackResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Accept => formatter.write_str("Accept"),
+            Self::Reject(status, reason) => formatter
+                .debug_struct("Reject")
+                .field("status", status)
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::Handle => formatter.write_str("Handle"),
+        }
+    }
 }
 
 // ===== Callback Registry =====

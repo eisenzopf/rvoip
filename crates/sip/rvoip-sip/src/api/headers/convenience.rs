@@ -78,13 +78,23 @@ use bytes::Bytes;
 
 /// One leaf of a `multipart/mixed` body: a header block plus the part's
 /// raw bytes. Build via [`MultipartPart::new`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MultipartPart {
     /// Headers preceding the part body. Typically at least
     /// `Content-Type:` and `Content-Disposition:`.
     pub headers: Vec<TypedHeader>,
     /// Raw part bytes (already-encoded payload).
     pub body: Bytes,
+}
+
+impl std::fmt::Debug for MultipartPart {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MultipartPart")
+            .field("header_count", &self.headers.len())
+            .field("body_bytes", &self.body.len())
+            .finish()
+    }
 }
 
 impl MultipartPart {

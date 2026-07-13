@@ -107,7 +107,7 @@ impl CallHandler for RejectAllHandler {
 // ===== RoutingHandler =====
 
 /// What to do when a routing rule matches.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum RoutingAction {
     /// Accept the call.
     Accept,
@@ -122,13 +122,40 @@ pub enum RoutingAction {
     Redirect(String),
 }
 
+impl std::fmt::Debug for RoutingAction {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Accept => formatter.write_str("Accept"),
+            Self::Reject { status, reason } => formatter
+                .debug_struct("Reject")
+                .field("status", status)
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::Redirect(target) => formatter
+                .debug_struct("Redirect")
+                .field("target_bytes", &target.len())
+                .finish(),
+        }
+    }
+}
+
 /// A single routing rule: if the `To` URI contains `pattern`, apply `action`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RoutingRule {
     /// Substring matched against the incoming call's `To` URI.
     pub pattern: String,
     /// Action applied when the pattern matches.
     pub action: RoutingAction,
+}
+
+impl std::fmt::Debug for RoutingRule {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RoutingRule")
+            .field("pattern_bytes", &self.pattern.len())
+            .field("action", &self.action)
+            .finish()
+    }
 }
 
 /// Routes incoming calls based on URI pattern matching.

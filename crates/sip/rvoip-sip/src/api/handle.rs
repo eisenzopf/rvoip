@@ -213,7 +213,7 @@ impl TryFrom<Event> for TransferOutcome {
 }
 
 /// RFC 3326 Reason header value for explicit teardown causes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SipReason {
     /// Reason protocol, usually `SIP` or `Q.850`.
     pub protocol: String,
@@ -221,6 +221,18 @@ pub struct SipReason {
     pub cause: u16,
     /// Optional human-readable cause text.
     pub text: Option<String>,
+}
+
+impl fmt::Debug for SipReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SipReason")
+            .field("protocol_bytes", &self.protocol.len())
+            .field("cause", &self.cause)
+            .field("text_present", &self.text.is_some())
+            .field("text_bytes", &self.text.as_ref().map_or(0, String::len))
+            .finish()
+    }
 }
 
 impl SipReason {
