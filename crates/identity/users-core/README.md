@@ -49,11 +49,27 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rvoip-users-core = "0.1"
+rvoip-users-core = "0.2"
 
 # If you want to use the REST API client examples
-rvoip-users-core = { version = "0.1", features = ["client"] }
+rvoip-users-core = { version = "0.2", features = ["client"] }
 ```
+
+### 0.2 migration
+
+Version 0.2 makes tenant binding an end-to-end token invariant. `UserClaims`
+and `JwtConfig` include `tenant_id`; migrate external struct literals to
+`UserClaims::new(...)` and `JwtConfig::new(...)` plus their `with_*` builders.
+`RateLimitError` is now non-exhaustive, so external matches require a wildcard.
+
+A configured tenant must match exactly during access-token validation and
+refresh exchange. Refresh tokens issued by older versions do not contain a
+tenant claim and are deliberately rejected by a tenant-bound 0.2 issuer. Plan a
+reauthentication window when upgrading a tenant-bound deployment; there is no
+silent legacy-token downgrade.
+
+See [MIGRATION-0.2.md](./MIGRATION-0.2.md) for the complete API and deployment
+checklist.
 
 ## Quick Start
 
@@ -190,7 +206,8 @@ For complete API documentation including request/response schemas, see the [Open
 
 ### Authentication
 - `POST /auth/login` - Login with username/password
-- `POST /auth/logout` - Logout and revoke tokens  
+- `POST /auth/logout` - Logout and revoke a presented JWT session. API keys are
+  rejected; revoke them explicitly with `DELETE /api-keys/:id`.
 - `POST /auth/refresh` - Get new access token
 - `GET /auth/jwks.json` - Public keys for token validation
 
@@ -481,11 +498,27 @@ API key permissions:
 - `*` - Wildcard (all permissions)
 
 For tenant-bound WebRTC/UCTP deployments, configure the issuer-owned
-`jwt.tenant_id` (or `RVOIP_USERS_JWT_TENANT_ID`). The value is copied into
-access tokens and cannot be selected by a login request. Use
+`jwt.tenant_id` (or `RVOIP_USERS_JWT_TENANT_ID`). The value is copied into both
+access and refresh tokens and cannot be selected by a login request. Use
 `UsersCoreAuthProvider::new_requiring_tenant` to fail startup when this binding
-is missing. Legacy tenantless claims remain parseable for non-tenant-bound
-consumers.
+is missing. Direct users-core validation enforces the same exact binding.
+Tenant-bound issuers reject legacy tenantless refresh tokens and require users
+to authenticate again.
+
+### Safe router embedding and client identity
+
+Serve custom routers with `api::into_peer_aware_make_service`,
+`api::create_make_service`, or `api::create_make_service_with_state`. A bare
+router does not carry the socket peer and therefore fails requests with `503`
+instead of collapsing every caller into a shared `unknown` rate-limit bucket.
+
+Forwarding headers are trusted only for configured proxy CIDRs. Parse a
+`TrustedProxyConfig` and apply it with
+`EnhancedRateLimiter::with_trusted_proxy_config`. IPv4 clients use their
+canonical address; IPv4-mapped IPv6 is folded into IPv4, and native IPv6
+identities are intentionally normalized to `/64`. Once an exact identity map
+is full, new identities use a bounded, process-secret hashed overflow tier;
+active lockout entries are never evicted.
 
 ### Example: Admin-Only Operations
 

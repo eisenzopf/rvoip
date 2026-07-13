@@ -220,7 +220,7 @@ rvoip-codec-core    = { path = "crates/media/codec-core", version = "0.2.5" }
 rvoip-infra-common  = { path = "crates/foundation/infra-common", version = "0.2.5" }
 rvoip-auth-core     = { path = "crates/identity/auth-core", version = "0.2.5" }
 rvoip-core-traits   = { path = "crates/foundation/rvoip-core-traits", version = "0.2.5" }
-rvoip-users-core    = { path = "crates/identity/users-core", version = "0.1.3" }
+rvoip-users-core    = { path = "crates/identity/users-core", version = "0.2.0" }
 
 # Remaining internal crates — alpha-tier (0.1.0) except `rvoip` (the 0.2.2
 # beta facade). All publishable now. rvoip-core lists rvoip-vcon / rvoip-harness

@@ -355,3 +355,80 @@ async fn test_jwt_claims_content() {
     assert!(claims.scope.contains("sip.register"));
     assert!(claims.scope.contains("admin")); // Because user has admin role
 }
+
+#[tokio::test]
+async fn tenant_bound_refresh_exchange_rejects_legacy_and_cross_tenant_tokens() {
+    use jsonwebtoken::{encode, EncodingKey, Header};
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_url = format!(
+        "sqlite://{}?mode=rwc",
+        temp_dir.path().join("tenant-refresh.db").display()
+    );
+    let mut config = create_test_config(db_url);
+    config.jwt.tenant_id = Some("tenant-a".into());
+    config.jwt.signing_key = Some("tenant-refresh-test-key".into());
+    let auth_service = init(config).await.unwrap();
+    let user = auth_service
+        .create_user(CreateUserRequest {
+            username: "tenantuser".into(),
+            password: "SecurePass2026".into(),
+            email: None,
+            display_name: None,
+            roles: vec!["user".into()],
+        })
+        .await
+        .unwrap();
+    let authentication = auth_service
+        .authenticate_password("tenantuser", "SecurePass2026")
+        .await
+        .unwrap();
+
+    let refreshed = auth_service
+        .refresh_token(&authentication.refresh_token)
+        .await
+        .unwrap();
+    let refreshed_claims = auth_service
+        .jwt_issuer()
+        .validate_access_token(&refreshed.access_token)
+        .unwrap();
+    assert_eq!(refreshed_claims.tenant_id.as_deref(), Some("tenant-a"));
+
+    let now = chrono::Utc::now().timestamp() as u64;
+    let legacy = users_core::jwt::RefreshTokenClaims {
+        iss: "https://test.rvoip.local".into(),
+        sub: user.id.clone(),
+        jti: "legacy-refresh".into(),
+        exp: now + 3600,
+        iat: now,
+    };
+    let legacy = encode(
+        &Header::default(),
+        &legacy,
+        &EncodingKey::from_secret(b"tenant-refresh-test-key"),
+    )
+    .unwrap();
+    assert!(matches!(
+        auth_service.refresh_token(&legacy).await,
+        Err(users_core::Error::Validation(_))
+    ));
+
+    let cross_tenant = serde_json::json!({
+        "iss": "https://test.rvoip.local",
+        "sub": user.id,
+        "jti": "cross-tenant-refresh",
+        "exp": now + 3600,
+        "iat": now,
+        "tenant_id": "tenant-b"
+    });
+    let cross_tenant = encode(
+        &Header::default(),
+        &cross_tenant,
+        &EncodingKey::from_secret(b"tenant-refresh-test-key"),
+    )
+    .unwrap();
+    assert!(matches!(
+        auth_service.refresh_token(&cross_tenant).await,
+        Err(users_core::Error::Validation(_))
+    ));
+}

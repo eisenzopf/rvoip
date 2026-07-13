@@ -7,31 +7,94 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use ipnet::IpNet;
-use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use serde::Deserialize;
+use std::collections::{hash_map::RandomState, HashMap};
+use std::hash::{BuildHasher, Hash, Hasher};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 const MAX_IDENTITY_BYTES: usize = 256;
+const MAX_OVERFLOW_BUCKETS: usize = 1_024;
+/// IPv6 clients are rate-limited by /64 so rotating interface identifiers
+/// cannot manufacture an unbounded number of independent identities.
+pub const IPV6_RATE_LIMIT_PREFIX_BITS: u8 = 64;
+
+struct BoundedIdentityMap<T> {
+    exact: HashMap<String, T>,
+    overflow: HashMap<usize, T>,
+    hash_builder: RandomState,
+}
+
+impl<T> Default for BoundedIdentityMap<T> {
+    fn default() -> Self {
+        Self {
+            exact: HashMap::new(),
+            overflow: HashMap::new(),
+            hash_builder: RandomState::new(),
+        }
+    }
+}
+
+impl<T> BoundedIdentityMap<T> {
+    fn get_or_insert_with(
+        &mut self,
+        identity: &str,
+        exact_capacity: usize,
+        force_overflow: bool,
+        create: impl FnOnce() -> T,
+    ) -> &mut T {
+        if !force_overflow && self.exact.contains_key(identity) {
+            return self.exact.get_mut(identity).expect("identity was present");
+        }
+
+        if !force_overflow && self.exact.len() < exact_capacity {
+            return self.exact.entry(identity.to_owned()).or_insert_with(create);
+        }
+
+        let bucket_count = exact_capacity.clamp(1, MAX_OVERFLOW_BUCKETS);
+        let mut hasher = self.hash_builder.build_hasher();
+        identity.hash(&mut hasher);
+        let bucket = (hasher.finish() as usize) % bucket_count;
+        self.overflow.entry(bucket).or_insert_with(create)
+    }
+
+    fn remove_exact(&mut self, identity: &str) {
+        self.exact.remove(identity);
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&mut T) -> bool) {
+        self.exact.retain(|_, value| keep(value));
+        self.overflow.retain(|_, value| keep(value));
+    }
+
+    #[cfg(test)]
+    fn stored_entries(&self) -> usize {
+        self.exact.len() + self.overflow.len()
+    }
+}
 
 #[derive(Clone)]
 pub struct EnhancedRateLimiter {
     // Track by user ID when authenticated
-    user_limits: Arc<RwLock<HashMap<String, UserRateLimit>>>,
+    user_limits: Arc<RwLock<BoundedIdentityMap<UserRateLimit>>>,
     // Track by IP for unauthenticated requests
-    ip_limits: Arc<RwLock<HashMap<String, Vec<Instant>>>>,
+    ip_limits: Arc<RwLock<BoundedIdentityMap<Vec<Instant>>>>,
     // Failed login tracking
-    failed_logins: Arc<RwLock<HashMap<String, FailedLoginInfo>>>,
+    failed_logins: Arc<RwLock<BoundedIdentityMap<FailedLoginInfo>>>,
     config: RateLimitConfig,
     capacities: RateLimitCapacity,
     trusted_proxies: Arc<Vec<IpNet>>,
+    next_cleanup: Arc<Mutex<Instant>>,
 }
 
 /// Hard bounds for attacker-controlled rate-limit identity keyspaces.
 ///
-/// Reaching a bound fails new identities closed with `429`; an active entry is
-/// never evicted to make room for an attacker-selected key.
+/// Once an exact identity map reaches its bound, unseen identities are routed
+/// through a secret-hashed bounded overflow tier. Existing exact identities
+/// and active lockout state are never evicted to make room for attacker input.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug)]
 pub struct RateLimitCapacity {
     pub users: usize,
@@ -45,6 +108,34 @@ impl Default for RateLimitCapacity {
             users: 16_384,
             ips: 16_384,
             failed_logins: 16_384,
+        }
+    }
+}
+
+impl RateLimitCapacity {
+    pub fn new(users: usize, ips: usize, failed_logins: usize) -> Self {
+        Self {
+            users,
+            ips,
+            failed_logins,
+        }
+    }
+}
+
+/// Declarative trusted-proxy configuration for embedding the REST router.
+/// Forwarding headers are ignored unless the immediate socket peer matches a
+/// configured CIDR.
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct TrustedProxyConfig {
+    #[serde(default)]
+    pub cidrs: Vec<String>,
+}
+
+impl TrustedProxyConfig {
+    pub fn new(cidrs: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            cidrs: cidrs.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -84,22 +175,19 @@ struct FailedLoginInfo {
 
 impl EnhancedRateLimiter {
     pub fn new(config: RateLimitConfig) -> Self {
-        let limiter = Self {
-            user_limits: Arc::new(RwLock::new(HashMap::new())),
-            ip_limits: Arc::new(RwLock::new(HashMap::new())),
-            failed_logins: Arc::new(RwLock::new(HashMap::new())),
+        let cleanup_interval = normalized_cleanup_interval(config.cleanup_interval);
+        let next_cleanup = Instant::now()
+            .checked_add(cleanup_interval)
+            .unwrap_or_else(Instant::now);
+        Self {
+            user_limits: Arc::new(RwLock::new(BoundedIdentityMap::default())),
+            ip_limits: Arc::new(RwLock::new(BoundedIdentityMap::default())),
+            failed_logins: Arc::new(RwLock::new(BoundedIdentityMap::default())),
             config,
             capacities: RateLimitCapacity::default(),
             trusted_proxies: Arc::new(Vec::new()),
-        };
-
-        // Start cleanup task
-        let limiter_clone = limiter.clone();
-        tokio::spawn(async move {
-            limiter_clone.cleanup_loop().await;
-        });
-
-        limiter
+            next_cleanup: Arc::new(Mutex::new(next_cleanup)),
+        }
     }
 
     /// Override identity-map bounds. Zero is normalized to one so a
@@ -120,12 +208,27 @@ impl EnhancedRateLimiter {
         self
     }
 
+    /// Apply trusted proxy CIDRs parsed from declarative configuration.
+    pub fn with_trusted_proxy_config(mut self, config: TrustedProxyConfig) -> crate::Result<Self> {
+        let proxies = config
+            .cidrs
+            .into_iter()
+            .map(|cidr| {
+                cidr.parse::<IpNet>().map_err(|error| {
+                    crate::Error::Config(format!("invalid trusted proxy CIDR {cidr:?}: {error}"))
+                })
+            })
+            .collect::<crate::Result<Vec<_>>>()?;
+        self.trusted_proxies = Arc::new(proxies);
+        Ok(self)
+    }
+
     /// Resolve a request identity from the real socket peer and, for an
     /// explicitly trusted proxy only, a validated forwarding header.
     pub fn client_ip(&self, peer: Option<SocketAddr>, headers: &HeaderMap) -> Option<IpAddr> {
         let peer_ip = peer?.ip();
         if !self.is_trusted_proxy(peer_ip) {
-            return Some(peer_ip);
+            return Some(normalize_client_ip(peer_ip));
         }
 
         if let Some(forwarded) = headers
@@ -143,7 +246,7 @@ impl EnhancedRateLimiter {
                     .rev()
                     .find(|address| !self.is_trusted_proxy(*address))
                 {
-                    return Some(client);
+                    return Some(normalize_client_ip(client));
                 }
             }
         }
@@ -153,10 +256,10 @@ impl EnhancedRateLimiter {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<IpAddr>().ok())
         {
-            return Some(real_ip);
+            return Some(normalize_client_ip(real_ip));
         }
 
-        Some(peer_ip)
+        Some(normalize_client_ip(peer_ip))
     }
 
     fn is_trusted_proxy(&self, address: IpAddr) -> bool {
@@ -176,25 +279,18 @@ impl EnhancedRateLimiter {
     }
 
     pub async fn record_failed_login(&self, username: &str) -> Result<(), RateLimitError> {
-        if username.len() > MAX_IDENTITY_BYTES {
-            return Err(RateLimitError::CapacityExhausted);
-        }
-        let mut failed_logins = self.failed_logins.write().await;
         let now = Instant::now();
-
-        if !failed_logins.contains_key(username) {
-            prune_failed_logins(&mut failed_logins, now);
-            if failed_logins.len() >= self.capacities.failed_logins {
-                return Err(RateLimitError::CapacityExhausted);
-            }
-        }
-
-        let info = failed_logins
-            .entry(username.to_string())
-            .or_insert_with(|| FailedLoginInfo {
+        self.maybe_cleanup(now).await;
+        let mut failed_logins = self.failed_logins.write().await;
+        let info = failed_logins.get_or_insert_with(
+            username,
+            self.capacities.failed_logins,
+            username.len() > MAX_IDENTITY_BYTES,
+            || FailedLoginInfo {
                 attempts: Vec::new(),
                 locked_until: None,
-            });
+            },
+        );
 
         // Check if already locked
         if let Some(locked_until) = info.locked_until {
@@ -225,30 +321,24 @@ impl EnhancedRateLimiter {
 
     pub async fn record_successful_login(&self, username: &str) {
         let mut failed_logins = self.failed_logins.write().await;
-        // Clear failed attempts on successful login
-        failed_logins.remove(username);
+        // Clear an exact identity after successful login. Overflow state is
+        // deliberately retained because it may represent multiple identities.
+        failed_logins.remove_exact(username);
     }
 
     async fn check_user_limit(&self, user_id: &str) -> Result<(), RateLimitError> {
-        if user_id.len() > MAX_IDENTITY_BYTES {
-            return Err(RateLimitError::CapacityExhausted);
-        }
-        let mut limits = self.user_limits.write().await;
         let now = Instant::now();
-
-        if !limits.contains_key(user_id) {
-            prune_user_limits(&mut limits, now);
-            if limits.len() >= self.capacities.users {
-                return Err(RateLimitError::CapacityExhausted);
-            }
-        }
-
-        let user_limit = limits
-            .entry(user_id.to_string())
-            .or_insert_with(|| UserRateLimit {
+        self.maybe_cleanup(now).await;
+        let mut limits = self.user_limits.write().await;
+        let user_limit = limits.get_or_insert_with(
+            user_id,
+            self.capacities.users,
+            user_id.len() > MAX_IDENTITY_BYTES,
+            || UserRateLimit {
                 requests: Vec::new(),
                 locked_until: None,
-            });
+            },
+        );
 
         // Check if account is locked
         if let Some(locked_until) = user_limit.locked_until {
@@ -280,20 +370,16 @@ impl EnhancedRateLimiter {
     }
 
     async fn check_ip_limit(&self, ip: &str) -> Result<(), RateLimitError> {
-        if ip.len() > MAX_IDENTITY_BYTES {
-            return Err(RateLimitError::CapacityExhausted);
-        }
-        let mut limits = self.ip_limits.write().await;
+        let identity = normalize_ip_text(ip);
         let now = Instant::now();
-
-        if !limits.contains_key(ip) {
-            prune_ip_limits(&mut limits, now);
-            if limits.len() >= self.capacities.ips {
-                return Err(RateLimitError::CapacityExhausted);
-            }
-        }
-
-        let timestamps = limits.entry(ip.to_string()).or_insert_with(Vec::new);
+        self.maybe_cleanup(now).await;
+        let mut limits = self.ip_limits.write().await;
+        let timestamps = limits.get_or_insert_with(
+            &identity,
+            self.capacities.ips,
+            identity.len() > MAX_IDENTITY_BYTES,
+            Vec::new,
+        );
 
         // Clean old requests
         timestamps.retain(|&t| now.duration_since(t) < Duration::from_secs(3600));
@@ -312,38 +398,49 @@ impl EnhancedRateLimiter {
         Ok(())
     }
 
-    async fn cleanup_loop(&self) {
-        let mut interval = tokio::time::interval(self.config.cleanup_interval);
-
-        loop {
-            interval.tick().await;
-
-            // Cleanup old entries
-            let now = Instant::now();
-
-            // Cleanup user limits
-            {
-                let mut user_limits = self.user_limits.write().await;
-                prune_user_limits(&mut user_limits, now);
+    async fn maybe_cleanup(&self, now: Instant) {
+        let interval = normalized_cleanup_interval(self.config.cleanup_interval);
+        let should_cleanup = {
+            let mut next_cleanup = self
+                .next_cleanup
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if now < *next_cleanup {
+                false
+            } else {
+                *next_cleanup = now.checked_add(interval).unwrap_or(now);
+                true
             }
+        };
+        if !should_cleanup {
+            return;
+        }
 
-            // Cleanup IP limits
-            {
-                let mut ip_limits = self.ip_limits.write().await;
-                prune_ip_limits(&mut ip_limits, now);
-            }
-
-            // Cleanup failed logins
-            {
-                let mut failed_logins = self.failed_logins.write().await;
-                prune_failed_logins(&mut failed_logins, now);
-            }
+        {
+            let mut limits = self.user_limits.write().await;
+            prune_user_limits(&mut limits, now);
+        }
+        {
+            let mut limits = self.ip_limits.write().await;
+            prune_ip_limits(&mut limits, now);
+        }
+        {
+            let mut limits = self.failed_logins.write().await;
+            prune_failed_logins(&mut limits, now);
         }
     }
 }
 
-fn prune_user_limits(limits: &mut HashMap<String, UserRateLimit>, now: Instant) {
-    limits.retain(|_, limit| {
+fn normalized_cleanup_interval(interval: Duration) -> Duration {
+    if interval.is_zero() {
+        Duration::from_secs(1)
+    } else {
+        interval.min(Duration::from_secs(3600))
+    }
+}
+
+fn prune_user_limits(limits: &mut BoundedIdentityMap<UserRateLimit>, now: Instant) {
+    limits.retain(|limit| {
         limit
             .requests
             .retain(|&time| now.duration_since(time) < Duration::from_secs(3600));
@@ -351,19 +448,52 @@ fn prune_user_limits(limits: &mut HashMap<String, UserRateLimit>, now: Instant) 
     });
 }
 
-fn prune_ip_limits(limits: &mut HashMap<String, Vec<Instant>>, now: Instant) {
-    limits.retain(|_, timestamps| {
+fn prune_ip_limits(limits: &mut BoundedIdentityMap<Vec<Instant>>, now: Instant) {
+    limits.retain(|timestamps| {
         timestamps.retain(|&time| now.duration_since(time) < Duration::from_secs(3600));
         !timestamps.is_empty()
     });
 }
 
-fn prune_failed_logins(limits: &mut HashMap<String, FailedLoginInfo>, now: Instant) {
-    limits.retain(|_, info| {
+fn prune_failed_logins(limits: &mut BoundedIdentityMap<FailedLoginInfo>, now: Instant) {
+    limits.retain(|info| {
         info.attempts
             .retain(|&time| now.duration_since(time) < Duration::from_secs(3600));
         !info.attempts.is_empty() || info.locked_until.is_some_and(|until| now < until)
     });
+}
+
+fn normalize_client_ip(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V4(address) => IpAddr::V4(address),
+        IpAddr::V6(address) => {
+            if let Some(mapped) = address.to_ipv4_mapped() {
+                return IpAddr::V4(mapped);
+            }
+            let network = u128::from(address) & (u128::MAX << (128 - IPV6_RATE_LIMIT_PREFIX_BITS));
+            IpAddr::V6(Ipv6Addr::from(network))
+        }
+    }
+}
+
+fn normalize_ip_text(value: &str) -> String {
+    value
+        .parse::<IpAddr>()
+        .map(normalize_client_ip)
+        .map(|address| match address {
+            IpAddr::V4(address) => address.to_string(),
+            IpAddr::V6(address) => format!("{address}/{IPV6_RATE_LIMIT_PREFIX_BITS}"),
+        })
+        // Invalid values can only enter through the public programmatic API,
+        // not the peer-aware HTTP middleware. They are forced into the bounded
+        // overflow tier by retaining their original overlength marker.
+        .unwrap_or_else(|_| {
+            if value.len() > MAX_IDENTITY_BYTES {
+                value.to_owned()
+            } else {
+                format!("invalid-ip:{value}")
+            }
+        })
 }
 
 #[derive(Debug)]
@@ -372,6 +502,7 @@ pub enum RateLimitIdentifier {
     Ip(String),
 }
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum RateLimitError {
     #[error("Too many requests")]
@@ -379,9 +510,6 @@ pub enum RateLimitError {
 
     #[error("Account temporarily locked")]
     AccountLocked(Duration),
-
-    #[error("Rate-limit identity capacity exhausted")]
-    CapacityExhausted,
 }
 
 // Rate limiting middleware
@@ -391,6 +519,16 @@ pub async fn rate_limit_middleware(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    let peer = match connect_info {
+        Some(info) => info.0,
+        None => {
+            tracing::error!(
+                "users-core router was served without ConnectInfo<SocketAddr>; refusing request"
+            );
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
+
     // Try to extract user ID from JWT token in Authorization header
     let mut user_id = None;
 
@@ -414,9 +552,9 @@ pub async fn rate_limit_middleware(
     } else {
         let ip = state
             .rate_limiter
-            .client_ip(connect_info.map(|info| info.0), request.headers())
+            .client_ip(Some(peer), request.headers())
             .map(|address| address.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
         RateLimitIdentifier::Ip(ip)
     };
@@ -437,13 +575,6 @@ pub async fn rate_limit_middleware(
                 header::RETRY_AFTER,
                 duration.as_secs().to_string().parse().unwrap(),
             );
-            Ok(response)
-        }
-        Err(RateLimitError::CapacityExhausted) => {
-            let mut response = StatusCode::TOO_MANY_REQUESTS.into_response();
-            response
-                .headers_mut()
-                .insert(header::RETRY_AFTER, "60".parse().unwrap());
             Ok(response)
         }
     }
@@ -504,7 +635,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn identity_keyspaces_fail_closed_at_capacity() {
+    async fn identity_keyspaces_use_bounded_overflow_at_capacity() {
         let limiter = EnhancedRateLimiter::new(RateLimitConfig {
             requests_per_minute: 100,
             requests_per_hour: 100,
@@ -521,35 +652,125 @@ mod tests {
             .check_rate_limit(RateLimitIdentifier::User("user-a".into()))
             .await
             .unwrap();
-        assert!(matches!(
-            limiter
-                .check_rate_limit(RateLimitIdentifier::User("user-b".into()))
-                .await,
-            Err(RateLimitError::CapacityExhausted)
-        ));
+        limiter
+            .check_rate_limit(RateLimitIdentifier::User("user-b".into()))
+            .await
+            .unwrap();
 
         limiter
             .check_rate_limit(RateLimitIdentifier::Ip("192.0.2.1".into()))
             .await
             .unwrap();
-        assert!(matches!(
-            limiter
-                .check_rate_limit(RateLimitIdentifier::Ip("192.0.2.2".into()))
-                .await,
-            Err(RateLimitError::CapacityExhausted)
-        ));
+        limiter
+            .check_rate_limit(RateLimitIdentifier::Ip("198.51.100.2".into()))
+            .await
+            .unwrap();
 
         limiter.record_failed_login("alice").await.unwrap();
+        limiter.record_failed_login("bob").await.unwrap();
+        limiter
+            .record_failed_login(&"x".repeat(MAX_IDENTITY_BYTES + 1))
+            .await
+            .unwrap();
+
+        assert!(limiter.user_limits.read().await.stored_entries() <= 2);
+        assert!(limiter.ip_limits.read().await.stored_entries() <= 2);
+        assert!(limiter.failed_logins.read().await.stored_entries() <= 2);
+    }
+
+    #[tokio::test]
+    async fn saturation_does_not_evict_active_lockout_state() {
+        let limiter = EnhancedRateLimiter::new(RateLimitConfig {
+            login_attempts_per_hour: 1,
+            lockout_duration: Duration::from_secs(60),
+            ..Default::default()
+        })
+        .with_capacity(RateLimitCapacity {
+            users: 1,
+            ips: 1,
+            failed_logins: 1,
+        });
+
         assert!(matches!(
-            limiter.record_failed_login("bob").await,
-            Err(RateLimitError::CapacityExhausted)
+            limiter.record_failed_login("alice").await,
+            Err(RateLimitError::AccountLocked(_))
         ));
+        let _ = limiter.record_failed_login("bob").await;
+        assert!(matches!(
+            limiter.record_failed_login("alice").await,
+            Err(RateLimitError::AccountLocked(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn ipv6_interface_rotation_and_equivalent_forms_share_one_budget() {
+        let limiter = EnhancedRateLimiter::new(RateLimitConfig {
+            requests_per_minute: 1,
+            requests_per_hour: 100,
+            ..Default::default()
+        });
+
+        limiter
+            .check_rate_limit(RateLimitIdentifier::Ip("2001:db8:1:2::1".into()))
+            .await
+            .unwrap();
         assert!(matches!(
             limiter
-                .record_failed_login(&"x".repeat(MAX_IDENTITY_BYTES + 1))
+                .check_rate_limit(RateLimitIdentifier::Ip(
+                    "2001:0db8:0001:0002:ffff::abcd".into()
+                ))
                 .await,
-            Err(RateLimitError::CapacityExhausted)
+            Err(RateLimitError::TooManyRequests)
         ));
+        limiter
+            .check_rate_limit(RateLimitIdentifier::Ip("2001:db8:1:3::1".into()))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ipv4_mapped_ipv6_shares_the_ipv4_budget() {
+        let limiter = EnhancedRateLimiter::new(RateLimitConfig {
+            requests_per_minute: 1,
+            ..Default::default()
+        });
+        limiter
+            .check_rate_limit(RateLimitIdentifier::Ip("::ffff:192.0.2.9".into()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            limiter
+                .check_rate_limit(RateLimitIdentifier::Ip("192.0.2.9".into()))
+                .await,
+            Err(RateLimitError::TooManyRequests)
+        ));
+    }
+
+    #[test]
+    fn construction_and_drop_do_not_require_a_runtime_or_retain_maps() {
+        let limiter = EnhancedRateLimiter::new(RateLimitConfig {
+            cleanup_interval: Duration::ZERO,
+            ..Default::default()
+        });
+        let maps = Arc::downgrade(&limiter.ip_limits);
+        drop(limiter);
+        assert!(maps.upgrade().is_none());
+    }
+
+    #[test]
+    fn trusted_proxy_configuration_is_declarative_and_validated() {
+        let limiter = EnhancedRateLimiter::new(RateLimitConfig::default())
+            .with_trusted_proxy_config(TrustedProxyConfig {
+                cidrs: vec!["192.0.2.0/24".into()],
+            })
+            .unwrap();
+        assert!(limiter.is_trusted_proxy("192.0.2.10".parse().unwrap()));
+
+        assert!(EnhancedRateLimiter::new(RateLimitConfig::default())
+            .with_trusted_proxy_config(TrustedProxyConfig {
+                cidrs: vec!["not-a-cidr".into()],
+            })
+            .is_err());
     }
 
     #[tokio::test]

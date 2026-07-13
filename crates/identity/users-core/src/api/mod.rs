@@ -9,7 +9,7 @@ use crate::{
     UpdateUserRequest, UserFilter,
 };
 use axum::{
-    extract::{FromRef, Json, Path, Query, State},
+    extract::{connect_info::IntoMakeServiceWithConnectInfo, FromRef, Json, Path, Query, State},
     http::{header, StatusCode},
     middleware::{self},
     response::{IntoResponse, Response},
@@ -377,6 +377,29 @@ pub fn create_router_with_state(state: ApiState) -> Router {
         .with_state(state)
 }
 
+/// Peer-aware make-service returned by the safe router embedding helpers.
+pub type ApiMakeService = IntoMakeServiceWithConnectInfo<Router, SocketAddr>;
+
+/// Convert a users-core router into a make-service that always installs the
+/// real socket peer as `ConnectInfo<SocketAddr>`.
+///
+/// Custom servers must use this helper (or Axum's equivalent directly). The
+/// rate-limit middleware deliberately returns `503` when peer metadata is
+/// absent rather than assigning unrelated callers to one shared identity.
+pub fn into_peer_aware_make_service(app: Router) -> ApiMakeService {
+    app.into_make_service_with_connect_info::<SocketAddr>()
+}
+
+/// Build the default REST router as a peer-aware make-service.
+pub fn create_make_service(auth_service: Arc<AuthenticationService>) -> ApiMakeService {
+    into_peer_aware_make_service(create_router(auth_service))
+}
+
+/// Build a custom-state REST router as a peer-aware make-service.
+pub fn create_make_service_with_state(state: ApiState) -> ApiMakeService {
+    into_peer_aware_make_service(create_router_with_state(state))
+}
+
 /// TLS configuration
 #[derive(Debug, Clone)]
 pub struct TlsConfig {
@@ -405,7 +428,7 @@ pub async fn create_server_with_tls(
             tracing::info!("   Private key: {}", tls.key_path.display());
 
             axum_server::bind_rustls(addr, config)
-                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                .serve(into_peer_aware_make_service(app))
                 .await
                 .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
         }
@@ -423,12 +446,9 @@ pub async fn create_server_with_tls(
             let listener = tokio::net::TcpListener::bind(addr).await?;
             tracing::info!("Starting HTTP server on http://{}", addr);
 
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
+            axum::serve(listener, into_peer_aware_make_service(app))
+                .await
+                .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
         }
     }
     Ok(())
@@ -1062,7 +1082,13 @@ where
         parts: &mut axum::http::request::Parts,
         state: &S,
     ) -> Result<Self, Self::Rejection> {
-        extract_request_authentication(parts, state).await.map(Self)
+        let authentication = extract_request_authentication(parts, state).await?;
+        if authentication.context.auth_type != AuthType::Jwt {
+            // An API key cannot prove possession of, or revoke, a specific JWT
+            // session. Key revocation remains explicit via DELETE /api-keys/:id.
+            return Err(AppError::Forbidden);
+        }
+        Ok(Self(authentication))
     }
 }
 

@@ -5,7 +5,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use rsa::{pkcs1::DecodeRsaPrivateKey, pkcs8::DecodePrivateKey, traits::PublicKeyParts};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
 /// JWT issuer
@@ -43,6 +43,51 @@ pub struct UserClaims {
     pub tenant_id: Option<String>,
 }
 
+impl UserClaims {
+    /// Construct access-token claims without optional profile, role, or tenant
+    /// fields. Builder methods can then add those values explicitly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        issuer: impl Into<String>,
+        subject: impl Into<String>,
+        audience: Vec<String>,
+        expires_at: u64,
+        issued_at: u64,
+        token_id: impl Into<String>,
+        username: impl Into<String>,
+        scope: impl Into<String>,
+    ) -> Self {
+        Self {
+            iss: issuer.into(),
+            sub: subject.into(),
+            aud: audience,
+            exp: expires_at,
+            iat: issued_at,
+            jti: token_id.into(),
+            username: username.into(),
+            email: None,
+            roles: Vec::new(),
+            scope: scope.into(),
+            tenant_id: None,
+        }
+    }
+
+    pub fn with_email(mut self, email: Option<String>) -> Self {
+        self.email = email;
+        self
+    }
+
+    pub fn with_roles(mut self, roles: Vec<String>) -> Self {
+        self.roles = roles;
+        self
+    }
+
+    pub fn with_tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
+        self.tenant_id = Some(tenant_id.into());
+        self
+    }
+}
+
 impl std::fmt::Debug for UserClaims {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -71,6 +116,19 @@ pub struct RefreshTokenClaims {
     pub jti: String, // Unique ID for revocation
     pub exp: u64,
     pub iat: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct RefreshTokenWireClaims {
+    #[serde(flatten)]
+    claims: RefreshTokenClaims,
+    #[serde(
+        default,
+        alias = "tenant",
+        alias = "tid",
+        skip_serializing_if = "Option::is_none"
+    )]
+    tenant_id: Option<String>,
 }
 
 impl std::fmt::Debug for RefreshTokenClaims {
@@ -132,6 +190,39 @@ impl Default for JwtConfig {
             tenant_id: None,
             signing_key: None,
         }
+    }
+}
+
+impl JwtConfig {
+    /// Construct JWT configuration with secure default lifetimes and HS256.
+    /// Use the builder methods for tenant binding, custom keys, or algorithms.
+    pub fn new(issuer: impl Into<String>, audience: Vec<String>) -> Self {
+        Self {
+            issuer: issuer.into(),
+            audience,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_token_ttls(mut self, access: Duration, refresh: Duration) -> Self {
+        self.access_ttl_seconds = access.as_secs();
+        self.refresh_ttl_seconds = refresh.as_secs();
+        self
+    }
+
+    pub fn with_algorithm(mut self, algorithm: impl Into<String>) -> Self {
+        self.algorithm = algorithm.into();
+        self
+    }
+
+    pub fn with_tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
+        self.tenant_id = Some(tenant_id.into());
+        self
+    }
+
+    pub fn with_signing_key(mut self, signing_key: impl Into<String>) -> Self {
+        self.signing_key = Some(signing_key.into());
+        self
     }
 }
 
@@ -227,12 +318,15 @@ impl JwtIssuer {
         let now = chrono::Utc::now();
         let exp = now + chrono::Duration::seconds(self.config.refresh_ttl_seconds as i64);
 
-        let claims = RefreshTokenClaims {
-            iss: self.config.issuer.clone(),
-            sub: user_id.to_string(),
-            jti: Uuid::new_v4().to_string(),
-            exp: exp.timestamp() as u64,
-            iat: now.timestamp() as u64,
+        let claims = RefreshTokenWireClaims {
+            claims: RefreshTokenClaims {
+                iss: self.config.issuer.clone(),
+                sub: user_id.to_string(),
+                jti: Uuid::new_v4().to_string(),
+                exp: exp.timestamp() as u64,
+                iat: now.timestamp() as u64,
+            },
+            tenant_id: self.config.tenant_id.clone(),
         };
 
         encode(&self.header, &claims, &self.encoding_key).map_err(|e| Error::Jwt(e))
@@ -243,10 +337,11 @@ impl JwtIssuer {
         validation.set_issuer(&[self.config.issuer.clone()]);
         validation.validate_exp = true;
 
-        let token_data = decode::<RefreshTokenClaims>(token, &self.decoding_key, &validation)
+        let token_data = decode::<RefreshTokenWireClaims>(token, &self.decoding_key, &validation)
             .map_err(|e| Error::Jwt(e))?;
+        self.enforce_tenant_binding(token_data.claims.tenant_id.as_deref(), "refresh")?;
 
-        Ok(token_data.claims)
+        Ok(token_data.claims.claims)
     }
 
     pub fn validate_access_token(&self, token: &str) -> Result<UserClaims> {
@@ -257,8 +352,19 @@ impl JwtIssuer {
 
         let token_data = decode::<UserClaims>(token, &self.decoding_key, &validation)
             .map_err(|e| Error::Jwt(e))?;
+        self.enforce_tenant_binding(token_data.claims.tenant_id.as_deref(), "access")?;
 
         Ok(token_data.claims)
+    }
+
+    fn enforce_tenant_binding(&self, actual: Option<&str>, token_kind: &str) -> Result<()> {
+        if actual == self.config.tenant_id.as_deref() {
+            return Ok(());
+        }
+
+        Err(Error::Validation(format!(
+            "{token_kind} token tenant does not match issuer binding"
+        )))
     }
 
     /// Issuer configured for generated tokens.
@@ -351,6 +457,35 @@ impl JwtIssuer {
 mod tests {
     use super::*;
 
+    fn configured_issuer(tenant: Option<&str>) -> JwtIssuer {
+        JwtIssuer::new(JwtConfig {
+            issuer: "https://users.test".into(),
+            audience: vec!["rvoip-api".into()],
+            access_ttl_seconds: 300,
+            refresh_ttl_seconds: 3600,
+            algorithm: "HS256".into(),
+            tenant_id: tenant.map(str::to_owned),
+            signing_key: Some("shared-test-signing-key".into()),
+        })
+        .unwrap()
+    }
+
+    fn test_user() -> User {
+        let now = chrono::Utc::now();
+        User {
+            id: "user-a".into(),
+            username: "alice".into(),
+            email: Some("alice@example.test".into()),
+            display_name: None,
+            password_hash: "not-used-by-jwt-tests".into(),
+            roles: vec!["user".into()],
+            active: true,
+            created_at: now,
+            updated_at: now,
+            last_login: None,
+        }
+    }
+
     #[test]
     fn test_jwt_config_default() {
         let config = JwtConfig::default();
@@ -378,5 +513,113 @@ mod tests {
         assert!(claims.tenant_id.is_none());
         let encoded = serde_json::to_value(claims).unwrap();
         assert!(encoded.get("tenant_id").is_none());
+    }
+
+    #[test]
+    fn configured_tenant_is_enforced_on_direct_access_validation() {
+        let tenant_a = configured_issuer(Some("tenant-a"));
+        let tenant_b = configured_issuer(Some("tenant-b"));
+        let access = tenant_a.create_access_token(&test_user()).unwrap();
+
+        assert!(tenant_a.validate_access_token(&access).is_ok());
+        assert!(matches!(
+            tenant_b.validate_access_token(&access),
+            Err(Error::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn refresh_tokens_carry_and_enforce_the_issuer_tenant() {
+        let tenant_a = configured_issuer(Some("tenant-a"));
+        let tenant_b = configured_issuer(Some("tenant-b"));
+        let refresh = tenant_a.create_refresh_token("user-a").unwrap();
+
+        assert!(tenant_a.validate_refresh_token(&refresh).is_ok());
+        assert!(matches!(
+            tenant_b.validate_refresh_token(&refresh),
+            Err(Error::Validation(_))
+        ));
+
+        let mut validation = Validation::new(tenant_a.header.alg);
+        validation.set_issuer(&[tenant_a.config.issuer.clone()]);
+        let decoded =
+            decode::<RefreshTokenWireClaims>(&refresh, &tenant_a.decoding_key, &validation)
+                .unwrap();
+        assert_eq!(decoded.claims.tenant_id.as_deref(), Some("tenant-a"));
+    }
+
+    #[test]
+    fn tenant_bound_issuer_rejects_legacy_tenantless_tokens_fail_closed() {
+        let issuer = configured_issuer(Some("tenant-a"));
+        let now = chrono::Utc::now().timestamp() as u64;
+        let legacy_access = UserClaims::new(
+            "https://users.test",
+            "user-a",
+            vec!["rvoip-api".into()],
+            now + 300,
+            now,
+            "access-a",
+            "alice",
+            "openid",
+        );
+        let access = encode(&issuer.header, &legacy_access, &issuer.encoding_key).unwrap();
+        assert!(matches!(
+            issuer.validate_access_token(&access),
+            Err(Error::Validation(_))
+        ));
+
+        let legacy_refresh = RefreshTokenClaims {
+            iss: "https://users.test".into(),
+            sub: "user-a".into(),
+            jti: "refresh-a".into(),
+            exp: now + 3600,
+            iat: now,
+        };
+        let refresh = encode(&issuer.header, &legacy_refresh, &issuer.encoding_key).unwrap();
+        assert!(matches!(
+            issuer.validate_refresh_token(&refresh),
+            Err(Error::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn unbound_issuer_accepts_only_legacy_tenantless_tokens() {
+        let issuer = configured_issuer(None);
+        let access = issuer.create_access_token(&test_user()).unwrap();
+        let refresh = issuer.create_refresh_token("user-a").unwrap();
+        assert!(issuer.validate_access_token(&access).is_ok());
+        assert!(issuer.validate_refresh_token(&refresh).is_ok());
+
+        let tenant_access = configured_issuer(Some("tenant-a"))
+            .create_access_token(&test_user())
+            .unwrap();
+        assert!(matches!(
+            issuer.validate_access_token(&tenant_access),
+            Err(Error::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn migration_constructors_cover_new_public_fields() {
+        let config = JwtConfig::new("https://users.test", vec!["rvoip-api".into()])
+            .with_token_ttls(Duration::from_secs(60), Duration::from_secs(120))
+            .with_tenant_id("tenant-a")
+            .with_signing_key("test-key");
+        assert_eq!(config.access_ttl_seconds, 60);
+        assert_eq!(config.refresh_ttl_seconds, 120);
+        assert_eq!(config.tenant_id.as_deref(), Some("tenant-a"));
+
+        let claims = UserClaims::new(
+            "https://users.test",
+            "user-a",
+            vec!["rvoip-api".into()],
+            2,
+            1,
+            "token-a",
+            "alice",
+            "openid",
+        )
+        .with_tenant_id("tenant-a");
+        assert_eq!(claims.tenant_id.as_deref(), Some("tenant-a"));
     }
 }
