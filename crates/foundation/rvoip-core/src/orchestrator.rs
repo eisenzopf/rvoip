@@ -7180,11 +7180,44 @@ impl Orchestrator {
         provider: Arc<dyn crate::identity::IdentityProvider>,
     ) -> Result<crate::identity::IdentityAssurance> {
         let (identity_id, assurance) = provider.authenticate(credential).await?;
-        self.emit(Event::IdentityAssuranceChanged {
-            connection_id,
-            identity_id: Some(identity_id),
-            at: Utc::now(),
-        });
+        {
+            let _registry = self
+                .connection_registry_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut entry = self
+                .connections
+                .get_mut(&connection_id)
+                .ok_or_else(|| RvoipError::ConnectionNotFound(connection_id.clone()))?;
+            let current = entry
+                .principal
+                .as_ref()
+                .ok_or(RvoipError::AdmissionRejected(
+                    "step-up requires an authenticated connection owner",
+                ))?;
+            if current.is_expired() || !principal_owns_identity(current, &identity_id) {
+                return Err(RvoipError::AdmissionRejected(
+                    "step-up credential does not belong to the connection owner",
+                ));
+            }
+            let mut updated = current.clone();
+            updated.scopes = assurance_scopes(&assurance);
+            if let crate::identity::IdentityAssurance::TaskScoped { expires_at, .. } = &assurance {
+                updated.expires_at = Some(
+                    updated
+                        .expires_at
+                        .map_or(*expires_at, |current| current.min(*expires_at)),
+                );
+            }
+            updated.assurance = assurance.clone();
+            entry.principal = Some(updated);
+            drop(entry);
+            self.emit(Event::IdentityAssuranceChanged {
+                connection_id,
+                identity_id: Some(identity_id),
+                at: Utc::now(),
+            });
+        }
         Ok(assurance)
     }
 
@@ -8539,6 +8572,34 @@ impl Orchestrator {
             }
             None => Err(RvoipError::BridgeNotFound(bridge_id)),
         }
+    }
+}
+
+fn principal_owns_identity(
+    principal: &AuthenticatedPrincipal,
+    identity: &crate::ids::IdentityId,
+) -> bool {
+    if principal.subject == identity.as_str() {
+        return true;
+    }
+    match &principal.assurance {
+        crate::identity::IdentityAssurance::TaskScoped {
+            identity: current, ..
+        } => current == identity,
+        crate::identity::IdentityAssurance::UserAuthorized {
+            identity: current,
+            user_id,
+            ..
+        } => current == identity || user_id == identity,
+        _ => false,
+    }
+}
+
+fn assurance_scopes(assurance: &crate::identity::IdentityAssurance) -> Vec<String> {
+    match assurance {
+        crate::identity::IdentityAssurance::TaskScoped { scopes, .. }
+        | crate::identity::IdentityAssurance::UserAuthorized { scopes, .. } => scopes.clone(),
+        _ => Vec::new(),
     }
 }
 

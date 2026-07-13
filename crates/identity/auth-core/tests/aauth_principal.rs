@@ -47,8 +47,8 @@ async fn combined_principal_uses_subject_ownership_and_earliest_expiry() {
         &Claims {
             sub: "user:alice",
             exp: subject_expiry,
-            iss: "https://subject-issuer.example",
-            tenant_id: "tenant-subject",
+            iss: "https://shared-issuer.example",
+            tenant_id: "tenant-shared",
             scope: "calls:read calls:write",
         },
     );
@@ -57,9 +57,9 @@ async fn combined_principal_uses_subject_ownership_and_earliest_expiry() {
         &Claims {
             sub: "agent:assistant-7",
             exp: actor_expiry,
-            iss: "https://actor-issuer.example",
-            tenant_id: "tenant-actor",
-            scope: "calls:write calls:transfer",
+            iss: "https://shared-issuer.example",
+            tenant_id: "tenant-shared",
+            scope: "aauth:act:user:alice calls:write calls:transfer",
         },
     );
 
@@ -77,9 +77,9 @@ async fn combined_principal_uses_subject_ownership_and_earliest_expiry() {
     assert_eq!(principal.subject, "user:alice");
     assert_eq!(
         principal.issuer.as_deref(),
-        Some("https://subject-issuer.example")
+        Some("https://shared-issuer.example")
     );
-    assert_eq!(principal.tenant.as_deref(), Some("tenant-subject"));
+    assert_eq!(principal.tenant.as_deref(), Some("tenant-shared"));
     assert_eq!(principal.method, AuthenticationMethod::AAuth);
     assert_eq!(
         principal.expires_at.expect("combined expiry").timestamp(),

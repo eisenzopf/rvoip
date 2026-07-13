@@ -24,34 +24,82 @@ const TEXT_PREFIX: &str = "rvoip-data-v1:";
 pub const MAX_WEBRTC_DATA_MESSAGE_BYTES: usize = 16 * 1024;
 pub const DATA_MESSAGE_SUBPROTOCOL: &str = "rvoip.data.v1";
 
-#[derive(Debug, thiserror::Error)]
 pub enum DataMessageWireError {
-    #[error(transparent)]
-    Validation(#[from] DataMessageValidationError),
-    #[error("invalid UTF-8 in data message {field}")]
+    Validation(DataMessageValidationError),
     InvalidUtf8 { field: &'static str },
-    #[error("invalid rvoip WebRTC data-message envelope")]
     InvalidEnvelope,
-    #[error("unsupported rvoip WebRTC data-message envelope version {0}")]
     UnsupportedVersion(u8),
-    #[error("unsupported rvoip WebRTC data-message reliability code {0}")]
     UnsupportedReliability(u8),
-    #[error("framed WebRTC data message is {actual} bytes; maximum is {maximum}")]
     WireMessageTooLarge { actual: usize, maximum: usize },
-    #[error("data-message envelope reliability does not match its WebRTC DataChannel")]
     ReliabilityMismatch,
-    #[error("data-message envelope label does not match its WebRTC DataChannel")]
     LabelMismatch,
-    #[error("data-message content type does not match its WebRTC text/binary frame kind")]
     FrameKindMismatch,
-    #[error("invalid WebRTC DataChannel reliability: {0}")]
     InvalidChannelReliability(String),
 }
 
-#[derive(Debug, Eq, PartialEq)]
+impl DataMessageWireError {
+    pub const fn diagnostic_class(&self) -> &'static str {
+        match self {
+            Self::Validation(_) => "validation",
+            Self::InvalidUtf8 { .. } => "invalid-utf8",
+            Self::InvalidEnvelope => "invalid-envelope",
+            Self::UnsupportedVersion(_) => "unsupported-version",
+            Self::UnsupportedReliability(_) => "unsupported-reliability",
+            Self::WireMessageTooLarge { .. } => "wire-message-too-large",
+            Self::ReliabilityMismatch => "reliability-mismatch",
+            Self::LabelMismatch => "label-mismatch",
+            Self::FrameKindMismatch => "frame-kind-mismatch",
+            Self::InvalidChannelReliability(_) => "invalid-channel-reliability",
+        }
+    }
+}
+
+impl std::fmt::Display for DataMessageWireError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "WebRTC data message failed (class={})",
+            self.diagnostic_class()
+        )
+    }
+}
+
+impl std::fmt::Debug for DataMessageWireError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DataMessageWireError")
+            .field("class", &self.diagnostic_class())
+            .finish()
+    }
+}
+
+impl std::error::Error for DataMessageWireError {}
+
+impl From<DataMessageValidationError> for DataMessageWireError {
+    fn from(error: DataMessageValidationError) -> Self {
+        Self::Validation(error)
+    }
+}
+
+#[derive(Eq, PartialEq)]
 pub enum EncodedDataMessage {
     Text(String),
     Binary(BytesMut),
+}
+
+impl std::fmt::Debug for EncodedDataMessage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text(value) => formatter
+                .debug_struct("Text")
+                .field("bytes", &value.len())
+                .finish(),
+            Self::Binary(value) => formatter
+                .debug_struct("Binary")
+                .field("bytes", &value.len())
+                .finish(),
+        }
+    }
 }
 
 /// Encode a transport-neutral message for a WebRTC DataChannel using

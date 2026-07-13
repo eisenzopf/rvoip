@@ -28,7 +28,7 @@ use chrono::{DateTime, Utc};
 use moka::future::Cache;
 use ring::signature::{UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
+use std::fmt;
 
 /// Maximum age of a signed envelope's `ts` field. Envelopes older
 /// than this are rejected as stale per spec §5.5.1. Default matches
@@ -39,48 +39,78 @@ pub const DEFAULT_SIG_REPLAY_TTL: Duration = Duration::from_secs(300);
 /// LRU eviction. Mirrors [`crate::dpop::DEFAULT_JTI_CACHE_CAPACITY`].
 pub const DEFAULT_REPLAY_CACHE_CAPACITY: u64 = 100_000;
 
-#[derive(Debug, Error)]
 pub enum Sig9421Error {
-    #[error("envelope missing required `signature` field")]
     MissingSignature,
-
-    #[error("malformed signature object: {0}")]
     MalformedSignature(String),
-
-    #[error("unsupported signature algorithm: {0}")]
     UnsupportedAlgorithm(String),
-
-    #[error("signature keyid `{0}` does not resolve to a registered public key")]
     UnknownKeyid(String),
-
-    #[error("signature verification failed")]
     InvalidSignature,
-
-    #[error("envelope replay detected: id `{0}` already seen")]
     ReplayDetected(String),
-
-    #[error("envelope timestamp `{0}` is older than the replay window")]
     StaleTimestamp(String),
-
-    #[error("envelope is not a JSON object")]
     MalformedEnvelope,
-
-    #[error("envelope `id` field missing or not a string")]
     MissingEnvelopeId,
-
-    #[error("envelope `ts` field missing or not a valid RFC 3339 timestamp")]
     InvalidEnvelopeTimestamp,
 }
 
+impl Sig9421Error {
+    fn diagnostic_class(&self) -> &'static str {
+        match self {
+            Self::MissingSignature => "missing-signature",
+            Self::MalformedSignature(_) => "malformed-signature",
+            Self::UnsupportedAlgorithm(_) => "unsupported-algorithm",
+            Self::UnknownKeyid(_) => "unknown-key",
+            Self::InvalidSignature => "invalid-signature",
+            Self::ReplayDetected(_) => "replay",
+            Self::StaleTimestamp(_) => "stale-timestamp",
+            Self::MalformedEnvelope => "malformed-envelope",
+            Self::MissingEnvelopeId => "missing-envelope-id",
+            Self::InvalidEnvelopeTimestamp => "invalid-envelope-timestamp",
+        }
+    }
+}
+
+impl fmt::Display for Sig9421Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "message signature validation failed (class={})",
+            self.diagnostic_class()
+        )
+    }
+}
+
+impl fmt::Debug for Sig9421Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Sig9421Error")
+            .field("class", &self.diagnostic_class())
+            .finish()
+    }
+}
+
+impl std::error::Error for Sig9421Error {}
+
 /// Inline `signature` field on a signed envelope. See
 /// CONVERSATION_PROTOCOL.md §5.5.1.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EnvelopeSignature {
     pub keyid: String,
     /// JWA algorithm name (e.g. `"EdDSA"`, `"ES256"`).
     pub alg: String,
     /// Base64url-encoded (no padding) signature bytes.
     pub sig: String,
+}
+
+impl fmt::Debug for EnvelopeSignature {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EnvelopeSignature")
+            .field("key_id_present", &!self.keyid.is_empty())
+            .field("algorithm_present", &!self.alg.is_empty())
+            .field("signature_present", &!self.sig.is_empty())
+            .field("signature_bytes", &self.sig.len())
+            .finish()
+    }
 }
 
 /// Trait the verifier uses to look up the public key bytes for a

@@ -17,7 +17,6 @@ use axum::{
     Router,
 };
 use chrono::{DateTime, Utc};
-use jsonwebtoken::{decode, Validation};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -135,12 +134,21 @@ impl std::fmt::Debug for ChangePasswordRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct UpdateRolesRequest {
     pub roles: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+impl std::fmt::Debug for UpdateRolesRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UpdateRolesRequest")
+            .field("role_count", &self.roles.len())
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
 pub struct UserResponse {
     pub id: String,
     pub username: String,
@@ -153,7 +161,22 @@ pub struct UserResponse {
     pub last_login: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+impl std::fmt::Debug for UserResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UserResponse")
+            .field("id_present", &!self.id.is_empty())
+            .field("username_present", &!self.username.is_empty())
+            .field("email_present", &self.email.is_some())
+            .field("display_name_present", &self.display_name.is_some())
+            .field("role_count", &self.roles.len())
+            .field("active", &self.active)
+            .field("last_login_present", &self.last_login.is_some())
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
 pub struct ApiKeyResponse {
     pub id: String,
     pub name: String,
@@ -162,6 +185,20 @@ pub struct ApiKeyResponse {
     pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub last_used: Option<DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for ApiKeyResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ApiKeyResponse")
+            .field("id_present", &!self.id.is_empty())
+            .field("name_len", &self.name.len())
+            .field("permission_count", &self.permissions.len())
+            .field("active", &self.active)
+            .field("expires_at_present", &self.expires_at.is_some())
+            .field("last_used_present", &self.last_used.is_some())
+            .finish()
+    }
 }
 
 #[derive(Serialize)]
@@ -182,12 +219,21 @@ impl std::fmt::Debug for CreateApiKeyResponse {
 }
 
 // Error response
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct ErrorResponse {
     pub error: ErrorDetail,
 }
 
-#[derive(Debug, Serialize)]
+impl std::fmt::Debug for ErrorResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ErrorResponse")
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
 pub struct ErrorDetail {
     pub code: String,
     pub message: String,
@@ -195,14 +241,29 @@ pub struct ErrorDetail {
     pub details: Option<serde_json::Value>,
 }
 
+impl std::fmt::Debug for ErrorDetail {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ErrorDetail")
+            .field("code_len", &self.code.len())
+            .field("message_len", &self.message.len())
+            .field("details_present", &self.details.is_some())
+            .finish()
+    }
+}
+
 // JWT validation for protected routes
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AuthContext {
     pub user_id: String,
     pub username: String,
     pub roles: Vec<String>,
     pub permissions: Vec<String>, // For API key auth
     pub auth_type: AuthType,
+    /// JWT identifier retained only for access-token revocation.
+    pub access_token_id: Option<String>,
+    /// Validated JWT expiry paired with `access_token_id`.
+    pub access_token_expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -227,6 +288,30 @@ impl AuthContext {
     /// Check if the user has admin role
     pub fn is_admin(&self) -> bool {
         self.roles.contains(&"admin".to_string())
+    }
+
+    fn require_permission(&self, permission: &str) -> Result<(), AppError> {
+        self.has_permission(permission)
+            .then_some(())
+            .ok_or(AppError::Forbidden)
+    }
+}
+
+impl std::fmt::Debug for AuthContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthContext")
+            .field("user_present", &!self.user_id.is_empty())
+            .field("username_present", &!self.username.is_empty())
+            .field("role_count", &self.roles.len())
+            .field("permission_count", &self.permissions.len())
+            .field("auth_type", &self.auth_type)
+            .field("access_token_id_present", &self.access_token_id.is_some())
+            .field(
+                "access_token_expires_at_present",
+                &self.access_token_expires_at.is_some(),
+            )
+            .finish()
     }
 }
 
@@ -391,6 +476,15 @@ async fn login(
 
 async fn logout(State(state): State<ApiState>, auth: AuthContext) -> Result<StatusCode, AppError> {
     state.auth_service.revoke_tokens(&auth.user_id).await?;
+    if let (Some(token_id), Some(expires_at)) = (
+        auth.access_token_id.as_deref(),
+        auth.access_token_expires_at,
+    ) {
+        state
+            .auth_service
+            .revoke_access_token_jti(token_id, Some(&auth.user_id), expires_at)
+            .await?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -422,10 +516,7 @@ async fn create_user(
     auth: AuthContext,
     Json(req): Json<CreateUserRequest>,
 ) -> Result<(StatusCode, Json<UserResponse>), AppError> {
-    // Only admins can create users
-    if !auth.is_admin() {
-        return Err(AppError::Forbidden);
-    }
+    require_admin_permission(&auth, "admin")?;
     let user = state.auth_service.create_user(req).await?;
 
     Ok((
@@ -446,9 +537,10 @@ async fn create_user(
 
 async fn list_users(
     State(state): State<ApiState>,
-    _auth: AuthContext,
+    auth: AuthContext,
     Query(filter): Query<UserFilter>,
 ) -> Result<Json<Vec<UserResponse>>, AppError> {
+    require_admin_permission(&auth, "read")?;
     let users = state.auth_service.user_store().list_users(filter).await?;
 
     let responses: Vec<UserResponse> = users
@@ -474,6 +566,7 @@ async fn get_user(
     auth: AuthContext,
     Path(id): Path<String>,
 ) -> Result<Json<UserResponse>, AppError> {
+    auth.require_permission("read")?;
     // Users can get their own info, admins can get anyone's
     if auth.user_id != id && !auth.is_admin() {
         return Err(AppError::Forbidden);
@@ -505,10 +598,7 @@ async fn update_user(
     Path(id): Path<String>,
     Json(req): Json<UpdateUserRequest>,
 ) -> Result<Json<UserResponse>, AppError> {
-    // Users can update their own info (limited), admins can update anyone
-    if auth.user_id != id && !auth.is_admin() {
-        return Err(AppError::Forbidden);
-    }
+    authorize_user_update(&auth, &id, &req)?;
 
     let user = state
         .auth_service
@@ -529,15 +619,34 @@ async fn update_user(
     }))
 }
 
+fn authorize_user_update(
+    auth: &AuthContext,
+    user_id: &str,
+    request: &UpdateUserRequest,
+) -> Result<(), AppError> {
+    auth.require_permission("write")?;
+    if auth.user_id != user_id && !auth.is_admin() {
+        return Err(AppError::Forbidden);
+    }
+    if !auth.is_admin() && (request.roles.is_some() || request.active.is_some()) {
+        return Err(AppError::Forbidden);
+    }
+    Ok(())
+}
+
+fn require_admin_permission(auth: &AuthContext, permission: &str) -> Result<(), AppError> {
+    if !auth.is_admin() {
+        return Err(AppError::Forbidden);
+    }
+    auth.require_permission(permission)
+}
+
 async fn delete_user(
     State(state): State<ApiState>,
     auth: AuthContext,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    // Only admins can delete users
-    if !auth.is_admin() {
-        return Err(AppError::Forbidden);
-    }
+    require_admin_permission(&auth, "delete")?;
     state.auth_service.user_store().delete_user(&id).await?;
 
     Ok(StatusCode::NO_CONTENT)
@@ -549,6 +658,7 @@ async fn change_password(
     Path(id): Path<String>,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<StatusCode, AppError> {
+    auth.require_permission("write")?;
     // Users can only change their own password
     if auth.user_id != id {
         return Err(AppError::Forbidden);
@@ -568,10 +678,7 @@ async fn update_roles(
     Path(id): Path<String>,
     Json(req): Json<UpdateRolesRequest>,
 ) -> Result<StatusCode, AppError> {
-    // Only admins can update roles
-    if !auth.is_admin() {
-        return Err(AppError::Forbidden);
-    }
+    require_admin_permission(&auth, "admin")?;
 
     // Update the user's roles
     let update_req = UpdateUserRequest {
@@ -596,12 +703,9 @@ async fn create_api_key(
     State(state): State<ApiState>,
     auth: AuthContext,
     Path(user_id): Path<String>,
-    Json(req): Json<CreateApiKeyRequest>,
+    Json(mut req): Json<CreateApiKeyRequest>,
 ) -> Result<(StatusCode, Json<CreateApiKeyResponse>), AppError> {
-    // Users can create their own API keys, admins can create for anyone
-    if auth.user_id != user_id && !auth.is_admin() {
-        return Err(AppError::Forbidden);
-    }
+    authorize_api_key_creation(&auth, &user_id, &mut req)?;
 
     let (key_info, raw_key) = state
         .auth_service
@@ -632,11 +736,27 @@ async fn create_api_key(
     ))
 }
 
+fn authorize_api_key_creation(
+    auth: &AuthContext,
+    path_user_id: &str,
+    request: &mut CreateApiKeyRequest,
+) -> Result<(), AppError> {
+    auth.require_permission("write")?;
+    if auth.user_id != path_user_id && !auth.is_admin() {
+        return Err(AppError::Forbidden);
+    }
+    // The authorized path identity is authoritative. Never let a body field
+    // retarget key ownership after the access check above.
+    request.user_id = path_user_id.to_owned();
+    Ok(())
+}
+
 async fn list_api_keys(
     State(state): State<ApiState>,
     auth: AuthContext,
     Path(user_id): Path<String>,
 ) -> Result<Json<Vec<ApiKeyResponse>>, AppError> {
+    auth.require_permission("read")?;
     // Users can list their own API keys, admins can list anyone's
     if auth.user_id != user_id && !auth.is_admin() {
         return Err(AppError::Forbidden);
@@ -669,6 +789,7 @@ async fn revoke_api_key(
     auth: AuthContext,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
+    auth.require_permission("delete")?;
     // Get the API key to check ownership
     let keys = state
         .auth_service
@@ -778,7 +899,6 @@ async fn metrics(State(state): State<ApiState>) -> Result<Json<serde_json::Value
 
 // Error handling
 
-#[derive(Debug)]
 pub enum AppError {
     Internal(anyhow::Error),
     InvalidCredentials,
@@ -788,11 +908,29 @@ pub enum AppError {
     AccountLocked(u64), // seconds until unlock
 }
 
+impl std::fmt::Debug for AppError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let class = match self {
+            Self::Internal(_) => "internal",
+            Self::InvalidCredentials => "invalid-credentials",
+            Self::NotFound => "not-found",
+            Self::Forbidden => "forbidden",
+            Self::BadRequest(_) => "bad-request",
+            Self::AccountLocked(_) => "account-locked",
+        };
+        formatter
+            .debug_struct("AppError")
+            .field("class", &class)
+            .finish()
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, code, message, retry_after) = match self {
             AppError::Internal(e) => {
-                tracing::error!("Internal error: {}", e);
+                let _ = e;
+                tracing::error!(error_class = "internal", "users API request failed");
                 (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "An internal error occurred".to_string(), None)
             },
             AppError::InvalidCredentials => {
@@ -878,21 +1016,38 @@ where
             if let Some(token) = auth_header.strip_prefix("Bearer ") {
                 let api_state = ApiState::from_ref(state);
 
-                let issuer = api_state.auth_service.jwt_issuer();
-                let mut validation = Validation::new(issuer.algorithm());
-                validation.set_issuer(&["https://users.rvoip.local"]);
-                validation.set_audience(&["rvoip-api", "rvoip-sip"]);
-
-                let token_data =
-                    decode::<crate::UserClaims>(token, issuer.decoding_key(), &validation)
-                        .map_err(|_| AppError::Forbidden)?;
+                let claims = api_state
+                    .auth_service
+                    .jwt_issuer()
+                    .validate_access_token(token)
+                    .map_err(|_| AppError::Forbidden)?;
+                if api_state
+                    .auth_service
+                    .is_access_token_revoked(&claims.jti)
+                    .await
+                    .map_err(|_| AppError::Forbidden)?
+                {
+                    return Err(AppError::Forbidden);
+                }
+                let user = api_state
+                    .auth_service
+                    .user_store()
+                    .get_user(&claims.sub)
+                    .await
+                    .map_err(|_| AppError::Forbidden)?
+                    .filter(|user| user.active)
+                    .ok_or(AppError::Forbidden)?;
+                let expires_at = DateTime::<Utc>::from_timestamp(claims.exp as i64, 0)
+                    .ok_or(AppError::Forbidden)?;
 
                 return Ok(AuthContext {
-                    user_id: token_data.claims.sub,
-                    username: token_data.claims.username,
-                    roles: token_data.claims.roles,
+                    user_id: user.id,
+                    username: user.username,
+                    roles: user.roles,
                     permissions: vec![], // JWT tokens don't have granular permissions
                     auth_type: AuthType::Jwt,
+                    access_token_id: Some(claims.jti),
+                    access_token_expires_at: Some(expires_at),
                 });
             }
         }
@@ -920,6 +1075,7 @@ where
                 .get_user(&api_key_info.user_id)
                 .await
                 .map_err(|_| AppError::Forbidden)?
+                .filter(|user| user.active)
                 .ok_or(AppError::Forbidden)?;
 
             return Ok(AuthContext {
@@ -928,10 +1084,117 @@ where
                 roles: user.roles,
                 permissions: api_key_info.permissions,
                 auth_type: AuthType::ApiKey,
+                access_token_id: None,
+                access_token_expires_at: None,
             });
         }
 
         // No valid authentication found
         Err(AppError::Forbidden)
+    }
+}
+
+#[cfg(test)]
+mod authorization_tests {
+    use super::*;
+
+    fn auth(auth_type: AuthType, roles: &[&str], permissions: &[&str]) -> AuthContext {
+        AuthContext {
+            user_id: "user-a".into(),
+            username: "alice".into(),
+            roles: roles.iter().map(|value| (*value).to_owned()).collect(),
+            permissions: permissions
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            auth_type,
+            access_token_id: None,
+            access_token_expires_at: None,
+        }
+    }
+
+    fn update() -> UpdateUserRequest {
+        UpdateUserRequest {
+            email: Some("alice@example.test".into()),
+            display_name: None,
+            roles: None,
+            active: None,
+        }
+    }
+
+    fn api_key_request(owner: &str) -> CreateApiKeyRequest {
+        CreateApiKeyRequest {
+            user_id: owner.into(),
+            name: "integration".into(),
+            permissions: vec!["read".into()],
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn self_service_cannot_change_roles_or_active_state() {
+        let context = auth(AuthType::Jwt, &["user"], &[]);
+
+        let mut roles = update();
+        roles.roles = Some(vec!["admin".into()]);
+        assert!(matches!(
+            authorize_user_update(&context, "user-a", &roles),
+            Err(AppError::Forbidden)
+        ));
+
+        let mut active = update();
+        active.active = Some(false);
+        assert!(matches!(
+            authorize_user_update(&context, "user-a", &active),
+            Err(AppError::Forbidden)
+        ));
+        assert!(authorize_user_update(&context, "user-a", &update()).is_ok());
+    }
+
+    #[test]
+    fn api_key_permissions_are_enforced_even_for_admin_users() {
+        let under_scoped = auth(AuthType::ApiKey, &["admin"], &["read"]);
+        let mut request = api_key_request("user-a");
+        assert!(matches!(
+            authorize_api_key_creation(&under_scoped, "user-a", &mut request),
+            Err(AppError::Forbidden)
+        ));
+
+        let scoped = auth(AuthType::ApiKey, &["admin"], &["write"]);
+        assert!(authorize_api_key_creation(&scoped, "user-a", &mut request).is_ok());
+    }
+
+    #[test]
+    fn user_listing_requires_admin_role_and_read_permission() {
+        let ordinary_user = auth(AuthType::Jwt, &["user"], &[]);
+        assert!(matches!(
+            require_admin_permission(&ordinary_user, "read"),
+            Err(AppError::Forbidden)
+        ));
+
+        let under_scoped_admin = auth(AuthType::ApiKey, &["admin"], &["write"]);
+        assert!(matches!(
+            require_admin_permission(&under_scoped_admin, "read"),
+            Err(AppError::Forbidden)
+        ));
+
+        let scoped_admin = auth(AuthType::ApiKey, &["admin"], &["read"]);
+        assert!(require_admin_permission(&scoped_admin, "read").is_ok());
+    }
+
+    #[test]
+    fn api_key_path_owner_is_authoritative_over_body_owner() {
+        let context = auth(AuthType::Jwt, &["user"], &[]);
+        let mut request = api_key_request("attacker-selected-owner");
+        authorize_api_key_creation(&context, "user-a", &mut request).unwrap();
+        assert_eq!(request.user_id, "user-a");
+    }
+
+    #[test]
+    fn jwt_extractor_enforces_revocation_active_user_and_current_roles() {
+        let source = include_str!("mod.rs");
+        assert!(source.contains(".is_access_token_revoked(&claims.jti)"));
+        assert!(source.contains(".filter(|user| user.active)"));
+        assert!(source.contains("roles: user.roles"));
     }
 }

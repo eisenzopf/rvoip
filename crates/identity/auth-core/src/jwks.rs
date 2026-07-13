@@ -294,7 +294,10 @@ impl JwksJwtValidator {
         }
         // Cache miss — fetch JWKS, populate every parseable key, then
         // re-check the cache for the kid we want.
-        debug!(kid = %kid, "jwks: cache miss, refetching");
+        debug!(
+            key_id_present = !kid.is_empty(),
+            "jwks: cache miss, refetching"
+        );
         let doc = self.fetch_jwks().await?;
         for jwk in doc.keys {
             let Some(jwk_kid) = jwk.kid.clone() else {
@@ -306,10 +309,10 @@ impl JwksJwtValidator {
                 Ok(key) => {
                     self.inner.cache.insert(jwk_kid, key).await;
                 }
-                Err(e) => {
+                Err(_) => {
                     warn!(
-                        kid = %jwk_kid,
-                        error = %e,
+                        key_id_present = !jwk_kid.is_empty(),
+                        error_class = "invalid-jwk",
                         "jwks: skipping unparseable key"
                     );
                 }

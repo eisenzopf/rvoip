@@ -61,7 +61,6 @@ use rvoip_core_traits::DataMessage;
 #[cfg(feature = "uctp")]
 use std::net::SocketAddr;
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::sync::{mpsc, RwLock};
 
 /// Per-protocol native client surface re-exports. Per
@@ -140,11 +139,25 @@ pub struct ClientOptions {
 /// substrate adapter by URL scheme: `Identity` and `Participant`
 /// route through UCTP; `Uri` accepts `sip:` / `tel:` and dispatches
 /// to the SIP interop adapter.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum CallTarget {
     Identity(String),
     Participant(String),
     Uri(String),
+}
+
+impl std::fmt::Debug for CallTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self {
+            Self::Identity(_) => "identity",
+            Self::Participant(_) => "participant",
+            Self::Uri(_) => "uri",
+        };
+        formatter
+            .debug_struct("CallTarget")
+            .field("kind", &kind)
+            .finish()
+    }
 }
 
 /// Medium of a Session at start time. Mirror of
@@ -159,27 +172,53 @@ pub enum SessionMedium {
     ScreenShare,
 }
 
-#[derive(Debug, Error)]
 pub enum ClientError {
-    #[error("transport not enabled for scheme: {0}")]
     UnsupportedScheme(String),
-    #[error("connection failed: {0}")]
     ConnectFailed(String),
-    #[error("invalid uri: {0}")]
     InvalidUri(String),
-    #[error("protocol error: {0}")]
     Protocol(String),
-    #[error("session not found")]
     SessionNotFound,
-    #[error("not implemented: {0}")]
     NotImplemented(&'static str),
 }
+
+impl ClientError {
+    pub const fn diagnostic_class(&self) -> &'static str {
+        match self {
+            Self::UnsupportedScheme(_) => "unsupported-scheme",
+            Self::ConnectFailed(_) => "connect",
+            Self::InvalidUri(_) => "invalid-uri",
+            Self::Protocol(_) => "protocol",
+            Self::SessionNotFound => "session-not-found",
+            Self::NotImplemented(_) => "not-implemented",
+        }
+    }
+}
+
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "client operation failed (class={})",
+            self.diagnostic_class()
+        )
+    }
+}
+
+impl std::fmt::Debug for ClientError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClientError")
+            .field("class", &self.diagnostic_class())
+            .finish()
+    }
+}
+
+impl std::error::Error for ClientError {}
 
 pub type Result<T> = std::result::Result<T, ClientError>;
 
 /// Inbound event from the connected substrate — consumer pumps
 /// `Client::incoming()` to receive these.
-#[derive(Debug)]
 #[non_exhaustive]
 pub enum InboundEvent {
     /// Peer is inviting us into a new Session. Consumer either
@@ -206,6 +245,27 @@ pub enum InboundEvent {
     Disconnected {
         reason: String,
     },
+}
+
+impl std::fmt::Debug for InboundEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IncomingSession(_) => formatter.write_str("IncomingSession"),
+            Self::Message { body, .. } => formatter
+                .debug_struct("Message")
+                .field("body_bytes", &body.len())
+                .finish(),
+            Self::DataMessage { message, .. } => formatter
+                .debug_struct("DataMessage")
+                .field("body_bytes", &message.bytes.len())
+                .finish(),
+            Self::AssuranceChanged { .. } => formatter.write_str("AssuranceChanged"),
+            Self::Disconnected { reason } => formatter
+                .debug_struct("Disconnected")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+        }
+    }
 }
 
 /// Handle to a single Session — returned from `Client::call` and
@@ -255,9 +315,12 @@ impl Default for SessionInner {
 impl std::fmt::Debug for SessionHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionHandle")
-            .field("session_id", &self.session_id)
-            .field("conversation_id", &self.conversation_id)
-            .field("connection_id", &self.connection_id)
+            .field("session_present", &!self.session_id.as_str().is_empty())
+            .field(
+                "conversation_present",
+                &!self.conversation_id.as_str().is_empty(),
+            )
+            .field("connection_present", &self.connection_id.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -764,7 +827,7 @@ async fn wait_for_message(
             .map_err(|_| format!("timed out waiting for {msg_type:?}"))?
             .ok_or_else(|| format!("connection closed waiting for {msg_type:?}"))?;
         if env.msg_type == rvoip_uctp::types::MessageType::Error {
-            return Err(format!("server returned error: {:?}", env.payload));
+            return Err("server returned a protocol error".into());
         }
         if env.msg_type == msg_type {
             return Ok(env);

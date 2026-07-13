@@ -88,9 +88,18 @@ pub const UCTP_SUBSCRIBE_SCOPE: &str = "uctp:subscribe";
 
 /// Per-envelope authorization policy evaluated after authentication and
 /// before correlation delivery or command dispatch.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct UctpScopePolicy {
     required: HashMap<MessageType, String>,
+}
+
+impl std::fmt::Debug for UctpScopePolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UctpScopePolicy")
+            .field("required_scope_count", &self.required.len())
+            .finish()
+    }
 }
 
 /// Aggregate-safe resource view for diagnostics and leak tests.
@@ -1240,7 +1249,7 @@ impl UctpCoordinator {
         warn!(
             transport = %self.transport,
             envelope = %env.msg_type,
-            %required_scope,
+            required_scope_present = !required_scope.is_empty(),
             "uctp.coordinator: refusing envelope without required scope"
         );
         self.emit_error_full(
@@ -1721,7 +1730,7 @@ impl UctpCoordinator {
         let span = info_span!(
             "uctp.session.invite",
             sid = %sid,
-            from = %payload.from,
+            sender_present = !payload.from.is_empty(),
             transport = %self.transport,
         );
 
@@ -1731,8 +1740,8 @@ impl UctpCoordinator {
         if payload.from != participant {
             warn!(
                 transport = %self.transport,
-                asserted_from = %payload.from,
-                authenticated_participant = %participant,
+                asserted_sender_present = !payload.from.is_empty(),
+                authenticated_participant_present = !participant.is_empty(),
                 "uctp.coordinator: replacing untrusted session sender identity"
             );
             metrics::counter!(
@@ -1930,8 +1939,8 @@ impl UctpCoordinator {
         if payload.by_participant != participant {
             warn!(
                 transport = %self.transport,
-                asserted_participant = %payload.by_participant,
-                authenticated_participant = %participant,
+                asserted_participant_present = !payload.by_participant.is_empty(),
+                authenticated_participant_present = !participant.is_empty(),
                 "uctp.coordinator: replacing untrusted publisher identity"
             );
             metrics::counter!(

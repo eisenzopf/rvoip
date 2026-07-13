@@ -1,65 +1,78 @@
-use thiserror::Error;
+use std::fmt;
 
 pub type Result<T> = std::result::Result<T, WebRtcError>;
 
-#[derive(Debug, Error)]
 pub enum WebRtcError {
-    #[error("webrtc-rs: {0}")]
     Webrtc(String),
-
-    #[error("adapter: {0}")]
     Adapter(String),
-
-    #[error("sdp: {0}")]
     Sdp(String),
-
-    #[error("signaling: {0}")]
     Signaling(String),
-
-    #[error("timeout waiting for {0}")]
     Timeout(&'static str),
-
-    #[error("connection not found")]
     ConnectionNotFound,
-
-    #[error("incompatible capabilities")]
     IncompatibleCapabilities,
-
-    #[error("wrong peer role: expected {expected}, got {actual}")]
     WrongRole {
         expected: &'static str,
         actual: &'static str,
     },
 
-    #[error("subscribe_events already taken; only one subscriber is supported")]
     AlreadySubscribed,
-
-    #[error("not implemented: {0}")]
     NotImplemented(&'static str),
-
-    #[error("invalid argument: {0}")]
     InvalidArgument(String),
-
-    #[error("unauthorized: {0}")]
     Unauthorized(String),
-
-    #[error("forbidden: {0}")]
     Forbidden(String),
-
-    #[error("precondition failed: {0}")]
     PreconditionFailed(String),
-
-    #[error("invalid state: {0}")]
     InvalidState(&'static str),
 
     /// Fixed, credential-free failure returned by secure inbound signaling
     /// for every missing, rejected, expired, or raced admission outcome.
-    #[error("inbound signaling was not admitted")]
     InboundAdmissionRejected,
-
-    #[error("DTLS fingerprint not in pinned list")]
     FingerprintNotPinned,
 }
+
+impl WebRtcError {
+    pub const fn diagnostic_class(&self) -> &'static str {
+        match self {
+            Self::Webrtc(_) => "webrtc",
+            Self::Adapter(_) => "adapter",
+            Self::Sdp(_) => "sdp",
+            Self::Signaling(_) => "signaling",
+            Self::Timeout(_) => "timeout",
+            Self::ConnectionNotFound => "connection-not-found",
+            Self::IncompatibleCapabilities => "incompatible-capabilities",
+            Self::WrongRole { .. } => "wrong-role",
+            Self::AlreadySubscribed => "already-subscribed",
+            Self::NotImplemented(_) => "not-implemented",
+            Self::InvalidArgument(_) => "invalid-argument",
+            Self::Unauthorized(_) => "unauthorized",
+            Self::Forbidden(_) => "forbidden",
+            Self::PreconditionFailed(_) => "precondition-failed",
+            Self::InvalidState(_) => "invalid-state",
+            Self::InboundAdmissionRejected => "inbound-admission",
+            Self::FingerprintNotPinned => "fingerprint-not-pinned",
+        }
+    }
+}
+
+impl fmt::Display for WebRtcError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "WebRTC operation failed (class={})",
+            self.diagnostic_class()
+        )
+    }
+}
+
+impl fmt::Debug for WebRtcError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WebRtcError")
+            .field("class", &self.diagnostic_class())
+            .finish()
+    }
+}
+
+impl std::error::Error for WebRtcError {}
 
 impl From<webrtc::error::Error> for WebRtcError {
     fn from(e: webrtc::error::Error) -> Self {

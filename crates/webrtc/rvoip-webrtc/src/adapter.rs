@@ -282,7 +282,7 @@ impl Default for OutboundEventStage {
 /// Complete principals are compared with [`PrincipalOwnershipKey`]. Legacy
 /// hooks which predate `AuthenticatedPrincipal` retain subject isolation, and
 /// the anonymous variant preserves the crate's authentication-disabled mode.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) enum RouteOwnerKey {
     #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
     Anonymous,
@@ -291,10 +291,35 @@ pub(crate) enum RouteOwnerKey {
     Principal(PrincipalOwnershipKey),
 }
 
-#[derive(Clone, Debug)]
+impl std::fmt::Debug for RouteOwnerKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
+            Self::Anonymous => formatter.write_str("Anonymous"),
+            #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
+            Self::LegacySubject(subject) => formatter
+                .debug_struct("LegacySubject")
+                .field("subject_present", &!subject.is_empty())
+                .finish(),
+            Self::Principal(_) => formatter.write_str("Principal"),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct RouteAuthorization {
     owner: RouteOwnerKey,
     principal: Option<AuthenticatedPrincipal>,
+}
+
+impl std::fmt::Debug for RouteAuthorization {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RouteAuthorization")
+            .field("owner", &self.owner)
+            .field("principal_present", &self.principal.is_some())
+            .finish()
+    }
 }
 
 impl RouteAuthorization {
@@ -2008,11 +2033,7 @@ impl WebRtcAdapter {
             crate::config::MdnsCandidatePolicy::Drop
         ) && crate::config::MdnsCandidatePolicy::is_mdns_candidate(&candidate.candidate)
         {
-            debug!(
-                conn = %conn,
-                candidate = %candidate.candidate,
-                "dropping mDNS (.local) trickle candidate per policy"
-            );
+            debug!(conn = %conn, "dropping mDNS (.local) trickle candidate per policy");
             return Ok(());
         }
         route.peer.add_remote_ice_candidate(candidate).await
@@ -2820,6 +2841,7 @@ mod inbound_hardening_tests {
         ));
     }
 
+    #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
     #[tokio::test]
     async fn secure_request_rejects_anonymous_identity_only_tenantless_and_missing_hint() {
         let secure = WebRtcAdapter::new_with_inbound_admission_confirmation(

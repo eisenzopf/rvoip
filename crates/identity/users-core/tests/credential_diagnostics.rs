@@ -1,14 +1,17 @@
 use chrono::Utc;
 use users_core::api::{
-    ApiKeyResponse, ChangePasswordRequest, CreateApiKeyResponse, LoginRequest, LoginResponse,
-    RefreshRequest,
+    ApiKeyResponse, AuthContext, AuthType, ChangePasswordRequest, CreateApiKeyResponse,
+    ErrorDetail, ErrorResponse, LoginRequest, LoginResponse, RefreshRequest, UpdateRolesRequest,
+    UserResponse,
 };
-use users_core::api_keys::ApiKey;
+use users_core::api_keys::{ApiKey, CreateApiKeyRequest};
 use users_core::jwt::{JwtConfig, RefreshTokenClaims, UserClaims};
 use users_core::validation::ValidatedCreateUserRequest;
 use users_core::{
-    AuthenticationResult, CreateSipDigestCredentialRequest, CreateUserRequest,
-    SipDigestAlgorithmFamily, SipDigestCredential, TokenIssueContext, TokenPair, User, UsersConfig,
+    AuthenticationResult, CreateSipDigestCredentialRequest, CreateUserRequest, ExternalIdentity,
+    PasskeyCredential, SipDigestAlgorithmFamily, SipDigestCredential, TokenIssueContext, TokenPair,
+    UpdateUserRequest, UpsertExternalIdentityRequest, UpsertPasskeyCredentialRequest, User,
+    UserFilter, UsersConfig,
 };
 
 const CANARY: &str = "users-credential-canary\r\nAuthorization: exposed";
@@ -225,4 +228,124 @@ fn every_users_core_token_password_and_hash_container_is_redacted() {
     assert_eq!(refresh_claims.jti, CANARY);
     assert_eq!(jwt.signing_key.as_deref(), Some(CANARY));
     assert_eq!(config.database_url, CANARY);
+}
+
+#[test]
+fn authorization_and_identity_diagnostics_never_expose_boundary_values() {
+    let now = Utc::now();
+    let auth = AuthContext {
+        user_id: CANARY.into(),
+        username: CANARY.into(),
+        roles: vec![CANARY.into()],
+        permissions: vec![CANARY.into()],
+        auth_type: AuthType::ApiKey,
+        access_token_id: Some(CANARY.into()),
+        access_token_expires_at: Some(now),
+    };
+    let update = UpdateUserRequest {
+        email: Some(CANARY.into()),
+        display_name: Some(CANARY.into()),
+        roles: Some(vec![CANARY.into()]),
+        active: Some(true),
+    };
+    let filter = UserFilter {
+        active: Some(true),
+        role: Some(CANARY.into()),
+        search: Some(CANARY.into()),
+        limit: Some(1),
+        offset: Some(0),
+    };
+    let external = ExternalIdentity {
+        provider_id: CANARY.into(),
+        external_subject: CANARY.into(),
+        user_id: CANARY.into(),
+        email: Some(CANARY.into()),
+        username: Some(CANARY.into()),
+        display_name: Some(CANARY.into()),
+        groups: vec![CANARY.into()],
+        active: true,
+        last_seen_at: Some(now),
+        created_at: now,
+        updated_at: now,
+    };
+    let external_request = UpsertExternalIdentityRequest {
+        provider_id: CANARY.into(),
+        external_subject: CANARY.into(),
+        user_id: CANARY.into(),
+        email: Some(CANARY.into()),
+        username: Some(CANARY.into()),
+        display_name: Some(CANARY.into()),
+        groups: vec![CANARY.into()],
+        active: true,
+    };
+    let passkey = PasskeyCredential {
+        credential_id: CANARY.into(),
+        user_id: CANARY.into(),
+        public_key: CANARY.into(),
+        sign_count: 1,
+        transports: vec![CANARY.into()],
+        backup_eligible: true,
+        backup_state: true,
+        display_name: Some(CANARY.into()),
+        created_at: now,
+        last_used_at: Some(now),
+    };
+    let passkey_request = UpsertPasskeyCredentialRequest {
+        credential_id: CANARY.into(),
+        user_id: CANARY.into(),
+        public_key: CANARY.into(),
+        sign_count: 1,
+        transports: vec![CANARY.into()],
+        backup_eligible: true,
+        backup_state: true,
+        display_name: Some(CANARY.into()),
+    };
+    let key_request = CreateApiKeyRequest {
+        user_id: CANARY.into(),
+        name: CANARY.into(),
+        permissions: vec![CANARY.into()],
+        expires_at: Some(now),
+    };
+    let roles = UpdateRolesRequest {
+        roles: vec![CANARY.into()],
+    };
+    let response = UserResponse {
+        id: CANARY.into(),
+        username: CANARY.into(),
+        email: Some(CANARY.into()),
+        display_name: Some(CANARY.into()),
+        roles: vec![CANARY.into()],
+        active: true,
+        created_at: now,
+        updated_at: now,
+        last_login: Some(now),
+    };
+    let error = ErrorResponse {
+        error: ErrorDetail {
+            code: CANARY.into(),
+            message: CANARY.into(),
+            details: Some(serde_json::json!(CANARY)),
+        },
+    };
+
+    for rendered in [
+        format!("{auth:?}"),
+        format!("{update:?}"),
+        format!("{filter:?}"),
+        format!("{external:?}"),
+        format!("{external_request:?}"),
+        format!("{passkey:?}"),
+        format!("{passkey_request:?}"),
+        format!("{key_request:?}"),
+        format!("{roles:?}"),
+        format!("{response:?}"),
+        format!("{error:?}"),
+    ] {
+        assert!(!rendered.contains(CANARY), "credential leaked: {rendered}");
+    }
+    assert_eq!(auth.user_id, CANARY);
+    assert_eq!(external.external_subject, CANARY);
+    assert_eq!(passkey.public_key, CANARY);
+    assert_eq!(key_request.user_id, CANARY);
+    assert_eq!(error.error.message, CANARY);
 }

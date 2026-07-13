@@ -1,4 +1,5 @@
-use rvoip_client::Credential;
+use rvoip_client::{CallTarget, ClientError, Credential, InboundEvent};
+use rvoip_core_traits::ids::{ConversationId, MessageId};
 
 const CANARY: &str = "client-credential-canary\r\nAuthorization: exposed";
 
@@ -25,4 +26,26 @@ fn client_credentials_keep_values_but_redact_tokens_and_proofs() {
             }
         }
     }
+}
+
+#[test]
+fn targets_events_and_errors_keep_live_values_out_of_diagnostics() {
+    let target = CallTarget::Uri(CANARY.into());
+    let event = InboundEvent::Message {
+        conversation_id: ConversationId::from_string(CANARY),
+        message_id: MessageId::from_string(CANARY),
+        from: CANARY.into(),
+        body: CANARY.into(),
+    };
+    let error = ClientError::Protocol(CANARY.into());
+
+    for rendered in [
+        format!("{target:?}"),
+        format!("{event:?}"),
+        format!("{error:?} {error}"),
+    ] {
+        assert!(!rendered.contains(CANARY), "credential leaked: {rendered}");
+    }
+    assert!(matches!(target, CallTarget::Uri(value) if value == CANARY));
+    assert!(matches!(error, ClientError::Protocol(value) if value == CANARY));
 }

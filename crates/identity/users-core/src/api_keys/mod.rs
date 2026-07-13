@@ -52,12 +52,24 @@ pub trait ApiKeyStore: Send + Sync {
 }
 
 /// Request to create an API key
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct CreateApiKeyRequest {
     pub user_id: String,
     pub name: String,
     pub permissions: Vec<String>,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for CreateApiKeyRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreateApiKeyRequest")
+            .field("user_present", &!self.user_id.is_empty())
+            .field("name_len", &self.name.len())
+            .field("permission_count", &self.permissions.len())
+            .field("expires_at_present", &self.expires_at.is_some())
+            .finish()
+    }
 }
 
 impl CreateApiKeyRequest {

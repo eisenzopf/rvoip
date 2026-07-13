@@ -63,7 +63,7 @@ impl std::fmt::Debug for CreateUserRequest {
 }
 
 /// Request to update an existing user
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct UpdateUserRequest {
     pub email: Option<String>,
     pub display_name: Option<String>,
@@ -71,8 +71,20 @@ pub struct UpdateUserRequest {
     pub active: Option<bool>,
 }
 
+impl std::fmt::Debug for UpdateUserRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UpdateUserRequest")
+            .field("email_present", &self.email.is_some())
+            .field("display_name_present", &self.display_name.is_some())
+            .field("roles_present", &self.roles.is_some())
+            .field("active_present", &self.active.is_some())
+            .finish()
+    }
+}
+
 /// Filter for listing users
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 pub struct UserFilter {
     pub active: Option<bool>,
     pub role: Option<String>,
@@ -81,8 +93,21 @@ pub struct UserFilter {
     pub offset: Option<u32>,
 }
 
+impl std::fmt::Debug for UserFilter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UserFilter")
+            .field("active_present", &self.active.is_some())
+            .field("role_present", &self.role.is_some())
+            .field("search_present", &self.search.is_some())
+            .field("limit", &self.limit)
+            .field("offset", &self.offset)
+            .finish()
+    }
+}
+
 /// External identity link from an IdP or provisioning source to a users-core user.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ExternalIdentity {
     pub provider_id: String,
     pub external_subject: String,
@@ -97,8 +122,25 @@ pub struct ExternalIdentity {
     pub updated_at: DateTime<Utc>,
 }
 
+impl std::fmt::Debug for ExternalIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExternalIdentity")
+            .field("provider_present", &!self.provider_id.is_empty())
+            .field("subject_present", &!self.external_subject.is_empty())
+            .field("user_present", &!self.user_id.is_empty())
+            .field("email_present", &self.email.is_some())
+            .field("username_present", &self.username.is_some())
+            .field("display_name_present", &self.display_name.is_some())
+            .field("group_count", &self.groups.len())
+            .field("active", &self.active)
+            .field("last_seen_present", &self.last_seen_at.is_some())
+            .finish()
+    }
+}
+
 /// Request to create or update an external identity link.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UpsertExternalIdentityRequest {
     pub provider_id: String,
     pub external_subject: String,
@@ -110,8 +152,24 @@ pub struct UpsertExternalIdentityRequest {
     pub active: bool,
 }
 
+impl std::fmt::Debug for UpsertExternalIdentityRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UpsertExternalIdentityRequest")
+            .field("provider_present", &!self.provider_id.is_empty())
+            .field("subject_present", &!self.external_subject.is_empty())
+            .field("user_present", &!self.user_id.is_empty())
+            .field("email_present", &self.email.is_some())
+            .field("username_present", &self.username.is_some())
+            .field("display_name_present", &self.display_name.is_some())
+            .field("group_count", &self.groups.len())
+            .field("active", &self.active)
+            .finish()
+    }
+}
+
 /// Stored WebAuthn/passkey credential metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PasskeyCredential {
     pub credential_id: String,
     pub user_id: String,
@@ -125,8 +183,24 @@ pub struct PasskeyCredential {
     pub last_used_at: Option<DateTime<Utc>>,
 }
 
+impl std::fmt::Debug for PasskeyCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PasskeyCredential")
+            .field("credential_present", &!self.credential_id.is_empty())
+            .field("user_present", &!self.user_id.is_empty())
+            .field("public_key_present", &!self.public_key.is_empty())
+            .field("transport_count", &self.transports.len())
+            .field("backup_eligible", &self.backup_eligible)
+            .field("backup_state", &self.backup_state)
+            .field("display_name_present", &self.display_name.is_some())
+            .field("last_used_present", &self.last_used_at.is_some())
+            .finish()
+    }
+}
+
 /// Request to create or replace a passkey credential.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UpsertPasskeyCredentialRequest {
     pub credential_id: String,
     pub user_id: String,
@@ -136,6 +210,21 @@ pub struct UpsertPasskeyCredentialRequest {
     pub backup_eligible: bool,
     pub backup_state: bool,
     pub display_name: Option<String>,
+}
+
+impl std::fmt::Debug for UpsertPasskeyCredentialRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UpsertPasskeyCredentialRequest")
+            .field("credential_present", &!self.credential_id.is_empty())
+            .field("user_present", &!self.user_id.is_empty())
+            .field("public_key_present", &!self.public_key.is_empty())
+            .field("transport_count", &self.transports.len())
+            .field("backup_eligible", &self.backup_eligible)
+            .field("backup_state", &self.backup_state)
+            .field("display_name_present", &self.display_name.is_some())
+            .finish()
+    }
 }
 
 impl User {

@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use rvoip_auth_core::{
     bearer::{BearerAuthError, BearerValidator},
-    AAuthValidator, ActorClaims, ActorTokenValidator,
+    AAuthValidator, ActorClaims, ActorTokenValidator, AuthenticatedPrincipal, AuthenticationMethod,
 };
 use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::IdentityId;
@@ -51,6 +51,22 @@ impl BearerValidator for StaticSubject {
             scopes: self.scopes.clone(),
         })
     }
+
+    async fn validate_principal(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+        let assurance = self.validate(token).await?;
+        Ok(AuthenticatedPrincipal {
+            subject: self.user_id.to_string(),
+            tenant: Some("aauth-test-tenant".into()),
+            scopes: self.scopes.clone(),
+            issuer: Some("aauth-test-issuer".into()),
+            expires_at: Some(Utc::now() + chrono::Duration::minutes(5)),
+            method: AuthenticationMethod::Bearer,
+            assurance,
+        })
+    }
 }
 
 struct StaticActor {
@@ -67,6 +83,28 @@ impl ActorTokenValidator for StaticActor {
         Ok(ActorClaims {
             identity: self.identity.clone(),
             scopes: self.scopes.clone(),
+        })
+    }
+
+    async fn validate_actor_principal(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+        let claims = self.validate_actor(token).await?;
+        let mut scopes = claims.scopes.clone();
+        scopes.push("aauth:act:user:alice".into());
+        Ok(AuthenticatedPrincipal {
+            subject: claims.identity.to_string(),
+            tenant: Some("aauth-test-tenant".into()),
+            scopes: scopes.clone(),
+            issuer: Some("aauth-test-issuer".into()),
+            expires_at: Some(Utc::now() + chrono::Duration::minutes(5)),
+            method: AuthenticationMethod::Bearer,
+            assurance: IdentityAssurance::UserAuthorized {
+                identity: claims.identity.clone(),
+                user_id: claims.identity,
+                scopes,
+            },
         })
     }
 }

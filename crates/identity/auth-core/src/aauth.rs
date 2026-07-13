@@ -68,10 +68,20 @@ pub trait ActorTokenValidator: Send + Sync {
 /// Output of [`ActorTokenValidator::validate_actor`] — the actor's
 /// identity (typically the `sub` claim of the actor JWT) and any
 /// scopes the actor was granted.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ActorClaims {
     pub identity: IdentityId,
     pub scopes: Vec<String>,
+}
+
+impl std::fmt::Debug for ActorClaims {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActorClaims")
+            .field("identity_present", &!self.identity.as_str().is_empty())
+            .field("scope_count", &self.scopes.len())
+            .finish()
+    }
 }
 
 fn actor_claims_from_principal(principal: &AuthenticatedPrincipal) -> ActorClaims {
@@ -183,10 +193,11 @@ impl AAuthValidator {
             | IdentityAssurance::TaskScoped { identity, .. } => identity.clone(),
             _ => IdentityId::from_string(actor_principal.subject.clone()),
         };
+        authorize_actor_delegation(&subject_principal, &actor_principal)?;
 
         let mut merged_scopes = subject_principal.scopes.clone();
         for s in &actor_principal.scopes {
-            if !merged_scopes.contains(s) {
+            if !is_delegation_scope(s, &subject_principal.subject) && !merged_scopes.contains(s) {
                 merged_scopes.push(s.clone());
             }
         }
@@ -222,6 +233,41 @@ impl AAuthValidator {
     }
 }
 
+fn authorize_actor_delegation(
+    subject: &AuthenticatedPrincipal,
+    actor: &AuthenticatedPrincipal,
+) -> Result<(), BearerAuthError> {
+    let same_issuer = subject
+        .issuer
+        .as_deref()
+        .zip(actor.issuer.as_deref())
+        .is_some_and(|(subject, actor)| subject == actor);
+    let same_tenant = subject
+        .tenant
+        .as_deref()
+        .zip(actor.tenant.as_deref())
+        .is_some_and(|(subject, actor)| subject == actor);
+    if !same_issuer || !same_tenant {
+        return Err(BearerAuthError::Invalid(
+            "AAuth actor and subject ownership domains do not match".into(),
+        ));
+    }
+    if !actor
+        .scopes
+        .iter()
+        .any(|scope| is_delegation_scope(scope, &subject.subject))
+    {
+        return Err(BearerAuthError::Invalid(
+            "AAuth actor is not delegated for this subject".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_delegation_scope(scope: &str, subject: &str) -> bool {
+    scope == "aauth:act" || scope.strip_prefix("aauth:act:") == Some(subject)
+}
+
 fn earliest_expiry(
     subject: Option<chrono::DateTime<chrono::Utc>>,
     actor: Option<chrono::DateTime<chrono::Utc>>,
@@ -255,6 +301,7 @@ mod tests {
     struct StaticActor {
         identity: IdentityId,
         scopes: Vec<String>,
+        tenant: &'static str,
     }
 
     #[async_trait]
@@ -268,6 +315,27 @@ mod tests {
                 scopes: self.scopes.clone(),
             })
         }
+
+        async fn validate_actor_principal(
+            &self,
+            token: &str,
+        ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+            let claims = self.validate_actor(token).await?;
+            let assurance = IdentityAssurance::UserAuthorized {
+                identity: claims.identity.clone(),
+                user_id: claims.identity.clone(),
+                scopes: claims.scopes.clone(),
+            };
+            Ok(AuthenticatedPrincipal {
+                subject: claims.identity.to_string(),
+                tenant: Some(self.tenant.into()),
+                scopes: claims.scopes,
+                issuer: Some("https://aauth.example".into()),
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+                method: AuthenticationMethod::AAuth,
+                assurance,
+            })
+        }
     }
 
     /// Returns a subject validator that yields UserAuthorized so the
@@ -277,6 +345,7 @@ mod tests {
     struct StaticSubject {
         user_id: IdentityId,
         scopes: Vec<String>,
+        tenant: &'static str,
     }
 
     #[async_trait]
@@ -291,6 +360,22 @@ mod tests {
                 scopes: self.scopes.clone(),
             })
         }
+
+        async fn validate_principal(
+            &self,
+            token: &str,
+        ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+            let assurance = self.validate(token).await?;
+            Ok(AuthenticatedPrincipal {
+                subject: self.user_id.to_string(),
+                tenant: Some(self.tenant.into()),
+                scopes: self.scopes.clone(),
+                issuer: Some("https://aauth.example".into()),
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+                method: AuthenticationMethod::Bearer,
+                assurance,
+            })
+        }
     }
 
     fn id(s: &str) -> IdentityId {
@@ -302,10 +387,16 @@ mod tests {
         let subject = Arc::new(StaticSubject {
             user_id: id("user:alice"),
             scopes: vec!["calls.write".into()],
+            tenant: "tenant-a",
         });
         let actor = Arc::new(StaticActor {
             identity: id("agent:assistant-7"),
-            scopes: vec!["calls.write".into(), "calls.transfer".into()],
+            scopes: vec![
+                "aauth:act:user:alice".into(),
+                "calls.write".into(),
+                "calls.transfer".into(),
+            ],
+            tenant: "tenant-a",
         });
         let v = AAuthValidator::new(subject, actor);
 
@@ -339,10 +430,12 @@ mod tests {
         let subject = Arc::new(StaticSubject {
             user_id: id("user:alice"),
             scopes: vec![],
+            tenant: "tenant-a",
         });
         let actor = Arc::new(StaticActor {
             identity: id("agent:7"),
             scopes: vec![],
+            tenant: "tenant-a",
         });
         let v = AAuthValidator::new(subject, actor);
         let err = v.validate_aauth("subj", "").await.unwrap_err();
@@ -359,7 +452,8 @@ mod tests {
         let subject = bearer_stub();
         let actor = Arc::new(StaticActor {
             identity: id("agent:7"),
-            scopes: vec![],
+            scopes: vec!["aauth:act".into()],
+            tenant: "tenant-a",
         });
         let v = AAuthValidator::new(subject, actor);
         let err = v.validate_aauth("subj-tok", "actor-tok").await.unwrap_err();
@@ -369,5 +463,43 @@ mod tests {
             }
             other => panic!("expected Invalid; got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn aauth_rejects_cross_tenant_actor_even_with_delegation_scope() {
+        let subject = Arc::new(StaticSubject {
+            user_id: id("user:alice"),
+            scopes: vec!["calls.write".into()],
+            tenant: "tenant-a",
+        });
+        let actor = Arc::new(StaticActor {
+            identity: id("agent:7"),
+            scopes: vec!["aauth:act".into(), "calls.transfer".into()],
+            tenant: "tenant-b",
+        });
+        let error = AAuthValidator::new(subject, actor)
+            .validate_aauth("subject", "actor")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BearerAuthError::Invalid(_)));
+    }
+
+    #[tokio::test]
+    async fn aauth_rejects_actor_without_explicit_delegation() {
+        let subject = Arc::new(StaticSubject {
+            user_id: id("user:alice"),
+            scopes: vec!["calls.write".into()],
+            tenant: "tenant-a",
+        });
+        let actor = Arc::new(StaticActor {
+            identity: id("agent:7"),
+            scopes: vec!["calls.transfer".into()],
+            tenant: "tenant-a",
+        });
+        let error = AAuthValidator::new(subject, actor)
+            .validate_aauth("subject", "actor")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BearerAuthError::Invalid(_)));
     }
 }

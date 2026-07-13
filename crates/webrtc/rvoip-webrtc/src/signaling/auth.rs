@@ -82,7 +82,7 @@ impl AuthContext {
 }
 
 /// Reasons the auth hook rejected a request.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum AuthRejection {
     /// 401 Unauthorized. The contained string is rendered into
     /// `WWW-Authenticate` (per RFC 7235 §4.1) — typically
@@ -92,6 +92,22 @@ pub enum AuthRejection {
     Forbidden,
     /// 429 Too Many Requests with `Retry-After: <seconds>`.
     Throttled { retry_after_secs: u32 },
+}
+
+impl fmt::Debug for AuthRejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unauthorized { www_authenticate } => formatter
+                .debug_struct("Unauthorized")
+                .field("challenge_present", &!www_authenticate.is_empty())
+                .finish(),
+            Self::Forbidden => formatter.write_str("Forbidden"),
+            Self::Throttled { retry_after_secs } => formatter
+                .debug_struct("Throttled")
+                .field("retry_after_secs", retry_after_secs)
+                .finish(),
+        }
+    }
 }
 
 /// WHIP / WHEP HTTP authentication hook (RFC 9725 §4.1).

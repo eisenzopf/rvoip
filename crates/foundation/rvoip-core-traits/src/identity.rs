@@ -13,8 +13,8 @@ use crate::ids::IdentityId;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt;
-use thiserror::Error;
 
 /// Opaque JWK placeholder. Real shape lives in `rvoip-identity`.
 #[derive(Clone, Serialize, Deserialize)]
@@ -242,17 +242,44 @@ impl fmt::Debug for AuthenticatedPrincipal {
 /// Bearer validation failure retained in the dependency-cycle-free trait
 /// surface so [`AuthenticatedPrincipal::require_scope`] remains source
 /// compatible when the principal type is re-exported by auth-core.
-#[derive(Debug, Error)]
 pub enum BearerAuthError {
-    #[error("empty bearer token")]
     Empty,
 
-    #[error("invalid bearer token: {0}")]
     Invalid(String),
 
-    #[error("validator unavailable: {0}")]
     Unavailable(String),
 }
+
+impl BearerAuthError {
+    pub const fn diagnostic_class(&self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::Invalid(_) => "invalid",
+            Self::Unavailable(_) => "unavailable",
+        }
+    }
+}
+
+impl fmt::Display for BearerAuthError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "bearer authentication failed (class={})",
+            self.diagnostic_class()
+        )
+    }
+}
+
+impl fmt::Debug for BearerAuthError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BearerAuthError")
+            .field("class", &self.diagnostic_class())
+            .finish()
+    }
+}
+
+impl std::error::Error for BearerAuthError {}
 
 impl AuthenticatedPrincipal {
     pub fn anonymous() -> Self {
@@ -320,30 +347,46 @@ impl AuthenticatedPrincipal {
         method: AuthenticationMethod,
     ) -> Self {
         let (subject, scopes, expires_at) = match &assurance {
-            IdentityAssurance::Anonymous => ("anonymous".into(), Vec::new(), None),
+            IdentityAssurance::Anonymous => ("assurance:anonymous".into(), Vec::new(), None),
             IdentityAssurance::Pseudonymous { ephemeral_key } => {
-                let subject = ephemeral_key
-                    .0
-                    .get("kid")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("pseudonymous")
-                    .to_string();
+                let canonical_key = canonical_json(&ephemeral_key.0);
+                let subject = hashed_subject("pseudonymous", canonical_key.as_bytes());
                 (subject, Vec::new(), None)
             }
-            IdentityAssurance::Identified { credential_kind } => {
-                (format!("identified:{credential_kind:?}"), Vec::new(), None)
-            }
+            IdentityAssurance::Identified { credential_kind } => (
+                format!("assurance:identified:{}", credential_kind.as_str()),
+                Vec::new(),
+                None,
+            ),
             IdentityAssurance::TaskScoped {
                 identity,
+                task_id,
                 scopes,
                 expires_at,
-                ..
-            } => (identity.to_string(), scopes.clone(), Some(*expires_at)),
+            } => (
+                format!("task-scoped:identity:{identity}:task:{task_id}"),
+                scopes.clone(),
+                Some(*expires_at),
+            ),
             IdentityAssurance::UserAuthorized {
-                identity, scopes, ..
-            } => (identity.to_string(), scopes.clone(), None),
-            IdentityAssurance::DtlsFingerprint { value, .. } => {
-                (format!("dtls:{value}"), Vec::new(), None)
+                identity,
+                user_id,
+                scopes,
+            } => (
+                format!("user-authorized:identity:{identity}:user:{user_id}"),
+                scopes.clone(),
+                None,
+            ),
+            IdentityAssurance::DtlsFingerprint { algorithm, value } => {
+                let algorithm = algorithm.to_ascii_lowercase();
+                let mut binding = Vec::with_capacity(16 + algorithm.len() + value.len());
+                append_length_prefixed(&mut binding, algorithm.as_bytes());
+                append_length_prefixed(&mut binding, value.as_bytes());
+                (
+                    hashed_subject("dtls-fingerprint", &binding),
+                    Vec::new(),
+                    None,
+                )
             }
         };
         Self {
@@ -358,6 +401,57 @@ impl AuthenticatedPrincipal {
     }
 }
 
+fn hashed_subject(kind: &str, binding: &[u8]) -> String {
+    let digest = Sha256::digest(binding);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("{kind}:sha256:{encoded}")
+}
+
+fn append_length_prefixed(target: &mut Vec<u8>, value: &[u8]) {
+    target.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    target.extend_from_slice(value);
+}
+
+fn canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_owned(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => {
+            serde_json::to_string(value).expect("serializing a JSON string cannot fail")
+        }
+        serde_json::Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(canonical_json)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        serde_json::Value::Object(values) => {
+            let mut members = values.iter().collect::<Vec<_>>();
+            members.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            format!(
+                "{{{}}}",
+                members
+                    .into_iter()
+                    .map(|(key, value)| format!(
+                        "{}:{}",
+                        serde_json::to_string(key)
+                            .expect("serializing a JSON object key cannot fail"),
+                        canonical_json(value)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CredentialKind {
     OAuth2Dpop,
@@ -365,6 +459,18 @@ pub enum CredentialKind {
     SipDigest,
     Passkey,
     AAuth,
+}
+
+impl CredentialKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OAuth2Dpop => "oauth2-dpop",
+            Self::Oidc => "oidc",
+            Self::SipDigest => "sip-digest",
+            Self::Passkey => "passkey",
+            Self::AAuth => "aauth",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -505,6 +611,90 @@ mod tests {
             "oauth2-introspection"
         );
         assert_eq!(AuthenticationMethod::MutualTls.to_string(), "mutual-tls");
+    }
+
+    #[test]
+    fn assurance_principal_subjects_are_typed_stable_and_credential_free() {
+        const KEY_CANARY: &str = "private-jwk-material-canary";
+        const FINGERPRINT_CANARY: &str = "AA:BB:CC:credential-canary";
+
+        let key_a = Jwk(serde_json::json!({
+            "kty": "OKP",
+            "x": KEY_CANARY,
+            "nested": {"b": 2, "a": 1}
+        }));
+        let key_a_reordered = Jwk(serde_json::json!({
+            "nested": {"a": 1, "b": 2},
+            "x": KEY_CANARY,
+            "kty": "OKP"
+        }));
+        let key_b = Jwk(serde_json::json!({"kty": "OKP", "x": "other-key"}));
+
+        let pseudo_a = AuthenticatedPrincipal::from_assurance(IdentityAssurance::Pseudonymous {
+            ephemeral_key: key_a,
+        });
+        let pseudo_a_reordered =
+            AuthenticatedPrincipal::from_assurance(IdentityAssurance::Pseudonymous {
+                ephemeral_key: key_a_reordered,
+            });
+        let pseudo_b = AuthenticatedPrincipal::from_assurance(IdentityAssurance::Pseudonymous {
+            ephemeral_key: key_b,
+        });
+        assert_eq!(pseudo_a.subject, pseudo_a_reordered.subject);
+        assert_ne!(pseudo_a.subject, pseudo_b.subject);
+        assert!(pseudo_a.subject.starts_with("pseudonymous:sha256:"));
+        assert!(!pseudo_a.subject.contains(KEY_CANARY));
+
+        let dtls = AuthenticatedPrincipal::from_assurance(IdentityAssurance::DtlsFingerprint {
+            algorithm: "SHA-256".into(),
+            value: FINGERPRINT_CANARY.into(),
+        });
+        assert!(dtls.subject.starts_with("dtls-fingerprint:sha256:"));
+        assert!(!dtls.subject.contains(FINGERPRINT_CANARY));
+
+        let delimiter_left =
+            AuthenticatedPrincipal::from_assurance(IdentityAssurance::DtlsFingerprint {
+                algorithm: "sha".into(),
+                value: "256:AA".into(),
+            });
+        let delimiter_right =
+            AuthenticatedPrincipal::from_assurance(IdentityAssurance::DtlsFingerprint {
+                algorithm: "sha:256".into(),
+                value: "AA".into(),
+            });
+        assert_ne!(delimiter_left.subject, delimiter_right.subject);
+
+        let identified = AuthenticatedPrincipal::from_assurance(IdentityAssurance::Identified {
+            credential_kind: CredentialKind::OAuth2Dpop,
+        });
+        assert_eq!(identified.subject, "assurance:identified:oauth2-dpop");
+    }
+
+    #[test]
+    fn typed_assurance_classes_cannot_collide_on_shared_ids() {
+        let shared = IdentityId::from_string("shared-id");
+        let task = AuthenticatedPrincipal::from_assurance(IdentityAssurance::TaskScoped {
+            identity: shared.clone(),
+            task_id: "task-a".into(),
+            scopes: vec![],
+            expires_at: Utc::now() + chrono::Duration::minutes(1),
+        });
+        let other_task = AuthenticatedPrincipal::from_assurance(IdentityAssurance::TaskScoped {
+            identity: shared.clone(),
+            task_id: "task-b".into(),
+            scopes: vec![],
+            expires_at: Utc::now() + chrono::Duration::minutes(1),
+        });
+        let user = AuthenticatedPrincipal::from_assurance(IdentityAssurance::UserAuthorized {
+            identity: shared.clone(),
+            user_id: shared,
+            scopes: vec![],
+        });
+
+        assert_ne!(task.subject, other_task.subject);
+        assert_ne!(task.subject, user.subject);
+        assert!(task.subject.starts_with("task-scoped:identity:"));
+        assert!(user.subject.starts_with("user-authorized:identity:"));
     }
 
     #[test]

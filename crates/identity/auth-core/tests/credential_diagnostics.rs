@@ -1,8 +1,11 @@
+use rvoip_auth_core::types::UserContext;
 use rvoip_auth_core::{
-    AuthAuditEvent, AuthAuditOutcome, AuthAuditScheme, AuthFailureReason, AuthRateLimitKey,
-    AuthRateLimitKind, CredentialAuthError, DigestAlgorithm, DigestChallenge, DigestComputed,
-    DigestResponse, DigestSecret, TokenRevocationContext,
+    ActorClaims, AuthAuditEvent, AuthAuditOutcome, AuthAuditScheme, AuthFailureReason,
+    AuthRateLimitKey, AuthRateLimitKind, CredentialAuthError, DigestAlgorithm, DigestChallenge,
+    DigestComputed, DigestResponse, DigestSecret, DpopError, DpopProof, EnvelopeSignature,
+    Sig9421Error, TokenRevocationContext, ValidatedDpop,
 };
+use rvoip_core_traits::ids::IdentityId;
 
 const CANARY: &str = "credential-boundary-malicious-canary\r\nAuthorization: exposed";
 
@@ -116,4 +119,56 @@ fn credential_containers_do_not_regain_derived_debug() {
             "{declaration} regained derived Debug"
         );
     }
+}
+
+#[test]
+fn principal_proofs_signatures_and_errors_are_metadata_only() {
+    let context = UserContext {
+        user_id: CANARY.into(),
+        username: CANARY.into(),
+        roles: vec![CANARY.into()],
+        claims: std::collections::HashMap::from([(CANARY.into(), serde_json::json!(CANARY))]),
+        expires_at: Some(1),
+        scopes: vec![CANARY.into()],
+    };
+    let actor = ActorClaims {
+        identity: IdentityId::from_string(CANARY),
+        scopes: vec![CANARY.into()],
+    };
+    let proof = DpopProof {
+        jti: CANARY.into(),
+        htm: CANARY.into(),
+        htu: CANARY.into(),
+        iat: 1,
+        ath: Some(CANARY.into()),
+    };
+    let validated = ValidatedDpop {
+        jkt: CANARY.into(),
+        proof,
+    };
+    let signature = EnvelopeSignature {
+        keyid: CANARY.into(),
+        alg: CANARY.into(),
+        sig: CANARY.into(),
+    };
+    let errors: Vec<Box<dyn std::fmt::Debug>> = vec![
+        Box::new(DpopError::Signature(CANARY.into())),
+        Box::new(Sig9421Error::UnknownKeyid(CANARY.into())),
+    ];
+
+    for rendered in [
+        format!("{context:?}"),
+        format!("{actor:?}"),
+        format!("{validated:?}"),
+        format!("{signature:?}"),
+    ] {
+        assert!(!rendered.contains(CANARY), "credential leaked: {rendered}");
+    }
+    for error in errors {
+        assert_redacted(&error);
+    }
+    assert_eq!(context.user_id, CANARY);
+    assert_eq!(actor.identity.as_str(), CANARY);
+    assert_eq!(validated.jkt, CANARY);
+    assert_eq!(signature.sig, CANARY);
 }

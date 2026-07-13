@@ -87,8 +87,8 @@ impl UctpWsServer {
                             .await
                             {
                                 Ok(Ok(stream)) => stream,
-                                Ok(Err(e)) => {
-                                    warn!(error = %e, %peer_addr, "rvoip-websocket: TLS handshake failed");
+                                Ok(Err(_)) => {
+                                    warn!(error_class = "tls-handshake", %peer_addr, "rvoip-websocket: TLS handshake failed");
                                     return;
                                 }
                                 Err(_) => {
@@ -103,8 +103,8 @@ impl UctpWsServer {
                             .await
                             {
                                 Ok(Ok(ws)) => ws,
-                                Ok(Err(e)) => {
-                                    warn!(error = %e, %peer_addr, "rvoip-websocket: handshake failed (wss)");
+                                Ok(Err(_)) => {
+                                    warn!(error_class = "websocket-upgrade", %peer_addr, "rvoip-websocket: handshake failed (wss)");
                                     return;
                                 }
                                 Err(_) => {

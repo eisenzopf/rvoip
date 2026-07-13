@@ -37,7 +37,7 @@ use crate::signaling::auth::{AnonymousAuth, AuthContext, AuthRejection, WsAuthHo
 const MAX_HANDSHAKE_BYTES: usize = 16 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Deserialize, Serialize, Default)]
 pub struct SignalingMessage {
     #[serde(rename = "type")]
     pub msg_type: String,
@@ -47,6 +47,18 @@ pub struct SignalingMessage {
     pub connection_id: String,
     #[serde(default)]
     pub candidate: String,
+}
+
+impl std::fmt::Debug for SignalingMessage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SignalingMessage")
+            .field("type_present", &!self.msg_type.is_empty())
+            .field("sdp_bytes", &self.sdp.len())
+            .field("connection_present", &!self.connection_id.is_empty())
+            .field("candidate_bytes", &self.candidate.len())
+            .finish()
+    }
 }
 
 /// Stream wrapper which replays the HTTP handshake bytes inspected during
@@ -185,8 +197,8 @@ pub async fn serve_tls_listener_with_auth(
         tokio::spawn(async move {
             let stream = match acceptor.accept(stream).await {
                 Ok(stream) => stream,
-                Err(error) => {
-                    warn!("WSS TLS handshake failed: {error}");
+                Err(_) => {
+                    warn!(error_class = "tls-handshake", "WSS TLS handshake failed");
                     return;
                 }
             };

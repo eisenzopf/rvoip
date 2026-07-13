@@ -1,7 +1,8 @@
 use rvoip_auth_core::EnvelopeSignature;
 use rvoip_uctp::payloads::auth::{AuthChallenge, AuthRefresh, AuthResponse};
 use rvoip_uctp::payloads::control::IdentityStepUpResponse;
-use rvoip_uctp::{MessageType, UctpEnvelope};
+use rvoip_uctp::state::UctpScopePolicy;
+use rvoip_uctp::{MessageType, SubstrateError, UctpEnvelope, UctpError};
 
 const CANARY: &str = "uctp-credential-malicious-canary\r\nAuthorization: exposed";
 
@@ -105,6 +106,29 @@ fn coordinator_never_logs_raw_auth_provider_errors() {
     assert!(!source.contains("warn!(error = %e, \"auth.refresh"));
     assert!(!source.contains("warn!(%error, \"auth.bearer"));
     assert!(!source.contains("warn!(%error, \"auth.refresh"));
+    assert!(!source.contains("asserted_participant = %"));
+    assert!(!source.contains("authenticated_participant = %"));
     assert!(source.contains("error_class = \"credential-validation\""));
     assert!(source.contains("error_class = \"resource-binding-authorization\""));
+}
+
+#[test]
+fn policy_and_protocol_errors_redact_arbitrary_boundary_values() {
+    let policy = UctpScopePolicy::secure_defaults();
+    let unknown = UctpError::UnknownEnvelopeType(CANARY.into());
+    let auth = UctpError::Auth(rvoip_auth_core::BearerAuthError::Invalid(CANARY.into()));
+    let transport = SubstrateError::Io(std::io::Error::other(CANARY));
+
+    for rendered in [
+        format!("{policy:?}"),
+        format!("{unknown:?} {unknown}"),
+        format!("{auth:?} {auth}"),
+        format!("{transport:?} {transport}"),
+    ] {
+        assert!(!rendered.contains(CANARY), "credential leaked: {rendered}");
+    }
+    match unknown {
+        UctpError::UnknownEnvelopeType(value) => assert_eq!(value, CANARY),
+        other => panic!("unexpected error variant: {other:?}"),
+    }
 }

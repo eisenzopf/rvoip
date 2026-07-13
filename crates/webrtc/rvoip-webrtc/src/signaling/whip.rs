@@ -415,12 +415,12 @@ fn route_error_response(state: &WhipState, error: WebRtcError) -> Response {
     state.adapter.note_signaling_error();
     match error {
         WebRtcError::ConnectionNotFound => StatusCode::NOT_FOUND.into_response(),
-        WebRtcError::Forbidden(detail) => (StatusCode::FORBIDDEN, detail).into_response(),
-        WebRtcError::Unauthorized(detail) => (StatusCode::UNAUTHORIZED, detail).into_response(),
+        WebRtcError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden").into_response(),
+        WebRtcError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
         WebRtcError::InboundAdmissionRejected => {
             (StatusCode::FORBIDDEN, "inbound signaling was not admitted").into_response()
         }
-        other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()).into_response(),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "WebRTC signaling failed").into_response(),
     }
 }
 
@@ -499,9 +499,13 @@ async fn whip_post(
     {
         Ok(id) => id,
         Err(e) => {
-            if matches!(e, WebRtcError::Adapter(_)) && e.to_string().contains("cap reached") {
+            if matches!(&e, WebRtcError::Adapter(detail) if detail.contains("cap reached")) {
                 state.adapter.note_signaling_error();
-                return (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response();
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "WebRTC capacity unavailable",
+                )
+                    .into_response();
             }
             return route_error_response(&state, e);
         }
@@ -713,18 +717,18 @@ async fn whep_post(
                     }
                     (StatusCode::CREATED, headers, sdp).into_response()
                 }
-                Err(e) => {
+                Err(_) => {
                     let _ = state
                         .adapter
                         .end(conn_id, rvoip_core::adapter::EndReason::Normal)
                         .await;
-                    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+                    (StatusCode::INTERNAL_SERVER_ERROR, "WebRTC signaling failed").into_response()
                 }
             }
         }
-        Err(e) => {
+        Err(_) => {
             state.adapter.note_signaling_error();
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            (StatusCode::INTERNAL_SERVER_ERROR, "WebRTC signaling failed").into_response()
         }
     }
 }

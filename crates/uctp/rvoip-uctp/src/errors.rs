@@ -4,82 +4,184 @@
 //! capability, auth, transport). Adapter crates wrap `UctpError` /
 //! `SubstrateError` with their own outer variant per design doc §3.2.1.
 
-use thiserror::Error;
+use std::fmt;
 
 use rvoip_auth_core::BearerAuthError;
 
-#[derive(Debug, Error)]
 pub enum UctpError {
-    #[error("envelope decode failed: {0}")]
-    Decode(#[from] serde_json::Error),
+    Decode(serde_json::Error),
 
-    #[error("unknown envelope type: {0}")]
     UnknownEnvelopeType(String),
 
-    #[error("missing required field: {0}")]
     MissingField(&'static str),
 
-    #[error("illegal state transition: state={state} event={event}")]
     IllegalTransition {
         state: &'static str,
         event: &'static str,
     },
 
     /// Typically code 488 (incompatible capabilities).
-    #[error("capability negotiation failed: code={code}")]
-    CapabilityNegotiationFailed { code: u16 },
+    CapabilityNegotiationFailed {
+        code: u16,
+    },
 
-    #[error("authentication failed: {0}")]
-    Auth(#[from] BearerAuthError),
+    Auth(BearerAuthError),
 
-    #[error("stream-handle exhausted (u16 wrap)")]
     StreamHandleExhausted,
 
-    #[error("invalid stream binding: {0}")]
     InvalidStreamBinding(&'static str),
 
-    #[error("operation timed out")]
     Timeout,
 
-    #[error("coordinator closed")]
     Closed,
 
-    #[error(transparent)]
-    Transport(#[from] SubstrateError),
+    Transport(SubstrateError),
 }
 
-#[derive(Debug, Error)]
 pub enum SubstrateError {
-    #[error("quinn connection error: {0}")]
-    Quinn(#[from] quinn::ConnectionError),
+    Quinn(quinn::ConnectionError),
 
-    #[error("quinn write error: {0}")]
-    Write(#[from] quinn::WriteError),
+    Write(quinn::WriteError),
 
-    #[error("quinn read error: {0}")]
-    Read(#[from] quinn::ReadError),
+    Read(quinn::ReadError),
 
-    #[error("rustls error: {0}")]
-    Tls(#[from] rustls::Error),
+    Tls(rustls::Error),
 
     /// Version mismatch, length too short, bad flags.
-    #[error("invalid datagram: {0}")]
     InvalidDatagram(&'static str),
 
-    #[error("envelope parse failed: {0}")]
-    EnvelopeParse(#[from] serde_json::Error),
+    EnvelopeParse(serde_json::Error),
 
-    #[error("frame too large: {0} bytes (max 1 MiB)")]
     FrameTooLarge(usize),
 
-    #[error("alpn dispatch closed")]
     DispatchClosed,
 
-    #[error("substrate closed")]
     Closed,
 
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
+}
+
+impl UctpError {
+    pub const fn diagnostic_class(&self) -> &'static str {
+        match self {
+            Self::Decode(_) => "decode",
+            Self::UnknownEnvelopeType(_) => "unknown-envelope",
+            Self::MissingField(_) => "missing-field",
+            Self::IllegalTransition { .. } => "illegal-transition",
+            Self::CapabilityNegotiationFailed { .. } => "capability-negotiation",
+            Self::Auth(_) => "authentication",
+            Self::StreamHandleExhausted => "stream-handle-exhausted",
+            Self::InvalidStreamBinding(_) => "invalid-stream-binding",
+            Self::Timeout => "timeout",
+            Self::Closed => "closed",
+            Self::Transport(_) => "transport",
+        }
+    }
+}
+
+impl fmt::Display for UctpError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "UCTP operation failed (class={})",
+            self.diagnostic_class()
+        )
+    }
+}
+
+impl fmt::Debug for UctpError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UctpError")
+            .field("class", &self.diagnostic_class())
+            .finish()
+    }
+}
+
+impl std::error::Error for UctpError {}
+
+impl SubstrateError {
+    pub const fn diagnostic_class(&self) -> &'static str {
+        match self {
+            Self::Quinn(_) => "quinn-connection",
+            Self::Write(_) => "quinn-write",
+            Self::Read(_) => "quinn-read",
+            Self::Tls(_) => "tls",
+            Self::InvalidDatagram(_) => "invalid-datagram",
+            Self::EnvelopeParse(_) => "envelope-parse",
+            Self::FrameTooLarge(_) => "frame-too-large",
+            Self::DispatchClosed => "dispatch-closed",
+            Self::Closed => "closed",
+            Self::Io(_) => "io",
+        }
+    }
+}
+
+impl fmt::Display for SubstrateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "substrate failed (class={})",
+            self.diagnostic_class()
+        )
+    }
+}
+
+impl fmt::Debug for SubstrateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SubstrateError")
+            .field("class", &self.diagnostic_class())
+            .finish()
+    }
+}
+
+impl std::error::Error for SubstrateError {}
+
+impl From<serde_json::Error> for UctpError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Decode(error)
+    }
+}
+impl From<BearerAuthError> for UctpError {
+    fn from(error: BearerAuthError) -> Self {
+        Self::Auth(error)
+    }
+}
+impl From<SubstrateError> for UctpError {
+    fn from(error: SubstrateError) -> Self {
+        Self::Transport(error)
+    }
+}
+impl From<quinn::ConnectionError> for SubstrateError {
+    fn from(error: quinn::ConnectionError) -> Self {
+        Self::Quinn(error)
+    }
+}
+impl From<quinn::WriteError> for SubstrateError {
+    fn from(error: quinn::WriteError) -> Self {
+        Self::Write(error)
+    }
+}
+impl From<quinn::ReadError> for SubstrateError {
+    fn from(error: quinn::ReadError) -> Self {
+        Self::Read(error)
+    }
+}
+impl From<rustls::Error> for SubstrateError {
+    fn from(error: rustls::Error) -> Self {
+        Self::Tls(error)
+    }
+}
+impl From<serde_json::Error> for SubstrateError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::EnvelopeParse(error)
+    }
+}
+impl From<std::io::Error> for SubstrateError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
 }
 
 /// Crate-local `Result` alias matching the rvoip-sip convention.

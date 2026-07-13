@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use thiserror::Error;
 
 use crate::ids::MessageId;
@@ -41,7 +42,7 @@ impl Default for DataReliability {
 
 /// A data-plane message that can be mapped to a WebRTC DataChannel, UCTP
 /// `message.send`, SIP MESSAGE, or an application-owned metadata transport.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DataMessage {
     pub label: String,
     pub content_type: String,
@@ -49,6 +50,21 @@ pub struct DataMessage {
     #[serde(default)]
     pub reliability: DataReliability,
     pub message_id: MessageId,
+}
+
+impl fmt::Debug for DataMessage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DataMessage")
+            .field("label_present", &!self.label.is_empty())
+            .field("label_bytes", &self.label.len())
+            .field("content_type_present", &!self.content_type.is_empty())
+            .field("content_type_bytes", &self.content_type.len())
+            .field("body_bytes", &self.bytes.len())
+            .field("reliability", &self.reliability)
+            .field("message_id_present", &!self.message_id.as_str().is_empty())
+            .finish()
+    }
 }
 
 pub const MAX_DATA_LABEL_BYTES: usize = 128;
@@ -326,5 +342,22 @@ mod tests {
             value.validate(),
             Err(DataMessageValidationError::MessageIdContainsControl)
         );
+    }
+
+    #[test]
+    fn debug_keeps_message_content_and_identifiers_private() {
+        const CANARY: &str = "data-message-diagnostic-canary\r\nAuthorization: exposed";
+        let value = DataMessage {
+            label: CANARY.into(),
+            content_type: "application/octet-stream".into(),
+            bytes: Bytes::copy_from_slice(CANARY.as_bytes()),
+            reliability: DataReliability::ReliableOrdered,
+            message_id: MessageId::from_string(CANARY),
+        };
+        let rendered = format!("{value:?}");
+        assert!(!rendered.contains(CANARY), "message leaked: {rendered}");
+        assert_eq!(value.label, CANARY);
+        assert_eq!(value.bytes.as_ref(), CANARY.as_bytes());
+        assert_eq!(value.message_id.as_str(), CANARY);
     }
 }
