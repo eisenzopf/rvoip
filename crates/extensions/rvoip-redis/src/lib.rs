@@ -26,6 +26,11 @@ use rvoip_auth_core::{
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
+/// Hard upper bound for configured peer or subject rate-limit cohorts.
+pub const MAX_REDIS_AUTH_RATE_LIMIT_COHORTS: usize = 1_000_000;
+/// Hard upper bound for configured incomplete auth-attempt reservations.
+pub const MAX_REDIS_AUTH_RATE_LIMIT_RESERVATIONS: usize = 1_000_000;
+
 const RATE_LIMIT_RESERVE_SCRIPT: &str = r#"
 local function cleanup(values, expiry, now)
     local expired = redis.call(
@@ -347,7 +352,13 @@ impl Default for RedisAuthRateLimitLimits {
 
 impl RedisAuthRateLimitLimits {
     fn validate(self) -> Result<Self, CredentialAuthError> {
-        if self.peer_cohorts == 0 || self.subject_cohorts == 0 || self.reservations == 0 {
+        if self.peer_cohorts == 0
+            || self.subject_cohorts == 0
+            || self.reservations == 0
+            || self.peer_cohorts > MAX_REDIS_AUTH_RATE_LIMIT_COHORTS
+            || self.subject_cohorts > MAX_REDIS_AUTH_RATE_LIMIT_COHORTS
+            || self.reservations > MAX_REDIS_AUTH_RATE_LIMIT_RESERVATIONS
+        {
             return Err(CredentialAuthError::PolicyRejected(
                 "invalid auth rate-limit cardinality bounds".to_string(),
             ));
@@ -1637,6 +1648,13 @@ mod tests {
         assert!(provider
             .with_auth_rate_limit_limits(RedisAuthRateLimitLimits {
                 reservations: 0,
+                ..RedisAuthRateLimitLimits::default()
+            })
+            .is_err());
+        assert!(RedisAuthProvider::new("redis://127.0.0.1:6379")
+            .unwrap()
+            .with_auth_rate_limit_limits(RedisAuthRateLimitLimits {
+                peer_cohorts: MAX_REDIS_AUTH_RATE_LIMIT_COHORTS + 1,
                 ..RedisAuthRateLimitLimits::default()
             })
             .is_err());

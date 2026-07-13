@@ -58,7 +58,9 @@ boundary; pre-authentication realm values never shard these aggregates.
 Rate-limit state uses a fixed set of Redis keys with bounded peer, subject,
 and incomplete-reservation cohorts. Configure those bounds with
 `with_auth_rate_limit_limits` and inspect aggregate-safe counts with
-`auth_rate_limit_cardinality`. The legacy `check_auth_attempt` and
+`auth_rate_limit_cardinality`. Explicit limits also have a hard one-million
+entry ceiling, so a mistaken deployment value cannot turn the bounded design
+back into unlimited state. The legacy `check_auth_attempt` and
 `record_auth_result` entry points now fail closed on this provider because
 they cannot provide atomic admission.
 
