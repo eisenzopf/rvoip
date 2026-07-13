@@ -10,6 +10,7 @@ use crate::message::{ContentType, Message};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::sync::Arc;
 
 /// Filter shape for `list_messages`. All fields optional; absent
@@ -56,12 +57,33 @@ pub trait MessageStore: Send + Sync {
     async fn mark_read(&self, id: &MessageId, by: &ParticipantId) -> Result<()>;
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct MemoryMessageStore {
     /// Per-Conversation log, kept in insertion order.
     log: Arc<DashMap<ConversationId, Vec<Message>>>,
     /// Side-band read receipts.
     read_by: Arc<DashMap<MessageId, Vec<ParticipantId>>>,
+}
+
+impl fmt::Debug for MemoryMessageStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message_count = self
+            .log
+            .iter()
+            .map(|entry| entry.value().len())
+            .sum::<usize>();
+        let receipt_count = self
+            .read_by
+            .iter()
+            .map(|entry| entry.value().len())
+            .sum::<usize>();
+        formatter
+            .debug_struct("MemoryMessageStore")
+            .field("conversation_count", &self.log.len())
+            .field("message_count", &message_count)
+            .field("receipt_count", &receipt_count)
+            .finish()
+    }
 }
 
 impl MemoryMessageStore {
@@ -146,5 +168,38 @@ impl MessageStore for MemoryMessageStore {
             e.push(by.clone());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use crate::connection::Direction;
+    use crate::message::{MessageOrigin, MessageRecipients};
+
+    #[tokio::test]
+    async fn memory_message_store_debug_is_aggregate_only() {
+        const CANARY: &str = "message-store-canary\r\nAuthorization: exposed";
+        let store = MemoryMessageStore::new();
+        store
+            .put(Message {
+                id: MessageId::from_string(CANARY),
+                conversation_id: ConversationId::from_string(CANARY),
+                origin: MessageOrigin::System,
+                from_participant: ParticipantId::from_string(CANARY),
+                to: MessageRecipients::All,
+                direction: Direction::Inbound,
+                content_type: ContentType::Attachment(CANARY.into()),
+                body: bytes::Bytes::from_static(b"message-store-canary\r\nAuthorization: exposed"),
+                attachments: Vec::new(),
+                in_reply_to: None,
+                timestamp: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let debug = format!("{store:?}");
+        assert!(!debug.contains(CANARY));
+        assert!(debug.contains("conversation_count: 1"));
+        assert!(debug.contains("message_count: 1"));
     }
 }

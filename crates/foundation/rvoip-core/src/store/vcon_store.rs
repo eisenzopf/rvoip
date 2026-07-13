@@ -3,13 +3,26 @@ use crate::ids::{SessionId, TenantId};
 use bytes::Bytes;
 use dashmap::DashMap;
 use sha2::{Digest, Sha256};
+use std::fmt;
 use std::sync::Arc;
 
 /// Reference to a stored vCon.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct VconHandle {
     pub url: String,
     pub content_hash: String,
+}
+
+impl fmt::Debug for VconHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VconHandle")
+            .field("url_present", &!self.url.is_empty())
+            .field("url_bytes", &self.url.len())
+            .field("content_hash_present", &!self.content_hash.is_empty())
+            .field("content_hash_bytes", &self.content_hash.len())
+            .finish()
+    }
 }
 
 /// Plug-in persistence for finalized vCons. Production signing /
@@ -33,12 +46,22 @@ pub trait VconStore: Send + Sync {
 /// promotes this from a mock (returning `len=N` for content_hash) to a
 /// real `sha256:<hex>` content hash so callers can verify the stored
 /// bytes match the returned handle.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct MemoryVconStore {
     inner: Arc<DashMap<String, Bytes>>,
     /// Per-session counter so multiple `put`s for the same Session
     /// generate distinct handles (vs the old design that overwrote).
     seq: Arc<DashMap<String, u64>>,
+}
+
+impl fmt::Debug for MemoryVconStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MemoryVconStore")
+            .field("object_count", &self.inner.len())
+            .field("session_count", &self.seq.len())
+            .finish()
+    }
 }
 
 impl MemoryVconStore {
@@ -107,5 +130,33 @@ mod hex {
             s.push(HEX[(b & 0x0f) as usize] as char);
         }
         s
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn vcon_store_debug_never_renders_urls_hashes_keys_or_payloads() {
+        const CANARY: &str = "vcon-store-canary\r\nAuthorization: exposed";
+        let handle = VconHandle {
+            url: CANARY.into(),
+            content_hash: CANARY.into(),
+        };
+        assert!(!format!("{handle:?}").contains(CANARY));
+
+        let store = MemoryVconStore::new();
+        store
+            .put(
+                &TenantId::from_string(CANARY),
+                &SessionId::from_string(CANARY),
+                Bytes::from_static(b"vcon-store-canary\r\nAuthorization: exposed"),
+            )
+            .await
+            .unwrap();
+        let debug = format!("{store:?}");
+        assert!(!debug.contains(CANARY));
+        assert!(debug.contains("object_count: 1"));
     }
 }

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -11,12 +12,29 @@ use crate::identity::IdentityAssurance;
 /// Legacy flat-fields codec entry — used internally by SIP/RTP adapters
 /// that need the parsed `clock_rate_hz` / `channels` numbers directly.
 /// Bridges to/from [`Codec`] (the spec wire shape) via `From`/`TryFrom`.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CodecInfo {
     pub name: String,
     pub clock_rate_hz: u32,
     pub channels: u8,
     pub fmtp: Option<String>,
+}
+
+impl fmt::Debug for CodecInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CodecInfo")
+            .field("name_present", &!self.name.is_empty())
+            .field("name_bytes", &self.name.len())
+            .field("clock_rate_hz", &self.clock_rate_hz)
+            .field("channels", &self.channels)
+            .field("fmtp_present", &self.fmtp.is_some())
+            .field(
+                "fmtp_bytes",
+                &self.fmtp.as_ref().map_or(0, std::string::String::len),
+            )
+            .finish()
+    }
 }
 
 /// Reasonable default for adapter and orchestrator paths that need a
@@ -65,11 +83,22 @@ impl CodecInfo {
 /// `{"name": "opus", "params": {"sample_rate": 48000, ...}}` shape.
 /// Distinct from [`CodecInfo`] — the flat-fields shape can't represent
 /// the spec wire format losslessly. Conversion helpers below.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Codec {
     pub name: String,
     #[serde(default)]
     pub params: BTreeMap<String, serde_json::Value>,
+}
+
+impl fmt::Debug for Codec {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Codec")
+            .field("name_present", &!self.name.is_empty())
+            .field("name_bytes", &self.name.len())
+            .field("parameter_count", &self.params.len())
+            .finish()
+    }
 }
 
 impl Codec {
@@ -134,7 +163,7 @@ impl TryFrom<Codec> for CodecInfo {
 /// `supports_dtmf_rfc4733` is a **method** (derived from `dtmf_modes`),
 /// not a field — `dtmf_modes` is the single source of truth on the wire
 /// and the boolean would silently desync from a custom serde round-trip.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct CapabilityDescriptor {
     #[serde(default)]
     pub audio_codecs: Vec<CodecInfo>,
@@ -179,6 +208,34 @@ pub struct CapabilityDescriptor {
     /// Independent of `transport_features`.
     #[serde(default)]
     pub supports_srtp: bool,
+}
+
+impl fmt::Debug for CapabilityDescriptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CapabilityDescriptor")
+            .field("audio_codec_count", &self.audio_codecs.len())
+            .field("video_codec_count", &self.video_codecs.len())
+            .field("data_protocols", &self.data_protocols)
+            .field("dtmf_modes", &self.dtmf_modes)
+            .field(
+                "max_streams_per_connection",
+                &self.max_streams_per_connection,
+            )
+            .field("transport_features", &self.transport_features)
+            .field("interop", &self.interop)
+            .field(
+                "identity_assurance_offered",
+                &self.identity_assurance_offered,
+            )
+            .field(
+                "identity_assurance_required",
+                &self.identity_assurance_required,
+            )
+            .field("supports_message_text", &self.supports_message_text)
+            .field("supports_srtp", &self.supports_srtp)
+            .finish()
+    }
 }
 
 fn default_assurance_offered() -> AssuranceLevel {
@@ -303,12 +360,24 @@ impl AssuranceLevel {
 // CapabilityDescriptor era — used by rvoip-sip and other adapters)
 // =====================================================================
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct CapabilityIntersection {
     pub audio: Option<CodecInfo>,
     pub video: Option<CodecInfo>,
     pub dtmf_method: Option<DtmfMethod>,
     pub messaging_enabled: bool,
+}
+
+impl fmt::Debug for CapabilityIntersection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CapabilityIntersection")
+            .field("audio_present", &self.audio.is_some())
+            .field("video_present", &self.video.is_some())
+            .field("dtmf_method", &self.dtmf_method)
+            .field("messaging_enabled", &self.messaging_enabled)
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -317,10 +386,20 @@ pub enum DtmfMethod {
     SipInfo,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct NegotiatedCodecs {
     pub audio: Option<CodecInfo>,
     pub video: Option<CodecInfo>,
+}
+
+impl fmt::Debug for NegotiatedCodecs {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NegotiatedCodecs")
+            .field("audio_present", &self.audio.is_some())
+            .field("video_present", &self.video.is_some())
+            .finish()
+    }
 }
 
 // =====================================================================
@@ -328,7 +407,7 @@ pub struct NegotiatedCodecs {
 // =====================================================================
 
 /// Outcome of running [`negotiate_streams`] over an offer/answer pair.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum NegotiationOutcome {
     /// Per-Stream chosen codecs. Order matches the input `streams_offered`.
     Ok(Vec<NegotiatedStream>),
@@ -336,8 +415,20 @@ pub enum NegotiationOutcome {
     NotAcceptable488,
 }
 
+impl fmt::Debug for NegotiationOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ok(streams) => formatter
+                .debug_struct("Ok")
+                .field("stream_count", &streams.len())
+                .finish(),
+            Self::NotAcceptable488 => formatter.write_str("NotAcceptable488"),
+        }
+    }
+}
+
 /// One stream's negotiation result.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct NegotiatedStream {
     pub stream_id: String,
     pub kind: String,
@@ -348,13 +439,78 @@ pub struct NegotiatedStream {
     pub chosen_codec: Option<String>,
 }
 
+impl fmt::Debug for NegotiatedStream {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NegotiatedStream")
+            .field("stream_id_present", &!self.stream_id.is_empty())
+            .field("stream_id_bytes", &self.stream_id.len())
+            .field("kind_present", &!self.kind.is_empty())
+            .field("kind_bytes", &self.kind.len())
+            .field("direction_present", &!self.direction.is_empty())
+            .field("direction_bytes", &self.direction.len())
+            .field("chosen_codec_present", &self.chosen_codec.is_some())
+            .finish()
+    }
+}
+
 /// Input shape mirroring `connection.offer.streams_offered`.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct StreamOffer<'a> {
     pub id: &'a str,
     pub kind: &'a str,
     pub direction: &'a str,
     pub codec_preferences: &'a [String],
+}
+
+impl fmt::Debug for StreamOffer<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StreamOffer")
+            .field("id_present", &!self.id.is_empty())
+            .field("id_bytes", &self.id.len())
+            .field("kind_present", &!self.kind.is_empty())
+            .field("kind_bytes", &self.kind.len())
+            .field("direction_present", &!self.direction.is_empty())
+            .field("direction_bytes", &self.direction.len())
+            .field("codec_preference_count", &self.codec_preferences.len())
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn capability_diagnostics_never_render_peer_strings() {
+        const CANARY: &str = "capability-canary\r\nAuthorization: exposed";
+        let codec = CodecInfo {
+            name: CANARY.into(),
+            clock_rate_hz: 48_000,
+            channels: 1,
+            fmtp: Some(CANARY.into()),
+        };
+        let descriptor = CapabilityDescriptor {
+            audio_codecs: vec![codec.clone()],
+            ..CapabilityDescriptor::default()
+        };
+        let negotiated = NegotiatedStream {
+            stream_id: CANARY.into(),
+            kind: CANARY.into(),
+            direction: CANARY.into(),
+            chosen_codec: Some(CANARY.into()),
+        };
+        for debug in [
+            format!("{codec:?}"),
+            format!("{:?}", Codec::new(CANARY)),
+            format!("{descriptor:?}"),
+            format!("{negotiated:?}"),
+            format!("{:?}", NegotiationOutcome::Ok(vec![negotiated])),
+        ] {
+            assert!(!debug.contains(CANARY));
+        }
+    }
 }
 
 /// Run the §8.1 negotiation algorithm on a single offer/answer pair.

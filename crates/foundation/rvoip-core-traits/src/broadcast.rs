@@ -5,6 +5,7 @@
 //! drain descriptors let control planes manage UCTP and MOQT publishers
 //! without importing either transport crate.
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -31,13 +32,30 @@ pub enum BroadcastTransport {
 ///
 /// New control-plane code should additionally query [`BroadcastPublisher::endpoint`]
 /// and [`BroadcastPublisher::protocol`] for structured transport metadata.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BroadcastDescriptor {
     pub transport: BroadcastTransport,
     pub namespace: String,
     pub audio_track: String,
     pub catalog_track: Option<String>,
     pub protocol_version: String,
+}
+
+impl fmt::Debug for BroadcastDescriptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BroadcastDescriptor")
+            .field("transport", &self.transport)
+            .field("namespace_bytes", &self.namespace.len())
+            .field("audio_track_bytes", &self.audio_track.len())
+            .field("catalog_track_present", &self.catalog_track.is_some())
+            .field(
+                "catalog_track_bytes",
+                &self.catalog_track.as_ref().map_or(0, String::len),
+            )
+            .field("protocol_version_bytes", &self.protocol_version.len())
+            .finish()
+    }
 }
 
 /// Largest integer represented exactly by interoperable JSON number parsers.
@@ -145,7 +163,7 @@ pub struct BroadcastSanitizedEventCapability {
 }
 
 /// Transport-specific resource addressed by a broadcast endpoint.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum BroadcastResource {
     /// A UCTP session and its receive-only media stream.
@@ -160,6 +178,33 @@ pub enum BroadcastResource {
         catalog_track: Option<String>,
         events_track: Option<String>,
     },
+}
+
+impl fmt::Debug for BroadcastResource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Uctp {
+                session_id,
+                stream_id,
+            } => formatter
+                .debug_struct("Uctp")
+                .field("session_id_bytes", &session_id.len())
+                .field("stream_id_bytes", &stream_id.len())
+                .finish(),
+            Self::Moqt {
+                namespace,
+                audio_track,
+                catalog_track,
+                events_track,
+            } => formatter
+                .debug_struct("Moqt")
+                .field("namespace_bytes", &namespace.len())
+                .field("audio_track_bytes", &audio_track.len())
+                .field("catalog_track_present", &catalog_track.is_some())
+                .field("events_track_present", &events_track.is_some())
+                .finish(),
+        }
+    }
 }
 
 impl BroadcastResource {
@@ -186,20 +231,43 @@ pub enum BroadcastRelayRole {
 ///
 /// Hop URIs belong in APIs, logs, and traces. They must not be copied into
 /// metric labels because their cardinality is deployment-dependent.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BroadcastRelayHop {
     pub role: BroadcastRelayRole,
     pub uri: String,
 }
 
+impl fmt::Debug for BroadcastRelayHop {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BroadcastRelayHop")
+            .field("role", &self.role)
+            .field("uri_present", &!self.uri.is_empty())
+            .field("uri_bytes", &self.uri.len())
+            .finish()
+    }
+}
+
 /// Subscriber-facing endpoint and protocol resource.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BroadcastEndpoint {
     /// Public raw-QUIC or WebTransport URI, when the publisher has bound one.
     pub uri: Option<String>,
     pub resource: BroadcastResource,
     /// Ordered origin-to-edge path. Direct publications leave this empty.
     pub relay_path: Vec<BroadcastRelayHop>,
+}
+
+impl fmt::Debug for BroadcastEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BroadcastEndpoint")
+            .field("uri_present", &self.uri.is_some())
+            .field("uri_bytes", &self.uri.as_ref().map_or(0, String::len))
+            .field("resource", &self.resource)
+            .field("relay_hop_count", &self.relay_path.len())
+            .finish()
+    }
 }
 
 impl BroadcastEndpoint {
@@ -236,7 +304,7 @@ pub enum BroadcastSubstrate {
 /// extension negotiates those values separately.
 /// UCTP implementations use `transport_version` for UCTP and `media_profile`
 /// for the full-RTP datagram profile.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BroadcastProtocolDescriptor {
     pub family: BroadcastProtocolFamily,
     pub substrate: Option<BroadcastSubstrate>,
@@ -244,6 +312,26 @@ pub struct BroadcastProtocolDescriptor {
     pub media_format_version: Option<String>,
     pub object_format_version: Option<String>,
     pub media_profile: Option<String>,
+}
+
+impl fmt::Debug for BroadcastProtocolDescriptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BroadcastProtocolDescriptor")
+            .field("family", &self.family)
+            .field("substrate", &self.substrate)
+            .field("transport_version_bytes", &self.transport_version.len())
+            .field(
+                "media_format_version_present",
+                &self.media_format_version.is_some(),
+            )
+            .field(
+                "object_format_version_present",
+                &self.object_format_version.is_some(),
+            )
+            .field("media_profile_present", &self.media_profile.is_some())
+            .finish()
+    }
 }
 
 /// Managed publisher lifecycle state.
@@ -621,5 +709,45 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn broadcast_diagnostics_redact_resource_and_network_identifiers() {
+        const CANARY: &str = "broadcast-canary\r\nAuthorization: exposed";
+        let descriptor = BroadcastDescriptor {
+            transport: BroadcastTransport::Moqt,
+            namespace: CANARY.into(),
+            audio_track: CANARY.into(),
+            catalog_track: Some(CANARY.into()),
+            protocol_version: CANARY.into(),
+        };
+        let endpoint = BroadcastEndpoint {
+            uri: Some(CANARY.into()),
+            resource: BroadcastResource::Moqt {
+                namespace: CANARY.into(),
+                audio_track: CANARY.into(),
+                catalog_track: Some(CANARY.into()),
+                events_track: Some(CANARY.into()),
+            },
+            relay_path: vec![BroadcastRelayHop {
+                role: BroadcastRelayRole::Relay,
+                uri: CANARY.into(),
+            }],
+        };
+        let protocol = BroadcastProtocolDescriptor {
+            family: BroadcastProtocolFamily::Moqt,
+            substrate: Some(BroadcastSubstrate::RawQuic),
+            transport_version: CANARY.into(),
+            media_format_version: Some(CANARY.into()),
+            object_format_version: Some(CANARY.into()),
+            media_profile: Some(CANARY.into()),
+        };
+        for debug in [
+            format!("{descriptor:?}"),
+            format!("{endpoint:?}"),
+            format!("{protocol:?}"),
+        ] {
+            assert!(!debug.contains(CANARY), "broadcast value leaked: {debug}");
+        }
     }
 }

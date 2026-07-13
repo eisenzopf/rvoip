@@ -6,6 +6,7 @@
 //! subscription path, while the source may be SIP, WebRTC, Amazon, or another
 //! adapter. The source receiver remains owned exactly once by `MediaGraph`.
 
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -23,11 +24,23 @@ use crate::Result;
 pub const DEFAULT_VIRTUAL_PUBLISHER_QUEUE_CAPACITY: usize = 10;
 
 /// Canonical identity under which a Connection's audio is published.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct VirtualPublisherDescriptor {
     pub session_id: SessionId,
     pub stream_id: StreamId,
     pub participant: String,
+}
+
+impl fmt::Debug for VirtualPublisherDescriptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VirtualPublisherDescriptor")
+            .field("session_id", &self.session_id)
+            .field("stream_id", &self.stream_id)
+            .field("participant_present", &!self.participant.is_empty())
+            .field("participant_bytes", &self.participant.len())
+            .finish()
+    }
 }
 
 impl VirtualPublisherDescriptor {
@@ -207,5 +220,23 @@ impl Drop for ManagedVirtualPublisher {
         }
         self.cleanup.unregister();
         self.route.take();
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn virtual_publisher_descriptor_debug_redacts_all_identity_values() {
+        const CANARY: &str = "virtual-publisher-canary\r\nAuthorization: exposed";
+        let descriptor = VirtualPublisherDescriptor::new(
+            SessionId::from_string(CANARY),
+            StreamId::from_string(CANARY),
+            CANARY,
+        );
+        let debug = format!("{descriptor:?}");
+        assert!(!debug.contains(CANARY));
+        assert!(debug.contains("participant_present: true"));
     }
 }

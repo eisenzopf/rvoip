@@ -14,6 +14,7 @@
 //! lets cleanup paths (connection.end, session.end) be eager without
 //! needing precise ordering.
 
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -182,7 +183,7 @@ impl SubscriptionRegistry {
 /// codec so [`crate::Orchestrator::fanout_frame`] can hand the right
 /// `CodecInfo` to the subscriber-side adapter when allocating a fresh
 /// per-subscription MediaStream.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PublisherEntry {
     pub connection: ConnectionId,
     /// The Participant that published this Stream. From the wire
@@ -198,6 +199,20 @@ pub struct PublisherEntry {
     /// (older test paths, or future stream kinds where codec doesn't
     /// apply); fanout falls back to [`crate::capability::default_audio_codec`].
     pub codec: Option<crate::capability::CodecInfo>,
+}
+
+impl fmt::Debug for PublisherEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PublisherEntry")
+            .field("connection", &self.connection)
+            .field("participant_present", &!self.participant.is_empty())
+            .field("participant_bytes", &self.participant.len())
+            .field("kind_present", &!self.kind.is_empty())
+            .field("kind_bytes", &self.kind.len())
+            .field("codec_present", &self.codec.is_some())
+            .finish()
+    }
 }
 
 /// `(SessionId, strm_id-string) -> PublisherEntry`.
@@ -490,6 +505,25 @@ impl PublisherRegistry {
 mod publisher_registry_tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn publisher_entry_debug_redacts_participant_kind_and_codec_values() {
+        const CANARY: &str = "publisher-canary\r\nAuthorization: exposed";
+        let entry = PublisherEntry {
+            connection: ConnectionId::from_string(CANARY),
+            participant: CANARY.into(),
+            kind: CANARY.into(),
+            codec: Some(crate::capability::CodecInfo {
+                name: CANARY.into(),
+                clock_rate_hz: 48_000,
+                channels: 1,
+                fmtp: Some(CANARY.into()),
+            }),
+        };
+        let debug = format!("{entry:?}");
+        assert!(!debug.contains(CANARY));
+        assert!(debug.contains("codec_present: true"));
+    }
 
     #[test]
     fn remove_stream_updates_primary_and_participant_indexes() {

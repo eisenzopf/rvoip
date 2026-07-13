@@ -634,7 +634,7 @@ impl fmt::Debug for ConnectionHandle {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum RejectReason {
     Busy,
     Decline,
@@ -645,7 +645,26 @@ pub enum RejectReason {
     Custom { code: u16, phrase: String },
 }
 
-#[derive(Clone, Debug)]
+impl fmt::Debug for RejectReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Busy => formatter.write_str("Busy"),
+            Self::Decline => formatter.write_str("Decline"),
+            Self::NotFound => formatter.write_str("NotFound"),
+            Self::Forbidden => formatter.write_str("Forbidden"),
+            Self::NotAcceptable => formatter.write_str("NotAcceptable"),
+            Self::ServerError => formatter.write_str("ServerError"),
+            Self::Custom { code, phrase } => formatter
+                .debug_struct("Custom")
+                .field("code", code)
+                .field("phrase_present", &!phrase.is_empty())
+                .field("phrase_bytes", &phrase.len())
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub enum EndReason {
     Normal,
     Cancelled,
@@ -654,19 +673,54 @@ pub enum EndReason {
     BridgeTorn,
 }
 
-#[derive(Clone, Debug)]
+impl fmt::Debug for EndReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Normal => formatter.write_str("Normal"),
+            Self::Cancelled => formatter.write_str("Cancelled"),
+            Self::Failed { detail } => formatter
+                .debug_struct("Failed")
+                .field("detail_present", &!detail.is_empty())
+                .field("detail_bytes", &detail.len())
+                .finish(),
+            Self::Timeout => formatter.write_str("Timeout"),
+            Self::BridgeTorn => formatter.write_str("BridgeTorn"),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub enum TransferTarget {
     Uri(String),
     Connection(ConnectionId),
     Session(SessionId),
 }
 
+impl fmt::Debug for TransferTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Uri(_) => "Uri([redacted])",
+            Self::Connection(_) => "Connection([redacted])",
+            Self::Session(_) => "Session([redacted])",
+        })
+    }
+}
+
 /// Handle returned by adapter playback paths that lets callers stop an
 /// in-flight playback.
-#[derive(Debug)]
 pub struct PlaybackHandle {
     id: PlaybackId,
     cancel_tx: oneshot::Sender<()>,
+}
+
+impl fmt::Debug for PlaybackHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PlaybackHandle")
+            .field("id", &self.id)
+            .field("cancel_closed", &self.cancel_tx.is_closed())
+            .finish()
+    }
 }
 
 impl PlaybackHandle {
@@ -1054,6 +1108,34 @@ mod tests {
         match event {
             AdapterEvent::StepUpResponse { credential, .. } => assert_eq!(credential, CANARY),
             other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_control_diagnostics_never_render_peer_values() {
+        const CANARY: &str = "adapter-control-canary\r\nAuthorization: exposed";
+        let values = [
+            format!(
+                "{:?}",
+                RejectReason::Custom {
+                    code: 488,
+                    phrase: CANARY.into(),
+                }
+            ),
+            format!(
+                "{:?}",
+                EndReason::Failed {
+                    detail: CANARY.into()
+                }
+            ),
+            format!("{:?}", TransferTarget::Uri(CANARY.into())),
+            format!(
+                "{:?}",
+                TransferTarget::Connection(ConnectionId::from_string(CANARY))
+            ),
+        ];
+        for debug in values {
+            assert!(!debug.contains(CANARY));
         }
     }
 }

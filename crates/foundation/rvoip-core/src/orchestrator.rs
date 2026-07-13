@@ -128,13 +128,10 @@ impl CrossCrateEventPublisher {
             let sink = Arc::clone(&self.sink);
             tokio::spawn(async move {
                 while let Some(event) = receiver.recv().await {
-                    if let Err(error) = sink.publish(event).await {
+                    if sink.publish(event).await.is_err() {
                         metrics::counter!("rvoip_core_cross_crate_event_publish_failures_total")
                             .increment(1);
-                        warn!(
-                            %error,
-                            "rvoip-core cross-crate event publish failed"
-                        );
+                        warn!("rvoip-core cross-crate event publish failed (class=downstream)");
                     }
                 }
             });
@@ -1128,7 +1125,7 @@ impl Drop for MediaTaskHandle {
 /// Accumulated by `handle_adapter_event` on `AdapterEvent::Quality`
 /// and snapshotted by `end_session` to populate
 /// `Event::SessionEnded.report`.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct QualityAggregator {
     pub samples: usize,
     pub jitter_ms_sum: f64,
@@ -1137,6 +1134,22 @@ pub(crate) struct QualityAggregator {
     pub mos_samples: usize,
     pub codec: Option<String>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl std::fmt::Debug for QualityAggregator {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QualityAggregator")
+            .field("samples", &self.samples)
+            .field("jitter_ms_sum", &self.jitter_ms_sum)
+            .field("packet_loss_pct_sum", &self.packet_loss_pct_sum)
+            .field("mos_sum", &self.mos_sum)
+            .field("mos_samples", &self.mos_samples)
+            .field("codec_present", &self.codec.is_some())
+            .field("codec_bytes", &self.codec.as_ref().map_or(0, String::len))
+            .field("started_at", &self.started_at)
+            .finish()
+    }
 }
 
 impl QualityAggregator {

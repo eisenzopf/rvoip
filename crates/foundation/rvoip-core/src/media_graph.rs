@@ -47,7 +47,7 @@ pub const DEFAULT_MEDIA_GRAPH_MAX_SINKS: usize = 1_024;
 ///
 /// It is intentionally defined here rather than in the shared ID vocabulary:
 /// a graph is an rvoip-core runtime concern, not a cross-adapter wire type.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct MediaGraphId(String);
 
 impl MediaGraphId {
@@ -73,6 +73,12 @@ impl Default for MediaGraphId {
 impl fmt::Display for MediaGraphId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl fmt::Debug for MediaGraphId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MediaGraphId([redacted])")
     }
 }
 
@@ -886,13 +892,27 @@ impl Drop for SinkRuntime {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct CodecGroupKey {
     payload_type: u8,
     name: String,
     clock_rate_hz: u32,
     channels: u8,
     fmtp: Option<String>,
+}
+
+impl fmt::Debug for CodecGroupKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CodecGroupKey")
+            .field("payload_type", &self.payload_type)
+            .field("name_present", &!self.name.is_empty())
+            .field("name_bytes", &self.name.len())
+            .field("clock_rate_hz", &self.clock_rate_hz)
+            .field("channels", &self.channels)
+            .field("fmtp_present", &self.fmtp.is_some())
+            .finish()
+    }
 }
 
 impl CodecGroupKey {
@@ -2272,6 +2292,37 @@ mod tests {
             clock_rate_hz: clock_rate,
             channels: 1,
             fmtp: None,
+        }
+    }
+
+    #[test]
+    fn graph_diagnostics_never_render_ids_or_codec_parameters() {
+        const CANARY: &str = "media-graph-canary\r\nAuthorization: exposed";
+        let codec = CodecInfo {
+            name: CANARY.into(),
+            clock_rate_hz: 48_000,
+            channels: 1,
+            fmtp: Some(CANARY.into()),
+        };
+        let graph_id = MediaGraphId::from_string(CANARY);
+        let key = CodecGroupKey::new(&codec, 111);
+        let snapshot = MediaGraphSnapshot {
+            graph_id,
+            source_state: MediaGraphSourceState::Open,
+            source_codec: codec,
+            source_payload_type: 111,
+            source_frames: 1,
+            sink_offers: 0,
+            dropped_frames: 0,
+            evictions: 0,
+            transcode_operations: 0,
+            transcode_errors: 0,
+            sinks: Vec::new(),
+            codec_groups: Vec::new(),
+            recent_evictions: Vec::new(),
+        };
+        for debug in [format!("{key:?}"), format!("{snapshot:?}")] {
+            assert!(!debug.contains(CANARY), "graph value leaked: {debug}");
         }
     }
 

@@ -464,7 +464,7 @@ impl fmt::Debug for Event {
 
 /// P9 — per-Session quality + accounting report carried on
 /// `Event::SessionEnded`. Mirrors PRD §10.2.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct SessionQualityReport {
     pub mos: Option<f32>,
     pub packet_loss_pct: f32,
@@ -478,6 +478,31 @@ pub struct SessionQualityReport {
     pub ring_time_ms: Option<u32>,
     pub setup_time_ms: Option<u32>,
     pub hangup_reason: Option<String>,
+}
+
+impl fmt::Debug for SessionQualityReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionQualityReport")
+            .field("mos", &self.mos)
+            .field("packet_loss_pct", &self.packet_loss_pct)
+            .field("jitter_ms", &self.jitter_ms)
+            .field("rtt_ms", &self.rtt_ms)
+            .field("codec_present", &self.codec.is_some())
+            .field("codec_bytes", &self.codec.as_ref().map_or(0, String::len))
+            .field("bitrate_bps", &self.bitrate_bps)
+            .field("talk_pct", &self.talk_pct)
+            .field("silence_pct", &self.silence_pct)
+            .field("pdd_ms", &self.pdd_ms)
+            .field("ring_time_ms", &self.ring_time_ms)
+            .field("setup_time_ms", &self.setup_time_ms)
+            .field("hangup_reason_present", &self.hangup_reason.is_some())
+            .field(
+                "hangup_reason_bytes",
+                &self.hangup_reason.as_ref().map_or(0, String::len),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -854,5 +879,19 @@ mod credential_diagnostic_tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn quality_report_debug_redacts_codec_and_hangup_text() {
+        const CANARY: &str = "quality-report-canary\r\nAuthorization: exposed";
+        let report = SessionQualityReport {
+            codec: Some(CANARY.into()),
+            hangup_reason: Some(CANARY.into()),
+            ..SessionQualityReport::default()
+        };
+        let debug = format!("{report:?}");
+        assert!(!debug.contains(CANARY));
+        assert!(debug.contains("codec_present: true"));
+        assert!(debug.contains("hangup_reason_present: true"));
     }
 }

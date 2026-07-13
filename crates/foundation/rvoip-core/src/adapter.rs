@@ -7,6 +7,7 @@ use crate::ids::ConnectionId;
 use crate::message::Message;
 use crate::stream::MediaStream;
 use crate::DataMessage;
+use std::fmt;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 
@@ -25,7 +26,7 @@ pub use rvoip_core_traits::adapter::{
 /// transport crates. Application-facing subscriptions continue to expose
 /// [`AdapterEvent`] and therefore retain its existing source surface.
 #[doc(hidden)]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub enum OrchestratorAdapterEvent {
     Public(AdapterEvent),
@@ -34,6 +35,23 @@ pub enum OrchestratorAdapterEvent {
         participant_id: String,
         principal: crate::identity::AuthenticatedPrincipal,
     },
+}
+
+impl fmt::Debug for OrchestratorAdapterEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Public(event) => formatter.debug_tuple("Public").field(event).finish(),
+            Self::AuthenticatedInboundConnection { connection, .. } => formatter
+                .debug_struct("AuthenticatedInboundConnection")
+                .field("transport", &connection.transport)
+                .field("direction", &connection.direction)
+                .field("state", &connection.state)
+                .field("stream_count", &connection.streams.len())
+                .field("participant_present", &true)
+                .field("principal_present", &true)
+                .finish(),
+        }
+    }
 }
 
 impl From<AdapterEvent> for OrchestratorAdapterEvent {

@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 macro_rules! id_type {
     ($name:ident, $prefix:expr) => {
-        #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+        #[derive(Clone, Eq, Hash, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
         pub struct $name(pub String);
 
         impl $name {
@@ -31,6 +31,15 @@ macro_rules! id_type {
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str(&self.0)
+            }
+        }
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                // IDs are correlation material. Keep their functional Display
+                // and wire forms intact, but make accidental structured-log
+                // capture metadata-only.
+                f.write_str(concat!(stringify!($name), "([redacted])"))
             }
         }
 
@@ -59,3 +68,26 @@ id_type!(AttachmentId, "att");
 id_type!(AiAttachmentId, "ai");
 id_type!(PlaybackId, "play");
 id_type!(TranscriptionId, "trn");
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn identifier_debug_never_discloses_correlation_values() {
+        const CANARY: &str = "id-diagnostic-canary\r\nAuthorization: exposed";
+        let ids = [
+            format!("{:?}", ConversationId::from_string(CANARY)),
+            format!("{:?}", SessionId::from_string(CANARY)),
+            format!("{:?}", ConnectionId::from_string(CANARY)),
+            format!("{:?}", StreamId::from_string(CANARY)),
+            format!("{:?}", MessageId::from_string(CANARY)),
+            format!("{:?}", TenantId::from_string(CANARY)),
+        ];
+        for debug in ids {
+            assert!(!debug.contains(CANARY));
+            assert!(debug.contains("[redacted]"));
+        }
+        assert_eq!(SessionId::from_string(CANARY).to_string(), CANARY);
+    }
+}

@@ -16,7 +16,7 @@ pub enum StreamKind {
     Data,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MediaFrame {
     pub stream_id: StreamId,
     pub kind: StreamKind,
@@ -33,6 +33,19 @@ pub struct MediaFrame {
     ///
     /// Gap plan §4.3 / CONVERSATION_PROTOCOL.md §7.5.
     pub payload_type: Option<u8>,
+}
+
+impl fmt::Debug for MediaFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MediaFrame")
+            .field("stream_id", &self.stream_id)
+            .field("kind", &self.kind)
+            .field("payload_bytes", &self.payload.len())
+            .field("timestamp_rtp", &self.timestamp_rtp)
+            .field("captured_at", &self.captured_at)
+            .field("payload_type", &self.payload_type)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -106,5 +119,27 @@ impl fmt::Debug for MediaStreamHandle {
             .field("id", &self.0.id())
             .field("kind", &self.0.kind())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn media_frame_debug_reports_shape_without_packet_bytes() {
+        const CANARY: &[u8] = b"media-frame-canary\r\nAuthorization: exposed";
+        let frame = MediaFrame {
+            stream_id: StreamId::from_string("stream-canary"),
+            kind: StreamKind::Audio,
+            payload: Bytes::from_static(CANARY),
+            timestamp_rtp: 123,
+            captured_at: Utc::now(),
+            payload_type: Some(111),
+        };
+        let debug = format!("{frame:?}");
+        assert!(!debug.contains("media-frame-canary"));
+        assert!(!debug.contains("stream-canary"));
+        assert!(debug.contains(&format!("payload_bytes: {}", CANARY.len())));
     }
 }
