@@ -42,6 +42,39 @@ const SMOKE_HEADER_NAME: &str = "X-Test";
 const SMOKE_INFO_VALUE: &str = "info-side";
 const SMOKE_NOTIFY_VALUE: &str = "notify-side";
 
+fn wire_headers(raw_message: &str) -> impl Iterator<Item = (&str, &str)> {
+    raw_message
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name, value.trim()))
+}
+
+fn wire_header_values<'a>(raw_message: &'a str, expected_name: &str) -> Vec<&'a str> {
+    wire_headers(raw_message)
+        .filter_map(|(name, value)| name.eq_ignore_ascii_case(expected_name).then_some(value))
+        .collect()
+}
+
+fn wire_body(raw_message: &str) -> &str {
+    raw_message
+        .split_once("\r\n\r\n")
+        .or_else(|| raw_message.split_once("\n\n"))
+        .map_or("", |(_, body)| body)
+}
+
+fn assert_verbatim_packet(trace: &rvoip_sip::SipTrace) {
+    assert!(
+        !trace.redacted,
+        "wire-contract assertions require explicit development trace passthrough"
+    );
+    assert!(
+        !trace.truncated,
+        "wire-contract assertions require a complete SIP packet"
+    );
+}
+
 /// §10 #23 sub-case (a) — after a successful `.send()`, the
 /// `pending_info_options` slot is cleared. A subsequent INFO on the
 /// same session that omits the trace header MUST NOT carry residue.
@@ -67,15 +100,12 @@ async fn stash_clears_between_successive_in_dialog_sends() {
     let first = wait_for_inbound_method(&mut call.bob_events, "INFO", Duration::from_secs(10))
         .await
         .expect("bob did not see first INFO trace");
-    assert!(
-        first.raw_message.contains(TRACE_HEADER_NAME),
-        "first INFO must carry trace header; wire =\n{}",
-        first.raw_message
-    );
-    assert!(
-        first.raw_message.contains(TRACE_HEADER_VALUE),
-        "first INFO trace value must be on the wire; wire =\n{}",
-        first.raw_message
+    assert_verbatim_packet(&first);
+    assert_eq!(
+        wire_header_values(&first.raw_message, TRACE_HEADER_NAME),
+        vec![TRACE_HEADER_VALUE],
+        "first INFO must carry exactly one trace header; wire =\n{}",
+        first.raw_message,
     );
 
     // Second INFO: NO trace header. If the stash leaked, the second
@@ -90,18 +120,14 @@ async fn stash_clears_between_successive_in_dialog_sends() {
     let second = wait_for_inbound_method(&mut call.bob_events, "INFO", Duration::from_secs(10))
         .await
         .expect("bob did not see second INFO trace");
+    assert_verbatim_packet(&second);
     assert!(
-        !second.raw_message.contains(TRACE_HEADER_NAME),
+        wire_header_values(&second.raw_message, TRACE_HEADER_NAME).is_empty(),
         "stash residue leak: trace header MUST NOT appear on second INFO; wire =\n{}",
-        second.raw_message
+        second.raw_message,
     );
     assert!(
-        !second.raw_message.contains(TRACE_HEADER_VALUE),
-        "stash residue leak: trace value MUST NOT appear on second INFO; wire =\n{}",
-        second.raw_message
-    );
-    assert!(
-        second.raw_message.contains("Signal=2"),
+        wire_body(&second.raw_message).contains("Signal=2"),
         "second INFO body should carry Signal=2; wire =\n{}",
         second.raw_message
     );
@@ -170,15 +196,15 @@ async fn stash_slots_are_independent_across_methods() {
                 if trace.direction != SipTraceDirection::Inbound {
                     continue;
                 }
-                if trace.start_line.starts_with("INFO")
-                    && trace.raw_message.contains(SMOKE_INFO_VALUE)
-                {
-                    saw_info = true;
+                if trace.start_line.starts_with("INFO") {
+                    assert_verbatim_packet(&trace);
+                    saw_info = wire_header_values(&trace.raw_message, SMOKE_HEADER_NAME)
+                        == [SMOKE_INFO_VALUE];
                 }
-                if trace.start_line.starts_with("NOTIFY")
-                    && trace.raw_message.contains(SMOKE_NOTIFY_VALUE)
-                {
-                    saw_notify = true;
+                if trace.start_line.starts_with("NOTIFY") {
+                    assert_verbatim_packet(&trace);
+                    saw_notify = wire_header_values(&trace.raw_message, SMOKE_HEADER_NAME)
+                        == [SMOKE_NOTIFY_VALUE];
                 }
             }
             Ok(Some(_)) => continue,

@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use rvoip_sip::state_table::wiring_manifest::{render_wiring_markdown, WiringKind, EVENT_WIRINGS};
 use rvoip_sip::state_table::yaml_loader::{YamlAction, YamlEvent, YamlStateTable};
 use rvoip_sip::state_table::YamlTableLoader;
+use rvoip_sip::SessionError;
 
 const DEFAULT_YAML: &str = include_str!("../state_tables/default.yaml");
 
@@ -215,7 +216,7 @@ transitions:
     event:
       type: "NotARealEvent"
 "#,
-        "Unknown YAML event",
+        "has invalid event",
     );
 
     assert_yaml_fails(
@@ -231,7 +232,7 @@ transitions:
     actions:
       - type: "NotARealAction"
 "#,
-        "Unknown YAML action",
+        "has invalid action",
     );
 
     assert_yaml_fails(
@@ -273,12 +274,22 @@ fn assert_yaml_fails(yaml: &str, expected: &str) {
     let result = loader.load_from_string(yaml).and_then(|_| loader.build());
     let error = match result {
         Ok(_) => panic!("fixture should fail validation"),
-        Err(error) => error.to_string(),
+        Err(error) => error,
+    };
+    let SessionError::InternalError(detail) = &error else {
+        panic!("expected typed InternalError from YAML validation, got {error:?}");
     };
     assert!(
-        error.contains(expected),
-        "expected error containing '{expected}', got: {error}"
+        detail.contains(expected),
+        "expected internal error detail containing '{expected}', got: {detail}"
     );
+
+    let rendered = error.to_string();
+    assert!(
+        !rendered.contains(detail),
+        "SessionError Display must not expose YAML validation details"
+    );
+    assert!(rendered.contains("redacted"));
 }
 
 fn event_name(event: &YamlEvent) -> String {
