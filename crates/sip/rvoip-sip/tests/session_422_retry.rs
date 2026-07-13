@@ -70,7 +70,7 @@ fn build_422(request: &Request, min_se: u32) -> Vec<u8> {
 /// dialog is properly established on the UAC side. Fixes up Content-Length
 /// and Content-Type to match the body (create_response defaults to
 /// Content-Length: 0 for an empty body).
-fn build_200(request: &Request, uas_port: u16) -> Vec<u8> {
+fn build_200(request: &Request, uas_rtp_port: u16) -> Vec<u8> {
     let mut resp = create_response(request, StatusCode::Ok);
     if let Some(TypedHeader::To(to)) = resp
         .headers
@@ -89,7 +89,7 @@ fn build_200(request: &Request, uas_port: u16) -> Vec<u8> {
          m=audio {} RTP/AVP 0\r\n\
          a=rtpmap:0 PCMU/8000\r\n\
          a=sendrecv\r\n",
-        uas_port + 2
+        uas_rtp_port
     );
     let body_bytes = sdp.into_bytes();
     let body_len = body_bytes.len() as u32;
@@ -117,7 +117,7 @@ struct MockUas {
     reject_count: u32,
 }
 
-async fn run_mock_uas(sock: Arc<UdpSocket>, uas: Arc<MockUas>, uas_port: u16) {
+async fn run_mock_uas(sock: Arc<UdpSocket>, uas: Arc<MockUas>, uas_rtp_port: u16) {
     let mut buf = vec![0u8; 8192];
     loop {
         let (n, from) = match sock.recv_from(&mut buf).await {
@@ -146,7 +146,7 @@ async fn run_mock_uas(sock: Arc<UdpSocket>, uas: Arc<MockUas>, uas_port: u16) {
                 let bytes = if count < uas.reject_count {
                     build_422(&request, UAS_MIN_SE)
                 } else {
-                    build_200(&request, uas_port)
+                    build_200(&request, uas_rtp_port)
                 };
                 let _ = sock.send_to(&bytes, from).await;
             }
@@ -163,10 +163,13 @@ async fn run_mock_uas(sock: Arc<UdpSocket>, uas: Arc<MockUas>, uas_port: u16) {
     }
 }
 
-fn client_config(client_port: u16) -> Config {
+fn client_config() -> Config {
     // Build on `Config::local` so newly-added fields (TLS / SRTP /
-    // PAI / outbound proxy / etc.) inherit defaults automatically.
-    let mut config = Config::local("alice", client_port);
+    // PAI / outbound proxy / etc.) inherit defaults automatically. Port 0
+    // keeps the listener allocation atomic: the SIP transport binds its own
+    // OS-assigned port instead of racing another test after a probe socket is
+    // released.
+    let mut config = Config::local("alice", 0);
     config.media_port_start = 41000;
     config.media_port_end = 41100;
     // Set Session-Expires below UAS's Min-SE so the first INVITE gets 422'd.
@@ -181,16 +184,18 @@ async fn invite_422_retry_bumps_session_expires_and_succeeds() {
         .with_max_level(tracing::Level::WARN)
         .try_init();
 
-    // Randomized ports avoid collisions when the two tests in this file run
-    // concurrently under `cargo test`.
-    let uas_port = 35200 + (rand::random::<u16>() % 100);
-    let client_port = uas_port + 200;
-
-    let sock = Arc::new(
-        UdpSocket::bind(format!("127.0.0.1:{}", uas_port))
-            .await
-            .expect("mock uas bind"),
-    );
+    let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("mock uas bind"));
+    let uas_port = sock.local_addr().expect("mock uas address").port();
+    // Keep the OS-assigned RTP destination bound for the lifetime of the
+    // call. This avoids both fixed-port collisions and the bind/release race
+    // inherent in probing for an available port.
+    let _uas_rtp_sink = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("mock uas RTP bind");
+    let uas_rtp_port = _uas_rtp_sink
+        .local_addr()
+        .expect("mock uas RTP address")
+        .port();
 
     let uas = Arc::new(MockUas {
         invite_count: Arc::new(AtomicU32::new(0)),
@@ -199,9 +204,9 @@ async fn invite_422_retry_bumps_session_expires_and_succeeds() {
         reject_count: 1, // First INVITE gets 422, retry succeeds.
     });
 
-    let uas_handle = tokio::spawn(run_mock_uas(sock.clone(), uas.clone(), uas_port));
+    let uas_handle = tokio::spawn(run_mock_uas(sock.clone(), uas.clone(), uas_rtp_port));
 
-    let config = client_config(client_port);
+    let config = client_config();
     let mut peer = StreamPeer::with_config(config).await.expect("peer");
 
     let call_id = peer
@@ -261,14 +266,15 @@ async fn invite_422_retry_cap_surfaces_call_failed() {
         .with_max_level(tracing::Level::WARN)
         .try_init();
 
-    let uas_port = 35400 + (rand::random::<u16>() % 100);
-    let client_port = uas_port + 200;
-
-    let sock = Arc::new(
-        UdpSocket::bind(format!("127.0.0.1:{}", uas_port))
-            .await
-            .expect("mock uas bind"),
-    );
+    let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("mock uas bind"));
+    let uas_port = sock.local_addr().expect("mock uas address").port();
+    let _uas_rtp_sink = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("mock uas RTP bind");
+    let uas_rtp_port = _uas_rtp_sink
+        .local_addr()
+        .expect("mock uas RTP address")
+        .port();
 
     let uas = Arc::new(MockUas {
         invite_count: Arc::new(AtomicU32::new(0)),
@@ -277,9 +283,9 @@ async fn invite_422_retry_cap_surfaces_call_failed() {
         reject_count: u32::MAX, // Always reject with 422.
     });
 
-    let uas_handle = tokio::spawn(run_mock_uas(sock.clone(), uas.clone(), uas_port));
+    let uas_handle = tokio::spawn(run_mock_uas(sock.clone(), uas.clone(), uas_rtp_port));
 
-    let config = client_config(client_port);
+    let config = client_config();
     let mut peer = StreamPeer::with_config(config).await.expect("peer");
 
     let call_id = peer
