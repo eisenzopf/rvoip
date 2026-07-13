@@ -1004,16 +1004,17 @@ impl RedisAuthProvider {
     }
 
     fn rate_limit_cohorts(&self, key: &AuthRateLimitKey) -> (String, String) {
+        // The provider namespace is the trusted tenant boundary. `realm` is
+        // supplied before credential validation and can be attacker-chosen,
+        // so including it here would let realm rotation bypass both limits.
         let peer = format!(
-            "kind={:?}|realm={}|peer={}",
+            "kind={:?}|peer={}",
             key.kind,
-            key.realm.as_deref().unwrap_or("_"),
             key.peer.as_deref().unwrap_or("_")
         );
         let subject = format!(
-            "kind={:?}|realm={}|subject={}",
+            "kind={:?}|subject={}",
             key.kind,
-            key.realm.as_deref().unwrap_or("_"),
             key.subject.as_deref().unwrap_or("_")
         );
         (digest_key(&peer), digest_key(&subject))

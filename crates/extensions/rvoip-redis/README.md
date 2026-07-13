@@ -51,7 +51,9 @@ intentional migration behavior and avoids an unbounded compatibility fallback.
 and a subject aggregate in one Lua operation. A failure retains one count; a
 success releases only the matching reservation, and repeated completion is
 idempotent. This avoids check-then-record races, double counting, username
-rotation around peer limits, and peer rotation around subject limits.
+or realm rotation around peer limits, and peer or realm rotation around
+subject limits. The configured provider namespace is the trusted tenant
+boundary; pre-authentication realm values never shard these aggregates.
 
 Rate-limit state uses a fixed set of Redis keys with bounded peer, subject,
 and incomplete-reservation cohorts. Configure those bounds with

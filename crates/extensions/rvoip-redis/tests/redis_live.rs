@@ -366,14 +366,14 @@ async fn rate_limiter_aggregates_peers_and_subjects_without_cross_release() {
     };
     provider.clear_namespace_for_tests().await.unwrap();
 
-    let peer_key = |subject: &str| {
+    let peer_key = |subject: &str, realm: &str| {
         AuthRateLimitKey::new(AuthRateLimitKind::SipRegister)
             .with_subject(subject)
-            .with_realm("pbx.example.test")
+            .with_realm(realm)
             .with_peer("198.51.100.20")
     };
     let AuthAttemptAdmission::Reserved(peer_failure) = provider
-        .reserve_auth_attempt(&peer_key("alice"))
+        .reserve_auth_attempt(&peer_key("alice", "pbx-a.example.test"))
         .await
         .unwrap()
     else {
@@ -387,7 +387,7 @@ async fn rate_limiter_aggregates_peers_and_subjects_without_cross_release() {
         .await
         .unwrap();
     let AuthAttemptAdmission::Reserved(peer_success) = provider
-        .reserve_auth_attempt(&peer_key("bob"))
+        .reserve_auth_attempt(&peer_key("bob", "pbx-b.example.test"))
         .await
         .unwrap()
     else {
@@ -398,7 +398,7 @@ async fn rate_limiter_aggregates_peers_and_subjects_without_cross_release() {
         .await
         .unwrap();
     let AuthAttemptAdmission::Reserved(peer_second_failure) = provider
-        .reserve_auth_attempt(&peer_key("carol"))
+        .reserve_auth_attempt(&peer_key("carol", "pbx-c.example.test"))
         .await
         .unwrap()
     else {
@@ -413,21 +413,24 @@ async fn rate_limiter_aggregates_peers_and_subjects_without_cross_release() {
         .unwrap();
     assert!(matches!(
         provider
-            .reserve_auth_attempt(&peer_key("rotated-user"))
+            .reserve_auth_attempt(&peer_key("rotated-user", "rotated-realm.example.test"))
             .await
             .unwrap(),
         AuthAttemptAdmission::Denied { .. }
     ));
 
-    let subject_key = |peer: &str| {
+    let subject_key = |peer: &str, realm: &str| {
         AuthRateLimitKey::new(AuthRateLimitKind::Digest)
             .with_subject("shared-subject")
-            .with_realm("pbx.example.test")
+            .with_realm(realm)
             .with_peer(peer)
     };
-    for peer in ["198.51.100.30", "198.51.100.31"] {
+    for (peer, realm) in [
+        ("198.51.100.30", "pbx-a.example.test"),
+        ("198.51.100.31", "pbx-b.example.test"),
+    ] {
         let AuthAttemptAdmission::Reserved(reservation) = provider
-            .reserve_auth_attempt(&subject_key(peer))
+            .reserve_auth_attempt(&subject_key(peer, realm))
             .await
             .unwrap()
         else {
@@ -443,7 +446,7 @@ async fn rate_limiter_aggregates_peers_and_subjects_without_cross_release() {
     }
     assert!(matches!(
         provider
-            .reserve_auth_attempt(&subject_key("198.51.100.32"))
+            .reserve_auth_attempt(&subject_key("198.51.100.32", "rotated-realm.example.test",))
             .await
             .unwrap(),
         AuthAttemptAdmission::Denied { .. }
