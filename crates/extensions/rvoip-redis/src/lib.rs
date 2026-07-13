@@ -191,12 +191,13 @@ impl RedisAuthProvider {
         format!("{}:digest:nonce:{}", self.config.namespace, hex_key(nonce))
     }
 
-    fn nonce_count_key(&self, username: &str, nonce: &str) -> String {
+    fn nonce_count_key(&self, username: &str, nonce: &str, cnonce: &str) -> String {
         format!(
-            "{}:digest:nc:{}:{}",
+            "{}:digest:nc:{}:{}:{}",
             self.config.namespace,
             hex_key(username),
-            hex_key(nonce)
+            hex_key(nonce),
+            hex_key(cnonce)
         )
     }
 
@@ -267,6 +268,7 @@ impl DigestReplayStore for RedisAuthProvider {
         &self,
         username: &str,
         nonce: &str,
+        cnonce: &str,
         nonce_count: u32,
     ) -> Result<bool, CredentialAuthError> {
         let mut connection = self.connection().await.map_credential_error()?;
@@ -281,7 +283,7 @@ impl DigestReplayStore for RedisAuthProvider {
             return 1
             "#,
         )
-        .key(self.nonce_count_key(username, nonce))
+        .key(self.nonce_count_key(username, nonce, cnonce))
         .arg(nonce_count)
         .arg(ttl)
         .invoke_async(&mut connection)

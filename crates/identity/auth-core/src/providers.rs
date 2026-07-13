@@ -226,8 +226,11 @@ pub enum DigestNonceStatus {
 
 /// Shared replay store for clustered SIP Digest UAS deployments.
 ///
-/// Implementations should key nonce-count replay by `(username, nonce)`, not by
-/// cnonce, because clients can change cnonce while replaying an old nonce-count.
+/// Implementations must key nonce-count replay by `(username, nonce, cnonce)`.
+/// A nonce may intentionally be shared by multiple clients when challenge
+/// admission is saturated; the client nonce keeps those independent Digest
+/// sequences from locking one another out. Replays within one client sequence
+/// are still rejected because its nonce-count must increase monotonically.
 #[async_trait]
 pub trait DigestReplayStore: Send + Sync {
     /// Record an issued nonce with its expiry time.
@@ -245,11 +248,12 @@ pub trait DigestReplayStore: Send + Sync {
     ) -> Result<DigestNonceStatus, CredentialAuthError>;
 
     /// Atomically accept a nonce-count only if it is greater than the last
-    /// accepted value for `(username, nonce)`.
+    /// accepted value for `(username, nonce, cnonce)`.
     async fn accept_nonce_count(
         &self,
         username: &str,
         nonce: &str,
+        cnonce: &str,
         nonce_count: u32,
     ) -> Result<bool, CredentialAuthError>;
 }

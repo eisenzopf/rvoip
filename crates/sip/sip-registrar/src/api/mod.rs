@@ -38,7 +38,7 @@ struct IssuedDigestNonce {
 #[derive(Default)]
 struct RegisterDigestReplayState {
     nonces: HashMap<String, IssuedDigestNonce>,
-    nonce_counts: HashMap<(String, String), u32>,
+    nonce_counts: HashMap<(String, String, String), u32>,
 }
 
 enum IssuedNonceStatus {
@@ -52,7 +52,7 @@ impl RegisterDigestReplayState {
         self.nonces.retain(|_, issued| issued.retain_until > now);
         let retained_nonces: HashSet<&str> = self.nonces.keys().map(String::as_str).collect();
         self.nonce_counts
-            .retain(|(_, nonce), _| retained_nonces.contains(nonce.as_str()));
+            .retain(|(_, nonce, _), _| retained_nonces.contains(nonce.as_str()));
     }
 
     /// Reclaim only expired challenges when admission is under pressure.
@@ -66,7 +66,7 @@ impl RegisterDigestReplayState {
         self.nonces.retain(|_, issued| issued.expires_at > now);
         let retained_nonces: HashSet<&str> = self.nonces.keys().map(String::as_str).collect();
         self.nonce_counts
-            .retain(|(_, nonce), _| retained_nonces.contains(nonce.as_str()));
+            .retain(|(_, nonce, _), _| retained_nonces.contains(nonce.as_str()));
     }
 }
 
@@ -369,6 +369,7 @@ impl RegistrarService {
             && self.accept_register_nonce_count(
                 &digest_response.username,
                 &digest_response.nonce,
+                digest_response.cnonce.as_deref().expect("validated above"),
                 nonce_count.expect("validated above"),
             );
 
@@ -460,7 +461,13 @@ impl RegistrarService {
         }
     }
 
-    fn accept_register_nonce_count(&self, username: &str, nonce: &str, count: u32) -> bool {
+    fn accept_register_nonce_count(
+        &self,
+        username: &str,
+        nonce: &str,
+        cnonce: &str,
+        count: u32,
+    ) -> bool {
         let Some(replay) = &self.digest_replay else {
             return false;
         };
@@ -477,7 +484,7 @@ impl RegistrarService {
             return false;
         }
 
-        let key = (username.to_string(), nonce.to_string());
+        let key = (username.to_string(), nonce.to_string(), cnonce.to_string());
         if let Some(previous) = replay.nonce_counts.get_mut(&key) {
             if count <= *previous {
                 return false;
@@ -1059,6 +1066,42 @@ mod digest_replay_tests {
                 .unwrap()
                 .0,
             "a legitimate proof must survive unauthenticated challenge churn"
+        );
+
+        let shared =
+            DigestAuthenticator::parse_challenge(&service.issue_register_digest_challenge(false))
+                .unwrap();
+        let first_client = authorization(&shared, uri, 1);
+        let second_client = authorization(&shared, uri, 1);
+        let first_cnonce = DigestAuthenticator::parse_authorization(&first_client)
+            .unwrap()
+            .cnonce;
+        let second_cnonce = DigestAuthenticator::parse_authorization(&second_client)
+            .unwrap()
+            .cnonce;
+        assert_ne!(first_cnonce, second_cnonce);
+        assert!(
+            service
+                .authenticate_register("alice", Some(&first_client), "REGISTER", uri)
+                .await
+                .unwrap()
+                .0
+        );
+        assert!(
+            service
+                .authenticate_register("alice", Some(&second_client), "REGISTER", uri)
+                .await
+                .unwrap()
+                .0,
+            "distinct clients sharing a saturated nonce must each start at nc=1"
+        );
+        assert!(
+            !service
+                .authenticate_register("alice", Some(&second_client), "REGISTER", uri)
+                .await
+                .unwrap()
+                .0,
+            "replaying the same cnonce/nc sequence must still fail"
         );
     }
 

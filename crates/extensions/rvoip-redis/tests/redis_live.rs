@@ -48,19 +48,23 @@ async fn digest_replay_store_round_trips_against_redis() {
         DigestNonceStatus::Active
     );
     assert!(provider
-        .accept_nonce_count("alice", "nonce-1", 1)
+        .accept_nonce_count("alice", "nonce-1", "client-a", 1)
         .await
         .unwrap());
     assert!(!provider
-        .accept_nonce_count("alice", "nonce-1", 1)
+        .accept_nonce_count("alice", "nonce-1", "client-a", 1)
         .await
         .unwrap());
     assert!(!provider
-        .accept_nonce_count("alice", "nonce-1", 0)
+        .accept_nonce_count("alice", "nonce-1", "client-a", 0)
         .await
         .unwrap());
     assert!(provider
-        .accept_nonce_count("alice", "nonce-1", 2)
+        .accept_nonce_count("alice", "nonce-1", "client-a", 2)
+        .await
+        .unwrap());
+    assert!(provider
+        .accept_nonce_count("alice", "nonce-1", "client-b", 1)
         .await
         .unwrap());
 
@@ -105,7 +109,7 @@ async fn digest_nonce_count_concurrent_replay_allows_only_one_same_count() {
         let provider = provider.clone();
         tasks.push(tokio::spawn(async move {
             provider
-                .accept_nonce_count("alice", "nonce-concurrent", 1)
+                .accept_nonce_count("alice", "nonce-concurrent", "same-client", 1)
                 .await
                 .unwrap()
         }));
@@ -122,11 +126,11 @@ async fn digest_nonce_count_concurrent_replay_allows_only_one_same_count() {
         "only one concurrent Digest request can consume the same nonce-count"
     );
     assert!(provider
-        .accept_nonce_count("alice", "nonce-concurrent", 2)
+        .accept_nonce_count("alice", "nonce-concurrent", "same-client", 2)
         .await
         .unwrap());
     assert!(!provider
-        .accept_nonce_count("alice", "nonce-concurrent", 2)
+        .accept_nonce_count("alice", "nonce-concurrent", "same-client", 2)
         .await
         .unwrap());
 

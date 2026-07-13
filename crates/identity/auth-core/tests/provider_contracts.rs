@@ -11,7 +11,7 @@ use rvoip_auth_core::{
 #[derive(Default)]
 struct MemoryDigestReplayStore {
     nonces: Mutex<HashMap<String, SystemTime>>,
-    counts: Mutex<HashMap<(String, String), u32>>,
+    counts: Mutex<HashMap<(String, String, String), u32>>,
 }
 
 #[async_trait::async_trait]
@@ -45,9 +45,10 @@ impl DigestReplayStore for MemoryDigestReplayStore {
         &self,
         username: &str,
         nonce: &str,
+        cnonce: &str,
         nonce_count: u32,
     ) -> Result<bool, CredentialAuthError> {
-        let key = (username.to_string(), nonce.to_string());
+        let key = (username.to_string(), nonce.to_string(), cnonce.to_string());
         let mut counts = self.counts.lock().expect("count lock");
         if counts.get(&key).is_some_and(|last| nonce_count <= *last) {
             return Ok(false);
@@ -102,10 +103,26 @@ async fn digest_replay_store_rejects_same_or_lower_nonce_count() {
         store.nonce_status("n1", SystemTime::now()).await.unwrap(),
         DigestNonceStatus::Active
     );
-    assert!(store.accept_nonce_count("alice", "n1", 1).await.unwrap());
-    assert!(!store.accept_nonce_count("alice", "n1", 1).await.unwrap());
-    assert!(!store.accept_nonce_count("alice", "n1", 0).await.unwrap());
-    assert!(store.accept_nonce_count("alice", "n1", 2).await.unwrap());
+    assert!(store
+        .accept_nonce_count("alice", "n1", "client-a", 1)
+        .await
+        .unwrap());
+    assert!(!store
+        .accept_nonce_count("alice", "n1", "client-a", 1)
+        .await
+        .unwrap());
+    assert!(!store
+        .accept_nonce_count("alice", "n1", "client-a", 0)
+        .await
+        .unwrap());
+    assert!(store
+        .accept_nonce_count("alice", "n1", "client-a", 2)
+        .await
+        .unwrap());
+    assert!(store
+        .accept_nonce_count("alice", "n1", "client-b", 1)
+        .await
+        .unwrap());
 }
 
 #[tokio::test]

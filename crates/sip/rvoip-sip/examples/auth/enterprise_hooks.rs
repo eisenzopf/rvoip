@@ -185,7 +185,7 @@ impl DigestSecretProvider for StaticDigestProvider {
 #[derive(Default)]
 struct MemoryDigestReplayStore {
     nonces: Mutex<HashMap<String, SystemTime>>,
-    nonce_counts: Mutex<HashMap<(String, String), u32>>,
+    nonce_counts: Mutex<HashMap<(String, String, String), u32>>,
 }
 
 #[async_trait]
@@ -218,9 +218,10 @@ impl DigestReplayStore for MemoryDigestReplayStore {
         &self,
         username: &str,
         nonce: &str,
+        cnonce: &str,
         nonce_count: u32,
     ) -> std::result::Result<bool, CredentialAuthError> {
-        let key = (username.to_string(), nonce.to_string());
+        let key = (username.to_string(), nonce.to_string(), cnonce.to_string());
         let mut counts = self.nonce_counts.lock().unwrap();
         if counts.get(&key).is_some_and(|last| nonce_count <= *last) {
             println!("[replay] rejected nonce-count replay for {username}");
