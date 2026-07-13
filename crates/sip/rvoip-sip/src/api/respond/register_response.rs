@@ -243,7 +243,10 @@ impl RegisterResponseBuilder {
         let extra_headers_wire = extras
             .into_iter()
             .map(|h| {
-                let name = format!("{:?}", h.name());
+                // This tuple crosses into dialog-core and becomes wire data.
+                // Use the canonical RFC/extension spelling, never the
+                // deliberately redacted diagnostic representation.
+                let name = h.name().canonical_wire_name().as_str().to_string();
                 let value = render_typed_header_value(&h);
                 (name, value)
             })
@@ -490,5 +493,34 @@ fn default_reason_for(status: u16) -> &'static str {
         423 => "Interval Too Brief",
         503 => "Service Unavailable",
         _ => "Rejected",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rvoip_sip_core::types::headers::HeaderName;
+
+    #[test]
+    fn staged_register_response_headers_keep_wire_names() {
+        let fields = RegisterResponseBuilder::new("register-transaction", None)
+            .with_raw_header(HeaderName::Other("sUpPoRtEd".into()), "outbound")
+            .expect("Supported is application-controlled on REGISTER responses")
+            .with_raw_header(HeaderName::Other("x-VENDOR-trace".into()), "trace-value")
+            .expect("extension header is application-controlled")
+            .build_event_fields()
+            .expect("event fields");
+
+        assert_eq!(
+            fields.extra_headers,
+            vec![
+                ("Supported".to_string(), "outbound".to_string()),
+                ("X-Vendor-Trace".to_string(), "trace-value".to_string()),
+            ]
+        );
+        assert!(fields
+            .extra_headers
+            .iter()
+            .all(|(name, _)| !name.contains("HeaderName")));
     }
 }

@@ -156,10 +156,7 @@ impl IncomingCall {
         let mut headers: HashMap<String, String> = HashMap::new();
         for hdr in &request.headers {
             let name = hdr.name();
-            let key = match &name {
-                HeaderName::Other(s) => s.to_ascii_lowercase(),
-                other => format!("{:?}", other).to_ascii_lowercase(),
-            };
+            let key = legacy_header_key(&name);
             // Keep first-seen wire value for the legacy HashMap.
             headers.entry(key).or_insert_with(|| hdr.to_string());
         }
@@ -543,6 +540,15 @@ impl IncomingCall {
             status,
         )
     }
+}
+
+/// Return the historical lowercase map key from the canonical SIP wire name.
+///
+/// The legacy map is protocol data despite being deprecated, so its keys must
+/// never be derived from `Debug`: diagnostic output is deliberately redacted
+/// and is free to change independently of RFC header spelling.
+fn legacy_header_key(name: &HeaderName) -> String {
+    name.canonical_wire_name().as_str().to_ascii_lowercase()
 }
 
 impl SipHeaderView for IncomingCall {
@@ -1838,6 +1844,26 @@ fn effective_transport_security_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_header_keys_use_canonical_wire_spelling_without_debug() {
+        assert_eq!(legacy_header_key(&HeaderName::CallId), "call-id");
+        assert_eq!(
+            legacy_header_key(&HeaderName::Other("i".into())),
+            "call-id",
+            "compact standard names must expand before entering the legacy map"
+        );
+        assert_eq!(
+            legacy_header_key(&HeaderName::Other("X-Vendor-Trace".into())),
+            "x-vendor-trace"
+        );
+
+        let debug = format!("{:?}", HeaderName::CallId);
+        assert_ne!(
+            legacy_header_key(&HeaderName::CallId),
+            debug.to_ascii_lowercase()
+        );
+    }
     use crate::api::unified::Config;
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 

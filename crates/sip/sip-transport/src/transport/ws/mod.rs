@@ -28,9 +28,10 @@ pub use crate::transport::tls::{TlsClientConfig, TlsServerClientAuthConfig};
 #[cfg(feature = "wss")]
 use tokio_rustls::TlsConnector;
 
-// SIP WebSocket subprotocol names as per RFC 7118
+// RFC 7118 registers exactly one WebSocket subprotocol token for SIP.
+// Transport security is selected by the ws:// versus wss:// URI, not by a
+// second `sips` subprotocol token.
 pub(crate) const SIP_WS_SUBPROTOCOL: &str = "sip";
-pub(crate) const SIP_WSS_SUBPROTOCOL: &str = "sips";
 
 fn selected_subprotocol_is_exact(selected: Option<&str>, expected: &str) -> bool {
     selected.is_some_and(|value| value == expected)
@@ -446,8 +447,8 @@ impl WebSocketTransport {
     ///    leaves the connector unset and WSS dials error with
     ///    `NotImplemented`; use [`Self::bind_with_client_tls`].
     /// 3. Build a WS handshake request with
-    ///    `Sec-WebSocket-Protocol: sip` (or `sips` for WSS) per
-    ///    RFC 7118 §4.5.
+    ///    `Sec-WebSocket-Protocol: sip` for both WS and WSS per RFC 7118
+    ///    §4.5.
     /// 4. Call `tokio_tungstenite::client_async` to negotiate the
     ///    WS upgrade on the established stream (plain TCP or TLS).
     /// 5. Register the resulting connection in the pool and spawn
@@ -534,7 +535,7 @@ impl WebSocketTransport {
                         })?;
                 (
                     SipWsStream::ClientTls(tls_stream),
-                    SIP_WSS_SUBPROTOCOL,
+                    SIP_WS_SUBPROTOCOL,
                     "wss",
                 )
             }
@@ -549,8 +550,8 @@ impl WebSocketTransport {
         };
 
         // Step 3 — build the WS handshake URL + subprotocol header.
-        // Per RFC 7118 §4.5 the client advertises `sip` for ws:// and
-        // `sips` for wss://.
+        // Per RFC 7118 §4.5 the client advertises `sip` for both ws:// and
+        // wss://. TLS is represented by the URI scheme, not the subprotocol.
         let url = format!("{}://{}/", url_scheme, addr);
         let mut request = url.into_client_request().map_err(|_error| {
             Error::WebSocketHandshakeFailed(format!(
@@ -739,7 +740,6 @@ mod tests {
         assert!(!selected_subprotocol_is_exact(Some("chat"), "sip"));
         assert!(!selected_subprotocol_is_exact(Some("sips"), "sip"));
         assert!(selected_subprotocol_is_exact(Some("sip"), "sip"));
-        assert!(selected_subprotocol_is_exact(Some("sips"), "sips"));
     }
     use rvoip_sip_core::builder::SimpleRequestBuilder;
     use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};

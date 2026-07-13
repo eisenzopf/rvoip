@@ -247,12 +247,20 @@ async fn wss_server_accepts_tls_handshake_and_negotiates_sip_subprotocol() {
     let mut request = url.into_client_request().expect("ws request");
     request.headers_mut().insert(
         "Sec-WebSocket-Protocol",
-        http::HeaderValue::from_static("sips"),
+        http::HeaderValue::from_static("sip"),
     );
 
-    let (mut ws_stream, _response) = tokio_tungstenite::client_async(request, tls_stream)
+    let (mut ws_stream, response) = tokio_tungstenite::client_async(request, tls_stream)
         .await
         .expect("ws upgrade over tls");
+    assert_eq!(
+        response
+            .headers()
+            .get("Sec-WebSocket-Protocol")
+            .and_then(|value| value.to_str().ok()),
+        Some("sip"),
+        "RFC 7118 requires the exact `sip` subprotocol for WSS"
+    );
 
     // The successful upgrade proves the WSS accept path:
     //  - TlsAcceptor::accept() handled the rustls handshake

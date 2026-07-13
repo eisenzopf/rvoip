@@ -17,13 +17,10 @@ use crate::error::{Error, Result};
 use crate::transport::{validate_typed_outbound_message, TransportConnectionMetadata};
 use rvoip_sip_core::{parse_message, Message};
 
-// SIP WebSocket subprotocol names as per RFC 7118. `SIP_WS_SUBPROTOCOL`
-// is referenced by the in-file tests; the others document the protocol
-// constants the upcoming SIP-over-WS path will consume.
+// SIP WebSocket subprotocol name as registered by RFC 7118. WS and WSS both
+// negotiate `sip`; TLS is represented by the URI scheme.
 #[allow(dead_code)]
 const SIP_WS_SUBPROTOCOL: &str = "sip";
-#[allow(dead_code)]
-const SIP_WSS_SUBPROTOCOL: &str = "sips";
 
 // Maximum message size in bytes.
 #[allow(dead_code)]
@@ -40,7 +37,7 @@ pub struct WebSocketConnection {
     closed: AtomicBool,
     /// Whether this is a secure WebSocket connection
     secure: bool,
-    /// The selected subprotocol (sip or sips)
+    /// The selected RFC 7118 subprotocol (`sip` for both WS and WSS)
     subprotocol: String,
     /// Verified TLS client identity retained for every message on an inbound
     /// WSS connection.
@@ -433,7 +430,7 @@ mod tests {
     async fn test_websocket_connection_parameters() {
         let addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
         let secure = true;
-        let subprotocol = "sips".to_string();
+        let subprotocol = SIP_WS_SUBPROTOCOL.to_string();
 
         let connection = TestWebSocketConnection::new(addr, secure, subprotocol.clone());
 

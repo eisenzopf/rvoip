@@ -15,18 +15,14 @@ use tracing::{debug, error, info};
 use tokio_rustls::TlsAcceptor;
 
 use super::connection::WebSocketConnection;
-use super::{SipWsStream, SIP_WSS_SUBPROTOCOL, SIP_WS_SUBPROTOCOL};
+use super::{SipWsStream, SIP_WS_SUBPROTOCOL};
 use crate::error::{Error, Result};
 #[cfg(feature = "wss")]
 use crate::transport::tls::TlsServerClientAuthConfig;
 
 #[cfg(feature = "ws")]
-fn select_sip_subprotocol(offered: Option<&str>, secure: bool) -> Option<&'static str> {
-    let required = if secure {
-        SIP_WSS_SUBPROTOCOL
-    } else {
-        SIP_WS_SUBPROTOCOL
-    };
+fn select_sip_subprotocol(offered: Option<&str>, _secure: bool) -> Option<&'static str> {
+    let required = SIP_WS_SUBPROTOCOL;
     offered
         .map(|value| value.split(',').map(str::trim).any(|item| item == required))
         .is_some_and(|matched| matched)
@@ -402,11 +398,8 @@ mod tests {
             select_sip_subprotocol(Some("chat, sip"), false),
             Some("sip")
         );
-        assert_eq!(select_sip_subprotocol(Some("sip"), true), None);
-        assert_eq!(
-            select_sip_subprotocol(Some("chat, sips"), true),
-            Some("sips")
-        );
+        assert_eq!(select_sip_subprotocol(Some("sips"), true), None);
+        assert_eq!(select_sip_subprotocol(Some("chat, sip"), true), Some("sip"));
     }
 
     /// Test binding a WebSocket listener

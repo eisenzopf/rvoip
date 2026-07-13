@@ -229,6 +229,7 @@ use base64::Engine as _;
 use rvoip_core_traits::identity::{
     AuthenticatedPrincipal, AuthenticationMethod, CredentialKind, IdentityAssurance,
 };
+use sha2::{Digest, Sha256};
 
 use crate::errors::{redacted_auth_failure, AuthFailureStage, Result, SessionError};
 use crate::types::Credentials;
@@ -3071,11 +3072,83 @@ fn identity_from_bearer_assurance(
         other => AuthIdentity {
             scheme: SipAuthScheme::Bearer,
             username: None,
-            subject: Some(format!("{other:?}")),
+            subject: Some(fallback_bearer_assurance_subject(&other)),
             realm,
             scopes: Vec::new(),
             source,
         },
+    }
+}
+
+/// Derive a stable, credential-free subject when a legacy Bearer validator
+/// returns assurance without a first-class principal subject.
+///
+/// The assurance variant is an explicit domain separator and every retained
+/// field is length-prefixed before SHA-256. This keeps subjects distinct
+/// without copying JWKs or DTLS fingerprints into application-visible state.
+/// Diagnostic formatting is intentionally not involved: `Debug` is redacted
+/// and does not have protocol stability guarantees.
+fn fallback_bearer_assurance_subject(assurance: &IdentityAssurance) -> String {
+    let (kind, fields): (&'static str, Vec<Vec<u8>>) = match assurance {
+        IdentityAssurance::Anonymous => ("anonymous", Vec::new()),
+        IdentityAssurance::Pseudonymous { ephemeral_key } => (
+            "pseudonymous",
+            vec![serde_json::to_vec(&ephemeral_key.0)
+                .expect("serde_json::Value is always serializable")],
+        ),
+        IdentityAssurance::Identified { credential_kind } => (
+            "identified",
+            vec![credential_kind_label(*credential_kind).as_bytes().to_vec()],
+        ),
+        IdentityAssurance::DtlsFingerprint { algorithm, value } => (
+            "dtls-fingerprint",
+            vec![algorithm.as_bytes().to_vec(), value.as_bytes().to_vec()],
+        ),
+        // These variants are handled above because they carry a meaningful
+        // subject and scopes. Keep this branch total if the matching logic is
+        // refactored later, without ever falling back to `Debug`.
+        IdentityAssurance::TaskScoped {
+            identity, task_id, ..
+        } => (
+            "task-scoped",
+            vec![
+                identity.as_str().as_bytes().to_vec(),
+                task_id.as_bytes().to_vec(),
+            ],
+        ),
+        IdentityAssurance::UserAuthorized { user_id, .. } => (
+            "user-authorized",
+            vec![user_id.as_str().as_bytes().to_vec()],
+        ),
+    };
+
+    let mut digest = Sha256::new();
+    digest.update(b"rvoip:sip:bearer-assurance-subject:v1\0");
+    update_length_prefixed(&mut digest, kind.as_bytes());
+    for field in fields {
+        update_length_prefixed(&mut digest, &field);
+    }
+    let digest = digest.finalize();
+    let mut fingerprint = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut fingerprint, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("urn:rvoip:sip:bearer-assurance:{kind}:sha256:{fingerprint}")
+}
+
+fn update_length_prefixed(digest: &mut Sha256, value: &[u8]) {
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value);
+}
+
+const fn credential_kind_label(kind: CredentialKind) -> &'static str {
+    match kind {
+        CredentialKind::OAuth2Dpop => "oauth2-dpop",
+        CredentialKind::Oidc => "oidc",
+        CredentialKind::SipDigest => "sip-digest",
+        CredentialKind::Passkey => "passkey",
+        CredentialKind::AAuth => "aauth",
     }
 }
 
@@ -4211,6 +4284,58 @@ mod tests {
             user_id: identity,
             scopes: vec!["sip.register".to_string()],
         }
+    }
+
+    #[test]
+    fn fallback_bearer_subjects_are_stable_typed_and_credential_free() {
+        const KEY_CANARY: &str = "jwk-private-material-canary";
+        const FINGERPRINT_CANARY: &str = "AA:BB:CC:credential-canary";
+
+        let assurances = [
+            IdentityAssurance::Anonymous,
+            IdentityAssurance::Identified {
+                credential_kind: CredentialKind::Oidc,
+            },
+            IdentityAssurance::Pseudonymous {
+                ephemeral_key: rvoip_core_traits::identity::Jwk(serde_json::json!({
+                    "kty": "oct",
+                    "k": KEY_CANARY,
+                })),
+            },
+            IdentityAssurance::DtlsFingerprint {
+                algorithm: "sha-256".into(),
+                value: FINGERPRINT_CANARY.into(),
+            },
+        ];
+
+        let subjects = assurances
+            .iter()
+            .map(fallback_bearer_assurance_subject)
+            .collect::<Vec<_>>();
+        for (assurance, subject) in assurances.iter().zip(&subjects) {
+            assert_eq!(subject, &fallback_bearer_assurance_subject(assurance));
+            assert!(subject.starts_with("urn:rvoip:sip:bearer-assurance:"));
+            assert!(subject.contains(assurance.kind()));
+            assert!(!subject.contains(KEY_CANARY));
+            assert!(!subject.contains(FINGERPRINT_CANARY));
+            assert!(!subject.contains("ephemeral_key_present"));
+            assert!(!subject.contains("fingerprint_bytes"));
+        }
+
+        let unique = subjects.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), subjects.len());
+
+        let changed_key = IdentityAssurance::Pseudonymous {
+            ephemeral_key: rvoip_core_traits::identity::Jwk(serde_json::json!({
+                "kty": "oct",
+                "k": "different-private-material",
+            })),
+        };
+        assert_ne!(
+            subjects[2],
+            fallback_bearer_assurance_subject(&changed_key),
+            "different pseudonymous key bindings must not collapse to one subject"
+        );
     }
 
     fn auth_token_strategy() -> impl Strategy<Value = String> {
