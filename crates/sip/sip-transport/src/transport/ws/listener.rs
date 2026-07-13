@@ -14,7 +14,7 @@ use tracing::{debug, error, info};
 #[cfg(feature = "wss")]
 use tokio_rustls::TlsAcceptor;
 
-use super::connection::WebSocketConnection;
+use super::connection::{sip_websocket_config, WebSocketConnection};
 use super::{SipWsStream, SIP_WS_SUBPROTOCOL};
 use crate::error::{Error, Result};
 #[cfg(feature = "wss")]
@@ -348,7 +348,7 @@ impl WebSocketListener {
     {
         let selected_protocol = Arc::new(std::sync::Mutex::new(String::new()));
         let selected_for_callback = Arc::clone(&selected_protocol);
-        let ws_stream = tokio_tungstenite::accept_hdr_async(
+        let ws_stream = tokio_tungstenite::accept_hdr_async_with_config(
             stream,
             move |request: &Request, response: Response| {
                 let (response, selected) = callback(request, response)?;
@@ -357,6 +357,7 @@ impl WebSocketListener {
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = selected;
                 Ok(response)
             },
+            Some(sip_websocket_config()),
         )
         .await?;
         let selected = selected_protocol

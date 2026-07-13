@@ -12,12 +12,10 @@ use crate::error::{Error, Result};
 #[cfg(test)]
 use tracing::error;
 
-// Reserved for the upcoming oversized-datagram drop path; kept so the
-// constant has one canonical home when that lands.
-#[allow(dead_code)]
-const MAX_UDP_PACKET_SIZE: usize = 65_507;
-// Buffer size for receiving packets
-const UDP_BUFFER_SIZE: usize = 8192;
+// Large enough for every ordinary UDP payload. Using the previous 8 KiB
+// buffer let the kernel truncate a legal SIP datagram without telling the
+// parser that bytes were missing.
+const UDP_BUFFER_SIZE: usize = 65_535;
 
 /// UDP listener for receiving SIP messages
 pub struct UdpListener {
@@ -70,7 +68,7 @@ impl UdpListener {
     /// Receives a packet from the UDP socket
     pub async fn receive(&self) -> Result<(Bytes, SocketAddr, SocketAddr)> {
         // Stack-allocated receive buffer. Previously we allocated a
-        // fresh 8 KiB `BytesMut` per packet and zero-filled it with
+        // fresh `BytesMut` per packet and zero-filled it with
         // `resize(_, 0)` — ~480 MB/s of heap churn at 60K req/s. The
         // stack buffer is reused for every call (tokio stores it in
         // the receive task's stack frame across awaits) and the

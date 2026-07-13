@@ -23,6 +23,7 @@ use crate::transport::{
     safe_method_label, validate_typed_outbound_message, Transport, TransportEvent,
     TransportReceiveTiming, TransportType,
 };
+use rvoip_sip_core::framing::{inspect_sip_frame_with_policy, SipFrameStatus, SipFramingPolicy};
 use rvoip_sip_core::Message;
 
 // Default channel capacity
@@ -548,7 +549,23 @@ async fn process_udp_datagram(
     }
 
     let parse_started = datagram.timing.as_ref().map(|_| Instant::now());
-    let parsed = rvoip_sip_core::parse_message(&datagram.packet);
+    // RFC 3261 section 18.3 requires bytes beyond an explicit Content-Length
+    // to be discarded for message-oriented transports. Snapshot and publish
+    // only the authoritative frame so raw SBC forwarding cannot turn ignored
+    // UDP suffix bytes into a second request on a stream transport.
+    let parsed =
+        match inspect_sip_frame_with_policy(&datagram.packet, SipFramingPolicy::CompleteMessage) {
+            Ok(SipFrameStatus::Complete(frame)) => {
+                let raw_bytes = datagram.packet.slice(..frame.total_bytes);
+                rvoip_sip_core::parse_message(&raw_bytes)
+                    .map(|message| (message, raw_bytes))
+                    .map_err(|error| Error::ParseError(error.to_string()))
+            }
+            Ok(SipFrameStatus::Incomplete { .. }) => {
+                Err(Error::ParseError("incomplete SIP UDP datagram".to_string()))
+            }
+            Err(error) => Err(Error::ParseError(error.to_string())),
+        };
     if let (Some(started), Some(timing)) = (parse_started, datagram.timing.as_mut()) {
         let now = Instant::now();
         diagnostics::record_udp_parse(now.duration_since(started));
@@ -556,7 +573,7 @@ async fn process_udp_datagram(
     }
 
     let event = match parsed {
-        Ok(message) => {
+        Ok((message, raw_bytes)) => {
             diagnostics::record_udp_parse_ok();
             diagnostics::record_inbound_message(&message, datagram.source, datagram.local_addr);
             TransportEvent::MessageReceived {
@@ -564,7 +581,7 @@ async fn process_udp_datagram(
                 source: datagram.source,
                 destination: datagram.local_addr,
                 transport_type: TransportType::Udp,
-                raw_bytes: Some(datagram.packet),
+                raw_bytes: Some(raw_bytes),
                 timing: datagram.timing,
                 connection_metadata: None,
             }
@@ -831,9 +848,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn udp_complete_datagram_accepts_missing_content_length_as_empty_body() {
+    async fn udp_complete_datagram_uses_missing_content_length_boundary_as_body() {
         let packet = Bytes::from_static(
-            b"OPTIONS sip:service.example SIP/2.0\r\nVia : SIP/2.0/UDP edge.example\r\n\r\n",
+            b"MESSAGE sip:service.example SIP/2.0\r\nVia : SIP/2.0/UDP edge.example\r\n\r\nbody",
         );
         let source = "127.0.0.1:5060".parse().unwrap();
         let local_addr = "127.0.0.1:5061".parse().unwrap();
@@ -857,8 +874,35 @@ mod tests {
         let Message::Request(request) = message else {
             panic!("request expected");
         };
-        assert!(request.body().is_empty());
+        assert_eq!(request.body(), b"body");
         assert_eq!(raw_bytes.as_deref(), Some(packet.as_ref()));
+    }
+
+    #[tokio::test]
+    async fn udp_discards_bytes_beyond_content_length_from_raw_snapshot() {
+        let first = Bytes::from_static(
+            b"OPTIONS sip:service.example SIP/2.0\r\nVia: SIP/2.0/UDP edge.example\r\nContent-Length: 0\r\n\r\n",
+        );
+        let suffix = b"BYE sip:service.example SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let mut packet = first.to_vec();
+        packet.extend_from_slice(suffix);
+        let datagram = UdpDatagram {
+            packet: Bytes::from(packet),
+            source: "127.0.0.1:5060".parse().unwrap(),
+            local_addr: "127.0.0.1:5061".parse().unwrap(),
+            timing: None,
+        };
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+
+        process_udp_datagram(0, datagram, &events_tx).await;
+
+        let TransportEvent::MessageReceived { raw_bytes, .. } =
+            events_rx.recv().await.expect("UDP parse event")
+        else {
+            panic!("message event expected");
+        };
+        assert_eq!(raw_bytes.as_deref(), Some(first.as_ref()));
+        assert!(!raw_bytes.unwrap().windows(3).any(|window| window == b"BYE"));
     }
 
     #[tokio::test]

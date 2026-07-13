@@ -15,16 +15,27 @@ use super::SipWsStream;
 
 use crate::error::{Error, Result};
 use crate::transport::{validate_typed_outbound_message, TransportConnectionMetadata};
-use rvoip_sip_core::{parse_message, Message};
+use rvoip_sip_core::{parse_message_with_mode, Message, ParseMode};
 
 // SIP WebSocket subprotocol name as registered by RFC 7118. WS and WSS both
 // negotiate `sip`; TLS is represented by the URI scheme.
-#[allow(dead_code)]
+#[cfg(test)]
 const SIP_WS_SUBPROTOCOL: &str = "sip";
 
-// Maximum message size in bytes.
-#[allow(dead_code)]
-const MAX_MESSAGE_SIZE: usize = 65535;
+// RFC 7118 carries exactly one complete SIP message in each WebSocket
+// message. Bound both the WebSocket codec and this application boundary so a
+// peer cannot make every connection reserve tungstenite's 64 MiB default.
+pub(super) const MAX_MESSAGE_SIZE: usize = 65_535;
+
+#[cfg(feature = "ws")]
+pub(super) fn sip_websocket_config() -> tungstenite::protocol::WebSocketConfig {
+    tungstenite::protocol::WebSocketConfig::default()
+        .read_buffer_size(16 * 1024)
+        .write_buffer_size(16 * 1024)
+        .max_write_buffer_size(MAX_MESSAGE_SIZE * 2)
+        .max_message_size(Some(MAX_MESSAGE_SIZE))
+        .max_frame_size(Some(MAX_MESSAGE_SIZE))
+}
 
 /// WebSocket connection for SIP messages
 pub struct WebSocketConnection {
@@ -116,11 +127,19 @@ impl WebSocketConnection {
 
         // Convert SIP message to bytes
         let message_bytes = message.to_bytes();
+        if message_bytes.len() > MAX_MESSAGE_SIZE {
+            return Err(Error::WebSocketProtocolError(
+                "SIP WebSocket message exceeds the configured size limit".to_string(),
+            ));
+        }
 
-        // In WebSocket, we send the raw SIP message as text content
-        // RFC 7118 section 7: SIP WebSocket Client and Server Examples
-        let ws_message =
-            WsMessage::Text(String::from_utf8_lossy(&message_bytes).to_string().into());
+        // RFC 7118 permits Text and Binary messages. Never use lossy UTF-8
+        // conversion: a SIP body can contain arbitrary octets and changing
+        // one byte can invalidate signatures or corrupt media metadata.
+        let ws_message = match String::from_utf8(message_bytes) {
+            Ok(text) => WsMessage::Text(text.into()),
+            Err(error) => WsMessage::Binary(bytes::Bytes::from(error.into_bytes())),
+        };
 
         // Acquire lock on the writer
         let mut writer = self.ws_writer.lock().await;
@@ -161,6 +180,11 @@ impl WebSocketConnection {
     pub async fn send_raw_bytes(&self, bytes: bytes::Bytes) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
+        }
+        if bytes.len() > MAX_MESSAGE_SIZE {
+            return Err(Error::WebSocketProtocolError(
+                "SIP WebSocket message exceeds the configured size limit".to_string(),
+            ));
         }
 
         // RFC 7118 §5 allows either Text or Binary; choose Binary so we
@@ -213,10 +237,16 @@ impl WebSocketConnection {
                     self.peer_addr
                 );
 
+                if text.len() > MAX_MESSAGE_SIZE {
+                    return Err(Error::WebSocketProtocolError(
+                        "SIP WebSocket message exceeds the configured size limit".to_string(),
+                    ));
+                }
+
                 // Snapshot the wire bytes before parsing so the upstream
                 // form rides through the bus unchanged.
                 let raw_bytes = bytes::Bytes::copy_from_slice(text.as_bytes());
-                match parse_message(&raw_bytes) {
+                match parse_message_with_mode(&raw_bytes, ParseMode::Strict) {
                     Ok(message) => Ok(Some((message, raw_bytes))),
                     Err(e) => {
                         warn!("Failed to parse SIP message from WebSocket: {}", e);
@@ -231,8 +261,16 @@ impl WebSocketConnection {
                     self.peer_addr
                 );
 
-                let raw_bytes = bytes::Bytes::copy_from_slice(&data);
-                match parse_message(&raw_bytes) {
+                if data.len() > MAX_MESSAGE_SIZE {
+                    return Err(Error::WebSocketProtocolError(
+                        "SIP WebSocket message exceeds the configured size limit".to_string(),
+                    ));
+                }
+
+                // Tungstenite already owns Binary payloads as Bytes; retain
+                // that allocation instead of copying the whole SIP message.
+                let raw_bytes = data;
+                match parse_message_with_mode(&raw_bytes, ParseMode::Strict) {
                     Ok(message) => Ok(Some((message, raw_bytes))),
                     Err(e) => {
                         warn!("Failed to parse SIP message from WebSocket binary: {}", e);
@@ -402,14 +440,14 @@ mod tests {
             match ws_message {
                 WsMessage::Text(text) => {
                     // Parse the text as a SIP message
-                    match parse_message(text.as_bytes()) {
+                    match parse_message_with_mode(text.as_bytes(), ParseMode::Strict) {
                         Ok(message) => Ok(Some(message)),
                         Err(e) => Err(Error::ParseError(e.to_string())),
                     }
                 }
                 WsMessage::Binary(data) => {
                     // Parse binary data as SIP message
-                    match parse_message(&data) {
+                    match parse_message_with_mode(&data, ParseMode::Strict) {
                         Ok(message) => Ok(Some(message)),
                         Err(e) => Err(Error::ParseError(e.to_string())),
                     }
@@ -507,7 +545,53 @@ mod tests {
         connection.send_raw_bytes(raw.clone()).await.unwrap();
         let received = server_stream.next().await.unwrap().unwrap();
         assert_eq!(received, WsMessage::Binary(raw));
+
+        let binary_message = Message::Request(
+            Request::new(Method::Message, Uri::sip("example.test"))
+                .with_body(bytes::Bytes::from_static(b"valid-utf8-then-\xff")),
+        );
+        let expected = bytes::Bytes::from(binary_message.to_bytes());
+        connection.send_message(&binary_message).await.unwrap();
+        let received = server_stream.next().await.unwrap().unwrap();
+        assert_eq!(received, WsMessage::Binary(expected));
+
+        let first = "OPTIONS sip:example.test SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let second = "BYE sip:example.test SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let error = connection
+            .process_ws_message(WsMessage::Text(format!("{first}{second}").into()))
+            .expect_err("RFC 7118 permits exactly one SIP message per WS message");
+        assert!(matches!(error, Error::ParseError(_)));
+
+        let missing_length =
+            "MESSAGE sip:example.test SIP/2.0\r\nVia: SIP/2.0/WS edge.test\r\n\r\nbody";
+        let (message, raw_bytes) = connection
+            .process_ws_message(WsMessage::Text(missing_length.into()))
+            .unwrap()
+            .expect("SIP message");
+        let Message::Request(request) = message else {
+            panic!("request expected");
+        };
+        assert_eq!(request.body(), b"body");
+        assert_eq!(raw_bytes.as_ref(), missing_length.as_bytes());
+
+        let error = connection
+            .process_ws_message(WsMessage::Binary(bytes::Bytes::from(vec![
+                b'x';
+                MAX_MESSAGE_SIZE
+                    + 1
+            ])))
+            .expect_err("oversized SIP WS message must fail closed");
+        assert!(matches!(error, Error::WebSocketProtocolError(_)));
         connection.close().await.unwrap();
+    }
+
+    #[cfg(feature = "ws")]
+    #[test]
+    fn websocket_codec_has_sip_sized_resource_limits() {
+        let config = sip_websocket_config();
+        assert_eq!(config.max_message_size, Some(MAX_MESSAGE_SIZE));
+        assert_eq!(config.max_frame_size, Some(MAX_MESSAGE_SIZE));
+        assert!(config.max_write_buffer_size < usize::MAX);
     }
 
     // Test message parsing from WebSocket frames

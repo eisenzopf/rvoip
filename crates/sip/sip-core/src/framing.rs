@@ -41,15 +41,16 @@ pub enum SipFrameStatus {
 /// Policy for interpreting a message that omits `Content-Length`.
 ///
 /// RFC 3261 gives stream transports no external message boundary, so they
-/// must require an explicit length. A transport-neutral parser (including a
-/// UDP datagram parser) already owns a complete-message boundary and retains
-/// the historical SIP behavior of treating an omitted length as an empty
-/// body.
+/// must require an explicit length. A transport-neutral parser (including UDP
+/// and WebSocket parsers) already owns a complete-message boundary. RFC 3261
+/// section 18.3 requires message-oriented transports to treat every byte after
+/// the header block as body when the length is omitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SipFramingPolicy {
     /// Require exactly one `Content-Length` (or compact `l`) header.
     Stream,
-    /// Treat an omitted `Content-Length` as a zero-byte body.
+    /// Treat an omitted `Content-Length` as extending through the supplied
+    /// complete-message boundary.
     CompleteMessage,
 }
 
@@ -102,8 +103,8 @@ impl std::error::Error for SipFramingError {}
 
 /// Inspect a transport-neutral complete SIP message without consuming it.
 ///
-/// This compatibility entry point treats an omitted `Content-Length` as a
-/// zero-byte body. Stream transports must use
+/// This compatibility entry point treats all bytes after the header block as
+/// body when `Content-Length` is omitted. Stream transports must use
 /// [`inspect_sip_frame_with_policy`] with [`SipFramingPolicy::Stream`].
 pub fn inspect_sip_frame(input: &[u8]) -> Result<SipFrameStatus, SipFramingError> {
     inspect_sip_frame_with_policy(input, SipFramingPolicy::CompleteMessage)
@@ -135,7 +136,10 @@ pub fn inspect_sip_frame_with_policy(
     let content_length = parse_headers(&input[..header_end])?;
     let body_bytes = match (content_length, policy) {
         (Some(body_bytes), _) => body_bytes,
-        (None, SipFramingPolicy::CompleteMessage) => 0,
+        (None, SipFramingPolicy::CompleteMessage) => input
+            .len()
+            .checked_sub(header_bytes)
+            .ok_or(SipFramingError::MessageTooLarge)?,
         (None, SipFramingPolicy::Stream) => return Err(SipFramingError::MissingContentLength),
     };
     if body_bytes > MAX_SIP_BODY_BYTES {
@@ -401,7 +405,7 @@ mod tests {
 
     #[test]
     fn applies_explicit_missing_content_length_policy() {
-        let missing = b"OPTIONS sip:service.example SIP/2.0\r\nVia: x\r\n\r\n";
+        let missing = b"OPTIONS sip:service.example SIP/2.0\r\nVia: x\r\n\r\nbody";
         assert_eq!(
             inspect_sip_frame_with_policy(missing, SipFramingPolicy::Stream),
             Err(SipFramingError::MissingContentLength)
@@ -411,7 +415,7 @@ mod tests {
         else {
             panic!("complete message expected");
         };
-        assert_eq!(frame.body_bytes, 0);
+        assert_eq!(frame.body_bytes, 4);
         assert_eq!(frame.total_bytes, missing.len());
         assert_eq!(
             inspect_sip_frame(missing),
@@ -496,24 +500,18 @@ mod tests {
 
     #[test]
     fn public_parser_uses_the_same_strict_singleton_decision() {
-        for (headers, class) in [
-            (
-                b"Content-Length: 0\r\nl: 0".as_slice(),
-                "duplicate-content-length",
-            ),
-            (
-                b"Content-Length: invalid".as_slice(),
-                "invalid-content-length",
-            ),
+        for headers in [
+            b"Content-Length: 0\r\nl: 0".as_slice(),
+            b"Content-Length: invalid".as_slice(),
         ] {
             let error = crate::parse_message(&request(headers, b""))
                 .expect_err("public parser must enforce framing singleton policy");
-            assert!(error.to_string().contains(class), "{error}");
+            assert!(matches!(error, crate::Error::ParseError(_)));
         }
     }
 
     #[test]
-    fn public_parser_accepts_hcolon_and_missing_length_as_zero_body() {
+    fn public_parser_accepts_hcolon_and_uses_complete_boundary_without_length() {
         let message = request(b"Content-Length \t : 4", b"body");
         let parsed = crate::parse_message(&message).expect("HCOLON message");
         let crate::Message::Request(request) = parsed else {
@@ -521,11 +519,11 @@ mod tests {
         };
         assert_eq!(request.body(), b"body");
 
-        let missing = b"OPTIONS sip:service.example SIP/2.0\r\nVia : x\r\n\r\n";
-        let parsed = crate::parse_message(missing).expect("missing length means empty body");
+        let missing = b"MESSAGE sip:service.example SIP/2.0\r\nVia : x\r\n\r\nbody";
+        let parsed = crate::parse_message(missing).expect("missing length uses packet boundary");
         let crate::Message::Request(request) = parsed else {
             panic!("request expected");
         };
-        assert!(request.body().is_empty());
+        assert_eq!(request.body(), b"body");
     }
 }

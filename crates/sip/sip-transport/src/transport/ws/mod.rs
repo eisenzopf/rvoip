@@ -566,13 +566,15 @@ impl WebSocketTransport {
         // Step 4 — run the WS upgrade on whichever stream variant we
         // ended up with (Plain or ClientTls — they both implement
         // AsyncRead+AsyncWrite via SipWsStream).
-        let (ws_stream, response) = tokio_tungstenite::client_async(request, stream)
-            .await
-            .map_err(|_error| {
-                Error::WebSocketHandshakeFailed(format!(
-                    "WebSocket client handshake failed for {addr}"
-                ))
-            })?;
+        let (ws_stream, response) = tokio_tungstenite::client_async_with_config(
+            request,
+            stream,
+            Some(connection::sip_websocket_config()),
+        )
+        .await
+        .map_err(|_error| {
+            Error::WebSocketHandshakeFailed(format!("WebSocket client handshake failed for {addr}"))
+        })?;
 
         // Capture the server's selected subprotocol so the connection
         // wrapper carries the negotiated value (mirrors what the
