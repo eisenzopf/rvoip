@@ -2828,7 +2828,7 @@ pub(crate) async fn execute_action(
 fn resolve_auth_method(session: &crate::session_store::SessionState) -> String {
     if let Some(m) = session.pending_auth_method.as_ref() {
         if !m.is_empty() {
-            return m.to_ascii_uppercase();
+            return safe_outbound_auth_method_label(m).to_string();
         }
     }
     if session.pending_bye_options.is_some() {
@@ -2870,7 +2870,7 @@ fn auth_method_for_error(method: &str) -> rvoip_sip_core::Method {
         "MESSAGE" => rvoip_sip_core::Method::Message,
         "OPTIONS" => rvoip_sip_core::Method::Options,
         "SUBSCRIBE" => rvoip_sip_core::Method::Subscribe,
-        other => rvoip_sip_core::Method::Extension(other.to_string()),
+        _ => rvoip_sip_core::Method::Extension("extension".to_string()),
     }
 }
 
@@ -3083,5 +3083,43 @@ mod invite_option_diagnostic_tests {
             HeaderName::Other("X-Application-Context".to_string())
         );
         assert_eq!(options.extra_headers[3].name(), HeaderName::Subject);
+    }
+
+    #[test]
+    fn extension_auth_method_is_classified_before_errors_and_dispatch() {
+        const METHOD_SECRET: &str = "X-AUTH-METHOD-PROVIDER-SECRET-CANARY";
+        let mut session = crate::session_store::SessionState::new(
+            crate::state_table::SessionId::new(),
+            crate::state_table::Role::UAC,
+        );
+        session.pending_auth_method = Some(METHOD_SECRET.to_string());
+
+        let method = resolve_auth_method(&session);
+        assert_eq!(method, "extension");
+        assert_eq!(safe_outbound_auth_method_label(METHOD_SECRET), "extension");
+
+        let missing = crate::errors::SessionError::MissingCredentialsForRequestAuth {
+            method: auth_method_for_error(&method),
+        };
+        let exhausted = crate::errors::SessionError::RequestAuthRetryExhausted {
+            method: auth_method_for_error(&method),
+        };
+        let no_uri = format!(
+            "SendRequestWithAuth: no request_uri for method {} on session",
+            method
+        );
+        let unsupported = format!(
+            "SendRequestWithAuth: unsupported method {} for session",
+            method
+        );
+        for rendered in [
+            missing.to_string(),
+            exhausted.to_string(),
+            no_uri,
+            unsupported,
+        ] {
+            assert!(rendered.contains("extension"));
+            assert!(!rendered.contains(METHOD_SECRET));
+        }
     }
 }

@@ -362,6 +362,7 @@ impl StateMachine {
         event: EventType,
         queued_follow_up_events: &mut std::collections::VecDeque<EventType>,
     ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::session_store::history::history_event_snapshot;
         use crate::session_store::{ActionRecord, GuardResult, TransitionRecord};
         use std::time::Instant;
 
@@ -371,6 +372,7 @@ impl StateMachine {
             session_id
         );
         let transition_start = Instant::now();
+        let history_event = history_event_snapshot(&event);
 
         // 1. Get current session state
         let mut session = match self.store.get_session(session_id).await {
@@ -554,7 +556,7 @@ impl StateMachine {
                             .unwrap_or_default()
                             .as_millis() as u64,
                         from_state: old_state,
-                        event: event.clone(),
+                        event: history_event.clone(),
                         to_state: Some(old_state),
                         guards_evaluated: vec![],
                         actions_executed: vec![],
@@ -605,7 +607,7 @@ impl StateMachine {
                             .unwrap_or_default()
                             .as_millis() as u64,
                         from_state: old_state,
-                        event: event.clone(),
+                        event: history_event.clone(),
                         to_state: Some(old_state),
                         guards_evaluated,
                         actions_executed: vec![],
@@ -725,7 +727,7 @@ impl StateMachine {
                             .unwrap_or_default()
                             .as_millis() as u64,
                         from_state: old_state,
-                        event: event.clone(),
+                        event: history_event.clone(),
                         to_state: Some(old_state),
                         guards_evaluated,
                         actions_executed: actions_executed_history,
@@ -754,7 +756,7 @@ impl StateMachine {
                     .unwrap_or_default()
                     .as_millis() as u64,
                 from_state: old_state,
-                event: event.clone(),
+                event: history_event,
                 to_state: next_state,
                 guards_evaluated,
                 actions_executed: actions_executed_history,

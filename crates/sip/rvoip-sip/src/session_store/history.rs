@@ -6,6 +6,108 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+const REDACTED_AUTH_ACTION_ERROR: &str = "outbound authentication action failed";
+const REDACTED_AUTH_TRANSITION_ERROR: &str = "authentication transition failed";
+
+fn safe_auth_method_label(method: &str) -> &'static str {
+    match method.trim().to_ascii_uppercase().as_str() {
+        "INVITE" => "INVITE",
+        "REGISTER" => "REGISTER",
+        "BYE" => "BYE",
+        "REFER" => "REFER",
+        "NOTIFY" => "NOTIFY",
+        "INFO" => "INFO",
+        "UPDATE" => "UPDATE",
+        "MESSAGE" => "MESSAGE",
+        "OPTIONS" => "OPTIONS",
+        "SUBSCRIBE" => "SUBSCRIBE",
+        _ => "extension",
+    }
+}
+
+fn challenge_realm_len(challenge: &str) -> Option<usize> {
+    let lower = challenge.to_ascii_lowercase();
+    for (offset, _) in lower.match_indices("realm") {
+        let before_is_boundary = offset == 0
+            || lower[..offset]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-');
+        if !before_is_boundary {
+            continue;
+        }
+
+        let mut value = &challenge[offset + "realm".len()..];
+        value = value.trim_start();
+        let Some(after_equals) = value.strip_prefix('=') else {
+            continue;
+        };
+        value = after_equals.trim_start();
+        if let Some(quoted) = value.strip_prefix('"') {
+            return quoted.find('"').map(|end| quoted[..end].len());
+        }
+        let end = value
+            .find(|ch: char| ch == ',' || ch.is_ascii_whitespace())
+            .unwrap_or(value.len());
+        return Some(value[..end].len());
+    }
+    None
+}
+
+fn auth_challenge_history_metadata(challenge: &str) -> String {
+    let realm_len = challenge_realm_len(challenge);
+    format!(
+        "metadata(challenge_present={},challenge_bytes={},realm_present={},realm_bytes={})",
+        !challenge.is_empty(),
+        challenge.len(),
+        realm_len.is_some(),
+        realm_len.unwrap_or_default()
+    )
+}
+
+/// Return a persistence-safe event snapshot. Live state-machine events retain
+/// their full payloads; history keeps only bounded metadata for auth material.
+pub(crate) fn history_event_snapshot(event: &EventType) -> EventType {
+    match event {
+        EventType::AuthRequired {
+            status_code,
+            challenge,
+            method,
+        } => EventType::AuthRequired {
+            status_code: *status_code,
+            challenge: auth_challenge_history_metadata(challenge),
+            method: safe_auth_method_label(method).to_string(),
+        },
+        _ => event.clone(),
+    }
+}
+
+fn is_auth_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::SendINVITEWithAuth
+            | Action::SendRequestWithAuth
+            | Action::SendREGISTERWithAuth
+            | Action::StoreAuthChallenge
+    )
+}
+
+fn sanitize_transition_record(record: &mut TransitionRecord) {
+    let auth_transition = matches!(record.event, EventType::AuthRequired { .. });
+    record.event = history_event_snapshot(&record.event);
+
+    for action in &mut record.actions_executed {
+        if is_auth_action(&action.action) && action.error.is_some() {
+            action.error = Some(REDACTED_AUTH_ACTION_ERROR.to_string());
+        }
+    }
+    if auth_transition && !record.errors.is_empty() {
+        record
+            .errors
+            .fill(REDACTED_AUTH_TRANSITION_ERROR.to_string());
+    }
+}
+
 /// Configuration for history tracking
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryConfig {
@@ -132,6 +234,8 @@ impl SessionHistory {
         if !self.config.enabled {
             return;
         }
+
+        sanitize_transition_record(&mut record);
 
         // Filter guards/actions based on config
         if !self.config.track_guards {
@@ -388,5 +492,96 @@ mod tests {
         // Should find 2 transitions involving Active state
         let active_transitions = history.get_by_state(CallState::Active);
         assert_eq!(active_transitions.len(), 3); // Ringing->Active, Active->OnHold, OnHold->Active
+    }
+
+    #[test]
+    fn default_history_and_exports_never_retain_auth_values() {
+        const CHALLENGE_SECRET: &str = "history-challenge-provider-secret-canary";
+        const REALM_SECRET: &str = "history-realm-secret-canary";
+        const METHOD_SECRET: &str = "X-HISTORY-METHOD-SECRET-CANARY";
+        const ERROR_SECRET: &str = "history-action-error-secret-canary";
+        let challenge = format!(
+            "Digest realm=\"{REALM_SECRET}\", nonce=\"{CHALLENGE_SECRET}\", algorithm=MALICIOUS"
+        );
+        let mut history = SessionHistory::new(HistoryConfig::default());
+        history.record_transition(TransitionRecord {
+            timestamp: Instant::now(),
+            timestamp_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            sequence: 0,
+            from_state: CallState::Initiating,
+            event: EventType::AuthRequired {
+                status_code: 401,
+                challenge: challenge.clone(),
+                method: METHOD_SECRET.to_string(),
+            },
+            to_state: Some(CallState::Authenticating),
+            guards_evaluated: vec![],
+            actions_executed: vec![ActionRecord {
+                action: Action::SendINVITEWithAuth,
+                success: false,
+                execution_time_us: 5,
+                error: Some(format!("provider failed: {ERROR_SECRET}")),
+            }],
+            events_published: vec![],
+            duration_ms: 1,
+            errors: vec![format!("provider failed: {ERROR_SECRET}")],
+        });
+
+        let record = history.get_recent(1).pop().expect("history record");
+        let EventType::AuthRequired {
+            status_code,
+            challenge: stored_challenge,
+            method,
+        } = &record.event
+        else {
+            panic!("expected AuthRequired history snapshot");
+        };
+        assert_eq!(*status_code, 401);
+        assert_eq!(method, "extension");
+        assert_eq!(
+            stored_challenge,
+            &format!(
+                "metadata(challenge_present=true,challenge_bytes={},realm_present=true,realm_bytes={})",
+                challenge.len(),
+                REALM_SECRET.len()
+            )
+        );
+        assert_eq!(
+            record.actions_executed[0].error.as_deref(),
+            Some(REDACTED_AUTH_ACTION_ERROR)
+        );
+        assert_eq!(record.errors, vec![REDACTED_AUTH_TRANSITION_ERROR]);
+
+        for rendered in [
+            format!("{record:?}"),
+            history.export_json(),
+            history.export_csv(),
+        ] {
+            assert!(rendered.contains("AuthRequired"));
+            assert!(rendered.contains("extension"));
+            for secret in [CHALLENGE_SECRET, REALM_SECRET, METHOD_SECRET, ERROR_SECRET] {
+                assert!(
+                    !rendered.contains(secret),
+                    "history leaked {secret}: {rendered}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn auth_history_source_uses_only_sanitized_event_projections() {
+        let executor = include_str!("../state_machine/executor.rs");
+        assert_eq!(executor.matches("event: history_event").count(), 4);
+
+        let history = include_str!("history.rs");
+        assert!(history.contains("record.event = history_event_snapshot(&record.event)"));
+
+        let actions = include_str!("../state_machine/actions.rs");
+        assert!(!actions.contains("return m.to_ascii_uppercase()"));
+        assert!(actions.contains("return safe_outbound_auth_method_label(m).to_string()"));
+        assert!(actions.contains("Method::Extension(\"extension\".to_string())"));
     }
 }

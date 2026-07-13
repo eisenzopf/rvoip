@@ -6,6 +6,7 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 
 use crate::events::types::{Event, EventPriority};
 use crate::planes::routing::RoutableEvent;
@@ -16,7 +17,7 @@ use std::any::Any;
 pub type EventTypeId = &'static str;
 
 /// All cross-crate events in the RVOIP system
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum RvoipCrossCrateEvent {
     /// Session-core to dialog-core events
     SessionToDialog(SessionToDialogEvent),
@@ -57,6 +58,30 @@ pub enum RvoipCrossCrateEvent {
     /// orchestration-core in PRD §13.3 step 7). Per-fine-grained-variant
     /// `event_type` per the same pattern as `Orchestration`.
     Core(RvoipCoreCrossCrateEvent),
+}
+
+impl fmt::Debug for RvoipCrossCrateEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SessionToDialog(event) => f.debug_tuple("SessionToDialog").field(event).finish(),
+            Self::DialogToSession(event) => f.debug_tuple("DialogToSession").field(event).finish(),
+            Self::SessionToMedia(event) => f.debug_tuple("SessionToMedia").field(event).finish(),
+            Self::MediaToSession(event) => f.debug_tuple("MediaToSession").field(event).finish(),
+            Self::DialogToTransport(event) => {
+                f.debug_tuple("DialogToTransport").field(event).finish()
+            }
+            Self::TransportToDialog(event) => {
+                f.debug_tuple("TransportToDialog").field(event).finish()
+            }
+            Self::TransportToSession(event) => {
+                f.debug_tuple("TransportToSession").field(event).finish()
+            }
+            Self::MediaToRtp(event) => f.debug_tuple("MediaToRtp").field(event).finish(),
+            Self::RtpToMedia(event) => f.debug_tuple("RtpToMedia").field(event).finish(),
+            Self::Orchestration(event) => f.debug_tuple("Orchestration").field(event).finish(),
+            Self::Core(event) => f.debug_tuple("Core").field(event).finish(),
+        }
+    }
 }
 
 /// Trait for cross-crate events
@@ -783,7 +808,7 @@ pub enum IdentityVerificationStatus {
 }
 
 /// Events sent from dialog-core to session-core
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum DialogToSessionEvent {
     /// Incoming call notification
     IncomingCall {
@@ -1162,6 +1187,308 @@ pub enum DialogToSessionEvent {
         /// telemetry and log correlation.
         reason: String,
     },
+}
+
+fn safe_auth_method_debug_label(method: &str) -> &'static str {
+    match method.trim().to_ascii_uppercase().as_str() {
+        "INVITE" => "INVITE",
+        "REGISTER" => "REGISTER",
+        "BYE" => "BYE",
+        "REFER" => "REFER",
+        "NOTIFY" => "NOTIFY",
+        "INFO" => "INFO",
+        "UPDATE" => "UPDATE",
+        "MESSAGE" => "MESSAGE",
+        "OPTIONS" => "OPTIONS",
+        "SUBSCRIBE" => "SUBSCRIBE",
+        _ => "extension",
+    }
+}
+
+macro_rules! debug_dialog_variant {
+    ($formatter:expr, $name:literal, $( $field:ident ),* $(,)?) => {{
+        let mut builder = $formatter.debug_struct($name);
+        $(builder.field(stringify!($field), $field);)*
+        builder.finish()
+    }};
+}
+
+impl fmt::Debug for DialogToSessionEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IncomingCall {
+                session_id,
+                call_id,
+                from,
+                to,
+                sdp_offer,
+                headers,
+                transaction_id,
+                source_addr,
+                raw_request,
+                transport,
+                identity_verification,
+            } => debug_dialog_variant!(
+                f,
+                "IncomingCall",
+                session_id,
+                call_id,
+                from,
+                to,
+                sdp_offer,
+                headers,
+                transaction_id,
+                source_addr,
+                raw_request,
+                transport,
+                identity_verification,
+            ),
+            Self::CallStateChanged {
+                session_id,
+                new_state,
+                reason,
+            } => debug_dialog_variant!(f, "CallStateChanged", session_id, new_state, reason),
+            Self::CallProgress {
+                session_id,
+                status_code,
+                reason_phrase,
+                sdp,
+                raw_response,
+            } => debug_dialog_variant!(
+                f,
+                "CallProgress",
+                session_id,
+                status_code,
+                reason_phrase,
+                sdp,
+                raw_response,
+            ),
+            Self::CallEstablished {
+                session_id,
+                sdp_answer,
+                raw_response,
+            } => debug_dialog_variant!(f, "CallEstablished", session_id, sdp_answer, raw_response,),
+            Self::CallTerminated { session_id, reason } => {
+                debug_dialog_variant!(f, "CallTerminated", session_id, reason)
+            }
+            Self::ByeReceived { session_id } => {
+                debug_dialog_variant!(f, "ByeReceived", session_id)
+            }
+            Self::CallFailed {
+                session_id,
+                status_code,
+                reason_phrase,
+                raw_response,
+            } => debug_dialog_variant!(
+                f,
+                "CallFailed",
+                session_id,
+                status_code,
+                reason_phrase,
+                raw_response,
+            ),
+            Self::CallCancelled { session_id } => {
+                debug_dialog_variant!(f, "CallCancelled", session_id)
+            }
+            Self::SessionRefreshed {
+                session_id,
+                expires_secs,
+            } => debug_dialog_variant!(f, "SessionRefreshed", session_id, expires_secs),
+            Self::SessionRefreshFailed { session_id, reason } => {
+                debug_dialog_variant!(f, "SessionRefreshFailed", session_id, reason)
+            }
+            Self::AuthRequired {
+                session_id,
+                status_code,
+                challenge,
+                realm,
+                method,
+                outbound_transport,
+            } => f
+                .debug_struct("AuthRequired")
+                .field("session_id", session_id)
+                .field("status_code", status_code)
+                .field("challenge_present", &!challenge.is_empty())
+                .field("challenge_bytes", &challenge.len())
+                .field(
+                    "realm_present",
+                    &realm.as_ref().is_some_and(|value| !value.is_empty()),
+                )
+                .field(
+                    "realm_bytes",
+                    &realm.as_ref().map_or(0, |value| value.len()),
+                )
+                .field("method", &safe_auth_method_debug_label(method))
+                .field("outbound_transport_present", &outbound_transport.is_some())
+                .finish(),
+            Self::CallRedirected {
+                session_id,
+                status_code,
+                targets,
+                q_values,
+            } => debug_dialog_variant!(
+                f,
+                "CallRedirected",
+                session_id,
+                status_code,
+                targets,
+                q_values,
+            ),
+            Self::ReinviteGlare { session_id } => {
+                debug_dialog_variant!(f, "ReinviteGlare", session_id)
+            }
+            Self::SessionIntervalTooSmall {
+                session_id,
+                min_se_secs,
+            } => debug_dialog_variant!(f, "SessionIntervalTooSmall", session_id, min_se_secs),
+            Self::DtmfReceived { session_id, tones } => {
+                debug_dialog_variant!(f, "DtmfReceived", session_id, tones)
+            }
+            Self::DialogError {
+                session_id,
+                error,
+                error_code,
+            } => debug_dialog_variant!(f, "DialogError", session_id, error, error_code),
+            Self::DialogCreated { dialog_id, call_id } => {
+                debug_dialog_variant!(f, "DialogCreated", dialog_id, call_id)
+            }
+            Self::DialogStateChanged {
+                session_id,
+                old_state,
+                new_state,
+            } => debug_dialog_variant!(f, "DialogStateChanged", session_id, old_state, new_state,),
+            Self::ReinviteReceived {
+                session_id,
+                sdp,
+                method,
+                raw_request,
+                transport,
+            } => debug_dialog_variant!(
+                f,
+                "ReinviteReceived",
+                session_id,
+                sdp,
+                method,
+                raw_request,
+                transport,
+            ),
+            Self::TransferRequested {
+                session_id,
+                refer_to,
+                transfer_type,
+                transaction_id,
+                referred_by,
+                replaces,
+                raw_request,
+                transport,
+            } => debug_dialog_variant!(
+                f,
+                "TransferRequested",
+                session_id,
+                refer_to,
+                transfer_type,
+                transaction_id,
+                referred_by,
+                replaces,
+                raw_request,
+                transport,
+            ),
+            Self::AckReceived { session_id, sdp } => {
+                debug_dialog_variant!(f, "AckReceived", session_id, sdp)
+            }
+            Self::RegistrationSuccess { session_id } => {
+                debug_dialog_variant!(f, "RegistrationSuccess", session_id)
+            }
+            Self::RegistrationFailed {
+                session_id,
+                status_code,
+            } => debug_dialog_variant!(f, "RegistrationFailed", session_id, status_code),
+            Self::SubscriptionAccepted { session_id } => {
+                debug_dialog_variant!(f, "SubscriptionAccepted", session_id)
+            }
+            Self::SubscriptionFailed {
+                session_id,
+                status_code,
+            } => debug_dialog_variant!(f, "SubscriptionFailed", session_id, status_code),
+            Self::NotifyReceived {
+                session_id,
+                event_package,
+                subscription_state,
+                content_type,
+                body,
+                raw_request,
+                transport,
+            } => debug_dialog_variant!(
+                f,
+                "NotifyReceived",
+                session_id,
+                event_package,
+                subscription_state,
+                content_type,
+                body,
+                raw_request,
+                transport,
+            ),
+            Self::InfoReceived {
+                session_id,
+                raw_request,
+                transport,
+            } => debug_dialog_variant!(f, "InfoReceived", session_id, raw_request, transport,),
+            Self::MessageReceived {
+                session_id,
+                raw_request,
+                transport,
+            } => debug_dialog_variant!(f, "MessageReceived", session_id, raw_request, transport,),
+            Self::OptionsReceived {
+                session_id,
+                raw_request,
+                transport,
+            } => debug_dialog_variant!(f, "OptionsReceived", session_id, raw_request, transport,),
+            Self::MessageDelivered { session_id } => {
+                debug_dialog_variant!(f, "MessageDelivered", session_id)
+            }
+            Self::MessageFailed {
+                session_id,
+                status_code,
+            } => debug_dialog_variant!(f, "MessageFailed", session_id, status_code),
+            Self::IncomingRegister {
+                transaction_id,
+                from_uri,
+                to_uri,
+                contact_uri,
+                expires,
+                authorization,
+                call_id,
+                raw_request,
+                transport,
+            } => f
+                .debug_struct("IncomingRegister")
+                .field("transaction_id", transaction_id)
+                .field("from_uri", from_uri)
+                .field("to_uri", to_uri)
+                .field("contact_uri", contact_uri)
+                .field("expires", expires)
+                .field("authorization_present", &authorization.is_some())
+                .field(
+                    "authorization_bytes",
+                    &authorization.as_ref().map_or(0, |value| value.len()),
+                )
+                .field("call_id", call_id)
+                .field("raw_request_present", &raw_request.is_some())
+                .field(
+                    "raw_request_bytes",
+                    &raw_request.as_ref().map_or(0, Bytes::len),
+                )
+                .field("transport", transport)
+                .finish(),
+            Self::OutboundFlowFailed {
+                aor,
+                reg_id,
+                instance,
+                reason,
+            } => debug_dialog_variant!(f, "OutboundFlowFailed", aor, reg_id, instance, reason,),
+        }
+    }
 }
 
 // =============================================================================
@@ -2121,6 +2448,67 @@ mod tests {
         assert_eq!(
             CrossCrateEvent::event_type(&deserialized),
             CrossCrateEvent::event_type(&event)
+        );
+    }
+
+    #[test]
+    fn auth_required_debug_is_metadata_only_while_wire_payload_is_unchanged() {
+        const CHALLENGE_SECRET: &str = "debug-challenge-secret-canary";
+        const REALM_SECRET: &str = "debug-realm-secret-canary";
+        const METHOD_SECRET: &str = "X-DEBUG-METHOD-SECRET-CANARY";
+        let challenge = format!("Digest realm=\"{REALM_SECRET}\", nonce=\"{CHALLENGE_SECRET}\"");
+        let event = DialogToSessionEvent::AuthRequired {
+            session_id: "session-1".to_string(),
+            status_code: 401,
+            challenge: challenge.clone(),
+            realm: Some(REALM_SECRET.to_string()),
+            method: METHOD_SECRET.to_string(),
+            outbound_transport: None,
+        };
+
+        for rendered in [
+            format!("{event:?}"),
+            format!("{:?}", RvoipCrossCrateEvent::DialogToSession(event.clone())),
+        ] {
+            assert!(rendered.contains("AuthRequired"));
+            assert!(rendered.contains(&format!("challenge_bytes: {}", challenge.len())));
+            assert!(rendered.contains(&format!("realm_bytes: {}", REALM_SECRET.len())));
+            assert!(rendered.contains("method: \"extension\""));
+            for secret in [CHALLENGE_SECRET, REALM_SECRET, METHOD_SECRET] {
+                assert!(
+                    !rendered.contains(secret),
+                    "debug leaked {secret}: {rendered}"
+                );
+            }
+        }
+
+        let wire = serde_json::to_string(&event).expect("serialize AuthRequired");
+        assert!(wire.contains(CHALLENGE_SECRET));
+        assert!(wire.contains(REALM_SECRET));
+        assert!(wire.contains(METHOD_SECRET));
+    }
+
+    #[test]
+    fn cross_crate_debug_preserves_legacy_session_to_dialog_shapes() {
+        let mapping =
+            RvoipCrossCrateEvent::SessionToDialog(SessionToDialogEvent::StoreDialogMapping {
+                session_id: "legacy-session".to_string(),
+                dialog_id: "legacy-dialog".to_string(),
+            });
+        assert_eq!(
+            format!("{mapping:?}"),
+            "SessionToDialog(StoreDialogMapping { session_id: \"legacy-session\", dialog_id: \"legacy-dialog\" })"
+        );
+
+        let refer = RvoipCrossCrateEvent::SessionToDialog(SessionToDialogEvent::ReferResponse {
+            transaction_id: "legacy-transaction".to_string(),
+            accept: true,
+            status_code: 202,
+            reason: "Accepted".to_string(),
+        });
+        assert_eq!(
+            format!("{refer:?}"),
+            "SessionToDialog(ReferResponse { transaction_id: \"legacy-transaction\", accept: true, status_code: 202, reason: \"Accepted\" })"
         );
     }
 
