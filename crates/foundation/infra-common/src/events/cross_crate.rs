@@ -1705,7 +1705,7 @@ impl fmt::Debug for SessionToMediaEvent {
 }
 
 /// Events sent from media-core to session-core
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum MediaToSessionEvent {
     /// Media stream started successfully
     MediaStreamStarted {
@@ -1774,6 +1774,75 @@ pub enum MediaToSessionEvent {
         session_id: String,
         loss_percentage: f32,
     },
+}
+
+impl fmt::Debug for MediaToSessionEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MediaStreamStarted {
+                local_port, codec, ..
+            } => formatter
+                .debug_struct("MediaStreamStarted")
+                .field("local_port", local_port)
+                .field("codec_bytes", &codec.len())
+                .finish(),
+            Self::MediaStreamStopped { reason, .. } => formatter
+                .debug_struct("MediaStreamStopped")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::MediaQualityUpdate {
+                quality_metrics, ..
+            } => formatter
+                .debug_struct("MediaQualityUpdate")
+                .field("quality_metrics", quality_metrics)
+                .finish(),
+            Self::RecordingStarted { file_path, .. } => formatter
+                .debug_struct("RecordingStarted")
+                .field("file_path_bytes", &file_path.len())
+                .finish(),
+            Self::RecordingStopped {
+                file_path,
+                duration_ms,
+                ..
+            } => formatter
+                .debug_struct("RecordingStopped")
+                .field("file_path_bytes", &file_path.len())
+                .field("duration_ms", duration_ms)
+                .finish(),
+            Self::AudioPlaybackFinished { .. } => formatter.write_str("AudioPlaybackFinished"),
+            Self::MediaError {
+                error, error_code, ..
+            } => formatter
+                .debug_struct("MediaError")
+                .field("error_bytes", &error.len())
+                .field("error_code", error_code)
+                .finish(),
+            Self::MediaFlowEstablished { .. } => formatter.write_str("MediaFlowEstablished"),
+            Self::MediaQualityDegraded {
+                metrics, severity, ..
+            } => formatter
+                .debug_struct("MediaQualityDegraded")
+                .field("metrics", metrics)
+                .field("severity", severity)
+                .finish(),
+            Self::DtmfDetected { duration_ms, .. } => formatter
+                .debug_struct("DtmfDetected")
+                .field("duration_ms", duration_ms)
+                .finish(),
+            Self::RtpTimeout {
+                last_packet_time, ..
+            } => formatter
+                .debug_struct("RtpTimeout")
+                .field("last_packet_time", last_packet_time)
+                .finish(),
+            Self::PacketLossThresholdExceeded {
+                loss_percentage, ..
+            } => formatter
+                .debug_struct("PacketLossThresholdExceeded")
+                .field("loss_percentage", loss_percentage)
+                .finish(),
+        }
+    }
 }
 
 // =============================================================================
@@ -1965,7 +2034,7 @@ impl fmt::Debug for TransportToDialogEvent {
 // =============================================================================
 
 /// Events sent from media-core to rtp-core
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum MediaToRtpEvent {
     /// Start RTP stream
     StartRtpStream {
@@ -1996,8 +2065,55 @@ pub enum MediaToRtpEvent {
     },
 }
 
+impl fmt::Debug for MediaToRtpEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StartRtpStream {
+                local_port,
+                remote_address,
+                remote_port,
+                payload_type,
+                codec,
+                ..
+            } => formatter
+                .debug_struct("StartRtpStream")
+                .field("local_port", local_port)
+                .field("remote_address_bytes", &remote_address.len())
+                .field("remote_port", remote_port)
+                .field("payload_type", payload_type)
+                .field("codec_bytes", &codec.len())
+                .finish(),
+            Self::StopRtpStream { .. } => formatter.write_str("StopRtpStream"),
+            Self::SendRtpPacket {
+                payload,
+                timestamp,
+                sequence_number,
+                ..
+            } => formatter
+                .debug_struct("SendRtpPacket")
+                .field("payload_bytes", &payload.len())
+                .field("timestamp", timestamp)
+                .field("sequence_number", sequence_number)
+                .finish(),
+            Self::UpdateRtpStream {
+                remote_address,
+                remote_port,
+                ..
+            } => formatter
+                .debug_struct("UpdateRtpStream")
+                .field("remote_address_present", &remote_address.is_some())
+                .field(
+                    "remote_address_bytes",
+                    &remote_address.as_ref().map_or(0, String::len),
+                )
+                .field("remote_port", remote_port)
+                .finish(),
+        }
+    }
+}
+
 /// Events sent from rtp-core to media-core
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum RtpToMediaEvent {
     /// RTP stream started
     RtpStreamStarted { session_id: String, local_port: u16 },
@@ -2022,6 +2138,42 @@ pub enum RtpToMediaEvent {
 
     /// RTP error occurred
     RtpError { session_id: String, error: String },
+}
+
+impl fmt::Debug for RtpToMediaEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RtpStreamStarted { local_port, .. } => formatter
+                .debug_struct("RtpStreamStarted")
+                .field("local_port", local_port)
+                .finish(),
+            Self::RtpStreamStopped { reason, .. } => formatter
+                .debug_struct("RtpStreamStopped")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::RtpPacketReceived {
+                payload,
+                timestamp,
+                sequence_number,
+                payload_type,
+                ..
+            } => formatter
+                .debug_struct("RtpPacketReceived")
+                .field("payload_bytes", &payload.len())
+                .field("timestamp", timestamp)
+                .field("sequence_number", sequence_number)
+                .field("payload_type", payload_type)
+                .finish(),
+            Self::RtpStatisticsUpdate { stats, .. } => formatter
+                .debug_struct("RtpStatisticsUpdate")
+                .field("stats", stats)
+                .finish(),
+            Self::RtpError { error, .. } => formatter
+                .debug_struct("RtpError")
+                .field("error_bytes", &error.len())
+                .finish(),
+        }
+    }
 }
 
 // =============================================================================
@@ -2214,7 +2366,7 @@ impl RvoipCrossCrateEvent {
 /// In-process subscribers within orchestration-core continue to use the
 /// rich, typed `OrchestrationEvent` API; this wire form exists for
 /// cross-crate observers (logging sinks, future rvoip-harness, telemetry).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum OrchestrationCrossCrateEvent {
     InboundCallReceived {
         call_id: String,
@@ -2332,6 +2484,15 @@ pub enum OrchestrationCrossCrateEvent {
     },
 }
 
+impl fmt::Debug for OrchestrationCrossCrateEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OrchestrationCrossCrateEvent")
+            .field("event_type", &self.event_type())
+            .finish()
+    }
+}
+
 impl OrchestrationCrossCrateEvent {
     /// Per-variant event type string, used by `GlobalEventCoordinator` to
     /// allocate a separate broadcast channel per variant.
@@ -2409,7 +2570,7 @@ impl OrchestrationCrossCrateEvent {
 /// In-process subscribers within rvoip-core continue to use the rich, typed
 /// `Event` API; this wire form exists for cross-crate observers (logging
 /// sinks, harness, telemetry, the rvoip facade).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum RvoipCoreCrossCrateEvent {
     // --- Conversation lifecycle ---
@@ -2594,6 +2755,15 @@ pub enum RvoipCoreCrossCrateEvent {
         packet_loss_pct: f32,
         mos: Option<f32>,
     },
+}
+
+impl fmt::Debug for RvoipCoreCrossCrateEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RvoipCoreCrossCrateEvent")
+            .field("event_type", &self.event_type())
+            .finish()
+    }
 }
 
 impl RvoipCoreCrossCrateEvent {
@@ -2896,7 +3066,49 @@ mod tests {
     }
 
     #[test]
-    fn signaling_event_source_keeps_sensitive_containers_on_manual_debug() {
+    fn media_and_orchestration_debug_is_metadata_only() {
+        const SECRET: &str = "cross-crate-media-secret-canary";
+
+        let events = [
+            RvoipCrossCrateEvent::MediaToSession(MediaToSessionEvent::MediaError {
+                session_id: SECRET.to_string(),
+                error: SECRET.to_string(),
+                error_code: Some(7),
+            }),
+            RvoipCrossCrateEvent::MediaToRtp(MediaToRtpEvent::SendRtpPacket {
+                session_id: SECRET.to_string(),
+                payload: SECRET.as_bytes().to_vec(),
+                timestamp: 8,
+                sequence_number: 9,
+            }),
+            RvoipCrossCrateEvent::RtpToMedia(RtpToMediaEvent::RtpError {
+                session_id: SECRET.to_string(),
+                error: SECRET.to_string(),
+            }),
+            RvoipCrossCrateEvent::Orchestration(OrchestrationCrossCrateEvent::VoiceAiTranscript {
+                call_id: SECRET.to_string(),
+                agent_id: SECRET.to_string(),
+                text: SECRET.to_string(),
+                is_final: true,
+            }),
+            RvoipCrossCrateEvent::Core(RvoipCoreCrossCrateEvent::TranscriptTurn {
+                stream_id: SECRET.to_string(),
+                speaker: Some(SECRET.to_string()),
+                text: SECRET.to_string(),
+                confidence: 0.5,
+                is_final: true,
+                assigned_provider: Some(SECRET.to_string()),
+            }),
+        ];
+
+        for event in events {
+            let rendered = format!("{event:?}");
+            assert!(!rendered.contains(SECRET), "event debug leaked: {rendered}");
+        }
+    }
+
+    #[test]
+    fn cross_crate_event_source_keeps_sensitive_containers_on_manual_debug() {
         let source = include_str!("cross_crate.rs");
         for declaration in [
             "pub struct SipTraceEvent",
@@ -2905,6 +3117,11 @@ mod tests {
             "pub enum SessionToMediaEvent",
             "pub enum DialogToTransportEvent",
             "pub enum TransportToDialogEvent",
+            "pub enum MediaToSessionEvent",
+            "pub enum MediaToRtpEvent",
+            "pub enum RtpToMediaEvent",
+            "pub enum OrchestrationCrossCrateEvent",
+            "pub enum RvoipCoreCrossCrateEvent",
         ] {
             let declaration_offset = source
                 .find(declaration)
