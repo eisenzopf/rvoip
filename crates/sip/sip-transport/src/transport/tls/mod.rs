@@ -15,6 +15,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_rustls::rustls::{
+    self,
     pki_types::{CertificateDer, PrivateKeyDer, ServerName},
     server::WebPkiClientVerifier,
     ClientConfig, RootCertStore, ServerConfig,
@@ -23,7 +24,6 @@ use tokio_rustls::rustls::{
 // everything below is only reachable inside that gate.
 #[cfg(feature = "dev-insecure-tls")]
 use tokio_rustls::rustls::{
-    self,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     pki_types::UnixTime,
     DigitallySignedStruct, SignatureScheme,
@@ -414,7 +414,7 @@ impl TlsTransport {
                                 )
                                 .await;
                             }
-                            Err(_error) => {
+                            Err(error) => {
                                 // Warn, not error: a failed inbound
                                 // handshake is recoverable and usually
                                 // benign (misconfigured peer, expired
@@ -425,7 +425,7 @@ impl TlsTransport {
                                 // look like a regression.
                                 warn!(
                                     destination = %remote_addr,
-                                    error_class = "tls_handshake_failed",
+                                    error_class = tls_runtime_failure_class(&error),
                                     "TLS handshake failed"
                                 );
                             }
@@ -673,8 +673,11 @@ impl TlsTransport {
             .connector
             .connect(server_name, tcp_stream)
             .await
-            .map_err(|_error| {
-                Error::TlsHandshakeFailed(format!("TLS client handshake failed for {remote_addr}"))
+            .map_err(|error| {
+                classify_tls_runtime_error(
+                    error,
+                    format!("TLS client handshake failed for {remote_addr}"),
+                )
             })?;
 
         info!("TLS handshake to {} succeeded", remote_addr);
@@ -732,6 +735,31 @@ fn sni_diagnostic_metadata(server_name: &ServerName<'_>) -> (bool, usize) {
         ServerName::DnsName(name) => (true, name.as_ref().len()),
         ServerName::IpAddress(_) => (false, 0),
         _ => (false, 0),
+    }
+}
+
+pub(crate) fn tls_runtime_failure_class(error: &std::io::Error) -> &'static str {
+    let certificate_failure = error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<rustls::Error>())
+        .is_some_and(|error| {
+            matches!(
+                error,
+                rustls::Error::InvalidCertificate(_) | rustls::Error::NoCertificatesPresented
+            )
+        });
+    if certificate_failure {
+        "tls_certificate_failed"
+    } else {
+        "tls_handshake_failed"
+    }
+}
+
+pub(crate) fn classify_tls_runtime_error(error: std::io::Error, context: String) -> Error {
+    if tls_runtime_failure_class(&error) == "tls_certificate_failed" {
+        Error::TlsCertificateError(context)
+    } else {
+        Error::TlsHandshakeFailed(context)
     }
 }
 
@@ -911,6 +939,35 @@ mod auth_boundary_tests {
             );
         }
     }
+
+    #[test]
+    fn runtime_tls_failures_preserve_certificate_vs_handshake_class() {
+        let certificate = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding),
+        );
+        assert_eq!(
+            tls_runtime_failure_class(&certificate),
+            "tls_certificate_failed"
+        );
+        assert!(matches!(
+            classify_tls_runtime_error(certificate, "certificate".to_string()),
+            Error::TlsCertificateError(_)
+        ));
+
+        let handshake = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            rustls::Error::General("handshake".to_string()),
+        );
+        assert_eq!(
+            tls_runtime_failure_class(&handshake),
+            "tls_handshake_failed"
+        );
+        assert!(matches!(
+            classify_tls_runtime_error(handshake, "handshake".to_string()),
+            Error::TlsHandshakeFailed(_)
+        ));
+    }
 }
 
 pub(crate) fn tls_server_name_for_message(
@@ -974,7 +1031,7 @@ pub(crate) fn build_server_config(
             let mut roots = RootCertStore::empty();
             for cert in load_certs(ca_path)? {
                 roots.add(cert).map_err(|error| {
-                    Error::TlsHandshakeFailed(format!(
+                    Error::TlsCertificateError(format!(
                         "{} client CA {} is invalid: {}",
                         transport_label,
                         ca_path.display(),
@@ -996,7 +1053,7 @@ pub(crate) fn build_server_config(
                 verifier.build()
             }
             .map_err(|error| {
-                Error::TlsHandshakeFailed(format!(
+                Error::TlsCertificateError(format!(
                     "{} client certificate verifier: {}",
                     transport_label, error
                 ))
@@ -1005,7 +1062,7 @@ pub(crate) fn build_server_config(
         }
     };
     builder.with_single_cert(certs, key).map_err(|error| {
-        Error::TlsHandshakeFailed(format!(
+        Error::TlsCertificateError(format!(
             "{} server certificate/key config: {}",
             transport_label, error
         ))
@@ -1062,7 +1119,7 @@ pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig>
                     let certs = load_certs(cert_path)?;
                     let key = load_private_key(key_path)?;
                     builder.with_client_auth_cert(certs, key).map_err(|e| {
-                        Error::TlsHandshakeFailed(format!(
+                        Error::TlsCertificateError(format!(
                             "TLS client certificate/key config failed: {}",
                             e
                         ))
@@ -1098,21 +1155,26 @@ pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig>
                         loaded_any_system = true;
                     }
                 }
-                for error in &certs.errors {
-                    warn!("TLS client: failed to load one system trust anchor: {}", error);
+                if !certs.errors.is_empty() {
+                    warn!(
+                        failed_anchor_count = certs.errors.len(),
+                        "TLS client failed to load system trust anchors"
+                    );
                 }
                 if loaded_any_system {
                     debug!(
                         "TLS client root store loaded {} system certs",
                         root_store.len()
                     );
-                } else if let Some(error) = certs.errors.first().map(|e| e.to_string()) {
+                } else if !certs.errors.is_empty() {
                     warn!(
-                        "TLS client: failed to read system trust store ({}); falling back to webpki-roots",
-                        error
+                        error_class = "system_trust_store_unavailable",
+                        "TLS client is falling back to bundled trust roots"
                     );
                 } else {
-                    warn!("TLS client: no system trust anchors found; falling back to webpki-roots");
+                    warn!(
+                        "TLS client: no system trust anchors found; falling back to webpki-roots"
+                    );
                 }
                 if !loaded_any_system {
                     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -1130,7 +1192,7 @@ pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig>
         let extras = load_certs(extra_path)?;
         for cert in extras {
             root_store.add(cert).map_err(|e| {
-                Error::TlsHandshakeFailed(format!(
+                Error::TlsCertificateError(format!(
                     "Failed to add extra CA from {}: {}",
                     extra_path.display(),
                     e
@@ -1138,9 +1200,9 @@ pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig>
             })?;
         }
         info!(
-            "TLS client root store has {} CA cert(s) after adding extras from {}",
-            root_store.len(),
-            extra_path.display()
+            root_count = root_store.len(),
+            extra_ca_configured = true,
+            "TLS client added configured trust roots"
         );
     }
 
@@ -1150,7 +1212,7 @@ pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig>
             let certs = load_certs(cert_path)?;
             let key = load_private_key(key_path)?;
             builder.with_client_auth_cert(certs, key).map_err(|e| {
-                Error::TlsHandshakeFailed(format!(
+                Error::TlsCertificateError(format!(
                     "TLS client certificate/key config failed: {}",
                     e
                 ))
@@ -1227,34 +1289,48 @@ pub(crate) fn ip_to_server_name(addr: SocketAddr) -> ServerName<'static> {
 
 /// Load PEM-encoded certificates from a file.
 pub(crate) fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
-    let mut cert_file = File::open(path)
-        .map_err(|e| Error::Other(format!("Failed to open cert {}: {}", path.display(), e)))?;
+    let mut cert_file = File::open(path).map_err(|error| {
+        Error::TlsCertificateError(format!(
+            "failed to open certificate (I/O class {:?})",
+            error.kind()
+        ))
+    })?;
     let mut cert_data = Vec::new();
-    cert_file
-        .read_to_end(&mut cert_data)
-        .map_err(|e| Error::Other(format!("Failed to read cert {}: {}", path.display(), e)))?;
+    cert_file.read_to_end(&mut cert_data).map_err(|error| {
+        Error::TlsCertificateError(format!(
+            "failed to read certificate (I/O class {:?})",
+            error.kind()
+        ))
+    })?;
     rustls_pemfile::certs(&mut cert_data.as_slice())
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| {
-            Error::TlsHandshakeFailed(format!("Failed to parse cert {}: {}", path.display(), e))
+            let _ = e;
+            Error::TlsCertificateError("failed to parse certificate".to_string())
         })
 }
 
 /// Load a PEM-encoded private key from a file.
 pub(crate) fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
-    let mut key_file = File::open(path)
-        .map_err(|e| Error::Other(format!("Failed to open key {}: {}", path.display(), e)))?;
+    let mut key_file = File::open(path).map_err(|error| {
+        Error::TlsCertificateError(format!(
+            "failed to open private key (I/O class {:?})",
+            error.kind()
+        ))
+    })?;
     let mut key_data = Vec::new();
-    key_file
-        .read_to_end(&mut key_data)
-        .map_err(|e| Error::Other(format!("Failed to read key {}: {}", path.display(), e)))?;
+    key_file.read_to_end(&mut key_data).map_err(|error| {
+        Error::TlsCertificateError(format!(
+            "failed to read private key (I/O class {:?})",
+            error.kind()
+        ))
+    })?;
     rustls_pemfile::private_key(&mut key_data.as_slice())
         .map_err(|e| {
-            Error::TlsHandshakeFailed(format!("Failed to parse key {}: {}", path.display(), e))
+            let _ = e;
+            Error::TlsCertificateError("failed to parse private key".to_string())
         })?
-        .ok_or_else(|| {
-            Error::TlsHandshakeFailed(format!("No private keys found in {}", path.display()))
-        })
+        .ok_or_else(|| Error::TlsCertificateError("no private key found".to_string()))
 }
 /// Try to parse a single complete SIP message off the front of `buffer`.
 ///

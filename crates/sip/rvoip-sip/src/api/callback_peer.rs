@@ -839,8 +839,8 @@ pub struct CallbackBuilderHandler {
 impl CallHandler for CallbackBuilderHandler {
     async fn on_event(&self, event: Event) {
         if let Some(hook) = &self.event {
-            if let Err(err) = hook(event).await {
-                tracing::warn!("[CallbackPeerBuilder] on_event failed: {}", err);
+            if let Err(_error) = hook(event).await {
+                tracing::warn!(callback = "on_event", "CallbackPeer hook failed");
             }
         }
     }
@@ -851,8 +851,8 @@ impl CallHandler for CallbackBuilderHandler {
 
     async fn on_call_established(&self, handle: SessionHandle) {
         if let Some(hook) = &self.established {
-            if let Err(err) = hook(handle).await {
-                tracing::warn!("[CallbackPeerBuilder] on_established failed: {}", err);
+            if let Err(_error) = hook(handle).await {
+                tracing::warn!(callback = "on_established", "CallbackPeer hook failed");
             }
         }
     }
@@ -865,80 +865,80 @@ impl CallHandler for CallbackBuilderHandler {
         sdp: Option<String>,
     ) {
         if let Some(hook) = &self.progress {
-            if let Err(err) = hook(handle, status_code, reason, sdp).await {
-                tracing::warn!("[CallbackPeerBuilder] on_progress failed: {}", err);
+            if let Err(_error) = hook(handle, status_code, reason, sdp).await {
+                tracing::warn!(callback = "on_progress", "CallbackPeer hook failed");
             }
         }
     }
 
     async fn on_call_ended(&self, call_id: CallId, reason: EndReason) {
         if let Some(hook) = &self.ended {
-            if let Err(err) = hook(call_id, reason).await {
-                tracing::warn!("[CallbackPeerBuilder] on_ended failed: {}", err);
+            if let Err(_error) = hook(call_id, reason).await {
+                tracing::warn!(callback = "on_ended", "CallbackPeer hook failed");
             }
         }
     }
 
     async fn on_call_failed(&self, call_id: CallId, status_code: u16, reason: String) {
         if let Some(hook) = &self.failed {
-            if let Err(err) = hook(call_id, status_code, reason).await {
-                tracing::warn!("[CallbackPeerBuilder] on_failed failed: {}", err);
+            if let Err(_error) = hook(call_id, status_code, reason).await {
+                tracing::warn!(callback = "on_failed", "CallbackPeer hook failed");
             }
         }
     }
 
     async fn on_call_cancelled(&self, call_id: CallId) {
         if let Some(hook) = &self.cancelled {
-            if let Err(err) = hook(call_id).await {
-                tracing::warn!("[CallbackPeerBuilder] on_cancelled failed: {}", err);
+            if let Err(_error) = hook(call_id).await {
+                tracing::warn!(callback = "on_cancelled", "CallbackPeer hook failed");
             }
         }
     }
 
     async fn on_dtmf(&self, handle: SessionHandle, digit: char) {
         if let Some(hook) = &self.dtmf {
-            if let Err(err) = hook(handle, digit).await {
-                tracing::warn!("[CallbackPeerBuilder] on_dtmf failed: {}", err);
+            if let Err(_error) = hook(handle, digit).await {
+                tracing::warn!(callback = "on_dtmf", "CallbackPeer hook failed");
             }
         }
     }
 
     async fn on_media_security_negotiated(&self, handle: SessionHandle, state: MediaSecurityState) {
         if let Some(hook) = &self.media_security {
-            if let Err(err) = hook(handle, state).await {
-                tracing::warn!("[CallbackPeerBuilder] on_media_security failed: {}", err);
+            if let Err(_error) = hook(handle, state).await {
+                tracing::warn!(callback = "on_media_security", "CallbackPeer hook failed");
             }
         }
     }
 
     async fn on_call_on_hold(&self, handle: SessionHandle) {
         if let Some(hook) = &self.local_hold {
-            if let Err(err) = hook(handle).await {
-                tracing::warn!("[CallbackPeerBuilder] on_local_hold failed: {}", err);
+            if let Err(_error) = hook(handle).await {
+                tracing::warn!(callback = "on_local_hold", "CallbackPeer hook failed");
             }
         }
     }
 
     async fn on_call_resumed(&self, handle: SessionHandle) {
         if let Some(hook) = &self.local_resume {
-            if let Err(err) = hook(handle).await {
-                tracing::warn!("[CallbackPeerBuilder] on_local_resume failed: {}", err);
+            if let Err(_error) = hook(handle).await {
+                tracing::warn!(callback = "on_local_resume", "CallbackPeer hook failed");
             }
         }
     }
 
     async fn on_remote_call_on_hold(&self, handle: SessionHandle) {
         if let Some(hook) = &self.remote_hold {
-            if let Err(err) = hook(handle).await {
-                tracing::warn!("[CallbackPeerBuilder] on_remote_hold failed: {}", err);
+            if let Err(_error) = hook(handle).await {
+                tracing::warn!(callback = "on_remote_hold", "CallbackPeer hook failed");
             }
         }
     }
 
     async fn on_remote_call_resumed(&self, handle: SessionHandle) {
         if let Some(hook) = &self.remote_resume {
-            if let Err(err) = hook(handle).await {
-                tracing::warn!("[CallbackPeerBuilder] on_remote_resume failed: {}", err);
+            if let Err(_error) = hook(handle).await {
+                tracing::warn!(callback = "on_remote_resume", "CallbackPeer hook failed");
             }
         }
     }
@@ -949,19 +949,19 @@ impl CallHandler for CallbackBuilderHandler {
         };
         let Some(coord) = request.coordinator.clone() else {
             tracing::warn!(
-                "[CallbackPeerBuilder] on_refer_received fired without a coordinator hook; \
-                 dropping REFER for call {}",
-                request.call_id
+                callback = "on_refer_received",
+                call_id_bytes = request.call_id.as_str().len(),
+                "CallbackPeer REFER hook has no coordinator"
             );
             return;
         };
         let handle = SessionHandle::new(request.call_id.clone(), coord);
         let accepted = match hook(handle.clone(), request).await {
             Ok(b) => b,
-            Err(err) => {
+            Err(_error) => {
                 tracing::warn!(
-                    "[CallbackPeerBuilder] on_refer_received failed; rejecting REFER: {}",
-                    err
+                    callback = "on_refer_received",
+                    "CallbackPeer hook failed; rejecting REFER"
                 );
                 false
             }
@@ -971,26 +971,29 @@ impl CallHandler for CallbackBuilderHandler {
         } else {
             handle.reject_refer(603, "Decline").await
         };
-        if let Err(err) = result {
+        if let Err(_error) = result {
             tracing::warn!(
-                "[CallbackPeerBuilder] applying REFER decision failed: {}",
-                err
+                callback = "on_refer_received_decision",
+                "CallbackPeer REFER decision failed"
             );
         }
     }
 
     async fn on_transfer_accepted(&self, handle: SessionHandle, refer_to: String) {
         if let Some(hook) = &self.transfer_accepted {
-            if let Err(err) = hook(handle, refer_to).await {
-                tracing::warn!("[CallbackPeerBuilder] on_transfer_accepted failed: {}", err);
+            if let Err(_error) = hook(handle, refer_to).await {
+                tracing::warn!(
+                    callback = "on_transfer_accepted",
+                    "CallbackPeer hook failed"
+                );
             }
         }
     }
 
     async fn on_refer_progress(&self, handle: SessionHandle, status_code: u16, reason: String) {
         if let Some(hook) = &self.refer_progress {
-            if let Err(err) = hook(handle, status_code, reason).await {
-                tracing::warn!("[CallbackPeerBuilder] on_refer_progress failed: {}", err);
+            if let Err(_error) = hook(handle, status_code, reason).await {
+                tracing::warn!(callback = "on_refer_progress", "CallbackPeer hook failed");
             }
         }
     }
@@ -1003,26 +1006,26 @@ impl CallHandler for CallbackBuilderHandler {
         reason: String,
     ) {
         if let Some(hook) = &self.refer_completed {
-            if let Err(err) = hook(handle, target, status_code, reason).await {
-                tracing::warn!("[CallbackPeerBuilder] on_refer_completed failed: {}", err);
+            if let Err(_error) = hook(handle, target, status_code, reason).await {
+                tracing::warn!(callback = "on_refer_completed", "CallbackPeer hook failed");
             }
         }
     }
 
     async fn on_transfer_failed(&self, handle: SessionHandle, status_code: u16, reason: String) {
         if let Some(hook) = &self.transfer_failed {
-            if let Err(err) = hook(handle, status_code, reason).await {
-                tracing::warn!("[CallbackPeerBuilder] on_transfer_failed failed: {}", err);
+            if let Err(_error) = hook(handle, status_code, reason).await {
+                tracing::warn!(callback = "on_transfer_failed", "CallbackPeer hook failed");
             }
         }
     }
 
     async fn on_registration_success(&self, registrar: String, expires: u32, contact: String) {
         if let Some(hook) = &self.registration_success {
-            if let Err(err) = hook(registrar, expires, contact).await {
+            if let Err(_error) = hook(registrar, expires, contact).await {
                 tracing::warn!(
-                    "[CallbackPeerBuilder] on_registration_success failed: {}",
-                    err
+                    callback = "on_registration_success",
+                    "CallbackPeer hook failed"
                 );
             }
         }
@@ -1030,10 +1033,10 @@ impl CallHandler for CallbackBuilderHandler {
 
     async fn on_registration_failed(&self, registrar: String, status_code: u16, reason: String) {
         if let Some(hook) = &self.registration_failed {
-            if let Err(err) = hook(registrar, status_code, reason).await {
+            if let Err(_error) = hook(registrar, status_code, reason).await {
                 tracing::warn!(
-                    "[CallbackPeerBuilder] on_registration_failed failed: {}",
-                    err
+                    callback = "on_registration_failed",
+                    "CallbackPeer hook failed"
                 );
             }
         }
@@ -1041,10 +1044,10 @@ impl CallHandler for CallbackBuilderHandler {
 
     async fn on_unregistration_success(&self, registrar: String) {
         if let Some(hook) = &self.unregistration_success {
-            if let Err(err) = hook(registrar).await {
+            if let Err(_error) = hook(registrar).await {
                 tracing::warn!(
-                    "[CallbackPeerBuilder] on_unregistration_success failed: {}",
-                    err
+                    callback = "on_unregistration_success",
+                    "CallbackPeer hook failed"
                 );
             }
         }
@@ -1052,10 +1055,10 @@ impl CallHandler for CallbackBuilderHandler {
 
     async fn on_unregistration_failed(&self, registrar: String, reason: String) {
         if let Some(hook) = &self.unregistration_failed {
-            if let Err(err) = hook(registrar, reason).await {
+            if let Err(_error) = hook(registrar, reason).await {
                 tracing::warn!(
-                    "[CallbackPeerBuilder] on_unregistration_failed failed: {}",
-                    err
+                    callback = "on_unregistration_failed",
+                    "CallbackPeer hook failed"
                 );
             }
         }
@@ -1063,8 +1066,8 @@ impl CallHandler for CallbackBuilderHandler {
 
     async fn on_sip_trace(&self, trace: SipTrace) {
         if let Some(hook) = &self.sip_trace {
-            if let Err(err) = hook(trace).await {
-                tracing::warn!("[CallbackPeerBuilder] on_sip_trace failed: {}", err);
+            if let Err(_error) = hook(trace).await {
+                tracing::warn!(callback = "on_sip_trace", "CallbackPeer hook failed");
             }
         }
     }
@@ -1841,9 +1844,12 @@ impl<H: CallHandler> CallbackPeer<H> {
                 // unboundedly on a long-lived peer. This branch is only
                 // selected when there's at least one pending handler.
                 Some(join_result) = handlers.join_next(), if !handlers.is_empty() => {
-                    if let Err(e) = join_result {
-                        if !e.is_cancelled() {
-                            tracing::warn!("[CallbackPeer] Handler task panicked or errored: {}", e);
+                    if let Err(error) = join_result {
+                        if !error.is_cancelled() {
+                            tracing::warn!(
+                                error_class = "handler_task_failed",
+                                "CallbackPeer handler task failed"
+                            );
                         }
                     }
                 }
@@ -1873,11 +1879,12 @@ impl<H: CallHandler> CallbackPeer<H> {
         // down the coordinator. This is the whole point of the JoinSet: user
         // code should never be interrupted mid-handler by a shutdown.
         while let Some(join_result) = handlers.join_next().await {
-            if let Err(e) = join_result {
-                if !e.is_cancelled() {
+            if let Err(error) = join_result {
+                if !error.is_cancelled() {
                     tracing::warn!(
-                        "[CallbackPeer] Handler task panicked or errored on drain: {}",
-                        e
+                        error_class = "handler_task_failed",
+                        phase = "drain",
+                        "CallbackPeer handler task failed"
                     );
                 }
             }
@@ -1895,12 +1902,15 @@ impl<H: CallHandler> CallbackPeer<H> {
         // transports to close before `run()` returns. Tests and services may
         // immediately restart a peer on the same port after this future
         // resolves.
-        if let Err(e) = self
+        if let Err(_error) = self
             .coordinator
             .shutdown_gracefully(Some(Duration::ZERO))
             .await
         {
-            tracing::warn!("[CallbackPeer] Coordinator shutdown failed: {}", e);
+            tracing::warn!(
+                error_class = "coordinator_shutdown_failed",
+                "CallbackPeer coordinator shutdown failed"
+            );
         }
         Ok(())
     }
@@ -1998,11 +2008,11 @@ impl<H: CallHandler> CallbackPeer<H> {
                                         handler.on_call_established(handle).await;
                                     }
                                 }
-                                Err(e) => {
+                                Err(_error) => {
                                     tracing::debug!(
-                                        "Callback accept decision for {} was not applied: {}",
-                                        call_id,
-                                        e
+                                        call_id_bytes = call_id.as_str().len(),
+                                        decision = "accept",
+                                        "Callback decision was not applied"
                                     );
                                     accept_guard.finish_failure();
                                 }
@@ -2034,11 +2044,11 @@ impl<H: CallHandler> CallbackPeer<H> {
                                         handler.on_call_established(handle).await;
                                     }
                                 }
-                                Err(e) => {
+                                Err(_error) => {
                                     tracing::debug!(
-                                        "Callback accept-with-SDP decision for {} was not applied: {}",
-                                        call_id,
-                                        e
+                                        call_id_bytes = call_id.as_str().len(),
+                                        decision = "accept_with_sdp",
+                                        "Callback decision was not applied"
                                     );
                                     accept_guard.finish_failure();
                                 }
@@ -2434,9 +2444,13 @@ impl<H: CallHandler> CallbackPeer<H> {
 
 fn reap_ready_handlers(handlers: &mut tokio::task::JoinSet<()>, context: &str) {
     while let Some(join_result) = handlers.try_join_next() {
-        if let Err(e) = join_result {
-            if !e.is_cancelled() {
-                tracing::warn!("[CallbackPeer] Handler task panicked or errored ({context}): {e}");
+        if let Err(error) = join_result {
+            if !error.is_cancelled() {
+                tracing::warn!(
+                    error_class = "handler_task_failed",
+                    phase = context,
+                    "CallbackPeer handler task failed"
+                );
             }
         }
     }
@@ -3110,7 +3124,10 @@ mod tests {
             Ok(_) => panic!("builder without on_incoming should fail"),
             Err(err) => err,
         };
-        assert!(err.to_string().contains("on_incoming"));
+        assert!(matches!(
+            err,
+            SessionError::ConfigError(ref detail) if detail.contains("on_incoming")
+        ));
     }
 
     #[tokio::test]

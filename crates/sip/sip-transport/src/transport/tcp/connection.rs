@@ -20,7 +20,6 @@ const INITIAL_BUFFER_SIZE: usize = 8192;
 /// pong and a CRLFCRLF ping — both only legal at the start of the
 /// receive buffer (never embedded between messages). Anything else is a
 /// regular SIP message.
-#[derive(Debug)]
 pub enum ReceivedFrame {
     /// A parsed SIP message paired with the original wire bytes that
     /// the parser consumed. The bytes are preserved end-to-end so
@@ -34,6 +33,20 @@ pub enum ReceivedFrame {
     /// RFC 5626 §3.5.1 server-initiated ping — `\r\n\r\n` at offset 0
     /// of the buffer. The receiver should answer with a single CRLF.
     KeepAlivePing,
+}
+
+impl std::fmt::Debug for ReceivedFrame {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Message(message, bytes) => formatter
+                .debug_struct("Message")
+                .field("parsed", message)
+                .field("wire_bytes", &bytes.len())
+                .finish(),
+            Self::KeepAlivePong => formatter.write_str("KeepAlivePong"),
+            Self::KeepAlivePing => formatter.write_str("KeepAlivePing"),
+        }
+    }
 }
 
 /// TCP connection for SIP messages.
@@ -353,6 +366,20 @@ mod tests {
         message.extend_from_slice(b"\r\n\r\n");
         message.extend_from_slice(body);
         message
+    }
+
+    #[test]
+    fn received_frame_debug_never_renders_exact_wire_bytes() {
+        const SECRET: &str = "received-frame-wire-secret-canary";
+        let message = Message::Request(Request::new(
+            Method::Options,
+            Uri::custom(format!("sip:{SECRET}@example.test")),
+        ));
+        let frame =
+            ReceivedFrame::Message(message, bytes::Bytes::copy_from_slice(SECRET.as_bytes()));
+        let rendered = format!("{frame:?}");
+        assert!(!rendered.contains(SECRET), "frame debug leaked: {rendered}");
+        assert!(rendered.contains(&format!("wire_bytes: {}", SECRET.len())));
     }
 
     #[tokio::test]

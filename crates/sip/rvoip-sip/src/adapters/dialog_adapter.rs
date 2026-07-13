@@ -2926,8 +2926,11 @@ mod tests {
                 assert!(!rendered.contains("Authorization"));
                 assert!(!rendered.contains("X-App"));
             }
-            assert!(display.contains("class="));
-            assert!(display.contains(failure.diagnostic()));
+            let SessionError::DialogError(detail) = &error else {
+                panic!("unexpected invite error class: {error:?}");
+            };
+            assert!(detail.contains("class="));
+            assert!(detail.contains(failure.diagnostic()));
         }
     }
 

@@ -32,6 +32,10 @@ use tokio_rustls::TlsConnector;
 pub(crate) const SIP_WS_SUBPROTOCOL: &str = "sip";
 pub(crate) const SIP_WSS_SUBPROTOCOL: &str = "sips";
 
+fn selected_subprotocol_is_exact(selected: Option<&str>, expected: &str) -> bool {
+    selected.is_some_and(|value| value == expected)
+}
+
 // Default channel capacity
 const DEFAULT_CHANNEL_CAPACITY: usize = 1000;
 
@@ -522,10 +526,11 @@ impl WebSocketTransport {
                     connector
                         .connect(server_name, tcp_stream)
                         .await
-                        .map_err(|_error| {
-                            Error::TlsHandshakeFailed(format!(
-                                "WSS client TLS handshake failed for {addr}"
-                            ))
+                        .map_err(|error| {
+                            crate::transport::tls::classify_tls_runtime_error(
+                                error,
+                                format!("WSS client TLS handshake failed for {addr}"),
+                            )
                         })?;
                 (
                     SipWsStream::ClientTls(tls_stream),
@@ -571,12 +576,16 @@ impl WebSocketTransport {
         // Capture the server's selected subprotocol so the connection
         // wrapper carries the negotiated value (mirrors what the
         // listener path does).
-        let selected_subprotocol = response
+        let selected = response
             .headers()
             .get("Sec-WebSocket-Protocol")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string)
-            .unwrap_or_else(|| subprotocol_advertised.to_string());
+            .and_then(|v| v.to_str().ok());
+        if !selected_subprotocol_is_exact(selected, subprotocol_advertised) {
+            return Err(Error::WebSocketHandshakeFailed(format!(
+                "WebSocket peer did not negotiate required subprotocol for {addr}"
+            )));
+        }
+        let selected_subprotocol = subprotocol_advertised.to_string();
 
         let (ws_writer, ws_reader) = ws_stream.split();
 
@@ -723,6 +732,15 @@ impl fmt::Debug for WebSocketTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_subprotocol_validation_is_fail_closed() {
+        assert!(!selected_subprotocol_is_exact(None, "sip"));
+        assert!(!selected_subprotocol_is_exact(Some("chat"), "sip"));
+        assert!(!selected_subprotocol_is_exact(Some("sips"), "sip"));
+        assert!(selected_subprotocol_is_exact(Some("sip"), "sip"));
+        assert!(selected_subprotocol_is_exact(Some("sips"), "sips"));
+    }
     use rvoip_sip_core::builder::SimpleRequestBuilder;
     use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
     use rvoip_sip_core::{Method, Response, StatusCode};

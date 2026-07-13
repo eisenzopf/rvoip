@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 #[cfg(feature = "ws")]
-use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 #[cfg(feature = "ws")]
 use tokio_tungstenite::{tungstenite, WebSocketStream};
 use tracing::{debug, error, info};
@@ -19,6 +19,19 @@ use super::{SipWsStream, SIP_WSS_SUBPROTOCOL, SIP_WS_SUBPROTOCOL};
 use crate::error::{Error, Result};
 #[cfg(feature = "wss")]
 use crate::transport::tls::TlsServerClientAuthConfig;
+
+#[cfg(feature = "ws")]
+fn select_sip_subprotocol(offered: Option<&str>, secure: bool) -> Option<&'static str> {
+    let required = if secure {
+        SIP_WSS_SUBPROTOCOL
+    } else {
+        SIP_WS_SUBPROTOCOL
+    };
+    offered
+        .map(|value| value.split(',').map(str::trim).any(|item| item == required))
+        .is_some_and(|matched| matched)
+        .then_some(required)
+}
 
 /// WebSocket listener for accepting SIP WebSocket connections
 pub struct WebSocketListener {
@@ -242,15 +255,17 @@ impl WebSocketListener {
                         "WSS listener marked secure but no TLS acceptor configured".into(),
                     )
                 })?;
-                let tls_stream = acceptor.accept(stream).await.map_err(|_error| {
+                let tls_stream = acceptor.accept(stream).await.map_err(|error| {
+                    let error_class = crate::transport::tls::tls_runtime_failure_class(&error);
                     error!(
                         source = %peer_addr,
-                        error_class = "tls_handshake_failed",
+                        error_class,
                         "WSS TLS handshake failed"
                     );
-                    Error::TlsHandshakeFailed(format!(
-                        "WSS server TLS handshake failed for {peer_addr}"
-                    ))
+                    crate::transport::tls::classify_tls_runtime_error(
+                        error,
+                        format!("WSS server TLS handshake failed for {peer_addr}"),
+                    )
                 })?;
                 let metadata = crate::transport::tls::verified_peer_metadata(
                     tls_stream.get_ref().1.peer_certificates(),
@@ -270,41 +285,27 @@ impl WebSocketListener {
         // Custom callback for WebSocket handshake to handle subprotocol negotiation
         let callback = |request: &Request, response: Response| {
             // Check for subprotocol request
-            let protocols = request
+            let offered = request
                 .headers()
                 .get("Sec-WebSocket-Protocol")
-                .and_then(|h| h.to_str().ok())
-                .map(|p| p.split(',').map(|s| s.trim()).collect::<Vec<_>>());
+                .and_then(|h| h.to_str().ok());
+
+            let Some(required_protocol) = select_sip_subprotocol(offered, self.secure) else {
+                let rejection: ErrorResponse = http::Response::builder()
+                    .status(http::StatusCode::BAD_REQUEST)
+                    .body(Some(
+                        "required SIP WebSocket subprotocol was not offered".to_string(),
+                    ))
+                    .expect("static WebSocket rejection response is valid");
+                return Err(rejection);
+            };
 
             let mut response = response;
-            let mut selected_protocol = String::new();
-
-            if let Some(protocols) = protocols {
-                // Check if the client supports our subprotocols
-                let supported_protocol = if self.secure {
-                    if protocols.contains(&SIP_WSS_SUBPROTOCOL) {
-                        Some(SIP_WSS_SUBPROTOCOL)
-                    } else {
-                        None
-                    }
-                } else {
-                    if protocols.contains(&SIP_WS_SUBPROTOCOL) {
-                        Some(SIP_WS_SUBPROTOCOL)
-                    } else {
-                        None
-                    }
-                };
-
-                if let Some(protocol) = supported_protocol {
-                    response.headers_mut().append(
-                        "Sec-WebSocket-Protocol",
-                        HeaderValue::from_str(protocol).unwrap(),
-                    );
-                    selected_protocol = protocol.to_string();
-                }
-            }
-
-            (response, selected_protocol)
+            response.headers_mut().append(
+                "Sec-WebSocket-Protocol",
+                HeaderValue::from_static(required_protocol),
+            );
+            Ok((response, required_protocol.to_string()))
         };
 
         // Perform WebSocket handshake
@@ -322,17 +323,7 @@ impl WebSocketListener {
                     ))
                 })?;
 
-        // Default to 'sip' if no subprotocol was selected
-        let subprotocol = if selected_protocol.is_empty() {
-            if self.secure {
-                SIP_WSS_SUBPROTOCOL
-            } else {
-                SIP_WS_SUBPROTOCOL
-            }
-            .to_string()
-        } else {
-            selected_protocol
-        };
+        let subprotocol = selected_protocol;
 
         // Split the stream for separate reading and writing
         let (ws_writer, ws_reader) = ws_stream.split();
@@ -356,14 +347,15 @@ impl WebSocketListener {
         callback: F,
     ) -> std::result::Result<(WebSocketStream<SipWsStream>, String), tungstenite::Error>
     where
-        F: FnOnce(&Request, Response) -> (Response, String) + Unpin,
+        F: FnOnce(&Request, Response) -> std::result::Result<(Response, String), ErrorResponse>
+            + Unpin,
     {
         let selected_protocol = Arc::new(std::sync::Mutex::new(String::new()));
         let selected_for_callback = Arc::clone(&selected_protocol);
         let ws_stream = tokio_tungstenite::accept_hdr_async(
             stream,
             move |request: &Request, response: Response| {
-                let (response, selected) = callback(request, response);
+                let (response, selected) = callback(request, response)?;
                 *selected_for_callback
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = selected;
@@ -399,6 +391,23 @@ impl WebSocketListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "ws")]
+    #[test]
+    fn sip_subprotocol_selection_is_fail_closed() {
+        assert_eq!(select_sip_subprotocol(None, false), None);
+        assert_eq!(select_sip_subprotocol(Some("chat"), false), None);
+        assert_eq!(select_sip_subprotocol(Some("sips"), false), None);
+        assert_eq!(
+            select_sip_subprotocol(Some("chat, sip"), false),
+            Some("sip")
+        );
+        assert_eq!(select_sip_subprotocol(Some("sip"), true), None);
+        assert_eq!(
+            select_sip_subprotocol(Some("chat, sips"), true),
+            Some("sips")
+        );
+    }
 
     /// Test binding a WebSocket listener
     #[tokio::test]

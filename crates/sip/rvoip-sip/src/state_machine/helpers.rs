@@ -30,13 +30,35 @@ pub struct StateMachineHelpers {
 }
 
 /// Events for subscribers
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum SessionEvent {
     StateChanged { from: CallState, to: CallState },
     CallEstablished,
     CallTerminated { reason: String },
     MediaReady,
     IncomingCall { from: String },
+}
+
+impl std::fmt::Debug for SessionEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StateChanged { from, to } => formatter
+                .debug_struct("StateChanged")
+                .field("from", from)
+                .field("to", to)
+                .finish(),
+            Self::CallEstablished => formatter.write_str("CallEstablished"),
+            Self::CallTerminated { reason } => formatter
+                .debug_struct("CallTerminated")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::MediaReady => formatter.write_str("MediaReady"),
+            Self::IncomingCall { from } => formatter
+                .debug_struct("IncomingCall")
+                .field("from_bytes", &from.len())
+                .finish(),
+        }
+    }
 }
 
 impl StateMachineHelpers {

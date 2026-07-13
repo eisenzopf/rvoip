@@ -14,58 +14,72 @@ use crate::api::headers::options::{HeaderNameDiagnostic, HeaderNamesDiagnostic, 
 /// Convenience alias for `Result<T, SessionError>` used across the crate's API.
 pub type Result<T> = std::result::Result<T, SessionError>;
 
+struct TextDiagnostic<'a>(&'a str);
+
+impl fmt::Display for TextDiagnostic<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "redacted(bytes={})", self.0.len())
+    }
+}
+
+impl fmt::Debug for TextDiagnostic<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
 /// Errors returned by the `rvoip-sip` session layer.
 #[derive(Error)]
 pub enum SessionError {
     /// No session with the given identifier exists in the registry.
-    #[error("Session not found: {0}")]
+    #[error("Session not found: {}", TextDiagnostic(.0))]
     SessionNotFound(String),
 
     /// A requested state-machine transition is not legal from the current state.
-    #[error("Invalid state transition: {0}")]
+    #[error("Invalid state transition: {}", TextDiagnostic(.0))]
     InvalidTransition(String),
 
     /// An error originating in the dialog layer (`rvoip-sip-dialog`).
-    #[error("Dialog error: {0}")]
+    #[error("Dialog error: {}", TextDiagnostic(.0))]
     DialogError(String),
 
     /// An error originating in the media layer (`rvoip-media-core`).
-    #[error("Media error: {0}")]
+    #[error("Media error: {}", TextDiagnostic(.0))]
     MediaError(String),
 
     /// SIP signalling succeeded but wiring media to the negotiated session failed.
-    #[error("Media integration error: {reason}")]
+    #[error("Media integration error: {}", TextDiagnostic(.reason))]
     MediaIntegration {
         /// Human-readable description of the media-integration failure.
         reason: String,
     },
 
     /// SDP offer/answer negotiation failed (no common codec, malformed SDP, etc.).
-    #[error("SDP negotiation failed: {0}")]
+    #[error("SDP negotiation failed: {}", TextDiagnostic(.0))]
     SDPNegotiationFailed(String),
 
     /// Invalid or inconsistent configuration supplied to a builder or coordinator.
-    #[error("Configuration error: {0}")]
+    #[error("Configuration error: {}", TextDiagnostic(.0))]
     ConfigurationError(String),
 
     /// Configuration error (legacy alias of [`SessionError::ConfigurationError`]).
-    #[error("Config error: {0}")]
+    #[error("Config error: {}", TextDiagnostic(.0))]
     ConfigError(String),
 
     /// An application-supplied argument was malformed or out of range.
-    #[error("Invalid input: {0}")]
+    #[error("Invalid input: {}", TextDiagnostic(.0))]
     InvalidInput(String),
 
     /// An operation did not complete within its allotted time.
-    #[error("Timeout: {0}")]
+    #[error("Timeout: {}", TextDiagnostic(.0))]
     Timeout(String),
 
     /// A transport-level network error occurred.
-    #[error("Network error: {0}")]
+    #[error("Network error: {}", TextDiagnostic(.0))]
     NetworkError(String),
 
     /// A SIP protocol violation was detected.
-    #[error("Protocol error: {0}")]
+    #[error("Protocol error: {}", TextDiagnostic(.0))]
     ProtocolError(String),
 
     /// RFC 3262 — the remote peer did not advertise `Supported: 100rel` on the
@@ -108,19 +122,19 @@ pub enum SessionError {
     },
 
     /// An unexpected internal invariant was violated.
-    #[error("Internal error: {0}")]
+    #[error("Internal error: {}", TextDiagnostic(.0))]
     InternalError(String),
 
     /// An underlying `std::io` error (transport sockets, file I/O).
-    #[error("IO error: {0}")]
+    #[error("I/O operation failed")]
     IoError(#[from] std::io::Error),
 
     /// The requested capability is recognized but not yet implemented.
-    #[error("Not implemented: {0}")]
+    #[error("Not implemented: {}", TextDiagnostic(.0))]
     NotImplemented(String),
 
     /// A call transfer (REFER flow) failed.
-    #[error("Transfer failed: {0}")]
+    #[error("Transfer failed: {}", TextDiagnostic(.0))]
     TransferFailed(String),
 
     /// Authentication failed or could not be completed.
@@ -148,11 +162,11 @@ pub enum SessionError {
     RegisterAuthConstructionFailed,
 
     /// A REGISTER flow failed after any supported retry path.
-    #[error("Registration failed: {0}")]
+    #[error("Registration failed: {}", TextDiagnostic(.0))]
     RegistrationFailed(String),
 
     /// A flattened/stringly error from a lower layer that has no dedicated variant.
-    #[error("Other error: {0}")]
+    #[error("Other error: {}", TextDiagnostic(.0))]
     Other(String),
 
     /// SIP_API_DESIGN_2 §8 — a builder setter or `with_header` call
@@ -213,37 +227,52 @@ impl fmt::Debug for SessionError {
         match self {
             Self::SessionNotFound(value) => formatter
                 .debug_tuple("SessionNotFound")
-                .field(value)
+                .field(&TextDiagnostic(value))
                 .finish(),
             Self::InvalidTransition(value) => formatter
                 .debug_tuple("InvalidTransition")
-                .field(value)
+                .field(&TextDiagnostic(value))
                 .finish(),
-            Self::DialogError(value) => formatter.debug_tuple("DialogError").field(value).finish(),
-            Self::MediaError(value) => formatter.debug_tuple("MediaError").field(value).finish(),
+            Self::DialogError(value) => formatter
+                .debug_tuple("DialogError")
+                .field(&TextDiagnostic(value))
+                .finish(),
+            Self::MediaError(value) => formatter
+                .debug_tuple("MediaError")
+                .field(&TextDiagnostic(value))
+                .finish(),
             Self::MediaIntegration { reason } => formatter
                 .debug_struct("MediaIntegration")
-                .field("reason", reason)
+                .field("reason", &TextDiagnostic(reason))
                 .finish(),
             Self::SDPNegotiationFailed(value) => formatter
                 .debug_tuple("SDPNegotiationFailed")
-                .field(value)
+                .field(&TextDiagnostic(value))
                 .finish(),
             Self::ConfigurationError(value) => formatter
                 .debug_tuple("ConfigurationError")
-                .field(value)
+                .field(&TextDiagnostic(value))
                 .finish(),
-            Self::ConfigError(value) => formatter.debug_tuple("ConfigError").field(value).finish(),
-            Self::InvalidInput(value) => {
-                formatter.debug_tuple("InvalidInput").field(value).finish()
-            }
-            Self::Timeout(value) => formatter.debug_tuple("Timeout").field(value).finish(),
-            Self::NetworkError(value) => {
-                formatter.debug_tuple("NetworkError").field(value).finish()
-            }
-            Self::ProtocolError(value) => {
-                formatter.debug_tuple("ProtocolError").field(value).finish()
-            }
+            Self::ConfigError(value) => formatter
+                .debug_tuple("ConfigError")
+                .field(&TextDiagnostic(value))
+                .finish(),
+            Self::InvalidInput(value) => formatter
+                .debug_tuple("InvalidInput")
+                .field(&TextDiagnostic(value))
+                .finish(),
+            Self::Timeout(value) => formatter
+                .debug_tuple("Timeout")
+                .field(&TextDiagnostic(value))
+                .finish(),
+            Self::NetworkError(value) => formatter
+                .debug_tuple("NetworkError")
+                .field(&TextDiagnostic(value))
+                .finish(),
+            Self::ProtocolError(value) => formatter
+                .debug_tuple("ProtocolError")
+                .field(&TextDiagnostic(value))
+                .finish(),
             Self::UnreliableProvisionalsNotSupported => {
                 formatter.write_str("UnreliableProvisionalsNotSupported")
             }
@@ -259,17 +288,21 @@ impl fmt::Debug for SessionError {
                 .debug_struct("RequestAuthRetryExhausted")
                 .field("method", &MethodDiagnostic(method))
                 .finish(),
-            Self::InternalError(value) => {
-                formatter.debug_tuple("InternalError").field(value).finish()
-            }
-            Self::IoError(value) => formatter.debug_tuple("IoError").field(value).finish(),
+            Self::InternalError(value) => formatter
+                .debug_tuple("InternalError")
+                .field(&TextDiagnostic(value))
+                .finish(),
+            Self::IoError(value) => formatter
+                .debug_struct("IoError")
+                .field("kind", &value.kind())
+                .finish(),
             Self::NotImplemented(value) => formatter
                 .debug_tuple("NotImplemented")
-                .field(value)
+                .field(&TextDiagnostic(value))
                 .finish(),
             Self::TransferFailed(value) => formatter
                 .debug_tuple("TransferFailed")
-                .field(value)
+                .field(&TextDiagnostic(value))
                 .finish(),
             Self::AuthError(value) => formatter
                 .debug_tuple("AuthError")
@@ -286,9 +319,12 @@ impl fmt::Debug for SessionError {
             }
             Self::RegistrationFailed(value) => formatter
                 .debug_tuple("RegistrationFailed")
-                .field(value)
+                .field(&TextDiagnostic(value))
                 .finish(),
-            Self::Other(value) => formatter.debug_tuple("Other").field(value).finish(),
+            Self::Other(value) => formatter
+                .debug_tuple("Other")
+                .field(&TextDiagnostic(value))
+                .finish(),
             Self::HeaderPolicy {
                 method,
                 header,
@@ -459,13 +495,19 @@ impl SessionError {
 
 impl From<Box<dyn std::error::Error>> for SessionError {
     fn from(err: Box<dyn std::error::Error>) -> Self {
-        SessionError::Other(err.to_string())
+        match err.downcast::<SessionError>() {
+            Ok(session_error) => *session_error,
+            Err(_lower) => SessionError::Other("lower-layer error".to_string()),
+        }
     }
 }
 
 impl From<Box<dyn std::error::Error + Send + Sync>> for SessionError {
     fn from(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
-        SessionError::Other(err.to_string())
+        match err.downcast::<SessionError>() {
+            Ok(session_error) => *session_error,
+            Err(_lower) => SessionError::Other("lower-layer error".to_string()),
+        }
     }
 }
 
@@ -543,7 +585,7 @@ mod method_diagnostic_tests {
     fn fixed_error_debug_shapes_remain_derived_compatible() {
         assert_eq!(
             format!("{:?}", SessionError::SessionNotFound("call-1".to_string())),
-            "SessionNotFound(\"call-1\")"
+            "SessionNotFound(redacted(bytes=6))"
         );
         assert_eq!(
             format!(

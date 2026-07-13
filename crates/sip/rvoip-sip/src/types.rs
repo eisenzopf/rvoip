@@ -164,7 +164,7 @@ impl fmt::Display for CallState {
 }
 
 /// Call information for active calls
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CallInfo {
     pub session_id: SessionId,
     pub from: String,
@@ -174,8 +174,21 @@ pub struct CallInfo {
     pub media_active: bool,
 }
 
+impl fmt::Debug for CallInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CallInfo")
+            .field("session_id", &self.session_id)
+            .field("from_bytes", &self.from.len())
+            .field("to_bytes", &self.to.len())
+            .field("state", &self.state)
+            .field("media_active", &self.media_active)
+            .finish()
+    }
+}
+
 /// Session information for queries
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub session_id: SessionId,
     pub from: String,
@@ -183,6 +196,19 @@ pub struct SessionInfo {
     pub state: CallState,
     pub start_time: std::time::SystemTime,
     pub media_active: bool,
+}
+
+impl fmt::Debug for SessionInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionInfo")
+            .field("session_id", &self.session_id)
+            .field("from_bytes", &self.from.len())
+            .field("to_bytes", &self.to.len())
+            .field("state", &self.state)
+            .field("media_active", &self.media_active)
+            .finish()
+    }
 }
 
 /// Audio frame subscriber for receiving decoded audio frames
@@ -219,7 +245,7 @@ impl AudioFrameSubscriber {
 }
 
 /// Session events that flow through the system
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum SessionEvent {
     /// Incoming call received
     IncomingCall {
@@ -327,8 +353,134 @@ pub enum SessionEvent {
     },
 }
 
+impl fmt::Debug for SessionEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IncomingCall { from, to, sdp, .. } => formatter
+                .debug_struct("IncomingCall")
+                .field("from_bytes", &from.len())
+                .field("to_bytes", &to.len())
+                .field("sdp_present", &sdp.is_some())
+                .field("sdp_bytes", &sdp.as_ref().map_or(0, String::len))
+                .finish(),
+            Self::CallProgress {
+                status_code,
+                reason,
+                ..
+            } => formatter
+                .debug_struct("CallProgress")
+                .field("status_code", status_code)
+                .field("reason_present", &reason.is_some())
+                .field("reason_bytes", &reason.as_ref().map_or(0, String::len))
+                .finish(),
+            Self::CallAnswered { sdp, .. } => formatter
+                .debug_struct("CallAnswered")
+                .field("sdp_present", &sdp.is_some())
+                .field("sdp_bytes", &sdp.as_ref().map_or(0, String::len))
+                .finish(),
+            Self::CallTerminated { reason, .. } => formatter
+                .debug_struct("CallTerminated")
+                .field("reason_present", &reason.is_some())
+                .field("reason_bytes", &reason.as_ref().map_or(0, String::len))
+                .finish(),
+            Self::CallFailed { reason, .. } => formatter
+                .debug_struct("CallFailed")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::MediaStateChanged { state, .. } => formatter
+                .debug_struct("MediaStateChanged")
+                .field("state", state)
+                .finish(),
+            Self::DtmfReceived { .. } => formatter.write_str("DtmfReceived"),
+            Self::HoldRequest { .. } => formatter.write_str("HoldRequest"),
+            Self::ResumeRequest { .. } => formatter.write_str("ResumeRequest"),
+            Self::TransferRequest {
+                attended, target, ..
+            } => formatter
+                .debug_struct("TransferRequest")
+                .field("target_bytes", &target.len())
+                .field("attended", attended)
+                .finish(),
+            Self::RegistrationStarted { uri, expires, .. } => formatter
+                .debug_struct("RegistrationStarted")
+                .field("uri_bytes", &uri.len())
+                .field("expires", expires)
+                .finish(),
+            Self::RegistrationSuccess { uri, expires, .. } => formatter
+                .debug_struct("RegistrationSuccess")
+                .field("uri_bytes", &uri.len())
+                .field("expires", expires)
+                .finish(),
+            Self::RegistrationFailed {
+                reason,
+                status_code,
+                ..
+            } => formatter
+                .debug_struct("RegistrationFailed")
+                .field("reason_bytes", &reason.len())
+                .field("status_code", status_code)
+                .finish(),
+            Self::UnregistrationComplete { .. } => formatter.write_str("UnregistrationComplete"),
+            Self::SubscriptionStarted {
+                uri,
+                event_package,
+                expires,
+                ..
+            } => formatter
+                .debug_struct("SubscriptionStarted")
+                .field("uri_bytes", &uri.len())
+                .field("event_package_bytes", &event_package.len())
+                .field("expires", expires)
+                .finish(),
+            Self::SubscriptionAccepted { expires, .. } => formatter
+                .debug_struct("SubscriptionAccepted")
+                .field("expires", expires)
+                .finish(),
+            Self::SubscriptionFailed {
+                reason,
+                status_code,
+                ..
+            } => formatter
+                .debug_struct("SubscriptionFailed")
+                .field("reason_bytes", &reason.len())
+                .field("status_code", status_code)
+                .finish(),
+            Self::NotifyReceived {
+                event_package,
+                body,
+                ..
+            } => formatter
+                .debug_struct("NotifyReceived")
+                .field("event_package_bytes", &event_package.len())
+                .field("body_present", &body.is_some())
+                .field("body_bytes", &body.as_ref().map_or(0, String::len))
+                .finish(),
+            Self::MessageSent { to, body, .. } => formatter
+                .debug_struct("MessageSent")
+                .field("to_bytes", &to.len())
+                .field("body_bytes", &body.len())
+                .finish(),
+            Self::MessageReceived { from, body, .. } => formatter
+                .debug_struct("MessageReceived")
+                .field("from_bytes", &from.len())
+                .field("body_bytes", &body.len())
+                .finish(),
+            Self::MessageDelivered { .. } => formatter.write_str("MessageDelivered"),
+            Self::MessageDeliveryFailed {
+                reason,
+                status_code,
+                ..
+            } => formatter
+                .debug_struct("MessageDeliveryFailed")
+                .field("reason_bytes", &reason.len())
+                .field("status_code", status_code)
+                .finish(),
+        }
+    }
+}
+
 /// Media session state
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MediaState {
     /// Media not initialized
     Idle,
@@ -344,8 +496,24 @@ pub enum MediaState {
     Terminated,
 }
 
+impl fmt::Debug for MediaState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Idle => formatter.write_str("Idle"),
+            Self::Negotiating => formatter.write_str("Negotiating"),
+            Self::Active => formatter.write_str("Active"),
+            Self::OnHold => formatter.write_str("OnHold"),
+            Self::Failed(reason) => formatter
+                .debug_struct("Failed")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::Terminated => formatter.write_str("Terminated"),
+        }
+    }
+}
+
 /// Transfer status
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransferStatus {
     /// Transfer initiated
     Initiated,
@@ -355,6 +523,20 @@ pub enum TransferStatus {
     Completed,
     /// Transfer failed
     Failed(String),
+}
+
+impl fmt::Debug for TransferStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Initiated => formatter.write_str("Initiated"),
+            Self::InProgress => formatter.write_str("InProgress"),
+            Self::Completed => formatter.write_str("Completed"),
+            Self::Failed(reason) => formatter
+                .debug_struct("Failed")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+        }
+    }
 }
 
 /// Media direction for hold/resume
@@ -371,7 +553,7 @@ pub enum MediaDirection {
 }
 
 /// Registration state
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RegistrationState {
     /// Not registered
     Unregistered,
@@ -385,8 +567,23 @@ pub enum RegistrationState {
     Unregistering,
 }
 
+impl fmt::Debug for RegistrationState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unregistered => formatter.write_str("Unregistered"),
+            Self::Registering => formatter.write_str("Registering"),
+            Self::Registered => formatter.write_str("Registered"),
+            Self::Failed(reason) => formatter
+                .debug_struct("Failed")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::Unregistering => formatter.write_str("Unregistering"),
+        }
+    }
+}
+
 /// Presence status types
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PresenceStatus {
     /// Available
     Available,
@@ -400,6 +597,22 @@ pub enum PresenceStatus {
     Offline,
     /// Custom status
     Custom(String),
+}
+
+impl fmt::Debug for PresenceStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Available => formatter.write_str("Available"),
+            Self::Away => formatter.write_str("Away"),
+            Self::Busy => formatter.write_str("Busy"),
+            Self::DoNotDisturb => formatter.write_str("DoNotDisturb"),
+            Self::Offline => formatter.write_str("Offline"),
+            Self::Custom(value) => formatter
+                .debug_struct("Custom")
+                .field("bytes", &value.len())
+                .finish(),
+        }
+    }
 }
 
 /// User credentials for authentication
@@ -442,7 +655,7 @@ impl Credentials {
 }
 
 /// Audio device information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AudioDevice {
     /// Device ID
     pub id: String,
@@ -456,6 +669,20 @@ pub struct AudioDevice {
     pub sample_rates: Vec<u32>,
     /// Number of channels
     pub channels: u8,
+}
+
+impl fmt::Debug for AudioDevice {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AudioDevice")
+            .field("id_bytes", &self.id.len())
+            .field("name_bytes", &self.name.len())
+            .field("is_input", &self.is_input)
+            .field("is_output", &self.is_output)
+            .field("sample_rates", &self.sample_rates)
+            .field("channels", &self.channels)
+            .finish()
+    }
 }
 
 /// Conference identifier
@@ -482,7 +709,7 @@ impl fmt::Display for ConferenceId {
 }
 
 /// Call detail record for billing/logging
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CallDetailRecord {
     /// Session ID
     pub session_id: SessionId,
@@ -504,8 +731,31 @@ pub struct CallDetailRecord {
     pub call_id: String,
 }
 
+impl fmt::Debug for CallDetailRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CallDetailRecord")
+            .field("session_id", &self.session_id)
+            .field("dialog_id", &"[opaque]")
+            .field("from_bytes", &self.from.len())
+            .field("to_bytes", &self.to.len())
+            .field("end_time_present", &self.end_time.is_some())
+            .field("duration", &self.duration)
+            .field(
+                "termination_reason_present",
+                &self.termination_reason.is_some(),
+            )
+            .field(
+                "termination_reason_bytes",
+                &self.termination_reason.as_ref().map_or(0, String::len),
+            )
+            .field("call_id_bytes", &self.call_id.len())
+            .finish()
+    }
+}
+
 /// Information about an incoming call
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct IncomingCallInfo {
     /// Session ID assigned to this call
     pub session_id: SessionId,
@@ -524,4 +774,71 @@ pub struct IncomingCallInfo {
     /// callers wanting structured access can re-parse with
     /// `rvoip_sip_core::types::p_asserted_identity::PAssertedIdentity::from_str`.
     pub p_asserted_identity: Option<String>,
+}
+
+impl fmt::Debug for IncomingCallInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IncomingCallInfo")
+            .field("session_id", &self.session_id)
+            .field("dialog_id", &"[opaque]")
+            .field("from_bytes", &self.from.len())
+            .field("to_bytes", &self.to.len())
+            .field("call_id_bytes", &self.call_id.len())
+            .field(
+                "p_asserted_identity_present",
+                &self.p_asserted_identity.is_some(),
+            )
+            .field(
+                "p_asserted_identity_bytes",
+                &self.p_asserted_identity.as_ref().map_or(0, String::len),
+            )
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_safety_tests {
+    use super::*;
+
+    #[test]
+    fn public_session_and_cdr_debug_is_payload_free() {
+        const SECRET: &str = "legacy-session-type-secret-canary";
+        let session_id = SessionId::from_string(SECRET);
+        let dialog_id = DialogId::new();
+        let event = SessionEvent::IncomingCall {
+            from: SECRET.to_string(),
+            to: SECRET.to_string(),
+            call_id: SECRET.to_string(),
+            dialog_id,
+            sdp: Some(SECRET.to_string()),
+        };
+        let cdr = CallDetailRecord {
+            session_id: session_id.clone(),
+            dialog_id,
+            from: SECRET.to_string(),
+            to: SECRET.to_string(),
+            start_time: std::time::SystemTime::now(),
+            end_time: None,
+            duration: None,
+            termination_reason: Some(SECRET.to_string()),
+            call_id: SECRET.to_string(),
+        };
+        let incoming = IncomingCallInfo {
+            session_id,
+            dialog_id,
+            from: SECRET.to_string(),
+            to: SECRET.to_string(),
+            call_id: SECRET.to_string(),
+            p_asserted_identity: Some(SECRET.to_string()),
+        };
+
+        for rendered in [
+            format!("{event:?}"),
+            format!("{cdr:?}"),
+            format!("{incoming:?}"),
+        ] {
+            assert!(!rendered.contains(SECRET), "debug leaked: {rendered}");
+        }
+    }
 }

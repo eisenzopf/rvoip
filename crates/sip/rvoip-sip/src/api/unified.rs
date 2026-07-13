@@ -2823,6 +2823,7 @@ mod config_tests {
         RegistrationStatus,
     };
     use crate::api::trace_redactor::{RedactionDecision, TraceRedactor};
+    use crate::errors::SessionError;
     use rvoip_sip_core::types::headers::HeaderName;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -2859,12 +2860,11 @@ mod config_tests {
             .with_sip_transaction_command_channel_capacity(0)
             .validate()
             .expect_err("zero transaction command channel capacity should fail");
-        assert!(
-            error
-                .to_string()
-                .contains("sip_transaction_command_channel_capacity"),
-            "unexpected error: {error}"
-        );
+        assert!(matches!(
+            error,
+            SessionError::ConfigError(ref detail)
+                if detail.contains("sip_transaction_command_channel_capacity")
+        ));
     }
 
     #[test]
@@ -2906,10 +2906,10 @@ mod config_tests {
         let error = config
             .validate()
             .expect_err("PT18 should require the g729 feature");
-        assert!(
-            error.to_string().contains("`g729` feature"),
-            "unexpected error: {error}"
-        );
+        assert!(matches!(
+            error,
+            SessionError::ConfigError(ref detail) if detail.contains("`g729` feature")
+        ));
     }
 
     #[test]

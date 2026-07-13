@@ -2048,7 +2048,10 @@ mod tests {
         publish_synthetic(&coordinator, Event::CallAnswered { call_id, sdp: None }).await;
 
         let err = waiter.await.unwrap().unwrap_err();
-        assert!(err.to_string().contains("answered before cancellation"));
+        assert!(matches!(
+            err,
+            SessionError::Other(ref detail) if detail.contains("answered before cancellation")
+        ));
         assert!(resolved.load(Ordering::SeqCst));
         coordinator.shutdown();
     }

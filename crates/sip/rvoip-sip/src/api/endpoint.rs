@@ -3116,7 +3116,10 @@ mod tests {
     #[test]
     fn endpoint_requires_registrar_for_bare_target() {
         let err = normalize_target(None, "1002", EndpointTransport::Udp).unwrap_err();
-        assert!(err.to_string().contains("registrar"));
+        assert!(matches!(
+            err,
+            SessionError::ConfigError(ref detail) if detail.contains("registrar")
+        ));
     }
 
     #[test]

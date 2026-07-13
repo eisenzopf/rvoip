@@ -2780,10 +2780,11 @@ mod sdp_format_tests {
             .unwrap_err();
         let display = error.to_string();
         let debug = format!("{error:?}");
-        assert_eq!(
-            display,
-            "SDP negotiation failed: SDP negotiation failed (stage=remote-offer, class=syntax)"
-        );
+        assert!(matches!(
+            &error,
+            SessionError::SDPNegotiationFailed(detail)
+                if detail == "SDP negotiation failed (stage=remote-offer, class=syntax)"
+        ));
         assert!(!display.contains(canary));
         assert!(!debug.contains(canary));
     }

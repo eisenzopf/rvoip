@@ -1236,11 +1236,10 @@ transitions:
         let err = loader
             .parse_action_by_name("ThisNameDoesNotExist42")
             .expect_err("unknown YAML action must be a hard error, not Custom fallback");
-        let msg = format!("{:?}", err);
-        assert!(
-            msg.contains("Unknown YAML action"),
-            "unexpected error for unknown action: {}",
-            msg,
-        );
+        assert!(matches!(
+            err,
+            SessionError::InternalError(ref detail) if detail.contains("Unknown YAML action")
+        ));
+        assert!(!format!("{err:?}").contains("ThisNameDoesNotExist42"));
     }
 }

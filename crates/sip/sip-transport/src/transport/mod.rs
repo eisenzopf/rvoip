@@ -476,13 +476,25 @@ pub trait Transport: Send + Sync + fmt::Debug {
 
 /// Direction-specific Via-stack edit for
 /// [`Transport::forward_raw_with_via_rewrite`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum ViaRewrite {
     /// Request forwarding — insert the supplied Via line (caller is
     /// responsible for the trailing `\r\n`) above the existing top.
     Push(Bytes),
     /// Response forwarding — remove the existing top Via line.
     Pop,
+}
+
+impl fmt::Debug for ViaRewrite {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Push(bytes) => formatter
+                .debug_struct("Push")
+                .field("bytes", &bytes.len())
+                .finish(),
+            Self::Pop => formatter.write_str("Pop"),
+        }
+    }
 }
 
 /// Apply a `ViaRewrite` to a serialized SIP message, returning the
@@ -662,5 +674,14 @@ mod tests {
             assert!(debug.contains("raw_bytes_present"));
             assert!(debug.contains("raw_bytes_len"));
         }
+    }
+
+    #[test]
+    fn via_rewrite_debug_reports_only_wire_extent() {
+        const SECRET: &str = "via-rewrite-secret-canary";
+        let rewrite = ViaRewrite::Push(Bytes::copy_from_slice(SECRET.as_bytes()));
+        let rendered = format!("{rewrite:?}");
+        assert!(!rendered.contains(SECRET));
+        assert!(rendered.contains(&format!("bytes: {}", SECRET.len())));
     }
 }

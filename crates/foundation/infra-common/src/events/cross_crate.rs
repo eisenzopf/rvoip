@@ -2191,13 +2191,31 @@ pub enum CallState {
     Terminated,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum TerminationReason {
     LocalHangup,
     RemoteHangup,
     Rejected(String),
     Error(String),
     Timeout,
+}
+
+impl fmt::Debug for TerminationReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LocalHangup => formatter.write_str("LocalHangup"),
+            Self::RemoteHangup => formatter.write_str("RemoteHangup"),
+            Self::Rejected(reason) => formatter
+                .debug_struct("Rejected")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::Error(error) => formatter
+                .debug_struct("Error")
+                .field("error_bytes", &error.len())
+                .finish(),
+            Self::Timeout => formatter.write_str("Timeout"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2247,11 +2265,24 @@ pub struct MediaQualityMetrics {
     pub delay_ms: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum RegistrationStatus {
     Registered,
     Unregistered,
     Failed(String),
+}
+
+impl fmt::Debug for RegistrationStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Registered => formatter.write_str("Registered"),
+            Self::Unregistered => formatter.write_str("Unregistered"),
+            Self::Failed(error) => formatter
+                .debug_struct("Failed")
+                .field("error_bytes", &error.len())
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -3104,6 +3135,15 @@ mod tests {
         for event in events {
             let rendered = format!("{event:?}");
             assert!(!rendered.contains(SECRET), "event debug leaked: {rendered}");
+        }
+        for rendered in [
+            format!("{:?}", TerminationReason::Error(SECRET.to_string())),
+            format!("{:?}", RegistrationStatus::Failed(SECRET.to_string())),
+        ] {
+            assert!(
+                !rendered.contains(SECRET),
+                "support debug leaked: {rendered}"
+            );
         }
     }
 

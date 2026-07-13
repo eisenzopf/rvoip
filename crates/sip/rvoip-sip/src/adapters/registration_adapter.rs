@@ -266,8 +266,14 @@ mod diagnostic_tests {
 
     impl std::error::Error for MaliciousLowerError {}
 
-    fn assert_redacted(error: SessionError, expected: &str) {
-        assert_eq!(error.to_string(), expected);
+    fn assert_redacted(error: SessionError, expected_detail: &str) {
+        let detail = match &error {
+            SessionError::InvalidInput(detail)
+            | SessionError::RegistrationFailed(detail)
+            | SessionError::InternalError(detail) => detail,
+            other => panic!("unexpected registration error: {other:?}"),
+        };
+        assert_eq!(detail, expected_detail);
         assert!(!error.to_string().contains(CANARY));
         assert!(!format!("{error:?}").contains(CANARY));
     }
@@ -275,29 +281,26 @@ mod diagnostic_tests {
     #[test]
     fn malformed_aor_error_does_not_echo_peer_input_or_parser_error() {
         let error = RegistrationAdapter::extract_aor(CANARY).expect_err("malformed AOR");
-        assert_redacted(
-            error,
-            "Invalid input: invalid registration address-of-record",
-        );
+        assert_redacted(error, "invalid registration address-of-record");
     }
 
     #[test]
     fn registrar_and_event_bus_errors_collapse_to_fixed_stage_classes() {
         assert_redacted(
             RegistrationAdapter::registrar_authentication_failure(MaliciousLowerError),
-            "Registration failed: registrar authentication failed",
+            "registrar authentication failed",
         );
         assert_redacted(
             RegistrationAdapter::registrar_storage_failure(MaliciousLowerError),
-            "Registration failed: registrar storage failed",
+            "registrar storage failed",
         );
         assert_redacted(
             RegistrationAdapter::registration_response_publish_failure(MaliciousLowerError),
-            "Internal error: registration response publish failed",
+            "registration response publish failed",
         );
         assert_redacted(
             RegistrationAdapter::registration_event_subscription_failure(MaliciousLowerError),
-            "Internal error: registration event subscription failed",
+            "registration event subscription failed",
         );
     }
 }

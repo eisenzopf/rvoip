@@ -12,13 +12,26 @@ use crate::state_table::{ConditionUpdates, Role};
 use crate::types::{CallState, MediaDirection};
 
 /// Negotiated media configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NegotiatedConfig {
     pub local_addr: SocketAddr,
     pub remote_addr: SocketAddr,
     pub codec: String,
     pub sample_rate: u32,
     pub channels: u8,
+}
+
+impl fmt::Debug for NegotiatedConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NegotiatedConfig")
+            .field("local_address_present", &true)
+            .field("remote_address_present", &true)
+            .field("codec_bytes", &self.codec.len())
+            .field("sample_rate", &self.sample_rate)
+            .field("channels", &self.channels)
+            .finish()
+    }
 }
 
 /// Kind of mid-dialog re-INVITE that was in flight when a 491 Request

@@ -159,7 +159,7 @@ fn action_error_diagnostic_class(
 }
 
 /// Events that flow through the system
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum SessionEvent {
     StateChanged {
         session_id: SessionId,
@@ -191,6 +191,42 @@ pub enum SessionEvent {
         session_id: SessionId,
         event: String,
     },
+}
+
+impl std::fmt::Debug for SessionEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StateChanged {
+                old_state,
+                new_state,
+                ..
+            } => formatter
+                .debug_struct("StateChanged")
+                .field("old_state", old_state)
+                .field("new_state", new_state)
+                .finish(),
+            Self::MediaFlowEstablished {
+                local_addr,
+                remote_addr,
+                direction,
+                ..
+            } => formatter
+                .debug_struct("MediaFlowEstablished")
+                .field("local_addr_bytes", &local_addr.len())
+                .field("remote_addr_bytes", &remote_addr.len())
+                .field("direction", direction)
+                .finish(),
+            Self::CallEstablished { .. } => formatter.write_str("CallEstablished"),
+            Self::CallTerminated { .. } => formatter.write_str("CallTerminated"),
+            Self::CallCancelled { .. } => formatter.write_str("CallCancelled"),
+            Self::CallOnHold { .. } => formatter.write_str("CallOnHold"),
+            Self::CallResumed { .. } => formatter.write_str("CallResumed"),
+            Self::Custom { event, .. } => formatter
+                .debug_struct("Custom")
+                .field("event_bytes", &event.len())
+                .finish(),
+        }
+    }
 }
 
 impl StateMachine {
