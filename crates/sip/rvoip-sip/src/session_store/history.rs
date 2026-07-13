@@ -67,10 +67,49 @@ fn auth_challenge_history_metadata(challenge: &str) -> String {
     )
 }
 
+fn text_history_metadata(value: &str) -> String {
+    format!(
+        "metadata(present={},bytes={})",
+        !value.is_empty(),
+        value.len()
+    )
+}
+
+fn optional_text_history_metadata(value: &Option<String>) -> Option<String> {
+    value.as_deref().map(text_history_metadata)
+}
+
+fn text_list_history_metadata(values: &[String]) -> Vec<String> {
+    let bytes = values.iter().map(String::len).sum::<usize>();
+    vec![format!("metadata(items={},bytes={bytes})", values.len())]
+}
+
 /// Return a persistence-safe event snapshot. Live state-machine events retain
 /// their full payloads; history keeps only bounded metadata for auth material.
 pub(crate) fn history_event_snapshot(event: &EventType) -> EventType {
     match event {
+        EventType::MakeCall { target } => EventType::MakeCall {
+            target: text_history_metadata(target),
+        },
+        EventType::IncomingCall { from, sdp } => EventType::IncomingCall {
+            from: text_history_metadata(from),
+            sdp: optional_text_history_metadata(sdp),
+        },
+        EventType::IncomingCallAutoAccept { from, sdp } => EventType::IncomingCallAutoAccept {
+            from: text_history_metadata(from),
+            sdp: optional_text_history_metadata(sdp),
+        },
+        EventType::RejectCall { status, reason } => EventType::RejectCall {
+            status: *status,
+            reason: text_history_metadata(reason),
+        },
+        EventType::RedirectCall { status, contacts } => EventType::RedirectCall {
+            status: *status,
+            contacts: text_list_history_metadata(contacts),
+        },
+        EventType::SendEarlyMedia { sdp } => EventType::SendEarlyMedia {
+            sdp: optional_text_history_metadata(sdp),
+        },
         EventType::AuthRequired {
             status_code,
             challenge,
@@ -80,6 +119,106 @@ pub(crate) fn history_event_snapshot(event: &EventType) -> EventType {
             challenge: auth_challenge_history_metadata(challenge),
             method: safe_auth_method_label(method).to_string(),
         },
+        EventType::PlayAudio { file } => EventType::PlayAudio {
+            file: text_history_metadata(file),
+        },
+        EventType::DialogCreated { dialog_id, call_id } => EventType::DialogCreated {
+            dialog_id: text_history_metadata(dialog_id),
+            call_id: text_history_metadata(call_id),
+        },
+        EventType::CallEstablished {
+            session_id,
+            sdp_answer,
+        } => EventType::CallEstablished {
+            session_id: text_history_metadata(session_id),
+            sdp_answer: optional_text_history_metadata(sdp_answer),
+        },
+        EventType::Dialog3xxRedirect { status, targets } => EventType::Dialog3xxRedirect {
+            status: *status,
+            targets: text_list_history_metadata(targets),
+        },
+        EventType::DialogError(error) => EventType::DialogError(text_history_metadata(error)),
+        EventType::DialogStateChanged {
+            old_state,
+            new_state,
+        } => EventType::DialogStateChanged {
+            old_state: text_history_metadata(old_state),
+            new_state: text_history_metadata(new_state),
+        },
+        EventType::ReinviteReceived { sdp } => EventType::ReinviteReceived {
+            sdp: optional_text_history_metadata(sdp),
+        },
+        EventType::UpdateReceived { sdp } => EventType::UpdateReceived {
+            sdp: optional_text_history_metadata(sdp),
+        },
+        EventType::TransferRequested {
+            refer_to,
+            transfer_type,
+            transaction_id,
+        } => EventType::TransferRequested {
+            refer_to: text_history_metadata(refer_to),
+            transfer_type: text_history_metadata(transfer_type),
+            transaction_id: text_history_metadata(transaction_id),
+        },
+        EventType::MediaError(error) => EventType::MediaError(text_history_metadata(error)),
+        EventType::MediaEvent(event) => EventType::MediaEvent(text_history_metadata(event)),
+        EventType::MediaQualityDegraded {
+            packet_loss_percent,
+            jitter_ms,
+            severity,
+        } => EventType::MediaQualityDegraded {
+            packet_loss_percent: *packet_loss_percent,
+            jitter_ms: *jitter_ms,
+            severity: text_history_metadata(severity),
+        },
+        EventType::DtmfDetected { duration_ms, .. } => EventType::DtmfDetected {
+            digit: '\0',
+            duration_ms: *duration_ms,
+        },
+        EventType::RtpTimeout { last_packet_time } => EventType::RtpTimeout {
+            last_packet_time: text_history_metadata(last_packet_time),
+        },
+        EventType::CreateConference { name } => EventType::CreateConference {
+            name: text_history_metadata(name),
+        },
+        EventType::AddParticipant { session_id } => EventType::AddParticipant {
+            session_id: text_history_metadata(session_id),
+        },
+        EventType::JoinConference { conference_id } => EventType::JoinConference {
+            conference_id: text_history_metadata(conference_id),
+        },
+        EventType::BridgeSessions { other_session } => EventType::BridgeSessions {
+            other_session: crate::state_table::SessionId(text_history_metadata(&other_session.0)),
+        },
+        _ => event.clone(),
+    }
+}
+
+fn history_action_snapshot(action: &Action) -> Action {
+    match action {
+        Action::SendSIPResponse(status, reason) => {
+            Action::SendSIPResponse(*status, text_history_metadata(reason))
+        }
+        Action::TransferCall(target) => Action::TransferCall(text_history_metadata(target)),
+        Action::PlayAudioFile(file) => Action::PlayAudioFile(text_history_metadata(file)),
+        Action::CreateBridge(session_id) => Action::CreateBridge(crate::state_table::SessionId(
+            text_history_metadata(&session_id.0),
+        )),
+        Action::Custom(value) => Action::Custom(text_history_metadata(value)),
+        _ => action.clone(),
+    }
+}
+
+fn history_guard_snapshot(guard: &Guard) -> Guard {
+    match guard {
+        Guard::Custom(value) => Guard::Custom(text_history_metadata(value)),
+        _ => guard.clone(),
+    }
+}
+
+fn history_event_template_snapshot(event: &EventTemplate) -> EventTemplate {
+    match event {
+        EventTemplate::Custom(value) => EventTemplate::Custom(text_history_metadata(value)),
         _ => event.clone(),
     }
 }
@@ -99,6 +238,7 @@ fn sanitize_transition_record(record: &mut TransitionRecord) {
     record.event = history_event_snapshot(&record.event);
 
     for action in &mut record.actions_executed {
+        action.action = history_action_snapshot(&action.action);
         if action.error.is_some() {
             action.error = Some(
                 if is_auth_action(&action.action) {
@@ -109,6 +249,12 @@ fn sanitize_transition_record(record: &mut TransitionRecord) {
                 .to_string(),
             );
         }
+    }
+    for guard in &mut record.guards_evaluated {
+        guard.guard = history_guard_snapshot(&guard.guard);
+    }
+    for event in &mut record.events_published {
+        *event = history_event_template_snapshot(event);
     }
     if !record.errors.is_empty() {
         record.errors.fill(
@@ -339,17 +485,22 @@ impl SessionHistory {
             String::from("sequence,timestamp_ms,from_state,event,to_state,duration_ms,errors\n");
 
         for t in &self.transitions {
+            let from_state = format!("{:?}", t.from_state);
+            let event = format!("{:?}", t.event);
+            let to_state = t
+                .to_state
+                .map(|s| format!("{:?}", s))
+                .unwrap_or_else(|| "None".to_string());
+            let errors = t.errors.join(";");
             csv.push_str(&format!(
-                "{},{},{:?},\"{:?}\",{:?},{},{}\n",
+                "{},{},{},{},{},{},{}\n",
                 t.sequence,
                 t.timestamp.elapsed().as_millis(),
-                t.from_state,
-                t.event,
-                t.to_state
-                    .map(|s| format!("{:?}", s))
-                    .unwrap_or_else(|| "None".to_string()),
+                csv_escape(&from_state),
+                csv_escape(&event),
+                csv_escape(&to_state),
                 t.duration_ms,
-                t.errors.join(";")
+                csv_escape(&errors)
             ));
         }
 
@@ -377,6 +528,17 @@ impl SessionHistory {
             return 0.0;
         }
         self.total_errors as f32 / self.total_transitions as f32
+    }
+}
+
+fn csv_escape(value: &str) -> String {
+    if value
+        .bytes()
+        .any(|byte| matches!(byte, b',' | b'"' | b'\r' | b'\n'))
+    {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
     }
 }
 
@@ -624,6 +786,200 @@ mod tests {
         ] {
             assert!(!rendered.contains(SECRET), "leaked error value: {rendered}");
         }
+    }
+
+    #[test]
+    fn payload_bearing_events_are_metadata_only_in_history_snapshots() {
+        const SECRET: &str = "history-payload-secret\r\nAuthorization: Bearer hidden";
+        let events = vec![
+            EventType::MakeCall {
+                target: SECRET.to_string(),
+            },
+            EventType::IncomingCall {
+                from: SECRET.to_string(),
+                sdp: Some(SECRET.to_string()),
+            },
+            EventType::IncomingCallAutoAccept {
+                from: SECRET.to_string(),
+                sdp: Some(SECRET.to_string()),
+            },
+            EventType::RejectCall {
+                status: 486,
+                reason: SECRET.to_string(),
+            },
+            EventType::RedirectCall {
+                status: 302,
+                contacts: vec![SECRET.to_string()],
+            },
+            EventType::SendEarlyMedia {
+                sdp: Some(SECRET.to_string()),
+            },
+            EventType::AuthRequired {
+                status_code: 401,
+                challenge: SECRET.to_string(),
+                method: SECRET.to_string(),
+            },
+            EventType::PlayAudio {
+                file: SECRET.to_string(),
+            },
+            EventType::DialogCreated {
+                dialog_id: SECRET.to_string(),
+                call_id: SECRET.to_string(),
+            },
+            EventType::CallEstablished {
+                session_id: SECRET.to_string(),
+                sdp_answer: Some(SECRET.to_string()),
+            },
+            EventType::Dialog3xxRedirect {
+                status: 302,
+                targets: vec![SECRET.to_string()],
+            },
+            EventType::DialogError(SECRET.to_string()),
+            EventType::DialogStateChanged {
+                old_state: SECRET.to_string(),
+                new_state: SECRET.to_string(),
+            },
+            EventType::ReinviteReceived {
+                sdp: Some(SECRET.to_string()),
+            },
+            EventType::UpdateReceived {
+                sdp: Some(SECRET.to_string()),
+            },
+            EventType::TransferRequested {
+                refer_to: SECRET.to_string(),
+                transfer_type: SECRET.to_string(),
+                transaction_id: SECRET.to_string(),
+            },
+            EventType::MediaError(SECRET.to_string()),
+            EventType::MediaEvent(SECRET.to_string()),
+            EventType::MediaQualityDegraded {
+                packet_loss_percent: 7,
+                jitter_ms: 11,
+                severity: SECRET.to_string(),
+            },
+            EventType::RtpTimeout {
+                last_packet_time: SECRET.to_string(),
+            },
+            EventType::CreateConference {
+                name: SECRET.to_string(),
+            },
+            EventType::AddParticipant {
+                session_id: SECRET.to_string(),
+            },
+            EventType::JoinConference {
+                conference_id: SECRET.to_string(),
+            },
+            EventType::BridgeSessions {
+                other_session: crate::state_table::SessionId(SECRET.to_string()),
+            },
+        ];
+
+        for event in events {
+            let live = event.clone();
+            let snapshot = history_event_snapshot(&event);
+            assert_eq!(event, live, "snapshot mutated live event");
+            let rendered = format!("{snapshot:?}");
+            assert!(rendered.contains("metadata") || rendered.contains("extension"));
+            assert!(!rendered.contains(SECRET), "event leaked: {rendered}");
+            assert!(
+                !rendered.contains("Bearer hidden"),
+                "event leaked: {rendered}"
+            );
+        }
+
+        assert_eq!(
+            history_event_snapshot(&EventType::DtmfDetected {
+                digit: '\r',
+                duration_ms: 80,
+            }),
+            EventType::DtmfDetected {
+                digit: '\0',
+                duration_ms: 80,
+            }
+        );
+    }
+
+    #[test]
+    fn all_retained_history_payloads_and_csv_are_sanitized() {
+        const SECRET: &str = "retained-history-secret\r\nnext,csv,record\"";
+        let mut history = SessionHistory::new(HistoryConfig {
+            track_actions: true,
+            track_guards: true,
+            ..HistoryConfig::default()
+        });
+        history.record_transition(TransitionRecord {
+            timestamp: Instant::now(),
+            timestamp_ms: 1,
+            sequence: 0,
+            from_state: CallState::Ringing,
+            event: EventType::IncomingCall {
+                from: SECRET.to_string(),
+                sdp: Some(SECRET.to_string()),
+            },
+            to_state: Some(CallState::Terminating),
+            guards_evaluated: vec![GuardResult {
+                guard: Guard::Custom(SECRET.to_string()),
+                passed: false,
+                evaluation_time_us: 1,
+            }],
+            actions_executed: vec![
+                ActionRecord {
+                    action: Action::SendSIPResponse(500, SECRET.to_string()),
+                    success: false,
+                    execution_time_us: 1,
+                    error: Some(SECRET.to_string()),
+                },
+                ActionRecord {
+                    action: Action::TransferCall(SECRET.to_string()),
+                    success: true,
+                    execution_time_us: 1,
+                    error: None,
+                },
+                ActionRecord {
+                    action: Action::PlayAudioFile(SECRET.to_string()),
+                    success: true,
+                    execution_time_us: 1,
+                    error: None,
+                },
+                ActionRecord {
+                    action: Action::CreateBridge(crate::state_table::SessionId(SECRET.to_string())),
+                    success: true,
+                    execution_time_us: 1,
+                    error: None,
+                },
+                ActionRecord {
+                    action: Action::Custom(SECRET.to_string()),
+                    success: true,
+                    execution_time_us: 1,
+                    error: None,
+                },
+            ],
+            events_published: vec![EventTemplate::Custom(SECRET.to_string())],
+            duration_ms: 1,
+            errors: vec![SECRET.to_string()],
+        });
+
+        let record = history.get_recent(1).pop().expect("history record");
+        for rendered in [
+            format!("{record:?}"),
+            history.export_json(),
+            history.export_csv(),
+        ] {
+            assert!(!rendered.contains(SECRET), "history leaked: {rendered}");
+            assert!(!rendered.contains("retained-history-secret"));
+            assert!(!rendered.contains("next,csv,record"));
+        }
+        let csv = history.export_csv();
+        assert_eq!(csv.lines().count(), 2, "CSV record escaped into extra rows");
+        assert!(csv.contains("\"\"metadata"));
+    }
+
+    #[test]
+    fn csv_escape_quotes_commas_quotes_and_line_breaks() {
+        assert_eq!(csv_escape("plain"), "plain");
+        assert_eq!(csv_escape("a,b"), "\"a,b\"");
+        assert_eq!(csv_escape("a\"b"), "\"a\"\"b\"");
+        assert_eq!(csv_escape("a\r\nb"), "\"a\r\nb\"");
     }
 
     #[test]
