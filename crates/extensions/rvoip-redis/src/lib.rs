@@ -21,6 +21,7 @@ use rvoip_auth_core::{
     DigestNonceStatus, DigestReplayStore, TokenRevocationChecker, TokenRevocationContext,
     TokenRevocationStatus,
 };
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 /// Errors returned while constructing or administering Redis auth providers.
@@ -47,7 +48,11 @@ pub struct RedisAuthConfig {
     /// Retaining expired nonce records lets SIP Digest UAS code distinguish a
     /// known stale nonce from an unknown nonce.
     pub nonce_stale_retention: Duration,
-    /// TTL for nonce-count replay records.
+    /// Minimum TTL for nonce-count replay records.
+    ///
+    /// The provider always extends this to cover the admitted nonce's full
+    /// validity and stale-retention window, so a still-valid proof cannot
+    /// become replayable when this value is configured too short.
     pub nonce_count_ttl: Duration,
     /// TTL used when revoking a token without a token expiry time.
     pub token_revocation_ttl: Duration,
@@ -55,6 +60,53 @@ pub struct RedisAuthConfig {
     pub rate_limit_window: Duration,
     /// Maximum failed attempts accepted in one rate-limit window.
     pub max_failures_per_window: u32,
+}
+
+/// Fair cardinality limits for one Redis Digest tenant namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RedisDigestReplayLimits {
+    /// Maximum retained active-or-stale server nonces.
+    pub retained_nonces: usize,
+    /// Maximum retained client replay sequences in the namespace.
+    pub client_sequences: usize,
+    /// Maximum retained sequences owned by one Digest username.
+    pub sequences_per_username: usize,
+    /// Maximum retained sequences sharing one server nonce.
+    pub sequences_per_nonce: usize,
+    /// Maximum retained sequences for one username and server nonce.
+    pub sequences_per_username_nonce: usize,
+}
+
+impl Default for RedisDigestReplayLimits {
+    fn default() -> Self {
+        Self {
+            retained_nonces: 4_096,
+            client_sequences: 16_384,
+            sequences_per_username: 4_096,
+            sequences_per_nonce: 8_192,
+            sequences_per_username_nonce: 4_096,
+        }
+    }
+}
+
+impl RedisDigestReplayLimits {
+    fn validate(self) -> Result<Self, CredentialAuthError> {
+        if self.retained_nonces == 0
+            || self.client_sequences == 0
+            || self.sequences_per_username == 0
+            || self.sequences_per_nonce == 0
+            || self.sequences_per_username_nonce == 0
+            || self.sequences_per_username > self.client_sequences
+            || self.sequences_per_nonce > self.client_sequences
+            || self.sequences_per_username_nonce > self.sequences_per_username
+            || self.sequences_per_username_nonce > self.sequences_per_nonce
+        {
+            return Err(CredentialAuthError::PolicyRejected(
+                "invalid Digest replay limits".to_string(),
+            ));
+        }
+        Ok(self)
+    }
 }
 
 impl RedisAuthConfig {
@@ -113,6 +165,7 @@ impl RedisAuthConfig {
 pub struct RedisAuthProvider {
     client: redis::Client,
     config: RedisAuthConfig,
+    digest_limits: RedisDigestReplayLimits,
 }
 
 impl RedisAuthProvider {
@@ -124,12 +177,30 @@ impl RedisAuthProvider {
     /// Create a Redis provider from explicit configuration.
     pub fn from_config(config: RedisAuthConfig) -> Result<Self, RedisAuthError> {
         let client = redis::Client::open(config.redis_url.as_str())?;
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+            digest_limits: RedisDigestReplayLimits::default(),
+        })
     }
 
     /// Return this provider's configuration.
     pub fn config(&self) -> &RedisAuthConfig {
         &self.config
+    }
+
+    /// Apply explicit fair limits to this provider's Digest namespace.
+    pub fn with_digest_replay_limits(
+        mut self,
+        limits: RedisDigestReplayLimits,
+    ) -> Result<Self, CredentialAuthError> {
+        self.digest_limits = limits.validate()?;
+        Ok(self)
+    }
+
+    /// Return the effective Digest replay limits.
+    pub fn digest_replay_limits(&self) -> RedisDigestReplayLimits {
+        self.digest_limits
     }
 
     /// Revoke a token id globally until its expiry time or the configured
@@ -187,18 +258,43 @@ impl RedisAuthProvider {
         self.client.get_multiplexed_async_connection().await
     }
 
-    fn nonce_key(&self, nonce: &str) -> String {
-        format!("{}:digest:nonce:{}", self.config.namespace, hex_key(nonce))
+    fn digest_pool_prefix(&self) -> String {
+        // The hash tag keeps every key used by an atomic Digest Lua script in
+        // one Redis Cluster slot while retaining the configured namespace for
+        // administration and fixture cleanup.
+        format!(
+            "{}:{{{}}}:digest",
+            self.config.namespace,
+            digest_key(&self.config.namespace)
+        )
     }
 
-    fn nonce_count_key(&self, username: &str, nonce: &str, cnonce: &str) -> String {
-        format!(
-            "{}:digest:nc:{}:{}:{}",
-            self.config.namespace,
-            hex_key(username),
-            hex_key(nonce),
-            hex_key(cnonce)
-        )
+    fn nonce_expiry_key(&self) -> String {
+        format!("{}:nonce-expiry", self.digest_pool_prefix())
+    }
+
+    fn nonce_retention_key(&self) -> String {
+        format!("{}:nonce-retention", self.digest_pool_prefix())
+    }
+
+    fn nonce_count_values_key(&self) -> String {
+        format!("{}:nc-values", self.digest_pool_prefix())
+    }
+
+    fn nonce_count_retention_key(&self) -> String {
+        format!("{}:nc-retention", self.digest_pool_prefix())
+    }
+
+    fn nonce_count_username_key(&self) -> String {
+        format!("{}:nc-by-username", self.digest_pool_prefix())
+    }
+
+    fn nonce_count_nonce_key(&self) -> String {
+        format!("{}:nc-by-nonce", self.digest_pool_prefix())
+    }
+
+    fn nonce_count_username_nonce_key(&self) -> String {
+        format!("{}:nc-by-username-nonce", self.digest_pool_prefix())
     }
 
     fn token_key(&self, issuer: Option<&str>, token_id: &str) -> String {
@@ -229,19 +325,95 @@ impl DigestReplayStore for RedisAuthProvider {
         nonce: &str,
         expires_at: SystemTime,
     ) -> Result<(), CredentialAuthError> {
-        let expires_unix = unix_seconds(expires_at)?;
-        let ttl_until_expiry = expires_at
-            .duration_since(SystemTime::now())
-            .unwrap_or_else(|_| Duration::from_secs(0));
-        let ttl = ttl_until_expiry
-            .saturating_add(self.config.nonce_stale_retention)
-            .max(Duration::from_secs(1));
-        let mut connection = self.connection().await.map_credential_error()?;
-        let _: () = connection
-            .set_ex(self.nonce_key(nonce), expires_unix, duration_secs(ttl)?)
-            .await
-            .map_credential_error()?;
+        let admitted = self.admit_nonce(nonce, expires_at).await?;
+        if admitted != nonce {
+            return Err(CredentialAuthError::PolicyRejected(
+                "legacy Digest nonce admission reached capacity".to_string(),
+            ));
+        }
         Ok(())
+    }
+
+    async fn admit_nonce(
+        &self,
+        proposed_nonce: &str,
+        expires_at: SystemTime,
+    ) -> Result<String, CredentialAuthError> {
+        let now = unix_seconds(SystemTime::now())?;
+        let expires_unix = unix_seconds(expires_at)?;
+        let retain_until = expires_unix
+            .checked_add(duration_secs(self.config.nonce_stale_retention)?)
+            .ok_or_else(|| {
+                CredentialAuthError::PolicyRejected(
+                    "Digest nonce retention is too large".to_string(),
+                )
+            })?;
+        if retain_until <= now {
+            return Err(CredentialAuthError::PolicyRejected(
+                "Digest nonce is outside stale retention".to_string(),
+            ));
+        }
+        let pool_ttl = retain_until.saturating_sub(now).max(1);
+        let mut connection = self.connection().await.map_credential_error()?;
+        redis::Script::new(
+            r#"
+            local expired = redis.call("ZRANGEBYSCORE", KEYS[2], "-inf", ARGV[4])
+            for _, member in ipairs(expired) do
+                redis.call("ZREM", KEYS[1], member)
+            end
+            redis.call("ZREMRANGEBYSCORE", KEYS[2], "-inf", ARGV[4])
+
+            if redis.call("ZSCORE", KEYS[1], ARGV[1]) then
+                redis.call("ZADD", KEYS[1], ARGV[2], ARGV[1])
+                redis.call("ZADD", KEYS[2], ARGV[3], ARGV[1])
+            elseif redis.call("ZCARD", KEYS[2]) >= tonumber(ARGV[5]) then
+                local best = redis.call(
+                    "ZREVRANGEBYSCORE",
+                    KEYS[1],
+                    "+inf",
+                    "(" .. ARGV[4],
+                    "LIMIT",
+                    0,
+                    1
+                )
+                if #best > 0 then
+                    return best[1]
+                end
+
+                local oldest = redis.call("ZRANGE", KEYS[2], 0, 0)
+                if #oldest > 0 then
+                    redis.call("ZREM", KEYS[1], oldest[1])
+                    redis.call("ZREM", KEYS[2], oldest[1])
+                end
+                redis.call("ZADD", KEYS[1], ARGV[2], ARGV[1])
+                redis.call("ZADD", KEYS[2], ARGV[3], ARGV[1])
+            else
+                redis.call("ZADD", KEYS[1], ARGV[2], ARGV[1])
+                redis.call("ZADD", KEYS[2], ARGV[3], ARGV[1])
+            end
+
+            local function extend_ttl(key, ttl)
+                local current = redis.call("TTL", key)
+                if current == -1 or current < ttl then
+                    redis.call("EXPIRE", key, ttl)
+                end
+            end
+            extend_ttl(KEYS[1], tonumber(ARGV[6]))
+            extend_ttl(KEYS[2], tonumber(ARGV[6]))
+            return ARGV[1]
+            "#,
+        )
+        .key(self.nonce_expiry_key())
+        .key(self.nonce_retention_key())
+        .arg(proposed_nonce)
+        .arg(expires_unix)
+        .arg(retain_until)
+        .arg(now)
+        .arg(self.digest_limits.retained_nonces)
+        .arg(pool_ttl)
+        .invoke_async(&mut connection)
+        .await
+        .map_credential_error()
     }
 
     async fn nonce_status(
@@ -250,46 +422,184 @@ impl DigestReplayStore for RedisAuthProvider {
         now: SystemTime,
     ) -> Result<DigestNonceStatus, CredentialAuthError> {
         let mut connection = self.connection().await.map_credential_error()?;
-        let expires_unix: Option<u64> = connection
-            .get(self.nonce_key(nonce))
-            .await
-            .map_credential_error()?;
-        let Some(expires_unix) = expires_unix else {
-            return Ok(DigestNonceStatus::Unknown);
-        };
-        if unix_seconds(now)? < expires_unix {
-            Ok(DigestNonceStatus::Active)
-        } else {
-            Ok(DigestNonceStatus::Expired)
-        }
+        let status: i32 = redis::Script::new(
+            r#"
+            local expiry = redis.call("ZSCORE", KEYS[1], ARGV[1])
+            local retain_until = redis.call("ZSCORE", KEYS[2], ARGV[1])
+            if not expiry or not retain_until then
+                return -1
+            end
+            if tonumber(retain_until) <= tonumber(ARGV[2]) then
+                redis.call("ZREM", KEYS[1], ARGV[1])
+                redis.call("ZREM", KEYS[2], ARGV[1])
+                return -1
+            end
+            if tonumber(expiry) > tonumber(ARGV[2]) then
+                return 1
+            end
+            return 0
+            "#,
+        )
+        .key(self.nonce_expiry_key())
+        .key(self.nonce_retention_key())
+        .arg(nonce)
+        .arg(unix_seconds(now)?)
+        .invoke_async(&mut connection)
+        .await
+        .map_credential_error()?;
+        Ok(match status {
+            1 => DigestNonceStatus::Active,
+            0 => DigestNonceStatus::Expired,
+            _ => DigestNonceStatus::Unknown,
+        })
     }
 
     async fn accept_nonce_count(
         &self,
         username: &str,
         nonce: &str,
-        cnonce: &str,
         nonce_count: u32,
     ) -> Result<bool, CredentialAuthError> {
+        self.accept_client_nonce_count(
+            username,
+            nonce,
+            "legacy-client-sequence",
+            nonce_count,
+            SystemTime::now(),
+        )
+        .await
+    }
+
+    async fn accept_client_nonce_count(
+        &self,
+        username: &str,
+        nonce: &str,
+        cnonce: &str,
+        nonce_count: u32,
+        now: SystemTime,
+    ) -> Result<bool, CredentialAuthError> {
         let mut connection = self.connection().await.map_credential_error()?;
-        let ttl = duration_secs(self.config.nonce_count_ttl)?;
+        let now = unix_seconds(now)?;
+        let username_key = digest_key(username);
+        let nonce_key = digest_key(nonce);
+        let username_nonce_key = format!("{username_key}:{nonce_key}");
+        let sequence_key = format!("{username_nonce_key}:{}", digest_key(cnonce));
+        let minimum_ttl = duration_secs(self.config.nonce_count_ttl)?.max(1);
         let accepted: i32 = redis::Script::new(
             r#"
-            local current = redis.call("GET", KEYS[1])
-            if current and tonumber(current) >= tonumber(ARGV[1]) then
+            local expired = redis.call("ZRANGEBYSCORE", KEYS[4], "-inf", ARGV[6])
+            for _, sequence in ipairs(expired) do
+                local value = redis.call("HGET", KEYS[3], sequence)
+                if value then
+                    local _, _, user, nonce, user_nonce = string.find(
+                        value,
+                        "^%d+|([^|]+)|([^|]+)|([^|]+)$"
+                    )
+                    if user then
+                        local user_count = redis.call("HINCRBY", KEYS[5], user, -1)
+                        if user_count <= 0 then redis.call("HDEL", KEYS[5], user) end
+                        local nonce_count = redis.call("HINCRBY", KEYS[6], nonce, -1)
+                        if nonce_count <= 0 then redis.call("HDEL", KEYS[6], nonce) end
+                        local pair_count = redis.call("HINCRBY", KEYS[7], user_nonce, -1)
+                        if pair_count <= 0 then redis.call("HDEL", KEYS[7], user_nonce) end
+                    end
+                    redis.call("HDEL", KEYS[3], sequence)
+                end
+            end
+            redis.call("ZREMRANGEBYSCORE", KEYS[4], "-inf", ARGV[6])
+
+            local nonce_expiry = redis.call("ZSCORE", KEYS[1], ARGV[2])
+            local retain_until = redis.call("ZSCORE", KEYS[2], ARGV[2])
+            if not nonce_expiry or not retain_until
+                or tonumber(nonce_expiry) <= tonumber(ARGV[6])
+                or tonumber(retain_until) <= tonumber(ARGV[6]) then
                 return 0
             end
-            redis.call("SET", KEYS[1], ARGV[1], "EX", ARGV[2])
+
+            local current = redis.call("HGET", KEYS[3], ARGV[1])
+            if current then
+                local current_count = tonumber(string.match(current, "^(%d+)|"))
+                if current_count and current_count >= tonumber(ARGV[7]) then
+                    return 0
+                end
+                redis.call(
+                    "HSET",
+                    KEYS[3],
+                    ARGV[1],
+                    ARGV[7] .. "|" .. ARGV[3] .. "|" .. ARGV[4] .. "|" .. ARGV[5]
+                )
+                redis.call("ZADD", KEYS[4], retain_until, ARGV[1])
+                local ttl = math.max(
+                    tonumber(ARGV[12]),
+                    tonumber(retain_until) - tonumber(ARGV[6]),
+                    1
+                )
+                for index = 3, 7 do
+                    local current_ttl = redis.call("TTL", KEYS[index])
+                    if current_ttl == -1 or current_ttl < ttl then
+                        redis.call("EXPIRE", KEYS[index], ttl)
+                    end
+                end
+                return 1
+            end
+
+            if redis.call("HLEN", KEYS[3]) >= tonumber(ARGV[8])
+                or tonumber(redis.call("HGET", KEYS[5], ARGV[3]) or "0") >= tonumber(ARGV[9])
+                or tonumber(redis.call("HGET", KEYS[6], ARGV[4]) or "0") >= tonumber(ARGV[10])
+                or tonumber(redis.call("HGET", KEYS[7], ARGV[5]) or "0") >= tonumber(ARGV[11]) then
+                return -1
+            end
+
+            redis.call(
+                "HSET",
+                KEYS[3],
+                ARGV[1],
+                ARGV[7] .. "|" .. ARGV[3] .. "|" .. ARGV[4] .. "|" .. ARGV[5]
+            )
+            redis.call("ZADD", KEYS[4], retain_until, ARGV[1])
+            redis.call("HINCRBY", KEYS[5], ARGV[3], 1)
+            redis.call("HINCRBY", KEYS[6], ARGV[4], 1)
+            redis.call("HINCRBY", KEYS[7], ARGV[5], 1)
+
+            local ttl = math.max(tonumber(ARGV[12]), tonumber(retain_until) - tonumber(ARGV[6]), 1)
+            for index = 3, 7 do
+                local current_ttl = redis.call("TTL", KEYS[index])
+                if current_ttl == -1 or current_ttl < ttl then
+                    redis.call("EXPIRE", KEYS[index], ttl)
+                end
+            end
             return 1
             "#,
         )
-        .key(self.nonce_count_key(username, nonce, cnonce))
+        .key(self.nonce_expiry_key())
+        .key(self.nonce_retention_key())
+        .key(self.nonce_count_values_key())
+        .key(self.nonce_count_retention_key())
+        .key(self.nonce_count_username_key())
+        .key(self.nonce_count_nonce_key())
+        .key(self.nonce_count_username_nonce_key())
+        .arg(sequence_key)
+        .arg(nonce)
+        .arg(username_key)
+        .arg(nonce_key)
+        .arg(username_nonce_key)
+        .arg(now)
         .arg(nonce_count)
-        .arg(ttl)
+        .arg(self.digest_limits.client_sequences)
+        .arg(self.digest_limits.sequences_per_username)
+        .arg(self.digest_limits.sequences_per_nonce)
+        .arg(self.digest_limits.sequences_per_username_nonce)
+        .arg(minimum_ttl)
         .invoke_async(&mut connection)
         .await
         .map_credential_error()?;
-        Ok(accepted == 1)
+        match accepted {
+            1 => Ok(true),
+            0 => Ok(false),
+            _ => Err(CredentialAuthError::PolicyRejected(
+                "Digest replay capacity exhausted".to_string(),
+            )),
+        }
     }
 }
 
@@ -428,4 +738,59 @@ fn hex_key(input: &str) -> String {
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
     output
+}
+
+fn digest_key(input: &str) -> String {
+    let digest = Sha256::digest(input.as_bytes());
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn digest_limit_validation_rejects_zero_and_inverted_limits() {
+        let provider = RedisAuthProvider::new("redis://127.0.0.1:6379").unwrap();
+        assert!(provider
+            .clone()
+            .with_digest_replay_limits(RedisDigestReplayLimits {
+                retained_nonces: 0,
+                ..RedisDigestReplayLimits::default()
+            })
+            .is_err());
+        assert!(provider
+            .with_digest_replay_limits(RedisDigestReplayLimits {
+                client_sequences: 4,
+                sequences_per_username: 5,
+                ..RedisDigestReplayLimits::default()
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn digest_script_keys_share_one_cluster_hash_tag() {
+        let provider = RedisAuthProvider::from_config(
+            RedisAuthConfig::new("redis://127.0.0.1:6379").with_namespace("tenant-a"),
+        )
+        .unwrap();
+        let keys = [
+            provider.nonce_expiry_key(),
+            provider.nonce_retention_key(),
+            provider.nonce_count_values_key(),
+            provider.nonce_count_retention_key(),
+            provider.nonce_count_username_key(),
+            provider.nonce_count_nonce_key(),
+            provider.nonce_count_username_nonce_key(),
+        ];
+        let expected_tag = format!("{{{}}}", digest_key("tenant-a"));
+        assert!(keys.iter().all(|key| key.contains(&expected_tag)));
+        assert!(keys.iter().all(|key| key.starts_with("tenant-a:")));
+    }
 }

@@ -46,6 +46,23 @@ rvoip-auth-core = "0.2.2"
   README](../../sip/rvoip-sip/README.md) and in
   [`crates/sip/rvoip-sip/examples/callback_peer/`](../../sip/rvoip-sip/examples/callback_peer/).
 
+## Clustered SIP Digest replay migration
+
+Existing `DigestReplayStore` implementations remain source compatible through
+the original `record_nonce`, `nonce_status`, and `(username, nonce)`
+`accept_nonce_count` methods. Secure clustered listeners additionally call two
+additive methods:
+
+- `admit_nonce` atomically bounds challenge state and may return an existing
+  active nonce when the tenant pool is full.
+- `accept_client_nonce_count` atomically verifies nonce activity and tracks a
+  monotonic `(username, nonce, cnonce)` sequence with fair cardinality limits.
+
+Their default implementations deliberately return `PolicyRejected`. A legacy
+store therefore compiles but fails closed when selected for a secure clustered
+listener until it implements the new contract. Use `RedisAuthProvider` as the
+first-party implementation and configure one namespace/provider per tenant.
+
 ## License
 
 Licensed under the MIT license. See the repository [LICENSE](https://github.com/eisenzopf/rvoip/blob/main/LICENSE).

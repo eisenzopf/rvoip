@@ -11,6 +11,7 @@ use rvoip_auth_core::{
 #[derive(Default)]
 struct MemoryDigestReplayStore {
     nonces: Mutex<HashMap<String, SystemTime>>,
+    legacy_counts: Mutex<HashMap<(String, String), u32>>,
     counts: Mutex<HashMap<(String, String, String), u32>>,
 }
 
@@ -45,9 +46,37 @@ impl DigestReplayStore for MemoryDigestReplayStore {
         &self,
         username: &str,
         nonce: &str,
-        cnonce: &str,
         nonce_count: u32,
     ) -> Result<bool, CredentialAuthError> {
+        let key = (username.to_string(), nonce.to_string());
+        let mut counts = self.legacy_counts.lock().expect("legacy count lock");
+        if counts.get(&key).is_some_and(|last| nonce_count <= *last) {
+            return Ok(false);
+        }
+        counts.insert(key, nonce_count);
+        Ok(true)
+    }
+
+    async fn admit_nonce(
+        &self,
+        proposed_nonce: &str,
+        expires_at: SystemTime,
+    ) -> Result<String, CredentialAuthError> {
+        self.record_nonce(proposed_nonce, expires_at).await?;
+        Ok(proposed_nonce.to_string())
+    }
+
+    async fn accept_client_nonce_count(
+        &self,
+        username: &str,
+        nonce: &str,
+        cnonce: &str,
+        nonce_count: u32,
+        now: SystemTime,
+    ) -> Result<bool, CredentialAuthError> {
+        if self.nonce_status(nonce, now).await? != DigestNonceStatus::Active {
+            return Ok(false);
+        }
         let key = (username.to_string(), nonce.to_string(), cnonce.to_string());
         let mut counts = self.counts.lock().expect("count lock");
         if counts.get(&key).is_some_and(|last| nonce_count <= *last) {
@@ -103,26 +132,77 @@ async fn digest_replay_store_rejects_same_or_lower_nonce_count() {
         store.nonce_status("n1", SystemTime::now()).await.unwrap(),
         DigestNonceStatus::Active
     );
+    assert!(store.accept_nonce_count("alice", "n1", 1).await.unwrap());
+    assert!(!store.accept_nonce_count("alice", "n1", 1).await.unwrap());
+
     assert!(store
-        .accept_nonce_count("alice", "n1", "client-a", 1)
+        .accept_client_nonce_count("alice", "n1", "client-a", 1, SystemTime::now())
         .await
         .unwrap());
     assert!(!store
-        .accept_nonce_count("alice", "n1", "client-a", 1)
+        .accept_client_nonce_count("alice", "n1", "client-a", 1, SystemTime::now())
         .await
         .unwrap());
     assert!(!store
-        .accept_nonce_count("alice", "n1", "client-a", 0)
+        .accept_client_nonce_count("alice", "n1", "client-a", 0, SystemTime::now())
         .await
         .unwrap());
     assert!(store
-        .accept_nonce_count("alice", "n1", "client-a", 2)
+        .accept_client_nonce_count("alice", "n1", "client-a", 2, SystemTime::now())
         .await
         .unwrap());
     assert!(store
-        .accept_nonce_count("alice", "n1", "client-b", 1)
+        .accept_client_nonce_count("alice", "n1", "client-b", 1, SystemTime::now())
         .await
         .unwrap());
+}
+
+struct LegacyDigestReplayStore;
+
+#[async_trait::async_trait]
+impl DigestReplayStore for LegacyDigestReplayStore {
+    async fn record_nonce(
+        &self,
+        _nonce: &str,
+        _expires_at: SystemTime,
+    ) -> Result<(), CredentialAuthError> {
+        Ok(())
+    }
+
+    async fn nonce_status(
+        &self,
+        _nonce: &str,
+        _now: SystemTime,
+    ) -> Result<DigestNonceStatus, CredentialAuthError> {
+        Ok(DigestNonceStatus::Active)
+    }
+
+    async fn accept_nonce_count(
+        &self,
+        _username: &str,
+        _nonce: &str,
+        _nonce_count: u32,
+    ) -> Result<bool, CredentialAuthError> {
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn legacy_digest_store_remains_source_compatible_but_secure_extensions_fail_closed() {
+    let store = LegacyDigestReplayStore;
+    assert!(store.accept_nonce_count("alice", "n1", 1).await.unwrap());
+    assert!(matches!(
+        store
+            .admit_nonce("n1", SystemTime::now() + Duration::from_secs(60))
+            .await,
+        Err(CredentialAuthError::PolicyRejected(_))
+    ));
+    assert!(matches!(
+        store
+            .accept_client_nonce_count("alice", "n1", "c1", 1, SystemTime::now())
+            .await,
+        Err(CredentialAuthError::PolicyRejected(_))
+    ));
 }
 
 #[tokio::test]

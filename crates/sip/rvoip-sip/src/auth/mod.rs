@@ -54,8 +54,10 @@
 //! The sync [`SipAuthService::challenges`] helper is for local/simple use. When
 //! a shared Digest replay store is configured, use
 //! [`SipAuthService::challenges_async`] or the async inbound authentication
-//! helpers so issued nonces are recorded in shared storage. Digest-only users
-//! can use
+//! helpers so issued nonces are atomically admitted into bounded shared
+//! storage. The store must implement the additive `admit_nonce` and
+//! `accept_client_nonce_count` methods; their legacy defaults fail closed.
+//! Digest-only users can use
 //! [`SipDigestAuthService::authenticate_authorization_with_replay_store`].
 //!
 //! # Examples
@@ -248,6 +250,9 @@ pub use rvoip_auth_core::{
 
 const MAX_LOCAL_DIGEST_NONCES: usize = 4_096;
 const MAX_LOCAL_DIGEST_NONCE_COUNTS: usize = 16_384;
+const MAX_LOCAL_DIGEST_SEQUENCES_PER_USERNAME: usize = 4_096;
+const MAX_LOCAL_DIGEST_SEQUENCES_PER_NONCE: usize = 8_192;
+const MAX_LOCAL_DIGEST_SEQUENCES_PER_USERNAME_NONCE: usize = 4_096;
 
 fn admit_local_digest_nonce(
     nonces: &RwLock<HashMap<String, Instant>>,
@@ -308,6 +313,60 @@ fn digest_nonce_count(response: &DigestResponse) -> Option<u32> {
         return None;
     }
     Some(count)
+}
+
+fn accept_local_digest_nonce_count(
+    nonce_counts: &RwLock<HashMap<(String, String, String), u32>>,
+    response: &DigestResponse,
+) -> bool {
+    let Some(count) = digest_nonce_count(response) else {
+        return false;
+    };
+    let cnonce = response
+        .cnonce
+        .as_deref()
+        .expect("validated by digest_nonce_count");
+    let key = (
+        response.username.clone(),
+        response.nonce.clone(),
+        cnonce.to_string(),
+    );
+    let mut nonce_counts = nonce_counts
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    if let Some(previous) = nonce_counts.get_mut(&key) {
+        if count <= *previous {
+            return false;
+        }
+        *previous = count;
+        return true;
+    }
+
+    let mut username_sequences = 0;
+    let mut nonce_sequences = 0;
+    let mut username_nonce_sequences = 0;
+    for (username, nonce, _) in nonce_counts.keys() {
+        if username == &response.username {
+            username_sequences += 1;
+        }
+        if nonce == &response.nonce {
+            nonce_sequences += 1;
+        }
+        if username == &response.username && nonce == &response.nonce {
+            username_nonce_sequences += 1;
+        }
+    }
+
+    if nonce_counts.len() >= MAX_LOCAL_DIGEST_NONCE_COUNTS
+        || username_sequences >= MAX_LOCAL_DIGEST_SEQUENCES_PER_USERNAME
+        || nonce_sequences >= MAX_LOCAL_DIGEST_SEQUENCES_PER_NONCE
+        || username_nonce_sequences >= MAX_LOCAL_DIGEST_SEQUENCES_PER_USERNAME_NONCE
+    {
+        return false;
+    }
+    nonce_counts.insert(key, count);
+    true
 }
 
 #[derive(Clone)]
@@ -2878,8 +2937,8 @@ impl DigestProviderAuthStore {
     async fn challenge_async(&self) -> Result<DigestChallenge> {
         let mut challenge = self.authenticator.generate_challenge();
         if let Some(replay_store) = &self.replay_store {
-            replay_store
-                .record_nonce(&challenge.nonce, system_time_after(self.nonce_ttl))
+            challenge.nonce = replay_store
+                .admit_nonce(&challenge.nonce, system_time_after(self.nonce_ttl))
                 .await
                 .map_err(|error| {
                     redacted_auth_failure(AuthFailureStage::ReplayNonceRecord, error)
@@ -3020,29 +3079,7 @@ impl DigestProviderAuthStore {
     }
 
     fn accept_nonce_count(&self, response: &DigestResponse) -> bool {
-        let Some(nc) = digest_nonce_count(response) else {
-            return false;
-        };
-        let key = (
-            response.username.clone(),
-            response.nonce.clone(),
-            response
-                .cnonce
-                .clone()
-                .expect("validated by digest_nonce_count"),
-        );
-        let mut nonce_counts = self
-            .nonce_counts
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if nonce_counts.get(&key).is_some_and(|last| nc <= *last) {
-            return false;
-        }
-        if !nonce_counts.contains_key(&key) && nonce_counts.len() >= MAX_LOCAL_DIGEST_NONCE_COUNTS {
-            return false;
-        }
-        nonce_counts.insert(key, nc);
-        true
+        accept_local_digest_nonce_count(self.nonce_counts.as_ref(), response)
     }
 
     async fn nonce_status_async(&self, nonce: &str) -> Result<NonceStatus> {
@@ -3069,7 +3106,7 @@ impl DigestProviderAuthStore {
         };
         let accepted = if let Some(replay_store) = &self.replay_store {
             replay_store
-                .accept_nonce_count(
+                .accept_client_nonce_count(
                     &response.username,
                     &response.nonce,
                     response
@@ -3077,6 +3114,7 @@ impl DigestProviderAuthStore {
                         .as_deref()
                         .expect("validated by digest_nonce_count"),
                     nc,
+                    SystemTime::now(),
                 )
                 .await
                 .map_err(|error| redacted_auth_failure(AuthFailureStage::ReplayNonceCount, error))?
@@ -3365,7 +3403,7 @@ async fn accept_nonce_count_with_replay_store(
         return Ok(false);
     };
     replay_store
-        .accept_nonce_count(
+        .accept_client_nonce_count(
             &response.username,
             &response.nonce,
             response
@@ -3373,6 +3411,7 @@ async fn accept_nonce_count_with_replay_store(
                 .as_deref()
                 .expect("validated by digest_nonce_count"),
             nc,
+            SystemTime::now(),
         )
         .await
         .map_err(|error| redacted_auth_failure(AuthFailureStage::ReplayNonceCount, error))
@@ -3678,8 +3717,9 @@ impl SipDigestAuthService {
         replay_store: Arc<dyn DigestReplayStore>,
     ) -> Result<DigestChallenge> {
         let challenge = self.authenticator.generate_challenge();
-        replay_store
-            .record_nonce(&challenge.nonce, system_time_after(self.nonce_ttl))
+        let mut challenge = challenge;
+        challenge.nonce = replay_store
+            .admit_nonce(&challenge.nonce, system_time_after(self.nonce_ttl))
             .await
             .map_err(|error| redacted_auth_failure(AuthFailureStage::ReplayNonceRecord, error))?;
         Ok(challenge)
@@ -3899,29 +3939,7 @@ impl SipDigestAuthService {
     }
 
     fn accept_nonce_count(&self, response: &DigestResponse) -> bool {
-        let Some(nc) = digest_nonce_count(response) else {
-            return false;
-        };
-        let key = (
-            response.username.clone(),
-            response.nonce.clone(),
-            response
-                .cnonce
-                .clone()
-                .expect("validated by digest_nonce_count"),
-        );
-        let mut nonce_counts = self
-            .nonce_counts
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if nonce_counts.get(&key).is_some_and(|last| nc <= *last) {
-            return false;
-        }
-        if !nonce_counts.contains_key(&key) && nonce_counts.len() >= MAX_LOCAL_DIGEST_NONCE_COUNTS {
-            return false;
-        }
-        nonce_counts.insert(key, nc);
-        true
+        accept_local_digest_nonce_count(self.nonce_counts.as_ref(), response)
     }
 
     fn rejected(&self) -> AuthDecision {
@@ -4310,8 +4328,30 @@ mod tests {
             &self,
             _username: &str,
             _nonce: &str,
+            _nonce_count: u32,
+        ) -> std::result::Result<bool, CredentialAuthError> {
+            Err(CredentialAuthError::Unavailable(
+                LOWER_ERROR_CANARY.to_string(),
+            ))
+        }
+
+        async fn admit_nonce(
+            &self,
+            _proposed_nonce: &str,
+            _expires_at: SystemTime,
+        ) -> std::result::Result<String, CredentialAuthError> {
+            Err(CredentialAuthError::Unavailable(
+                LOWER_ERROR_CANARY.to_string(),
+            ))
+        }
+
+        async fn accept_client_nonce_count(
+            &self,
+            _username: &str,
+            _nonce: &str,
             _cnonce: &str,
             _nonce_count: u32,
+            _now: SystemTime,
         ) -> std::result::Result<bool, CredentialAuthError> {
             Err(CredentialAuthError::Unavailable(
                 LOWER_ERROR_CANARY.to_string(),
@@ -4359,9 +4399,38 @@ mod tests {
             &self,
             username: &str,
             nonce: &str,
-            cnonce: &str,
             nonce_count: u32,
         ) -> std::result::Result<bool, CredentialAuthError> {
+            self.accept_client_nonce_count(
+                username,
+                nonce,
+                "legacy-client-sequence",
+                nonce_count,
+                SystemTime::now(),
+            )
+            .await
+        }
+
+        async fn admit_nonce(
+            &self,
+            proposed_nonce: &str,
+            expires_at: SystemTime,
+        ) -> std::result::Result<String, CredentialAuthError> {
+            self.record_nonce(proposed_nonce, expires_at).await?;
+            Ok(proposed_nonce.to_string())
+        }
+
+        async fn accept_client_nonce_count(
+            &self,
+            username: &str,
+            nonce: &str,
+            cnonce: &str,
+            nonce_count: u32,
+            now: SystemTime,
+        ) -> std::result::Result<bool, CredentialAuthError> {
+            if self.nonce_status(nonce, now).await? != DigestNonceStatus::Active {
+                return Ok(false);
+            }
             let key = (username.to_string(), nonce.to_string(), cnonce.to_string());
             let mut counts = self.nonce_counts.lock().unwrap();
             if counts.get(&key).is_some_and(|last| nonce_count <= *last) {
@@ -4666,6 +4735,80 @@ mod tests {
                 .expect("same-client replay decision"),
             AuthDecision::Rejected { .. }
         ));
+    }
+
+    #[test]
+    fn local_digest_replay_quota_is_fair_between_usernames() {
+        let counts = RwLock::new(HashMap::new());
+        {
+            let mut retained = counts.write().unwrap();
+            for index in 0..MAX_LOCAL_DIGEST_SEQUENCES_PER_USERNAME {
+                retained.insert(
+                    (
+                        "noisy-user".to_string(),
+                        format!("nonce-{index}"),
+                        format!("client-{index}"),
+                    ),
+                    1,
+                );
+            }
+        }
+
+        let response = |username: &str| DigestResponse {
+            username: username.to_string(),
+            realm: "example.test".to_string(),
+            nonce: "shared-active-nonce".to_string(),
+            uri: "sip:bob@example.test".to_string(),
+            response: "proof".to_string(),
+            algorithm: DigestAlgorithm::MD5,
+            cnonce: Some("new-client".to_string()),
+            qop: Some("auth".to_string()),
+            nc: Some("00000001".to_string()),
+            opaque: None,
+        };
+
+        assert!(!accept_local_digest_nonce_count(
+            &counts,
+            &response("noisy-user")
+        ));
+        assert!(accept_local_digest_nonce_count(
+            &counts,
+            &response("unrelated-user")
+        ));
+    }
+
+    #[test]
+    fn local_digest_shared_nonce_quota_preserves_other_users() {
+        let counts = RwLock::new(HashMap::new());
+        {
+            let mut retained = counts.write().unwrap();
+            for index in 0..MAX_LOCAL_DIGEST_SEQUENCES_PER_USERNAME_NONCE {
+                retained.insert(
+                    (
+                        "noisy-user".to_string(),
+                        "shared-active-nonce".to_string(),
+                        format!("client-{index}"),
+                    ),
+                    1,
+                );
+            }
+        }
+
+        let mut response = DigestResponse {
+            username: "noisy-user".to_string(),
+            realm: "example.test".to_string(),
+            nonce: "shared-active-nonce".to_string(),
+            uri: "sip:bob@example.test".to_string(),
+            response: "proof".to_string(),
+            algorithm: DigestAlgorithm::MD5,
+            cnonce: Some("new-client".to_string()),
+            qop: Some("auth".to_string()),
+            nc: Some("00000001".to_string()),
+            opaque: None,
+        };
+        assert!(!accept_local_digest_nonce_count(&counts, &response));
+        response.username = "unrelated-user".to_string();
+        assert!(accept_local_digest_nonce_count(&counts, &response));
     }
 
     #[test]

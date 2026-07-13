@@ -23,6 +23,9 @@ const REGISTER_DIGEST_NONCE_TTL: Duration = Duration::from_secs(5 * 60);
 const REGISTER_DIGEST_NONCE_RETENTION: Duration = Duration::from_secs(10 * 60);
 const MAX_REGISTER_DIGEST_NONCES: usize = 4_096;
 const MAX_REGISTER_DIGEST_NONCE_COUNTS: usize = 16_384;
+const MAX_REGISTER_DIGEST_SEQUENCES_PER_USERNAME: usize = 4_096;
+const MAX_REGISTER_DIGEST_SEQUENCES_PER_NONCE: usize = 8_192;
+const MAX_REGISTER_DIGEST_SEQUENCES_PER_USERNAME_NONCE: usize = 4_096;
 const MAX_REGISTER_AUTHORIZATION_BYTES: usize = 8 * 1024;
 
 #[derive(Clone)]
@@ -492,7 +495,26 @@ impl RegistrarService {
             *previous = count;
             return true;
         }
-        if replay.nonce_counts.len() >= MAX_REGISTER_DIGEST_NONCE_COUNTS {
+
+        let mut username_sequences = 0;
+        let mut nonce_sequences = 0;
+        let mut username_nonce_sequences = 0;
+        for (recorded_username, recorded_nonce, _) in replay.nonce_counts.keys() {
+            if recorded_username == username {
+                username_sequences += 1;
+            }
+            if recorded_nonce == nonce {
+                nonce_sequences += 1;
+            }
+            if recorded_username == username && recorded_nonce == nonce {
+                username_nonce_sequences += 1;
+            }
+        }
+        if replay.nonce_counts.len() >= MAX_REGISTER_DIGEST_NONCE_COUNTS
+            || username_sequences >= MAX_REGISTER_DIGEST_SEQUENCES_PER_USERNAME
+            || nonce_sequences >= MAX_REGISTER_DIGEST_SEQUENCES_PER_NONCE
+            || username_nonce_sequences >= MAX_REGISTER_DIGEST_SEQUENCES_PER_USERNAME_NONCE
+        {
             return false;
         }
         replay.nonce_counts.insert(key, count);
@@ -1126,6 +1148,38 @@ mod digest_replay_tests {
             .unwrap();
         assert!(!result.0);
         assert!(result.1.unwrap().contains("stale=true"));
+    }
+
+    #[tokio::test]
+    async fn register_replay_quota_is_fair_between_usernames() {
+        let (service, challenge) = service_and_challenge().await;
+        {
+            let replay = service.digest_replay.as_ref().unwrap();
+            let mut replay = replay.lock().unwrap();
+            for index in 0..MAX_REGISTER_DIGEST_SEQUENCES_PER_USERNAME {
+                replay.nonce_counts.insert(
+                    (
+                        "noisy-user".to_string(),
+                        challenge.nonce.clone(),
+                        format!("client-{index}"),
+                    ),
+                    1,
+                );
+            }
+        }
+
+        assert!(!service.accept_register_nonce_count(
+            "noisy-user",
+            &challenge.nonce,
+            "new-client",
+            1,
+        ));
+        assert!(service.accept_register_nonce_count(
+            "unrelated-user",
+            &challenge.nonce,
+            "new-client",
+            1,
+        ));
     }
 }
 

@@ -226,14 +226,16 @@ pub enum DigestNonceStatus {
 
 /// Shared replay store for clustered SIP Digest UAS deployments.
 ///
-/// Implementations must key nonce-count replay by `(username, nonce, cnonce)`.
-/// A nonce may intentionally be shared by multiple clients when challenge
-/// admission is saturated; the client nonce keeps those independent Digest
-/// sequences from locking one another out. Replays within one client sequence
-/// are still rejected because its nonce-count must increase monotonically.
+/// The original methods remain for source compatibility with pre-0.3 stores.
+/// Secure clustered SIP listeners use [`DigestReplayStore::admit_nonce`] and
+/// [`DigestReplayStore::accept_client_nonce_count`], whose defaults fail closed
+/// until a store explicitly implements bounded, client-aware replay state.
 #[async_trait]
 pub trait DigestReplayStore: Send + Sync {
-    /// Record an issued nonce with its expiry time.
+    /// Record an issued nonce with its expiry time (legacy compatibility).
+    ///
+    /// This method cannot return a reused nonce when storage is saturated.
+    /// New challenge issuers must call [`Self::admit_nonce`] instead.
     async fn record_nonce(
         &self,
         nonce: &str,
@@ -247,15 +249,54 @@ pub trait DigestReplayStore: Send + Sync {
         now: SystemTime,
     ) -> Result<DigestNonceStatus, CredentialAuthError>;
 
-    /// Atomically accept a nonce-count only if it is greater than the last
-    /// accepted value for `(username, nonce, cnonce)`.
+    /// Atomically accept a nonce-count for the legacy `(username, nonce)` key.
+    ///
+    /// New validators must call [`Self::accept_client_nonce_count`] so clients
+    /// sharing an admitted nonce retain independent monotonic sequences.
     async fn accept_nonce_count(
         &self,
         username: &str,
         nonce: &str,
-        cnonce: &str,
         nonce_count: u32,
     ) -> Result<bool, CredentialAuthError>;
+
+    /// Atomically admit a proposed nonce or return an already-active nonce.
+    ///
+    /// Implementations must bound retained nonce state for their tenant/store
+    /// namespace and make concurrent admission atomic. Returning an active
+    /// nonce under pressure prevents unauthenticated challenge churn from
+    /// allocating unbounded shared state.
+    async fn admit_nonce(
+        &self,
+        _proposed_nonce: &str,
+        _expires_at: SystemTime,
+    ) -> Result<String, CredentialAuthError> {
+        Err(CredentialAuthError::PolicyRejected(
+            "bounded Digest nonce admission is not implemented".to_string(),
+        ))
+    }
+
+    /// Atomically accept a count only when the issued nonce is still active
+    /// and the value is greater than the last accepted value for
+    /// `(username, nonce, cnonce)`.
+    ///
+    /// Implementations must retain replay state for at least the nonce's
+    /// remaining validity and stale-retention interval, and must apply fair
+    /// tenant, principal, and nonce cardinality bounds. The default fails
+    /// closed so legacy stores remain source compatible without silently
+    /// weakening clustered replay protection.
+    async fn accept_client_nonce_count(
+        &self,
+        _username: &str,
+        _nonce: &str,
+        _cnonce: &str,
+        _nonce_count: u32,
+        _now: SystemTime,
+    ) -> Result<bool, CredentialAuthError> {
+        Err(CredentialAuthError::PolicyRejected(
+            "client-aware Digest replay protection is not implemented".to_string(),
+        ))
+    }
 }
 
 /// Auth scheme associated with an audit event.
