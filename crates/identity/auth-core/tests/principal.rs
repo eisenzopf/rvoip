@@ -87,12 +87,10 @@ async fn existing_validate_only_implementations_gain_empty_credential_metadata()
         .await
         .unwrap();
 
-    assert!(
-        credential
-            .principal
-            .subject
-            .starts_with("task-scoped:sha256:")
-    );
+    assert!(credential
+        .principal
+        .subject
+        .starts_with("task-scoped:sha256:"));
     assert!(credential.token_id.is_none());
     assert!(credential.issued_at.is_none());
 }
