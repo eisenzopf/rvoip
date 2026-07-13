@@ -29,6 +29,65 @@ use support::soak::{
 };
 use support::{LatencyHistogram, LoadProfile, ResourceSampler, ResourceSummary, ScenarioReport};
 
+#[test]
+fn retention_diagnostics_aggregate_planner_state_and_transaction_tombstones() {
+    let snapshot = json!({
+        "transaction_manager": {
+            "retired_client_transactions": 2,
+        },
+        "dialog_manager": {
+            "invite_failover_plans": 3,
+            "active_invite_failover_by_dialog": 5,
+            "invite_failover_attempts": 7,
+            "invite_failover_plan_reservations": 11,
+            "invite_failover_attempt_reservations": 13,
+        },
+    });
+
+    assert_eq!(support::soak::endpoint_live_ownership_total(&snapshot), 29);
+    assert_eq!(
+        support::soak::endpoint_bounded_tombstone_total(&snapshot),
+        12
+    );
+    assert_eq!(support::soak::endpoint_retained_total(&snapshot), 41);
+
+    let summary = support::soak::endpoint_summary(&snapshot);
+    assert_eq!(
+        summary
+            .pointer("/retention_totals/live_ownership")
+            .and_then(serde_json::Value::as_u64),
+        Some(29)
+    );
+    assert_eq!(
+        summary
+            .pointer("/retention_totals/bounded_tombstones")
+            .and_then(serde_json::Value::as_u64),
+        Some(12)
+    );
+    assert_eq!(
+        summary
+            .pointer("/retention_totals/retained")
+            .and_then(serde_json::Value::as_u64),
+        Some(41)
+    );
+}
+
+#[test]
+fn retention_drain_horizon_covers_invite_state_ttl_with_margin() {
+    assert!(
+        support::soak::DEFAULT_RETENTION_DRAIN_WAIT_SECS
+            > support::soak::RETAINED_INVITE_STATE_TTL_SECS
+    );
+    assert_eq!(
+        support::soak::retention_drain_wait_for_configured(Some(1)),
+        Duration::from_secs(support::soak::MIN_RETENTION_DRAIN_WAIT_SECS as u64)
+    );
+    assert_eq!(
+        support::soak::retention_drain_wait_for_configured(Some(120)),
+        Duration::from_secs(120)
+    );
+}
+
 #[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn perf_soak_caller() {

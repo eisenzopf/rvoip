@@ -17,7 +17,14 @@ use super::{LatencyHistogram, ResourceSample, ResourceSummary};
 
 pub const DEFAULT_PERF_APP_EVENT_CHANNEL_CAPACITY: usize =
     Config::DEFAULT_APP_EVENT_CHANNEL_CAPACITY;
-pub const DEFAULT_RETENTION_DRAIN_WAIT_SECS: usize = 40;
+// Keep this synchronized with sip-dialog's INVITE failover-plan retention and
+// sip-transaction's retired-client-transaction retention. The margin ensures
+// the post-load sample runs after their 90-second expiry boundary.
+pub const RETAINED_INVITE_STATE_TTL_SECS: usize = 90;
+pub const RETENTION_DRAIN_MARGIN_SECS: usize = 5;
+pub const MIN_RETENTION_DRAIN_WAIT_SECS: usize =
+    RETAINED_INVITE_STATE_TTL_SECS + RETENTION_DRAIN_MARGIN_SECS;
+pub const DEFAULT_RETENTION_DRAIN_WAIT_SECS: usize = MIN_RETENTION_DRAIN_WAIT_SECS;
 pub const BOB_PORT_ENV: &str = "RVOIP_PERF_SOAK_BOB_PORT";
 pub const ALICE_PORT_ENV: &str = "RVOIP_PERF_SOAK_ALICE_PORT";
 pub const READY_FILE_ENV: &str = "RVOIP_PERF_SOAK_READY_FILE";
@@ -593,7 +600,7 @@ fn sip_udp_call_trace_json(
     snapshot: &rvoip_sip_transport::diagnostics::CallTraceSnapshot,
 ) -> Value {
     json!({
-        "call_id": &snapshot.call_id,
+        "call_correlation": &snapshot.call_correlation,
         "inbound_invite": snapshot.inbound_invite,
         "inbound_ack": snapshot.inbound_ack,
         "inbound_bye": snapshot.inbound_bye,
@@ -656,7 +663,7 @@ fn dialog_call_timing_traces_json(
         .iter()
         .map(|snapshot| {
             json!({
-                "call_id": &snapshot.call_id,
+                "call_correlation": &snapshot.call_correlation,
                 "first_uac_invite_2xx_response_epoch_us": snapshot.first_uac_invite_2xx_response_epoch_us,
                 "last_uac_invite_2xx_response_epoch_us": snapshot.last_uac_invite_2xx_response_epoch_us,
                 "first_uac_ack_attempt_epoch_us": snapshot.first_uac_ack_attempt_epoch_us,
@@ -1065,12 +1072,16 @@ pub fn perf_config(name: &str, port: u16) -> Config {
 }
 
 pub fn retention_drain_wait() -> Duration {
-    Duration::from_secs(
-        read_positive_usize_env("RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS")
-            .unwrap_or(DEFAULT_RETENTION_DRAIN_WAIT_SECS)
-            .try_into()
-            .unwrap_or(u64::MAX),
-    )
+    retention_drain_wait_for_configured(read_positive_usize_env(
+        "RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS",
+    ))
+}
+
+pub fn retention_drain_wait_for_configured(configured_secs: Option<usize>) -> Duration {
+    let seconds = configured_secs
+        .unwrap_or(DEFAULT_RETENTION_DRAIN_WAIT_SECS)
+        .max(MIN_RETENTION_DRAIN_WAIT_SECS);
+    Duration::from_secs(seconds.try_into().unwrap_or(u64::MAX))
 }
 
 pub async fn run_caller_load(
@@ -1808,6 +1819,11 @@ fn endpoint_retention_sample_summary(
 
 pub fn endpoint_summary(snapshot: &serde_json::Value) -> serde_json::Value {
     json!({
+        "retention_totals": {
+            "live_ownership": endpoint_live_ownership_total(snapshot),
+            "bounded_tombstones": endpoint_bounded_tombstone_total(snapshot),
+            "retained": endpoint_retained_total(snapshot),
+        },
         "session_store": snapshot["session_store"].clone(),
         "session_registry": snapshot["session_registry"].clone(),
         "lifecycle": snapshot["lifecycle"].clone(),
@@ -1822,6 +1838,11 @@ pub fn endpoint_summary(snapshot: &serde_json::Value) -> serde_json::Value {
 }
 
 pub fn endpoint_retained_total(snapshot: &serde_json::Value) -> u64 {
+    endpoint_live_ownership_total(snapshot)
+        .saturating_add(endpoint_bounded_tombstone_total(snapshot))
+}
+
+pub fn endpoint_live_ownership_total(snapshot: &serde_json::Value) -> u64 {
     const POINTERS: &[&str] = &[
         "/session_store/total",
         "/session_registry/sessions",
@@ -1832,13 +1853,9 @@ pub fn endpoint_retained_total(snapshot: &serde_json::Value) -> u64 {
         "/dialog_adapter/callid_to_session",
         "/dialog_adapter/outgoing_invite_tx",
         "/dialog_adapter/registration_refresh_tasks",
-        "/lifecycle/expired_terminal_entries",
         "/transaction_manager/total",
-        "/transaction_manager/terminated_transactions",
         "/transaction_manager/server_invite_dialog_index",
         "/transaction_manager/server_invite_dialog_keys_by_tx",
-        "/transaction_manager/invite_2xx_response_cache",
-        "/transaction_manager/invite_2xx_response_due_queue",
         "/transaction_manager/transaction_destinations",
         "/transaction_manager/subscriber_to_transactions",
         "/transaction_manager/transaction_to_subscribers",
@@ -1847,10 +1864,12 @@ pub fn endpoint_retained_total(snapshot: &serde_json::Value) -> u64 {
         "/dialog_manager/dialogs",
         "/dialog_manager/dialog_lookup",
         "/dialog_manager/early_dialog_lookup",
-        "/dialog_manager/terminated_bye_lookup",
         "/dialog_manager/transaction_to_dialog",
         "/dialog_manager/transaction_dialog_route_hash",
         "/dialog_manager/dialog_invite_transactions",
+        "/dialog_manager/active_invite_failover_by_dialog",
+        "/dialog_manager/invite_failover_plan_reservations",
+        "/dialog_manager/invite_failover_attempt_reservations",
         "/dialog_manager/dialog_server_transactions",
         "/dialog_manager/pending_response_transaction_by_dialog",
         "/dialog_manager/session_to_dialog",
@@ -1881,10 +1900,22 @@ pub fn endpoint_retained_total(snapshot: &serde_json::Value) -> u64 {
         "/cleanup/active_total",
     ];
 
-    POINTERS
-        .iter()
-        .map(|pointer| endpoint_metric(snapshot, pointer))
-        .sum()
+    endpoint_metrics_total(snapshot, POINTERS)
+}
+
+pub fn endpoint_bounded_tombstone_total(snapshot: &serde_json::Value) -> u64 {
+    const POINTERS: &[&str] = &[
+        "/lifecycle/expired_terminal_entries",
+        "/transaction_manager/terminated_transactions",
+        "/transaction_manager/invite_2xx_response_cache",
+        "/transaction_manager/invite_2xx_response_due_queue",
+        "/transaction_manager/retired_client_transactions",
+        "/dialog_manager/terminated_bye_lookup",
+        "/dialog_manager/invite_failover_plans",
+        "/dialog_manager/invite_failover_attempts",
+    ];
+
+    endpoint_metrics_total(snapshot, POINTERS)
 }
 
 pub fn endpoint_global_retained_total(snapshot: &serde_json::Value) -> u64 {
@@ -1893,10 +1924,13 @@ pub fn endpoint_global_retained_total(snapshot: &serde_json::Value) -> u64 {
         "/sip_dialog_diagnostics/transaction_cleanup/in_flight",
     ];
 
-    POINTERS
-        .iter()
-        .map(|pointer| endpoint_metric(snapshot, pointer))
-        .sum()
+    endpoint_metrics_total(snapshot, POINTERS)
+}
+
+fn endpoint_metrics_total(snapshot: &serde_json::Value, pointers: &[&str]) -> u64 {
+    pointers.iter().fold(0, |total, pointer| {
+        total.saturating_add(endpoint_metric(snapshot, pointer))
+    })
 }
 
 pub fn endpoint_metric(snapshot: &serde_json::Value, pointer: &str) -> u64 {

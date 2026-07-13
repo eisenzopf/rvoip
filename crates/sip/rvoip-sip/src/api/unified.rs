@@ -3203,7 +3203,8 @@ mod config_tests {
 
 #[cfg(all(test, feature = "perf-tests"))]
 mod perf_config_tests {
-    use super::Config;
+    use super::{dialog_manager_retention_snapshot, Config};
+    use rvoip_sip_dialog::manager::core::DialogManagerRetentionCounts;
 
     #[test]
     fn perf_rss_growth_default_is_ten_mb_per_hour() {
@@ -3234,6 +3235,79 @@ mod perf_config_tests {
             );
         }
     }
+
+    #[test]
+    fn perf_dialog_snapshot_exposes_invite_failover_retention_counts() {
+        let snapshot = dialog_manager_retention_snapshot(DialogManagerRetentionCounts {
+            invite_failover_plans: 2,
+            active_invite_failover_by_dialog: 3,
+            invite_failover_attempts: 5,
+            invite_failover_plan_reservations: 7,
+            invite_failover_attempt_reservations: 11,
+            ..DialogManagerRetentionCounts::default()
+        });
+
+        assert_eq!(
+            snapshot
+                .pointer("/invite_failover_plans")
+                .and_then(serde_json::Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            snapshot
+                .pointer("/active_invite_failover_by_dialog")
+                .and_then(serde_json::Value::as_u64),
+            Some(3)
+        );
+        assert_eq!(
+            snapshot
+                .pointer("/invite_failover_attempts")
+                .and_then(serde_json::Value::as_u64),
+            Some(5)
+        );
+        assert_eq!(
+            snapshot
+                .pointer("/invite_failover_plan_reservations")
+                .and_then(serde_json::Value::as_u64),
+            Some(7)
+        );
+        assert_eq!(
+            snapshot
+                .pointer("/invite_failover_attempt_reservations")
+                .and_then(serde_json::Value::as_u64),
+            Some(11)
+        );
+    }
+}
+
+#[cfg(feature = "perf-tests")]
+fn dialog_manager_retention_snapshot(
+    counts: rvoip_sip_dialog::manager::core::DialogManagerRetentionCounts,
+) -> serde_json::Value {
+    serde_json::json!({
+        "dialogs": counts.dialogs,
+        "dialog_lookup": counts.dialog_lookup,
+        "early_dialog_lookup": counts.early_dialog_lookup,
+        "terminated_bye_lookup": counts.terminated_bye_lookup,
+        "transaction_to_dialog": counts.transaction_to_dialog,
+        "transaction_dialog_route_hash": counts.transaction_dialog_route_hash,
+        "dialog_invite_transactions": counts.dialog_invite_transactions,
+        "invite_failover_plans": counts.invite_failover_plans,
+        "active_invite_failover_by_dialog": counts.active_invite_failover_by_dialog,
+        "invite_failover_attempts": counts.invite_failover_attempts,
+        "invite_failover_plan_reservations": counts.invite_failover_plan_reservations,
+        "invite_failover_attempt_reservations": counts.invite_failover_attempt_reservations,
+        "dialog_server_transactions": counts.dialog_server_transactions,
+        "pending_response_transaction_by_dialog": counts.pending_response_transaction_by_dialog,
+        "session_to_dialog": counts.session_to_dialog,
+        "dialog_to_session": counts.dialog_to_session,
+        "reliable_provisional_tasks": counts.reliable_provisional_tasks,
+        "session_refresh_tasks": counts.session_refresh_tasks,
+        "outbound_flows": counts.outbound_flows,
+        "outbound_flow_tasks": counts.outbound_flow_tasks,
+        "flow_by_destination": counts.flow_by_destination,
+        "flow_by_aor": counts.flow_by_aor,
+    })
 }
 
 fn default_session_event_dispatcher_workers() -> usize {
@@ -3515,25 +3589,7 @@ impl UnifiedCoordinator {
                 "pending_inbound_timing": transaction_counts.pending_inbound_timing,
                 "breakdown": transaction_breakdown,
             },
-            "dialog_manager": {
-                "dialogs": dialog_counts.dialogs,
-                "dialog_lookup": dialog_counts.dialog_lookup,
-                "early_dialog_lookup": dialog_counts.early_dialog_lookup,
-                "terminated_bye_lookup": dialog_counts.terminated_bye_lookup,
-                "transaction_to_dialog": dialog_counts.transaction_to_dialog,
-                "transaction_dialog_route_hash": dialog_counts.transaction_dialog_route_hash,
-                "dialog_invite_transactions": dialog_counts.dialog_invite_transactions,
-                "dialog_server_transactions": dialog_counts.dialog_server_transactions,
-                "pending_response_transaction_by_dialog": dialog_counts.pending_response_transaction_by_dialog,
-                "session_to_dialog": dialog_counts.session_to_dialog,
-                "dialog_to_session": dialog_counts.dialog_to_session,
-                "reliable_provisional_tasks": dialog_counts.reliable_provisional_tasks,
-                "session_refresh_tasks": dialog_counts.session_refresh_tasks,
-                "outbound_flows": dialog_counts.outbound_flows,
-                "outbound_flow_tasks": dialog_counts.outbound_flow_tasks,
-                "flow_by_destination": dialog_counts.flow_by_destination,
-                "flow_by_aor": dialog_counts.flow_by_aor,
-            },
+            "dialog_manager": dialog_manager_retention_snapshot(dialog_counts),
             "dialog_adapter": self.dialog_adapter.perf_diagnostic_counts(),
             "media_adapter": self.media_adapter.perf_diagnostic_counts(),
             "memory_diagnostics": memory_diagnostics,
