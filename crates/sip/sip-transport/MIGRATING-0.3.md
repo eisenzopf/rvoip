@@ -112,9 +112,15 @@ unwrap it for transport-agnostic ingress; retain `None` for UDP and require
 
 TLS/WSS requests also require the logical next-hop authority. Typed requests
 derive it from the top `Route` URI (or Request-URI); resolver candidates carry
-that same authority through SRV/A expansion. Address-only response selection is
-retained only as a legacy multiplexer probe and must not be used by transaction
-servers.
+that same authority through NAPTR/SRV/A expansion. Address-only stream
+selection has been removed: a flowless response may use an explicit UDP route,
+but TCP, TLS, WS, and WSS responses, cached bytes, and lifecycle writes fail
+closed without the exact route.
+
+REGISTER clients that enable CRLF keepalive must retain the route returned by
+the REGISTER transaction. Re-resolving the registrar URI or looking up a flow
+by socket address can select a different authenticated connection and is no
+longer accepted.
 
 ## Event shape migration
 
@@ -132,6 +138,12 @@ Use `raw_bytes: None`, `timing: None`, and `connection_metadata: None` when a
 synthetic event has no corresponding wire data or authenticated connection
 metadata. Matchers that do not inspect the new fields can use `..`, but code
 that returns a response must retain `transport_type` and `flow_id`.
+
+TCP, TLS, WS, and WSS production constructors can receive a separately
+reserved lifecycle/control sender. `ConnectionClosed`, keepalive pong, error,
+and shutdown events use that bounded lane; SIP message saturation therefore
+cannot pin socket cleanup. Consumers should preserve a corresponding reserved
+lane through their own dispatch queues.
 
 ## Resolver migration
 

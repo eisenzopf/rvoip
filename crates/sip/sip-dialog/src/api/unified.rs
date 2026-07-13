@@ -1990,6 +1990,19 @@ impl UnifiedDialogApi {
         &self,
         options: RegisterRequestOptions,
     ) -> ApiResult<Response> {
+        self.send_register_with_options_and_route(options)
+            .await
+            .map(|(response, _route)| response)
+    }
+
+    /// Send REGISTER and retain the exact transport route selected for the
+    /// transaction. Callers that bind RFC 5626 or symmetric keep-alives to the
+    /// registered flow must use this result instead of reconstructing a route
+    /// from the registrar's socket address.
+    pub async fn send_register_with_options_and_route(
+        &self,
+        options: RegisterRequestOptions,
+    ) -> ApiResult<(Response, rvoip_sip_transport::TransportRoute)> {
         use crate::transaction::client::builders::RegisterBuilder;
         use rvoip_sip_core::types::header::HeaderName;
 
@@ -2098,12 +2111,16 @@ impl UnifiedDialogApi {
 
         debug!("Sending REGISTER to {}", destination);
 
-        let response = self
-            .send_non_dialog_request(request, destination, std::time::Duration::from_secs(32))
+        let (response, route) = self
+            .send_non_dialog_request_with_route(
+                request,
+                destination,
+                std::time::Duration::from_secs(32),
+            )
             .await?;
 
         debug!("Received REGISTER response: {}", response.status_code());
-        Ok(response)
+        Ok((response, route))
     }
 
     /// Out-of-dialog SUBSCRIBE with application-staged `extra_headers`
@@ -3077,6 +3094,21 @@ impl UnifiedDialogApi {
         destination: SocketAddr,
         timeout: std::time::Duration,
     ) -> ApiResult<Response> {
+        self.send_non_dialog_request_with_route(request, destination, timeout)
+            .await
+            .map(|(response, _route)| response)
+    }
+
+    /// Send a non-dialog request and return the exact transport route bound by
+    /// the transaction's initial send. This is intentionally captured before
+    /// waiting for the final response, so fast peer closure cannot erase the
+    /// opaque flow identity needed by lifecycle traffic.
+    pub async fn send_non_dialog_request_with_route(
+        &self,
+        request: Request,
+        destination: SocketAddr,
+        timeout: std::time::Duration,
+    ) -> ApiResult<(Response, rvoip_sip_transport::TransportRoute)> {
         debug!(
             "Sending non-dialog {} request to {}",
             method_class(&request.method()),
@@ -3117,6 +3149,13 @@ impl UnifiedDialogApi {
             .send_request(&transaction_id)
             .await
             .map_err(|_error| ApiError::internal("Failed to send request"))?;
+        let route = self
+            .manager
+            .core()
+            .transaction_manager()
+            .transaction_route(&transaction_id)
+            .await
+            .ok_or_else(|| ApiError::internal("Sent transaction did not retain its route"))?;
         self.manager.core().record_outbound_transport_context(
             &transaction_id,
             request_key,
@@ -3138,7 +3177,7 @@ impl UnifiedDialogApi {
             "Received response {} for non-dialog request",
             response.status_code()
         );
-        Ok(response)
+        Ok((response, route))
     }
 }
 

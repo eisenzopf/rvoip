@@ -237,14 +237,11 @@ impl MultiplexedTransport {
     /// - **Requests** route by top Route URI when present, otherwise
     ///   Request-URI, then by scheme + `;transport=` parameter (RFC 3261
     ///   §8.1.2, §19.1.5, §26.2).
-    /// - **Responses** must go back over the same connection-oriented
-    ///   transport that received the matching request (RFC 3261 §17.2,
-    ///   §18.2.2). The transport layer doesn't have the request
-    ///   transport stamped on the response, so we approximate: ask each
-    ///   connection-oriented transport whether it currently has a live
-    ///   connection to `destination`. The first match wins; otherwise
-    ///   fall through to the default (UDP — connectionless, can send
-    ///   anywhere).
+    /// - **Responses** on a connection-oriented transport must carry the
+    ///   exact ingress [`TransportRoute`]. Socket addresses are not flow
+    ///   identities: multiple authenticated, inbound, or outbound flows may
+    ///   share an address. Callers must supply an explicit UDP route or an
+    ///   exact stream route; this address-only path always fails closed.
     fn pick_transport(
         &self,
         message: &Message,
@@ -278,33 +275,10 @@ impl MultiplexedTransport {
                 }
             }
             Message::Response(response) => {
-                // Probe connection-oriented transports first. We do
-                // *not* probe UDP because it always reports false (the
-                // default-impl `has_connection_to` is a no-op) and it's
-                // the fallback anyway.
-                for kind in [
-                    TransportType::Tls,
-                    TransportType::Tcp,
-                    TransportType::Wss,
-                    TransportType::Ws,
-                ] {
-                    if let Some(transport) = self.transport_for_kind(kind) {
-                        if transport.has_connection_to(destination) {
-                            trace!(
-                                "MultiplexedTransport: routing {} response to {} via {} (existing connection)",
-                                response.status_code(),
-                                destination,
-                                kind
-                            );
-                            return Ok((kind, transport));
-                        }
-                    }
-                }
-                trace!(
-                    "MultiplexedTransport: no connection-oriented transport has {}; routing response via default",
-                    destination
-                );
-                Ok((self.default.default_transport_type(), self.default.clone()))
+                Err(TransportError::InvalidState(format!(
+                    "{} response to {destination} requires an explicit UDP route or exact connection flow",
+                    response.status_code()
+                )))
             }
         }
     }
@@ -561,6 +535,11 @@ impl Transport for MultiplexedTransport {
             return transport.send_message_raw_via(bytes, route).await;
         }
         if let Some(kind) = route.transport_type {
+            if kind != TransportType::Udp && route.authority.is_none() {
+                return Err(TransportError::InvalidState(format!(
+                    "raw SIP on {kind} requires an outbound authority or exact flow"
+                )));
+            }
             let transport = self.transport_for_kind(kind).ok_or_else(|| {
                 TransportError::UnsupportedTransport(format!(
                     "raw SIP route transport {kind} is not registered"
@@ -568,31 +547,9 @@ impl Transport for MultiplexedTransport {
             })?;
             return transport.send_message_raw_via(bytes, route).await;
         }
-        for kind in [
-            TransportType::Tls,
-            TransportType::Tcp,
-            TransportType::Wss,
-            TransportType::Ws,
-        ] {
-            if let Some(transport) = self.transport_for_kind(kind) {
-                if transport.has_connection_to(destination) {
-                    trace!(
-                        "MultiplexedTransport: routing pre-built SIP bytes to {} via {} (existing connection)",
-                        destination,
-                        kind
-                    );
-                    let mut selected_route = route;
-                    selected_route.transport_type = Some(kind);
-                    return transport.send_message_raw_via(bytes, selected_route).await;
-                }
-            }
-        }
-
-        trace!(
-            "MultiplexedTransport: routing pre-built SIP bytes to {} via default",
-            destination
-        );
-        self.default.send_message_raw_via(bytes, route).await
+        Err(TransportError::InvalidState(format!(
+            "raw SIP to {destination} requires an explicit UDP route, outbound authority, or exact flow"
+        )))
     }
 
     async fn close(&self) -> TransportResult<()> {
@@ -727,49 +684,23 @@ impl Transport for MultiplexedTransport {
     }
 
     async fn send_raw_via(&self, route: TransportRoute, data: Bytes) -> TransportResult<()> {
-        let destination = route.destination;
-        if let Some(flow_id) = route.flow_id {
-            let kind = route.transport_type.ok_or_else(|| {
-                TransportError::InvalidState(format!(
-                    "exact raw flow {} is missing its transport type",
-                    flow_id.as_u64()
-                ))
-            })?;
-            let transport = self.transport_for_kind(kind).ok_or_else(|| {
-                TransportError::UnsupportedTransport(format!(
-                    "raw flow transport {kind} is not registered"
-                ))
-            })?;
-            return transport.send_raw_via(route, data).await;
-        }
-        // RFC 5626 §3.5.1 keep-alive: probe connection-oriented
-        // transports for an existing flow to `destination` and dispatch
-        // bare bytes on the first that matches. UDP is never asked —
-        // RFC 5626 UDP keep-alive uses STUN, out of scope here.
-        for kind in [
-            TransportType::Tls,
-            TransportType::Tcp,
-            TransportType::Wss,
-            TransportType::Ws,
-        ] {
-            if let Some(transport) = self.transport_for_kind(kind) {
-                if transport.has_connection_to(destination) {
-                    trace!(
-                        "MultiplexedTransport::send_raw routing {} bytes to {} via {}",
-                        data.len(),
-                        destination,
-                        kind
-                    );
-                    let mut selected_route = route;
-                    selected_route.transport_type = Some(kind);
-                    return transport.send_raw_via(selected_route, data).await;
-                }
-            }
-        }
-        Err(TransportError::InvalidState(format!(
-            "No connection-oriented transport has a live connection to {} for send_raw",
-            destination
-        )))
+        let flow_id = route.flow_id.ok_or_else(|| {
+            TransportError::InvalidState(
+                "raw lifecycle traffic requires an exact connection flow".into(),
+            )
+        })?;
+        let kind = route.transport_type.ok_or_else(|| {
+            TransportError::InvalidState(format!(
+                "exact raw flow {} is missing its transport type",
+                flow_id.as_u64()
+            ))
+        })?;
+        let transport = self.transport_for_kind(kind).ok_or_else(|| {
+            TransportError::UnsupportedTransport(format!(
+                "raw flow transport {kind} is not registered"
+            ))
+        })?;
+        transport.send_raw_via(route, data).await
     }
 }
 
@@ -1209,7 +1140,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_raw_routes_to_transport_with_live_connection() {
+    async fn send_raw_rejects_address_only_even_with_live_connection() {
         let udp = CountingTransport::new("udp");
         let tcp = CountingTransport::new("tcp");
         let tls = CountingTransport::new("tls");
@@ -1226,15 +1157,13 @@ mod tests {
             MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-        mux.send_raw(dest, Bytes::from_static(b"\r\n\r\n"))
+        let error = mux
+            .send_raw(dest, Bytes::from_static(b"\r\n\r\n"))
             .await
-            .unwrap();
+            .expect_err("an address-only lifecycle send must fail closed");
+        assert!(matches!(error, TransportError::InvalidState(_)));
 
-        assert_eq!(
-            tcp.raw_count(),
-            1,
-            "send_raw must route to TCP (live connection)"
-        );
+        assert_eq!(tcp.raw_count(), 0);
         assert_eq!(tls.raw_count(), 0);
         assert_eq!(
             udp.raw_count(),
@@ -1244,7 +1173,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_response_probe_includes_ws_and_wss_children() {
+    async fn flowless_response_fails_without_probing_ws_or_wss_children() {
         use rvoip_sip_core::{Response, StatusCode};
 
         for (kind, label) in [(TransportType::Ws, "ws"), (TransportType::Wss, "wss")] {
@@ -1256,15 +1185,25 @@ mod tests {
             transports.insert(kind, websocket.clone());
             let mux = MultiplexedTransport::new_without_trace(udp.clone(), transports).unwrap();
 
-            mux.send_message(
-                Message::Response(Response::new(StatusCode::Ok)),
-                "127.0.0.1:5090".parse().unwrap(),
-            )
-            .await
-            .unwrap();
+            let error = mux
+                .send_message(
+                    Message::Response(Response::new(StatusCode::Ok)),
+                    "127.0.0.1:5090".parse().unwrap(),
+                )
+                .await
+                .expect_err("flowless response must fail closed");
+            assert!(matches!(error, TransportError::InvalidState(_)));
 
-            assert_eq!(websocket.count(), 1, "{kind} live-flow probe was skipped");
-            assert_eq!(udp.count(), 0, "{kind} response fell back to UDP");
+            assert_eq!(
+                websocket.count(),
+                0,
+                "{kind} must not be selected by address"
+            );
+            assert_eq!(
+                udp.count(),
+                0,
+                "UDP also requires an explicit response route"
+            );
         }
     }
 
@@ -1409,7 +1348,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_raw_prefers_tls_over_tcp_when_both_live() {
+    async fn send_raw_rejects_ambiguous_coaddressed_live_flows() {
         let udp = CountingTransport::new("udp");
         let tcp = CountingTransport::new("tcp");
         let tls = CountingTransport::new("tls");
@@ -1425,13 +1364,13 @@ mod tests {
             MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5061".parse().unwrap();
-        mux.send_raw(dest, Bytes::from_static(b"\r\n\r\n"))
+        let error = mux
+            .send_raw(dest, Bytes::from_static(b"\r\n\r\n"))
             .await
-            .unwrap();
+            .expect_err("co-addressed flows require an exact route");
+        assert!(matches!(error, TransportError::InvalidState(_)));
 
-        // TLS is tried first in the probe order — matches the
-        // response-routing order in `pick_transport`.
-        assert_eq!(tls.raw_count(), 1);
+        assert_eq!(tls.raw_count(), 0);
         assert_eq!(tcp.raw_count(), 0);
     }
 

@@ -1,7 +1,9 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use std::time::Instant;
+use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
 use bytes::Bytes;
@@ -352,6 +354,32 @@ pub enum TransportEvent {
 
     /// Transport shutdown complete
     ShutdownComplete,
+}
+
+/// Whether an event belongs on the reserved lifecycle/control lane rather
+/// than the bounded SIP message lane.
+pub const fn is_control_event(event: &TransportEvent) -> bool {
+    !matches!(event, TransportEvent::MessageReceived { .. })
+}
+
+/// Emit lifecycle state without allowing a saturated consumer to pin a socket
+/// reader or teardown task indefinitely. Each production transport receives a
+/// separately reserved sender; compatibility constructors may point it at the
+/// ordinary event sender.
+pub(crate) async fn send_control_event(
+    sender: &mpsc::Sender<TransportEvent>,
+    event: TransportEvent,
+) -> bool {
+    match sender.try_send(event) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(event)) => {
+            matches!(
+                tokio::time::timeout(Duration::from_millis(100), sender.send(event)).await,
+                Ok(Ok(()))
+            )
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+    }
 }
 
 impl fmt::Debug for TransportEvent {

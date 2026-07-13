@@ -2553,8 +2553,8 @@ pub(crate) async fn execute_action(
                 let contact_uri = opts.contact_uri.clone();
                 let requested_expires = opts.expires;
                 let session_id = session.session_id.clone();
-                let response = dialog_adapter
-                    .send_register_with_options(opts.clone())
+                let (response, register_route) = dialog_adapter
+                    .send_register_with_options_and_route(opts.clone())
                     .await
                     .map_err(|e| {
                         Box::<dyn std::error::Error + Send + Sync>::from(format!(
@@ -2576,8 +2576,9 @@ pub(crate) async fn execute_action(
                 ) {
                     RegisterAttemptOutcome::Registered {
                         accepted_expires,
-                        metadata,
+                        mut metadata,
                     } => {
+                        metadata.transport_route = Some(register_route);
                         dialog_adapter
                             .apply_registration_success(
                                 &session_id,

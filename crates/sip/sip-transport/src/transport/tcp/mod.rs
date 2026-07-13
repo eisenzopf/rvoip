@@ -9,8 +9,8 @@ pub use pool::{ConnectionPool, PoolConfig};
 use crate::error::{Error, Result};
 use crate::transport::{
     runtime::{DialAdmission, OutboundDialCoordinator, TransportTaskSet},
-    safe_method_label, validate_typed_outbound_message, Transport, TransportEvent, TransportFlowId,
-    TransportRoute, TransportType,
+    safe_method_label, send_control_event, validate_typed_outbound_message, Transport,
+    TransportEvent, TransportFlowId, TransportRoute, TransportType,
 };
 use bytes::Bytes;
 use rvoip_sip_core::Message;
@@ -36,6 +36,7 @@ struct TcpTransportInner {
     connection_pool: ConnectionPool,
     closed: AtomicBool,
     events_tx: mpsc::Sender<TransportEvent>,
+    control_events_tx: mpsc::Sender<TransportEvent>,
     outbound_dials: Arc<OutboundDialCoordinator<SocketAddr>>,
     tasks: Arc<TransportTaskSet>,
 }
@@ -47,9 +48,20 @@ impl TcpTransport {
         channel_capacity: Option<usize>,
         pool_config: Option<PoolConfig>,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_control_sender(addr, channel_capacity, pool_config, None).await
+    }
+
+    /// Bind with a separately reserved lifecycle/control event sender.
+    pub async fn bind_with_control_sender(
+        addr: SocketAddr,
+        channel_capacity: Option<usize>,
+        pool_config: Option<PoolConfig>,
+        control_events_tx: Option<mpsc::Sender<TransportEvent>>,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         // Create the event channel
         let capacity = channel_capacity.unwrap_or(DEFAULT_CHANNEL_CAPACITY);
         let (events_tx, events_rx) = mpsc::channel(capacity);
+        let control_events_tx = control_events_tx.unwrap_or_else(|| events_tx.clone());
 
         // Create the TCP listener
         let listener = TcpListener::bind(addr).await?;
@@ -70,6 +82,7 @@ impl TcpTransport {
                 connection_pool,
                 closed: AtomicBool::new(false),
                 events_tx: events_tx.clone(),
+                control_events_tx,
                 outbound_dials: OutboundDialCoordinator::new(
                     outbound_dial_limit,
                     outbound_dial_limit.saturating_mul(2),
@@ -123,13 +136,15 @@ impl TcpTransport {
                                 Err(e) => {
                                     error!("Failed to create connection from stream: {}", e);
                                     if let Some(inner) = weak_inner.upgrade() {
-                                        let events_tx = inner.events_tx.clone();
+                                        let events_tx = inner.control_events_tx.clone();
                                         drop(inner);
-                                        let _ = events_tx
-                                            .send(TransportEvent::Error {
+                                        let _ = send_control_event(
+                                            &events_tx,
+                                            TransportEvent::Error {
                                                 error: format!("Connection setup error: {}", e),
-                                            })
-                                            .await;
+                                            },
+                                        )
+                                        .await;
                                     }
                                     continue;
                                 }
@@ -145,7 +160,7 @@ impl TcpTransport {
                                 break;
                             };
                             let pool = inner.connection_pool.clone();
-                            let events_tx = inner.events_tx.clone();
+                            let events_tx = inner.control_events_tx.clone();
                             let tasks = inner.tasks.clone();
                             drop(inner);
                             if let Err(error) = pool.add_connection(peer_addr, arc.clone()).await {
@@ -154,11 +169,13 @@ impl TcpTransport {
                                     error_class = "connection-limit",
                                     "Rejecting inbound TCP connection at pool capacity"
                                 );
-                                let _ = events_tx
-                                    .send(TransportEvent::Error {
+                                let _ = send_control_event(
+                                    &events_tx,
+                                    TransportEvent::Error {
                                         error: error.to_string(),
-                                    })
-                                    .await;
+                                    },
+                                )
+                                .await;
                                 continue;
                             }
                             Self::spawn_connection_handler_task(tasks, weak_inner.clone(), arc)
@@ -171,15 +188,17 @@ impl TcpTransport {
                             if inner.closed.load(Ordering::Relaxed) {
                                 break;
                             }
-                            let events_tx = inner.events_tx.clone();
+                            let events_tx = inner.control_events_tx.clone();
                             drop(inner);
 
                             error!("Error accepting TCP connection: {}", e);
-                            let _ = events_tx
-                                .send(TransportEvent::Error {
+                            let _ = send_control_event(
+                                &events_tx,
+                                TransportEvent::Error {
                                     error: format!("Accept error: {}", e),
-                                })
-                                .await;
+                                },
+                            )
+                            .await;
 
                             // Brief pause to avoid tight accept loop on errors
                             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -190,9 +209,9 @@ impl TcpTransport {
                 // Notify that the transport is closed
                 info!("TCP accept loop terminated");
                 if let Some(inner) = weak_inner.upgrade() {
-                    let events_tx = inner.events_tx.clone();
+                    let events_tx = inner.control_events_tx.clone();
                     drop(inner);
-                    let _ = events_tx.send(TransportEvent::Closed).await;
+                    let _ = send_control_event(&events_tx, TransportEvent::Closed).await;
                 }
             })
             .await;
@@ -250,9 +269,16 @@ impl TcpTransport {
                             };
                             let events_tx = inner.events_tx.clone();
                             drop(inner);
-                            if let Err(e) = events_tx.send(event).await {
-                                error!("Error sending event: {}", e);
-                                break;
+                            match events_tx.try_send(event) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    warn!(
+                                        source = %peer_addr,
+                                        "TCP message lane saturated; closing flow"
+                                    );
+                                    break;
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => break,
                             }
                         }
                         Ok(Some(ReceivedFrame::KeepAlivePong)) => {
@@ -260,15 +286,17 @@ impl TcpTransport {
                             let Some(inner) = weak_inner.upgrade() else {
                                 break;
                             };
-                            let events_tx = inner.events_tx.clone();
+                            let events_tx = inner.control_events_tx.clone();
                             drop(inner);
-                            let _ = events_tx
-                                .send(TransportEvent::KeepAlivePongReceived {
+                            let _ = send_control_event(
+                                &events_tx,
+                                TransportEvent::KeepAlivePongReceived {
                                     source: peer_addr,
                                     destination: local_addr,
                                     flow_id: Some(flow_id),
-                                })
-                                .await;
+                                },
+                            )
+                            .await;
                         }
                         Ok(Some(ReceivedFrame::KeepAlivePing)) => {
                             // Peer-initiated ping. RFC 5626 §3.5.1 says reply
@@ -289,39 +317,40 @@ impl TcpTransport {
                             if inner.closed.load(Ordering::Relaxed) || connection.is_closed() {
                                 break;
                             }
-                            let events_tx = inner.events_tx.clone();
+                            let events_tx = inner.control_events_tx.clone();
                             drop(inner);
 
                             error!("Error reading from connection {}: {}", peer_addr, e);
-                            let _ = events_tx
-                                .send(TransportEvent::Error {
+                            let _ = send_control_event(
+                                &events_tx,
+                                TransportEvent::Error {
                                     error: format!("Connection error from {}: {}", peer_addr, e),
-                                })
-                                .await;
+                                },
+                            )
+                            .await;
                             break;
                         }
                     }
                 }
 
-                // Emit ConnectionClosed *before* the pool eviction so any
-                // downstream observer (e.g. RFC 5626 OutboundFlow) can see
-                // the lifecycle event before a subsequent `has_connection_to`
-                // query returns false.
                 let Some(inner) = weak_inner.upgrade() else {
                     return;
                 };
-                let events_tx = inner.events_tx.clone();
+                let events_tx = inner.control_events_tx.clone();
                 let pool = inner.connection_pool.clone();
                 drop(inner);
-                let _ = events_tx
-                    .send(TransportEvent::ConnectionClosed {
+                // Registry cleanup must never wait behind application traffic.
+                let _ = connection.close().await;
+                pool.remove_connection_for_flow(&peer_addr, flow_id).await;
+                let _ = send_control_event(
+                    &events_tx,
+                    TransportEvent::ConnectionClosed {
                         remote_addr: peer_addr,
                         transport_type: TransportType::Tcp,
                         flow_id: Some(flow_id),
-                    })
-                    .await;
-
-                pool.remove_connection_for_flow(&peer_addr, flow_id).await;
+                    },
+                )
+                .await;
             })
             .await;
     }
@@ -520,9 +549,9 @@ impl Transport for TcpTransport {
             bytes.len(),
             destination
         );
-        // Resolve or open a connection — `send_message_raw` is the
-        // general-purpose verbatim-bytes path (unlike `send_raw`,
-        // which is RFC 5626 keep-alive on already-open flows only).
+        // Verbatim outbound requests may open a connection only when the
+        // caller supplied the next-hop authority. Raw responses must retain
+        // the exact ingress flow; an address alone is never a flow identity.
         let connection = if let Some(flow_id) = route.flow_id {
             self.inner
                 .connection_pool
@@ -531,21 +560,34 @@ impl Transport for TcpTransport {
                 .ok_or_else(|| {
                     Error::InvalidState(format!("TCP flow is no longer active for {destination}"))
                 })?
-        } else {
+        } else if route.authority.is_some() {
             self.connect_to(destination).await?
+        } else {
+            return Err(Error::InvalidState(
+                "raw TCP SIP sends require an authority or exact flow".into(),
+            ));
         };
         connection.send_raw_bytes(&bytes).await
     }
 
     async fn close(&self) -> Result<()> {
         // Set the closed flag to prevent new operations
-        self.inner.closed.store(true, Ordering::Relaxed);
+        let already_closed = self.inner.closed.swap(true, Ordering::Relaxed);
         self.inner.outbound_dials.close();
         self.inner.tasks.close().await;
         self.inner.listener.lock().await.take();
 
         // Close all connections in the pool
         self.inner.connection_pool.close_all().await;
+
+        if !already_closed
+            && !self
+                .inner
+                .control_events_tx
+                .same_channel(&self.inner.events_tx)
+        {
+            let _ = send_control_event(&self.inner.control_events_tx, TransportEvent::Closed).await;
+        }
 
         Ok(())
     }
@@ -595,20 +637,14 @@ impl Transport for TcpTransport {
         // flow is gone, the caller (typically a ping task in dialog-
         // core) terminates; a fresh flow is the upper layer's job.
         let destination = route.destination;
-        let connection = match route.flow_id {
-            Some(flow_id) => {
-                self.inner
-                    .connection_pool
-                    .get_connection_for_flow(&destination, flow_id)
-                    .await
-            }
-            None => {
-                self.inner
-                    .connection_pool
-                    .get_connection(&destination)
-                    .await
-            }
-        };
+        let flow_id = route.flow_id.ok_or_else(|| {
+            Error::InvalidState("TCP raw flow traffic requires an exact flow ID".into())
+        })?;
+        let connection = self
+            .inner
+            .connection_pool
+            .get_connection_for_flow(&destination, flow_id)
+            .await;
         let Some(connection) = connection else {
             return Err(Error::InvalidState(format!(
                 "No active TCP connection to {} for send_raw",
@@ -634,6 +670,57 @@ mod tests {
     use rvoip_sip_core::{Method, Response, StatusCode};
     use std::collections::HashSet;
     use tokio::time::Duration;
+
+    #[tokio::test]
+    async fn tcp_control_close_bypasses_saturated_message_lane() {
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+        let (server, _server_events) = TcpTransport::bind_with_control_sender(
+            "127.0.0.1:0".parse().unwrap(),
+            Some(1),
+            None,
+            Some(control_tx),
+        )
+        .await
+        .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, _client_events) =
+            TcpTransport::bind("127.0.0.1:0".parse().unwrap(), None, None)
+                .await
+                .unwrap();
+
+        for cseq in 1..=3 {
+            let request =
+                SimpleRequestBuilder::new(Method::Options, "sip:service@localhost;transport=tcp")
+                    .unwrap()
+                    .from("alice", "sip:alice@localhost", Some("tag"))
+                    .to("service", "sip:service@localhost", None)
+                    .call_id("saturated-live-tcp")
+                    .cseq(cseq)
+                    .build();
+            let _ = client
+                .send_message(Message::Request(request), destination)
+                .await;
+        }
+
+        let closed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(TransportEvent::ConnectionClosed {
+                    flow_id: Some(_), ..
+                }) = control_rx.recv().await
+                {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            closed.is_ok(),
+            "control close was blocked by saturated SIP data"
+        );
+
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
 
     #[tokio::test]
     async fn test_tcp_transport_bind() {
@@ -1016,11 +1103,17 @@ mod tests {
             .call_id("warmup@example.com")
             .cseq(1)
             .build();
-        client.send_message(req.into(), server_addr).await.unwrap();
+        let route = client
+            .send_message_on_route(
+                req.into(),
+                TransportRoute::new(server_addr).with_transport_type(TransportType::Tcp),
+            )
+            .await
+            .unwrap();
 
         // Ping → pong.
         client
-            .send_raw(server_addr, bytes::Bytes::from_static(b"\r\n\r\n"))
+            .send_raw_via(route, bytes::Bytes::from_static(b"\r\n\r\n"))
             .await
             .unwrap();
 
@@ -1043,11 +1136,10 @@ mod tests {
         server.close().await.unwrap();
     }
 
-    /// `ConnectionClosed` is emitted when the peer drops the TCP
-    /// connection, *before* the per-address entry is evicted from the
-    /// pool (so observers can correlate the drop with flow state).
+    /// `ConnectionClosed` is emitted after the exact TCP flow is evicted, so
+    /// teardown never leaves a stale route while waiting for event capacity.
     #[tokio::test]
-    async fn connection_closed_emits_before_pool_eviction() {
+    async fn connection_closed_emits_after_pool_eviction() {
         let (server, _server_rx) =
             TcpTransport::bind("127.0.0.1:0".parse().unwrap(), Some(10), None)
                 .await
@@ -1094,6 +1186,10 @@ mod tests {
             }
         }
         assert!(saw_closed, "client never observed ConnectionClosed");
+        assert!(
+            !client.has_connection_to(server_addr),
+            "the exact flow must be evicted before ConnectionClosed is delivered"
+        );
 
         client.close().await.unwrap();
     }

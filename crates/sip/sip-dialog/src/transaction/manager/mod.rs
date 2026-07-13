@@ -454,6 +454,8 @@ pub struct TransactionManager {
     next_subscriber_id: Arc<AtomicUsize>,
     /// Transport message channel
     transport_rx: Arc<Mutex<mpsc::Receiver<TransportEvent>>>,
+    /// Separately reserved lifecycle/control channel.
+    control_transport_rx: Arc<Mutex<mpsc::Receiver<TransportEvent>>>,
     /// Running flag. `AtomicBool` — the previous `Mutex<bool>` was
     /// locked per-iteration of the message loop.
     running: Arc<AtomicBool>,
@@ -510,6 +512,7 @@ pub struct TransactionManager {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransactionIngressKind {
+    Control,
     Invite,
     Ack,
     Bye,
@@ -520,6 +523,7 @@ enum TransactionIngressKind {
 impl TransactionIngressKind {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Control => "control",
             Self::Invite => "invite",
             Self::Ack => "ack",
             Self::Bye => "bye",
@@ -538,12 +542,14 @@ struct QueuedTransactionDispatch {
 
 #[derive(Clone)]
 struct TransactionDispatchWorkerSender {
+    control: mpsc::Sender<QueuedTransactionDispatch>,
     high: mpsc::Sender<QueuedTransactionDispatch>,
     normal: mpsc::Sender<QueuedTransactionDispatch>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransactionDispatchLane {
+    Control,
     High,
     Normal,
 }
@@ -596,6 +602,12 @@ fn build_timer_settings() -> TimerSettings {
     settings
 }
 
+fn closed_transport_event_receiver() -> Arc<Mutex<mpsc::Receiver<TransportEvent>>> {
+    let (sender, receiver) = mpsc::channel(1);
+    drop(sender);
+    Arc::new(Mutex::new(receiver))
+}
+
 fn transaction_ingress_kind(event: &TransportEvent) -> TransactionIngressKind {
     match event {
         TransportEvent::MessageReceived { message, .. } => match message {
@@ -608,12 +620,13 @@ fn transaction_ingress_kind(event: &TransportEvent) -> TransactionIngressKind {
             },
             Message::Response(_) => TransactionIngressKind::Other,
         },
-        _ => TransactionIngressKind::Other,
+        _ => TransactionIngressKind::Control,
     }
 }
 
 fn transaction_dispatch_lane(kind: TransactionIngressKind) -> TransactionDispatchLane {
     match kind {
+        TransactionIngressKind::Control => TransactionDispatchLane::Control,
         TransactionIngressKind::Ack | TransactionIngressKind::Bye => TransactionDispatchLane::High,
         TransactionIngressKind::Invite
         | TransactionIngressKind::Cancel
@@ -674,6 +687,8 @@ fn start_transaction_dispatch_workers(
     let mut senders = Vec::with_capacity(worker_count);
 
     for worker_id in 0..worker_count {
+        let (control_tx, mut control_rx) =
+            mpsc::channel::<QueuedTransactionDispatch>(per_worker_capacity.max(8));
         let (high_tx, mut high_rx) =
             mpsc::channel::<QueuedTransactionDispatch>(per_worker_capacity);
         let (normal_tx, mut normal_rx) =
@@ -683,6 +698,7 @@ fn start_transaction_dispatch_workers(
         tokio::spawn(async move {
             let mut high_burst_count = 0usize;
             while let Some(queued) = recv_transaction_dispatch_event(
+                &mut control_rx,
                 &mut high_rx,
                 &mut normal_rx,
                 &mut high_burst_count,
@@ -695,7 +711,7 @@ fn start_transaction_dispatch_workers(
                         queued.worker_id,
                         queued.kind.as_str(),
                         queued_at.elapsed(),
-                        high_rx.len() + normal_rx.len(),
+                        control_rx.len() + high_rx.len() + normal_rx.len(),
                     );
                 }
                 process_transaction_dispatch_event(&manager_for_worker, queued).await;
@@ -703,6 +719,7 @@ fn start_transaction_dispatch_workers(
             debug!(worker_id, "Transaction dispatch worker terminated");
         });
         senders.push(TransactionDispatchWorkerSender {
+            control: control_tx,
             high: high_tx,
             normal: normal_tx,
         });
@@ -717,12 +734,18 @@ fn start_transaction_dispatch_workers(
 }
 
 async fn recv_transaction_dispatch_event(
+    control_rx: &mut mpsc::Receiver<QueuedTransactionDispatch>,
     high_rx: &mut mpsc::Receiver<QueuedTransactionDispatch>,
     normal_rx: &mut mpsc::Receiver<QueuedTransactionDispatch>,
     high_burst_count: &mut usize,
     priority_burst_max: usize,
 ) -> Option<QueuedTransactionDispatch> {
     loop {
+        match control_rx.try_recv() {
+            Ok(queued) => return Some(queued),
+            Err(mpsc::error::TryRecvError::Empty) => {}
+            Err(mpsc::error::TryRecvError::Disconnected) => {}
+        }
         if *high_burst_count >= priority_burst_max.max(1) {
             match normal_rx.try_recv() {
                 Ok(queued) => {
@@ -760,6 +783,7 @@ async fn recv_transaction_dispatch_event(
 
         tokio::select! {
             biased;
+            Some(queued) = control_rx.recv() => return Some(queued),
             queued = high_rx.recv() => {
                 if let Some(queued) = queued {
                     *high_burst_count += 1;
@@ -811,6 +835,7 @@ async fn dispatch_transaction_event(
     };
     let lane = transaction_dispatch_lane(kind);
     let sender = match lane {
+        TransactionDispatchLane::Control => &dispatch_senders[worker_index].control,
         TransactionDispatchLane::High => &dispatch_senders[worker_index].high,
         TransactionDispatchLane::Normal => &dispatch_senders[worker_index].normal,
     };
@@ -818,6 +843,14 @@ async fn dispatch_transaction_event(
     match sender.try_send(queued) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Full(queued)) => {
+            if lane == TransactionDispatchLane::Control {
+                warn!(
+                    worker_index,
+                    "Transaction control dispatch lane full; bounding lifecycle delivery"
+                );
+                let _ = tokio::time::timeout(Duration::from_millis(100), sender.send(queued)).await;
+                return;
+            }
             let backpressure_started = timing_enabled.then(Instant::now);
             warn!(
                 worker_index,
@@ -1356,6 +1389,7 @@ impl TransactionManager {
             transaction_to_subscribers,
             next_subscriber_id,
             transport_rx,
+            control_transport_rx: closed_transport_event_receiver(),
             running,
             timer_settings,
             timer_manager,
@@ -1499,6 +1533,7 @@ impl TransactionManager {
             transaction_to_subscribers,
             next_subscriber_id,
             transport_rx,
+            control_transport_rx: closed_transport_event_receiver(),
             running,
             timer_settings,
             timer_manager,
@@ -1692,6 +1727,11 @@ impl TransactionManager {
                     e
                 ))
             })?;
+        let control_transport_rx = transport_manager
+            .take_control_event_receiver()
+            .await
+            .map(|receiver| Arc::new(Mutex::new(receiver)))
+            .unwrap_or_else(closed_transport_event_receiver);
 
         // Create the transaction manager using the default transport and event channel
         let events_capacity = capacity.unwrap_or(100);
@@ -1746,6 +1786,7 @@ impl TransactionManager {
             transaction_to_subscribers,
             next_subscriber_id,
             transport_rx,
+            control_transport_rx,
             running,
             timer_settings,
             timer_manager,
@@ -1866,6 +1907,7 @@ impl TransactionManager {
             transaction_to_subscribers,
             next_subscriber_id,
             transport_rx,
+            control_transport_rx: closed_transport_event_receiver(),
             running,
             timer_settings,
             timer_manager,
@@ -1964,6 +2006,7 @@ impl TransactionManager {
             transaction_to_subscribers,
             next_subscriber_id,
             transport_rx: Arc::new(Mutex::new(transport_rx)),
+            control_transport_rx: closed_transport_event_receiver(),
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
@@ -3225,6 +3268,7 @@ impl TransactionManager {
     fn start_message_loop(&self) {
         let events_tx = self.events_tx.clone();
         let transport_rx = self.transport_rx.clone();
+        let control_transport_rx = self.control_transport_rx.clone();
         let event_subscribers = self.event_subscribers.clone();
         let running = self.running.clone();
         let manager_arc = self.clone();
@@ -3256,6 +3300,7 @@ impl TransactionManager {
 
             // Get the transport receiver
             let mut receiver = transport_rx.lock().await;
+            let mut control_receiver = control_transport_rx.lock().await;
             let mut cleanup_interval = tokio::time::interval(Duration::from_secs(1));
             cleanup_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let cleanup_running = Arc::new(AtomicBool::new(false));
@@ -3277,6 +3322,20 @@ impl TransactionManager {
 
                 // Use tokio::select to wait for a message from either the transport or internal channel
                 tokio::select! {
+                    biased;
+                    Some(control_event) = control_receiver.recv() => {
+                        if manager_arc.running.load(Ordering::Relaxed) {
+                            if let Some(dispatch_senders) = dispatch_senders.as_ref() {
+                                dispatch_transaction_event(
+                                    control_event,
+                                    dispatch_senders,
+                                    &fallback_dispatch_worker,
+                                ).await;
+                            } else if let Err(e) = manager_arc.handle_transport_event(control_event).await {
+                                error!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error handling transport control event");
+                            }
+                        }
+                    }
                     Some(mut message_event) = receiver.recv() => {
                         // Check if we're still running before processing
                         let still_running = manager_arc.running.load(Ordering::Relaxed);

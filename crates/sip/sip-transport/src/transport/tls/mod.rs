@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
@@ -38,9 +39,9 @@ use crate::transport::{
         next_trust_context, ConnectionDirection, ConnectionLifecycleConfig, DialAdmission,
         OutboundDialCoordinator, TransportTaskSet,
     },
-    transport_authority_for_request, validate_typed_outbound_message, HandshakeAdmissionConfig,
-    TlsPeerIdentity, Transport, TransportAuthority, TransportConnectionMetadata, TransportEvent,
-    TransportFlowId, TransportRoute, TransportType,
+    send_control_event, transport_authority_for_request, validate_typed_outbound_message,
+    HandshakeAdmissionConfig, TlsPeerIdentity, Transport, TransportAuthority,
+    TransportConnectionMetadata, TransportEvent, TransportFlowId, TransportRoute, TransportType,
 };
 
 #[derive(Clone, Debug)]
@@ -51,6 +52,16 @@ struct TlsConnectionRecord {
 }
 
 struct AbortTaskOnDrop(tokio::task::AbortHandle);
+
+const TLS_ACCEPT_ERROR_BACKOFF_MIN: Duration = Duration::from_millis(10);
+const TLS_ACCEPT_ERROR_BACKOFF_MAX: Duration = Duration::from_secs(1);
+
+fn tls_accept_error_backoff(consecutive_errors: u32) -> Duration {
+    let exponent = consecutive_errors.saturating_sub(1).min(7);
+    TLS_ACCEPT_ERROR_BACKOFF_MIN
+        .saturating_mul(1u32 << exponent)
+        .min(TLS_ACCEPT_ERROR_BACKOFF_MAX)
+}
 
 impl AbortTaskOnDrop {
     fn abort(&self) {
@@ -232,6 +243,9 @@ pub struct TlsTransport {
     /// Transport event sender.
     event_tx: Option<mpsc::Sender<TransportEvent>>,
 
+    /// Separately reserved lifecycle/control event sender.
+    control_event_tx: Option<mpsc::Sender<TransportEvent>>,
+
     /// Closed flag. Once set, `connect()` and `send_message` short-circuit.
     closed: Arc<AtomicBool>,
 
@@ -370,6 +384,7 @@ impl TlsTransport {
             cert_path,
             key_path,
             event_tx,
+            None,
             client_cfg,
             server_client_auth,
             TlsRole::ClientAndServer,
@@ -393,6 +408,7 @@ impl TlsTransport {
             cert_path,
             key_path,
             event_tx,
+            None,
             client_cfg,
             TlsServerClientAuthConfig::default(),
             TlsRole::ServerOnly,
@@ -415,6 +431,7 @@ impl TlsTransport {
             cert_path,
             key_path,
             event_tx,
+            None,
             TlsClientConfig::default(),
             server_client_auth,
             TlsRole::ServerOnly,
@@ -439,6 +456,59 @@ impl TlsTransport {
             cert_path,
             key_path,
             event_tx,
+            None,
+            client_cfg,
+            server_client_auth,
+            TlsRole::ServerOnly,
+            handshake_admission,
+        )
+        .await
+    }
+
+    /// Bind a bidirectional TLS transport with separately reserved data and
+    /// lifecycle/control channels.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn bind_with_configs_and_control_sender(
+        local_addr: SocketAddr,
+        cert_path: &Path,
+        key_path: &Path,
+        event_tx: Option<mpsc::Sender<TransportEvent>>,
+        control_event_tx: mpsc::Sender<TransportEvent>,
+        client_cfg: TlsClientConfig,
+        server_client_auth: TlsServerClientAuthConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_role_and_configs(
+            local_addr,
+            cert_path,
+            key_path,
+            event_tx,
+            Some(control_event_tx),
+            client_cfg,
+            server_client_auth,
+            TlsRole::ClientAndServer,
+            HandshakeAdmissionConfig::default(),
+        )
+        .await
+    }
+
+    /// Bind a server-only TLS transport with a reserved control sender.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn bind_server_only_with_configs_handshake_and_control_sender(
+        local_addr: SocketAddr,
+        cert_path: &Path,
+        key_path: &Path,
+        event_tx: Option<mpsc::Sender<TransportEvent>>,
+        control_event_tx: mpsc::Sender<TransportEvent>,
+        client_cfg: TlsClientConfig,
+        server_client_auth: TlsServerClientAuthConfig,
+        handshake_admission: HandshakeAdmissionConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_role_and_configs(
+            local_addr,
+            cert_path,
+            key_path,
+            event_tx,
+            Some(control_event_tx),
             client_cfg,
             server_client_auth,
             TlsRole::ServerOnly,
@@ -452,6 +522,7 @@ impl TlsTransport {
         cert_path: &Path,
         key_path: &Path,
         event_tx: Option<mpsc::Sender<TransportEvent>>,
+        control_event_tx: Option<mpsc::Sender<TransportEvent>>,
         client_cfg: TlsClientConfig,
         server_client_auth: TlsServerClientAuthConfig,
         role: TlsRole,
@@ -471,6 +542,7 @@ impl TlsTransport {
         } else {
             mpsc::channel::<TransportEvent>(100)
         };
+        let control_tx = control_event_tx.unwrap_or_else(|| tx.clone());
 
         // Bind the listener synchronously so we can report the
         // actually-allocated port back via `local_addr()`. (Important
@@ -500,6 +572,7 @@ impl TlsTransport {
             connections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             next_connection_generation: Arc::new(AtomicU64::new(1)),
             event_tx: Some(tx),
+            control_event_tx: Some(control_tx),
             closed: Arc::new(AtomicBool::new(false)),
             tasks: tasks.clone(),
             close_gate: Arc::new(Mutex::new(())),
@@ -526,6 +599,7 @@ impl TlsTransport {
                 transport.connections.clone(),
                 transport.next_connection_generation.clone(),
                 transport.event_tx.clone().unwrap(),
+                transport.control_event_tx.clone().unwrap(),
                 Arc::downgrade(&tasks),
                 handshake_admission,
                 lifecycle,
@@ -573,6 +647,34 @@ impl TlsTransport {
         client_cfg: TlsClientConfig,
         handshake_admission: HandshakeAdmissionConfig,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::client_only_with_channels(local_addr, event_tx, None, client_cfg, handshake_admission)
+            .await
+    }
+
+    /// Create a client-only TLS transport with a reserved control sender.
+    pub async fn client_only_with_control_sender(
+        local_addr: SocketAddr,
+        event_tx: Option<mpsc::Sender<TransportEvent>>,
+        control_event_tx: mpsc::Sender<TransportEvent>,
+        client_cfg: TlsClientConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::client_only_with_channels(
+            local_addr,
+            event_tx,
+            Some(control_event_tx),
+            client_cfg,
+            HandshakeAdmissionConfig::default(),
+        )
+        .await
+    }
+
+    async fn client_only_with_channels(
+        local_addr: SocketAddr,
+        event_tx: Option<mpsc::Sender<TransportEvent>>,
+        control_event_tx: Option<mpsc::Sender<TransportEvent>>,
+        client_cfg: TlsClientConfig,
+        handshake_admission: HandshakeAdmissionConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         let handshake_admission = handshake_admission.validate("TLS")?;
         let lifecycle = ConnectionLifecycleConfig::from_handshake(handshake_admission);
         let connector = TlsConnector::from(Arc::new(build_client_config(&client_cfg)?));
@@ -582,6 +684,7 @@ impl TlsTransport {
         } else {
             mpsc::channel::<TransportEvent>(100)
         };
+        let control_tx = control_event_tx.unwrap_or_else(|| tx.clone());
 
         info!(
             "TLS client-only transport configured with logical local address {}",
@@ -597,6 +700,7 @@ impl TlsTransport {
                 connections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                 next_connection_generation: Arc::new(AtomicU64::new(1)),
                 event_tx: Some(tx),
+                control_event_tx: Some(control_tx),
                 closed: Arc::new(AtomicBool::new(false)),
                 tasks: TransportTaskSet::new(),
                 close_gate: Arc::new(Mutex::new(())),
@@ -627,6 +731,7 @@ impl TlsTransport {
         connections: Arc<tokio::sync::Mutex<HashMap<TlsConnectionKey, TlsConnectionRecord>>>,
         next_connection_generation: Arc<AtomicU64>,
         event_tx: mpsc::Sender<TransportEvent>,
+        control_event_tx: mpsc::Sender<TransportEvent>,
         weak_tasks: Weak<TransportTaskSet>,
         handshake_admission: HandshakeAdmissionConfig,
         lifecycle: ConnectionLifecycleConfig,
@@ -634,6 +739,7 @@ impl TlsTransport {
         trust_context: u64,
     ) {
         let semaphore = Arc::new(Semaphore::new(handshake_admission.max_concurrent));
+        let mut consecutive_accept_errors = 0u32;
         loop {
             let permit = match semaphore.clone().acquire_owned().await {
                 Ok(permit) => permit,
@@ -641,10 +747,12 @@ impl TlsTransport {
             };
             match listener.accept().await {
                 Ok((stream, remote_addr)) => {
+                    consecutive_accept_errors = 0;
                     debug!("New TCP connection from {}", remote_addr);
                     let acceptor = acceptor.clone();
                     let connections = connections.clone();
                     let event_tx = event_tx.clone();
+                    let control_event_tx = control_event_tx.clone();
                     let next_connection_generation = next_connection_generation.clone();
                     let established = established.clone();
                     let local_addr = addr;
@@ -697,6 +805,7 @@ impl TlsTransport {
                                         local_addr,
                                         connections,
                                         event_tx,
+                                        control_event_tx,
                                         connection_metadata,
                                         weak_tasks_for_connection,
                                         next_connection_generation.fetch_add(1, Ordering::Relaxed),
@@ -739,7 +848,21 @@ impl TlsTransport {
                 }
                 Err(e) => {
                     drop(permit);
-                    error!("Failed to accept TCP connection: {}", e);
+                    consecutive_accept_errors = consecutive_accept_errors.saturating_add(1);
+                    let delay = tls_accept_error_backoff(consecutive_accept_errors);
+                    error!(
+                        error = %e,
+                        retry_delay_ms = delay.as_millis(),
+                        "Failed to accept TCP connection; listener remains active"
+                    );
+                    let _ = send_control_event(
+                        &control_event_tx,
+                        TransportEvent::Error {
+                            error: format!("TLS accept error: {e}"),
+                        },
+                    )
+                    .await;
+                    tokio::time::sleep(delay).await;
                 }
             }
         }
@@ -755,6 +878,7 @@ impl TlsTransport {
         local_addr: SocketAddr,
         connections: Arc<tokio::sync::Mutex<HashMap<TlsConnectionKey, TlsConnectionRecord>>>,
         event_tx: mpsc::Sender<TransportEvent>,
+        control_event_tx: mpsc::Sender<TransportEvent>,
         connection_metadata: Option<TransportConnectionMetadata>,
         weak_tasks: Weak<TransportTaskSet>,
         generation: u64,
@@ -878,14 +1002,15 @@ impl TlsTransport {
                     loop {
                         match try_consume_keepalive_frame(&mut buffer) {
                             Some(KeepAliveFrame::Pong) => {
-                                if event_tx
-                                    .send(TransportEvent::KeepAlivePongReceived {
+                                if !send_control_event(
+                                    &control_event_tx,
+                                    TransportEvent::KeepAlivePongReceived {
                                         source: remote_addr,
                                         destination: local_addr,
                                         flow_id: Some(flow_id),
-                                    })
-                                    .await
-                                    .is_err()
+                                    },
+                                )
+                                .await
                                 {
                                     break 'connection;
                                 }
@@ -952,22 +1077,19 @@ impl TlsTransport {
 
         write_task.abort();
 
-        // Lifecycle delivery is lossless under ordinary backpressure. The
-        // established permit remains held while this bounded task waits, so a
-        // stalled consumer stops admission instead of creating unbounded
-        // cleanup tasks or dropping the exact-flow close signal.
-        let _ = event_tx
-            .send(TransportEvent::ConnectionClosed {
-                remote_addr,
-                transport_type: TransportType::Tls,
-                flow_id: Some(flow_id),
-            })
-            .await;
-
         {
             let mut connections_guard = connections.lock().await;
             remove_tls_connection_if_generation(&mut connections_guard, &key, generation);
         }
+        let _ = send_control_event(
+            &control_event_tx,
+            TransportEvent::ConnectionClosed {
+                remote_addr,
+                transport_type: TransportType::Tls,
+                flow_id: Some(flow_id),
+            },
+        )
+        .await;
 
         debug!("TLS connection closed: {}", remote_addr);
     }
@@ -1121,6 +1243,9 @@ impl TlsTransport {
             .event_tx
             .clone()
             .ok_or_else(|| Error::TlsHandshakeFailed("TLS transport has no event sender".into()))?;
+        let control_event_tx = self.control_event_tx.clone().ok_or_else(|| {
+            Error::TlsHandshakeFailed("TLS transport has no control event sender".into())
+        })?;
         let local_addr = self.local_addr;
         let coordinator = self.outbound_dials.clone();
         let lifecycle = self.lifecycle;
@@ -1212,6 +1337,7 @@ impl TlsTransport {
                                     local_addr,
                                     connections,
                                     event_tx,
+                                    control_event_tx,
                                     None,
                                     weak_tasks,
                                     generation,
@@ -1447,12 +1573,21 @@ impl Transport for TlsTransport {
 
     async fn close(&self) -> Result<()> {
         let _close_guard = self.close_gate.lock().await;
-        self.closed.store(true, Ordering::SeqCst);
+        let already_closed = self.closed.swap(true, Ordering::SeqCst);
         self.outbound_dials.close();
         self.inbound_established.close();
         self.outbound_established.close();
         self.tasks.close().await;
         self.connections.lock().await.clear();
+        if !already_closed {
+            if let (Some(control_event_tx), Some(event_tx)) =
+                (self.control_event_tx.as_ref(), self.event_tx.as_ref())
+            {
+                if !control_event_tx.same_channel(event_tx) {
+                    let _ = send_control_event(control_event_tx, TransportEvent::Closed).await;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1588,7 +1723,7 @@ impl Transport for TlsTransport {
 #[cfg(test)]
 mod auth_boundary_tests {
     use super::*;
-    use rvoip_sip_core::builder::SimpleRequestBuilder;
+    use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
     use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
     use rvoip_sip_core::{CallId, Message, Method, Request, Response, StatusCode, Uri};
     use std::time::Duration;
@@ -1610,6 +1745,167 @@ mod auth_boundary_tests {
             .write_all(certificate.signing_key.serialize_pem().as_bytes())
             .unwrap();
         (directory, cert_path, key_path)
+    }
+
+    #[test]
+    fn tls_accept_backoff_is_bounded_and_exponential() {
+        assert_eq!(tls_accept_error_backoff(1), Duration::from_millis(10));
+        assert_eq!(tls_accept_error_backoff(2), Duration::from_millis(20));
+        assert_eq!(tls_accept_error_backoff(3), Duration::from_millis(40));
+        assert_eq!(tls_accept_error_backoff(100), Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn exact_live_tls_flow_carries_structured_and_cached_raw_responses() {
+        let (_directory, cert_path, key_path) = write_test_certificate();
+        let client_config = TlsClientConfig {
+            extra_ca_path: Some(cert_path.clone()),
+            ..TlsClientConfig::default()
+        };
+        let (server, mut server_events) = TlsTransport::bind_with_client_config(
+            "127.0.0.1:0".parse().unwrap(),
+            &cert_path,
+            &key_path,
+            None,
+            client_config.clone(),
+        )
+        .await
+        .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, mut client_events) =
+            TlsTransport::client_only("127.0.0.1:0".parse().unwrap(), None, client_config)
+                .await
+                .unwrap();
+        let request = SimpleRequestBuilder::new(Method::Options, "sips:service@localhost")
+            .unwrap()
+            .from("alice", "sips:alice@localhost", Some("tag"))
+            .to("service", "sips:service@localhost", None)
+            .call_id("exact-live-tls")
+            .cseq(1)
+            .build();
+        client
+            .send_message_on_route(
+                Message::Request(request.clone()),
+                TransportRoute::new(destination)
+                    .with_transport_type(TransportType::Tls)
+                    .with_authority(TransportAuthority::dns("localhost").unwrap()),
+            )
+            .await
+            .unwrap();
+
+        let route = match tokio::time::timeout(Duration::from_secs(2), server_events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            TransportEvent::MessageReceived {
+                source,
+                flow_id: Some(flow_id),
+                ..
+            } => TransportRoute::new(source)
+                .with_transport_type(TransportType::Tls)
+                .with_flow_id(flow_id),
+            event => panic!("expected exact TLS ingress route, got {event:?}"),
+        };
+        let response =
+            SimpleResponseBuilder::response_from_request(&request, StatusCode::Ok, Some("OK"))
+                .build();
+        server
+            .send_message_via(Message::Response(response.clone()), route.clone())
+            .await
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), client_events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            TransportEvent::MessageReceived {
+                message: Message::Response(_),
+                ..
+            }
+        ));
+
+        server
+            .send_message_raw_via(Bytes::from(Message::Response(response).to_bytes()), route)
+            .await
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), client_events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            TransportEvent::MessageReceived {
+                message: Message::Response(_),
+                ..
+            }
+        ));
+
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tls_control_close_bypasses_saturated_message_lane() {
+        let (_directory, cert_path, key_path) = write_test_certificate();
+        let client_config = TlsClientConfig {
+            extra_ca_path: Some(cert_path.clone()),
+            ..TlsClientConfig::default()
+        };
+        let (data_tx, _data_rx) = mpsc::channel(1);
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+        let (server, _unused) = TlsTransport::bind_with_configs_and_control_sender(
+            "127.0.0.1:0".parse().unwrap(),
+            &cert_path,
+            &key_path,
+            Some(data_tx),
+            control_tx,
+            client_config.clone(),
+            TlsServerClientAuthConfig::default(),
+        )
+        .await
+        .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, _events) =
+            TlsTransport::client_only("127.0.0.1:0".parse().unwrap(), None, client_config)
+                .await
+                .unwrap();
+
+        for cseq in 1..=3 {
+            let request = SimpleRequestBuilder::new(Method::Options, "sips:service@localhost")
+                .unwrap()
+                .from("alice", "sips:alice@localhost", Some("tag"))
+                .to("service", "sips:service@localhost", None)
+                .call_id("saturated-live-tls")
+                .cseq(cseq)
+                .build();
+            let _ = client
+                .send_message_on_route(
+                    Message::Request(request),
+                    TransportRoute::new(destination)
+                        .with_transport_type(TransportType::Tls)
+                        .with_authority(TransportAuthority::dns("localhost").unwrap()),
+                )
+                .await;
+        }
+
+        let closed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(TransportEvent::ConnectionClosed {
+                    flow_id: Some(_), ..
+                }) = control_rx.recv().await
+                {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            closed.is_ok(),
+            "control close was blocked by saturated SIP data"
+        );
+
+        client.close().await.unwrap();
+        server.close().await.unwrap();
     }
 
     #[test]

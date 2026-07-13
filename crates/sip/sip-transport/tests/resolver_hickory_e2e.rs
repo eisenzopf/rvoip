@@ -18,7 +18,7 @@ use hickory_server::zone_handler::{AxfrPolicy, Catalog, ZoneHandler, ZoneType};
 use hickory_server::Server;
 use rvoip_sip_core::Uri;
 use rvoip_sip_transport::resolver::{HickoryResolver, Resolver};
-use rvoip_sip_transport::transport::TransportType;
+use rvoip_sip_transport::transport::{TransportAuthority, TransportType};
 use tokio::net::UdpSocket;
 
 const TTL: u32 = 300;
@@ -168,6 +168,12 @@ async fn hickory_client_resolves_naptr_then_srv_then_a() {
         "TLS should precede UDP (lower NAPTR order); got TLS@{} UDP@{}",
         tls_idx,
         udp_idx
+    );
+    assert!(
+        candidates.iter().all(|candidate| {
+            candidate.authority == Some(TransportAuthority::Dns("example.test".to_string()))
+        }),
+        "NAPTR/SRV targets must retain the original SIP authority for TLS SNI: {candidates:?}"
     );
 
     server.abort();

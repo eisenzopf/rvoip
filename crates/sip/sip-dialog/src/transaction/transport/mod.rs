@@ -3,7 +3,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, mpsc::error::TrySendError, Mutex};
 use tracing::{debug, error, info, trace, warn};
@@ -260,6 +260,20 @@ async fn forward_transport_event(
     }
 }
 
+async fn forward_control_event(
+    event_tx: &mpsc::Sender<TransportEvent>,
+    event: TransportEvent,
+) -> bool {
+    match event_tx.try_send(event) {
+        Ok(()) => true,
+        Err(TrySendError::Full(event)) => matches!(
+            tokio::time::timeout(Duration::from_millis(100), event_tx.send(event)).await,
+            Ok(Ok(()))
+        ),
+        Err(TrySendError::Closed(_)) => false,
+    }
+}
+
 async fn dispatch_transport_event(
     event: TransportEvent,
     dispatch_senders: &Arc<Vec<mpsc::Sender<TransportEvent>>>,
@@ -309,6 +323,9 @@ pub struct TransportManager {
     transport_factory: Arc<TransportFactory>,
     /// Combined event channel
     event_tx: mpsc::Sender<TransportEvent>,
+    /// Separately reserved lifecycle/control lane.
+    control_event_tx: mpsc::Sender<TransportEvent>,
+    control_event_rx: Arc<Mutex<Option<mpsc::Receiver<TransportEvent>>>>,
     /// Flag indicating whether the manager is running
     running: Arc<Mutex<bool>>,
     /// Optional SIP trace publisher shared with the transaction manager.
@@ -321,6 +338,8 @@ impl TransportManager {
         config: TransportManagerConfig,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         let (event_tx, event_rx) = mpsc::channel(config.default_channel_capacity);
+        let control_capacity = (config.default_channel_capacity / 8).clamp(16, 256);
+        let (control_event_tx, control_event_rx) = mpsc::channel(control_capacity);
 
         let transports = Arc::new(Mutex::new(HashMap::new()));
         let transport_factory = Arc::new(TransportFactory::new(TransportFactoryConfig {
@@ -340,11 +359,18 @@ impl TransportManager {
             udp_transport: None,
             transport_factory,
             event_tx,
+            control_event_tx,
+            control_event_rx: Arc::new(Mutex::new(Some(control_event_rx))),
             running: Arc::new(Mutex::new(false)),
             sip_trace: None,
         };
 
         Ok((manager, event_rx))
+    }
+
+    /// Take the single consumer for the reserved lifecycle/control lane.
+    pub async fn take_control_event_receiver(&self) -> Option<mpsc::Receiver<TransportEvent>> {
+        self.control_event_rx.lock().await.take()
     }
 
     /// Creates a new TransportManager with default configuration
@@ -635,16 +661,19 @@ impl TransportManager {
             // (incoming SIP messages, errors) flow through the same
             // pipeline as UDP/TCP — no separate forwarder task needed.
             let (transport, _rx_unused) = match self.config.tls_role {
-                TlsRole::ClientOnly => {
-                    TlsTransport::client_only(bind_addr, Some(self.event_tx.clone()), client_cfg)
-                        .await
-                        .map_err(|e| {
-                            Error::Transport(format!(
-                                "Failed to configure client-only TLS transport at {}: {}",
-                                bind_addr, e
-                            ))
-                        })?
-                }
+                TlsRole::ClientOnly => TlsTransport::client_only_with_control_sender(
+                    bind_addr,
+                    Some(self.event_tx.clone()),
+                    self.control_event_tx.clone(),
+                    client_cfg,
+                )
+                .await
+                .map_err(|e| {
+                    Error::Transport(format!(
+                        "Failed to configure client-only TLS transport at {}: {}",
+                        bind_addr, e
+                    ))
+                })?,
                 TlsRole::ServerOnly | TlsRole::ClientAndServer => {
                     let cert_path = self.config.tls_cert_path.as_ref().ok_or_else(|| {
                         Error::Transport("TLS enabled but tls_cert_path is missing".into())
@@ -653,22 +682,24 @@ impl TransportManager {
                         Error::Transport("TLS enabled but tls_key_path is missing".into())
                     })?;
                     let result = if self.config.tls_role == TlsRole::ServerOnly {
-                        TlsTransport::bind_server_only_with_configs_and_handshake(
+                        TlsTransport::bind_server_only_with_configs_handshake_and_control_sender(
                             bind_addr,
                             Path::new(cert_path),
                             Path::new(key_path),
                             Some(self.event_tx.clone()),
+                            self.control_event_tx.clone(),
                             client_cfg,
                             self.config.tls_server_client_auth.clone(),
                             rvoip_sip_transport::transport::HandshakeAdmissionConfig::default(),
                         )
                         .await
                     } else {
-                        TlsTransport::bind_with_configs(
+                        TlsTransport::bind_with_configs_and_control_sender(
                             bind_addr,
                             Path::new(cert_path),
                             Path::new(key_path),
                             Some(self.event_tx.clone()),
+                            self.control_event_tx.clone(),
                             client_cfg,
                             self.config.tls_server_client_auth.clone(),
                         )
@@ -691,15 +722,19 @@ impl TransportManager {
             let arc: Arc<dyn Transport> = Arc::new(transport);
             (arc, format!("tls:{}", actual))
         } else {
-            let (transport, rx) =
-                TcpTransport::bind(bind_addr, Some(self.config.default_channel_capacity), None)
-                    .await
-                    .map_err(|e| {
-                        Error::Transport(format!(
-                            "Failed to bind TCP transport to {}: {}",
-                            bind_addr, e
-                        ))
-                    })?;
+            let (transport, rx) = TcpTransport::bind_with_control_sender(
+                bind_addr,
+                Some(self.config.default_channel_capacity),
+                None,
+                Some(self.control_event_tx.clone()),
+            )
+            .await
+            .map_err(|e| {
+                Error::Transport(format!(
+                    "Failed to bind TCP transport to {}: {}",
+                    bind_addr, e
+                ))
+            })?;
             let arc: Arc<dyn Transport> = Arc::new(transport);
             // TCP path retains its own event channel; bridge it into
             // the manager's combined channel.
@@ -763,7 +798,7 @@ impl TransportManager {
                     .as_ref()
                     .map(std::path::PathBuf::from),
             };
-            WebSocketTransport::bind_with_tls_configs(
+            WebSocketTransport::bind_with_tls_configs_handshake_and_control_sender(
                 bind_addr,
                 true,
                 _cert_path,
@@ -771,15 +806,18 @@ impl TransportManager {
                 Some(self.config.default_channel_capacity),
                 Some(client_tls),
                 self.config.tls_server_client_auth.clone(),
+                rvoip_sip_transport::transport::HandshakeAdmissionConfig::default(),
+                self.control_event_tx.clone(),
             )
             .await
         } else {
-            WebSocketTransport::bind(
+            WebSocketTransport::bind_with_control_sender(
                 bind_addr,
                 false,
                 None,
                 None,
                 Some(self.config.default_channel_capacity),
+                self.control_event_tx.clone(),
             )
             .await
         };
@@ -941,6 +979,13 @@ impl TransportManager {
                 );
                 let mut event = event;
                 mark_transport_manager_forwarded(&mut event, Instant::now());
+
+                if rvoip_sip_transport::transport::is_control_event(&event) {
+                    if !forward_control_event(&self.control_event_tx, event).await {
+                        break;
+                    }
+                    continue;
+                }
 
                 // Forward the event to the main event channel. Avoid the
                 // async send fast path unless the channel is actually full so
@@ -1301,6 +1346,15 @@ mod tests {
             "Failed to close transport manager: {:?}",
             result
         );
+    }
+
+    #[tokio::test]
+    async fn reserved_control_receiver_has_single_owner() {
+        let (manager, _events) = TransportManager::new(TransportManagerConfig::default())
+            .await
+            .unwrap();
+        assert!(manager.take_control_event_receiver().await.is_some());
+        assert!(manager.take_control_event_receiver().await.is_none());
     }
 
     #[tokio::test]

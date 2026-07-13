@@ -467,11 +467,12 @@ async fn record_outbound_flow_from_response(
 
     let key = (aor.clone(), params.reg_id, params.instance_urn.clone());
     let dest = route.destination;
-    manager.start_outbound_ping_on_route(key, route);
-    info!(
-        "RFC 5626: keep-alive ping started for AoR (reg-id={}) → {}",
-        params.reg_id, dest
-    );
+    if manager.start_outbound_ping_on_route(key, route) {
+        info!(
+            "RFC 5626: keep-alive ping started for AoR (reg-id={}) → {}",
+            params.reg_id, dest
+        );
+    }
 }
 
 #[cfg(test)]

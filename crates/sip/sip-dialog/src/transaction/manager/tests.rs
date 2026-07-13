@@ -760,6 +760,10 @@ mod tests {
             transaction_dispatch_lane(transaction_ingress_kind(&response)),
             TransactionDispatchLane::Normal
         );
+        assert_eq!(
+            transaction_dispatch_lane(transaction_ingress_kind(&TransportEvent::Closed)),
+            TransactionDispatchLane::Control
+        );
 
         Ok(())
     }
@@ -769,6 +773,7 @@ mod tests {
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let (high_tx, mut high_rx) = mpsc::channel(4);
         let (_normal_tx, mut normal_rx) = mpsc::channel(4);
+        let (_control_tx, mut control_rx) = mpsc::channel(4);
         high_tx
             .send(queued_dispatch_request(
                 Method::Ack,
@@ -788,6 +793,7 @@ mod tests {
 
         let mut high_burst_count = 0;
         let first = recv_transaction_dispatch_event(
+            &mut control_rx,
             &mut high_rx,
             &mut normal_rx,
             &mut high_burst_count,
@@ -796,6 +802,7 @@ mod tests {
         .await
         .unwrap();
         let second = recv_transaction_dispatch_event(
+            &mut control_rx,
             &mut high_rx,
             &mut normal_rx,
             &mut high_burst_count,
@@ -815,6 +822,7 @@ mod tests {
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let (high_tx, mut high_rx) = mpsc::channel(4);
         let (normal_tx, mut normal_rx) = mpsc::channel(4);
+        let (_control_tx, mut control_rx) = mpsc::channel(4);
         normal_tx
             .send(queued_dispatch_request(
                 Method::Invite,
@@ -834,6 +842,7 @@ mod tests {
 
         let mut high_burst_count = 0;
         let first = recv_transaction_dispatch_event(
+            &mut control_rx,
             &mut high_rx,
             &mut normal_rx,
             &mut high_burst_count,
@@ -842,6 +851,7 @@ mod tests {
         .await
         .unwrap();
         let second = recv_transaction_dispatch_event(
+            &mut control_rx,
             &mut high_rx,
             &mut normal_rx,
             &mut high_burst_count,
@@ -857,11 +867,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transaction_dispatch_control_lane_preempts_saturated_data_lanes(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (control_tx, mut control_rx) = mpsc::channel(1);
+        let (high_tx, mut high_rx) = mpsc::channel(1);
+        let (normal_tx, mut normal_rx) = mpsc::channel(1);
+        high_tx
+            .send(queued_dispatch_request(
+                Method::Bye,
+                "z9hG4bK.control-priority-bye",
+                101,
+            )?)
+            .await
+            .unwrap();
+        normal_tx
+            .send(queued_dispatch_request(
+                Method::Invite,
+                "z9hG4bK.control-priority-invite",
+                102,
+            )?)
+            .await
+            .unwrap();
+        control_tx
+            .send(QueuedTransactionDispatch {
+                event: TransportEvent::Closed,
+                queued_at: None,
+                kind: TransactionIngressKind::Control,
+                worker_id: 0,
+            })
+            .await
+            .unwrap();
+
+        let mut high_burst_count = 0;
+        let first = recv_transaction_dispatch_event(
+            &mut control_rx,
+            &mut high_rx,
+            &mut normal_rx,
+            &mut high_burst_count,
+            TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.kind, TransactionIngressKind::Control);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn transaction_dispatch_starvation_guard_processes_normal_after_bye_burst(
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let burst_max = 2;
         let (high_tx, mut high_rx) = mpsc::channel(burst_max + 1);
         let (normal_tx, mut normal_rx) = mpsc::channel(1);
+        let (_control_tx, mut control_rx) = mpsc::channel(1);
         normal_tx
             .send(queued_dispatch_request(
                 Method::Invite,
@@ -884,6 +941,7 @@ mod tests {
         let mut high_burst_count = 0;
         for _ in 0..burst_max {
             let queued = recv_transaction_dispatch_event(
+                &mut control_rx,
                 &mut high_rx,
                 &mut normal_rx,
                 &mut high_burst_count,
@@ -895,6 +953,7 @@ mod tests {
         }
 
         let queued = recv_transaction_dispatch_event(
+            &mut control_rx,
             &mut high_rx,
             &mut normal_rx,
             &mut high_burst_count,
@@ -906,6 +965,7 @@ mod tests {
         assert_eq!(high_burst_count, 0);
 
         let queued = recv_transaction_dispatch_event(
+            &mut control_rx,
             &mut high_rx,
             &mut normal_rx,
             &mut high_burst_count,

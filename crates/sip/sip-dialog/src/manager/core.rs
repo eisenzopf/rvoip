@@ -1051,9 +1051,10 @@ impl DialogManager {
     ///
     /// No-op when `outbound_keepalive_interval` is `None`.
     pub fn start_outbound_ping(&self, flow_key: (String, u32, String), destination: SocketAddr) {
-        self.start_outbound_ping_on_route(
-            flow_key,
-            rvoip_sip_transport::TransportRoute::new(destination),
+        let _ = flow_key;
+        warn!(
+            destination = %destination,
+            "refusing address-only outbound keep-alive; retain the transaction's exact transport route"
         );
     }
 
@@ -1062,22 +1063,43 @@ impl DialogManager {
     pub fn start_outbound_ping_on_route(
         &self,
         flow_key: (String, u32, String),
-        mut route: rvoip_sip_transport::TransportRoute,
-    ) {
+        route: rvoip_sip_transport::TransportRoute,
+    ) -> bool {
         let Some(interval) = self.outbound_keepalive_interval() else {
-            return;
+            return false;
         };
         if interval.is_zero() {
-            return;
+            return false;
+        }
+
+        let Some(flow_id) = route.flow_id else {
+            warn!(
+                destination = %route.destination,
+                "refusing flowless outbound keep-alive route"
+            );
+            return false;
+        };
+        if !matches!(
+            route.transport_type,
+            Some(
+                rvoip_sip_transport::transport::TransportType::Tcp
+                    | rvoip_sip_transport::transport::TransportType::Tls
+                    | rvoip_sip_transport::transport::TransportType::Ws
+                    | rvoip_sip_transport::transport::TransportType::Wss
+            )
+        ) {
+            warn!(
+                destination = %route.destination,
+                flow_id = flow_id.as_u64(),
+                "refusing outbound CRLF keep-alive on a non-stream route"
+            );
+            return false;
         }
 
         // Replace any prior flow for this key (idempotent on re-REGISTER).
         self.stop_outbound_ping(&flow_key);
 
         let transport = self.transaction_manager.transport().clone();
-        if route.flow_id.is_none() {
-            route.flow_id = transport.flow_id_for_route(&route);
-        }
         let destination = route.destination;
         let flow = Arc::new(OutboundFlow::new_with_route(
             flow_key.clone(),
@@ -1095,6 +1117,7 @@ impl DialogManager {
         self.outbound_flows.insert(flow_key.clone(), flow);
         self.outbound_flow_tasks.insert(flow_key.clone(), handle);
         self.index_outbound_flow_key(flow_key, destination);
+        true
     }
 
     /// Stop (and forget) the RFC 5626 keep-alive flow for this key, if
@@ -4115,5 +4138,22 @@ mod outbound_flow_handler_tests {
                 .is_err(),
             "stop must not emit OutboundFlowFailed"
         );
+    }
+
+    #[tokio::test]
+    async fn outbound_keepalive_rejects_address_only_and_flowless_routes() {
+        let (manager, _rx) = make_manager().await;
+        manager.set_outbound_keepalive_interval(Some(Duration::from_secs(30)));
+        let key = test_key(4);
+        let destination = dest_addr(5084);
+
+        manager.start_outbound_ping(key.clone(), destination);
+        assert!(!manager.outbound_flows.contains_key(&key));
+        assert!(!manager.start_outbound_ping_on_route(
+            key.clone(),
+            rvoip_sip_transport::TransportRoute::new(destination)
+                .with_transport_type(rvoip_sip_transport::transport::TransportType::Tcp),
+        ));
+        assert!(!manager.outbound_flows.contains_key(&key));
     }
 }

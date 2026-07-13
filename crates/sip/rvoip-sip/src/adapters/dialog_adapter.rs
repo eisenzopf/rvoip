@@ -52,6 +52,8 @@ pub(crate) struct RegistrationResponseMetadata {
     pub(crate) service_route: Option<Vec<String>>,
     pub(crate) pub_gruu: Option<String>,
     pub(crate) temp_gruu: Option<String>,
+    /// Exact flow-bearing route used by the successful REGISTER attempt.
+    pub(crate) transport_route: Option<rvoip_sip_transport::TransportRoute>,
 }
 
 /// Outcome for a single REGISTER wire attempt.
@@ -627,6 +629,7 @@ impl DialogAdapter {
             service_route,
             pub_gruu,
             temp_gruu,
+            transport_route: None,
         }
     }
 
@@ -723,6 +726,7 @@ impl DialogAdapter {
         session.registration_next_refresh_at = next_refresh_at;
         session.registration_last_failure = None;
         session.registration_retry_count = 0;
+        let registration_route = metadata.transport_route;
         session.registration_service_route = metadata.service_route;
         session.registration_pub_gruu = metadata.pub_gruu;
         session.registration_temp_gruu = metadata.temp_gruu;
@@ -738,8 +742,7 @@ impl DialogAdapter {
             contact: contact_uri.to_string(),
         });
         self.schedule_registration_refresh(session_id.clone(), next_refresh_at);
-        self.start_symmetric_registration_keepalive(from_uri, registrar_uri)
-            .await;
+        self.start_symmetric_registration_keepalive(from_uri, registration_route);
         Ok(())
     }
 
@@ -2094,15 +2097,27 @@ impl DialogAdapter {
     /// goes through `outbound_proxy_uri` directly on the options struct.
     pub async fn send_register_with_options(
         &self,
-        mut opts: rvoip_sip_dialog::api::unified::RegisterRequestOptions,
+        opts: rvoip_sip_dialog::api::unified::RegisterRequestOptions,
     ) -> Result<rvoip_sip_core::Response> {
+        self.send_register_with_options_and_route(opts)
+            .await
+            .map(|(response, _route)| response)
+    }
+
+    pub(crate) async fn send_register_with_options_and_route(
+        &self,
+        mut opts: rvoip_sip_dialog::api::unified::RegisterRequestOptions,
+    ) -> Result<(
+        rvoip_sip_core::Response,
+        rvoip_sip_transport::TransportRoute,
+    )> {
         opts.extra_headers = apply_outbound_extras_policy(
             rvoip_sip_core::types::Method::Register,
             opts.extra_headers,
             self.outbound_proxy_uri.as_ref(),
         )?;
         self.dialog_api
-            .send_register_with_options(opts)
+            .send_register_with_options_and_route(opts)
             .await
             .map_err(|error| redacted_dialog_operation_error("send REGISTER", error))
     }
@@ -2294,50 +2309,45 @@ impl DialogAdapter {
 
     // ===== Registration Methods =====
 
-    async fn start_symmetric_registration_keepalive(&self, from_uri: &str, registrar_uri: &str) {
+    fn start_symmetric_registration_keepalive(
+        &self,
+        from_uri: &str,
+        route: Option<rvoip_sip_transport::TransportRoute>,
+    ) {
         let Some(params) = self.symmetric_flow_params.as_ref() else {
             return;
         };
-
-        let dest_uri = match registrar_uri.parse::<rvoip_sip_core::Uri>() {
-            Ok(uri) => uri,
-            Err(_) => {
-                tracing::warn!(
-                    registrar_present = !registrar_uri.is_empty(),
-                    registrar_bytes = registrar_uri.len(),
-                    "symmetric registered-flow: invalid registrar URI"
-                );
-                return;
-            }
-        };
-        let Some(destination) =
-            rvoip_sip_dialog::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri).await
-        else {
+        let Some(route) = route else {
             tracing::warn!(
-                registrar_present = !registrar_uri.is_empty(),
-                registrar_bytes = registrar_uri.len(),
-                "symmetric registered-flow: could not resolve registrar URI for keep-alive"
+                "symmetric registered-flow: successful REGISTER did not retain an exact route"
             );
             return;
         };
+        let destination = route.destination;
 
-        self.dialog_api.dialog_manager().core().start_outbound_ping(
-            (
-                from_uri.to_string(),
-                params.reg_id,
-                params.instance_urn.clone(),
-            ),
-            destination,
-        );
-        tracing::info!(
-            aor_present = !from_uri.is_empty(),
-            aor_bytes = from_uri.len(),
-            reg_id = params.reg_id,
-            instance_present = !params.instance_urn.is_empty(),
-            instance_bytes = params.instance_urn.len(),
-            destination = %destination,
-            "symmetric registered-flow: keep-alive ping started"
-        );
+        if self
+            .dialog_api
+            .dialog_manager()
+            .core()
+            .start_outbound_ping_on_route(
+                (
+                    from_uri.to_string(),
+                    params.reg_id,
+                    params.instance_urn.clone(),
+                ),
+                route,
+            )
+        {
+            tracing::info!(
+                aor_present = !from_uri.is_empty(),
+                aor_bytes = from_uri.len(),
+                reg_id = params.reg_id,
+                instance_present = !params.instance_urn.is_empty(),
+                instance_bytes = params.instance_urn.len(),
+                destination = %destination,
+                "symmetric registered-flow: keep-alive ping started"
+            );
+        }
     }
 
     /// Send REGISTER request and process response.
@@ -2501,22 +2511,24 @@ impl DialogAdapter {
         // A5 Phase 2a: when the coordinator is configured for RFC 5626 SIP
         // Outbound, route through the outbound-aware REGISTER so the Contact
         // carries `+sip.instance` + `reg-id` + `;ob`.
-        let response = self
+        let (response, register_route) = self
             .dialog_api
-            .send_register_with_options(rvoip_sip_dialog::api::unified::RegisterRequestOptions {
-                registrar_uri: registrar_uri.to_string(),
-                aor_uri: from_uri.to_string(),
-                contact_uri: rewritten_contact,
-                expires,
-                authorization,
-                proxy_authorization,
-                call_id: Some(registration_call_id),
-                cseq: Some(registration_cseq),
-                outbound_contact: self.outbound_contact_params.clone(),
-                outbound_proxy_uri: self.outbound_proxy_uri.clone(),
-                extra_headers: extras,
-                refresh: false,
-            })
+            .send_register_with_options_and_route(
+                rvoip_sip_dialog::api::unified::RegisterRequestOptions {
+                    registrar_uri: registrar_uri.to_string(),
+                    aor_uri: from_uri.to_string(),
+                    contact_uri: rewritten_contact,
+                    expires,
+                    authorization,
+                    proxy_authorization,
+                    call_id: Some(registration_call_id),
+                    cseq: Some(registration_cseq),
+                    outbound_contact: self.outbound_contact_params.clone(),
+                    outbound_proxy_uri: self.outbound_proxy_uri.clone(),
+                    extra_headers: extras,
+                    refresh: false,
+                },
+            )
             .await
             .map_err(|error| redacted_dialog_operation_error("send REGISTER", error))?;
 
@@ -2545,7 +2557,8 @@ impl DialogAdapter {
                 } else {
                     let accepted_expires =
                         Self::accepted_registration_expires(&response, contact_uri, expires);
-                    let metadata = Self::response_registration_metadata(&response);
+                    let mut metadata = Self::response_registration_metadata(&response);
+                    metadata.transport_route = Some(register_route);
                     Ok(RegisterAttemptOutcome::Registered {
                         accepted_expires,
                         metadata,
