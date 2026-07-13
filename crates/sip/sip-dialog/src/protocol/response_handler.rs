@@ -454,9 +454,9 @@ async fn record_outbound_flow_from_response(
     // Destination to ping is wherever we sent the REGISTER. The
     // transaction-destinations map in TransactionManager captured that
     // at send time.
-    let Some(dest) = manager
+    let Some(route) = manager
         .transaction_manager
-        .transaction_destination(transaction_id)
+        .transaction_route(transaction_id)
         .await
     else {
         debug!(
@@ -466,7 +466,8 @@ async fn record_outbound_flow_from_response(
     };
 
     let key = (aor.clone(), params.reg_id, params.instance_urn.clone());
-    manager.start_outbound_ping(key, dest);
+    let dest = route.destination;
+    manager.start_outbound_ping_on_route(key, route);
     info!(
         "RFC 5626: keep-alive ping started for AoR (reg-id={}) → {}",
         params.reg_id, dest

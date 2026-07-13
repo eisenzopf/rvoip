@@ -10,7 +10,6 @@ use std::sync::{Arc, Weak};
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
 use rvoip_sip_core::framing::{inspect_sip_frame_with_policy, SipFrameStatus, SipFramingPolicy};
-use rvoip_sip_core::types::uri::Host;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -34,17 +33,20 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::{Error, Result};
 use crate::transport::{
+    next_transport_flow_id,
     runtime::{
         next_trust_context, ConnectionDirection, ConnectionLifecycleConfig, DialAdmission,
         OutboundDialCoordinator, TransportTaskSet,
     },
-    validate_typed_outbound_message, HandshakeAdmissionConfig, TlsPeerIdentity, Transport,
-    TransportConnectionMetadata, TransportEvent, TransportType,
+    transport_authority_for_request, validate_typed_outbound_message, HandshakeAdmissionConfig,
+    TlsPeerIdentity, Transport, TransportAuthority, TransportConnectionMetadata, TransportEvent,
+    TransportFlowId, TransportRoute, TransportType,
 };
 
 #[derive(Clone, Debug)]
 struct TlsConnectionRecord {
     generation: u64,
+    flow_id: TransportFlowId,
     sender: mpsc::Sender<Bytes>,
 }
 
@@ -698,6 +700,7 @@ impl TlsTransport {
                                         connection_metadata,
                                         weak_tasks_for_connection,
                                         next_connection_generation.fetch_add(1, Ordering::Relaxed),
+                                        next_transport_flow_id(),
                                         None,
                                         lifecycle,
                                         established_permit,
@@ -755,6 +758,7 @@ impl TlsTransport {
         connection_metadata: Option<TransportConnectionMetadata>,
         weak_tasks: Weak<TransportTaskSet>,
         generation: u64,
+        flow_id: TransportFlowId,
         registered: Option<tokio::sync::oneshot::Sender<()>>,
         lifecycle: ConnectionLifecycleConfig,
         _established_permit: OwnedSemaphorePermit,
@@ -822,6 +826,7 @@ impl TlsTransport {
             key.clone(),
             TlsConnectionRecord {
                 generation,
+                flow_id,
                 sender: tx.clone(),
             },
         );
@@ -873,10 +878,17 @@ impl TlsTransport {
                     loop {
                         match try_consume_keepalive_frame(&mut buffer) {
                             Some(KeepAliveFrame::Pong) => {
-                                let _ = event_tx.try_send(TransportEvent::KeepAlivePongReceived {
-                                    source: remote_addr,
-                                    destination: local_addr,
-                                });
+                                if event_tx
+                                    .send(TransportEvent::KeepAlivePongReceived {
+                                        source: remote_addr,
+                                        destination: local_addr,
+                                        flow_id: Some(flow_id),
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    break 'connection;
+                                }
                                 continue;
                             }
                             Some(KeepAliveFrame::Ping) => {
@@ -900,6 +912,7 @@ impl TlsTransport {
                                         source: remote_addr,
                                         destination: local_addr,
                                         transport_type: TransportType::Tls,
+                                        flow_id: Some(flow_id),
                                         raw_bytes: Some(raw_bytes),
                                         timing: None,
                                         connection_metadata: connection_metadata.clone(),
@@ -939,14 +952,17 @@ impl TlsTransport {
 
         write_task.abort();
 
-        // Emit ConnectionClosed *before* the registry eviction so any
-        // observer (e.g. RFC 5626 OutboundFlow) sees the lifecycle
-        // event before a subsequent `has_connection_to` query returns
-        // false.
-        let _ = event_tx.try_send(TransportEvent::ConnectionClosed {
-            remote_addr,
-            transport_type: TransportType::Tls,
-        });
+        // Lifecycle delivery is lossless under ordinary backpressure. The
+        // established permit remains held while this bounded task waits, so a
+        // stalled consumer stops admission instead of creating unbounded
+        // cleanup tasks or dropping the exact-flow close signal.
+        let _ = event_tx
+            .send(TransportEvent::ConnectionClosed {
+                remote_addr,
+                transport_type: TransportType::Tls,
+                flow_id: Some(flow_id),
+            })
+            .await;
 
         {
             let mut connections_guard = connections.lock().await;
@@ -965,7 +981,36 @@ impl TlsTransport {
         addr: SocketAddr,
         server_name: Option<ServerName<'static>>,
         prefer_inbound: bool,
-    ) -> Result<()> {
+        exact_flow: Option<TransportFlowId>,
+    ) -> Result<TransportFlowId> {
+        if let Some(flow_id) = exact_flow {
+            let sender = {
+                let connections =
+                    tokio::time::timeout(self.handshake_admission.timeout, self.connections.lock())
+                        .await
+                        .map_err(|_| Error::ConnectionTimeout(addr))?;
+                connections
+                    .iter()
+                    .find(|(key, record)| {
+                        key.remote_addr == addr
+                            && record.flow_id == flow_id
+                            && !record.sender.is_closed()
+                    })
+                    .map(|(_, record)| record.sender.clone())
+            }
+            .ok_or_else(|| {
+                Error::InvalidState(format!(
+                    "TLS flow {} is not active for {}",
+                    flow_id.as_u64(),
+                    addr
+                ))
+            })?;
+            sender.try_send(data).map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => Error::BufferCapacityExceeded,
+                mpsc::error::TrySendError::Closed(_) => Error::TransportClosed,
+            })?;
+            return Ok(flow_id);
+        }
         let server_name = server_name.unwrap_or_else(|| ip_to_server_name(addr));
         let outbound_key =
             TlsConnectionKey::outbound(addr, &server_name, self.outbound_trust_context);
@@ -974,11 +1019,17 @@ impl TlsTransport {
                 tokio::time::timeout(self.handshake_admission.timeout, self.connections.lock())
                     .await
                     .map_err(|_| Error::ConnectionTimeout(addr))?;
-            select_tls_sender(&connections, &outbound_key, prefer_inbound)?
+            let sender = select_tls_sender(&connections, &outbound_key, prefer_inbound)?;
+            sender.and_then(|sender| {
+                connections
+                    .values()
+                    .find(|record| record.sender.same_channel(&sender))
+                    .map(|record| (sender, record.flow_id))
+            })
         };
-        if let Some(sender) = existing {
+        if let Some((sender, flow_id)) = existing {
             match sender.try_send(data.clone()) {
-                Ok(()) => return Ok(()),
+                Ok(()) => return Ok(flow_id),
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     return Err(Error::BufferCapacityExceeded)
                 }
@@ -996,23 +1047,24 @@ impl TlsTransport {
         // Auto-dial.
         self.connect_with_server_name(addr, server_name).await?;
 
-        let sender =
-            tokio::time::timeout(self.handshake_admission.timeout, self.connections.lock())
-                .await
-                .map_err(|_| Error::ConnectionTimeout(addr))?
-                .get(&outbound_key)
-                .ok_or_else(|| {
-                    Error::Other(format!(
-                        "TLS auto-dial succeeded but no connection registered for {}",
-                        addr
-                    ))
-                })?
-                .sender
-                .clone();
+        let (sender, flow_id) = {
+            let connections =
+                tokio::time::timeout(self.handshake_admission.timeout, self.connections.lock())
+                    .await
+                    .map_err(|_| Error::ConnectionTimeout(addr))?;
+            let record = connections.get(&outbound_key).ok_or_else(|| {
+                Error::Other(format!(
+                    "TLS auto-dial succeeded but no connection registered for {}",
+                    addr
+                ))
+            })?;
+            (record.sender.clone(), record.flow_id)
+        };
         sender.try_send(data).map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => Error::BufferCapacityExceeded,
             mpsc::error::TrySendError::Closed(_) => Error::TransportClosed,
-        })
+        })?;
+        Ok(flow_id)
     }
 
     /// Connect to a remote address. The SNI `ServerName` is derived
@@ -1163,6 +1215,7 @@ impl TlsTransport {
                                     None,
                                     weak_tasks,
                                     generation,
+                                    next_transport_flow_id(),
                                     Some(registered_tx),
                                     lifecycle,
                                     established_permit,
@@ -1243,6 +1296,16 @@ fn normalized_server_name(server_name: &ServerName<'_>) -> String {
     }
 }
 
+fn server_name_for_transport_authority(
+    authority: &TransportAuthority,
+) -> Result<ServerName<'static>> {
+    match authority {
+        TransportAuthority::Dns(domain) => ServerName::try_from(domain.clone())
+            .map_err(|_| Error::InvalidAddress("invalid TLS authority".into())),
+        TransportAuthority::Ip(address) => Ok((*address).into()),
+    }
+}
+
 fn sni_diagnostic_metadata(server_name: &ServerName<'_>) -> (bool, usize) {
     match server_name {
         ServerName::DnsName(name) => (true, name.as_ref().len()),
@@ -1297,17 +1360,85 @@ impl Transport for TlsTransport {
         message: rvoip_sip_core::Message,
         destination: SocketAddr,
     ) -> Result<()> {
+        let route = match &message {
+            rvoip_sip_core::Message::Request(request) => TransportRoute::new(destination)
+                .with_transport_type(TransportType::Tls)
+                .with_authority(transport_authority_for_request(request)?),
+            rvoip_sip_core::Message::Response(_) => {
+                TransportRoute::new(destination).with_transport_type(TransportType::Tls)
+            }
+        };
+        self.send_message_via(message, route).await
+    }
+
+    async fn send_message_via(
+        &self,
+        message: rvoip_sip_core::Message,
+        route: TransportRoute,
+    ) -> Result<()> {
+        self.send_message_on_route(message, route).await.map(|_| ())
+    }
+
+    async fn prepare_message_route(
+        &self,
+        message: &rvoip_sip_core::Message,
+        mut route: TransportRoute,
+    ) -> Result<TransportRoute> {
+        validate_typed_outbound_message(message)?;
+        route.transport_type = Some(TransportType::Tls);
+        if route.flow_id.is_some() {
+            route.flow_id = self.resolve_flow_id_for_route(&route).await;
+            return route.flow_id.map(|_| route).ok_or(Error::TransportClosed);
+        }
+        if matches!(message, rvoip_sip_core::Message::Response(_)) {
+            return Err(Error::InvalidState(
+                "TLS responses require the exact ingress flow".into(),
+            ));
+        }
+        let authority = route.authority.as_ref().ok_or_else(|| {
+            Error::InvalidState("TLS requests require an authenticated next-hop authority".into())
+        })?;
+        let server_name = server_name_for_transport_authority(authority)?;
+        self.connect_with_server_name(route.destination, server_name)
+            .await?;
+        route.flow_id = self.resolve_flow_id_for_route(&route).await;
+        route.flow_id.map(|_| route).ok_or(Error::TransportClosed)
+    }
+
+    async fn send_message_on_route(
+        &self,
+        message: rvoip_sip_core::Message,
+        mut route: TransportRoute,
+    ) -> Result<TransportRoute> {
         validate_typed_outbound_message(&message)?;
         // `Message::to_bytes` produces wire-format SIP (header CRLFs +
         // trailing CRLF separator + body) — required by RFC 3261 §7.2.
         // `to_string()` is for display/debug only and omits the final
         // separator, which then breaks Content-Length framing on the
         // peer's read side.
-        let server_name = tls_server_name_for_message(&message, destination);
-        let prefer_inbound = matches!(message, rvoip_sip_core::Message::Response(_));
+        let destination = route.destination;
+        let is_response = matches!(message, rvoip_sip_core::Message::Response(_));
+        if is_response && route.flow_id.is_none() {
+            return Err(Error::InvalidState(
+                "TLS responses require the exact ingress flow".into(),
+            ));
+        }
+        let server_name = match route.authority.as_ref() {
+            Some(authority) => Some(server_name_for_transport_authority(authority)?),
+            None if is_response => None,
+            None => {
+                return Err(Error::InvalidState(
+                    "TLS requests require an authenticated next-hop authority".into(),
+                ))
+            }
+        };
         let bytes = message.to_bytes();
-        self.send_to_addr(bytes.into(), destination, server_name, prefer_inbound)
-            .await
+        let flow_id = self
+            .send_to_addr(bytes.into(), destination, server_name, false, route.flow_id)
+            .await?;
+        route.transport_type = Some(TransportType::Tls);
+        route.flow_id = Some(flow_id);
+        Ok(route)
     }
 
     fn local_addr(&self) -> Result<SocketAddr> {
@@ -1346,54 +1477,111 @@ impl Transport for TlsTransport {
         }
     }
 
+    fn flow_id_for_route(&self, route: &TransportRoute) -> Option<TransportFlowId> {
+        let connections = self.connections.try_lock().ok()?;
+        if let Some(flow_id) = route.flow_id {
+            return connections
+                .iter()
+                .any(|(key, record)| {
+                    key.remote_addr == route.destination
+                        && record.flow_id == flow_id
+                        && !record.sender.is_closed()
+                })
+                .then_some(flow_id);
+        }
+        if let Some(authority) = route.authority.as_ref() {
+            let server_name = server_name_for_transport_authority(authority).ok()?;
+            let key = TlsConnectionKey::outbound(
+                route.destination,
+                &server_name,
+                self.outbound_trust_context,
+            );
+            return connections
+                .get(&key)
+                .filter(|record| !record.sender.is_closed())
+                .map(|record| record.flow_id);
+        }
+        let mut matches = connections.iter().filter(|(key, record)| {
+            key.remote_addr == route.destination && !record.sender.is_closed()
+        });
+        let first = matches.next().map(|(_, record)| record.flow_id)?;
+        matches.next().is_none().then_some(first)
+    }
+
+    async fn resolve_flow_id_for_route(&self, route: &TransportRoute) -> Option<TransportFlowId> {
+        let connections = self.connections.lock().await;
+        if let Some(flow_id) = route.flow_id {
+            return connections
+                .iter()
+                .any(|(key, record)| {
+                    key.remote_addr == route.destination
+                        && record.flow_id == flow_id
+                        && !record.sender.is_closed()
+                })
+                .then_some(flow_id);
+        }
+        if let Some(authority) = route.authority.as_ref() {
+            let server_name = server_name_for_transport_authority(authority).ok()?;
+            let key = TlsConnectionKey::outbound(
+                route.destination,
+                &server_name,
+                self.outbound_trust_context,
+            );
+            return connections
+                .get(&key)
+                .filter(|record| !record.sender.is_closed())
+                .map(|record| record.flow_id);
+        }
+        let mut matches = connections.iter().filter(|(key, record)| {
+            key.remote_addr == route.destination && !record.sender.is_closed()
+        });
+        let first = matches.next().map(|(_, record)| record.flow_id)?;
+        matches.next().is_none().then_some(first)
+    }
+
     async fn send_raw(&self, destination: SocketAddr, data: Bytes) -> Result<()> {
+        self.send_raw_via(TransportRoute::new(destination), data)
+            .await
+    }
+
+    async fn send_raw_via(&self, route: TransportRoute, data: Bytes) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
-
-        // RFC 5626 keep-alive: only reuse an existing TLS connection.
-        // A fresh dial would defeat the purpose — the flow we'd keep
-        // alive is already gone.
-        let sender = {
-            let connections = self.connections.lock().await;
-            let candidates = connections.iter().filter(|(key, record)| {
-                key.remote_addr == destination && !record.sender.is_closed()
-            });
-            let inbound = candidates
-                .clone()
-                .find(|(key, _)| key.direction == ConnectionDirection::Inbound)
-                .map(|(_, record)| record.sender.clone());
-            inbound.or_else(|| {
-                let mut outbound =
-                    candidates.filter(|(key, _)| key.direction == ConnectionDirection::Outbound);
-                let first = outbound.next().map(|(_, record)| record.sender.clone());
-                if outbound.next().is_some() {
-                    None
-                } else {
-                    first
-                }
-            })
+        let Some(flow_id) = route.flow_id else {
+            return Err(Error::InvalidState(
+                "TLS raw flow traffic requires an exact flow ID".into(),
+            ));
         };
-        let Some(sender) = sender else {
-            return Err(Error::InvalidState(format!(
-                "No unambiguous active TLS connection to {} for send_raw",
-                destination
-            )));
-        };
-        sender.try_send(data).map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => Error::BufferCapacityExceeded,
-            mpsc::error::TrySendError::Closed(_) => Error::TransportClosed,
-        })
+        self.send_to_addr(data, route.destination, None, false, Some(flow_id))
+            .await
+            .map(|_| ())
     }
 
     async fn send_message_raw(&self, bytes: Bytes, destination: SocketAddr) -> Result<()> {
+        self.send_message_raw_via(bytes, TransportRoute::new(destination))
+            .await
+    }
+
+    async fn send_message_raw_via(&self, bytes: Bytes, route: TransportRoute) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
-        // No server-name hint — verbatim-bytes callers pre-canonicalised
-        // their request; we route by destination IP. Auto-dial when no
-        // pooled connection exists (modulo ServerOnly role).
-        self.send_to_addr(bytes, destination, None, true).await
+        if let Some(flow_id) = route.flow_id {
+            return self
+                .send_to_addr(bytes, route.destination, None, false, Some(flow_id))
+                .await
+                .map(|_| ());
+        }
+        let authority = route.authority.as_ref().ok_or_else(|| {
+            Error::InvalidState(
+                "raw TLS requests require an authority; raw responses require a flow ID".into(),
+            )
+        })?;
+        let server_name = server_name_for_transport_authority(authority)?;
+        self.send_to_addr(bytes, route.destination, Some(server_name), false, None)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -1436,6 +1624,7 @@ mod auth_boundary_tests {
             TlsConnectionKey::outbound(destination, &dns_name, 7),
             TlsConnectionRecord {
                 generation: 1,
+                flow_id: TransportFlowId::for_test(1),
                 sender: first_tx.clone(),
             },
         );
@@ -1451,6 +1640,7 @@ mod auth_boundary_tests {
             TlsConnectionKey::outbound(destination, &second_name, 7),
             TlsConnectionRecord {
                 generation: 2,
+                flow_id: TransportFlowId::for_test(2),
                 sender: second_tx,
             },
         );
@@ -1514,6 +1704,7 @@ mod auth_boundary_tests {
             key.clone(),
             TlsConnectionRecord {
                 generation: 2,
+                flow_id: TransportFlowId::for_test(2),
                 sender,
             },
         )]);
@@ -1800,20 +1991,6 @@ mod auth_boundary_tests {
             classify_tls_runtime_error(handshake, "handshake".to_string()),
             Error::TlsHandshakeFailed(_)
         ));
-    }
-}
-
-pub(crate) fn tls_server_name_for_message(
-    message: &rvoip_sip_core::Message,
-    destination: SocketAddr,
-) -> Option<ServerName<'static>> {
-    let rvoip_sip_core::Message::Request(request) = message else {
-        return Some(ip_to_server_name(destination));
-    };
-
-    match &request.uri().host {
-        Host::Domain(domain) => ServerName::try_from(domain.to_string()).ok(),
-        Host::Address(_) => Some(ip_to_server_name(destination)),
     }
 }
 

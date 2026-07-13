@@ -51,6 +51,7 @@ mod tests {
         sent_messages: Arc<Mutex<Vec<(Message, SocketAddr)>>>,
         should_fail_send: Arc<AtomicBool>,
         raw_send_count: Arc<AtomicUsize>,
+        raw_routes: Arc<Mutex<Vec<rvoip_sip_transport::TransportRoute>>>,
     }
 
     impl MockTransport {
@@ -60,6 +61,7 @@ mod tests {
                 sent_messages: Arc::new(Mutex::new(Vec::new())),
                 should_fail_send: Arc::new(AtomicBool::new(false)),
                 raw_send_count: Arc::new(AtomicUsize::new(0)),
+                raw_routes: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -69,6 +71,7 @@ mod tests {
                 sent_messages: Arc::new(Mutex::new(Vec::new())),
                 should_fail_send: Arc::new(AtomicBool::new(should_fail)),
                 raw_send_count: Arc::new(AtomicUsize::new(0)),
+                raw_routes: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -83,6 +86,10 @@ mod tests {
 
         fn raw_send_count(&self) -> usize {
             self.raw_send_count.load(Ordering::SeqCst)
+        }
+
+        async fn raw_routes(&self) -> Vec<rvoip_sip_transport::TransportRoute> {
+            self.raw_routes.lock().await.clone()
         }
     }
 
@@ -136,6 +143,15 @@ mod tests {
             self.raw_send_count.fetch_add(1, Ordering::SeqCst);
             self.sent_messages.lock().await.push((message, destination));
             Ok(())
+        }
+
+        async fn send_message_raw_via(
+            &self,
+            bytes: bytes::Bytes,
+            route: rvoip_sip_transport::TransportRoute,
+        ) -> std::result::Result<(), rvoip_sip_transport::Error> {
+            self.raw_routes.lock().await.push(route.clone());
+            self.send_message_raw(bytes, route.destination).await
         }
 
         fn local_addr(&self) -> std::result::Result<SocketAddr, rvoip_sip_transport::Error> {
@@ -208,6 +224,7 @@ mod tests {
             source,
             destination: "127.0.0.1:5061".parse().unwrap(),
             transport_type: TransportType::Udp,
+            flow_id: None,
             raw_bytes: None,
             timing: None,
             connection_metadata: None,
@@ -349,6 +366,38 @@ mod tests {
         assert!(manager.transaction_destinations.is_empty());
         assert!(transport.get_sent_messages().await.is_empty());
         assert_eq!(transport.raw_send_count(), 0);
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn direct_transaction_manager_rejects_plaintext_sips_route() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+        let request = SimpleRequestBuilder::new(Method::Options, "sips:service@example.test")
+            .unwrap()
+            .from("alice", "sips:alice@example.test", Some("tag"))
+            .to("service", "sips:service@example.test", None)
+            .contact("sips:alice@127.0.0.1:5061", None)
+            .call_id("direct-sips-route-policy")
+            .cseq(1)
+            .max_forwards(70)
+            .build();
+
+        let result = manager
+            .create_client_transaction_on_route(
+                request,
+                rvoip_sip_transport::TransportRoute::new("192.0.2.1:5061".parse().unwrap())
+                    .with_transport_type(TransportType::Tcp),
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(manager.client_transactions.is_empty());
+        assert!(manager.transaction_destinations.is_empty());
+        assert!(transport.get_sent_messages().await.is_empty());
 
         manager.shutdown().await;
         Ok(())
@@ -931,13 +980,67 @@ mod tests {
         Invite2xxResponseCacheEntry {
             response,
             wire_bytes,
-            destination,
+            route: rvoip_sip_transport::TransportRoute::new(destination)
+                .with_transport_type(TransportType::Udp),
             created_at,
             acked_at: None,
             expires_at: created_at + Duration::from_secs(90),
             next_retransmit_at,
             retransmit_interval: Duration::from_millis(500),
         }
+    }
+
+    async fn two_live_tcp_flow_ids() -> (
+        rvoip_sip_transport::TransportFlowId,
+        rvoip_sip_transport::TransportFlowId,
+    ) {
+        let (server, mut events) =
+            rvoip_sip_transport::TcpTransport::bind("127.0.0.1:0".parse().unwrap(), Some(8), None)
+                .await
+                .unwrap();
+        let destination = server.local_addr().unwrap();
+        let mut clients = Vec::new();
+        for index in 0..2u32 {
+            let (client, _events) = rvoip_sip_transport::TcpTransport::bind(
+                "127.0.0.1:0".parse().unwrap(),
+                Some(4),
+                None,
+            )
+            .await
+            .unwrap();
+            let call_id = format!("cache-flow-{index}");
+            let request = SimpleRequestBuilder::new(Method::Options, "sip:flow-id.test")
+                .unwrap()
+                .from("alice", "sip:alice@example.test", Some("tag"))
+                .to("service", "sip:flow-id.test", None)
+                .call_id(&call_id)
+                .cseq(1)
+                .build();
+            client
+                .send_message(Message::Request(request), destination)
+                .await
+                .unwrap();
+            clients.push(client);
+        }
+
+        let mut flows = Vec::new();
+        while flows.len() < 2 {
+            if let TransportEvent::MessageReceived {
+                flow_id: Some(flow_id),
+                ..
+            } = tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                flows.push(flow_id);
+            }
+        }
+        for client in clients {
+            client.close().await.unwrap();
+        }
+        server.close().await.unwrap();
+        (flows[0], flows[1])
     }
 
     async fn send_through_client_transaction(request: Request) -> Result<Request> {
@@ -1274,6 +1377,7 @@ mod tests {
                 source: destination,
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
+                flow_id: None,
                 raw_bytes: None,
                 timing: None,
                 connection_metadata: None,
@@ -1617,6 +1721,7 @@ mod tests {
                 source: destination,
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
+                flow_id: None,
                 raw_bytes: None,
                 timing: None,
                 connection_metadata: None,
@@ -1645,6 +1750,7 @@ mod tests {
                 source: destination,
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
+                flow_id: None,
                 raw_bytes: None,
                 timing: None,
                 connection_metadata: None,
@@ -1775,6 +1881,7 @@ mod tests {
                 source: destination,
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
+                flow_id: None,
                 raw_bytes: None,
                 timing: None,
                 connection_metadata: None,
@@ -1974,6 +2081,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn immediate_tcp_response_survives_peer_close_after_first_write() -> Result<()> {
+        use rvoip_sip_core::builder::SimpleResponseBuilder;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, source) = listener.accept().await.unwrap();
+            let connection =
+                rvoip_sip_transport::transport::tcp::TcpConnection::from_stream(stream, source)
+                    .expect("accepted TCP connection");
+            let Message::Request(request) = connection
+                .receive_message()
+                .await
+                .expect("read request")
+                .expect("request frame")
+            else {
+                panic!("expected request");
+            };
+            let response =
+                SimpleResponseBuilder::response_from_request(&request, StatusCode::Ok, Some("OK"))
+                    .build();
+            connection
+                .send_message(&Message::Response(response))
+                .await
+                .expect("write immediate response");
+            connection.close().await.expect("close immediately");
+        });
+
+        let (transport, transport_rx) =
+            rvoip_sip_transport::TcpTransport::bind("127.0.0.1:0".parse().unwrap(), Some(16), None)
+                .await
+                .unwrap();
+        let transport = Arc::new(transport);
+        let (manager, mut events) =
+            TransactionManager::new(transport, transport_rx, Some(16)).await?;
+        let request = SimpleRequestBuilder::new(Method::Options, "sip:immediate-close.test")
+            .unwrap()
+            .from("alice", "sip:alice@example.test", Some("tag"))
+            .to("service", "sip:immediate-close.test", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("tcp-immediate-response-close")
+            .cseq(1)
+            .via("127.0.0.1:5060", "TCP", Some("z9hG4bK.immediate-close"))
+            .max_forwards(70)
+            .build();
+        let transaction = manager
+            .create_client_transaction_on_route(
+                request,
+                rvoip_sip_transport::TransportRoute::new(destination)
+                    .with_transport_type(TransportType::Tcp),
+            )
+            .await?;
+        manager.send_request(&transaction).await?;
+
+        let success = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(event) = events.recv().await {
+                if matches!(
+                    event,
+                    TransactionEvent::SuccessResponse {
+                        ref transaction_id,
+                        ..
+                    } if transaction_id == &transaction
+                ) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+        assert!(success, "immediate response was rejected after peer close");
+        assert!(
+            manager
+                .transaction_route(&transaction)
+                .await
+                .is_some_and(|route| route.flow_id.is_some()),
+            "client transaction did not retain its pre-write exact flow"
+        );
+
+        peer.await.unwrap();
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn invite_retransmission_after_2xx_reuses_cached_response() -> Result<()> {
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
         let (transport_tx, transport_rx) = mpsc::channel(16);
@@ -2011,6 +2203,7 @@ mod tests {
                 source,
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
+                flow_id: None,
                 raw_bytes: None,
                 timing: None,
                 connection_metadata: None,
@@ -2231,7 +2424,11 @@ mod tests {
         );
 
         let retransmitted = manager
-            .retransmit_cached_invite_2xx_response(&transaction_id, source)
+            .retransmit_cached_invite_2xx_response_on_route(
+                &transaction_id,
+                rvoip_sip_transport::TransportRoute::new(source)
+                    .with_transport_type(TransportType::Udp),
+            )
             .await?;
         assert!(
             retransmitted,
@@ -2264,6 +2461,63 @@ mod tests {
             "ACK-retained entry should prune once its retention expires"
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cached_invite_2xx_never_crosses_coaddressed_tcp_flows() -> Result<()> {
+        let (cached_flow, other_flow) = two_live_tcp_flow_ids().await;
+        assert_ne!(cached_flow, other_flow);
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+        manager.shutdown().await;
+
+        let invite = create_test_invite().map_err(|error| Error::Other(error.to_string()))?;
+        let response = create_test_response(&invite, StatusCode::Ok, Some("OK"));
+        let transaction_id =
+            TransactionKey::new("z9hG4bK.exact-cache-flow".into(), Method::Invite, true);
+        let destination: SocketAddr = "192.0.2.100:5060".parse().unwrap();
+        let cached_route = rvoip_sip_transport::TransportRoute::new(destination)
+            .with_transport_type(TransportType::Tcp)
+            .with_flow_id(cached_flow);
+        let now = Instant::now();
+        let wire_bytes = bytes::Bytes::from(Message::Response(response.clone()).to_bytes());
+        manager.insert_invite_2xx_response_cache_entry(
+            transaction_id.clone(),
+            Invite2xxResponseCacheEntry {
+                response,
+                wire_bytes,
+                route: cached_route.clone(),
+                created_at: now,
+                acked_at: None,
+                expires_at: now + Duration::from_secs(90),
+                next_retransmit_at: now + Duration::from_secs(1),
+                retransmit_interval: Duration::from_millis(500),
+            },
+        );
+
+        let wrong_route = rvoip_sip_transport::TransportRoute::new(destination)
+            .with_transport_type(TransportType::Tcp)
+            .with_flow_id(other_flow);
+        assert!(
+            !manager
+                .retransmit_cached_invite_2xx_response_on_route(&transaction_id, wrong_route,)
+                .await?
+        );
+        assert_eq!(transport.raw_send_count(), 0);
+
+        assert!(
+            manager
+                .retransmit_cached_invite_2xx_response_on_route(
+                    &transaction_id,
+                    cached_route.clone(),
+                )
+                .await?
+        );
+        assert_eq!(transport.raw_send_count(), 1);
+        assert_eq!(transport.raw_routes().await, vec![cached_route]);
         Ok(())
     }
 
@@ -2651,6 +2905,7 @@ mod tests {
                 source: "192.0.2.100:5060".parse().unwrap(),
                 destination: transport.local_addr().unwrap(),
                 transport_type: TransportType::Udp,
+                flow_id: None,
                 raw_bytes: Some(raw_bytes),
                 timing: None,
                 connection_metadata: None,
@@ -2719,6 +2974,7 @@ mod tests {
                 source: destination,
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
+                flow_id: None,
                 raw_bytes: None,
                 timing: None,
                 connection_metadata: None,

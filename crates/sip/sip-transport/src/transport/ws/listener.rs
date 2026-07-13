@@ -3,8 +3,12 @@ use futures_util::StreamExt;
 #[cfg(feature = "ws")]
 use http::HeaderValue;
 use std::future::Future;
+#[cfg(feature = "ws")]
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+#[cfg(feature = "ws")]
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 #[cfg(feature = "ws")]
@@ -13,6 +17,8 @@ use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 #[cfg(feature = "ws")]
 use tokio_tungstenite::{tungstenite, WebSocketStream};
+#[cfg(feature = "ws")]
+use tracing::warn;
 use tracing::{debug, error, info};
 
 #[cfg(feature = "wss")]
@@ -33,6 +39,20 @@ fn select_sip_subprotocol(offered: Option<&str>, _secure: bool) -> Option<&'stat
         .map(|value| value.split(',').map(str::trim).any(|item| item == required))
         .is_some_and(|matched| matched)
         .then_some(required)
+}
+
+#[cfg(feature = "ws")]
+const ACCEPT_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(10);
+#[cfg(feature = "ws")]
+const ACCEPT_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(1);
+
+#[cfg(feature = "ws")]
+fn is_recoverable_accept_error(_error: &io::Error) -> bool {
+    // A successfully bound listener has no per-error signal that justifies
+    // tearing down unrelated established sessions. Even a persistent kernel
+    // failure is safer as a bounded-backoff readiness failure; explicit
+    // listener shutdown is performed by cancelling the supervisor.
+    true
 }
 
 /// WebSocket listener for accepting SIP WebSocket connections
@@ -318,30 +338,6 @@ impl WebSocketListener {
             .map_err(|e| Error::LocalAddrFailed(e))
     }
 
-    /// Disabled compatibility entry point.
-    ///
-    /// Returning an independently owned reader makes it impossible for the
-    /// listener to enforce idle/authentication expiry or to account for the
-    /// underlying socket after the read half escapes. The method remains only
-    /// to give existing source code a clear migration error; new and existing
-    /// servers must use [`Self::serve_concurrent`].
-    #[cfg(feature = "ws")]
-    #[deprecated(
-        since = "0.2.5",
-        note = "disabled: use Arc<WebSocketListener>::serve_concurrent for bounded supervised sessions"
-    )]
-    pub async fn accept(
-        &self,
-    ) -> Result<(
-        WebSocketConnection,
-        SplitStream<WebSocketStream<SipWsStream>>,
-    )> {
-        Err(Error::InvalidState(
-            "WebSocketListener::accept is disabled; use serve_concurrent for supervised sessions"
-                .into(),
-        ))
-    }
-
     /// Concurrent, supervised public listener API.
     ///
     /// Raw sockets are accepted continuously and each TLS/HTTP upgrade runs in
@@ -360,6 +356,7 @@ impl WebSocketListener {
         let handler = Arc::new(handler);
         let lifecycle = ConnectionLifecycleConfig::from_handshake(self.handshake_admission);
         let mut tasks = JoinSet::new();
+        let mut accept_retry_backoff = ACCEPT_RETRY_INITIAL_BACKOFF;
         loop {
             while let Some(completed) = tasks.try_join_next() {
                 if let Err(error) = completed {
@@ -374,7 +371,26 @@ impl WebSocketListener {
                 .acquire_owned()
                 .await
                 .map_err(|_| Error::TransportClosed)?;
-            let (stream, peer_addr) = self.accept_tcp().await?;
+            let (stream, peer_addr) = match self.accept_tcp().await {
+                Ok(accepted) => {
+                    accept_retry_backoff = ACCEPT_RETRY_INITIAL_BACKOFF;
+                    accepted
+                }
+                Err(Error::ReceiveFailed(error)) if is_recoverable_accept_error(&error) => {
+                    warn!(
+                        error_kind = ?error.kind(),
+                        retry_ms = accept_retry_backoff.as_millis(),
+                        "recoverable WebSocket accept failure; preserving live sessions and retrying"
+                    );
+                    drop(handshake_permit);
+                    tokio::time::sleep(accept_retry_backoff).await;
+                    accept_retry_backoff = accept_retry_backoff
+                        .saturating_mul(2)
+                        .min(ACCEPT_RETRY_MAX_BACKOFF);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let listener = self.clone();
             let handler = handler.clone();
             tasks.spawn(async move {
@@ -601,18 +617,6 @@ impl WebSocketListener {
     }
 }
 
-#[cfg(not(feature = "ws"))]
-impl WebSocketListener {
-    /// Accepts a new WebSocket connection (not implemented without ws feature)
-    pub async fn accept(&self) -> Result<()> {
-        Err(Error::NotImplemented(
-            "WebSocket support is not enabled".into(),
-        ))
-    }
-}
-
-// Unit tests will be added later
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,6 +635,34 @@ mod tests {
         assert_eq!(select_sip_subprotocol(Some("chat, sip"), true), Some("sip"));
     }
 
+    #[cfg(feature = "ws")]
+    #[test]
+    fn accept_retry_policy_preserves_sessions_for_all_kernel_failures() {
+        for kind in [
+            io::ErrorKind::Interrupted,
+            io::ErrorKind::WouldBlock,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::Other,
+        ] {
+            assert!(
+                is_recoverable_accept_error(&io::Error::from(kind)),
+                "{kind:?} should retain live sessions and retry accept"
+            );
+        }
+        for kind in [
+            io::ErrorKind::InvalidInput,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::Unsupported,
+            io::ErrorKind::NotConnected,
+        ] {
+            assert!(
+                is_recoverable_accept_error(&io::Error::from(kind)),
+                "{kind:?} should retain live sessions under bounded retry"
+            );
+        }
+    }
+
     /// Test binding a WebSocket listener
     #[tokio::test]
     async fn test_websocket_listener_bind() {
@@ -643,25 +675,6 @@ mod tests {
         assert!(bound_addr.port() > 0); // Random port assigned
         assert_eq!(bound_addr.ip(), addr.ip());
         assert!(!listener.is_secure());
-    }
-
-    #[cfg(feature = "ws")]
-    #[tokio::test]
-    #[allow(deprecated)]
-    async fn deprecated_accept_fails_closed_and_requires_supervisor_migration() {
-        let listener = WebSocketListener::bind_with_handshake_config(
-            "127.0.0.1:0".parse().unwrap(),
-            false,
-            None,
-            None,
-            HandshakeAdmissionConfig::new(std::time::Duration::from_secs(1), 1),
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            listener.accept().await,
-            Err(Error::InvalidState(message)) if message.contains("serve_concurrent")
-        ));
     }
 
     #[cfg(feature = "ws")]
@@ -778,6 +791,87 @@ mod tests {
         let _ = supervisor.await;
     }
 
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn public_supervisor_releases_capacity_promptly_after_peer_close() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+        let listener = Arc::new(
+            WebSocketListener::bind_with_handshake_config(
+                "127.0.0.1:0".parse().unwrap(),
+                false,
+                None,
+                None,
+                HandshakeAdmissionConfig::new(std::time::Duration::from_secs(2), 1),
+            )
+            .await
+            .unwrap(),
+        );
+        let destination = listener.local_addr().unwrap();
+        let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::channel(2);
+        let supervisor = {
+            let listener = listener.clone();
+            tokio::spawn(async move {
+                listener
+                    .serve_concurrent(move |connection, mut reader| {
+                        let accepted_tx = accepted_tx.clone();
+                        async move {
+                            let _ = accepted_tx.send(connection.peer_addr()).await;
+                            while let Some(frame) = reader.next().await {
+                                let Ok(frame) = frame else {
+                                    break;
+                                };
+                                let peer_closed = matches!(frame, WsMessage::Close(_));
+                                if connection.process_ws_message(frame).is_err() || peer_closed {
+                                    break;
+                                }
+                            }
+                        }
+                    })
+                    .await
+            })
+        };
+        let request = || {
+            let mut request = format!("ws://{destination}/")
+                .into_client_request()
+                .unwrap();
+            request.headers_mut().insert(
+                "Sec-WebSocket-Protocol",
+                http::HeaderValue::from_static("sip"),
+            );
+            request
+        };
+
+        let (mut first_client, _) = tokio_tungstenite::connect_async(request()).await.unwrap();
+        accepted_rx.recv().await.expect("first handler not started");
+        first_client.send(WsMessage::Close(None)).await.unwrap();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(250), first_client.next())
+                .await
+                .expect("server did not acknowledge peer Close promptly"),
+            Some(Ok(WsMessage::Close(_))) | None
+        ));
+        tokio::task::yield_now().await;
+
+        let (second_client, _) = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            tokio_tungstenite::connect_async(request()),
+        )
+        .await
+        .expect("second handshake waited for the full first-session write timeout")
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_millis(500), accepted_rx.recv())
+            .await
+            .expect("peer Close did not release established-session capacity")
+            .expect("supervisor stopped before the replacement session");
+
+        drop(second_client);
+        supervisor.abort();
+        let _ = supervisor.await;
+    }
+
     /// Test binding a secure WebSocket listener.
     ///
     /// Phase 4 wired real TLS into `bind()`: when `secure = true`, the
@@ -821,55 +915,5 @@ mod tests {
         // Verify certificate paths are stored
         assert_eq!(listener.cert_path.as_deref(), cert_path.to_str());
         assert_eq!(listener.key_path.as_deref(), key_path.to_str());
-    }
-
-    /// Tests accepting a WebSocket connection
-    #[cfg(feature = "ws")]
-    #[tokio::test]
-    async fn test_websocket_listener_accept() {
-        // This is a more complex test that would require us to actually
-        // create a WebSocket client that connects to our listener.
-
-        // For now, we'll simply test that the listener can be created and accept() method exists
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let listener = WebSocketListener::bind(addr, false, None, None)
-            .await
-            .unwrap();
-
-        let bound_addr = listener.local_addr().unwrap();
-        assert!(bound_addr.port() > 0);
-
-        // We can't easily test the accept method without setting up a real WebSocket client
-        // The method signature is what we're primarily verifying here
-        let accept_method_exists = true; // This test passes if it compiles
-        assert!(accept_method_exists);
-    }
-
-    /// Simple client-server connection test (integration level)
-    #[cfg(all(feature = "ws", test))]
-    #[tokio::test]
-    async fn test_websocket_client_server_connection() {
-        // This test is marked with #[cfg(all(feature = "ws", test))] because:
-        // 1. It requires the ws feature
-        // 2. It's more of an integration test than a unit test
-
-        // Ideally we'd have a full client-server test that uses a client to connect to
-        // our listener and test the full protocol flow, but that's challenging to do
-        // without refactoring the code to support a test client or using a real client.
-
-        // To directly test the listener's accept method properly would require:
-        // 1. Setting up a tokio runtime
-        // 2. Creating a TCP connection to the listener
-        // 3. Performing a WebSocket handshake manually or with a client
-        // 4. Verifying the connection is accepted and the right objects are returned
-
-        // This is left as a future enhancement. In a production environment,
-        // you'd typically have integration tests that create a real client and
-        // send actual WebSocket frames to test the complete flow.
-
-        // For now we're relying on:
-        // 1. The unit tests for individual components
-        // 2. The integration tests for the transport as a whole
-        // 3. Manual testing with real clients
     }
 }

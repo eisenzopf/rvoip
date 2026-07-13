@@ -227,6 +227,7 @@ impl HickoryResolver {
                 .map(|(ip, expires)| ResolvedTarget {
                     addr: SocketAddr::new(ip, port),
                     transport,
+                    authority: None,
                     expires,
                 })
                 .collect());
@@ -326,6 +327,7 @@ impl HickoryResolver {
             .map(|(ip, expires)| ResolvedTarget {
                 addr: SocketAddr::new(ip, port),
                 transport,
+                authority: None,
                 expires,
             })
             .collect())
@@ -351,6 +353,7 @@ impl HickoryResolver {
                 out.push(ResolvedTarget {
                     addr: SocketAddr::new(ip, port),
                     transport,
+                    authority: None,
                     expires,
                 });
             }
@@ -362,6 +365,15 @@ impl HickoryResolver {
 #[async_trait]
 impl Resolver for HickoryResolver {
     async fn resolve(&self, uri: &Uri) -> Result<Vec<ResolvedTarget>, ResolverError> {
+        if matches!(uri.scheme(), Scheme::Sips)
+            && uri.transport().is_some_and(|transport| {
+                matches!(transport.to_ascii_lowercase().as_str(), "udp" | "ws")
+            })
+        {
+            return Err(ResolverError::Forbidden(
+                "sips: scheme cannot use an insecure transport",
+            ));
+        }
         // (1) IP literal short-circuit — no DNS.
         let transport = select_transport_for_uri(uri);
         let default_port = default_port_for_scheme(uri.scheme());
@@ -399,7 +411,13 @@ impl Resolver for HickoryResolver {
                             .to_string(),
                     ));
                 }
-                self.resolve_domain(domain, uri).await
+                let authority = crate::transport::TransportAuthority::dns(domain.clone())
+                    .map_err(|_| ResolverError::NoCandidates)?;
+                let mut targets = self.resolve_domain(domain, uri).await?;
+                for target in &mut targets {
+                    target.authority = Some(authority.clone());
+                }
+                Ok(targets)
             }
         }
     }
@@ -551,9 +569,9 @@ mod tests {
     #[tokio::test]
     async fn sips_with_transport_udp_is_forbidden_for_ip_literal() {
         let resolver = empty_resolver();
-        // `sips:` pinned to UDP. Even though `select_transport_for_uri`
-        // returns TLS for `sips:` by default, an explicit `transport=udp`
-        // overrides it and the resolver must reject.
+        // The syntax classifier remains fail-secure and returns TLS, while
+        // the resolver rejects the explicitly insecure hint rather than
+        // silently rewriting caller intent.
         let uri = Uri::from_str("sips:1.2.3.4;transport=udp").unwrap();
         let err = resolver.resolve(&uri).await.unwrap_err();
         assert!(matches!(err, ResolverError::Forbidden(_)));

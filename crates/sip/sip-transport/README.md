@@ -79,6 +79,9 @@ All transport implementations share a common `Transport` trait:
 pub trait Transport: Send + Sync + fmt::Debug {
     fn local_addr(&self) -> Result<SocketAddr>;
     async fn send_message(&self, message: Message, destination: SocketAddr) -> Result<()>;
+    async fn prepare_message_route(&self, message: &Message, route: TransportRoute) -> Result<TransportRoute>;
+    async fn send_message_on_route(&self, message: Message, route: TransportRoute) -> Result<TransportRoute>;
+    async fn send_message_via(&self, message: Message, route: TransportRoute) -> Result<()>;
     async fn close(&self) -> Result<()>;
     fn is_closed(&self) -> bool;
     // ... additional methods for transport capabilities
@@ -126,13 +129,51 @@ The transport layer emits events through the `TransportEvent` enum:
 
 ```rust
 pub enum TransportEvent {
-    MessageReceived { message: Message, source: SocketAddr, destination: SocketAddr },
+    MessageReceived {
+        message: Message,
+        source: SocketAddr,
+        destination: SocketAddr,
+        transport_type: TransportType,
+        flow_id: Option<TransportFlowId>,
+        raw_bytes: Option<Bytes>,
+        timing: Option<TransportReceiveTiming>,
+        connection_metadata: Option<TransportConnectionMetadata>,
+    },
+    KeepAlivePongReceived {
+        source: SocketAddr,
+        destination: SocketAddr,
+        flow_id: Option<TransportFlowId>,
+    },
+    ConnectionClosed {
+        remote_addr: SocketAddr,
+        transport_type: TransportType,
+        flow_id: Option<TransportFlowId>,
+    },
     Error { error: String },
     Closed,
+    // ... graceful-shutdown events
 }
 ```
 
+For stream transports, retain the receive event's `transport_type` and opaque
+`flow_id` in a `TransportRoute` when sending responses, cached bytes,
+keepalives, CANCEL, or teardown traffic. See
+[MIGRATING-0.3.md](./MIGRATING-0.3.md) for the complete event-shape and
+route-aware API migration.
+
 ## Usage
+
+### WebSocket listener API in 0.3
+
+The 0.3 API removes the unsafe `WebSocketListener::accept` escape hatch in
+favor of `Arc<WebSocketListener>::serve_concurrent`, which retains ownership of
+handshake/session admission and shutdown. See the complete before/after example
+and release guidance in [MIGRATING-0.3.md](./MIGRATING-0.3.md). The transport
+crate now carries the required 0.3.0 package version.
+
+SIPS never falls back to a plaintext transport: `sips:...;transport=tcp` means
+TLS-over-TCP, `transport=wss` means secure WebSocket, and explicit `udp` or
+plain `ws` hints are rejected.
 
 ### Basic Example
 
@@ -262,7 +303,7 @@ Disable default features and enable only what you need:
 
 ```toml
 [dependencies]
-rvoip-sip-transport = { version = "0.1", default-features = false, features = ["udp", "tcp"] }
+rvoip-sip-transport = { version = "0.3", default-features = false, features = ["udp", "tcp"] }
 ```
 
 ## Performance Characteristics

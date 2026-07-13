@@ -83,6 +83,7 @@ enum WriterCommand {
         reply: oneshot::Sender<Result<()>>,
     },
     Close(oneshot::Sender<Result<()>>),
+    PeerClose(oneshot::Sender<Result<()>>),
 }
 
 impl WebSocketConnection {
@@ -227,6 +228,19 @@ impl WebSocketConnection {
         self.send_writer_message(ws_message).await
     }
 
+    /// Send a WebSocket-native keepalive ping. RFC 7118 carries SIP as
+    /// complete WebSocket messages, so RFC 5626 CRLF bytes must not be framed
+    /// as Binary SIP payload. The matching Pong is surfaced by the transport
+    /// reader as an exact-flow lifecycle event.
+    #[cfg(feature = "ws")]
+    pub(crate) async fn send_keepalive_ping(&self) -> Result<()> {
+        if self.is_closed() {
+            return Err(Error::TransportClosed);
+        }
+        self.send_writer_message(WsMessage::Ping(bytes::Bytes::new()))
+            .await
+    }
+
     /// Processes a WebSocket message and attempts to parse it as a SIP message.
     /// Returns the parsed [`Message`] paired with a frozen [`bytes::Bytes`]
     /// snapshot of the wire bytes (text or binary frame body) the parser
@@ -299,12 +313,13 @@ impl WebSocketConnection {
             }
             WsMessage::Close(_) => {
                 debug!("Received close frame from {}", self.peer_addr);
-                let _ = self.writer_state.compare_exchange(
-                    WRITER_OPEN,
-                    WRITER_CLOSING,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                );
+                // A peer Close is also a writer-lifecycle transition. Merely
+                // setting `WRITER_CLOSING` leaves the writer task blocked on
+                // its command queue, so the reader supervisor cannot release
+                // established-connection capacity until the full write
+                // timeout expires. Queue the close handshake now (or abort a
+                // saturated writer) exactly as a local close does.
+                self.request_writer_peer_close();
                 Ok(None)
             }
             WsMessage::Frame(_) => {
@@ -318,27 +333,7 @@ impl WebSocketConnection {
     /// Closes the WebSocket connection
     #[cfg(feature = "ws")]
     pub async fn close(&self) -> Result<()> {
-        if self.writer_state.load(Ordering::Acquire) != WRITER_CLOSED
-            && self
-                .writer_state
-                .compare_exchange(
-                    WRITER_OPEN,
-                    WRITER_CLOSING,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-        {
-            let (reply, _ignored) = oneshot::channel();
-            if self
-                .writer_tx
-                .try_send(WriterCommand::Close(reply))
-                .is_err()
-            {
-                // A saturated writer queue must not hold drain hostage.
-                self.writer_abort.abort();
-            }
-        }
+        self.request_writer_close();
 
         let mut task_slot = self.writer_task.lock().await;
         if let Some(mut task) = task_slot.take() {
@@ -376,6 +371,47 @@ impl WebSocketConnection {
     #[cfg(feature = "ws")]
     pub(crate) fn writer_closed_receiver(&self) -> watch::Receiver<bool> {
         self.writer_closed.subscribe()
+    }
+
+    #[cfg(feature = "ws")]
+    fn request_writer_close(&self) {
+        self.request_writer_shutdown(false);
+    }
+
+    #[cfg(feature = "ws")]
+    fn request_writer_peer_close(&self) {
+        self.request_writer_shutdown(true);
+    }
+
+    #[cfg(feature = "ws")]
+    fn request_writer_shutdown(&self, peer_initiated: bool) {
+        if self
+            .writer_state
+            .compare_exchange(
+                WRITER_OPEN,
+                WRITER_CLOSING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return;
+        }
+
+        let (reply, _ignored) = oneshot::channel();
+        let command = if peer_initiated {
+            WriterCommand::PeerClose(reply)
+        } else {
+            WriterCommand::Close(reply)
+        };
+        if self.writer_tx.try_send(command).is_err() {
+            // A saturated writer queue must not hold peer-close handling or
+            // local drain hostage. Aborting drops the split sink; the reader
+            // supervisor then drops its half and releases the socket permit.
+            self.writer_abort.abort();
+            self.writer_state.store(WRITER_CLOSED, Ordering::Release);
+            self.writer_closed.send_replace(true);
+        }
     }
 
     #[cfg(feature = "ws")]
@@ -445,6 +481,19 @@ async fn writer_loop(
                 })
                 .await
                 {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(error)) => Err(map_writer_error(peer_addr, error)),
+                    Err(_) => Err(Error::Timeout),
+                };
+                let _ = reply.send(result);
+                break;
+            }
+            WriterCommand::PeerClose(reply) => {
+                // Reading the peer Close makes tungstenite queue the reply.
+                // Closing the sink flushes that queued handshake; attempting
+                // to send a second Close first is rejected as "already
+                // closing" and can reset the socket before the acknowledgement.
+                let result = match tokio::time::timeout(write_timeout, writer.close()).await {
                     Ok(Ok(())) => Ok(()),
                     Ok(Err(error)) => Err(map_writer_error(peer_addr, error)),
                     Err(_) => Err(Error::Timeout),
@@ -618,6 +667,58 @@ mod tests {
             .expect("writer failure did not wake reader supervision")
             .expect("writer lifecycle sender disappeared without notification");
         assert!(*writer_closed.borrow());
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn peer_close_wakes_writer_and_releases_without_write_timeout() {
+        use futures_util::StreamExt as _;
+        use tokio_tungstenite::tungstenite::protocol::Role;
+
+        let (transport_side, peer_side) = tokio::io::duplex(4_096);
+        let transport_stream = WebSocketStream::from_raw_socket(
+            SipWsStream::Test(transport_side),
+            Role::Client,
+            Some(sip_websocket_config()),
+        )
+        .await;
+        let mut peer_stream = WebSocketStream::from_raw_socket(
+            SipWsStream::Test(peer_side),
+            Role::Server,
+            Some(sip_websocket_config()),
+        )
+        .await;
+        let (writer, _reader) = transport_stream.split();
+        let connection = WebSocketConnection::from_writer_with_runtime(
+            writer,
+            "127.0.0.1:5060".parse().unwrap(),
+            false,
+            "sip".into(),
+            None,
+            1,
+            Duration::from_secs(5),
+        );
+        let mut writer_closed = connection.writer_closed_receiver();
+
+        connection
+            .process_ws_message(WsMessage::Close(None))
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_millis(250), writer_closed.changed())
+            .await
+            .expect("peer Close left the writer parked until its write timeout")
+            .expect("writer lifecycle sender disappeared without notification");
+        assert!(*writer_closed.borrow());
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(250), peer_stream.next())
+                .await
+                .expect("peer did not receive the server Close promptly"),
+            Some(Ok(WsMessage::Close(_)))
+        ));
+        tokio::time::timeout(Duration::from_millis(250), connection.close())
+            .await
+            .expect("peer Close retained connection capacity until the write timeout")
+            .unwrap();
     }
 
     // For testing only: a simplified WebSocketConnection without real WebSocket dependencies

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use rvoip_sip_core::{Request, Response};
+use rvoip_sip_transport::TransportRoute;
 
 use crate::transaction::TransactionKey;
 
@@ -56,7 +57,7 @@ pub(crate) struct ServerInviteAckIndexEntry {
 pub(crate) struct Invite2xxResponseCacheEntry {
     pub(crate) response: Response,
     pub(crate) wire_bytes: Bytes,
-    pub(crate) destination: SocketAddr,
+    pub(crate) route: TransportRoute,
     pub(crate) created_at: Instant,
     pub(crate) acked_at: Option<Instant>,
     pub(crate) expires_at: Instant,

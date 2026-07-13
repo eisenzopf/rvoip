@@ -8,15 +8,16 @@ pub(crate) use stream::SipWsStream;
 
 use crate::error::{Error, Result};
 use crate::transport::{
+    next_transport_flow_id,
     runtime::{
         next_trust_context, ConnectionDirection, ConnectionLifecycleConfig, DialAdmission,
         OutboundDialCoordinator, TransportTaskSet,
     },
-    safe_method_label, validate_typed_outbound_message, HandshakeAdmissionConfig, Transport,
-    TransportEvent, TransportType,
+    safe_method_label, transport_authority_for_request, validate_typed_outbound_message,
+    HandshakeAdmissionConfig, Transport, TransportAuthority, TransportEvent, TransportFlowId,
+    TransportRoute, TransportType,
 };
 use futures_util::StreamExt;
-use rvoip_sip_core::types::uri::Host;
 use rvoip_sip_core::Message;
 use std::collections::HashMap;
 use std::fmt;
@@ -79,6 +80,7 @@ struct WebSocketTransportInner {
 #[derive(Clone)]
 struct WebSocketConnectionRecord {
     generation: u64,
+    flow_id: TransportFlowId,
     connection: Arc<WebSocketConnection>,
 }
 
@@ -95,20 +97,12 @@ struct WebSocketAuthority {
 }
 
 impl WebSocketAuthority {
-    fn for_message(message: &Message, destination: SocketAddr) -> Self {
-        let host = match message {
-            Message::Request(request) => match &request.uri().host {
-                Host::Domain(domain) => {
-                    WebSocketAuthorityHost::Dns(domain.trim_end_matches('.').to_ascii_lowercase())
-                }
-                Host::Address(address) => WebSocketAuthorityHost::Ip(*address),
-            },
-            Message::Response(_) => return Self::for_address(destination),
+    fn from_transport(authority: &TransportAuthority, port: u16) -> Self {
+        let host = match authority {
+            TransportAuthority::Dns(domain) => WebSocketAuthorityHost::Dns(domain.clone()),
+            TransportAuthority::Ip(address) => WebSocketAuthorityHost::Ip(*address),
         };
-        Self {
-            host,
-            port: destination.port(),
-        }
+        Self { host, port }
     }
 
     fn for_address(destination: SocketAddr) -> Self {
@@ -188,31 +182,17 @@ impl WebSocketConnectionKey {
     }
 }
 
-fn select_unambiguous_websocket_flow(
+fn select_websocket_flow(
     connections: &HashMap<WebSocketConnectionKey, WebSocketConnectionRecord>,
-    destination: SocketAddr,
-) -> Result<Option<Arc<WebSocketConnection>>> {
-    if let Some(inbound) = connections.iter().find_map(|(key, record)| {
-        (key.remote_addr == destination
-            && key.direction == ConnectionDirection::Inbound
+    route: &TransportRoute,
+) -> Option<Arc<WebSocketConnection>> {
+    let flow_id = route.flow_id?;
+    connections.iter().find_map(|(key, record)| {
+        (key.remote_addr == route.destination
+            && record.flow_id == flow_id
             && !record.connection.is_closed())
         .then(|| record.connection.clone())
-    }) {
-        return Ok(Some(inbound));
-    }
-
-    let mut outbound = connections.iter().filter(|(key, record)| {
-        key.remote_addr == destination
-            && key.direction == ConnectionDirection::Outbound
-            && !record.connection.is_closed()
-    });
-    let first = outbound.next().map(|(_, record)| record.connection.clone());
-    if outbound.next().is_some() {
-        return Err(Error::InvalidState(format!(
-            "Multiple authenticated WebSocket flows exist for {destination}; an explicit authority is required"
-        )));
-    }
-    Ok(first)
+    })
 }
 
 async fn close_websocket_connections(
@@ -641,6 +621,7 @@ impl WebSocketTransport {
                             let generation = inner
                                 .next_connection_generation
                                 .fetch_add(1, Ordering::Relaxed);
+                            let flow_id = next_transport_flow_id();
                             let key = WebSocketConnectionKey::inbound(
                                 peer_addr,
                                 inner.local_addr,
@@ -666,6 +647,7 @@ impl WebSocketTransport {
                                 key.clone(),
                                 WebSocketConnectionRecord {
                                     generation,
+                                    flow_id,
                                     connection: connection.clone(),
                                 },
                             );
@@ -678,6 +660,7 @@ impl WebSocketTransport {
                                 connection,
                                 reader,
                                 generation,
+                                flow_id,
                                 key,
                                 lifecycle,
                                 established_permit,
@@ -707,6 +690,7 @@ impl WebSocketTransport {
             tokio_tungstenite::WebSocketStream<SipWsStream>,
         >,
         generation: u64,
+        flow_id: TransportFlowId,
         key: WebSocketConnectionKey,
         lifecycle: ConnectionLifecycleConfig,
         _established_permit: OwnedSemaphorePermit,
@@ -801,6 +785,8 @@ impl WebSocketTransport {
                 }
             };
 
+            let is_keepalive_pong = matches!(&ws_message, tungstenite::Message::Pong(_));
+
             // Process the WebSocket message
             match connection.process_ws_message(ws_message) {
                 Ok(Some((sip_message, raw_bytes))) => {
@@ -823,6 +809,7 @@ impl WebSocketTransport {
                         } else {
                             TransportType::Ws
                         },
+                        flow_id: Some(flow_id),
                         raw_bytes: Some(raw_bytes),
                         timing: None,
                         connection_metadata: connection.connection_metadata().cloned(),
@@ -838,7 +825,25 @@ impl WebSocketTransport {
                     }
                 }
                 Ok(None) => {
-                    // Control message like ping/pong/close, already handled
+                    if is_keepalive_pong {
+                        let Some(inner) = weak_inner.upgrade() else {
+                            break;
+                        };
+                        if inner
+                            .events_tx
+                            .send(TransportEvent::KeepAlivePongReceived {
+                                source: peer_addr,
+                                destination: inner.local_addr,
+                                flow_id: Some(flow_id),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    // Other control messages are handled by tungstenite or
+                    // the connection lifecycle.
                     continue;
                 }
                 Err(e) => {
@@ -856,14 +861,38 @@ impl WebSocketTransport {
             }
         }
 
-        // Connection closed, remove it from the map.
+        // Emit ConnectionClosed before evicting the exact flow. Observers use
+        // this ordering to correlate lifecycle events with the live flow
+        // registry. Re-check the generation after the bounded send so an
+        // address-key replacement cannot be removed by an older reader.
         if let Some(inner) = weak_inner.upgrade() {
-            let mut connections = inner.connections.lock().await;
-            if connections
+            let is_current = inner
+                .connections
+                .lock()
+                .await
                 .get(&key)
-                .is_some_and(|record| record.generation == generation)
-            {
-                connections.remove(&key);
+                .is_some_and(|record| record.generation == generation);
+            if is_current {
+                let _ = inner
+                    .events_tx
+                    .send(TransportEvent::ConnectionClosed {
+                        remote_addr: peer_addr,
+                        transport_type: if inner.secure {
+                            TransportType::Wss
+                        } else {
+                            TransportType::Ws
+                        },
+                        flow_id: Some(flow_id),
+                    })
+                    .await;
+
+                let mut connections = inner.connections.lock().await;
+                if connections
+                    .get(&key)
+                    .is_some_and(|record| record.generation == generation)
+                {
+                    connections.remove(&key);
+                }
             }
         }
 
@@ -1112,6 +1141,7 @@ impl WebSocketTransport {
                             let generation = inner
                                 .next_connection_generation
                                 .fetch_add(1, Ordering::Relaxed);
+                            let flow_id = next_transport_flow_id();
                             let weak_inner = Arc::downgrade(&inner);
                             let (start_tx, start_rx) = tokio::sync::oneshot::channel();
                             let reader_connection = connection_arc.clone();
@@ -1126,6 +1156,7 @@ impl WebSocketTransport {
                                             reader_connection,
                                             ws_reader,
                                             generation,
+                                            flow_id,
                                             reader_key,
                                             lifecycle,
                                             established_permit,
@@ -1155,6 +1186,7 @@ impl WebSocketTransport {
                                 key.clone(),
                                 WebSocketConnectionRecord {
                                     generation,
+                                    flow_id,
                                     connection: connection_arc.clone(),
                                 },
                             );
@@ -1202,10 +1234,90 @@ impl Transport for WebSocketTransport {
     }
 
     async fn send_message(&self, message: Message, destination: SocketAddr) -> Result<()> {
+        let route = match &message {
+            Message::Request(request) => TransportRoute::new(destination)
+                .with_transport_type(if self.inner.secure {
+                    TransportType::Wss
+                } else {
+                    TransportType::Ws
+                })
+                .with_authority(transport_authority_for_request(request)?),
+            Message::Response(_) => {
+                TransportRoute::new(destination).with_transport_type(if self.inner.secure {
+                    TransportType::Wss
+                } else {
+                    TransportType::Ws
+                })
+            }
+        };
+        self.send_message_via(message, route).await
+    }
+
+    async fn send_message_via(&self, message: Message, route: TransportRoute) -> Result<()> {
+        self.send_message_on_route(message, route).await.map(|_| ())
+    }
+
+    async fn prepare_message_route(
+        &self,
+        message: &Message,
+        mut route: TransportRoute,
+    ) -> Result<TransportRoute> {
+        if self.is_closed() {
+            return Err(Error::TransportClosed);
+        }
+        validate_typed_outbound_message(message)?;
+        route.transport_type = Some(if self.inner.secure {
+            TransportType::Wss
+        } else {
+            TransportType::Ws
+        });
+        if route.flow_id.is_some() {
+            route.flow_id = self.resolve_flow_id_for_route(&route).await;
+            return route.flow_id.map(|_| route).ok_or(Error::TransportClosed);
+        }
+        if matches!(message, Message::Response(_)) {
+            return Err(Error::InvalidState(
+                "WebSocket responses require the exact ingress flow".into(),
+            ));
+        }
+
+        #[cfg(feature = "ws")]
+        {
+            let authority = route.authority.as_ref().ok_or_else(|| {
+                Error::InvalidState(
+                    "outbound WebSocket requests require a next-hop authority".into(),
+                )
+            })?;
+            let authority = WebSocketAuthority::from_transport(authority, route.destination.port());
+            let connection = self.connect_to(route.destination, authority).await?;
+            route.flow_id = self
+                .inner
+                .connections
+                .lock()
+                .await
+                .values()
+                .find(|record| Arc::ptr_eq(&record.connection, &connection))
+                .map(|record| record.flow_id);
+            route.flow_id.map(|_| route).ok_or(Error::TransportClosed)
+        }
+
+        #[cfg(not(feature = "ws"))]
+        Err(Error::NotImplemented(
+            "WebSocket transport not implemented".into(),
+        ))
+    }
+
+    async fn send_message_on_route(
+        &self,
+        message: Message,
+        mut route: TransportRoute,
+    ) -> Result<TransportRoute> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
         validate_typed_outbound_message(&message)?;
+
+        let destination = route.destination;
 
         debug!(
             "Sending {} message to {}",
@@ -1219,20 +1331,49 @@ impl Transport for WebSocketTransport {
 
         #[cfg(feature = "ws")]
         {
-            if matches!(message, Message::Response(_)) {
-                let existing = {
+            if route.flow_id.is_some() {
+                let connection = {
                     let connections = self.inner.connections.lock().await;
-                    select_unambiguous_websocket_flow(&connections, destination)?
-                };
-                if let Some(connection) = existing {
-                    return connection.send_message(&message).await;
+                    select_websocket_flow(&connections, &route)
                 }
+                .ok_or_else(|| {
+                    Error::InvalidState(format!(
+                        "WebSocket flow is no longer active for {destination}"
+                    ))
+                })?;
+                connection.send_message(&message).await?;
+                return Ok(route);
             }
-            let authority = WebSocketAuthority::for_message(&message, destination);
-            let connection = self.connect_to(destination, authority).await?;
 
-            // Send the message
-            connection.send_message(&message).await
+            if matches!(message, Message::Response(_)) {
+                return Err(Error::InvalidState(
+                    "WebSocket responses require the exact ingress flow".into(),
+                ));
+            }
+            let authority = route.authority.as_ref().ok_or_else(|| {
+                Error::InvalidState(
+                    "outbound WebSocket requests require a next-hop authority".into(),
+                )
+            })?;
+            let authority = WebSocketAuthority::from_transport(authority, destination.port());
+            let connection = self.connect_to(destination, authority).await?;
+            let flow_id = self
+                .inner
+                .connections
+                .lock()
+                .await
+                .values()
+                .find(|record| Arc::ptr_eq(&record.connection, &connection))
+                .map(|record| record.flow_id)
+                .ok_or(Error::TransportClosed)?;
+            connection.send_message(&message).await?;
+            route.transport_type = Some(if self.inner.secure {
+                TransportType::Wss
+            } else {
+                TransportType::Ws
+            });
+            route.flow_id = Some(flow_id);
+            Ok(route)
         }
 
         #[cfg(not(feature = "ws"))]
@@ -1242,9 +1383,15 @@ impl Transport for WebSocketTransport {
     }
 
     async fn send_message_raw(&self, bytes: bytes::Bytes, destination: SocketAddr) -> Result<()> {
+        self.send_message_raw_via(bytes, TransportRoute::new(destination))
+            .await
+    }
+
+    async fn send_message_raw_via(&self, bytes: bytes::Bytes, route: TransportRoute) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
+        let destination = route.destination;
         debug!(
             "WS: sending {} pre-built bytes to {}",
             bytes.len(),
@@ -1253,15 +1400,29 @@ impl Transport for WebSocketTransport {
 
         #[cfg(feature = "ws")]
         {
-            let existing = {
-                let connections = self.inner.connections.lock().await;
-                select_unambiguous_websocket_flow(&connections, destination)?
-            };
-            if let Some(connection) = existing {
+            if route.flow_id.is_some() {
+                let connection = {
+                    let connections = self.inner.connections.lock().await;
+                    select_websocket_flow(&connections, &route)
+                }
+                .ok_or_else(|| {
+                    Error::InvalidState(format!(
+                        "WebSocket flow is no longer active for {destination}"
+                    ))
+                })?;
                 return connection.send_raw_bytes(bytes).await;
             }
+
+            let authority = route.authority.as_ref().ok_or_else(|| {
+                Error::InvalidState(
+                    "raw WebSocket SIP sends require an authority or exact flow".into(),
+                )
+            })?;
             let connection = self
-                .connect_to(destination, WebSocketAuthority::for_address(destination))
+                .connect_to(
+                    destination,
+                    WebSocketAuthority::from_transport(authority, destination.port()),
+                )
                 .await?;
             connection.send_raw_bytes(bytes).await
         }
@@ -1270,6 +1431,143 @@ impl Transport for WebSocketTransport {
         Err(Error::NotImplemented(
             "WebSocket transport not implemented".into(),
         ))
+    }
+
+    fn flow_id_for_route(&self, route: &TransportRoute) -> Option<TransportFlowId> {
+        let connections = self.inner.connections.try_lock().ok()?;
+        if let Some(flow_id) = route.flow_id {
+            return connections
+                .iter()
+                .any(|(key, record)| {
+                    key.remote_addr == route.destination
+                        && record.flow_id == flow_id
+                        && !record.connection.is_closed()
+                })
+                .then_some(flow_id);
+        }
+
+        if let Some(authority) = &route.authority {
+            let authority = WebSocketAuthority::from_transport(authority, route.destination.port());
+            let key = WebSocketConnectionKey::outbound(
+                route.destination,
+                authority,
+                self.inner.outbound_trust_context,
+                self.inner.secure,
+            );
+            return connections
+                .get(&key)
+                .filter(|record| !record.connection.is_closed())
+                .map(|record| record.flow_id);
+        }
+
+        let mut matches = connections.iter().filter_map(|(key, record)| {
+            (key.remote_addr == route.destination && !record.connection.is_closed())
+                .then_some(record.flow_id)
+        });
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
+    async fn resolve_flow_id_for_route(&self, route: &TransportRoute) -> Option<TransportFlowId> {
+        let connections = self.inner.connections.lock().await;
+        if let Some(flow_id) = route.flow_id {
+            return connections
+                .iter()
+                .any(|(key, record)| {
+                    key.remote_addr == route.destination
+                        && record.flow_id == flow_id
+                        && !record.connection.is_closed()
+                })
+                .then_some(flow_id);
+        }
+
+        if let Some(authority) = &route.authority {
+            let authority = WebSocketAuthority::from_transport(authority, route.destination.port());
+            let key = WebSocketConnectionKey::outbound(
+                route.destination,
+                authority,
+                self.inner.outbound_trust_context,
+                self.inner.secure,
+            );
+            return connections
+                .get(&key)
+                .filter(|record| !record.connection.is_closed())
+                .map(|record| record.flow_id);
+        }
+
+        let mut matches = connections.iter().filter_map(|(key, record)| {
+            (key.remote_addr == route.destination && !record.connection.is_closed())
+                .then_some(record.flow_id)
+        });
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
+    async fn send_raw(&self, destination: SocketAddr, data: bytes::Bytes) -> Result<()> {
+        self.send_raw_via(TransportRoute::new(destination), data)
+            .await
+    }
+
+    async fn send_raw_via(&self, route: TransportRoute, data: bytes::Bytes) -> Result<()> {
+        if self.is_closed() {
+            return Err(Error::TransportClosed);
+        }
+        if data.as_ref() != b"\r\n\r\n" {
+            return Err(Error::NotImplemented(
+                "WebSocket raw flow sends support only the RFC 5626 keepalive ping mapping".into(),
+            ));
+        }
+        let connection = {
+            let connections = self.inner.connections.lock().await;
+            select_websocket_flow(&connections, &route)
+        }
+        .ok_or_else(|| {
+            Error::InvalidState(format!(
+                "exact WebSocket flow is required for raw send to {}",
+                route.destination
+            ))
+        })?;
+        connection.send_keepalive_ping().await
+    }
+
+    fn has_connection_to(&self, remote_addr: SocketAddr) -> bool {
+        self.inner.connections.try_lock().is_ok_and(|connections| {
+            connections.iter().any(|(key, record)| {
+                key.remote_addr == remote_addr && !record.connection.is_closed()
+            })
+        })
+    }
+
+    fn supports_ws(&self) -> bool {
+        !self.inner.secure
+    }
+
+    fn supports_wss(&self) -> bool {
+        self.inner.secure
+    }
+
+    fn default_transport_type(&self) -> TransportType {
+        if self.inner.secure {
+            TransportType::Wss
+        } else {
+            TransportType::Ws
+        }
+    }
+
+    fn get_connection_count(&self, transport_type: TransportType) -> usize {
+        if transport_type != self.default_transport_type() {
+            return 0;
+        }
+        self.inner
+            .connections
+            .try_lock()
+            .map(|connections| {
+                connections
+                    .values()
+                    .filter(|record| !record.connection.is_closed())
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     async fn close(&self) -> Result<()> {
@@ -1520,7 +1818,7 @@ mod tests {
 
     #[cfg(feature = "ws")]
     #[tokio::test]
-    async fn response_reuses_sole_authenticated_outbound_websocket_flow() {
+    async fn response_requires_and_reuses_exact_authenticated_websocket_flow() {
         let (server, _server_events) =
             WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
                 .await
@@ -1541,14 +1839,159 @@ mod tests {
             .await
             .unwrap();
 
+        assert!(matches!(
+            client
+                .send_message(
+                    Message::Response(Response::new(StatusCode::Ok)),
+                    destination,
+                )
+                .await,
+            Err(Error::InvalidState(_))
+        ));
+        let authority = TransportAuthority::dns("sip.example.test").unwrap();
+        let mut route = TransportRoute::new(destination)
+            .with_transport_type(TransportType::Ws)
+            .with_authority(authority);
+        route.flow_id = client.flow_id_for_route(&route);
+        assert!(route.flow_id.is_some());
         client
-            .send_message(
-                Message::Response(Response::new(StatusCode::Ok)),
-                destination,
-            )
+            .send_message_via(Message::Response(Response::new(StatusCode::Ok)), route)
             .await
             .unwrap();
         assert_eq!(client.inner.connections.lock().await.len(), 1);
+
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn connection_closed_waits_for_bounded_event_capacity_without_being_dropped() {
+        let (server, mut server_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, Some(1))
+                .await
+                .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, _client_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+        let request = SimpleRequestBuilder::new(
+            Method::Options,
+            "sip:service@bounded-events.example;transport=ws",
+        )
+        .unwrap()
+        .from("alice", "sip:alice@example.test", Some("tag"))
+        .to("service", "sip:service@example.test", None)
+        .call_id("bounded-close-event")
+        .cseq(1)
+        .build();
+        client
+            .send_message(Message::Request(request), destination)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        client.close().await.unwrap();
+
+        let flow_id = match tokio::time::timeout(Duration::from_secs(1), server_events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            TransportEvent::MessageReceived {
+                flow_id: Some(flow_id),
+                ..
+            } => flow_id,
+            event => panic!("expected flow-bearing message, got {event:?}"),
+        };
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), server_events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            TransportEvent::ConnectionClosed {
+                flow_id: Some(closed_flow),
+                ..
+            } if closed_flow == flow_id
+        ));
+
+        server.close().await.unwrap();
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn websocket_pong_waits_for_bounded_event_capacity_without_being_dropped() {
+        let (server, mut server_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, Some(1))
+                .await
+                .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, _client_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+
+        let make_request = |cseq: u32| {
+            SimpleRequestBuilder::new(
+                Method::Options,
+                "sip:service@bounded-pong.example;transport=ws",
+            )
+            .unwrap()
+            .from("alice", "sip:alice@example.test", Some("tag"))
+            .to("service", "sip:service@example.test", None)
+            .call_id("bounded-pong-event")
+            .cseq(cseq)
+            .build()
+        };
+        client
+            .send_message(Message::Request(make_request(1)), destination)
+            .await
+            .unwrap();
+        let route = match tokio::time::timeout(Duration::from_secs(1), server_events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            TransportEvent::MessageReceived {
+                source,
+                flow_id: Some(flow_id),
+                ..
+            } => TransportRoute::new(source)
+                .with_transport_type(TransportType::Ws)
+                .with_flow_id(flow_id),
+            event => panic!("expected flow-bearing message, got {event:?}"),
+        };
+
+        // Fill the only event slot, then provoke a native RFC 6455 Pong.
+        // The control event must wait behind the SIP event rather than being
+        // dropped by a best-effort `try_send`.
+        client
+            .send_message(Message::Request(make_request(2)), destination)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        server
+            .send_raw_via(route.clone(), bytes::Bytes::from_static(b"\r\n\r\n"))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), server_events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            TransportEvent::MessageReceived { .. }
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), server_events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            TransportEvent::KeepAlivePongReceived {
+                flow_id: Some(pong_flow),
+                ..
+            } if Some(pong_flow) == route.flow_id
+        ));
 
         client.close().await.unwrap();
         server.close().await.unwrap();
@@ -1598,6 +2041,7 @@ mod tests {
                 ),
                 WebSocketConnectionRecord {
                     generation: u64::from(index),
+                    flow_id: TransportFlowId::for_test(u64::from(index) + 1),
                     connection,
                 },
             ));

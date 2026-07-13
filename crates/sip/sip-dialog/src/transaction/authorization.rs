@@ -10,7 +10,9 @@
 use async_trait::async_trait;
 use rvoip_core_traits::identity::AuthenticatedPrincipal;
 use rvoip_sip_core::{Request, StatusCode, TypedHeader};
-use rvoip_sip_transport::transport::{TransportConnectionMetadata, TransportType};
+use rvoip_sip_transport::transport::{
+    TransportConnectionMetadata, TransportFlowId, TransportRoute, TransportType,
+};
 use std::fmt;
 use std::net::SocketAddr;
 
@@ -23,6 +25,8 @@ pub struct SipRequestIngressContext {
     pub destination: SocketAddr,
     /// Concrete receiving transport.
     pub transport_type: TransportType,
+    /// Exact connection-oriented flow that carried the request.
+    pub flow_id: Option<TransportFlowId>,
     /// Identity produced by the transport after client-certificate
     /// verification.
     ///
@@ -44,6 +48,7 @@ impl fmt::Debug for SipRequestIngressContext {
             )
             .field("destination_port", &self.destination.port())
             .field("transport_type", &self.transport_type)
+            .field("flow_id", &self.flow_id)
             .field(
                 "connection_metadata_present",
                 &self.connection_metadata.is_some(),
@@ -67,6 +72,7 @@ impl SipRequestIngressContext {
             source,
             destination,
             transport_type,
+            flow_id: None,
             connection_metadata: None,
         }
     }
@@ -78,6 +84,19 @@ impl SipRequestIngressContext {
     pub fn with_connection_metadata(mut self, metadata: TransportConnectionMetadata) -> Self {
         self.connection_metadata = Some(metadata);
         self
+    }
+
+    /// Attach the exact connection-oriented ingress flow.
+    pub fn with_flow_id(mut self, flow_id: TransportFlowId) -> Self {
+        self.flow_id = Some(flow_id);
+        self
+    }
+
+    /// Build the response route back to the concrete ingress flow.
+    pub fn response_route(&self) -> TransportRoute {
+        let mut route = TransportRoute::new(self.source).with_transport_type(self.transport_type);
+        route.flow_id = self.flow_id;
+        route
     }
 }
 

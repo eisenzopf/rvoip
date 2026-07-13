@@ -122,6 +122,7 @@ impl Harness {
             source,
             destination: self.transport.local_addr,
             transport_type: TransportType::Udp,
+            flow_id: None,
             raw_bytes: None,
             timing: None,
             connection_metadata: None,

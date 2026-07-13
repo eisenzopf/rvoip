@@ -1372,15 +1372,15 @@ impl DialogManager {
             let sent_request = req.clone();
             let request_key = crate::manager::core::outbound_request_key(&sent_request);
 
-            let tx_result = if method == Method::Invite {
-                self.transaction_manager
-                    .create_invite_client_transaction(req, target.addr)
-                    .await
-            } else {
-                self.transaction_manager
-                    .create_non_invite_client_transaction(req, target.addr)
-                    .await
-            };
+            let mut request_route = rvoip_sip_transport::TransportRoute::new(target.addr)
+                .with_transport_type(target.transport);
+            if let Some(authority) = target.authority.clone() {
+                request_route.authority = Some(authority);
+            }
+            let tx_result = self
+                .transaction_manager
+                .create_client_transaction_on_route(req, request_route)
+                .await;
             let tx_id = match tx_result {
                 Ok(id) => id,
                 Err(_error) => {

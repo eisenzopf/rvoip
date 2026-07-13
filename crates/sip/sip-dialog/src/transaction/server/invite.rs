@@ -73,7 +73,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, trace, warn};
 
 use rvoip_sip_core::prelude::*;
-use rvoip_sip_transport::Transport;
+use rvoip_sip_transport::{Transport, TransportRoute};
 
 use crate::transaction::common_logic;
 use crate::transaction::error::{Error, Result};
@@ -205,7 +205,10 @@ impl ServerInviteLogic {
 
             if let Err(e) = data
                 .transport
-                .send_message(Message::Response(trying_response.clone()), data.remote_addr)
+                .send_message_via(
+                    Message::Response(trying_response.clone()),
+                    data.response_route.clone(),
+                )
                 .await
             {
                 error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_for_task), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send automatic 100 Trying response");
@@ -279,7 +282,10 @@ impl ServerInviteLogic {
                     // Send the 100 Trying response
                     if let Err(e) = data
                         .transport
-                        .send_message(Message::Response(trying_response.clone()), data.remote_addr)
+                        .send_message_via(
+                            Message::Response(trying_response.clone()),
+                            data.response_route.clone(),
+                        )
                         .await
                     {
                         error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send automatic 100 Trying response");
@@ -447,7 +453,10 @@ impl ServerInviteLogic {
                 if let Some(response) = &*response_guard {
                     if let Err(e) = data
                         .transport
-                        .send_message(Message::Response(response.clone()), data.remote_addr)
+                        .send_message_via(
+                            Message::Response(response.clone()),
+                            data.response_route.clone(),
+                        )
                         .await
                     {
                         error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to retransmit response");
@@ -553,7 +562,10 @@ impl ServerInviteLogic {
                 if let Some(response) = &*last_response {
                     if let Err(e) = data
                         .transport
-                        .send_message(Message::Response(response.clone()), data.remote_addr)
+                        .send_message_via(
+                            Message::Response(response.clone()),
+                            data.response_route.clone(),
+                        )
                         .await
                     {
                         error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to retransmit response");
@@ -574,7 +586,10 @@ impl ServerInviteLogic {
                         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Retransmitting cached 2xx response for INVITE retransmission");
                         if let Err(e) = data
                             .transport
-                            .send_message(Message::Response(response), data.remote_addr)
+                            .send_message_via(
+                                Message::Response(response),
+                                data.response_route.clone(),
+                            )
                             .await
                         {
                             error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to retransmit 2xx response");
@@ -903,6 +918,27 @@ impl ServerInviteTransaction {
         timer_config_override: Option<TimerSettings>,
         command_channel_capacity: usize,
     ) -> Result<Self> {
+        Self::new_with_response_route_and_command_channel_capacity(
+            id,
+            request,
+            TransportRoute::new(remote_addr),
+            transport,
+            events_tx,
+            timer_config_override,
+            command_channel_capacity,
+        )
+    }
+
+    /// Create a server INVITE transaction bound to the exact ingress route.
+    pub fn new_with_response_route_and_command_channel_capacity(
+        id: TransactionKey,
+        request: Request,
+        response_route: TransportRoute,
+        transport: Arc<dyn Transport>,
+        events_tx: mpsc::Sender<TransactionEvent>,
+        timer_config_override: Option<TimerSettings>,
+        command_channel_capacity: usize,
+    ) -> Result<Self> {
         if request.method() != Method::Invite {
             return Err(Error::Other(
                 "Request must be INVITE for INVITE server transaction".to_string(),
@@ -911,6 +947,7 @@ impl ServerInviteTransaction {
 
         let timer_config = timer_config_override.unwrap_or_default();
         let (cmd_tx, local_cmd_rx) = mpsc::channel(command_channel_capacity.max(1));
+        let remote_addr = response_route.destination;
 
         let data = Arc::new(ServerTransactionData {
             id: id.clone(),
@@ -919,6 +956,7 @@ impl ServerInviteTransaction {
             request: Arc::new(request.clone()),
             last_response: Arc::new(Mutex::new(None)),
             remote_addr,
+            response_route,
             transport,
             events_tx,
             cmd_tx: cmd_tx.clone(),
@@ -1121,7 +1159,10 @@ impl ServerTransaction for ServerInviteTransaction {
 
             // Always send the response
             data.transport
-                .send_message(Message::Response(response.clone()), data.remote_addr)
+                .send_message_via(
+                    Message::Response(response.clone()),
+                    data.response_route.clone(),
+                )
                 .await
                 .map_err(|e| Error::transport_error(e, "Failed to send response"))?;
 

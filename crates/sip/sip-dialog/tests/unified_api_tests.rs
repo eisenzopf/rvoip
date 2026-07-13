@@ -385,7 +385,7 @@ async fn test_unified_api_client_operations() -> Result<(), Box<dyn std::error::
     let result = api
         .make_call(
             "sip:alice@example.com",
-            "sip:bob@example.com",
+            "sip:bob@127.0.0.1:5061",
             Some("SDP offer".to_string()),
         )
         .await;
@@ -393,7 +393,7 @@ async fn test_unified_api_client_operations() -> Result<(), Box<dyn std::error::
 
     // Test create_dialog operation (should succeed in client mode)
     let result = api
-        .create_dialog("sip:alice@example.com", "sip:carol@example.com")
+        .create_dialog("sip:alice@example.com", "sip:carol@127.0.0.1:5061")
         .await;
     assert!(result.is_ok());
 
@@ -454,12 +454,12 @@ async fn test_unified_api_hybrid_operations() -> Result<(), Box<dyn std::error::
 
     // Test both outgoing operations (should succeed in hybrid mode)
     let outgoing_call = api
-        .make_call("sip:pbx@company.com", "sip:external@provider.com", None)
+        .make_call("sip:pbx@company.com", "sip:external@127.0.0.1:5061", None)
         .await;
     assert!(outgoing_call.is_ok());
 
     let outgoing_dialog = api
-        .create_dialog("sip:pbx@company.com", "sip:user@company.com")
+        .create_dialog("sip:pbx@company.com", "sip:user@127.0.0.1:5061")
         .await;
     assert!(outgoing_dialog.is_ok());
 

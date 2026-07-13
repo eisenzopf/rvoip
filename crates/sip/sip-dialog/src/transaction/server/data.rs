@@ -1,5 +1,5 @@
 use rvoip_sip_core::prelude::*;
-use rvoip_sip_transport::Transport;
+use rvoip_sip_transport::{Transport, TransportRoute};
 /// # Server Transaction Data Structures
 ///
 /// This module provides data structures and traits for implementing the server transaction
@@ -75,6 +75,10 @@ pub struct ServerTransactionData {
     /// Remote address to which responses are sent
     pub remote_addr: SocketAddr,
 
+    /// Exact route back to the ingress flow. Connection-oriented responses
+    /// must use this rather than rediscovering a socket by address.
+    pub response_route: TransportRoute,
+
     /// Transport layer for sending SIP messages
     pub transport: Arc<dyn Transport>,
 
@@ -103,6 +107,7 @@ impl std::fmt::Debug for ServerTransactionData {
             )
             .field("state", &self.state.get())
             .field("remote_addr", &self.remote_addr)
+            .field("response_route", &self.response_route)
             .field("request_header_count", &self.request.all_headers().len())
             .field("request_body_len", &self.request.body().len())
             .field(

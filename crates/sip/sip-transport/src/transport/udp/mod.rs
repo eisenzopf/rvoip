@@ -581,6 +581,7 @@ async fn process_udp_datagram(
                 source: datagram.source,
                 destination: datagram.local_addr,
                 transport_type: TransportType::Udp,
+                flow_id: None,
                 raw_bytes: Some(raw_bytes),
                 timing: datagram.timing,
                 connection_metadata: None,

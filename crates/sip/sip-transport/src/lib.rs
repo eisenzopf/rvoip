@@ -26,8 +26,9 @@ pub use transport::tls::{
 pub use transport::udp::{UdpParseConfig, UdpParseDispatch, UdpSocketOptions, UdpTransport};
 pub use transport::ws::WebSocketTransport;
 pub use transport::{
-    HandshakeAdmissionConfig, TlsPeerIdentity, Transport, TransportConnectionMetadata,
-    TransportEvent, TransportReceiveTiming,
+    transport_authority_for_request, HandshakeAdmissionConfig, TlsPeerIdentity, Transport,
+    TransportAuthority, TransportConnectionMetadata, TransportEvent, TransportFlowId,
+    TransportReceiveTiming, TransportRoute,
 };
 
 // Simplified helper functions
@@ -51,8 +52,8 @@ pub mod prelude {
         bind_tcp, bind_udp, events::TransportEventAdapter, factory::TransportFactory,
         manager::TransportManager, Error, HandshakeAdmissionConfig, Result, TcpTransport,
         TlsClientAuthMode, TlsClientConfig, TlsPeerIdentity, TlsServerClientAuthConfig,
-        TlsTransport, Transport, TransportConnectionMetadata, TransportEvent,
-        TransportReceiveTiming, UdpParseDispatch, UdpSocketOptions, UdpTransport,
-        WebSocketTransport,
+        TlsTransport, Transport, TransportAuthority, TransportConnectionMetadata, TransportEvent,
+        TransportFlowId, TransportReceiveTiming, TransportRoute, UdpParseDispatch,
+        UdpSocketOptions, UdpTransport, WebSocketTransport,
     };
 }

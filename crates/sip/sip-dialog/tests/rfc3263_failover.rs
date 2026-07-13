@@ -45,6 +45,7 @@ struct ProgrammableTransport {
 enum Outcome {
     Ok,
     RecoverableFail(String),
+    DelayedRecoverableFail(std::time::Duration, String),
     FatalFail(String),
 }
 
@@ -74,12 +75,20 @@ impl Transport for ProgrammableTransport {
         destination: SocketAddr,
     ) -> Result<(), TransportError> {
         self.sends.lock().unwrap().push(destination);
-        match self.outcomes.lock().unwrap().get(&destination).cloned() {
+        let outcome = self.outcomes.lock().unwrap().get(&destination).cloned();
+        match outcome {
             None | Some(Outcome::Ok) => Ok(()),
             Some(Outcome::RecoverableFail(msg)) => Err(TransportError::ConnectFailed(
                 destination,
                 std::io::Error::new(std::io::ErrorKind::ConnectionRefused, msg),
             )),
+            Some(Outcome::DelayedRecoverableFail(delay, msg)) => {
+                tokio::time::sleep(delay).await;
+                Err(TransportError::ConnectFailed(
+                    destination,
+                    std::io::Error::new(std::io::ErrorKind::ConnectionRefused, msg),
+                ))
+            }
             Some(Outcome::FatalFail(_msg)) => {
                 // MessageTooLarge is marked non-recoverable by Error::is_recoverable().
                 Err(TransportError::MessageTooLarge(99999))
@@ -275,15 +284,84 @@ async fn build_manager() -> Arc<DialogManager> {
     let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
     let transport = Arc::new(ProgrammableTransport::new(local_addr));
     let (_tx, transport_rx) = mpsc::channel(8);
-    let (transaction_manager, _event_rx) =
+    let (transaction_manager, mut event_rx) =
         TransactionManager::new(transport.clone(), transport_rx, Some(16))
             .await
             .expect("TransactionManager::new");
+    tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
     Arc::new(
         DialogManager::new(Arc::new(transaction_manager), local_addr)
             .await
             .expect("DialogManager::new"),
     )
+}
+
+async fn build_manager_with_transport() -> (Arc<DialogManager>, Arc<ProgrammableTransport>) {
+    let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
+    let transport = Arc::new(ProgrammableTransport::new(local_addr));
+    let (_tx, transport_rx) = mpsc::channel(8);
+    let (transaction_manager, mut event_rx) =
+        TransactionManager::new(transport.clone(), transport_rx, Some(16))
+            .await
+            .expect("TransactionManager::new");
+    tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+    let manager = Arc::new(
+        DialogManager::new(Arc::new(transaction_manager), local_addr)
+            .await
+            .expect("DialogManager::new"),
+    );
+    (manager, transport)
+}
+
+#[tokio::test]
+async fn transaction_candidate_failover_waits_for_slow_initial_send_failure() {
+    use rvoip_sip_core::builder::SimpleRequestBuilder;
+
+    let (manager, transport) = build_manager_with_transport().await;
+    let first: SocketAddr = "10.0.0.1:5060".parse().unwrap();
+    let second: SocketAddr = "10.0.0.2:5060".parse().unwrap();
+    let delay = std::time::Duration::from_millis(75);
+    transport.program(
+        first,
+        Outcome::DelayedRecoverableFail(delay, "slow refusal".into()),
+    );
+    let request = SimpleRequestBuilder::new(Method::Options, "sip:service@example.com")
+        .unwrap()
+        .from("alice", "sip:alice@example.com", Some("tag"))
+        .to("service", "sip:service@example.com", None)
+        .contact("sip:alice@127.0.0.1:5060", None)
+        .call_id("transaction-candidate-slow-fail")
+        .cseq(1)
+        .max_forwards(70)
+        .build();
+    let started = tokio::time::Instant::now();
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        manager.send_request_with_candidate_failover(
+            request,
+            vec![
+                ResolvedTarget::immediate(first, TransportType::Tcp),
+                ResolvedTarget::immediate(second, TransportType::Udp),
+            ],
+            second,
+            None,
+        ),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    let sends = transport.sends();
+    let (_transaction, selected) = result
+        .unwrap_or_else(|_| panic!("candidate failover hung; sends={sends:?}; elapsed={elapsed:?}"))
+        .unwrap_or_else(|error| {
+        panic!(
+            "second candidate should succeed after actual first send fails: {error:?}; sends={sends:?}; elapsed={elapsed:?}"
+        )
+    });
+
+    assert_eq!(selected, second);
+    assert!(elapsed >= delay);
+    assert_eq!(sends, vec![first, second]);
 }
 
 #[tokio::test]

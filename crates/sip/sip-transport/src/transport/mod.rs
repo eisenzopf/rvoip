@@ -1,10 +1,11 @@
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::error::{Error, Result};
 use bytes::Bytes;
-use rvoip_sip_core::{Message, Method};
+use rvoip_sip_core::{types::uri::Host, HeaderName, Message, Method, Request, TypedHeader};
 
 mod runtime;
 pub mod tcp;
@@ -58,6 +59,128 @@ pub enum TransportType {
     Tls,
     Ws,
     Wss,
+}
+
+/// Opaque process-local identity for one established connection-oriented flow.
+///
+/// Socket addresses are not sufficient identities once a transport can hold
+/// multiple authenticated authorities or directions at the same address. The
+/// value is deliberately opaque: callers retain and return it to the transport
+/// when replying, but must not derive tenant or authorization policy from it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TransportFlowId(u64);
+
+impl TransportFlowId {
+    /// Stable numeric value for low-level diagnostics and packet-capture
+    /// correlation. It is process-local and must not be persisted as a route.
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl fmt::Debug for TransportFlowId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("TransportFlowId")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+static NEXT_TRANSPORT_FLOW_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn next_transport_flow_id() -> TransportFlowId {
+    TransportFlowId(NEXT_TRANSPORT_FLOW_ID.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Host identity authenticated for an outbound connection.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum TransportAuthority {
+    /// Normalized DNS authority (lowercase, without a terminal dot).
+    Dns(String),
+    /// Literal IP authority.
+    Ip(IpAddr),
+}
+
+impl TransportAuthority {
+    /// Construct and normalize a DNS authority.
+    pub fn dns(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        let normalized = value.trim_end_matches('.').to_ascii_lowercase();
+        if normalized.is_empty() || normalized.bytes().any(|byte| byte.is_ascii_whitespace()) {
+            return Err(Error::InvalidAddress(
+                "invalid empty or whitespace authority".into(),
+            ));
+        }
+        Ok(Self::Dns(normalized))
+    }
+
+    /// Construct an IP-literal authority.
+    pub const fn ip(value: IpAddr) -> Self {
+        Self::Ip(value)
+    }
+}
+
+/// Determine the authenticated authority for a typed SIP request: the top
+/// Route URI when present, otherwise the Request-URI.
+pub fn transport_authority_for_request(request: &Request) -> Result<TransportAuthority> {
+    let route_host = request.headers.iter().find_map(|header| {
+        if header.name() != HeaderName::Route {
+            return None;
+        }
+        match header {
+            TypedHeader::Route(route) => route.first().map(|entry| entry.0.uri.host.clone()),
+            _ => None,
+        }
+    });
+    match route_host.as_ref().unwrap_or(&request.uri().host) {
+        Host::Domain(domain) => TransportAuthority::dns(domain.clone()),
+        Host::Address(address) => Ok(TransportAuthority::ip(*address)),
+    }
+}
+
+/// Complete routing identity for one transport send.
+///
+/// Requests carry the selected next-hop authority. Responses and lifecycle
+/// traffic additionally carry the exact ingress flow. `transport_type` lets a
+/// multiplexer select the same concrete transport without probing by address.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TransportRoute {
+    pub destination: SocketAddr,
+    pub transport_type: Option<TransportType>,
+    pub authority: Option<TransportAuthority>,
+    pub flow_id: Option<TransportFlowId>,
+}
+
+impl TransportRoute {
+    pub const fn new(destination: SocketAddr) -> Self {
+        Self {
+            destination,
+            transport_type: None,
+            authority: None,
+            flow_id: None,
+        }
+    }
+
+    pub const fn with_transport_type(mut self, transport_type: TransportType) -> Self {
+        self.transport_type = Some(transport_type);
+        self
+    }
+
+    pub fn with_authority(mut self, authority: TransportAuthority) -> Self {
+        self.authority = Some(authority);
+        self
+    }
+
+    pub const fn with_flow_id(mut self, flow_id: TransportFlowId) -> Self {
+        self.flow_id = Some(flow_id);
+        self
+    }
 }
 
 impl fmt::Display for TransportType {
@@ -155,6 +278,9 @@ pub enum TransportEvent {
         destination: SocketAddr,
         /// Transport flavour that received the message.
         transport_type: TransportType,
+        /// Exact connection-oriented flow that carried this message. `None`
+        /// for connectionless or legacy transports.
+        flow_id: Option<TransportFlowId>,
         /// Original wire bytes the parser consumed, when available.
         ///
         /// Carried through the bus end-to-end so byte-exact consumers
@@ -196,6 +322,8 @@ pub enum TransportEvent {
         source: SocketAddr,
         /// The local address that received the pong
         destination: SocketAddr,
+        /// Exact flow that carried the pong.
+        flow_id: Option<TransportFlowId>,
     },
 
     /// A connection-oriented transport lost a live connection to `remote_addr`.
@@ -208,6 +336,8 @@ pub enum TransportEvent {
         remote_addr: SocketAddr,
         /// The transport type that owned the dropped connection
         transport_type: TransportType,
+        /// Exact flow that closed.
+        flow_id: Option<TransportFlowId>,
     },
 
     // ========== GRACEFUL SHUTDOWN EVENTS ==========
@@ -232,6 +362,7 @@ impl fmt::Debug for TransportEvent {
                 source,
                 destination,
                 transport_type,
+                flow_id,
                 raw_bytes,
                 timing,
                 connection_metadata,
@@ -257,6 +388,7 @@ impl fmt::Debug for TransportEvent {
                     .field("source", source)
                     .field("destination", destination)
                     .field("transport_type", transport_type)
+                    .field("flow_id", flow_id)
                     .field("raw_bytes_present", &raw_bytes.is_some())
                     .field("raw_bytes_len", &raw_bytes.as_ref().map(Bytes::len))
                     .field("timing", timing)
@@ -273,18 +405,22 @@ impl fmt::Debug for TransportEvent {
             Self::KeepAlivePongReceived {
                 source,
                 destination,
+                flow_id,
             } => formatter
                 .debug_struct("KeepAlivePongReceived")
                 .field("source", source)
                 .field("destination", destination)
+                .field("flow_id", flow_id)
                 .finish(),
             Self::ConnectionClosed {
                 remote_addr,
                 transport_type,
+                flow_id,
             } => formatter
                 .debug_struct("ConnectionClosed")
                 .field("remote_addr", remote_addr)
                 .field("transport_type", transport_type)
+                .field("flow_id", flow_id)
                 .finish(),
             Self::ShutdownRequested => formatter.write_str("ShutdownRequested"),
             Self::ShutdownReady => formatter.write_str("ShutdownReady"),
@@ -329,6 +465,66 @@ pub trait Transport: Send + Sync + fmt::Debug {
 
     /// Sends a SIP message to the specified destination
     async fn send_message(&self, message: Message, destination: SocketAddr) -> Result<()>;
+
+    /// Send a structured SIP message using an authority- and flow-aware route.
+    ///
+    /// Connection-oriented secure transports override this method. The default
+    /// preserves compatibility for connectionless transports while refusing to
+    /// silently discard an exact flow requirement.
+    async fn send_message_via(&self, message: Message, route: TransportRoute) -> Result<()> {
+        if route.flow_id.is_some() {
+            return Err(Error::InvalidState(
+                "transport does not support exact flow routing".into(),
+            ));
+        }
+        self.send_message(message, route.destination).await
+    }
+
+    /// Send a message and return the concrete route that carried it.
+    /// Connection-oriented implementations bind the returned route to the
+    /// selected opaque flow before exposing the send as successful. Client
+    /// transactions retain that route so a queued response remains verifiable
+    /// even when the peer closes before the event consumer runs.
+    async fn send_message_on_route(
+        &self,
+        message: Message,
+        mut route: TransportRoute,
+    ) -> Result<TransportRoute> {
+        self.send_message_via(message, route.clone()).await?;
+        if route.flow_id.is_none() {
+            route.flow_id = self.resolve_flow_id_for_route(&route).await;
+        }
+        Ok(route)
+    }
+
+    /// Prepare and bind a route before any SIP bytes are written.
+    ///
+    /// Client transactions use this two-phase hook to retain an exact stream
+    /// identity before a peer can respond and immediately close. The default
+    /// is sufficient for connectionless transports.
+    async fn prepare_message_route(
+        &self,
+        _message: &Message,
+        route: TransportRoute,
+    ) -> Result<TransportRoute> {
+        Ok(route)
+    }
+
+    /// Resolve the established flow currently represented by an outbound
+    /// route. Used to bind later lifecycle operations to the same connection.
+    fn flow_id_for_route(&self, _route: &TransportRoute) -> Option<TransportFlowId> {
+        None
+    }
+
+    /// Reliably resolve an established flow for security-sensitive routing.
+    ///
+    /// The synchronous compatibility probe may conservatively return `None`
+    /// while an internal registry lock is busy. Transaction validation must
+    /// use this awaited variant so transient contention cannot reject a valid
+    /// authenticated response.
+    async fn resolve_flow_id_for_route(&self, route: &TransportRoute) -> Option<TransportFlowId> {
+        self.flow_id_for_route(route)
+    }
 
     /// Closes the transport
     async fn close(&self) -> Result<()>;
@@ -445,6 +641,16 @@ pub trait Transport: Send + Sync + fmt::Debug {
         ))
     }
 
+    /// Send non-SIP flow bytes on an exact route.
+    async fn send_raw_via(&self, route: TransportRoute, data: Bytes) -> Result<()> {
+        if route.flow_id.is_some() {
+            return Err(Error::InvalidState(
+                "transport does not support exact raw flow routing".into(),
+            ));
+        }
+        self.send_raw(route.destination, data).await
+    }
+
     /// Send pre-built SIP-formatted bytes verbatim to `destination`.
     ///
     /// Unlike [`Transport::send_raw`] (RFC 5626 §3.5.1 keep-alive
@@ -463,6 +669,16 @@ pub trait Transport: Send + Sync + fmt::Debug {
         Err(crate::error::Error::NotImplemented(
             "send_message_raw is not supported on this transport".to_string(),
         ))
+    }
+
+    /// Send pre-built SIP bytes using an authority- and flow-aware route.
+    async fn send_message_raw_via(&self, bytes: Bytes, route: TransportRoute) -> Result<()> {
+        if route.flow_id.is_some() {
+            return Err(Error::InvalidState(
+                "transport does not support exact raw SIP flow routing".into(),
+            ));
+        }
+        self.send_message_raw(bytes, route.destination).await
     }
 
     /// Forward a serialized SIP message verbatim while pushing or
@@ -499,6 +715,17 @@ pub trait Transport: Send + Sync + fmt::Debug {
     ) -> Result<()> {
         let rewritten = apply_via_rewrite(bytes, rewrite)?;
         self.send_message_raw(rewritten, destination).await
+    }
+
+    /// Flow-aware variant of [`Transport::forward_raw_with_via_rewrite`].
+    async fn forward_raw_with_via_rewrite_via(
+        &self,
+        bytes: Bytes,
+        rewrite: ViaRewrite,
+        route: TransportRoute,
+    ) -> Result<()> {
+        let rewritten = apply_via_rewrite(bytes, rewrite)?;
+        self.send_message_raw_via(rewritten, route).await
     }
 }
 
@@ -644,6 +871,7 @@ mod tests {
                 source,
                 destination,
                 transport_type: TransportType::Tcp,
+                flow_id: Some(TransportFlowId::for_test(1)),
                 raw_bytes: Some(Bytes::from_static(RAW_SECRET.as_bytes())),
                 timing: None,
                 connection_metadata: None,
@@ -659,6 +887,7 @@ mod tests {
                 source,
                 destination,
                 transport_type: TransportType::Tls,
+                flow_id: Some(TransportFlowId::for_test(2)),
                 raw_bytes: None,
                 timing: None,
                 connection_metadata: None,
@@ -674,6 +903,7 @@ mod tests {
                 source,
                 destination,
                 transport_type: TransportType::Udp,
+                flow_id: None,
                 raw_bytes: None,
                 timing: None,
                 connection_metadata: None,

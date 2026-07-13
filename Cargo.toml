@@ -206,10 +206,11 @@ collapsible_else_if = "allow"
 #
 # Package names are unchanged on crates.io (rvoip-sip-core, etc.) — only
 # the in-repo directory changed. See the grouped [workspace] members above.
-# Beta-tier crates (publish to crates.io as 0.2.2).
+# Beta-tier crates normally track the 0.2 line. SIP transport and dialog are
+# coordinated at 0.3 for the semver-breaking flow-aware routing API.
 rvoip-sip-core      = { path = "crates/sip/sip-core", version = "0.2.5" }
-rvoip-sip-transport = { path = "crates/sip/sip-transport", version = "0.2.5" }
-rvoip-sip-dialog    = { path = "crates/sip/sip-dialog", version = "0.2.5" }
+rvoip-sip-transport = { path = "crates/sip/sip-transport", version = "0.3.0" }
+rvoip-sip-dialog    = { path = "crates/sip/sip-dialog", version = "0.3.0" }
 rvoip-sip-proxy     = { path = "crates/sip/sip-proxy", version = "0.2.5" }
 rvoip-sip-registrar = { path = "crates/sip/sip-registrar", version = "0.2.5" }
 rvoip-rtp-core      = { path = "crates/media/rtp-core", version = "0.2.5" }

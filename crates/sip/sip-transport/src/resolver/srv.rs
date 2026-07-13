@@ -16,7 +16,8 @@ pub fn default_port_for_scheme(scheme: &Scheme) -> u16 {
 /// RFC 3263 §4.1 service label for `_service._proto.host` SRV lookups.
 ///
 /// Returns `None` when the (scheme, transport) combination is invalid
-/// per RFC 3263 §4.2 — specifically `sips:` paired with `;transport=udp`
+/// per RFC 3263 §4.2 — specifically `sips:` paired with an insecure
+/// `;transport=udp` or `;transport=ws`
 /// (TLS-capable transport is mandatory for the SIPS scheme).
 ///
 /// Examples:
@@ -26,18 +27,18 @@ pub fn default_port_for_scheme(scheme: &Scheme) -> u16 {
 /// - `(Sips, Tls/Tcp)` → `_sips._tcp.example.com`
 /// - `(Sip, Ws)` → `_sip._ws.example.com`   (RFC 7118)
 /// - `(Sip, Wss)` → `_sips._wss.example.com` (RFC 7118)
-/// - `(Sips, Udp)` → `None`  (forbidden by RFC 3263 §4.2)
+/// - `(Sips, Udp/Ws)` → `None`  (insecure and forbidden)
 pub fn srv_service_name(host: &str, transport: TransportType, scheme: &Scheme) -> Option<String> {
-    // sips: pinned to a TLS-capable transport. UDP is forbidden — caller
+    // sips: pinned to a TLS-capable transport. UDP and plain WS are forbidden — caller
     // should map this to ResolverError::Forbidden, not silently coerce.
-    if matches!(scheme, Scheme::Sips) && matches!(transport, TransportType::Udp) {
+    if matches!(scheme, Scheme::Sips) && matches!(transport, TransportType::Udp | TransportType::Ws)
+    {
         return None;
     }
 
     let (service, proto) = match (scheme, transport) {
         // `sips:` URIs travel over TLS-over-TCP regardless of any
         // ;transport= hint other than the WebSocket variants below.
-        (Scheme::Sips, TransportType::Ws) => ("_sip", "_ws"),
         (Scheme::Sips, TransportType::Wss) => ("_sips", "_wss"),
         (Scheme::Sips, _) => ("_sips", "_tcp"),
         (_, TransportType::Tls) => ("_sips", "_tcp"),

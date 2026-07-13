@@ -71,7 +71,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, trace, warn};
 
 use rvoip_sip_core::prelude::*;
-use rvoip_sip_transport::Transport;
+use rvoip_sip_transport::{Transport, TransportRoute};
 
 use crate::transaction::client::{
     ClientTransaction, ClientTransactionData, CommonClientTransaction,
@@ -270,10 +270,10 @@ impl ClientInviteLogic {
         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "ClientInviteLogic: Sending initial request in Calling state");
         let request_guard: &Request = &data.request;
         if let Err(e) = data
-            .transport
-            .send_message(Message::Request(request_guard.clone()), data.remote_addr)
+            .send_on_request_route(Message::Request(request_guard.clone()))
             .await
         {
+            data.complete_initial_send(false);
             error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send initial request from Calling state");
             common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
             // If send fails, command a transition to Terminated
@@ -284,6 +284,7 @@ impl ClientInviteLogic {
                 .await;
             return Err(Error::transport_error(e, "Failed to send initial request"));
         }
+        data.complete_initial_send(true);
         // `request_guard` is a plain `&Request`, no lock to release.
 
         // Start timers for Calling state
@@ -317,8 +318,7 @@ impl ClientInviteLogic {
                 // Retransmit the request
                 let request_guard: &Request = &data.request;
                 if let Err(e) = data
-                    .transport
-                    .send_message(Message::Request(request_guard.clone()), data.remote_addr)
+                    .send_on_request_route(Message::Request(request_guard.clone()))
                     .await
                 {
                     error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to retransmit request");
@@ -420,11 +420,7 @@ impl ClientInviteLogic {
         match utils::create_ack_from_invite(&request_guard, response) {
             Ok(ack) => {
                 // Send the ACK request
-                if let Err(e) = data
-                    .transport
-                    .send_message(Message::Request(ack), data.remote_addr)
-                    .await
-                {
+                if let Err(e) = data.send_on_request_route(Message::Request(ack)).await {
                     error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send ACK");
                     common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
                     return Err(Error::transport_error(e, "Failed to send ACK"));
@@ -750,6 +746,27 @@ impl ClientInviteTransaction {
         timer_config_override: Option<TimerSettings>,
         command_channel_capacity: usize,
     ) -> Result<Self> {
+        Self::new_with_route_and_command_channel_capacity(
+            id,
+            request,
+            TransportRoute::new(remote_addr),
+            transport,
+            events_tx,
+            timer_config_override,
+            command_channel_capacity,
+        )
+    }
+
+    /// Create a client INVITE transaction bound to an explicit resolved route.
+    pub fn new_with_route_and_command_channel_capacity(
+        id: TransactionKey,
+        request: Request,
+        request_route: TransportRoute,
+        transport: Arc<dyn Transport>,
+        events_tx: mpsc::Sender<TransactionEvent>,
+        timer_config_override: Option<TimerSettings>,
+        command_channel_capacity: usize,
+    ) -> Result<Self> {
         tracing::trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&id), "Creating new ClientInviteTransaction");
 
         if request.method() != Method::Invite {
@@ -760,6 +777,7 @@ impl ClientInviteTransaction {
 
         let timer_config = timer_config_override.unwrap_or_default();
         let (cmd_tx, local_cmd_rx) = mpsc::channel(command_channel_capacity.max(1));
+        let remote_addr = request_route.destination;
 
         let data = Arc::new(ClientTransactionData {
             id: id.clone(),
@@ -768,11 +786,14 @@ impl ClientInviteTransaction {
             request: Arc::new(request.clone()),
             last_response: Arc::new(Mutex::new(None)),
             remote_addr,
+            request_route: Arc::new(Mutex::new(request_route)),
             transport,
             events_tx,
             cmd_tx: cmd_tx.clone(),
             event_loop_handle: Arc::new(Mutex::new(None)),
             timer_config: timer_config.clone(),
+            initial_send_state: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            initial_send_notify: Arc::new(tokio::sync::Notify::new()),
         });
 
         let logic = Arc::new(ClientInviteLogic {
@@ -841,20 +862,7 @@ impl ClientTransaction for ClientInviteTransaction {
             {
                 Ok(_) => {
                     tracing::trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Successfully sent TransitionTo command");
-                    // Wait a small amount of time to allow the transaction runner to process the command
-                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-                    // Verify state change
-                    let new_state = data.state.get();
-                    tracing::trace!("State after sending command: {:?}", new_state);
-                    if new_state != TransactionState::Calling {
-                        tracing::trace!(
-                            "WARNING: State didn't change to Calling, still: {:?}",
-                            new_state
-                        );
-                    }
-
-                    Ok(())
+                    data.await_initial_send().await
                 }
                 Err(e) => {
                     tracing::trace!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send command");

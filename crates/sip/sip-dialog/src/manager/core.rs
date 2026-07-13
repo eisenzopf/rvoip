@@ -1051,6 +1051,19 @@ impl DialogManager {
     ///
     /// No-op when `outbound_keepalive_interval` is `None`.
     pub fn start_outbound_ping(&self, flow_key: (String, u32, String), destination: SocketAddr) {
+        self.start_outbound_ping_on_route(
+            flow_key,
+            rvoip_sip_transport::TransportRoute::new(destination),
+        );
+    }
+
+    /// Spawn a keep-alive monitor bound to the exact established transport
+    /// flow represented by `route`.
+    pub fn start_outbound_ping_on_route(
+        &self,
+        flow_key: (String, u32, String),
+        mut route: rvoip_sip_transport::TransportRoute,
+    ) {
         let Some(interval) = self.outbound_keepalive_interval() else {
             return;
         };
@@ -1061,8 +1074,16 @@ impl DialogManager {
         // Replace any prior flow for this key (idempotent on re-REGISTER).
         self.stop_outbound_ping(&flow_key);
 
-        let flow = Arc::new(OutboundFlow::new(flow_key.clone(), destination, interval));
         let transport = self.transaction_manager.transport().clone();
+        if route.flow_id.is_none() {
+            route.flow_id = transport.flow_id_for_route(&route);
+        }
+        let destination = route.destination;
+        let flow = Arc::new(OutboundFlow::new_with_route(
+            flow_key.clone(),
+            route,
+            interval,
+        ));
         let manager = self.clone();
         let flow_for_task = flow.clone();
 
@@ -1135,12 +1156,24 @@ impl DialogManager {
     /// treated as an answer to the in-flight ping (if any). No-op when
     /// no flow is registered for the address.
     pub async fn on_pong_received(&self, source: SocketAddr) {
+        self.on_pong_received_on_flow(source, None).await;
+    }
+
+    /// Transport pong callback with an exact connection identity.
+    pub async fn on_pong_received_on_flow(
+        &self,
+        source: SocketAddr,
+        flow_id: Option<rvoip_sip_transport::TransportFlowId>,
+    ) {
         let keys: Vec<(String, u32, String)> = match self.flow_by_destination.get(&source) {
             Some(entry) => entry.value().clone(),
             None => return,
         };
         for key in keys {
             if let Some(flow) = self.outbound_flows.get(&key).map(|e| e.value().clone()) {
+                if flow.route.flow_id != flow_id {
+                    continue;
+                }
                 flow.on_pong().await;
                 tracing::trace!(
                     src = %source,
@@ -1157,6 +1190,15 @@ impl DialogManager {
     /// session-core's problem (trigger re-REGISTER) — dialog-core only
     /// reports the flow death.
     pub async fn on_connection_closed(&self, remote_addr: SocketAddr) {
+        self.on_connection_closed_on_flow(remote_addr, None).await;
+    }
+
+    /// Transport close callback with an exact connection identity.
+    pub async fn on_connection_closed_on_flow(
+        &self,
+        remote_addr: SocketAddr,
+        flow_id: Option<rvoip_sip_transport::TransportFlowId>,
+    ) {
         let keys: Vec<(String, u32, String)> = match self.flow_by_destination.get(&remote_addr) {
             Some(entry) => entry.value().clone(),
             None => return,
@@ -1166,6 +1208,9 @@ impl DialogManager {
                 Some(f) => f,
                 None => continue,
             };
+            if flow.route.flow_id != flow_id {
+                continue;
+            }
             if flow.mark_failed().await {
                 tracing::info!(
                     dest = %remote_addr,
@@ -1336,13 +1381,21 @@ impl DialogManager {
         tokio::spawn(async move {
             while let Some(event) = flow_rx.recv().await {
                 match event {
-                    crate::manager::outbound_flow::FlowTransportEvent::PongReceived { source } => {
-                        flow_consumer.on_pong_received(source).await;
+                    crate::manager::outbound_flow::FlowTransportEvent::PongReceived {
+                        source,
+                        flow_id,
+                    } => {
+                        flow_consumer
+                            .on_pong_received_on_flow(source, flow_id)
+                            .await;
                     }
                     crate::manager::outbound_flow::FlowTransportEvent::ConnectionClosed {
                         remote_addr,
+                        flow_id,
                     } => {
-                        flow_consumer.on_connection_closed(remote_addr).await;
+                        flow_consumer
+                            .on_connection_closed_on_flow(remote_addr, flow_id)
+                            .await;
                     }
                 }
             }
@@ -3404,7 +3457,7 @@ async fn run_outbound_flow_loop(
         tokio::select! {
             _ = ticker.tick() => {
                 match transport
-                    .send_raw(flow.destination, Bytes::from_static(b"\r\n\r\n"))
+                    .send_raw_via(flow.route.clone(), Bytes::from_static(b"\r\n\r\n"))
                     .await
                 {
                     Ok(()) => {

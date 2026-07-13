@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, trace, warn};
 
 use rvoip_sip_core::prelude::*;
-use rvoip_sip_transport::Transport;
+use rvoip_sip_transport::{Transport, TransportRoute};
 
 use crate::transaction::common_logic;
 use crate::transaction::error::{Error, Result};
@@ -128,7 +128,10 @@ impl ServerNonInviteLogic {
                     if let Some(response) = &*last_response {
                         if let Err(e) = data
                             .transport
-                            .send_message(Message::Response(response.clone()), data.remote_addr)
+                            .send_message_via(
+                                Message::Response(response.clone()),
+                                data.response_route.clone(),
+                            )
                             .await
                         {
                             error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to retransmit response");
@@ -290,6 +293,27 @@ impl ServerNonInviteTransaction {
         timer_config_override: Option<TimerSettings>,
         command_channel_capacity: usize,
     ) -> Result<Self> {
+        Self::new_with_response_route_and_command_channel_capacity(
+            id,
+            request,
+            TransportRoute::new(remote_addr),
+            transport,
+            events_tx,
+            timer_config_override,
+            command_channel_capacity,
+        )
+    }
+
+    /// Create a server non-INVITE transaction bound to the exact ingress route.
+    pub fn new_with_response_route_and_command_channel_capacity(
+        id: TransactionKey,
+        request: Request,
+        response_route: TransportRoute,
+        transport: Arc<dyn Transport>,
+        events_tx: mpsc::Sender<TransactionEvent>,
+        timer_config_override: Option<TimerSettings>,
+        command_channel_capacity: usize,
+    ) -> Result<Self> {
         if request.method() == Method::Invite || request.method() == Method::Ack {
             return Err(Error::Other(
                 "Request must not be INVITE or ACK for non-INVITE server transaction".to_string(),
@@ -298,6 +322,7 @@ impl ServerNonInviteTransaction {
 
         let timer_config = timer_config_override.unwrap_or_default();
         let (cmd_tx, local_cmd_rx) = mpsc::channel(command_channel_capacity.max(1));
+        let remote_addr = response_route.destination;
 
         let data = Arc::new(ServerTransactionData {
             id: id.clone(),
@@ -306,6 +331,7 @@ impl ServerNonInviteTransaction {
             request: Arc::new(request.clone()),
             last_response: Arc::new(Mutex::new(None)),
             remote_addr,
+            response_route,
             transport,
             events_tx,
             cmd_tx: cmd_tx.clone(),
@@ -477,7 +503,10 @@ impl ServerTransaction for ServerNonInviteTransaction {
 
             // Always send the response
             data.transport
-                .send_message(Message::Response(response.clone()), data.remote_addr)
+                .send_message_via(
+                    Message::Response(response.clone()),
+                    data.response_route.clone(),
+                )
                 .await
                 .map_err(|e| Error::transport_error(e, "Failed to send response"))?;
 

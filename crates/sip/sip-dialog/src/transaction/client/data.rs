@@ -17,13 +17,14 @@ use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::{debug, trace};
 
 use rvoip_sip_core::prelude::*;
-use rvoip_sip_transport::Transport;
+use rvoip_sip_transport::{Transport, TransportRoute};
 
 use crate::transaction::error::{Error, Result};
 use crate::transaction::runner::{
@@ -33,6 +34,7 @@ use crate::transaction::state::TransactionLifecycle;
 use crate::transaction::timer::TimerSettings;
 use crate::transaction::{
     AtomicTransactionState, InternalTransactionCommand, TransactionEvent, TransactionKey,
+    TransactionState,
 };
 
 /// Command sender for transaction event loops.
@@ -86,6 +88,10 @@ pub struct ClientTransactionData {
     /// Remote address to which requests are sent
     pub remote_addr: SocketAddr,
 
+    /// Authority- and transport-bearing route for every initial send and
+    /// retransmission of this client transaction.
+    pub request_route: Arc<Mutex<TransportRoute>>,
+
     /// Transport layer for sending SIP messages
     pub transport: Arc<dyn Transport>,
 
@@ -100,6 +106,13 @@ pub struct ClientTransactionData {
 
     /// Configuration for transaction timers (T1, T2, etc.)
     pub timer_config: TimerSettings,
+
+    /// Completion handshake for the first transport write. `initiate()` must
+    /// not report success merely because the state-transition command was
+    /// queued: RFC 3263 candidate failover depends on the actual initial send
+    /// result. 0=pending, 1=sent, 2=failed.
+    pub(crate) initial_send_state: Arc<AtomicU8>,
+    pub(crate) initial_send_notify: Arc<Notify>,
 }
 
 impl Drop for ClientTransactionData {
@@ -113,6 +126,78 @@ impl Drop for ClientTransactionData {
                 debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&self.id), "Aborted client transaction event loop");
             }
         }
+    }
+}
+
+impl ClientTransactionData {
+    pub(crate) fn complete_initial_send(&self, succeeded: bool) {
+        let state = if succeeded { 1 } else { 2 };
+        if self
+            .initial_send_state
+            .compare_exchange(0, state, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            // One initiator waits for this one-shot result. `notify_one`
+            // retains a permit when completion wins the race with the first
+            // poll of `notified()`; `notify_waiters` would lose that wake.
+            self.initial_send_notify.notify_one();
+        }
+    }
+
+    pub(crate) async fn await_initial_send(&self) -> Result<()> {
+        loop {
+            // Register before reading the state so completion between the
+            // read and await cannot be lost.
+            let notified = self.initial_send_notify.notified();
+            match self.initial_send_state.load(Ordering::Acquire) {
+                1 => return Ok(()),
+                2 => {
+                    return Err(Error::transport_error(
+                        rvoip_sip_transport::Error::ProtocolError(
+                            "initial request transport send failed".into(),
+                        ),
+                        "Failed to send initial request",
+                    ));
+                }
+                _ if self.state.get() == TransactionState::Terminated => {
+                    return Err(Error::transport_error(
+                        rvoip_sip_transport::Error::TransportClosed,
+                        "Initial request transaction terminated before transport send",
+                    ));
+                }
+                _ => {
+                    // A transaction runner can terminate before entering its
+                    // first state (for example when its TU event channel is
+                    // already closed), in which case no transport handler can
+                    // complete the one-shot. Periodically re-check state so
+                    // `initiate()` remains bounded by lifecycle progress.
+                    tokio::select! {
+                        _ = notified => {}
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// Send on the retained route and atomically retain the concrete selected
+    /// flow before the transaction reports the send as successful.
+    pub async fn send_on_request_route(&self, message: Message) -> rvoip_sip_transport::Result<()> {
+        let route = self.request_route.lock().await.clone();
+        let prepared = self
+            .transport
+            .prepare_message_route(&message, route)
+            .await?;
+        // Publish the exact flow before the first SIP byte can trigger a
+        // response. The event dispatcher can authenticate against this route
+        // even if the peer responds and closes immediately.
+        *self.request_route.lock().await = prepared.clone();
+        let bound = self
+            .transport
+            .send_message_on_route(message, prepared)
+            .await?;
+        *self.request_route.lock().await = bound;
+        Ok(())
     }
 }
 
@@ -173,6 +258,10 @@ impl fmt::Debug for ClientTransactionData {
             )
             .field("state", &self.state.get())
             .field("remote_addr", &self.remote_addr)
+            .field(
+                "request_route_available",
+                &self.request_route.try_lock().is_ok(),
+            )
             .field("request_header_count", &self.request.all_headers().len())
             .field("request_body_len", &self.request.body().len())
             .field(

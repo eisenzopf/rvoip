@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::transport::validate_typed_outbound_message;
+use crate::transport::{next_transport_flow_id, validate_typed_outbound_message, TransportFlowId};
 use bytes::{Buf, BufMut, BytesMut};
 use rvoip_sip_core::framing::{inspect_sip_frame_with_policy, SipFrameStatus, SipFramingPolicy};
 use rvoip_sip_core::{parse_message, Message};
@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 use tracing::{debug, trace, warn};
 
 // Buffer sizes
@@ -59,6 +59,8 @@ impl std::fmt::Debug for ReceivedFrame {
 /// where a ping task writes while the reader simultaneously awaits a
 /// pong.
 pub struct TcpConnection {
+    /// Opaque identity for this concrete socket lifetime.
+    flow_id: TransportFlowId,
     /// Owned write half. Held under a mutex so concurrent senders
     /// serialise their writes (RFC 3261 §7.5 requires atomic message
     /// delivery over stream transports).
@@ -74,6 +76,9 @@ pub struct TcpConnection {
     peer_addr: SocketAddr,
     /// Whether the connection is closed
     closed: AtomicBool,
+    /// Wakes a blocked read immediately when pool/transport lifecycle closes
+    /// this exact socket.
+    close_signal: watch::Sender<bool>,
     /// Buffer for receiving data
     recv_buffer: Mutex<BytesMut>,
 }
@@ -92,11 +97,13 @@ impl TcpConnection {
         let local_addr = stream.local_addr().map_err(Error::LocalAddrFailed)?;
         let (read_half, write_half) = stream.into_split();
         Ok(Self {
+            flow_id: next_transport_flow_id(),
             write_half: Mutex::new(write_half),
             read_half: Mutex::new(read_half),
             local_addr,
             peer_addr,
             closed: AtomicBool::new(false),
+            close_signal: watch::channel(false).0,
             recv_buffer: Mutex::new(BytesMut::with_capacity(INITIAL_BUFFER_SIZE)),
         })
     }
@@ -104,6 +111,11 @@ impl TcpConnection {
     /// Returns the peer address of the connection
     pub fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
+    }
+
+    /// Returns the opaque identity for this concrete socket lifetime.
+    pub fn flow_id(&self) -> TransportFlowId {
+        self.flow_id
     }
 
     /// Returns the local address of the connection
@@ -206,6 +218,10 @@ impl TcpConnection {
         // Acquire locks for the buffer and read half
         let mut recv_buffer = self.recv_buffer.lock().await;
         let mut reader = self.read_half.lock().await;
+        let mut close_rx = self.close_signal.subscribe();
+        if *close_rx.borrow() {
+            return Err(Error::TransportClosed);
+        }
 
         loop {
             // RFC 5626 §3.5.1: keep-alive frames only legal at buffer
@@ -234,7 +250,14 @@ impl TcpConnection {
             // No complete frame, read more data
             let mut temp_buffer = vec![0; 8192];
 
-            match reader.read(&mut temp_buffer).await {
+            let read = tokio::select! {
+                changed = close_rx.changed() => {
+                    let _ = changed;
+                    return Err(Error::TransportClosed);
+                }
+                read = reader.read(&mut temp_buffer) => read,
+            };
+            match read {
                 Ok(0) => {
                     // End of stream
                     if recv_buffer.is_empty() {
@@ -313,6 +336,7 @@ impl TcpConnection {
             // Already closed
             return Ok(());
         }
+        self.close_signal.send_replace(true);
 
         // Shutting down the write half closes the socket from both
         // directions (read half will return EOF on its next poll).

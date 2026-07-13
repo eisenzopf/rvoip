@@ -35,7 +35,7 @@ use std::env;
 /// to be added without modifying the runner itself.
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, error::TrySendError};
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, trace};
 
 use crate::diagnostics;
 use crate::transaction::logic::TransactionLogic;
@@ -209,21 +209,12 @@ pub async fn run_transaction_loop<D, TH, L>(
                             debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Dropped StateChanged event because TU event channel is full");
                         }
                         Err(TrySendError::Closed(_)) => {
-                            error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Failed to send StateChanged event: channel closed");
-
-                            // In test mode, don't terminate transactions when event channels close
-                            if is_test_mode {
-                                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Test mode detected, continuing despite closed event channel");
-                            } else if requested_new_state == TransactionState::Terminated {
-                                // If we're already terminating, this is expected
-                                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Event channel closed during termination - expected");
-                            } else {
-                                // In production, only terminate if we're certain the channel is closed
-                                warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Event channel appears closed, initiating graceful shutdown");
-                                logic.cancel_all_specific_timers(&mut timer_handles);
-                                data.as_ref_state().set(TransactionState::Terminated);
-                                break;
-                            }
+                            // TU observation is optional. Dropping the public
+                            // event receiver must not prevent the state action
+                            // (especially the initial network send) from
+                            // running or silently turn signaling into a local
+                            // transport-closed failure.
+                            debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), test_mode=is_test_mode, "StateChanged observer channel closed; continuing transaction");
                         }
                     }
                 } else {

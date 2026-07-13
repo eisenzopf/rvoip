@@ -188,7 +188,7 @@ use rvoip_sip_core::{Host, TypedHeader};
 use rvoip_sip_transport::diagnostics as udp_diagnostics;
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{
-    Error as TransportError, Transport, TransportEvent, TransportReceiveTiming,
+    Error as TransportError, Transport, TransportEvent, TransportReceiveTiming, TransportRoute,
 };
 
 use crate::diagnostics;
@@ -263,6 +263,7 @@ struct InboundPrincipalBinding {
     principal: AuthenticatedPrincipal,
     source: SocketAddr,
     transport_type: rvoip_sip_transport::transport::TransportType,
+    flow_id: Option<rvoip_sip_transport::TransportFlowId>,
     tls_leaf_sha256: Option<String>,
 }
 
@@ -272,6 +273,7 @@ impl InboundPrincipalBinding {
             principal,
             source: context.source,
             transport_type: context.transport_type,
+            flow_id: context.flow_id,
             tls_leaf_sha256: context.connection_metadata.as_ref().map(|metadata| {
                 metadata
                     .tls_peer_identity
@@ -284,6 +286,7 @@ impl InboundPrincipalBinding {
     fn matches(&self, context: &SipRequestIngressContext) -> bool {
         self.source == context.source
             && self.transport_type == context.transport_type
+            && self.flow_id == context.flow_id
             && self.tls_leaf_sha256
                 == context.connection_metadata.as_ref().map(|metadata| {
                     metadata
@@ -430,9 +433,9 @@ pub struct TransactionManager {
     invite_2xx_response_due_queue: Arc<std::sync::Mutex<BinaryHeap<Invite2xxDueEntry>>>,
     invite_2xx_response_due_sequence: Arc<AtomicU64>,
     terminated_cleanup_tx: Option<mpsc::Sender<TerminatedCleanupItem>>,
-    /// Transaction destinations — `transaction_id → SocketAddr`.
-    /// DashMap for sharded lock-free reads.
-    transaction_destinations: Arc<DashMap<TransactionKey, SocketAddr>>,
+    /// Client transaction routes, including authority and the exact response
+    /// flow once one has been observed.
+    transaction_destinations: Arc<DashMap<TransactionKey, TransportRoute>>,
     /// Event sender
     events_tx: mpsc::Sender<TransactionEvent>,
     /// Additional event subscribers. ArcSwap so the broadcast hot path
@@ -2068,6 +2071,15 @@ impl TransactionManager {
                 return Err(e);
             }
 
+            // The transport returns the selected opaque flow as part of the
+            // successful send. Persist it before draining any queued response
+            // events so an immediate peer close cannot erase the identity we
+            // need to authenticate that response.
+            let bound_route = client_tx.data().request_route.lock().await.clone();
+            if let Some(mut route) = self.transaction_destinations.get_mut(transaction_id) {
+                *route = bound_route;
+            }
+
             let current_state = tx.state();
             if current_state == TransactionState::Terminated {
                 if tx_kind == TransactionKind::InviteClient {
@@ -2591,7 +2603,17 @@ impl TransactionManager {
     ) -> Option<SocketAddr> {
         self.transaction_destinations
             .get(transaction_id)
-            .map(|r| *r.value())
+            .map(|route| route.destination)
+    }
+
+    /// Return the authority- and flow-bearing route used by a client transaction.
+    pub async fn transaction_route(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Option<TransportRoute> {
+        self.transaction_destinations
+            .get(transaction_id)
+            .map(|route| route.value().clone())
     }
 
     /// Subscribe to events from all transactions.
@@ -3372,6 +3394,27 @@ impl TransactionManager {
         request: Request,
         destination: SocketAddr,
     ) -> Result<TransactionKey> {
+        let route = crate::transaction::transport::multiplexed::transport_route_for_request(
+            &request,
+            destination,
+        )?;
+        self.create_client_transaction_on_route(request, route)
+            .await
+    }
+
+    /// Create a client transaction using an explicit resolver-selected route.
+    /// The route's transport and authenticated authority govern every initial
+    /// send and retransmission; they are not reconstructed from the request.
+    pub async fn create_client_transaction_on_route(
+        &self,
+        request: Request,
+        mut request_route: TransportRoute,
+    ) -> Result<TransactionKey> {
+        crate::transaction::transport::multiplexed::validate_request_route_security(
+            &request,
+            &request_route,
+        )?;
+        let destination = request_route.destination;
         // Reject caller-controlled start lines and fields before route/Via
         // inspection, normalization, transaction allocation, or any route log.
         rvoip_sip_core::validation::validate_typed_outbound_message(&Message::Request(
@@ -3463,6 +3506,36 @@ impl TransactionManager {
             "Client transaction request Via metadata after normalization"
         );
 
+        let derived_route =
+            crate::transaction::transport::multiplexed::transport_route_for_request(
+                &modified_request,
+                destination,
+            )?;
+        if request_route.transport_type.is_none() {
+            request_route.transport_type = derived_route.transport_type;
+        }
+        if request_route.authority.is_none() {
+            request_route.authority = derived_route.authority;
+        }
+        if request_route.transport_type == Some(TransportType::Udp)
+            && Message::Request(modified_request.clone()).to_bytes().len()
+                > self.transport.max_safe_message_size()
+            && self.transport.supports_tcp()
+        {
+            request_route.transport_type = Some(TransportType::Tcp);
+        }
+        if request.method() != Method::Cancel {
+            let via_transport = match request_route.transport_type {
+                Some(TransportType::Udp) => "UDP",
+                Some(TransportType::Tcp) => "TCP",
+                Some(TransportType::Tls) => "TLS",
+                Some(TransportType::Ws) => "WS",
+                Some(TransportType::Wss) => "WSS",
+                None => transport_token_for_request(&modified_request),
+            };
+            crate::transaction::utils::set_top_via_protocol(&mut modified_request, via_transport);
+        }
+
         rvoip_sip_core::validation::validate_wire_request(&modified_request)?;
 
         // Create the appropriate transaction. Returns Arc<dyn ClientTransaction>
@@ -3471,10 +3544,10 @@ impl TransactionManager {
         let transaction: ArcClientTransaction = match modified_request.method() {
             Method::Invite => {
                 tracing::trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Creating ClientInviteTransaction");
-                let tx = ClientInviteTransaction::new_with_command_channel_capacity(
+                let tx = ClientInviteTransaction::new_with_route_and_command_channel_capacity(
                     key.clone(),
                     modified_request.clone(),
-                    destination,
+                    request_route.clone(),
                     self.transport.clone(),
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request),
@@ -3491,10 +3564,10 @@ impl TransactionManager {
                         "Creating transaction for CANCEL with possible validation issues"
                     );
                 }
-                let tx = ClientNonInviteTransaction::new_with_command_channel_capacity(
+                let tx = ClientNonInviteTransaction::new_with_route_and_command_channel_capacity(
                     key.clone(),
                     modified_request.clone(),
-                    destination,
+                    request_route.clone(),
                     self.transport.clone(),
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request),
@@ -3510,10 +3583,10 @@ impl TransactionManager {
                         "Creating transaction for UPDATE with possible validation issues"
                     );
                 }
-                let tx = ClientNonInviteTransaction::new_with_command_channel_capacity(
+                let tx = ClientNonInviteTransaction::new_with_route_and_command_channel_capacity(
                     key.clone(),
                     modified_request.clone(),
-                    destination,
+                    request_route.clone(),
                     self.transport.clone(),
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request),
@@ -3522,10 +3595,10 @@ impl TransactionManager {
                 Arc::new(tx)
             }
             _ => {
-                let tx = ClientNonInviteTransaction::new_with_command_channel_capacity(
+                let tx = ClientNonInviteTransaction::new_with_route_and_command_channel_capacity(
                     key.clone(),
                     modified_request.clone(),
-                    destination,
+                    request_route.clone(),
                     self.transport.clone(),
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request),
@@ -3535,10 +3608,10 @@ impl TransactionManager {
             }
         };
 
-        // Store the transaction + destination
+        // Store the transaction + complete request route.
         self.client_transactions.insert(key.clone(), transaction);
         self.transaction_destinations
-            .insert(key.clone(), destination);
+            .insert(key.clone(), request_route);
 
         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Created client transaction");
 
@@ -3584,7 +3657,7 @@ impl TransactionManager {
             dest
         } else {
             match self.transaction_destinations.get(invite_tx_id) {
-                Some(entry) => *entry.value(),
+                Some(entry) => entry.destination,
                 None => {
                     return Err(Error::Other(format!(
                         "Destination for transaction {:?} not found",
@@ -3758,33 +3831,67 @@ impl TransactionManager {
     ///
     /// This is called when a new request is received from the transport layer.
     /// It creates an appropriate transaction based on the request method.
+    /// Deprecated compatibility entry point: address-only construction is
+    /// valid only for UDP. New code must use
+    /// [`Self::create_server_transaction_on_route`] for stream transports.
     pub async fn create_server_transaction(
         &self,
         request: Request,
         remote_addr: SocketAddr,
     ) -> Result<Arc<dyn ServerTransaction>> {
-        self.create_server_transaction_inner(request, remote_addr, true)
+        self.create_server_transaction_inner(
+            request,
+            TransportRoute::new(remote_addr).with_transport_type(TransportType::Udp),
+            true,
+        )
+        .await
+    }
+
+    /// Create a server transaction bound to the exact ingress transport flow.
+    pub async fn create_server_transaction_on_route(
+        &self,
+        request: Request,
+        response_route: TransportRoute,
+    ) -> Result<Arc<dyn ServerTransaction>> {
+        self.create_server_transaction_inner(request, response_route, true)
             .await
     }
 
     /// Transaction-ingress variant used while listener authorization is still
     /// pending. CANCEL publication is deferred until the authorization gate
     /// succeeds, preventing rejected requests from reaching the TU.
+    #[allow(dead_code)]
     pub(crate) async fn create_server_transaction_deferred_events(
         &self,
         request: Request,
         remote_addr: SocketAddr,
     ) -> Result<Arc<dyn ServerTransaction>> {
-        self.create_server_transaction_inner(request, remote_addr, false)
+        self.create_server_transaction_inner(
+            request,
+            TransportRoute::new(remote_addr).with_transport_type(TransportType::Udp),
+            false,
+        )
+        .await
+    }
+
+    /// Create a server transaction bound to the exact ingress route while TU
+    /// publication remains deferred behind authorization.
+    pub(crate) async fn create_server_transaction_deferred_events_on_route(
+        &self,
+        request: Request,
+        response_route: TransportRoute,
+    ) -> Result<Arc<dyn ServerTransaction>> {
+        self.create_server_transaction_inner(request, response_route, false)
             .await
     }
 
     async fn create_server_transaction_inner(
         &self,
         request: Request,
-        remote_addr: SocketAddr,
+        response_route: TransportRoute,
         publish_cancel_event: bool,
     ) -> Result<Arc<dyn ServerTransaction>> {
+        let remote_addr = response_route.destination;
         // Extract branch parameter from the top Via header
         let branch = match request.first_via() {
             Some(via) => match via.branch() {
@@ -3821,15 +3928,17 @@ impl TransactionManager {
         // Create a new transaction based on the request method
         let transaction: Arc<dyn ServerTransaction> = match request.method() {
             Method::Invite => {
-                let tx = Arc::new(ServerInviteTransaction::new_with_command_channel_capacity(
-                    key.clone(),
-                    request.clone(),
-                    remote_addr,
-                    self.transport.clone(),
-                    self.events_tx.clone(),
-                    Some(self.timer_settings.clone()),
-                    self.transaction_command_channel_capacity,
-                )?);
+                let tx = Arc::new(
+                    ServerInviteTransaction::new_with_response_route_and_command_channel_capacity(
+                        key.clone(),
+                        request.clone(),
+                        response_route.clone(),
+                        self.transport.clone(),
+                        self.events_tx.clone(),
+                        Some(self.timer_settings.clone()),
+                        self.transaction_command_channel_capacity,
+                    )?,
+                );
 
                 info!(
                     id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(tx.id()),
@@ -3860,10 +3969,10 @@ impl TransactionManager {
 
                 // Create a non-INVITE server transaction for CANCEL
                 let tx = Arc::new(
-                    ServerNonInviteTransaction::new_with_command_channel_capacity(
+                    ServerNonInviteTransaction::new_with_response_route_and_command_channel_capacity(
                         key.clone(),
                         request.clone(),
-                        remote_addr,
+                        response_route.clone(),
                         self.transport.clone(),
                         self.events_tx.clone(),
                         Some(self.timer_settings.clone()),
@@ -3883,10 +3992,10 @@ impl TransactionManager {
 
                 // Create a non-INVITE server transaction for UPDATE
                 let tx = Arc::new(
-                    ServerNonInviteTransaction::new_with_command_channel_capacity(
+                    ServerNonInviteTransaction::new_with_response_route_and_command_channel_capacity(
                         key.clone(),
                         request.clone(),
-                        remote_addr,
+                        response_route.clone(),
                         self.transport.clone(),
                         self.events_tx.clone(),
                         Some(self.timer_settings.clone()),
@@ -3899,10 +4008,10 @@ impl TransactionManager {
             }
             _ => {
                 let tx = Arc::new(
-                    ServerNonInviteTransaction::new_with_command_channel_capacity(
+                    ServerNonInviteTransaction::new_with_response_route_and_command_channel_capacity(
                         key.clone(),
                         request.clone(),
-                        remote_addr,
+                        response_route.clone(),
                         self.transport.clone(),
                         self.events_tx.clone(),
                         Some(self.timer_settings.clone()),
@@ -4025,12 +4134,13 @@ impl TransactionManager {
         &self,
         response: Response,
         wire_bytes: bytes::Bytes,
-        destination: SocketAddr,
+        route: TransportRoute,
         context: &'static str,
     ) -> std::result::Result<(), TransportError> {
+        let destination = route.destination;
         match self
             .transport
-            .send_message_raw(wire_bytes, destination)
+            .send_message_raw_via(wire_bytes, route.clone())
             .await
         {
             Ok(()) => Ok(()),
@@ -4043,7 +4153,7 @@ impl TransactionManager {
                     "Cached response raw send unavailable; falling back to structured send"
                 );
                 self.transport
-                    .send_message(Message::Response(response), destination)
+                    .send_message_via(Message::Response(response), route)
                     .await
             }
             Err(error) => Err(error),
@@ -4084,7 +4194,7 @@ impl TransactionManager {
             Invite2xxResponseCacheEntry {
                 response,
                 wire_bytes,
-                destination: tx.data().remote_addr,
+                route: tx.data().response_route.clone(),
                 created_at: now,
                 acked_at: None,
                 expires_at: now + INVITE_2XX_RESPONSE_CACHE_TTL,
@@ -4117,10 +4227,10 @@ impl TransactionManager {
         }
     }
 
-    pub(crate) async fn retransmit_cached_invite_2xx_response(
+    pub(crate) async fn retransmit_cached_invite_2xx_response_on_route(
         &self,
         transaction_id: &TransactionKey,
-        source: SocketAddr,
+        ingress_route: TransportRoute,
     ) -> Result<bool> {
         let entry = self
             .invite_2xx_response_cache
@@ -4137,18 +4247,22 @@ impl TransactionManager {
             return Ok(false);
         }
 
+        // A cached response remains bound to the exact authenticated ingress
+        // flow that created it. Address equality is insufficient when TLS or
+        // WSS virtual authorities share an IP:port; a duplicate on another
+        // flow must pass through normal authorization instead of redirecting
+        // cached bytes.
+        if ingress_route != entry.route {
+            return Ok(false);
+        }
+
         diagnostics::record_duplicate_invite_cache_hit();
         let is_200_ok = entry.response.status().as_u16() == 200;
-        let destination = if source == entry.destination {
-            entry.destination
-        } else {
-            source
-        };
 
         self.send_cached_response(
             entry.response,
             entry.wire_bytes,
-            destination,
+            entry.route,
             "Failed to retransmit cached INVITE 2xx",
         )
         .await
@@ -4353,7 +4467,7 @@ impl TransactionManager {
                     send = Some((
                         entry.response.clone(),
                         entry.wire_bytes.clone(),
-                        entry.destination,
+                        entry.route.clone(),
                     ));
                     entry.retransmit_interval = entry
                         .retransmit_interval
@@ -4370,8 +4484,8 @@ impl TransactionManager {
                 diagnostics::record_invite_2xx_cache_expired();
                 expired_count += 1;
             }
-            if let Some((response, wire_bytes, destination)) = send {
-                sends.push((response, wire_bytes, destination));
+            if let Some((response, wire_bytes, route)) = send {
+                sends.push((response, wire_bytes, route));
             }
             if let Some(next_due) = next_due {
                 reschedule.push((due_entry.transaction_id, next_due));
@@ -4383,14 +4497,15 @@ impl TransactionManager {
         }
 
         let mut retransmitted = 0usize;
-        for (response, wire_bytes, destination) in sends {
+        for (response, wire_bytes, route) in sends {
             let is_200_ok = response.status().as_u16() == 200;
             let send_started = diagnostics::transaction_timing_enabled().then(Instant::now);
+            let destination = route.destination;
             match self
                 .send_cached_response(
                     response,
                     wire_bytes,
-                    destination,
+                    route,
                     "Failed to retransmit cached INVITE 2xx response",
                 )
                 .await
@@ -4577,12 +4692,13 @@ impl TransactionManager {
             warn!(method=%crate::transaction::safe_diagnostics::SafeMethod::new(&cancel_request.method()), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "CANCEL request validation issue - proceeding anyway");
         }
 
-        // Get the destination for the CANCEL request (same as the INVITE)
-        let destination = match self.transaction_destinations.get(invite_tx_id) {
-            Some(entry) => *entry.value(),
+        // CANCEL uses the complete INVITE route, including resolver-selected
+        // transport/authority and the established opaque flow.
+        let request_route = match self.transaction_destinations.get(invite_tx_id) {
+            Some(entry) => entry.value().clone(),
             None => {
                 return Err(Error::Other(format!(
-                    "No destination found for transaction {}",
+                    "No transport route found for transaction {}",
                     invite_tx_id
                 )));
             }
@@ -4590,7 +4706,7 @@ impl TransactionManager {
 
         // Create a transaction for the CANCEL request
         let cancel_tx_id = self
-            .create_client_transaction(cancel_request, destination)
+            .create_client_transaction_on_route(cancel_request, request_route)
             .await?;
 
         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&cancel_tx_id), original_id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_tx_id), "Created CANCEL transaction");

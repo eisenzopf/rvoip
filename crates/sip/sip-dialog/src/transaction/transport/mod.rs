@@ -1146,6 +1146,7 @@ mod tests {
             source: "127.0.0.1:5060".parse().unwrap(),
             destination: "127.0.0.1:5061".parse().unwrap(),
             transport_type: TransportType::Udp,
+            flow_id: None,
             raw_bytes: None,
             timing: None,
             connection_metadata: None,

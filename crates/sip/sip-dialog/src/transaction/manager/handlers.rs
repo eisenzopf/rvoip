@@ -28,7 +28,7 @@ use std::time::Instant;
 use rvoip_infra_common::events::cross_crate::SipTraceDirection;
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_transport::transport::TransportType;
-use rvoip_sip_transport::{Transport, TransportEvent};
+use rvoip_sip_transport::{Transport, TransportEvent, TransportFlowId, TransportRoute};
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
@@ -43,6 +43,36 @@ use crate::transaction::{TransactionEvent, TransactionKey, TransactionKind, Tran
 
 use super::types::*;
 use super::TransactionManager;
+
+fn bind_client_response_route(
+    expected: &TransportRoute,
+    source: SocketAddr,
+    transport_type: TransportType,
+    ingress_flow_id: Option<TransportFlowId>,
+    resolved_expected_flow_id: Option<TransportFlowId>,
+) -> Option<TransportRoute> {
+    if expected.destination != source || expected.transport_type != Some(transport_type) {
+        return None;
+    }
+
+    let mut bound = expected.clone();
+    match transport_type {
+        TransportType::Udp => {
+            if ingress_flow_id.is_some() {
+                return None;
+            }
+            bound.flow_id = None;
+        }
+        TransportType::Tcp | TransportType::Tls | TransportType::Ws | TransportType::Wss => {
+            let expected_flow_id = expected.flow_id.or(resolved_expected_flow_id)?;
+            if ingress_flow_id != Some(expected_flow_id) {
+                return None;
+            }
+            bound.flow_id = Some(expected_flow_id);
+        }
+    }
+    Some(bound)
+}
 
 /// Handle transport message events and route them to appropriate transactions.
 ///
@@ -88,11 +118,16 @@ pub(crate) async fn handle_transport_message(
             source,
             destination,
             transport_type,
+            flow_id,
             connection_metadata,
             ..
         } => {
             let ingress_context =
                 SipRequestIngressContext::new(source, destination, transport_type);
+            let ingress_context = match flow_id {
+                Some(flow_id) => ingress_context.with_flow_id(flow_id),
+                None => ingress_context,
+            };
             let ingress_context = match connection_metadata {
                 Some(metadata) => ingress_context.with_connection_metadata(metadata),
                 None => ingress_context,
@@ -225,7 +260,12 @@ pub(crate) async fn handle_transport_message(
                                         "CANCEL request has no branch parameter, can't find matching INVITE"
                                     );
                                     // Fall through to stray CANCEL handling
-                                    handle_stray_cancel(request.clone(), source, transport).await?;
+                                    handle_stray_cancel(
+                                        request.clone(),
+                                        ingress_context.response_route(),
+                                        transport,
+                                    )
+                                    .await?;
 
                                     // Broadcast stray CANCEL event
                                     TransactionManager::broadcast_event(
@@ -245,7 +285,12 @@ pub(crate) async fn handle_transport_message(
                                     "CANCEL request has no Via header, can't find matching INVITE"
                                 );
                                 // Fall through to stray CANCEL handling
-                                handle_stray_cancel(request.clone(), source, transport).await?;
+                                handle_stray_cancel(
+                                    request.clone(),
+                                    ingress_context.response_route(),
+                                    transport,
+                                )
+                                .await?;
 
                                 // Broadcast stray CANCEL event
                                 TransactionManager::broadcast_event(
@@ -325,7 +370,10 @@ pub(crate) async fn handle_transport_message(
                             // Build and send response to CANCEL
                             let cancel_response = builder.build();
                             if let Err(e) = transport
-                                .send_message(Message::Response(cancel_response), source)
+                                .send_message_via(
+                                    Message::Response(cancel_response),
+                                    ingress_context.response_route(),
+                                )
                                 .await
                             {
                                 return Err(Error::transport_error(
@@ -382,7 +430,12 @@ pub(crate) async fn handle_transport_message(
 
                         // If no matching transaction was found, handle as stray CANCEL
                         debug!("Received CANCEL that doesn't match any INVITE server transaction");
-                        handle_stray_cancel(request.clone(), source, transport).await?;
+                        handle_stray_cancel(
+                            request.clone(),
+                            ingress_context.response_route(),
+                            transport,
+                        )
+                        .await?;
 
                         // Broadcast stray CANCEL event
                         TransactionManager::broadcast_event(
@@ -408,7 +461,10 @@ pub(crate) async fn handle_transport_message(
                         if !matches!(lifecycle, TransactionLifecycle::Active) {
                             if request.method() == Method::Invite
                                 && manager
-                                    .retransmit_cached_invite_2xx_response(&tx_id, source)
+                                    .retransmit_cached_invite_2xx_response_on_route(
+                                        &tx_id,
+                                        ingress_context.response_route(),
+                                    )
                                     .await?
                             {
                                 return Ok(());
@@ -420,7 +476,10 @@ pub(crate) async fn handle_transport_message(
                         if request.method() == Method::Invite
                             && tx.state() == TransactionState::Terminated
                             && manager
-                                .retransmit_cached_invite_2xx_response(&tx_id, source)
+                                .retransmit_cached_invite_2xx_response_on_route(
+                                    &tx_id,
+                                    ingress_context.response_route(),
+                                )
                                 .await?
                         {
                             return Ok(());
@@ -432,7 +491,10 @@ pub(crate) async fn handle_transport_message(
 
                     if request.method() == Method::Invite
                         && manager
-                            .retransmit_cached_invite_2xx_response(&tx_id, source)
+                            .retransmit_cached_invite_2xx_response_on_route(
+                                &tx_id,
+                                ingress_context.response_route(),
+                            )
                             .await?
                     {
                         return Ok(());
@@ -463,6 +525,53 @@ pub(crate) async fn handle_transport_message(
                                 ));
                             }
                         };
+
+                    if let Some(mut expected) = manager
+                        .transaction_destinations
+                        .get(&tx_id)
+                        .map(|route| route.value().clone())
+                    {
+                        if expected.flow_id.is_none() {
+                            let client = client_transactions
+                                .get(&tx_id)
+                                .map(|transaction| transaction.value().clone());
+                            if let Some(client) = client {
+                                let sent_route = client.data().request_route.lock().await.clone();
+                                if sent_route.destination == expected.destination
+                                    && sent_route.transport_type == expected.transport_type
+                                    && sent_route.authority == expected.authority
+                                    && sent_route.flow_id.is_some()
+                                {
+                                    expected = sent_route;
+                                    manager
+                                        .transaction_destinations
+                                        .insert(tx_id.clone(), expected.clone());
+                                }
+                            }
+                        }
+                        let resolved_expected_flow_id =
+                            transport.resolve_flow_id_for_route(&expected).await;
+                        let Some(bound) = bind_client_response_route(
+                            &expected,
+                            source,
+                            transport_type,
+                            flow_id,
+                            resolved_expected_flow_id,
+                        ) else {
+                            warn!(
+                                transport = %transport_type,
+                                "Dropping client response received outside its authenticated transaction route"
+                            );
+                            return Ok(());
+                        };
+                        if let Some(mut current) = manager.transaction_destinations.get_mut(&tx_id)
+                        {
+                            if current.value() != &expected && current.value() != &bound {
+                                return Ok(());
+                            }
+                            *current = bound;
+                        }
+                    }
 
                     // Look up the client transaction — clone Arc out of shard.
                     let client_tx_arc = client_transactions.get(&tx_id).map(|r| r.value().clone());
@@ -786,6 +895,7 @@ impl TransactionManager {
                 source,
                 destination,
                 transport_type,
+                flow_id,
                 raw_bytes,
                 timing,
                 connection_metadata,
@@ -795,6 +905,63 @@ impl TransactionManager {
                     .await;
                 let transaction_key =
                     crate::transaction::utils::transaction_key_from_message(&message);
+                if matches!(&message, Message::Response(_)) {
+                    if let Some(key) = transaction_key.as_ref() {
+                        if let Some(mut expected) = self
+                            .transaction_destinations
+                            .get(key)
+                            .map(|route| route.value().clone())
+                        {
+                            if expected.flow_id.is_none() {
+                                let client = self
+                                    .client_transactions
+                                    .get(key)
+                                    .map(|transaction| transaction.value().clone());
+                                if let Some(client) = client {
+                                    let sent_route =
+                                        client.data().request_route.lock().await.clone();
+                                    if sent_route.destination == expected.destination
+                                        && sent_route.transport_type == expected.transport_type
+                                        && sent_route.authority == expected.authority
+                                        && sent_route.flow_id.is_some()
+                                    {
+                                        expected = sent_route;
+                                        self.transaction_destinations
+                                            .insert(key.clone(), expected.clone());
+                                    }
+                                }
+                            }
+                            let resolved_expected_flow_id =
+                                self.transport.resolve_flow_id_for_route(&expected).await;
+                            let Some(bound) = bind_client_response_route(
+                                &expected,
+                                source,
+                                transport_type,
+                                flow_id,
+                                resolved_expected_flow_id,
+                            ) else {
+                                warn!(
+                                    transport = %transport_type,
+                                    expected_transport = ?expected.transport_type,
+                                    expected_flow = expected.flow_id.is_some() || resolved_expected_flow_id.is_some(),
+                                    ingress_flow = flow_id.is_some(),
+                                    "Dropping client response received outside its authenticated transaction route"
+                                );
+                                return Ok(());
+                            };
+                            if let Some(mut current) = self.transaction_destinations.get_mut(key) {
+                                if current.value() != &expected && current.value() != &bound {
+                                    warn!(
+                                        transport = %transport_type,
+                                        "Dropping client response after concurrent transaction route change"
+                                    );
+                                    return Ok(());
+                                }
+                                *current = bound;
+                            }
+                        }
+                    }
+                }
                 if let Some(bytes) = raw_bytes.as_ref() {
                     let cache_raw_bytes = match &message {
                         Message::Request(request) => {
@@ -847,6 +1014,10 @@ impl TransactionManager {
                 }
                 let ingress_context =
                     SipRequestIngressContext::new(source, destination, transport_type);
+                let ingress_context = match flow_id {
+                    Some(flow_id) => ingress_context.with_flow_id(flow_id),
+                    None => ingress_context,
+                };
                 let ingress_context = match connection_metadata {
                     Some(metadata) => ingress_context.with_connection_metadata(metadata),
                     None => ingress_context,
@@ -854,27 +1025,41 @@ impl TransactionManager {
                 self.handle_message(message, source, destination, &ingress_context)
                     .await
             }
-            TransportEvent::KeepAlivePongReceived { source, .. } => {
+            TransportEvent::KeepAlivePongReceived {
+                source, flow_id, ..
+            } => {
                 // RFC 5626 §3.5.1 pong arrived on a connection-oriented
                 // transport. Forward to dialog-core's outbound-flow
                 // monitor if it's subscribed; no-op otherwise.
                 if let Some(sender) = self.flow_event_sender.read().await.as_ref() {
-                    let _ = sender.try_send(
-                        crate::manager::outbound_flow::FlowTransportEvent::PongReceived { source },
-                    );
+                    let _ = sender
+                        .send(
+                            crate::manager::outbound_flow::FlowTransportEvent::PongReceived {
+                                source,
+                                flow_id,
+                            },
+                        )
+                        .await;
                 }
                 Ok(())
             }
-            TransportEvent::ConnectionClosed { remote_addr, .. } => {
+            TransportEvent::ConnectionClosed {
+                remote_addr,
+                flow_id,
+                ..
+            } => {
                 // Connection-oriented transport lost its flow. Forward
                 // so outbound-flow monitor can emit OutboundFlowFailed
                 // and trigger re-REGISTER.
                 if let Some(sender) = self.flow_event_sender.read().await.as_ref() {
-                    let _ = sender.try_send(
-                        crate::manager::outbound_flow::FlowTransportEvent::ConnectionClosed {
-                            remote_addr,
-                        },
-                    );
+                    let _ = sender
+                        .send(
+                            crate::manager::outbound_flow::FlowTransportEvent::ConnectionClosed {
+                                remote_addr,
+                                flow_id,
+                            },
+                        )
+                        .await;
                 }
                 Ok(())
             }
@@ -1027,7 +1212,7 @@ impl TransactionManager {
                             self.send_cached_response(
                                 response,
                                 wire_bytes,
-                                source,
+                                ingress_context.response_route(),
                                 "Failed to retransmit listener authorization response",
                             )
                             .await
@@ -1045,7 +1230,10 @@ impl TransactionManager {
                 if !matches!(lifecycle, TransactionLifecycle::Active) {
                     if request.method() == Method::Invite {
                         if self
-                            .retransmit_cached_invite_2xx_response(&key, source)
+                            .retransmit_cached_invite_2xx_response_on_route(
+                                &key,
+                                ingress_context.response_route(),
+                            )
                             .await?
                         {
                             return Ok(());
@@ -1059,7 +1247,10 @@ impl TransactionManager {
                     && transaction.state() == TransactionState::Terminated
                 {
                     if self
-                        .retransmit_cached_invite_2xx_response(&key, source)
+                        .retransmit_cached_invite_2xx_response_on_route(
+                            &key,
+                            ingress_context.response_route(),
+                        )
                         .await?
                     {
                         return Ok(());
@@ -1076,7 +1267,10 @@ impl TransactionManager {
 
             if request.method() == Method::Invite
                 && self
-                    .retransmit_cached_invite_2xx_response(&key, source)
+                    .retransmit_cached_invite_2xx_response_on_route(
+                        &key,
+                        ingress_context.response_route(),
+                    )
                     .await?
             {
                 return Ok(());
@@ -1107,14 +1301,17 @@ impl TransactionManager {
             && self.request_ingress_authorizer().is_some()
             && inherited_cancel_principal.is_none()
         {
-            handle_stray_cancel(request, source, &self.transport).await?;
+            handle_stray_cancel(request, ingress_context.response_route(), &self.transport).await?;
             return Ok(());
         }
 
         // No existing transaction found, create a new one
         let create_started = diagnostics::transaction_timing_enabled().then(Instant::now);
         let transaction = self
-            .create_server_transaction_deferred_events(request.clone(), source)
+            .create_server_transaction_deferred_events_on_route(
+                request.clone(),
+                ingress_context.response_route(),
+            )
             .await?;
         if let Some(started) = create_started {
             diagnostics::record_server_transaction_create(started.elapsed());
@@ -1558,7 +1755,7 @@ async fn send_transaction_event(
 #[allow(dead_code)]
 async fn handle_stray_cancel(
     request: Request,
-    source: SocketAddr,
+    response_route: rvoip_sip_transport::TransportRoute,
     transport: &Arc<dyn Transport>,
 ) -> Result<()> {
     // Send 481 Transaction Does Not Exist
@@ -1590,7 +1787,7 @@ async fn handle_stray_cancel(
 
     // Send the response
     if let Err(e) = transport
-        .send_message(Message::Response(cancel_response), source)
+        .send_message_via(Message::Response(cancel_response), response_route)
         .await
     {
         return Err(Error::transport_error(
