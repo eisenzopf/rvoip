@@ -420,10 +420,10 @@ impl SipMediaStream {
         self.close_local_channels();
     }
 
-    async fn close_retained(self: &Arc<Self>) {
+    async fn close_retained(self: &Arc<Self>) -> RvoipResult<()> {
         let _gate = self.inner.lifecycle_gate.lock().await;
         if self.inner.lifecycle.current() == SipMediaLifecycle::Closed {
-            return;
+            return Ok(());
         }
         self.request_close();
 
@@ -443,15 +443,22 @@ impl SipMediaStream {
             .is_err()
             {
                 abort.abort();
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                if tokio::time::timeout(std::time::Duration::from_secs(1), async {
                     while !abort.is_finished() {
                         tokio::task::yield_now().await;
                     }
                 })
-                .await;
+                .await
+                .is_err()
+                {
+                    return Err(RvoipError::Adapter(
+                        "SIP media driver did not terminate after abort".to_string(),
+                    ));
+                }
             }
         }
         self.inner.lifecycle.mark_closed();
+        Ok(())
     }
 }
 
@@ -659,8 +666,7 @@ impl MediaStream for SipMediaStream {
     }
 
     async fn close(self: Arc<Self>) -> RvoipResult<()> {
-        self.close_retained().await;
-        Ok(())
+        self.close_retained().await
     }
 }
 
