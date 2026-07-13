@@ -1096,6 +1096,28 @@ impl CrossCrateEventHandler for DialogEventHub {
                             .await?;
                             return Ok(()); // Early return after handling
                         }
+                        SessionToDialogEvent::StoreDialogMapping {
+                            session_id,
+                            dialog_id,
+                        } => {
+                            self.store_dialog_mapping(session_id, dialog_id);
+                            return Ok(());
+                        }
+                        SessionToDialogEvent::ReferResponse {
+                            transaction_id,
+                            accept,
+                            status_code,
+                            reason,
+                        } => {
+                            self.handle_refer_response_parts(
+                                transaction_id,
+                                *accept,
+                                *status_code,
+                                reason,
+                            )
+                            .await?;
+                            return Ok(());
+                        }
                         _ => {}
                     }
                 }
@@ -1103,68 +1125,7 @@ impl CrossCrateEventHandler for DialogEventHub {
             }
         }
 
-        // Fallback to string parsing for other events (legacy support)
-        let event_str = format!("{:?}", event);
-
         match event.event_type() {
-            "session_to_dialog" => {
-                debug!("Processing session-to-dialog event");
-
-                // Handle ReferResponse event
-                if event_str.contains("ReferResponse") {
-                    self.handle_refer_response(&event_str).await?;
-                }
-                // Handle StoreDialogMapping event
-                else if event_str.contains("StoreDialogMapping") {
-                    // Extract session_id and dialog_id
-                    if let Some(session_id_start) = event_str.find("session_id: \"") {
-                        let session_id_content_start = session_id_start + 13;
-                        if let Some(session_id_end) =
-                            event_str[session_id_content_start..].find("\"")
-                        {
-                            let session_id = event_str[session_id_content_start
-                                ..session_id_content_start + session_id_end]
-                                .to_string();
-
-                            if let Some(dialog_id_start) = event_str.find("dialog_id: \"") {
-                                let dialog_id_content_start = dialog_id_start + 12;
-                                if let Some(dialog_id_end) =
-                                    event_str[dialog_id_content_start..].find("\"")
-                                {
-                                    let dialog_id = event_str[dialog_id_content_start
-                                        ..dialog_id_content_start + dialog_id_end]
-                                        .to_string();
-
-                                    info!(
-                                        "Storing dialog mapping: session {} -> dialog {}",
-                                        session_id, dialog_id
-                                    );
-
-                                    // Parse dialog ID from UUID string
-                                    if let Ok(uuid) = dialog_id.parse::<uuid::Uuid>() {
-                                        let parsed_dialog_id = DialogId(uuid);
-                                        // Store the bidirectional mapping
-                                        self.dialog_manager
-                                            .session_to_dialog
-                                            .insert(session_id.clone(), parsed_dialog_id.clone());
-                                        self.dialog_manager
-                                            .dialog_to_session
-                                            .insert(parsed_dialog_id, session_id.clone());
-
-                                        info!(
-                                            "Successfully stored dialog mapping for session {}",
-                                            session_id
-                                        );
-                                    } else {
-                                        warn!("Failed to parse dialog ID");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
             "transport_to_dialog" => {
                 info!("Processing transport-to-dialog event");
                 // Handle transport events if needed
@@ -1180,6 +1141,26 @@ impl CrossCrateEventHandler for DialogEventHub {
 }
 
 impl DialogEventHub {
+    fn store_dialog_mapping(&self, session_id: &str, dialog_id: &str) {
+        debug!(
+            session_bytes = session_id.len(),
+            dialog_bytes = dialog_id.len(),
+            "Storing typed dialog mapping"
+        );
+        if let Ok(uuid) = dialog_id.parse::<uuid::Uuid>() {
+            let parsed_dialog_id = DialogId(uuid);
+            self.dialog_manager
+                .session_to_dialog
+                .insert(session_id.to_string(), parsed_dialog_id.clone());
+            self.dialog_manager
+                .dialog_to_session
+                .insert(parsed_dialog_id, session_id.to_string());
+            info!("Stored typed dialog mapping");
+        } else {
+            warn!("Failed to parse dialog mapping identifier");
+        }
+    }
+
     /// Handle SendRegisterResponse event from session-core
     async fn handle_register_response(
         &self,
@@ -1311,30 +1292,14 @@ impl DialogEventHub {
         Ok(())
     }
 
-    /// Handle ReferResponse event from session-core
-    async fn handle_refer_response(&self, event_str: &str) -> Result<()> {
-        // Extract transaction_id, accept flag, status_code, and reason
-        let transaction_id = self
-            .extract_field(event_str, "transaction_id: \"")
-            .ok_or_else(|| anyhow::anyhow!("Missing transaction_id in ReferResponse"))?;
-
-        let accept = event_str.contains("accept: true");
-
-        let status_code = self
-            .extract_field(event_str, "status_code: ")
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(if accept { 202 } else { 603 });
-
-        let reason = self
-            .extract_field(event_str, "reason: \"")
-            .unwrap_or_else(|| {
-                if accept {
-                    "Accepted".to_string()
-                } else {
-                    "Decline".to_string()
-                }
-            });
-
+    /// Handle a typed ReferResponse event from session-core.
+    async fn handle_refer_response_parts(
+        &self,
+        transaction_id: &str,
+        accept: bool,
+        status_code: u16,
+        reason: &str,
+    ) -> Result<()> {
         info!(
             "Handling ReferResponse: accept={}, status={} reason_present={}",
             accept,
@@ -1390,26 +1355,6 @@ impl DialogEventHub {
 
         Ok(())
     }
-
-    /// Extract field value from event debug string
-    fn extract_field(&self, event_str: &str, field_prefix: &str) -> Option<String> {
-        if let Some(start) = event_str.find(field_prefix) {
-            let start = start + field_prefix.len();
-            if field_prefix.ends_with("\"") {
-                // String field - find closing quote
-                if let Some(end) = event_str[start..].find('"') {
-                    return Some(event_str[start..start + end].to_string());
-                }
-            } else {
-                // Numeric field - find next space or comma
-                let end = event_str[start..]
-                    .find(|c: char| c.is_whitespace() || c == ',')
-                    .unwrap_or(event_str[start..].len());
-                return Some(event_str[start..start + end].to_string());
-            }
-        }
-        None
-    }
 }
 
 /// Extract the `realm="..."` parameter from a `Digest` challenge header value,
@@ -1438,5 +1383,20 @@ mod safe_diagnostic_tests {
         assert_eq!(rendered, "Invalid transaction identifier");
         assert!(!rendered.contains(SECRET));
         assert!(!rendered.contains("X-Leak"));
+    }
+
+    #[test]
+    fn session_to_dialog_routing_never_parses_debug_text() {
+        let source = include_str!("event_hub.rs");
+        assert!(source.contains("SessionToDialogEvent::StoreDialogMapping"));
+        assert!(source.contains("SessionToDialogEvent::ReferResponse"));
+        assert!(source.contains("handle_refer_response_parts"));
+        for forbidden in [
+            ["let event_str = ", "format!(\"{:?}\", event)"].concat(),
+            ["async fn handle_refer_response(&self, ", "event_str"].concat(),
+            ["fn extract_field(&self, ", "event_str"].concat(),
+        ] {
+            assert!(!source.contains(&forbidden), "legacy fallback returned");
+        }
     }
 }

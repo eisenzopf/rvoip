@@ -536,6 +536,7 @@ pub fn redact_sip_trace_start_line(start_line: &str) -> String {
         return "<redacted start line>".to_string();
     };
     if is_sip_token(method) && !request_uri.is_empty() && version.eq_ignore_ascii_case("SIP/2.0") {
+        let method = safe_auth_method_debug_label(method);
         format!("{method} {SIP_TRACE_REDACTED_REQUEST_URI} SIP/2.0")
     } else {
         "<redacted start line>".to_string()
@@ -833,15 +834,13 @@ impl fmt::Debug for SessionToDialogEvent {
                 .debug_struct("SendDtmf")
                 .field("tone_count", &tones.chars().count())
                 .finish(),
-            // These exact shapes are consumed by sip-dialog's legacy string
-            // fallback parser. Keep them stable until that fallback is removed.
             Self::StoreDialogMapping {
                 session_id,
                 dialog_id,
             } => formatter
                 .debug_struct("StoreDialogMapping")
-                .field("session_id", session_id)
-                .field("dialog_id", dialog_id)
+                .field("session_bytes", &session_id.len())
+                .field("dialog_bytes", &dialog_id.len())
                 .finish(),
             Self::ReferResponse {
                 transaction_id,
@@ -850,10 +849,10 @@ impl fmt::Debug for SessionToDialogEvent {
                 reason,
             } => formatter
                 .debug_struct("ReferResponse")
-                .field("transaction_id", transaction_id)
+                .field("transaction_bytes", &transaction_id.len())
                 .field("accept", accept)
                 .field("status_code", status_code)
-                .field("reason", reason)
+                .field("reason_bytes", &reason.len())
                 .finish(),
             Self::SendRegisterResponse {
                 status_code,
@@ -1299,8 +1298,10 @@ pub enum DialogToSessionEvent {
 fn safe_auth_method_debug_label(method: &str) -> &'static str {
     match method.trim().to_ascii_uppercase().as_str() {
         "INVITE" => "INVITE",
+        "ACK" => "ACK",
         "REGISTER" => "REGISTER",
         "BYE" => "BYE",
+        "CANCEL" => "CANCEL",
         "REFER" => "REFER",
         "NOTIFY" => "NOTIFY",
         "INFO" => "INFO",
@@ -1308,6 +1309,8 @@ fn safe_auth_method_debug_label(method: &str) -> &'static str {
         "MESSAGE" => "MESSAGE",
         "OPTIONS" => "OPTIONS",
         "SUBSCRIBE" => "SUBSCRIBE",
+        "PRACK" => "PRACK",
+        "PUBLISH" => "PUBLISH",
         _ => "extension",
     }
 }
@@ -2760,16 +2763,19 @@ mod tests {
     }
 
     #[test]
-    fn cross_crate_debug_preserves_legacy_session_to_dialog_shapes() {
+    fn cross_crate_debug_redacts_typed_session_to_dialog_payloads() {
         let mapping =
             RvoipCrossCrateEvent::SessionToDialog(SessionToDialogEvent::StoreDialogMapping {
                 session_id: "legacy-session".to_string(),
                 dialog_id: "legacy-dialog".to_string(),
             });
+        let mapping_debug = format!("{mapping:?}");
         assert_eq!(
-            format!("{mapping:?}"),
-            "SessionToDialog(StoreDialogMapping { session_id: \"legacy-session\", dialog_id: \"legacy-dialog\" })"
+            mapping_debug,
+            "SessionToDialog(StoreDialogMapping { session_bytes: 14, dialog_bytes: 13 })"
         );
+        assert!(!mapping_debug.contains("legacy-session"));
+        assert!(!mapping_debug.contains("legacy-dialog"));
 
         let refer = RvoipCrossCrateEvent::SessionToDialog(SessionToDialogEvent::ReferResponse {
             transaction_id: "legacy-transaction".to_string(),
@@ -2777,10 +2783,13 @@ mod tests {
             status_code: 202,
             reason: "Accepted".to_string(),
         });
+        let refer_debug = format!("{refer:?}");
         assert_eq!(
-            format!("{refer:?}"),
-            "SessionToDialog(ReferResponse { transaction_id: \"legacy-transaction\", accept: true, status_code: 202, reason: \"Accepted\" })"
+            refer_debug,
+            "SessionToDialog(ReferResponse { transaction_bytes: 18, accept: true, status_code: 202, reason_bytes: 8 })"
         );
+        assert!(!refer_debug.contains("legacy-transaction"));
+        assert!(!refer_debug.contains("Accepted"));
     }
 
     #[test]
@@ -3060,6 +3069,15 @@ mod tests {
             format!("SIP/2.0 503 {SIP_TRACE_REDACTED_RESPONSE_REASON}")
         );
         assert!(!safe_response.contains("upstream-account-secret"));
+
+        let extension = redact_sip_trace_start_line(
+            "ACCOUNT_TOKEN_SECRET sip:user:password@example.test SIP/2.0",
+        );
+        assert_eq!(
+            extension,
+            format!("extension {SIP_TRACE_REDACTED_REQUEST_URI} SIP/2.0")
+        );
+        assert!(!extension.contains("ACCOUNT_TOKEN_SECRET"));
 
         for malformed in [
             "SIP/2.0",
