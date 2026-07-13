@@ -1120,6 +1120,12 @@ pub struct SipAdapter {
     retained_tasks: Arc<SipRetainedTasks>,
     draining: AtomicBool,
     drained: AtomicBool,
+    /// The first destructive drain failure is sticky. Once route ownership
+    /// has been retired, a later invocation must not infer success merely
+    /// because the registries are empty.
+    drain_failure: StdMutex<Option<String>>,
+    #[cfg(test)]
+    force_drain_compensation_failure: AtomicBool,
     drain_gate: AsyncMutex<()>,
     observer_registered: AtomicBool,
     inbound_invite_observer_id: u64,
@@ -1238,6 +1244,9 @@ impl SipAdapter {
             retained_tasks: Arc::clone(&retained_tasks),
             draining: AtomicBool::new(false),
             drained: AtomicBool::new(false),
+            drain_failure: StdMutex::new(None),
+            #[cfg(test)]
+            force_drain_compensation_failure: AtomicBool::new(false),
             drain_gate: AsyncMutex::new(()),
             observer_registered: AtomicBool::new(true),
             inbound_invite_observer_id,
@@ -1324,6 +1333,24 @@ impl SipAdapter {
         self.retained_tasks.count()
     }
 
+    fn prior_drain_failure(&self) -> Option<RvoipError> {
+        self.drain_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .map(RvoipError::Adapter)
+    }
+
+    fn fail_drain(&self, message: impl Into<String>) -> RvoipError {
+        let mut failure = self
+            .drain_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let message = message.into();
+        let retained = failure.get_or_insert(message);
+        RvoipError::Adapter(retained.clone())
+    }
+
     /// Stop admission, compensate every live SIP route, and wait until every
     /// adapter-owned task and media driver has terminated.
     ///
@@ -1335,6 +1362,9 @@ impl SipAdapter {
         let _drain = self.drain_gate.lock().await;
         if self.drained.load(Ordering::Acquire) {
             return Ok(());
+        }
+        if let Some(failure) = self.prior_drain_failure() {
+            return Err(failure);
         }
 
         let (outbound, inbound) = {
@@ -1426,31 +1456,35 @@ impl SipAdapter {
             .await
             .is_err()
         {
-            return Err(RvoipError::Adapter(format!(
+            return Err(self.fail_drain(format!(
                 "SIP adapter drain timed out with {} retained tasks",
                 self.retained_tasks.count()
             )));
         }
         if spawn_failed {
-            return Err(RvoipError::Adapter(
-                "SIP adapter drain could not retain an inbound cleanup task".to_string(),
-            ));
+            return Err(
+                self.fail_drain("SIP adapter drain could not retain an inbound cleanup task")
+            );
         }
         if self.retained_tasks.panicked() {
-            return Err(RvoipError::Adapter(
-                "SIP adapter retained task panicked during drain".to_string(),
-            ));
+            return Err(self.fail_drain("SIP adapter retained task panicked during drain"));
         }
-        if outbound_results
-            .iter()
-            .any(|route| route.cleanup_result() != Some(true))
+        #[cfg(test)]
+        let forced_compensation_failure = self
+            .force_drain_compensation_failure
+            .load(Ordering::Acquire);
+        #[cfg(not(test))]
+        let forced_compensation_failure = false;
+        if forced_compensation_failure
+            || outbound_results
+                .iter()
+                .any(|route| route.cleanup_result() != Some(true))
             || inbound_results
                 .iter()
                 .any(|result| !result.load(Ordering::Acquire))
         {
-            return Err(RvoipError::Adapter(
-                "SIP adapter drain could not complete network or media compensation".to_string(),
-            ));
+            return Err(self
+                .fail_drain("SIP adapter drain could not complete network or media compensation"));
         }
 
         let registry_empty = {
@@ -1465,9 +1499,9 @@ impl SipAdapter {
                 && self.authenticated_inbound_sessions.is_empty()
         };
         if !registry_empty {
-            return Err(RvoipError::Adapter(
-                "SIP adapter drain completed with live lifecycle registry entries".to_string(),
-            ));
+            return Err(
+                self.fail_drain("SIP adapter drain completed with live lifecycle registry entries")
+            );
         }
         self.inbound_contexts.clear();
         self.retired_sessions.clear();
@@ -3020,7 +3054,7 @@ impl ConnectionAdapter for SipAdapter {
                 None,
                 "activation-during-drain",
             );
-            return route.wait_activation().await;
+            return Err(SipActivationFailure::RouteEnded.into_error());
         }
         match route.claim_activation() {
             Ok(true) => {
@@ -3056,7 +3090,7 @@ impl ConnectionAdapter for SipAdapter {
                 }
             }
             Ok(false) => {}
-            Err(error) => route.complete_activation_failure(error),
+            Err(error) => return Err(error.into_error()),
         }
         route.wait_activation().await
     }
@@ -3670,6 +3704,52 @@ mod inbound_context_tests {
             Err(RvoipError::AdmissionRejected(_))
         ));
         adapter.shutdown().await.expect("coordinator shutdown");
+    }
+
+    #[tokio::test]
+    async fn failed_destructive_drain_remains_sticky_on_retry() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("adapter-drain-sticky", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+
+        let request = OriginateRequest::new(
+            CoreSessionId::new(),
+            ParticipantId::new(),
+            "sip:target@example.test",
+            Direction::Outbound,
+            CapabilityDescriptor::default(),
+        )
+        .with_transport(Transport::Sip);
+        ConnectionAdapter::originate(adapter.as_ref(), request)
+            .await
+            .expect("prepared route");
+        // Force the result boundary after real zero-wire cleanup has retired
+        // every route. A later call must not reinterpret those empty maps as
+        // proof that the failed compensation succeeded.
+        adapter
+            .force_drain_compensation_failure
+            .store(true, Ordering::Release);
+        let first = adapter.drain().await.expect_err("first drain must fail");
+        let second = adapter
+            .drain()
+            .await
+            .expect_err("destructive drain failure must remain sticky");
+        assert_eq!(first.to_string(), second.to_string());
+        assert!(!adapter.drained.load(Ordering::Acquire));
+        assert!(adapter.by_connection.is_empty());
+        assert!(adapter.by_session.is_empty());
+        assert!(adapter.outbound_routes.is_empty());
+        assert!(adapter.streams_cache.is_empty());
+        assert_eq!(adapter.retained_task_count(), 0);
+
+        drop(adapter);
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("coordinator shutdown");
     }
 
     #[tokio::test]
@@ -4774,6 +4854,73 @@ mod inbound_context_tests {
                 if id == connection_id
         ));
         adapter.shutdown().await.expect("adapter shutdown");
+    }
+
+    #[tokio::test]
+    async fn activation_after_terminal_never_replays_cached_success() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("terminal-reactivation", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let connection_id = ConnectionId::new();
+        let route = SipOutboundRoute::new(
+            connection_id.clone(),
+            SessionId::new(),
+            "sip:target@example.test".to_string(),
+            Arc::new(SipOriginateContext::default()),
+            crate::media_stream::SipMediaStream::dormant(Direction::Outbound),
+        );
+        adapter
+            .reserve_outbound_route(Arc::clone(&route))
+            .expect("route reservation");
+        assert!(route.claim_activation().expect("initial activation claim"));
+        route
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .phase = SipOutboundRoutePhase::Active;
+        let reference = ExternalConnectionReference::new(
+            "sip.call-id",
+            "completed-before-terminal@example.test",
+        )
+        .expect("reference");
+        assert!(route
+            .complete_activation_success(OutboundActivation::with_external_reference(reference),));
+        assert_eq!(
+            route.stage_event(AdapterEvent::Ended {
+                connection_id: connection_id.clone(),
+                reason: EndReason::Normal,
+            }),
+            SipRouteStageDisposition::Retained
+        );
+
+        let mut callers = Vec::new();
+        for _ in 0..100 {
+            let caller = Arc::clone(&adapter);
+            let caller_connection = connection_id.clone();
+            callers.push(tokio::spawn(async move {
+                ConnectionAdapter::activate_outbound_with_receipt(
+                    caller.as_ref(),
+                    caller_connection,
+                )
+                .await
+            }));
+        }
+        for caller in callers {
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), caller)
+                    .await
+                    .expect("reactivation deadline")
+                    .expect("reactivation task")
+                    .is_err(),
+                "a terminating route must never return its cached receipt"
+            );
+        }
+
+        adapter.drain().await.expect("zero-wire route drain");
+        adapter.shutdown().await.expect("coordinator shutdown");
     }
 
     #[tokio::test]

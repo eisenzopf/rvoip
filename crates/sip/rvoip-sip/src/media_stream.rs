@@ -457,6 +457,37 @@ impl SipMediaStream {
     }
 }
 
+impl Drop for SipMediaStream {
+    fn drop(&mut self) {
+        // The driver deliberately does not retain `SipMediaStreamInner`, so
+        // dropping the final public stream owner is the authoritative signal
+        // that a cancelled constructor/bind has no owner left to close it.
+        // Wake a cooperative subscription first, then abort as a synchronous
+        // fail-safe for an uncooperative coordinator future.
+        self.inner.lifecycle.begin_closing();
+        self.inner.cancel.send_replace(true);
+        self.inner
+            .frames_in_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        self.inner
+            .frames_out_rx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(driver) = self
+            .inner
+            .driver_abort
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            driver.abort();
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_media_driver(
     lifecycle: Arc<SipMediaLifecycleState>,
@@ -821,6 +852,31 @@ mod receiver_ownership_tests {
         assert_eq!(stream.inner.lifecycle.current(), SipMediaLifecycle::Closed);
         Arc::clone(&stream).close().await.unwrap();
         assert_eq!(stream.inner.lifecycle.current(), SipMediaLifecycle::Closed);
+    }
+
+    #[tokio::test]
+    async fn dropping_final_owner_aborts_every_inflight_driver() {
+        for _ in 0..100 {
+            let stream = SipMediaStream::dormant(Direction::Outbound);
+            assert!(stream.inner.lifecycle.begin_binding());
+            let driver = tokio::spawn(std::future::pending::<()>());
+            let abort = driver.abort_handle();
+            *stream
+                .inner
+                .driver_abort
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(abort.clone());
+            drop(driver);
+
+            drop(stream);
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while !abort.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("driver aborted when its final stream owner disappeared");
+        }
     }
 
     #[tokio::test]
