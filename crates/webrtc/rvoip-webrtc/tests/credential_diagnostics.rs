@@ -5,6 +5,8 @@ use rvoip_webrtc::client::{VideoCodec, VideoFrame, YuvFrame};
 use rvoip_webrtc::config::{IceServerConfig, WebRtcConfig};
 use rvoip_webrtc::data_message::EncodedDataMessage;
 use rvoip_webrtc::identity::DtlsFingerprint;
+use rvoip_webrtc::media::packetize::{H264Packet, Vp8Packet};
+use rvoip_webrtc::peer::DataChannelOptions;
 #[cfg(feature = "signaling-ws")]
 use rvoip_webrtc::signaling::websocket::SignalingMessage;
 #[cfg(feature = "signaling-ws")]
@@ -44,6 +46,18 @@ fn turn_and_handshake_containers_do_not_regain_derived_debug() {
             include_str!("../src/signaling/websocket.rs"),
             "struct HandshakeMetadata",
         ),
+        (
+            include_str!("../src/peer/data_channel.rs"),
+            "pub struct DataChannelOptions",
+        ),
+        (
+            include_str!("../src/media/packetize/vp8.rs"),
+            "pub struct Vp8Packet",
+        ),
+        (
+            include_str!("../src/media/packetize/h264.rs"),
+            "pub struct H264Packet",
+        ),
     ] {
         assert_no_derived_debug(source, declaration);
     }
@@ -75,6 +89,42 @@ fn turn_and_handshake_containers_do_not_regain_derived_debug() {
     ] {
         assert_no_derived_debug(source, declaration);
     }
+}
+
+#[test]
+fn data_channel_and_packetizer_debug_is_metadata_only() {
+    use bytes::Bytes;
+
+    let options = DataChannelOptions::partial_reliable_retransmits(3)
+        .with_protocol(CANARY)
+        .with_negotiated_id(7);
+    let payload = Bytes::copy_from_slice(CANARY.as_bytes());
+    let vp8 = Vp8Packet {
+        payload: payload.clone(),
+        marker: true,
+    };
+    let h264 = H264Packet {
+        payload,
+        marker: false,
+    };
+
+    let options_debug = format!("{options:?}");
+    let vp8_debug = format!("{vp8:?}");
+    let h264_debug = format!("{h264:?}");
+    for rendered in [&options_debug, &vp8_debug, &h264_debug] {
+        assert!(!rendered.contains(CANARY), "payload leaked: {rendered}");
+    }
+    assert!(options_debug.contains("protocol_bytes"));
+    assert!(vp8_debug.contains("payload_bytes"));
+    assert!(h264_debug.contains("payload_bytes"));
+
+    assert_eq!(options.protocol.as_deref(), Some(CANARY));
+    assert_eq!(options.max_retransmits, Some(3));
+    assert_eq!(options.negotiated_id, Some(7));
+    assert_eq!(vp8.payload.as_ref(), CANARY.as_bytes());
+    assert!(vp8.marker);
+    assert_eq!(h264.payload.as_ref(), CANARY.as_bytes());
+    assert!(!h264.marker);
 }
 
 fn assert_no_derived_debug(source: &str, declaration: &str) {
@@ -224,4 +274,9 @@ fn route_ownership_and_candidate_logging_do_not_regain_raw_diagnostics() {
         !adapter.contains("#[derive(Clone, Debug, Eq, PartialEq)]\npub(crate) enum RouteOwnerKey")
     );
     assert!(!adapter.contains("candidate = %candidate.candidate"));
+    assert!(!adapter.contains("warn!(conn = %conn, label,"));
+    assert!(!adapter.contains("warn!(conn = %conn, label = %label"));
+    assert!(!adapter.contains("warn!(conn = %conn, label = ?label"));
+    assert!(!adapter.contains("label, \"WebRTC adapter event queue full"));
+    assert!(!adapter.contains("label, error = %error, \"dropping invalid"));
 }

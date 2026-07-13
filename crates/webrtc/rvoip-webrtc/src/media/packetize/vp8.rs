@@ -12,13 +12,24 @@
 //! Reference: <https://datatracker.ietf.org/doc/html/rfc7741#section-4.2>.
 
 use bytes::Bytes;
+use std::fmt;
 
 /// One packetized VP8 RTP payload — codec payload only (no RTP header).
 /// `marker` is `true` on the *last* packet of a frame (RFC 7741 §4.2).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Vp8Packet {
     pub payload: Bytes,
     pub marker: bool,
+}
+
+impl fmt::Debug for Vp8Packet {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Vp8Packet")
+            .field("payload_bytes", &self.payload.len())
+            .field("marker", &self.marker)
+            .finish()
+    }
 }
 
 /// Default packetization MTU. webrtc-rs uses 1200; matches Chrome's

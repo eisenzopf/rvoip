@@ -1159,11 +1159,22 @@ impl WebRtcAdapter {
                                             message,
                                         }) {
                                             dropped.fetch_add(1, Ordering::Relaxed);
-                                            warn!(conn = %conn, label, "WebRTC adapter event queue full; dropping data message");
+                                            warn!(
+                                                conn = %conn,
+                                                label_bytes = label.len(),
+                                                protocol_bytes = protocol.len(),
+                                                "WebRTC adapter event queue full; dropping data message"
+                                            );
                                         }
                                     }
                                     Err(error) => {
-                                        warn!(conn = %conn, label, error = %error, "dropping invalid WebRTC data message");
+                                        warn!(
+                                            conn = %conn,
+                                            label_bytes = label.len(),
+                                            protocol_bytes = protocol.len(),
+                                            error = %error,
+                                            "dropping invalid WebRTC data message"
+                                        );
                                     }
                                 }
                             }
