@@ -404,6 +404,7 @@ mod tests {
             jwt: JwtConfig {
                 issuer: "https://users.rvoip.local".to_string(),
                 audience: vec!["rvoip-app".to_string()],
+                tenant_id: Some("webauthn-test-tenant".to_string()),
                 access_ttl_seconds: 300,
                 refresh_ttl_seconds: 3600,
                 algorithm: "HS256".to_string(),
