@@ -30,6 +30,75 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
+const AUTH_RETRY_DISPATCH_JOIN_FAILURE: &str = "SIP auth-retry dispatch task failed (class=join)";
+
+type StateMachineProcessResult =
+    std::result::Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>>;
+
+/// Owns the state-machine task that performs an authenticated retry.
+///
+/// Dropping Tokio's `JoinHandle` detaches the task. Keep an armed owner around
+/// the await instead so dispatcher shutdown or cancellation also cancels the
+/// retry and its signaling work.
+struct AbortAuthRetryTaskOnDrop {
+    handle: tokio::task::JoinHandle<StateMachineProcessResult>,
+    armed: bool,
+}
+
+impl AbortAuthRetryTaskOnDrop {
+    fn new(handle: tokio::task::JoinHandle<StateMachineProcessResult>) -> Self {
+        Self {
+            handle,
+            armed: true,
+        }
+    }
+
+    async fn join(
+        mut self,
+    ) -> std::result::Result<StateMachineProcessResult, tokio::task::JoinError> {
+        let result = (&mut self.handle).await;
+        self.armed = false;
+        result
+    }
+}
+
+impl Drop for AbortAuthRetryTaskOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.handle.abort();
+        }
+    }
+}
+
+async fn join_auth_retry_task(task: AbortAuthRetryTaskOnDrop) -> StateMachineProcessResult {
+    task.join().await.map_err(|_| {
+        Box::new(SessionError::InternalError(
+            AUTH_RETRY_DISPATCH_JOIN_FAILURE.to_string(),
+        )) as Box<dyn std::error::Error + Send + Sync>
+    })?
+}
+
+/// Poll the large auth-retry state-machine future from the root of a fresh
+/// Tokio task while retaining strict per-session ordering in the caller.
+///
+/// Dialog events already enter through a sharded worker, but that worker polls
+/// the complete cross-crate handler before it reaches `process_event`. The
+/// resulting transport → dialog → session → state-machine → INVITE retry poll
+/// chain can exhaust Tokio's default worker stack. Awaiting this owned child
+/// task lets the parent poll unwind before the retry is polled; it does not
+/// detach the retry or weaken completion/error semantics.
+async fn process_auth_required_on_fresh_task(
+    state_machine: Arc<StateMachineExecutor>,
+    session_id: SessionId,
+    event: EventType,
+) -> StateMachineProcessResult {
+    let task_session_id = session_id.clone();
+    let task = AbortAuthRetryTaskOnDrop::new(tokio::spawn(async move {
+        state_machine.process_event(&task_session_id, event).await
+    }));
+    join_auth_retry_task(task).await
+}
+
 fn is_missing_credentials_for_auth_error(
     error: &(dyn std::error::Error + Send + Sync + 'static),
 ) -> bool {
@@ -2176,17 +2245,16 @@ impl SessionCrossCrateEventHandler {
             .map(|s| s.call_state)
             .ok();
 
-        if let Err(e) = self
-            .state_machine
-            .process_event(
-                &session_id,
-                EventType::AuthRequired {
-                    status_code: status,
-                    challenge,
-                    method,
-                },
-            )
-            .await
+        if let Err(e) = process_auth_required_on_fresh_task(
+            Arc::clone(&self.state_machine),
+            session_id.clone(),
+            EventType::AuthRequired {
+                status_code: status,
+                challenge,
+                method,
+            },
+        )
+        .await
         {
             let failure_class = OutboundAuthTerminalClass::from_error(e.as_ref());
             if is_missing_credentials_for_auth_error(e.as_ref()) {
@@ -5138,9 +5206,10 @@ fn parse_sipfrag_status_line(body: &str) -> Option<(u16, String)> {
 mod tests {
     use super::{
         build_incoming_response_from_bytes, dialog_bye_requires_terminal_release,
-        map_sip_trace_session_id, parse_sipfrag_status_line, safe_auth_method_label,
-        sip_trace_owner_matches, CallFailureDiagnostics, CallFailureReason,
-        OutboundAuthTerminalClass,
+        join_auth_retry_task, map_sip_trace_session_id, parse_sipfrag_status_line,
+        safe_auth_method_label, sip_trace_owner_matches, AbortAuthRetryTaskOnDrop,
+        CallFailureDiagnostics, CallFailureReason, OutboundAuthTerminalClass,
+        StateMachineProcessResult, AUTH_RETRY_DISPATCH_JOIN_FAILURE,
     };
     use crate::errors::SessionError;
     use crate::state_machine::ProcessEventResult;
@@ -5149,6 +5218,56 @@ mod tests {
     use crate::types::CallState;
     use dashmap::DashMap;
     use rvoip_infra_common::events::cross_crate::{SipTraceDirection, SipTraceEvent};
+    use tokio::sync::oneshot;
+
+    struct DropSignal(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(signal) = self.0.take() {
+                let _ = signal.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_auth_retry_join_aborts_the_owned_state_machine_task() {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let task = AbortAuthRetryTaskOnDrop::new(tokio::spawn(async move {
+            let _drop_signal = DropSignal(Some(dropped_tx));
+            let _ = started_tx.send(());
+            std::future::pending::<StateMachineProcessResult>().await
+        }));
+
+        started_rx.await.expect("auth-retry task started");
+        let join = Box::pin(task.join());
+        drop(join);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("cancelled auth-retry task did not stop")
+            .expect("auth-retry task drop signal closed");
+    }
+
+    #[tokio::test]
+    async fn auth_retry_task_panics_map_to_a_fixed_internal_error_class() {
+        let task = AbortAuthRetryTaskOnDrop::new(tokio::spawn(async {
+            panic!("synthetic auth-retry dispatch panic");
+            #[allow(unreachable_code)]
+            std::future::pending::<StateMachineProcessResult>().await
+        }));
+
+        let error = join_auth_retry_task(task)
+            .await
+            .expect_err("panicked auth-retry task must fail");
+        match error.downcast_ref::<SessionError>() {
+            Some(SessionError::InternalError(detail)) => {
+                assert_eq!(detail, AUTH_RETRY_DISPATCH_JOIN_FAILURE);
+            }
+            other => panic!("unexpected auth-retry join error: {other:?}"),
+        }
+    }
 
     #[test]
     fn outbound_auth_terminal_reasons_and_log_metadata_are_value_free() {

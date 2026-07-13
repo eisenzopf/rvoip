@@ -40,6 +40,9 @@ const UAC_PORT: u16 = 35201;
 const TRACE_HEADER_NAME: &str = "X-Trace";
 const TRACE_HEADER_VALUE: &str = "trace-cafe-babe";
 
+/// Regression: this must complete on Tokio's default worker stack. The
+/// response-to-auth-retry path must not require `RUST_MIN_STACK` or a custom
+/// runtime `thread_stack_size`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn invite_extras_survive_401_driven_auth_retry() {
     let _ = tracing_subscriber::fmt()
