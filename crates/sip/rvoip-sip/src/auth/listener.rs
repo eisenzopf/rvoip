@@ -2,7 +2,7 @@
 
 use super::{
     SipAuthContext, SipAuthService, SipAuthSource, SipPrincipalAuthDecision,
-    SipTransportSecurityContext,
+    SipPrincipalAuthEvaluation, SipTransportSecurityContext,
 };
 use async_trait::async_trait;
 use ipnet::IpNet;
@@ -17,6 +17,25 @@ use rvoip_sip_transport::transport::TransportType;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
+
+const DEFAULT_AUTH_RATE_LIMIT_RETRY_AFTER_SECS: u32 = 1;
+const MAX_AUTH_RATE_LIMIT_RETRY_AFTER_SECS: u32 = 3_600;
+
+fn bounded_auth_retry_after_secs(retry_after: Option<Duration>) -> u32 {
+    let retry_after = retry_after
+        .unwrap_or_else(|| Duration::from_secs(DEFAULT_AUTH_RATE_LIMIT_RETRY_AFTER_SECS.into()));
+    let rounded_seconds = retry_after
+        .as_secs()
+        .saturating_add(u64::from(retry_after.subsec_nanos() != 0));
+    rounded_seconds
+        .clamp(
+            u64::from(DEFAULT_AUTH_RATE_LIMIT_RETRY_AFTER_SECS),
+            u64::from(MAX_AUTH_RATE_LIMIT_RETRY_AFTER_SECS),
+        )
+        .try_into()
+        .expect("bounded authentication Retry-After fits u32")
+}
 
 /// Disabled-by-default policy enforced before a new SIP request reaches the
 /// dialog layer or application callbacks.
@@ -360,7 +379,7 @@ impl SipRequestIngressAuthorizer for SipListenerAuthPolicy {
         let body = (!request.body().is_empty()).then(|| request.body());
 
         match auth_service
-            .authenticate_principal_with_context_and_transport(
+            .evaluate_principal_with_context_and_transport(
                 authorization.as_deref(),
                 request.method().as_str(),
                 &request.uri().to_string(),
@@ -371,23 +390,34 @@ impl SipRequestIngressAuthorizer for SipListenerAuthPolicy {
             )
             .await
         {
-            Ok(SipPrincipalAuthDecision::Authorized { principal, .. })
-                if !principal.is_expired() =>
-            {
-                match self.tenant_bound_header_principal(principal) {
-                    Some(principal) => SipRequestAuthorization::Authorized { principal },
-                    None => SipRequestAuthorization::Rejected(
-                        SipRequestRejection::new(StatusCode::Forbidden)
-                            .with_reason("SIP listener principal tenant is not authorized"),
-                    ),
-                }
-            }
-            Ok(SipPrincipalAuthDecision::Authorized { .. }) => SipRequestAuthorization::Rejected(
+            Ok(SipPrincipalAuthEvaluation::Decision(SipPrincipalAuthDecision::Authorized {
+                principal,
+                ..
+            })) if !principal.is_expired() => match self.tenant_bound_header_principal(principal) {
+                Some(principal) => SipRequestAuthorization::Authorized { principal },
+                None => SipRequestAuthorization::Rejected(
+                    SipRequestRejection::new(StatusCode::Forbidden)
+                        .with_reason("SIP listener principal tenant is not authorized"),
+                ),
+            },
+            Ok(SipPrincipalAuthEvaluation::Decision(SipPrincipalAuthDecision::Authorized {
+                ..
+            })) => SipRequestAuthorization::Rejected(
                 SipRequestRejection::new(StatusCode::Unauthorized)
                     .with_reason("SIP listener principal is expired"),
             ),
-            Ok(SipPrincipalAuthDecision::Rejected { challenges }) => {
-                Self::rejection_from_challenges(challenges)
+            Ok(SipPrincipalAuthEvaluation::Decision(SipPrincipalAuthDecision::Rejected {
+                challenges,
+            })) => Self::rejection_from_challenges(challenges),
+            Ok(SipPrincipalAuthEvaluation::RateLimited { retry_after }) => {
+                let seconds = bounded_auth_retry_after_secs(retry_after);
+                SipRequestAuthorization::Rejected(
+                    SipRequestRejection::new(StatusCode::ServiceUnavailable)
+                        .with_header(TypedHeader::RetryAfter(
+                            rvoip_sip_core::types::retry_after::RetryAfter::new(seconds),
+                        ))
+                        .with_reason("SIP listener authentication rate limited"),
+                )
             }
             Err(error) => SipRequestAuthorization::Rejected(
                 SipRequestRejection::new(StatusCode::ServiceUnavailable)
@@ -453,7 +483,11 @@ fn validate_static_principal_tenant(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{BearerAuthError, BearerValidator, DigestAuth, DigestAuthenticator};
+    use crate::auth::{
+        AuthAttemptAdmission, AuthAttemptReservation, AuthAuditOutcome, AuthRateLimitKey,
+        AuthRateLimitVerdict, AuthRateLimiter, BearerAuthError, BearerValidator,
+        CredentialAuthError, DigestAuth, DigestAuthenticator,
+    };
     use rvoip_core_traits::identity::{CredentialKind, IdentityAssurance};
     use rvoip_core_traits::ids::IdentityId;
     use rvoip_sip_core::builder::SimpleRequestBuilder;
@@ -504,12 +538,103 @@ mod tests {
         )
     }
 
+    #[derive(Clone)]
+    struct DenyingRateLimiter {
+        retry_after: Option<Duration>,
+    }
+
+    #[async_trait]
+    impl AuthRateLimiter for DenyingRateLimiter {
+        async fn check_auth_attempt(
+            &self,
+            _key: &AuthRateLimitKey,
+        ) -> std::result::Result<AuthRateLimitVerdict, CredentialAuthError> {
+            Ok(AuthRateLimitVerdict::Denied {
+                retry_after: self.retry_after,
+            })
+        }
+
+        async fn record_auth_result(
+            &self,
+            _key: &AuthRateLimitKey,
+            _outcome: &AuthAuditOutcome,
+        ) -> std::result::Result<(), CredentialAuthError> {
+            panic!("denied listener admission must not record an auth result")
+        }
+
+        async fn reserve_auth_attempt(
+            &self,
+            _key: &AuthRateLimitKey,
+        ) -> std::result::Result<AuthAttemptAdmission, CredentialAuthError> {
+            Ok(AuthAttemptAdmission::Denied {
+                retry_after: self.retry_after,
+            })
+        }
+
+        async fn complete_auth_attempt(
+            &self,
+            _reservation: &AuthAttemptReservation,
+            _outcome: &AuthAuditOutcome,
+        ) -> std::result::Result<(), CredentialAuthError> {
+            panic!("denied listener admission must not complete a reservation")
+        }
+    }
+
     #[test]
     fn rate_limit_peer_ignores_attacker_controlled_source_ports() {
         let first: std::net::SocketAddr = "192.0.2.42:5060".parse().unwrap();
         let rotated: std::net::SocketAddr = "192.0.2.42:65000".parse().unwrap();
         assert_eq!(rate_limit_peer(first), "192.0.2.42");
         assert_eq!(rate_limit_peer(first), rate_limit_peer(rotated));
+    }
+
+    #[test]
+    fn authentication_retry_after_is_rounded_and_bounded() {
+        for (retry_after, expected) in [
+            (None, 1),
+            (Some(Duration::ZERO), 1),
+            (Some(Duration::from_nanos(1)), 1),
+            (Some(Duration::from_millis(1_500)), 2),
+            (Some(Duration::from_secs(3_600)), 3_600),
+            (Some(Duration::from_secs(3_601)), 3_600),
+            (Some(Duration::from_secs(u64::MAX)), 3_600),
+        ] {
+            assert_eq!(bounded_auth_retry_after_secs(retry_after), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limited_listener_rejects_with_bounded_retry_after_without_challenge() {
+        for (retry_after, expected) in [
+            (None, 1),
+            (Some(Duration::from_millis(1_500)), 2),
+            (Some(Duration::from_secs(86_400)), 3_600),
+        ] {
+            let service = SipAuthService::digest("listener")
+                .with_digest_user("alice", "secret")
+                .with_rate_limiter(Arc::new(DenyingRateLimiter { retry_after }));
+            let policy = SipListenerAuthPolicy::authenticated_for_tenant("tenant-a", service)
+                .expect("tenant-bound policy");
+            let decision = policy
+                .authorize(
+                    &invite(None),
+                    &context("192.0.2.42:5060", TransportType::Udp),
+                )
+                .await;
+            let SipRequestAuthorization::Rejected(rejection) = decision else {
+                panic!("rate-limited request was unexpectedly authorized");
+            };
+            assert_eq!(rejection.status, StatusCode::ServiceUnavailable);
+            assert!(!rejection.headers.iter().any(|header| {
+                matches!(
+                    header.name(),
+                    HeaderName::WwwAuthenticate | HeaderName::ProxyAuthenticate
+                )
+            }));
+            assert!(rejection.headers.iter().any(|header| {
+                matches!(header, TypedHeader::RetryAfter(value) if value.delay == expected)
+            }));
+        }
     }
 
     #[test]

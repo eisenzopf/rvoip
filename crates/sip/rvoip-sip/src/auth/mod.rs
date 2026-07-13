@@ -897,7 +897,39 @@ enum AuthAttemptScheme {
 enum SipRateLimitAdmission {
     Unmanaged,
     Reserved(AuthAttemptReservation),
-    Denied,
+    Denied { retry_after: Option<Duration> },
+}
+
+enum SipAuthEvaluation {
+    Decision(SipAuthDecision),
+    RateLimited { retry_after: Option<Duration> },
+}
+
+pub(crate) enum SipPrincipalAuthEvaluation {
+    Decision(SipPrincipalAuthDecision),
+    RateLimited { retry_after: Option<Duration> },
+}
+
+impl SipAuthEvaluation {
+    fn into_legacy_decision(self) -> SipAuthDecision {
+        match self {
+            Self::Decision(decision) => decision,
+            Self::RateLimited { .. } => SipAuthDecision::Rejected {
+                challenges: Vec::new(),
+            },
+        }
+    }
+}
+
+impl SipPrincipalAuthEvaluation {
+    fn into_legacy_decision(self) -> SipPrincipalAuthDecision {
+        match self {
+            Self::Decision(decision) => decision,
+            Self::RateLimited { .. } => SipPrincipalAuthDecision::Rejected {
+                challenges: Vec::new(),
+            },
+        }
+    }
 }
 
 impl AuthAttemptScheme {
@@ -1954,17 +1986,19 @@ impl SipAuthService {
         context: &SipAuthContext,
     ) -> Result<SipAuthDecision> {
         let mut principal = None;
-        self.authenticate_authorization_with_context_and_transport_internal(
-            authorization,
-            method,
-            request_uri,
-            body,
-            source,
-            transport,
-            context,
-            &mut principal,
-        )
-        .await
+        Ok(self
+            .authenticate_authorization_with_context_and_transport_internal(
+                authorization,
+                method,
+                request_uri,
+                body,
+                source,
+                transport,
+                context,
+                &mut principal,
+            )
+            .await?
+            .into_legacy_decision())
     }
 
     /// Validate listener credentials while retaining the provider's complete
@@ -1981,8 +2015,32 @@ impl SipAuthService {
         transport: &SipTransportSecurityContext,
         context: &SipAuthContext,
     ) -> Result<SipPrincipalAuthDecision> {
+        Ok(self
+            .evaluate_principal_with_context_and_transport(
+                authorization,
+                method,
+                request_uri,
+                body,
+                source,
+                transport,
+                context,
+            )
+            .await?
+            .into_legacy_decision())
+    }
+
+    pub(crate) async fn evaluate_principal_with_context_and_transport(
+        &self,
+        authorization: Option<&str>,
+        method: &str,
+        request_uri: &str,
+        body: Option<&[u8]>,
+        source: SipAuthSource,
+        transport: &SipTransportSecurityContext,
+        context: &SipAuthContext,
+    ) -> Result<SipPrincipalAuthEvaluation> {
         let mut principal = None;
-        let decision = self
+        let evaluation = self
             .authenticate_authorization_with_context_and_transport_internal(
                 authorization,
                 method,
@@ -1995,20 +2053,27 @@ impl SipAuthService {
             )
             .await?;
 
-        match decision {
-            SipAuthDecision::Authorized(identity) => {
+        match evaluation {
+            SipAuthEvaluation::Decision(SipAuthDecision::Authorized(identity)) => {
                 let principal = principal
                     .or_else(|| principal_from_sip_auth_identity(&identity))
                     .ok_or_else(|| {
                         redacted_auth_failure(AuthFailureStage::PrincipalProjection, ())
                     })?;
-                Ok(SipPrincipalAuthDecision::Authorized {
-                    identity,
-                    principal,
-                })
+                Ok(SipPrincipalAuthEvaluation::Decision(
+                    SipPrincipalAuthDecision::Authorized {
+                        identity,
+                        principal,
+                    },
+                ))
             }
-            SipAuthDecision::Rejected { challenges } => {
-                Ok(SipPrincipalAuthDecision::Rejected { challenges })
+            SipAuthEvaluation::Decision(SipAuthDecision::Rejected { challenges }) => {
+                Ok(SipPrincipalAuthEvaluation::Decision(
+                    SipPrincipalAuthDecision::Rejected { challenges },
+                ))
+            }
+            SipAuthEvaluation::RateLimited { retry_after } => {
+                Ok(SipPrincipalAuthEvaluation::RateLimited { retry_after })
             }
         }
     }
@@ -2023,7 +2088,7 @@ impl SipAuthService {
         transport: &SipTransportSecurityContext,
         context: &SipAuthContext,
         principal_out: &mut Option<AuthenticatedPrincipal>,
-    ) -> Result<SipAuthDecision> {
+    ) -> Result<SipAuthEvaluation> {
         let attempt = auth_attempt_scheme(authorization);
         let rate_key = self.rate_limit_key(attempt, authorization, method, context);
 
@@ -2043,11 +2108,14 @@ impl SipAuthService {
         let reservation = match rate_admission {
             SipRateLimitAdmission::Unmanaged => None,
             SipRateLimitAdmission::Reserved(reservation) => Some(reservation),
-            SipRateLimitAdmission::Denied => {
-                let outcome = AuthAuditOutcome::Failure(AuthFailureReason::PolicyRejected);
-                self.audit_attempt(attempt, outcome, authorization, source, method, context)
-                    .await?;
-                return self.rejected_async(source).await;
+            SipRateLimitAdmission::Denied { retry_after } => {
+                // Rate-limit denial is terminal for this evaluation. In
+                // particular, do not mint a Digest nonce, query a credential
+                // provider, or call an external audit sink after admission has
+                // already failed. The listener consumes the richer result and
+                // emits a bounded Retry-After response; legacy callers receive
+                // an empty rejection projection.
+                return Ok(SipAuthEvaluation::RateLimited { retry_after });
             }
         };
 
@@ -2202,7 +2270,7 @@ impl SipAuthService {
         .await?;
         self.audit_attempt(attempt, outcome, authorization, source, method, context)
             .await?;
-        Ok(result)
+        Ok(SipAuthEvaluation::Decision(result))
     }
 
     fn rate_limit_key(
@@ -2248,7 +2316,9 @@ impl SipAuthService {
             AuthAttemptAdmission::Reserved(reservation) => {
                 SipRateLimitAdmission::Reserved(reservation)
             }
-            AuthAttemptAdmission::Denied { .. } => SipRateLimitAdmission::Denied,
+            AuthAttemptAdmission::Denied { retry_after } => {
+                SipRateLimitAdmission::Denied { retry_after }
+            }
         })
     }
 
@@ -4191,11 +4261,9 @@ mod tests {
             }
         }
 
-        fn deny() -> Self {
+        fn deny_with_retry_after(retry_after: Option<Duration>) -> Self {
             Self {
-                verdict: AuthRateLimitVerdict::Denied {
-                    retry_after: Some(Duration::from_secs(1)),
-                },
+                verdict: AuthRateLimitVerdict::Denied { retry_after },
                 checked: Arc::new(Mutex::new(Vec::new())),
                 results: Arc::new(Mutex::new(Vec::new())),
                 fail_check: false,
@@ -5552,38 +5620,107 @@ mod tests {
 
     #[tokio::test]
     async fn sip_auth_service_rate_limiter_denies_before_validation() {
-        let sink = RecordingAuditSink::default();
-        let limiter = TestRateLimiter::deny();
-        let mut service = SipAuthService::new()
-            .with_basic_realm("legacy")
-            .allow_basic_over_cleartext(true)
+        let sink = RecordingAuditSink {
+            fail: true,
+            ..RecordingAuditSink::default()
+        };
+        let limiter = TestRateLimiter::deny_with_retry_after(Some(Duration::from_millis(1_500)));
+        let service = SipAuthService::new()
+            .with_digest_provider("example.test", Arc::new(FailingDigestProvider))
+            .with_digest_replay_store(Arc::new(FailingDigestReplayStore))
             .with_audit_sink(sink.clone().into_arc())
+            .with_audit_failure_policy(AuditFailurePolicy::FailClosed)
             .with_rate_limiter(limiter.clone().into_arc());
-        service.add_basic_user("alice", "secret");
-        let token = BASE64_STANDARD.encode("alice:secret");
 
         let decision = service
-            .authenticate_authorization(
-                Some(&format!("Basic {token}")),
+            .authenticate_authorization_with_context(
+                None,
                 "OPTIONS",
                 "sip:bob@example.test",
                 None,
                 SipAuthSource::Origin,
                 false,
+                &SipAuthContext::new().with_peer("192.0.2.10"),
             )
             .await
             .expect("rate-limit denial");
 
-        assert!(matches!(decision, SipAuthDecision::Rejected { .. }));
-        assert_eq!(
-            sink.events()[0].outcome,
-            AuthAuditOutcome::Failure(AuthFailureReason::PolicyRejected)
+        assert!(matches!(
+            decision,
+            SipAuthDecision::Rejected { ref challenges } if challenges.is_empty()
+        ));
+        assert!(
+            sink.events().is_empty(),
+            "denial must not call the external audit sink"
         );
         assert_eq!(
             limiter.results(),
             Vec::<AuthAuditOutcome>::new(),
             "a denied admission has no reservation to complete"
         );
+
+        let denied_digest = concat!(
+            "Digest username=\"alice\", realm=\"example.test\", ",
+            "nonce=\"denied-nonce\", uri=\"sip:bob@example.test\", ",
+            "response=\"00000000000000000000000000000000\", algorithm=MD5"
+        );
+        let credential_decision = service
+            .authenticate_authorization_with_context(
+                Some(denied_digest),
+                "OPTIONS",
+                "sip:bob@example.test",
+                None,
+                SipAuthSource::Origin,
+                false,
+                &SipAuthContext::new().with_peer("192.0.2.10"),
+            )
+            .await
+            .expect("credential-bearing rate-limit denial");
+        assert!(matches!(
+            credential_decision,
+            SipAuthDecision::Rejected { ref challenges } if challenges.is_empty()
+        ));
+
+        let transport = SipTransportSecurityContext::from_transport_name("UDP");
+        let context = SipAuthContext::new().with_peer("192.0.2.10");
+        let evaluation = service
+            .evaluate_principal_with_context_and_transport(
+                None,
+                "OPTIONS",
+                "sip:bob@example.test",
+                None,
+                SipAuthSource::Origin,
+                &transport,
+                &context,
+            )
+            .await
+            .expect("listener rate-limit evaluation");
+        assert!(matches!(
+            evaluation,
+            SipPrincipalAuthEvaluation::RateLimited {
+                retry_after: Some(delay)
+            } if delay == Duration::from_millis(1_500)
+        ));
+
+        let principal_decision = service
+            .authenticate_principal_with_context_and_transport(
+                None,
+                "OPTIONS",
+                "sip:bob@example.test",
+                None,
+                SipAuthSource::Origin,
+                &transport,
+                &context,
+            )
+            .await
+            .expect("legacy principal rate-limit projection");
+        assert!(matches!(
+            principal_decision,
+            SipPrincipalAuthDecision::Rejected { ref challenges } if challenges.is_empty()
+        ));
+        assert!(sink.events().is_empty());
+        assert_eq!(limiter.checked().len(), 4);
+        assert!(limiter.results().is_empty());
     }
 
     #[tokio::test]

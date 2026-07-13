@@ -2,7 +2,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket as StdUdpSocket};
 use std::path::{Path, PathBuf};
-use std::sync::Once;
+use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use ipnet::IpNet;
@@ -15,8 +15,9 @@ use rvoip_core::identity::{
     AuthenticatedPrincipal, AuthenticationMethod, CredentialKind, IdentityAssurance,
 };
 use rvoip_sip::{
-    Config, DigestAuth, DigestAuthenticator, MediaMode, SipAdapter, SipAuthService,
-    SipListenerAuthPolicy,
+    AuthAttemptAdmission, AuthAttemptReservation, AuthAuditOutcome, AuthRateLimitKey,
+    AuthRateLimitVerdict, AuthRateLimiter, Config, CredentialAuthError, DigestAuth,
+    DigestAuthenticator, MediaMode, SipAdapter, SipAuthService, SipListenerAuthPolicy,
 };
 use rvoip_sip_core::types::headers::HeaderAccess;
 use rvoip_sip_core::{parse_message, HeaderName, Message, StatusCode};
@@ -140,6 +141,47 @@ async fn assert_no_authenticated_event(
     })
     .await;
     assert!(!matches!(received, Ok(true)));
+}
+
+struct AlwaysDenyAuthRateLimiter {
+    retry_after: Option<Duration>,
+}
+
+#[async_trait::async_trait]
+impl AuthRateLimiter for AlwaysDenyAuthRateLimiter {
+    async fn check_auth_attempt(
+        &self,
+        _key: &AuthRateLimitKey,
+    ) -> Result<AuthRateLimitVerdict, CredentialAuthError> {
+        Ok(AuthRateLimitVerdict::Denied {
+            retry_after: self.retry_after,
+        })
+    }
+
+    async fn record_auth_result(
+        &self,
+        _key: &AuthRateLimitKey,
+        _outcome: &AuthAuditOutcome,
+    ) -> Result<(), CredentialAuthError> {
+        panic!("denied listener admission must not record an auth result")
+    }
+
+    async fn reserve_auth_attempt(
+        &self,
+        _key: &AuthRateLimitKey,
+    ) -> Result<AuthAttemptAdmission, CredentialAuthError> {
+        Ok(AuthAttemptAdmission::Denied {
+            retry_after: self.retry_after,
+        })
+    }
+
+    async fn complete_auth_attempt(
+        &self,
+        _reservation: &AuthAttemptReservation,
+        _outcome: &AuthAuditOutcome,
+    ) -> Result<(), CredentialAuthError> {
+        panic!("denied listener admission must not complete a reservation")
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -278,6 +320,83 @@ async fn digest_reaches_sip_adapter_stamped_with_policy_tenant() {
     assert_eq!(admitted.subject, "alice");
     assert_eq!(admitted.tenant.as_deref(), Some(TENANT));
     assert_eq!(admitted.method, AuthenticationMethod::SipDigest);
+
+    adapter
+        .coordinator()
+        .shutdown_gracefully(Some(Duration::from_secs(1)))
+        .await
+        .expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn rate_limited_listener_emits_bounded_503_retry_after_on_wire() {
+    let bind = reserve_udp_addr();
+    let service = SipAuthService::digest("bridgefu-listener")
+        .with_digest_user("alice", "correct horse battery staple")
+        .with_rate_limiter(Arc::new(AlwaysDenyAuthRateLimiter {
+            retry_after: Some(Duration::from_secs(86_400)),
+        }));
+    let policy =
+        SipListenerAuthPolicy::authenticated_for_tenant(TENANT, service).expect("tenant policy");
+    let adapter = SipAdapter::from_config_with_listener_auth(signaling_config(bind), policy)
+        .await
+        .expect("rate-limited SIP adapter");
+    let mut events = adapter
+        .try_subscribe_atomic_events()
+        .expect("adapter event stream");
+    let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("UDP client");
+
+    client
+        .send_to(
+            &invite_wire(
+                bind,
+                "UDP",
+                "rate-limited@adapter.test",
+                1,
+                "z9hG4bK.rate-limited",
+                None,
+            ),
+            bind,
+        )
+        .await
+        .expect("send rate-limited INVITE");
+
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let response = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let (len, _) = client
+                .recv_from(&mut buffer)
+                .await
+                .expect("receive rate-limit response");
+            let Message::Response(response) =
+                parse_message(&buffer[..len]).expect("parse rate-limit response")
+            else {
+                continue;
+            };
+            if response.status_code() == StatusCode::ServiceUnavailable.as_u16() {
+                return response;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for rate-limit response");
+
+    assert_eq!(
+        response
+            .raw_header_value(&HeaderName::RetryAfter)
+            .as_deref(),
+        Some("3600")
+    );
+    assert!(response
+        .raw_header_value(&HeaderName::WwwAuthenticate)
+        .is_none());
+    assert!(response
+        .raw_header_value(&HeaderName::ProxyAuthenticate)
+        .is_none());
+    assert_no_authenticated_event(&mut events).await;
 
     adapter
         .coordinator()
