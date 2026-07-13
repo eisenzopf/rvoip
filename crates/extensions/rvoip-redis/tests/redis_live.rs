@@ -374,12 +374,15 @@ async fn rate_limiter_missing_dimensions_are_isolated_atomic_and_recover() {
     let config = RedisAuthConfig::new(redis_url)
         .with_namespace(namespace)
         .with_rate_limit_window(Duration::from_secs(1))
-        .with_max_failures_per_window(1)
-        .with_max_initial_challenges_per_window(2);
+        .with_max_failures_per_window(1);
     // Independent providers model separate workers racing on one clustered
     // tenant namespace rather than clones sharing one cached connection.
-    let first = RedisAuthProvider::from_config(config.clone()).unwrap();
-    let second = RedisAuthProvider::from_config(config).unwrap();
+    let first = RedisAuthProvider::from_config(config.clone())
+        .unwrap()
+        .with_max_initial_challenges_per_window(2);
+    let second = RedisAuthProvider::from_config(config)
+        .unwrap()
+        .with_max_initial_challenges_per_window(2);
     first.clear_namespace_for_tests().await.unwrap();
 
     let challenge = AuthRateLimitKey::new(AuthRateLimitKind::SipChallenge)

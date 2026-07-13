@@ -31,6 +31,9 @@ use thiserror::Error;
 pub const MAX_REDIS_AUTH_RATE_LIMIT_COHORTS: usize = 1_000_000;
 /// Hard upper bound for configured incomplete auth-attempt reservations.
 pub const MAX_REDIS_AUTH_RATE_LIMIT_RESERVATIONS: usize = 1_000_000;
+/// Default protocol-normal initial SIP challenges accepted from one peer in
+/// one rate-limit window.
+pub const DEFAULT_REDIS_AUTH_INITIAL_CHALLENGES_PER_WINDOW: u32 = 120;
 
 // Redis auth-attempt keys are an internal persistence protocol. Version the
 // schema explicitly so Rust Debug output or a future enum rename cannot split
@@ -397,12 +400,6 @@ pub struct RedisAuthConfig {
     pub rate_limit_window: Duration,
     /// Maximum failed attempts accepted in one rate-limit window.
     pub max_failures_per_window: u32,
-    /// Maximum protocol-normal initial SIP challenges accepted from one peer
-    /// in one rate-limit window.
-    ///
-    /// Challenge issuance has no authenticated subject yet, so it uses this
-    /// independent per-peer budget instead of the credential-failure budget.
-    pub max_initial_challenges_per_window: u32,
 }
 
 impl fmt::Debug for RedisAuthConfig {
@@ -416,10 +413,6 @@ impl fmt::Debug for RedisAuthConfig {
             .field("token_revocation_ttl", &self.token_revocation_ttl)
             .field("rate_limit_window", &self.rate_limit_window)
             .field("max_failures_per_window", &self.max_failures_per_window)
-            .field(
-                "max_initial_challenges_per_window",
-                &self.max_initial_challenges_per_window,
-            )
             .finish()
     }
 }
@@ -482,7 +475,6 @@ impl RedisAuthConfig {
             token_revocation_ttl: Duration::from_secs(24 * 60 * 60),
             rate_limit_window: Duration::from_secs(60),
             max_failures_per_window: 10,
-            max_initial_challenges_per_window: 120,
         }
     }
 
@@ -521,13 +513,6 @@ impl RedisAuthConfig {
         self.max_failures_per_window = max_failures;
         self
     }
-
-    /// Set the bounded per-peer budget for protocol-normal initial SIP
-    /// authentication challenges.
-    pub fn with_max_initial_challenges_per_window(mut self, max_challenges: u32) -> Self {
-        self.max_initial_challenges_per_window = max_challenges;
-        self
-    }
 }
 
 /// Redis-backed auth provider for shared enterprise auth state.
@@ -538,6 +523,7 @@ pub struct RedisAuthProvider {
     runtime: RedisAuthRuntimeConfig,
     digest_limits: RedisDigestReplayLimits,
     rate_limit_limits: RedisAuthRateLimitLimits,
+    max_initial_challenges_per_window: u32,
 }
 
 #[derive(Clone)]
@@ -625,7 +611,7 @@ impl fmt::Debug for RedisAuthProvider {
             )
             .field(
                 "max_initial_challenges_per_window",
-                &self.config.max_initial_challenges_per_window,
+                &self.max_initial_challenges_per_window,
             )
             .field("digest_limits", &self.digest_limits)
             .field("runtime", &self.runtime)
@@ -692,6 +678,7 @@ impl RedisAuthProvider {
             runtime,
             digest_limits: RedisDigestReplayLimits::default(),
             rate_limit_limits: RedisAuthRateLimitLimits::default(),
+            max_initial_challenges_per_window: DEFAULT_REDIS_AUTH_INITIAL_CHALLENGES_PER_WINDOW,
         })
     }
 
@@ -811,6 +798,7 @@ impl RedisAuthProvider {
             runtime,
             digest_limits: RedisDigestReplayLimits::default(),
             rate_limit_limits: RedisAuthRateLimitLimits::default(),
+            max_initial_challenges_per_window: DEFAULT_REDIS_AUTH_INITIAL_CHALLENGES_PER_WINDOW,
         })
     }
 
@@ -858,6 +846,21 @@ impl RedisAuthProvider {
     /// Return the effective auth-attempt cardinality bounds.
     pub fn auth_rate_limit_limits(&self) -> RedisAuthRateLimitLimits {
         self.rate_limit_limits
+    }
+
+    /// Set the bounded per-peer budget for protocol-normal initial SIP
+    /// authentication challenges.
+    ///
+    /// This provider-level builder is additive and keeps the released public
+    /// [`RedisAuthConfig`] struct source-compatible for exhaustive literals.
+    pub fn with_max_initial_challenges_per_window(mut self, max_challenges: u32) -> Self {
+        self.max_initial_challenges_per_window = max_challenges;
+        self
+    }
+
+    /// Return the effective initial SIP challenge budget per peer and window.
+    pub fn max_initial_challenges_per_window(&self) -> u32 {
+        self.max_initial_challenges_per_window
     }
 
     /// Return aggregate-safe rate-limit state cardinality.
@@ -1435,7 +1438,7 @@ impl AuthRateLimiter for RedisAuthProvider {
         key: &AuthRateLimitKey,
     ) -> Result<AuthAttemptAdmission, CredentialAuthError> {
         let max_attempts_per_window = match key.kind {
-            AuthRateLimitKind::SipChallenge => self.config.max_initial_challenges_per_window,
+            AuthRateLimitKind::SipChallenge => self.max_initial_challenges_per_window,
             _ => self.config.max_failures_per_window,
         };
         if max_attempts_per_window == 0 {
@@ -1653,7 +1656,10 @@ mod tests {
         );
         assert_eq!(provider.config().redis_url, "redis://127.0.0.1:6379");
         assert_eq!(provider.runtime_config(), RedisAuthRuntimeConfig::default());
-        assert_eq!(provider.config().max_initial_challenges_per_window, 120);
+        assert_eq!(
+            provider.max_initial_challenges_per_window(),
+            DEFAULT_REDIS_AUTH_INITIAL_CHALLENGES_PER_WINDOW
+        );
     }
 
     #[test]

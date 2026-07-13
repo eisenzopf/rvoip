@@ -59,8 +59,10 @@ when a peer is unavailable, its aggregate is derived from the known subject.
 A key missing both dimensions fails closed instead of entering a shared global
 sentinel cohort. Protocol-normal initial SIP challenges use the distinct
 `SipChallenge` kind and a configurable per-peer budget set with
-`with_max_initial_challenges_per_window` (120 per window by default), so they
-do not consume the invalid-credential budget.
+the additive provider builder `with_max_initial_challenges_per_window` (120 per
+window by default), so they do not consume the invalid-credential budget. The
+budget is private provider state rather than a new public `RedisAuthConfig`
+field, preserving source compatibility for existing exhaustive config literals.
 
 Rate-limit state uses a fixed set of Redis keys with bounded peer, subject,
 and incomplete-reservation cohorts. Configure those bounds with

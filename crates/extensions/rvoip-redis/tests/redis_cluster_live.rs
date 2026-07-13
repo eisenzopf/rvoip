@@ -31,6 +31,26 @@ fn released_redis_auth_error_remains_exhaustively_matchable() {
     );
 }
 
+#[test]
+fn released_redis_auth_config_remains_exhaustively_constructible() {
+    // This integration test compiles at the external-crate boundary and locks
+    // the released 0.1.3 public field set. New optional policy belongs behind
+    // additive provider builders, not new fields that break struct literals.
+    let config = RedisAuthConfig {
+        redis_url: "redis://127.0.0.1:6379".to_string(),
+        namespace: "rvoip:test:source-compat".to_string(),
+        nonce_stale_retention: Duration::from_secs(300),
+        nonce_count_ttl: Duration::from_secs(600),
+        token_revocation_ttl: Duration::from_secs(86_400),
+        rate_limit_window: Duration::from_secs(60),
+        max_failures_per_window: 10,
+    };
+    let provider = RedisAuthProvider::from_config(config)
+        .expect("released exhaustive config literal must still construct")
+        .with_max_initial_challenges_per_window(7);
+    assert_eq!(provider.max_initial_challenges_per_window(), 7);
+}
+
 fn cluster_seed_urls(variable: &str) -> Option<Vec<String>> {
     let raw = match std::env::var(variable) {
         Ok(raw) => raw,
@@ -64,15 +84,15 @@ fn provider_for_namespace(namespace: String, seed_urls: Vec<String>) -> RedisAut
         .with_nonce_count_ttl(Duration::from_secs(30))
         .with_token_revocation_ttl(Duration::from_secs(30))
         .with_rate_limit_window(Duration::from_secs(30))
-        .with_max_failures_per_window(1)
-        .with_max_initial_challenges_per_window(1);
-    if seed_urls.iter().all(|url| url.starts_with("rediss://")) {
+        .with_max_failures_per_window(1);
+    let provider = if seed_urls.iter().all(|url| url.starts_with("rediss://")) {
         RedisAuthProvider::from_cluster_config_with_tls(config, seed_urls, tls_config())
             .expect("configured TLS Redis Cluster provider must construct")
     } else {
         RedisAuthProvider::from_cluster_config(config, seed_urls)
             .expect("configured Redis Cluster provider must construct")
-    }
+    };
+    provider.with_max_initial_challenges_per_window(1)
 }
 
 fn cluster_provider_from_env(test_name: &str, variable: &str) -> Option<RedisAuthProvider> {
