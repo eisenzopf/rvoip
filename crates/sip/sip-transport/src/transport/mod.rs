@@ -96,7 +96,7 @@ pub struct TransportReceiveTiming {
 /// certificate fingerprint rather than retaining the potentially large DER
 /// chain or parsing application-specific subject names at the transport
 /// boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TlsPeerIdentity {
     /// Lowercase hexadecimal SHA-256 digest of the presented leaf
     /// certificate's DER encoding.
@@ -105,13 +105,39 @@ pub struct TlsPeerIdentity {
     pub presented_chain_len: usize,
 }
 
+impl fmt::Debug for TlsPeerIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TlsPeerIdentity")
+            .field(
+                "leaf_fingerprint_present",
+                &!self.leaf_certificate_sha256.is_empty(),
+            )
+            .field(
+                "leaf_fingerprint_bytes",
+                &self.leaf_certificate_sha256.len(),
+            )
+            .field("presented_chain_len", &self.presented_chain_len)
+            .finish()
+    }
+}
+
 /// Connection-scoped metadata attached to every SIP message received on the
 /// corresponding transport connection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TransportConnectionMetadata {
     /// Verified mutual-TLS client identity. Present only when a TLS or WSS
     /// client supplied a chain accepted by the configured client verifier.
     pub tls_peer_identity: TlsPeerIdentity,
+}
+
+impl fmt::Debug for TransportConnectionMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TransportConnectionMetadata")
+            .field("tls_peer_identity", &self.tls_peer_identity)
+            .finish()
+    }
 }
 
 /// Events emitted by a transport
@@ -683,5 +709,21 @@ mod tests {
         let rendered = format!("{rewrite:?}");
         assert!(!rendered.contains(SECRET));
         assert!(rendered.contains(&format!("bytes: {}", SECRET.len())));
+    }
+
+    #[test]
+    fn tls_peer_metadata_debug_never_exposes_certificate_fingerprint() {
+        const CANARY: &str = "tls-certificate-fingerprint-secret-canary";
+        let identity = TlsPeerIdentity {
+            leaf_certificate_sha256: CANARY.into(),
+            presented_chain_len: 2,
+        };
+        let metadata = TransportConnectionMetadata {
+            tls_peer_identity: identity.clone(),
+        };
+        for rendered in [format!("{identity:?}"), format!("{metadata:?}")] {
+            assert!(!rendered.contains(CANARY));
+            assert!(rendered.contains("presented_chain_len: 2"));
+        }
     }
 }

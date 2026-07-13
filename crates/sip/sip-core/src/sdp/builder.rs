@@ -1376,6 +1376,7 @@ impl SdpSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Error;
 
     #[test]
     fn test_basic_sdp_builder() {
@@ -1498,7 +1499,11 @@ mod tests {
 
         assert!(result.is_err());
         if let Err(e) = result {
-            assert!(e.to_string().contains("time description"));
+            assert!(matches!(
+                &e,
+                Error::SdpValidationError(detail) if detail.contains("time description")
+            ));
+            assert!(!e.to_string().contains("time description"));
         }
 
         // Test missing connection data
@@ -1514,7 +1519,11 @@ mod tests {
 
         assert!(result.is_err());
         if let Err(e) = result {
-            assert!(e.to_string().contains("Connection information"));
+            assert!(matches!(
+                &e,
+                Error::SdpValidationError(detail) if detail.contains("Connection information")
+            ));
+            assert!(!e.to_string().contains("Connection information"));
         }
 
         // Test missing formats in media
@@ -1529,7 +1538,12 @@ mod tests {
 
         assert!(result.is_err());
         if let Err(e) = result {
-            assert!(e.to_string().contains("must have at least one format"));
+            assert!(matches!(
+                &e,
+                Error::SdpValidationError(detail)
+                    if detail.contains("must have at least one format")
+            ));
+            assert!(!e.to_string().contains("must have at least one format"));
         }
     }
 

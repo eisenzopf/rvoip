@@ -663,6 +663,15 @@ mod tests {
             .build()
     }
 
+    fn assert_validation_detail(error: &Error, expected: &str) {
+        assert!(matches!(
+            error,
+            Error::ValidationError(detail) if detail.contains(expected)
+        ));
+        assert!(!error.to_string().contains(expected));
+        assert_eq!(error.diagnostic_class(), "validation");
+    }
+
     #[test]
     fn accepts_valid_empty_request() {
         assert!(validate_wire_request(&valid_request()).is_ok());
@@ -684,8 +693,8 @@ mod tests {
                 HeaderValue::Raw(value.as_bytes().to_vec()),
             ));
             let error = validate_wire_request(&request).unwrap_err();
-            assert!(error.to_string().contains(label), "{alias}: {error}");
-            assert!(error.to_string().contains("duplicate"), "{alias}: {error}");
+            assert_validation_detail(&error, label);
+            assert_validation_detail(&error, "duplicate");
         }
     }
 
@@ -730,7 +739,7 @@ mod tests {
 
         let oversized = format!("{exact}a");
         let oversized_error = validate_authorization_header_value(&oversized).unwrap_err();
-        assert!(oversized_error.to_string().contains("size limit"));
+        assert_validation_detail(&oversized_error, "size limit");
         assert!(!oversized_error.to_string().contains(&oversized));
 
         for malicious in [
@@ -741,7 +750,7 @@ mod tests {
             "Bearer safe\u{85}tail",
         ] {
             let error = validate_authorization_header_value(malicious).unwrap_err();
-            assert!(error.to_string().contains("control character"));
+            assert_validation_detail(&error, "control character");
             assert!(!error.to_string().contains(malicious));
         }
         assert!(validate_authorization_header_value("").is_err());
@@ -802,7 +811,7 @@ mod tests {
                 HeaderValue::Raw(b"Bearer safe\r\nX-Injected: yes".to_vec()),
             ));
             let error = validate_wire_request(&request).unwrap_err();
-            assert!(error.to_string().contains("control character"));
+            assert_validation_detail(&error, "control character");
             assert!(!error.to_string().contains("X-Injected"));
         }
     }
@@ -859,7 +868,7 @@ mod tests {
             },
         ] {
             let error = validate_outbound_authorization_headers(&message).unwrap_err();
-            assert!(error.to_string().contains("control character"));
+            assert_validation_detail(&error, "control character");
             assert!(!error.to_string().contains("X-Injected"));
         }
     }
@@ -883,7 +892,7 @@ mod tests {
             ));
             let message = Message::Request(request);
             let error = validate_typed_outbound_message(&message).unwrap_err();
-            assert!(error.to_string().contains("valid token"));
+            assert_validation_detail(&error, "valid token");
             if !name.is_empty() {
                 assert!(!error.to_string().contains(name));
             }
@@ -950,7 +959,7 @@ mod tests {
             let mut request = valid_request();
             request.headers.push(header);
             let error = validate_typed_outbound_message(&Message::Request(request)).unwrap_err();
-            assert!(error.to_string().contains("header line"));
+            assert_validation_detail(&error, "header line");
             assert!(!error.to_string().contains(SECRET));
         }
     }
@@ -963,7 +972,7 @@ mod tests {
         ]));
 
         let error = validate_typed_outbound_message(&Message::Request(request)).unwrap_err();
-        assert!(error.to_string().contains("header line exceeds"));
+        assert_validation_detail(&error, "header line exceeds");
 
         // A long collection must stop at the first overflowing element rather
         // than formatting the entire caller-owned vector.
@@ -973,7 +982,7 @@ mod tests {
             MAX_TYPED_HEADER_LINE_BYTES / 2
         ]));
         let error = validate_typed_outbound_message(&Message::Request(request)).unwrap_err();
-        assert!(error.to_string().contains("header line exceeds"));
+        assert_validation_detail(&error, "header line exceeds");
 
         // Exercise a byte limit that lands inside a multi-byte scalar value.
         let mut request = valid_request();
@@ -981,7 +990,7 @@ mod tests {
             "🦀".repeat(MAX_TYPED_HEADER_LINE_BYTES / 4 + 1),
         )));
         let error = validate_typed_outbound_message(&Message::Request(request)).unwrap_err();
-        assert!(error.to_string().contains("header line exceeds"));
+        assert_validation_detail(&error, "header line exceeds");
     }
 
     #[test]
@@ -1009,7 +1018,7 @@ mod tests {
             Request::new(Method::Options, nested_domain_uri),
         ] {
             let error = validate_typed_outbound_message(&Message::Request(request)).unwrap_err();
-            assert!(error.to_string().contains("request"));
+            assert_validation_detail(&error, "request");
             assert!(!error.to_string().contains(SECRET));
         }
     }
@@ -1025,7 +1034,7 @@ mod tests {
         ] {
             let request = Request::new(Method::Options, uri);
             let error = validate_typed_outbound_message(&Message::Request(request)).unwrap_err();
-            assert!(error.to_string().contains("start line exceeds"));
+            assert_validation_detail(&error, "start line exceeds");
         }
     }
 
@@ -1113,30 +1122,24 @@ mod tests {
     fn rejects_refer_missing_contact() {
         let mut request = valid_refer_request();
         request.headers.retain(|h| h.name() != HeaderName::Contact);
-        assert!(validate_wire_request(&request)
-            .unwrap_err()
-            .to_string()
-            .contains("Contact"));
+        let error = validate_wire_request(&request).unwrap_err();
+        assert_validation_detail(&error, "Contact");
     }
 
     #[test]
     fn rejects_refer_missing_refer_to() {
         let mut request = valid_refer_request();
         request.headers.retain(|h| h.name() != HeaderName::ReferTo);
-        assert!(validate_wire_request(&request)
-            .unwrap_err()
-            .to_string()
-            .contains("Refer-To"));
+        let error = validate_wire_request(&request).unwrap_err();
+        assert_validation_detail(&error, "Refer-To");
     }
 
     #[test]
     fn rejects_missing_call_id() {
         let mut request = valid_request();
         request.headers.retain(|h| h.name() != HeaderName::CallId);
-        assert!(validate_wire_request(&request)
-            .unwrap_err()
-            .to_string()
-            .contains("Call-ID"));
+        let error = validate_wire_request(&request).unwrap_err();
+        assert_validation_detail(&error, "Call-ID");
     }
 
     #[test]
@@ -1145,10 +1148,8 @@ mod tests {
         request
             .headers
             .retain(|h| h.name() != HeaderName::MaxForwards);
-        assert!(validate_wire_request(&request)
-            .unwrap_err()
-            .to_string()
-            .contains("Max-Forwards"));
+        let error = validate_wire_request(&request).unwrap_err();
+        assert_validation_detail(&error, "Max-Forwards");
     }
 
     #[test]
@@ -1157,20 +1158,16 @@ mod tests {
         request
             .headers
             .retain(|h| h.name() != HeaderName::ContentLength);
-        assert!(validate_wire_request(&request)
-            .unwrap_err()
-            .to_string()
-            .contains("Content-Length"));
+        let error = validate_wire_request(&request).unwrap_err();
+        assert_validation_detail(&error, "Content-Length");
     }
 
     #[test]
     fn rejects_content_length_mismatch() {
         let mut request = valid_request();
         request.body = "hello".as_bytes().to_vec().into();
-        assert!(validate_wire_request(&request)
-            .unwrap_err()
-            .to_string()
-            .contains("mismatch"));
+        let error = validate_wire_request(&request).unwrap_err();
+        assert_validation_detail(&error, "mismatch");
     }
 
     #[test]
@@ -1186,10 +1183,8 @@ mod tests {
             .body("hello")
             .build();
 
-        assert!(validate_wire_request(&request)
-            .unwrap_err()
-            .to_string()
-            .contains("Content-Type"));
+        let error = validate_wire_request(&request).unwrap_err();
+        assert_validation_detail(&error, "Content-Type");
     }
 
     #[test]
@@ -1248,9 +1243,7 @@ mod tests {
             HeaderValue::Raw(b"zero".to_vec()),
         ));
 
-        assert!(validate_wire_request(&request)
-            .unwrap_err()
-            .to_string()
-            .contains("valid integer"));
+        let error = validate_wire_request(&request).unwrap_err();
+        assert_validation_detail(&error, "valid integer");
     }
 }

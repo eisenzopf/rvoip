@@ -3,12 +3,13 @@
 use crate::types::{ContactInfo, PresenceStatus};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
+use std::fmt;
 
 // Import Event trait from infra-common
 use rvoip_infra_common::events::types::{Event, EventPriority};
 
 /// Registration-related events
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum RegistrarEvent {
     /// User registered
     UserRegistered { user: String, contact: ContactInfo },
@@ -29,6 +30,30 @@ pub enum RegistrarEvent {
     ContactRemoved { user: String, uri: String },
 }
 
+impl fmt::Debug for RegistrarEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UserRegistered { contact, .. } => formatter
+                .debug_struct("UserRegistered")
+                .field("contact_transport", &contact.transport)
+                .field("contact_method_count", &contact.methods.len())
+                .finish(),
+            Self::UserUnregistered { .. } => formatter.write_str("UserUnregistered"),
+            Self::RegistrationExpired { .. } => formatter.write_str("RegistrationExpired"),
+            Self::RegistrationRefreshed { expires, .. } => formatter
+                .debug_struct("RegistrationRefreshed")
+                .field("expires", expires)
+                .finish(),
+            Self::ContactAdded { contact, .. } => formatter
+                .debug_struct("ContactAdded")
+                .field("contact_transport", &contact.transport)
+                .field("contact_method_count", &contact.methods.len())
+                .finish(),
+            Self::ContactRemoved { .. } => formatter.write_str("ContactRemoved"),
+        }
+    }
+}
+
 impl Event for RegistrarEvent {
     fn event_type() -> &'static str {
         "registrar"
@@ -44,7 +69,7 @@ impl Event for RegistrarEvent {
 }
 
 /// Presence-related events
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum PresenceEvent {
     /// Presence updated
     Updated {
@@ -82,6 +107,32 @@ pub enum PresenceEvent {
     BuddyListUpdated { user: String, buddy_count: usize },
 }
 
+impl fmt::Debug for PresenceEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Updated {
+                status,
+                note,
+                watchers_notified,
+                ..
+            } => formatter
+                .debug_struct("Updated")
+                .field("status", &status.diagnostic_kind())
+                .field("note_present", &note.is_some())
+                .field("watchers_notified", watchers_notified)
+                .finish(),
+            Self::Subscribed { .. } => formatter.write_str("Subscribed"),
+            Self::Unsubscribed { .. } => formatter.write_str("Unsubscribed"),
+            Self::SubscriptionExpired { .. } => formatter.write_str("SubscriptionExpired"),
+            Self::NotificationSent { .. } => formatter.write_str("NotificationSent"),
+            Self::BuddyListUpdated { buddy_count, .. } => formatter
+                .debug_struct("BuddyListUpdated")
+                .field("buddy_count", buddy_count)
+                .finish(),
+        }
+    }
+}
+
 impl Event for PresenceEvent {
     fn event_type() -> &'static str {
         "presence"
@@ -97,10 +148,19 @@ impl Event for PresenceEvent {
 }
 
 /// Combined event type for convenience
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum RegistrarServiceEvent {
     Registrar(RegistrarEvent),
     Presence(PresenceEvent),
+}
+
+impl fmt::Debug for RegistrarServiceEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Registrar(event) => formatter.debug_tuple("Registrar").field(event).finish(),
+            Self::Presence(event) => formatter.debug_tuple("Presence").field(event).finish(),
+        }
+    }
 }
 
 impl Event for RegistrarServiceEvent {
@@ -194,5 +254,87 @@ mod tests {
     fn test_event_priority() {
         assert_eq!(RegistrarEvent::priority(), EventPriority::Normal);
         assert_eq!(PresenceEvent::priority(), EventPriority::Normal);
+    }
+
+    #[test]
+    fn public_event_debug_is_payload_free_while_serde_remains_exact() {
+        const CANARY: &str = "registrar-event-direct-secret-canary";
+        let contact = ContactInfo {
+            uri: format!("sip:{CANARY}@example.test"),
+            instance_id: CANARY.into(),
+            transport: crate::types::Transport::TLS,
+            user_agent: CANARY.into(),
+            expires: chrono::Utc::now(),
+            q_value: 1.0,
+            received: Some(CANARY.into()),
+            path: vec![CANARY.into()],
+            methods: vec!["INVITE".into()],
+            reg_id: Some(1),
+            flow_id: Some(CANARY.into()),
+            reachability: crate::types::ContactReachability::Reachable,
+        };
+        let registrar = [
+            RegistrarEvent::UserRegistered {
+                user: CANARY.into(),
+                contact: contact.clone(),
+            },
+            RegistrarEvent::UserUnregistered {
+                user: CANARY.into(),
+            },
+            RegistrarEvent::RegistrationExpired {
+                user: CANARY.into(),
+            },
+            RegistrarEvent::RegistrationRefreshed {
+                user: CANARY.into(),
+                expires: 60,
+            },
+            RegistrarEvent::ContactAdded {
+                user: CANARY.into(),
+                contact,
+            },
+            RegistrarEvent::ContactRemoved {
+                user: CANARY.into(),
+                uri: CANARY.into(),
+            },
+        ];
+        for event in registrar {
+            assert!(!format!("{event:?}").contains(CANARY));
+            assert!(serde_json::to_string(&event).unwrap().contains(CANARY));
+        }
+
+        let presence = [
+            PresenceEvent::Updated {
+                user: CANARY.into(),
+                status: PresenceStatus::Custom(CANARY.into()),
+                note: Some(CANARY.into()),
+                watchers_notified: 2,
+            },
+            PresenceEvent::Subscribed {
+                subscriber: CANARY.into(),
+                target: CANARY.into(),
+                subscription_id: CANARY.into(),
+            },
+            PresenceEvent::Unsubscribed {
+                subscription_id: CANARY.into(),
+            },
+            PresenceEvent::SubscriptionExpired {
+                subscription_id: CANARY.into(),
+                subscriber: CANARY.into(),
+                target: CANARY.into(),
+            },
+            PresenceEvent::NotificationSent {
+                subscription_id: CANARY.into(),
+                target: CANARY.into(),
+                subscriber: CANARY.into(),
+            },
+            PresenceEvent::BuddyListUpdated {
+                user: CANARY.into(),
+                buddy_count: 3,
+            },
+        ];
+        for event in presence {
+            assert!(!format!("{event:?}").contains(CANARY));
+            assert!(serde_json::to_string(&event).unwrap().contains(CANARY));
+        }
     }
 }

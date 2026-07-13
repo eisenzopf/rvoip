@@ -9,8 +9,20 @@ use std::str::FromStr;
 // ============ Registration Types ============
 
 /// Canonical SIP address-of-record for registered users.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AddressOfRecord(String);
+
+impl fmt::Debug for AddressOfRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AddressOfRecord")
+            .field("scheme", &self.scheme())
+            .field("user_present", &!self.user().is_empty())
+            .field("domain_present", &!self.domain().is_empty())
+            .field("bytes", &self.0.len())
+            .finish()
+    }
+}
 
 impl AddressOfRecord {
     pub fn parse(input: &str) -> std::result::Result<Self, String> {
@@ -95,7 +107,7 @@ impl FromStr for AddressOfRecord {
 }
 
 /// Represents a user's registration information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UserRegistration {
     /// Unique user identifier (e.g., "alice")
     pub user_id: String,
@@ -122,8 +134,22 @@ pub struct UserRegistration {
     pub attributes: HashMap<String, String>,
 }
 
+impl fmt::Debug for UserRegistration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UserRegistration")
+            .field("user_present", &!self.user_id.is_empty())
+            .field("aor_present", &self.aor.is_some())
+            .field("contact_count", &self.contacts.len())
+            .field("presence_enabled", &self.presence_enabled)
+            .field("capability_count", &self.capabilities.len())
+            .field("attribute_count", &self.attributes.len())
+            .finish()
+    }
+}
+
 /// Contact information for a registered endpoint
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContactInfo {
     /// SIP URI (e.g., "sip:alice@192.168.1.100:5060")
     pub uri: String,
@@ -160,6 +186,25 @@ pub struct ContactInfo {
 
     /// Current reachability/qualify state for this binding.
     pub reachability: ContactReachability,
+}
+
+impl fmt::Debug for ContactInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ContactInfo")
+            .field("uri_present", &!self.uri.is_empty())
+            .field("instance_id_present", &!self.instance_id.is_empty())
+            .field("transport", &self.transport)
+            .field("user_agent_present", &!self.user_agent.is_empty())
+            .field("q_value", &self.q_value)
+            .field("received_present", &self.received.is_some())
+            .field("path_count", &self.path.len())
+            .field("method_count", &self.methods.len())
+            .field("reg_id_present", &self.reg_id.is_some())
+            .field("flow_id_present", &self.flow_id.is_some())
+            .field("reachability", &self.reachability)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,7 +250,7 @@ pub enum Transport {
 // ============ Presence Types ============
 
 /// Complete presence state for a user
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PresenceState {
     /// User identifier
     pub user_id: String,
@@ -235,6 +280,28 @@ pub struct PresenceState {
     pub priority: i32,
 }
 
+impl fmt::Debug for PresenceState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PresenceState")
+            .field("user_present", &!self.user_id.is_empty())
+            .field("basic_status", &self.basic_status)
+            .field(
+                "extended_status",
+                &self
+                    .extended_status
+                    .as_ref()
+                    .map(ExtendedStatus::diagnostic_kind),
+            )
+            .field("note_present", &self.note.is_some())
+            .field("activity_count", &self.activities.len())
+            .field("device_count", &self.devices.len())
+            .field("expires_present", &self.expires.is_some())
+            .field("priority", &self.priority)
+            .finish()
+    }
+}
+
 /// Basic presence status (RFC 3863)
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BasicStatus {
@@ -245,7 +312,7 @@ pub enum BasicStatus {
 }
 
 /// Extended presence status
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExtendedStatus {
     Available,
     Away,
@@ -257,8 +324,29 @@ pub enum ExtendedStatus {
     Custom(String),
 }
 
+impl ExtendedStatus {
+    pub const fn diagnostic_kind(&self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Away => "away",
+            Self::Busy => "busy",
+            Self::DoNotDisturb => "do-not-disturb",
+            Self::OnThePhone => "on-the-phone",
+            Self::InMeeting => "in-meeting",
+            Self::Offline => "offline",
+            Self::Custom(_) => "custom",
+        }
+    }
+}
+
+impl fmt::Debug for ExtendedStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.diagnostic_kind())
+    }
+}
+
 /// Simplified presence status for API
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PresenceStatus {
     Available,
     Busy,
@@ -267,6 +355,26 @@ pub enum PresenceStatus {
     Offline,
     InCall,
     Custom(String),
+}
+
+impl PresenceStatus {
+    pub const fn diagnostic_kind(&self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Busy => "busy",
+            Self::Away => "away",
+            Self::DoNotDisturb => "do-not-disturb",
+            Self::Offline => "offline",
+            Self::InCall => "in-call",
+            Self::Custom(_) => "custom",
+        }
+    }
+}
+
+impl fmt::Debug for PresenceStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.diagnostic_kind())
+    }
 }
 
 impl From<PresenceStatus> for BasicStatus {
@@ -293,7 +401,7 @@ impl From<PresenceStatus> for ExtendedStatus {
 }
 
 /// User activity information
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Activity {
     Meeting,
     Lunch,
@@ -304,8 +412,28 @@ pub enum Activity {
     Custom(String),
 }
 
+impl Activity {
+    pub const fn diagnostic_kind(&self) -> &'static str {
+        match self {
+            Self::Meeting => "meeting",
+            Self::Lunch => "lunch",
+            Self::Travel => "travel",
+            Self::Holiday => "holiday",
+            Self::Working => "working",
+            Self::Presenting => "presenting",
+            Self::Custom(_) => "custom",
+        }
+    }
+}
+
+impl fmt::Debug for Activity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.diagnostic_kind())
+    }
+}
+
 /// Per-device presence information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DevicePresence {
     /// Device/instance identifier
     pub instance_id: String,
@@ -326,13 +454,26 @@ pub struct DevicePresence {
     pub last_seen: DateTime<Utc>,
 }
 
+impl fmt::Debug for DevicePresence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DevicePresence")
+            .field("instance_id_present", &!self.instance_id.is_empty())
+            .field("status", &self.status)
+            .field("note_present", &self.note.is_some())
+            .field("capability_count", &self.capabilities.len())
+            .field("device_type_present", &self.device_type.is_some())
+            .finish()
+    }
+}
+
 /// Device information (alias for compatibility)
 pub type DeviceInfo = DevicePresence;
 
 // ============ Subscription Types ============
 
 /// Presence subscription information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Subscription {
     /// Unique subscription identifier
     pub id: String,
@@ -365,6 +506,21 @@ pub struct Subscription {
     pub notify_count: u32,
 }
 
+impl fmt::Debug for Subscription {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Subscription")
+            .field("id_present", &!self.id.is_empty())
+            .field("subscriber_present", &!self.subscriber.is_empty())
+            .field("target_present", &!self.target.is_empty())
+            .field("state", &self.state)
+            .field("accept_type_count", &self.accept_types.len())
+            .field("last_notify_present", &self.last_notify.is_some())
+            .field("notify_count", &self.notify_count)
+            .finish()
+    }
+}
+
 /// Subscription state (RFC 6665)
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SubscriptionState {
@@ -379,7 +535,7 @@ pub enum SubscriptionState {
 // ============ Buddy List Types ============
 
 /// Buddy information for UI display
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct BuddyInfo {
     /// User identifier
     pub user_id: String,
@@ -403,8 +559,22 @@ pub struct BuddyInfo {
     pub active_devices: usize,
 }
 
+impl fmt::Debug for BuddyInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BuddyInfo")
+            .field("user_present", &!self.user_id.is_empty())
+            .field("display_name_present", &self.display_name.is_some())
+            .field("status", &self.status.diagnostic_kind())
+            .field("note_present", &self.note.is_some())
+            .field("is_online", &self.is_online)
+            .field("active_devices", &self.active_devices)
+            .finish()
+    }
+}
+
 /// Buddy list for a user
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct BuddyList {
     /// Owner of this buddy list
     pub user_id: String,
@@ -414,6 +584,16 @@ pub struct BuddyList {
 
     /// Last update time
     pub last_updated: DateTime<Utc>,
+}
+
+impl fmt::Debug for BuddyList {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BuddyList")
+            .field("user_present", &!self.user_id.is_empty())
+            .field("buddy_count", &self.buddies.len())
+            .finish()
+    }
 }
 
 // ============ Configuration Types ============
@@ -482,5 +662,112 @@ impl Default for RegistrarConfig {
             max_subscriptions_per_user: 100,
             expiry_check_interval: 30, // Check every 30 seconds
         }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn public_registrar_types_redact_debug_without_changing_serde() {
+        const CANARY: &str = "registrar-type-direct-secret-canary";
+        let now = Utc::now();
+        let aor = AddressOfRecord::parse(&format!("sip:{CANARY}@example.test")).unwrap();
+        let contact = ContactInfo {
+            uri: format!("sip:{CANARY}@192.0.2.1"),
+            instance_id: CANARY.into(),
+            transport: Transport::WSS,
+            user_agent: CANARY.into(),
+            expires: now,
+            q_value: 0.5,
+            received: Some(CANARY.into()),
+            path: vec![CANARY.into()],
+            methods: vec![CANARY.into()],
+            reg_id: Some(7),
+            flow_id: Some(CANARY.into()),
+            reachability: ContactReachability::Reachable,
+        };
+        let registration = UserRegistration {
+            user_id: CANARY.into(),
+            aor: Some(aor.clone()),
+            contacts: vec![contact.clone()],
+            expires: now,
+            presence_enabled: true,
+            capabilities: vec![CANARY.into()],
+            registered_at: now,
+            attributes: HashMap::from([(CANARY.into(), CANARY.into())]),
+        };
+        let device = DevicePresence {
+            instance_id: CANARY.into(),
+            status: BasicStatus::Open,
+            note: Some(CANARY.into()),
+            capabilities: vec![CANARY.into()],
+            device_type: Some(CANARY.into()),
+            last_seen: now,
+        };
+        let presence = PresenceState {
+            user_id: CANARY.into(),
+            basic_status: BasicStatus::Open,
+            extended_status: Some(ExtendedStatus::Custom(CANARY.into())),
+            note: Some(CANARY.into()),
+            activities: vec![Activity::Custom(CANARY.into())],
+            devices: vec![device.clone()],
+            last_updated: now,
+            expires: Some(now),
+            priority: 1,
+        };
+        let subscription = Subscription {
+            id: CANARY.into(),
+            subscriber: CANARY.into(),
+            target: CANARY.into(),
+            state: SubscriptionState::Active,
+            expires_at: now,
+            event_id: 1,
+            accept_types: vec![CANARY.into()],
+            created_at: now,
+            last_notify: Some(now),
+            notify_count: 2,
+        };
+        let buddy = BuddyInfo {
+            user_id: CANARY.into(),
+            display_name: Some(CANARY.into()),
+            status: PresenceStatus::Custom(CANARY.into()),
+            note: Some(CANARY.into()),
+            last_updated: now,
+            is_online: true,
+            active_devices: 1,
+        };
+        let buddy_list = BuddyList {
+            user_id: CANARY.into(),
+            buddies: vec![buddy.clone()],
+            last_updated: now,
+        };
+
+        let rendered = [
+            format!("{aor:?}"),
+            format!("{contact:?}"),
+            format!("{registration:?}"),
+            format!("{device:?}"),
+            format!("{presence:?}"),
+            format!("{subscription:?}"),
+            format!("{buddy:?}"),
+            format!("{buddy_list:?}"),
+            format!("{:?}", ExtendedStatus::Custom(CANARY.into())),
+            format!("{:?}", PresenceStatus::Custom(CANARY.into())),
+            format!("{:?}", Activity::Custom(CANARY.into())),
+        ];
+        for debug in rendered {
+            assert!(!debug.contains(CANARY), "payload leaked: {debug}");
+        }
+
+        assert!(serde_json::to_string(&registration)
+            .unwrap()
+            .contains(CANARY));
+        assert!(serde_json::to_string(&presence).unwrap().contains(CANARY));
+        assert!(serde_json::to_string(&subscription)
+            .unwrap()
+            .contains(CANARY));
+        assert!(serde_json::to_string(&buddy_list).unwrap().contains(CANARY));
     }
 }

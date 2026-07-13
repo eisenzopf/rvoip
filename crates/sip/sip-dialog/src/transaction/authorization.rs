@@ -15,7 +15,7 @@ use std::fmt;
 use std::net::SocketAddr;
 
 /// Transport-truth input supplied to an ingress authorizer.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SipRequestIngressContext {
     /// Remote socket address that sent the request.
     pub source: SocketAddr,
@@ -30,6 +30,34 @@ pub struct SipRequestIngressContext {
     /// client-certificate verification. A SIP header, URI, or source address
     /// is never sufficient to populate this field.
     pub connection_metadata: Option<TransportConnectionMetadata>,
+}
+
+impl fmt::Debug for SipRequestIngressContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SipRequestIngressContext")
+            .field("source_address_family", &address_family(self.source))
+            .field("source_port", &self.source.port())
+            .field(
+                "destination_address_family",
+                &address_family(self.destination),
+            )
+            .field("destination_port", &self.destination.port())
+            .field("transport_type", &self.transport_type)
+            .field(
+                "connection_metadata_present",
+                &self.connection_metadata.is_some(),
+            )
+            .finish()
+    }
+}
+
+const fn address_family(address: SocketAddr) -> &'static str {
+    if address.is_ipv4() {
+        "ipv4"
+    } else {
+        "ipv6"
+    }
 }
 
 impl SipRequestIngressContext {
@@ -127,4 +155,32 @@ pub trait SipRequestIngressAuthorizer: Send + Sync + fmt::Debug {
         request: &Request,
         context: &SipRequestIngressContext,
     ) -> SipRequestAuthorization;
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use rvoip_sip_transport::transport::TlsPeerIdentity;
+
+    #[test]
+    fn ingress_context_debug_redacts_addresses_and_tls_fingerprint() {
+        const FINGERPRINT_CANARY: &str = "ingress-tls-fingerprint-secret-canary";
+        let context = SipRequestIngressContext::new(
+            "192.0.2.44:5061".parse().unwrap(),
+            "198.51.100.22:5061".parse().unwrap(),
+            TransportType::Tls,
+        )
+        .with_connection_metadata(TransportConnectionMetadata {
+            tls_peer_identity: TlsPeerIdentity {
+                leaf_certificate_sha256: FINGERPRINT_CANARY.into(),
+                presented_chain_len: 1,
+            },
+        });
+        let rendered = format!("{context:?}");
+        assert!(!rendered.contains("192.0.2.44"));
+        assert!(!rendered.contains("198.51.100.22"));
+        assert!(!rendered.contains(FINGERPRINT_CANARY));
+        assert!(rendered.contains("source_address_family: \"ipv4\""));
+        assert!(rendered.contains("connection_metadata_present: true"));
+    }
 }

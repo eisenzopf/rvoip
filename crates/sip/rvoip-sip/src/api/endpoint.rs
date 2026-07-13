@@ -850,7 +850,8 @@ impl EndpointCall {
 impl fmt::Debug for EndpointCall {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EndpointCall")
-            .field("id", &self.id().to_string())
+            .field("id_present", &!self.handle.id().as_str().is_empty())
+            .field("id_bytes", &self.handle.id().as_str().len())
             .finish()
     }
 }
@@ -940,9 +941,12 @@ impl EndpointIncomingCall {
 impl fmt::Debug for EndpointIncomingCall {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EndpointIncomingCall")
-            .field("id", &self.id().to_string())
-            .field("from", &self.from())
-            .field("to", &self.to())
+            .field("id_present", &!self.incoming.call_id.as_str().is_empty())
+            .field("id_bytes", &self.incoming.call_id.as_str().len())
+            .field("from_present", &!self.from().is_empty())
+            .field("from_bytes", &self.from().len())
+            .field("to_present", &!self.to().is_empty())
+            .field("to_bytes", &self.to().len())
             .finish()
     }
 }
@@ -2842,6 +2846,7 @@ fn parse_uri(value: &str, label: &str) -> Result<Uri> {
 mod tests {
     use super::*;
     use crate::api::unified::{SipContactMode, SipTlsMode};
+    use crate::UnifiedCoordinator;
     use rvoip_sip_core::types::{headers::HeaderValue, HeaderName, TypedHeader};
 
     const DEBUG_SECRET: &str = "endpoint-account-secret-canary";
@@ -3003,6 +3008,36 @@ mod tests {
             assert_debug_redacted(&rendered);
             assert!(!rendered.contains("42"), "audio samples leaked: {rendered}");
         }
+    }
+
+    #[tokio::test]
+    async fn endpoint_call_wrappers_redact_call_ids_and_party_uris() {
+        let coordinator = UnifiedCoordinator::new(Config::local("endpoint-debug", 0))
+            .await
+            .expect("coordinator");
+        let call_id = CallId::from_string(DEBUG_SECRET);
+        let call = EndpointCall::new(
+            SessionHandle::new(call_id.clone(), Arc::clone(&coordinator)),
+            Some(format!("sip:{DEBUG_SECRET}@registrar.invalid")),
+            EndpointTransport::Udp,
+        );
+        let incoming = EndpointIncomingCall::new(
+            IncomingCall::new(
+                call_id,
+                format!("sip:{DEBUG_SECRET}@from.invalid"),
+                format!("sip:{DEBUG_SECRET}@to.invalid"),
+                None,
+                Arc::clone(&coordinator),
+            ),
+            Some(format!("sip:{DEBUG_SECRET}@registrar.invalid")),
+            EndpointTransport::Udp,
+        );
+
+        for rendered in [format!("{call:?}"), format!("{incoming:?}")] {
+            assert_debug_redacted(&rendered);
+            assert!(rendered.contains("id_bytes"));
+        }
+        coordinator.shutdown();
     }
 
     #[test]

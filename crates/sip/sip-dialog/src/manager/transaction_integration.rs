@@ -742,9 +742,13 @@ mod outward_error_redaction_tests {
             .unwrap_err();
         let rendered = format!("{error:?}");
 
-        assert!(rendered.contains("operation=request_build"));
-        assert!(rendered.contains("method=extension"));
-        assert!(rendered.contains("error_class=builder_error"));
+        let crate::errors::DialogError::InternalError { message, .. } = &error else {
+            panic!("internal error expected");
+        };
+        assert!(message.contains("operation=request_build"));
+        assert!(message.contains("method=extension"));
+        assert!(message.contains("error_class=builder_error"));
+        assert!(rendered.contains("class: \"internal\""));
         assert!(!rendered.contains(LOWER_ERROR_SECRET));
         assert!(!rendered.contains(EXTENSION_METHOD_SECRET));
     }

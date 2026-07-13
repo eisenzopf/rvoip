@@ -3,46 +3,129 @@
 //! This module defines error types for dialog recovery operations including
 //! failure detection, recovery strategies, and recovery coordination.
 
-use thiserror::Error;
+use std::{error, fmt};
 
 /// Result type for recovery operations
 pub type RecoveryResult<T> = Result<T, RecoveryError>;
 
 /// Error types for dialog recovery operations
-#[derive(Error, Debug, Clone)]
+#[derive(Clone)]
 pub enum RecoveryError {
     /// Recovery not needed for this dialog
-    #[error("Recovery not needed for dialog: {dialog_id}")]
     RecoveryNotNeeded { dialog_id: String },
 
     /// Recovery already in progress
-    #[error("Recovery already in progress for dialog: {dialog_id}")]
     RecoveryInProgress { dialog_id: String },
 
     /// Recovery failed after maximum attempts
-    #[error("Recovery failed after {attempts} attempts for dialog: {dialog_id}")]
     RecoveryFailed { dialog_id: String, attempts: u32 },
 
     /// Recovery strategy not available
-    #[error("Recovery strategy not available: {strategy}")]
     StrategyNotAvailable { strategy: String },
 
     /// Failure detection error
-    #[error("Failure detection error: {message}")]
     FailureDetectionError { message: String },
 
     /// Recovery coordination error
-    #[error("Recovery coordination error: {message}")]
     CoordinationError { message: String },
 
     /// Dialog state incompatible with recovery
-    #[error("Dialog state incompatible with recovery: {state}")]
     IncompatibleState { state: String },
 
     /// Recovery timeout
-    #[error("Recovery timed out for dialog: {dialog_id}")]
     RecoveryTimeout { dialog_id: String },
 }
+
+impl RecoveryError {
+    pub const fn diagnostic_class(&self) -> &'static str {
+        match self {
+            Self::RecoveryNotNeeded { .. } => "not-needed",
+            Self::RecoveryInProgress { .. } => "in-progress",
+            Self::RecoveryFailed { .. } => "failed",
+            Self::StrategyNotAvailable { .. } => "strategy-unavailable",
+            Self::FailureDetectionError { .. } => "failure-detection",
+            Self::CoordinationError { .. } => "coordination",
+            Self::IncompatibleState { .. } => "incompatible-state",
+            Self::RecoveryTimeout { .. } => "timeout",
+        }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn every_recovery_error_variant_is_payload_free() {
+        const CANARY: &str = "recovery-error-direct-secret-canary";
+        let errors = vec![
+            RecoveryError::RecoveryNotNeeded {
+                dialog_id: CANARY.into(),
+            },
+            RecoveryError::RecoveryInProgress {
+                dialog_id: CANARY.into(),
+            },
+            RecoveryError::RecoveryFailed {
+                dialog_id: CANARY.into(),
+                attempts: 3,
+            },
+            RecoveryError::StrategyNotAvailable {
+                strategy: CANARY.into(),
+            },
+            RecoveryError::FailureDetectionError {
+                message: CANARY.into(),
+            },
+            RecoveryError::CoordinationError {
+                message: CANARY.into(),
+            },
+            RecoveryError::IncompatibleState {
+                state: CANARY.into(),
+            },
+            RecoveryError::RecoveryTimeout {
+                dialog_id: CANARY.into(),
+            },
+        ];
+
+        for error in errors {
+            let rendered = format!("{error:?} {error}");
+            assert!(!rendered.contains(CANARY), "payload leaked: {rendered}");
+            assert!(!error.diagnostic_class().is_empty());
+            assert!(std::error::Error::source(&error).is_none());
+        }
+    }
+}
+
+impl fmt::Display for RecoveryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "SIP dialog recovery failed (class={}",
+            self.diagnostic_class()
+        )?;
+        if let Self::RecoveryFailed { attempts, .. } = self {
+            write!(formatter, ", attempts={attempts}")?;
+        }
+        formatter.write_str(")")
+    }
+}
+
+impl fmt::Debug for RecoveryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RecoveryError")
+            .field("class", &self.diagnostic_class())
+            .field(
+                "attempts",
+                &match self {
+                    Self::RecoveryFailed { attempts, .. } => Some(*attempts),
+                    _ => None,
+                },
+            )
+            .finish()
+    }
+}
+
+impl error::Error for RecoveryError {}
 
 impl RecoveryError {
     /// Create a recovery not needed error

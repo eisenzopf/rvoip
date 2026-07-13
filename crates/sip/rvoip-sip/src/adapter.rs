@@ -1168,7 +1168,8 @@ impl SipAdapter {
                 // partially authenticated route after admission overflow,
                 // expiry, or an undeliverable inbound queue.
                 warn!(
-                    subject = %principal.subject,
+                    subject_present = !principal.subject.is_empty(),
+                    subject_bytes = principal.subject.len(),
                     "SipAdapter suppressed unmatched inbound authentication event"
                 );
             }

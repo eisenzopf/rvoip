@@ -1895,11 +1895,15 @@ mod tests {
             let header = Header::new(name, HeaderValue::Raw(value.to_vec()));
             let error = TypedHeader::try_from(header)
                 .expect_err("malformed sensitive header must fail typed conversion");
-            assert!(matches!(error, Error::ParseError(_)));
+            assert!(matches!(
+                &error,
+                Error::ParseError(detail)
+                    if detail.contains("class=parse-error")
+                        && detail.contains(&format!("value_bytes={}", value.len()))
+            ));
             let rendered = format!("{error:?} {error}");
             assert!(!rendered.contains(secret));
-            assert!(rendered.contains("class=parse-error"));
-            assert!(rendered.contains(&format!("value_bytes={}", value.len())));
+            assert!(rendered.contains("class=parse"));
         }
     }
 
@@ -1920,11 +1924,15 @@ mod tests {
             let header = Header::new(name, HeaderValue::Raw(value.to_vec()));
             let error = TypedHeader::try_from(header)
                 .expect_err("invalid UTF-8 route header must fail typed conversion");
-            assert!(matches!(error, Error::InvalidHeader(_)));
+            assert!(matches!(
+                &error,
+                Error::InvalidHeader(detail)
+                    if detail.contains("class=invalid-header")
+                        && detail.contains(&format!("value_bytes={}", value.len()))
+            ));
             let rendered = format!("{error:?} {error}");
             assert!(!rendered.contains(secret));
             assert!(rendered.contains("class=invalid-header"));
-            assert!(rendered.contains(&format!("value_bytes={}", value.len())));
         }
     }
 
@@ -1939,6 +1947,6 @@ mod tests {
         assert!(matches!(error, Error::Utf8Error(_)));
         let rendered = format!("{error:?} {error}");
         assert!(!rendered.contains(SECRET));
-        assert!(rendered.contains("Invalid UTF-8"));
+        assert!(rendered.contains("class=utf8"));
     }
 }

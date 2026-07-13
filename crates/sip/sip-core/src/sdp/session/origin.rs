@@ -266,11 +266,12 @@ mod tests {
         assert!(result.is_err(), "Should reject invalid network type");
 
         if let Err(e) = result {
-            let error_message = format!("{:?}", e);
             assert!(
-                error_message.contains("Unsupported network type"),
-                "Error message should mention unsupported network type"
+                matches!(&e, Error::SdpParsingError(detail)
+                    if detail.contains("Unsupported network type")),
+                "live error should retain its unsupported-network detail"
             );
+            assert!(!format!("{e:?} {e}").contains("NET"));
         }
     }
 
@@ -282,11 +283,12 @@ mod tests {
         assert!(result.is_err(), "Should reject invalid address type");
 
         if let Err(e) = result {
-            let error_message = format!("{:?}", e);
             assert!(
-                error_message.contains("Unsupported address type"),
-                "Error message should mention unsupported address type"
+                matches!(&e, Error::SdpParsingError(detail)
+                    if detail.contains("Unsupported address type")),
+                "live error should retain its unsupported-address detail"
             );
+            assert!(!format!("{e:?} {e}").contains("IPX"));
         }
     }
 
@@ -298,11 +300,12 @@ mod tests {
         assert!(result.is_err(), "Should reject origin with too few fields");
 
         if let Err(e) = result {
-            let error_message = format!("{:?}", e);
             assert!(
-                error_message.contains("Invalid o= line format"),
-                "Error message should mention invalid format"
+                matches!(&e, Error::SdpParsingError(detail)
+                    if detail.contains("Invalid o= line format")),
+                "live error should retain its invalid-format detail"
             );
+            assert!(!format!("{e:?} {e}").contains(origin_line));
         }
     }
 
@@ -314,11 +317,12 @@ mod tests {
         assert!(result.is_err(), "Should reject origin with too many fields");
 
         if let Err(e) = result {
-            let error_message = format!("{:?}", e);
             assert!(
-                error_message.contains("Invalid o= line format"),
-                "Error message should mention invalid format"
+                matches!(&e, Error::SdpParsingError(detail)
+                    if detail.contains("Invalid o= line format")),
+                "live error should retain its invalid-format detail"
             );
+            assert!(!format!("{e:?} {e}").contains(origin_line));
         }
     }
 

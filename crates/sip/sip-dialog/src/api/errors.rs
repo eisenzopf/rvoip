@@ -130,7 +130,7 @@ pub type ApiResult<T> = Result<T, ApiError>;
 /// - Unexpected internal states
 /// - System resource issues
 /// - Programming errors
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum ApiError {
     /// Configuration error
     ///
@@ -225,29 +225,47 @@ pub enum ApiError {
 
 impl fmt::Display for ApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ApiError::Configuration { message } => {
-                write!(f, "Configuration error: {}", message)
-            }
-            ApiError::Network { message } => {
-                write!(f, "Network error: {}", message)
-            }
-            ApiError::Protocol { message } => {
-                write!(f, "SIP protocol error: {}", message)
-            }
-            ApiError::Dialog { message } => {
-                write!(f, "Dialog error: {}", message)
-            }
-            ApiError::Internal { message } => {
-                write!(f, "Internal error: {}", message)
-            }
-        }
+        write!(
+            f,
+            "SIP dialog API failed (class={})",
+            self.diagnostic_class()
+        )
+    }
+}
+
+impl fmt::Debug for ApiError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ApiError")
+            .field("class", &self.diagnostic_class())
+            .field("message_bytes", &self.message().len())
+            .finish()
     }
 }
 
 impl std::error::Error for ApiError {}
 
 impl ApiError {
+    pub const fn diagnostic_class(&self) -> &'static str {
+        match self {
+            Self::Configuration { .. } => "configuration",
+            Self::Network { .. } => "network",
+            Self::Protocol { .. } => "protocol",
+            Self::Dialog { .. } => "dialog",
+            Self::Internal { .. } => "internal",
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::Configuration { message }
+            | Self::Network { message }
+            | Self::Protocol { message }
+            | Self::Dialog { message }
+            | Self::Internal { message } => message,
+        }
+    }
+
     /// Create a configuration error
     pub fn configuration(message: impl Into<String>) -> Self {
         Self::Configuration {
@@ -382,20 +400,48 @@ mod tests {
     #[test]
     fn test_error_display() {
         let config_error = ApiError::Configuration {
-            message: "Invalid config".to_string(),
+            message: "api-error-direct-secret-canary".to_string(),
         };
         assert_eq!(
             format!("{}", config_error),
-            "Configuration error: Invalid config"
+            "SIP dialog API failed (class=configuration)"
         );
 
         let network_error = ApiError::Network {
-            message: "Connection failed".to_string(),
+            message: "api-error-direct-secret-canary".to_string(),
         };
         assert_eq!(
             format!("{}", network_error),
-            "Network error: Connection failed"
+            "SIP dialog API failed (class=network)"
         );
+    }
+
+    #[test]
+    fn every_api_error_variant_is_payload_free() {
+        const CANARY: &str = "api-error-direct-secret-canary";
+        let errors = [
+            ApiError::Configuration {
+                message: CANARY.into(),
+            },
+            ApiError::Network {
+                message: CANARY.into(),
+            },
+            ApiError::Protocol {
+                message: CANARY.into(),
+            },
+            ApiError::Dialog {
+                message: CANARY.into(),
+            },
+            ApiError::Internal {
+                message: CANARY.into(),
+            },
+        ];
+        for error in errors {
+            let rendered = format!("{error:?} {error}");
+            assert!(!rendered.contains(CANARY));
+            assert!(!error.diagnostic_class().is_empty());
+            assert!(std::error::Error::source(&error).is_none());
+        }
     }
 
     #[test]

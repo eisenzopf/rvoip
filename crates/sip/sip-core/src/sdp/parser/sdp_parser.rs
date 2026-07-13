@@ -1417,9 +1417,14 @@ t=0 0
         let line_error = parse_sdp(&Bytes::from(malformed_line)).unwrap_err();
         let line_display = line_error.to_string();
         let line_debug = format!("{line_error:?}");
-        assert!(line_display.contains("class=line-syntax"));
-        assert!(line_display.contains("line=4"));
-        assert!(line_display.contains(&format!("field_bytes={}", line_canary.len())));
+        assert!(matches!(
+            &line_error,
+            Error::SdpParsingError(detail)
+                if detail.contains("class=line-syntax")
+                    && detail.contains("line=4")
+                    && detail.contains(&format!("field_bytes={}", line_canary.len()))
+        ));
+        assert!(line_display.contains("class=sdp-parsing"));
         assert!(!line_display.contains(line_canary));
         assert!(!line_debug.contains(line_canary));
 
@@ -1431,9 +1436,14 @@ t=0 0
         let media_error = parse_sdp(&Bytes::from(malformed_media)).unwrap_err();
         let media_display = media_error.to_string();
         let media_debug = format!("{media_error:?}");
-        assert!(media_display.contains("class=media-field"));
-        assert!(media_display.contains("line=6"));
-        assert!(media_display.contains(&format!("field_bytes={}", media_value.len())));
+        assert!(matches!(
+            &media_error,
+            Error::SdpParsingError(detail)
+                if detail.contains("class=media-field")
+                    && detail.contains("line=6")
+                    && detail.contains(&format!("field_bytes={}", media_value.len()))
+        ));
+        assert!(media_display.contains("class=sdp-parsing"));
         assert!(!media_display.contains(media_canary));
         assert!(!media_debug.contains(media_canary));
     }

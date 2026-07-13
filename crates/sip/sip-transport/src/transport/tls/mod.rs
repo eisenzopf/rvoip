@@ -745,7 +745,21 @@ pub(crate) fn tls_runtime_failure_class(error: &std::io::Error) -> &'static str 
         .is_some_and(|error| {
             matches!(
                 error,
-                rustls::Error::InvalidCertificate(_) | rustls::Error::NoCertificatesPresented
+                rustls::Error::InvalidCertificate(_)
+                    | rustls::Error::InvalidCertRevocationList(_)
+                    | rustls::Error::NoCertificatesPresented
+                    | rustls::Error::AlertReceived(
+                        rustls::AlertDescription::NoCertificate
+                            | rustls::AlertDescription::BadCertificate
+                            | rustls::AlertDescription::UnsupportedCertificate
+                            | rustls::AlertDescription::CertificateRevoked
+                            | rustls::AlertDescription::CertificateExpired
+                            | rustls::AlertDescription::CertificateUnknown
+                            | rustls::AlertDescription::UnknownCA
+                            | rustls::AlertDescription::BadCertificateStatusResponse
+                            | rustls::AlertDescription::BadCertificateHashValue
+                            | rustls::AlertDescription::CertificateRequired
+                    )
             )
         });
     if certificate_failure {
@@ -952,6 +966,45 @@ mod auth_boundary_tests {
         );
         assert!(matches!(
             classify_tls_runtime_error(certificate, "certificate".to_string()),
+            Error::TlsCertificateError(_)
+        ));
+
+        for alert in [
+            rustls::AlertDescription::NoCertificate,
+            rustls::AlertDescription::BadCertificate,
+            rustls::AlertDescription::UnsupportedCertificate,
+            rustls::AlertDescription::CertificateRevoked,
+            rustls::AlertDescription::CertificateExpired,
+            rustls::AlertDescription::CertificateUnknown,
+            rustls::AlertDescription::UnknownCA,
+            rustls::AlertDescription::BadCertificateStatusResponse,
+            rustls::AlertDescription::BadCertificateHashValue,
+            rustls::AlertDescription::CertificateRequired,
+        ] {
+            let certificate_alert = std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                rustls::Error::AlertReceived(alert),
+            );
+            assert_eq!(
+                tls_runtime_failure_class(&certificate_alert),
+                "tls_certificate_failed"
+            );
+            assert!(matches!(
+                classify_tls_runtime_error(certificate_alert, "certificate alert".into()),
+                Error::TlsCertificateError(_)
+            ));
+        }
+
+        let invalid_crl = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            rustls::Error::InvalidCertRevocationList(rustls::CertRevocationListError::BadSignature),
+        );
+        assert_eq!(
+            tls_runtime_failure_class(&invalid_crl),
+            "tls_certificate_failed"
+        );
+        assert!(matches!(
+            classify_tls_runtime_error(invalid_crl, "invalid CRL".into()),
             Error::TlsCertificateError(_)
         ));
 
