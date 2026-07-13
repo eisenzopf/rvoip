@@ -4641,10 +4641,10 @@ mod tests {
             "sip:bob@example.test",
             None,
         );
-        let first_cnonce = DigestAuth::parse_authorization(&first_client)
+        let first_cnonce = DigestAuthenticator::parse_authorization(&first_client)
             .unwrap()
             .cnonce;
-        let second_cnonce = DigestAuth::parse_authorization(&second_client)
+        let second_cnonce = DigestAuthenticator::parse_authorization(&second_client)
             .unwrap()
             .cnonce;
         assert_ne!(first_cnonce, second_cnonce);
@@ -4701,7 +4701,7 @@ mod tests {
     }
 
     #[test]
-    fn sip_digest_auth_service_rejects_unknown_nonce_and_replay() {
+    fn sip_digest_auth_service_rejects_unknown_and_same_client_replay() {
         let service = SipDigestAuthService::new("example.test");
         service.add_user("alice", "secret");
 
@@ -4754,7 +4754,7 @@ mod tests {
             AuthDecision::Rejected { .. }
         ));
 
-        let next_nonce_same_count = authorization_for_nc(
+        let independent_client_same_count = authorization_for_nc(
             "alice",
             "secret",
             &challenge,
@@ -4766,12 +4766,23 @@ mod tests {
         assert!(matches!(
             service
                 .validate_authorization(
-                    &next_nonce_same_count,
+                    &independent_client_same_count,
                     "OPTIONS",
                     "sip:bob@example.test",
                     None
                 )
                 .expect("same nonce-count with new cnonce decision"),
+            AuthDecision::Authorized { .. }
+        ));
+        assert!(matches!(
+            service
+                .validate_authorization(
+                    &independent_client_same_count,
+                    "OPTIONS",
+                    "sip:bob@example.test",
+                    None
+                )
+                .expect("same-client nonce-count replay decision"),
             AuthDecision::Rejected { .. }
         ));
 
