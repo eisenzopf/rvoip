@@ -31,7 +31,7 @@ use std::str::FromStr;
 /// let custom = HeaderName::from_str("X-Custom-Header").unwrap();
 /// assert_eq!(custom, HeaderName::Other("X-Custom-Header".to_string()));
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HeaderName {
     /// Call-ID: Unique identifier for this call
     CallId,
@@ -157,6 +157,21 @@ pub enum HeaderName {
     PPreferredIdentity,
     /// Identity: STIR signed PASSporT token (RFC 8224)
     Identity,
+}
+
+impl fmt::Debug for HeaderName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Other(value) => formatter
+                .debug_struct("HeaderName::Other")
+                .field("name_bytes", &value.len())
+                .finish(),
+            standard => formatter
+                .debug_tuple("HeaderName")
+                .field(&standard.as_str())
+                .finish(),
+        }
+    }
 }
 
 impl HeaderName {

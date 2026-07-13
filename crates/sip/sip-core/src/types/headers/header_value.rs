@@ -56,7 +56,7 @@ use crate::types::warning::Warning;
 /// let value = HeaderValue::text_list(vec!["foo".to_string(), "bar".to_string()]);
 /// assert_eq!(value.as_text_list(), Some(vec!["foo", "bar"]));
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum HeaderValue {
     // === Address Headers ===
     Contact(TypesContactValue), // Use imported type
@@ -128,7 +128,90 @@ pub enum HeaderValue {
     Raw(Vec<u8>),
 }
 
+impl fmt::Debug for HeaderValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("HeaderValue");
+        debug.field("kind", &self.diagnostic_kind());
+        match self {
+            Self::Route(values) => debug.field("item_count", &values.len()),
+            Self::RecordRoute(values) => debug.field("item_count", &values.len()),
+            Self::Via(values) => debug.field("item_count", &values.len()),
+            Self::Warning(values) => debug.field("item_count", &values.len()),
+            Self::Accept(values) => debug.field("item_count", &values.len()),
+            Self::AcceptEncoding(values) => debug.field("item_count", &values.len()),
+            Self::AcceptLanguage(values) => debug.field("item_count", &values.len()),
+            Self::ContentEncoding(values) => debug.field("item_count", &values.len()),
+            Self::ContentLanguage(values) => debug.field("item_count", &values.len()),
+            Self::Allow(values) => debug.field("item_count", &values.len()),
+            Self::Require(values) => debug.field("item_count", &values.len()),
+            Self::Supported(values) => debug.field("item_count", &values.len()),
+            Self::Unsupported(values) => debug.field("item_count", &values.len()),
+            Self::ProxyRequire(values) => debug.field("item_count", &values.len()),
+            Self::AlertInfo(values) => debug.field("item_count", &values.len()),
+            Self::CallInfo(values) => debug.field("item_count", &values.len()),
+            Self::ErrorInfo(values) => debug.field("item_count", &values.len()),
+            Self::Server(values) => debug.field("item_count", &values.len()),
+            Self::UserAgent(values) => debug.field("item_count", &values.len()),
+            Self::Raw(value) => debug.field("value_bytes", &value.len()),
+            _ => &mut debug,
+        };
+        debug.finish()
+    }
+}
+
 impl HeaderValue {
+    fn diagnostic_kind(&self) -> &'static str {
+        match self {
+            Self::Contact(_) => "contact",
+            Self::From(_) => "from",
+            Self::To(_) => "to",
+            Self::Route(_) => "route",
+            Self::RecordRoute(_) => "record-route",
+            Self::ReplyTo(_) => "reply-to",
+            Self::ReferTo(_) => "refer-to",
+            Self::ReferredBy(_) => "referred-by",
+            Self::Via(_) => "via",
+            Self::CSeq(_) => "cseq",
+            Self::MaxForwards(_) => "max-forwards",
+            Self::CallId(_) => "call-id",
+            Self::Expires(_) => "expires",
+            Self::MinExpires(_) => "min-expires",
+            Self::RetryAfter(_) => "retry-after",
+            Self::Warning(_) => "warning",
+            Self::Timestamp(_, _) => "timestamp",
+            Self::Date(_) => "date",
+            Self::Accept(_) => "accept",
+            Self::AcceptEncoding(_) => "accept-encoding",
+            Self::AcceptLanguage(_) => "accept-language",
+            Self::ContentLength(_) => "content-length",
+            Self::ContentType(_) => "content-type",
+            Self::ContentEncoding(_) => "content-encoding",
+            Self::ContentLanguage(_) => "content-language",
+            Self::ContentDisposition(_) => "content-disposition",
+            Self::MimeVersion(_) => "mime-version",
+            Self::Allow(_) => "allow",
+            Self::Require(_) => "require",
+            Self::Supported(_) => "supported",
+            Self::Unsupported(_) => "unsupported",
+            Self::ProxyRequire(_) => "proxy-require",
+            Self::AlertInfo(_) => "alert-info",
+            Self::CallInfo(_) => "call-info",
+            Self::ErrorInfo(_) => "error-info",
+            Self::Organization(_) => "organization",
+            Self::Priority(_) => "priority",
+            Self::Subject(_) => "subject",
+            Self::Server(_) => "server",
+            Self::UserAgent(_) => "user-agent",
+            Self::InReplyTo(_) => "in-reply-to",
+            Self::Authorization(_) => "authorization",
+            Self::ProxyAuthorization(_) => "proxy-authorization",
+            Self::WwwAuthenticate(_) => "www-authenticate",
+            Self::ProxyAuthenticate(_) => "proxy-authenticate",
+            Self::AuthenticationInfo(_) => "authentication-info",
+            Self::Raw(_) => "raw",
+        }
+    }
+
     pub fn text(value: impl Into<String>) -> Self {
         HeaderValue::Raw(value.into().into_bytes())
     }

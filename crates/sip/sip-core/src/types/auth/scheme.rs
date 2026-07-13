@@ -13,7 +13,7 @@ use std::str::FromStr;
 /// SIP authentication can use different schemes, with Digest being the recommended
 /// approach in RFC 3261. Basic authentication is less secure and generally not recommended
 /// for production use.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AuthScheme {
     /// Digest authentication (RFC 3261 and RFC 7616)
     Digest,
@@ -21,6 +21,19 @@ pub enum AuthScheme {
     Basic, // Less common in SIP, but possible
     /// Other authentication schemes
     Other(String),
+}
+
+impl fmt::Debug for AuthScheme {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Digest => formatter.write_str("AuthScheme::Digest"),
+            Self::Basic => formatter.write_str("AuthScheme::Basic"),
+            Self::Other(value) => formatter
+                .debug_struct("AuthScheme::Other")
+                .field("value_bytes", &value.len())
+                .finish(),
+        }
+    }
 }
 
 impl fmt::Display for AuthScheme {
@@ -51,7 +64,7 @@ impl FromStr for AuthScheme {
 /// Specifies the algorithm used for calculating digest hashes in SIP authentication.
 /// MD5 is the original algorithm from RFC 2617, but newer algorithms like SHA-256
 /// are recommended for better security as defined in RFC 7616.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Algorithm {
     /// MD5 algorithm (RFC 2617)
     Md5,
@@ -67,6 +80,23 @@ pub enum Algorithm {
     Sha512Sess,
     /// Other algorithms
     Other(String),
+}
+
+impl fmt::Debug for Algorithm {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Md5 => formatter.write_str("Algorithm::Md5"),
+            Self::Md5Sess => formatter.write_str("Algorithm::Md5Sess"),
+            Self::Sha256 => formatter.write_str("Algorithm::Sha256"),
+            Self::Sha256Sess => formatter.write_str("Algorithm::Sha256Sess"),
+            Self::Sha512 => formatter.write_str("Algorithm::Sha512"),
+            Self::Sha512Sess => formatter.write_str("Algorithm::Sha512Sess"),
+            Self::Other(value) => formatter
+                .debug_struct("Algorithm::Other")
+                .field("value_bytes", &value.len())
+                .finish(),
+        }
+    }
 }
 
 impl fmt::Display for Algorithm {
@@ -105,7 +135,7 @@ impl FromStr for Algorithm {
 /// Specifies the quality of protection for HTTP Digest Authentication as defined
 /// in RFC 7616. The `auth` quality means authentication only, while `auth-int`
 /// also provides integrity protection for the message body.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Qop {
     /// Authentication only
     Auth,
@@ -113,6 +143,19 @@ pub enum Qop {
     AuthInt,
     /// Other QOP values
     Other(String),
+}
+
+impl fmt::Debug for Qop {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Auth => formatter.write_str("Qop::Auth"),
+            Self::AuthInt => formatter.write_str("Qop::AuthInt"),
+            Self::Other(value) => formatter
+                .debug_struct("Qop::Other")
+                .field("value_bytes", &value.len())
+                .finish(),
+        }
+    }
 }
 
 impl fmt::Display for Qop {
@@ -134,6 +177,56 @@ impl FromStr for Qop {
             "auth-int" => Ok(Qop::AuthInt),
             _ if !s.is_empty() => Ok(Qop::Other(s.to_string())),
             _ => Err(Error::InvalidInput("Empty qop value".to_string())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_safety_tests {
+    use super::*;
+
+    const SECRET: &str = "auth-scheme-direct-debug-canary";
+
+    #[test]
+    fn extension_scheme_algorithm_and_qop_debug_are_metadata_only() {
+        let values: Vec<(&str, String, String)> = vec![
+            (
+                "scheme",
+                format!("{:?}", AuthScheme::Other(SECRET.into())),
+                AuthScheme::Other(SECRET.into()).to_string(),
+            ),
+            (
+                "algorithm",
+                format!("{:?}", Algorithm::Other(SECRET.into())),
+                Algorithm::Other(SECRET.into()).to_string(),
+            ),
+            (
+                "qop",
+                format!("{:?}", Qop::Other(SECRET.into())),
+                Qop::Other(SECRET.into()).to_string(),
+            ),
+        ];
+
+        for (kind, debug, wire) in values {
+            assert!(
+                !debug.contains(SECRET),
+                "{kind} Debug reflected {SECRET}: {debug}"
+            );
+            assert!(debug.contains("value_bytes"));
+            assert!(wire.contains(SECRET));
+        }
+        assert!(serde_json::to_string(&AuthScheme::Other(SECRET.into()))
+            .unwrap()
+            .contains(SECRET));
+    }
+
+    #[test]
+    fn authentication_scheme_types_cannot_regain_derived_debug() {
+        let source = include_str!("scheme.rs");
+        for declaration in ["pub enum AuthScheme", "pub enum Algorithm", "pub enum Qop"] {
+            let declaration_offset = source.find(declaration).unwrap();
+            let derive_offset = source[..declaration_offset].rfind("#[derive(").unwrap();
+            assert!(!source[derive_offset..declaration_offset].contains("Debug"));
         }
     }
 }

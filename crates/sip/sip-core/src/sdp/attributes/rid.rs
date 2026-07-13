@@ -514,4 +514,28 @@ mod tests {
             "Parser should handle missing semicolon for compatibility"
         );
     }
+
+    #[test]
+    fn rid_debug_does_not_reflect_identifier_or_restriction_values() {
+        const RID: &str = "rid-direct-debug-canary";
+        const RESTRICTION: &str = "rid-restriction-direct-debug-canary";
+        let value = RidAttribute {
+            id: RID.into(),
+            direction: RidDirection::Send,
+            formats: vec![RESTRICTION.into()],
+            restrictions: HashMap::from([(RESTRICTION.into(), RESTRICTION.into())]),
+        };
+        let debug = format!("{value:?}");
+        assert!(!debug.contains(RID));
+        assert!(!debug.contains(RESTRICTION));
+        assert!(serde_json::to_string(&value).unwrap().contains(RID));
+    }
+
+    #[test]
+    fn rid_attribute_cannot_regain_derived_debug() {
+        let source = include_str!("rid.rs");
+        let declaration = source.find("pub struct RidAttribute").unwrap();
+        let derive = source[..declaration].rfind("#[derive(").unwrap();
+        assert!(!source[derive..declaration].contains("Debug"));
+    }
 }
