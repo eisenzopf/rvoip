@@ -61,7 +61,7 @@ use crate::auth::SipClientAuth;
 use crate::errors::{Result, SessionError};
 use crate::session_registry::SessionRegistry;
 use crate::session_store::SessionStore;
-use crate::state_machine::{StateMachine, StateMachineHelpers};
+use crate::state_machine::{ProcessEventResult, StateMachine, StateMachineHelpers};
 use crate::state_table::types::{Action, EventType, Role, SessionId};
 use crate::types::CallState;
 use crate::types::{IncomingCallInfo, SessionInfo};
@@ -88,6 +88,44 @@ pub use rvoip_rtp_core::{RtpSessionBufferConfig, RtpTransportBufferConfig};
 pub use rvoip_sip_dialog::api::RelUsage;
 
 const MAX_INBOUND_INVITE_OBSERVERS: usize = 16;
+const OUTBOUND_DISPATCH_JOIN_FAILURE: &str = "SIP outbound dispatch task failed (class=join)";
+
+type OutboundDispatchResult =
+    std::result::Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>>;
+
+/// Owns a spawned outbound state-machine dispatch until it is joined.
+///
+/// The state-machine to dialog to transport poll chain is intentionally run
+/// from the root of a fresh Tokio task. Keeping this abort-on-drop owner around
+/// the join preserves cancellation semantics instead of detaching signaling
+/// work when the public builder future is cancelled.
+struct AbortOutboundDispatchTaskOnDrop {
+    handle: tokio::task::JoinHandle<OutboundDispatchResult>,
+    armed: bool,
+}
+
+impl AbortOutboundDispatchTaskOnDrop {
+    fn new(handle: tokio::task::JoinHandle<OutboundDispatchResult>) -> Self {
+        Self {
+            handle,
+            armed: true,
+        }
+    }
+
+    async fn join(mut self) -> std::result::Result<OutboundDispatchResult, tokio::task::JoinError> {
+        let result = (&mut self.handle).await;
+        self.armed = false;
+        result
+    }
+}
+
+impl Drop for AbortOutboundDispatchTaskOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.handle.abort();
+        }
+    }
+}
 
 /// Authenticated inbound INVITE material exposed only to internal adapter
 /// observers before the public `IncomingCall` event is published. `request`
@@ -6593,10 +6631,14 @@ impl UnifiedCoordinator {
         session_id: &SessionId,
         event: crate::state_table::EventType,
     ) -> Result<crate::state_machine::executor::ProcessEventResult> {
-        self.helpers
-            .state_machine
-            .process_event(session_id, event)
+        let state_machine = Arc::clone(&self.helpers.state_machine);
+        let task_session_id = session_id.clone();
+        let task = AbortOutboundDispatchTaskOnDrop::new(tokio::spawn(async move {
+            state_machine.process_event(&task_session_id, event).await
+        }));
+        task.join()
             .await
+            .map_err(|_| SessionError::InternalError(OUTBOUND_DISPATCH_JOIN_FAILURE.to_string()))?
             .map_err(|e| SessionError::InternalError(format!("dispatch_outbound: {}", e)))
     }
 

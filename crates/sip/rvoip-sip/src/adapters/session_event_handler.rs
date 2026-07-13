@@ -30,22 +30,23 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
-const AUTH_RETRY_DISPATCH_JOIN_FAILURE: &str = "SIP auth-retry dispatch task failed (class=join)";
+const STATE_MACHINE_DISPATCH_JOIN_FAILURE: &str =
+    "SIP state-machine dispatch task failed (class=join)";
 
 type StateMachineProcessResult =
     std::result::Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>>;
 
-/// Owns the state-machine task that performs an authenticated retry.
+/// Owns a state-machine task that performs outbound signaling.
 ///
 /// Dropping Tokio's `JoinHandle` detaches the task. Keep an armed owner around
 /// the await instead so dispatcher shutdown or cancellation also cancels the
-/// retry and its signaling work.
-struct AbortAuthRetryTaskOnDrop {
+/// state-machine task and its signaling work.
+struct AbortStateMachineTaskOnDrop {
     handle: tokio::task::JoinHandle<StateMachineProcessResult>,
     armed: bool,
 }
 
-impl AbortAuthRetryTaskOnDrop {
+impl AbortStateMachineTaskOnDrop {
     fn new(handle: tokio::task::JoinHandle<StateMachineProcessResult>) -> Self {
         Self {
             handle,
@@ -62,7 +63,7 @@ impl AbortAuthRetryTaskOnDrop {
     }
 }
 
-impl Drop for AbortAuthRetryTaskOnDrop {
+impl Drop for AbortStateMachineTaskOnDrop {
     fn drop(&mut self) {
         if self.armed {
             self.handle.abort();
@@ -70,33 +71,33 @@ impl Drop for AbortAuthRetryTaskOnDrop {
     }
 }
 
-async fn join_auth_retry_task(task: AbortAuthRetryTaskOnDrop) -> StateMachineProcessResult {
+async fn join_state_machine_task(task: AbortStateMachineTaskOnDrop) -> StateMachineProcessResult {
     task.join().await.map_err(|_| {
         Box::new(SessionError::InternalError(
-            AUTH_RETRY_DISPATCH_JOIN_FAILURE.to_string(),
+            STATE_MACHINE_DISPATCH_JOIN_FAILURE.to_string(),
         )) as Box<dyn std::error::Error + Send + Sync>
     })?
 }
 
-/// Poll the large auth-retry state-machine future from the root of a fresh
-/// Tokio task while retaining strict per-session ordering in the caller.
+/// Poll a signaling state-machine future from the root of a fresh Tokio task
+/// while retaining strict per-session ordering in the caller.
 ///
 /// Dialog events already enter through a sharded worker, but that worker polls
 /// the complete cross-crate handler before it reaches `process_event`. The
-/// resulting transport → dialog → session → state-machine → INVITE retry poll
-/// chain can exhaust Tokio's default worker stack. Awaiting this owned child
-/// task lets the parent poll unwind before the retry is polled; it does not
-/// detach the retry or weaken completion/error semantics.
-async fn process_auth_required_on_fresh_task(
+/// resulting transport → dialog → session → state-machine → outbound signaling
+/// poll chain can exhaust the default stack. Awaiting this owned child task lets
+/// the parent poll unwind before the signaling action is polled; it does not
+/// detach the action or weaken completion/error semantics.
+async fn process_event_on_fresh_task(
     state_machine: Arc<StateMachineExecutor>,
     session_id: SessionId,
     event: EventType,
 ) -> StateMachineProcessResult {
     let task_session_id = session_id.clone();
-    let task = AbortAuthRetryTaskOnDrop::new(tokio::spawn(async move {
+    let task = AbortStateMachineTaskOnDrop::new(tokio::spawn(async move {
         state_machine.process_event(&task_session_id, event).await
     }));
-    join_auth_retry_task(task).await
+    join_state_machine_task(task).await
 }
 
 fn is_missing_credentials_for_auth_error(
@@ -2245,7 +2246,7 @@ impl SessionCrossCrateEventHandler {
             .map(|s| s.call_state)
             .ok();
 
-        if let Err(e) = process_auth_required_on_fresh_task(
+        if let Err(e) = process_event_on_fresh_task(
             Arc::clone(&self.state_machine),
             session_id.clone(),
             EventType::AuthRequired {
@@ -2812,17 +2813,16 @@ impl SessionCrossCrateEventHandler {
             .map(|s| s.call_state)
             .ok();
 
-        if let Err(e) = self
-            .state_machine
-            .process_event(
-                &session_id,
-                EventType::AuthRequired {
-                    status_code: status,
-                    challenge,
-                    method,
-                },
-            )
-            .await
+        if let Err(e) = process_event_on_fresh_task(
+            Arc::clone(&self.state_machine),
+            session_id.clone(),
+            EventType::AuthRequired {
+                status_code: status,
+                challenge,
+                method,
+            },
+        )
+        .await
         {
             let failure_class = OutboundAuthTerminalClass::from_error(e.as_ref());
             if is_missing_credentials_for_auth_error(e.as_ref()) {
@@ -3076,23 +3076,24 @@ impl SessionCrossCrateEventHandler {
             // generic failure path so the state machine tears the call
             // down cleanly instead of hanging waiting for a retry.
             warn!("3xx response with no Contact URIs — treating as failure");
-            let _ = self
-                .state_machine
-                .process_event(&session_id, EventType::Dialog4xxFailure(status_code))
-                .await;
+            let _ = process_event_on_fresh_task(
+                Arc::clone(&self.state_machine),
+                session_id,
+                EventType::Dialog4xxFailure(status_code),
+            )
+            .await;
             return Ok(());
         }
 
-        if let Err(e) = self
-            .state_machine
-            .process_event(
-                &session_id,
-                EventType::Dialog3xxRedirect {
-                    status: status_code,
-                    targets: targets.to_vec(),
-                },
-            )
-            .await
+        if let Err(e) = process_event_on_fresh_task(
+            Arc::clone(&self.state_machine),
+            session_id.clone(),
+            EventType::Dialog3xxRedirect {
+                status: status_code,
+                targets: targets.to_vec(),
+            },
+        )
+        .await
         {
             error!(
                 "Failed to process CallRedirected for session {}: {}",
@@ -3127,13 +3128,12 @@ impl SessionCrossCrateEventHandler {
         let can_retry = min_se_secs > 0 && current_retries < CAP;
 
         if can_retry {
-            if let Err(e) = self
-                .state_machine
-                .process_event(
-                    &session_id,
-                    EventType::SessionIntervalTooSmall { min_se_secs },
-                )
-                .await
+            if let Err(e) = process_event_on_fresh_task(
+                Arc::clone(&self.state_machine),
+                session_id.clone(),
+                EventType::SessionIntervalTooSmall { min_se_secs },
+            )
+            .await
             {
                 error!(
                     "Failed to dispatch SessionIntervalTooSmall retry for session {}: {}",
@@ -3144,10 +3144,12 @@ impl SessionCrossCrateEventHandler {
             }
         }
 
-        if let Err(e) = self
-            .state_machine
-            .process_event(&session_id, EventType::Dialog4xxFailure(422))
-            .await
+        if let Err(e) = process_event_on_fresh_task(
+            Arc::clone(&self.state_machine),
+            session_id.clone(),
+            EventType::Dialog4xxFailure(422),
+        )
+        .await
         {
             error!(
                 "Failed to process 422 SessionIntervalTooSmall fallback for session {}: {}",
@@ -3346,13 +3348,12 @@ impl SessionCrossCrateEventHandler {
                 current_retries + 1,
                 CAP
             );
-            if let Err(e) = self
-                .state_machine
-                .process_event(
-                    &session_id,
-                    EventType::SessionIntervalTooSmall { min_se_secs },
-                )
-                .await
+            if let Err(e) = process_event_on_fresh_task(
+                Arc::clone(&self.state_machine),
+                session_id.clone(),
+                EventType::SessionIntervalTooSmall { min_se_secs },
+            )
+            .await
             {
                 // Retry dispatch failed — surface as terminal 422. No
                 // `CallFailed` publish needed; the error path below does it.
@@ -3375,10 +3376,12 @@ impl SessionCrossCrateEventHandler {
 
         // Terminal path: route through generic 4xx failure + publish
         // CallFailed so the session cleans up and the app observes the 422.
-        if let Err(e) = self
-            .state_machine
-            .process_event(&session_id, EventType::Dialog4xxFailure(422))
-            .await
+        if let Err(e) = process_event_on_fresh_task(
+            Arc::clone(&self.state_machine),
+            session_id.clone(),
+            EventType::Dialog4xxFailure(422),
+        )
+        .await
         {
             error!(
                 "Failed to process 422 SessionIntervalTooSmall fallback for session {}: {}",
@@ -5206,10 +5209,10 @@ fn parse_sipfrag_status_line(body: &str) -> Option<(u16, String)> {
 mod tests {
     use super::{
         build_incoming_response_from_bytes, dialog_bye_requires_terminal_release,
-        join_auth_retry_task, map_sip_trace_session_id, parse_sipfrag_status_line,
-        safe_auth_method_label, sip_trace_owner_matches, AbortAuthRetryTaskOnDrop,
+        join_state_machine_task, map_sip_trace_session_id, parse_sipfrag_status_line,
+        safe_auth_method_label, sip_trace_owner_matches, AbortStateMachineTaskOnDrop,
         CallFailureDiagnostics, CallFailureReason, OutboundAuthTerminalClass,
-        StateMachineProcessResult, AUTH_RETRY_DISPATCH_JOIN_FAILURE,
+        StateMachineProcessResult, STATE_MACHINE_DISPATCH_JOIN_FAILURE,
     };
     use crate::errors::SessionError;
     use crate::state_machine::ProcessEventResult;
@@ -5231,10 +5234,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_auth_retry_join_aborts_the_owned_state_machine_task() {
+    async fn dropping_state_machine_join_aborts_the_owned_task() {
         let (started_tx, started_rx) = oneshot::channel();
         let (dropped_tx, dropped_rx) = oneshot::channel();
-        let task = AbortAuthRetryTaskOnDrop::new(tokio::spawn(async move {
+        let task = AbortStateMachineTaskOnDrop::new(tokio::spawn(async move {
             let _drop_signal = DropSignal(Some(dropped_tx));
             let _ = started_tx.send(());
             std::future::pending::<StateMachineProcessResult>().await
@@ -5246,26 +5249,26 @@ mod tests {
 
         tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
             .await
-            .expect("cancelled auth-retry task did not stop")
-            .expect("auth-retry task drop signal closed");
+            .expect("cancelled state-machine task did not stop")
+            .expect("state-machine task drop signal closed");
     }
 
     #[tokio::test]
-    async fn auth_retry_task_panics_map_to_a_fixed_internal_error_class() {
-        let task = AbortAuthRetryTaskOnDrop::new(tokio::spawn(async {
-            panic!("synthetic auth-retry dispatch panic");
+    async fn state_machine_task_panics_map_to_a_fixed_internal_error_class() {
+        let task = AbortStateMachineTaskOnDrop::new(tokio::spawn(async {
+            panic!("synthetic state-machine dispatch panic");
             #[allow(unreachable_code)]
             std::future::pending::<StateMachineProcessResult>().await
         }));
 
-        let error = join_auth_retry_task(task)
+        let error = join_state_machine_task(task)
             .await
-            .expect_err("panicked auth-retry task must fail");
+            .expect_err("panicked state-machine task must fail");
         match error.downcast_ref::<SessionError>() {
             Some(SessionError::InternalError(detail)) => {
-                assert_eq!(detail, AUTH_RETRY_DISPATCH_JOIN_FAILURE);
+                assert_eq!(detail, STATE_MACHINE_DISPATCH_JOIN_FAILURE);
             }
-            other => panic!("unexpected auth-retry join error: {other:?}"),
+            other => panic!("unexpected state-machine join error: {other:?}"),
         }
     }
 
