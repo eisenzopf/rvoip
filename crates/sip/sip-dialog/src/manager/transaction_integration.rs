@@ -1857,6 +1857,22 @@ impl DialogManager {
                 }
             }
             TransactionEvent::FailureResponse { response, .. } => {
+                // A locally initiated CANCEL closes the plan before the wire
+                // command is sent so it wins races with candidate failover.
+                // The matching 487 still belongs to the selected INVITE and
+                // must reach normal dialog processing, which publishes the
+                // terminal CallCancelled event. Retire the current slot here
+                // so a duplicate terminal event cannot be handed off twice.
+                if plan.phase == InviteFailoverPlanPhase::Cancelled
+                    && is_current
+                    && response.status_code() == 487
+                {
+                    plan.current_transaction = None;
+                    plan.current_candidate_index = None;
+                    plan.current_send_generation = None;
+                    return InviteFailoverEventDisposition::Continue;
+                }
+
                 if !plan_is_active || !is_current {
                     return InviteFailoverEventDisposition::Consumed;
                 }

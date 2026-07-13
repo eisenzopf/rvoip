@@ -4968,6 +4968,130 @@ mod outbound_flow_handler_tests {
     }
 
     #[tokio::test]
+    async fn cancelled_retained_invite_hands_terminal_487_to_dialog_once() {
+        use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};
+
+        let (manager, mut session_events) = make_manager().await;
+        let mut dialog = Dialog::new(
+            "retained-cancel-terminal".to_string(),
+            "sip:alice@example.com".parse().unwrap(),
+            "sip:bob@example.com".parse().unwrap(),
+            Some("alice-cancel-terminal".to_string()),
+            None,
+            true,
+        );
+        dialog.state = DialogState::Early;
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
+
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from(
+                "Alice",
+                "sip:alice@example.com",
+                Some("alice-cancel-terminal"),
+            )
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("retained-cancel-terminal")
+            .cseq(1)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-cancel-terminal"))
+            .max_forwards(70)
+            .build();
+        let (transaction_id, _) = manager
+            .send_request_with_candidate_wire_plan(
+                request,
+                vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                    dest_addr(5093),
+                    rvoip_sip_transport::transport::TransportType::Udp,
+                )],
+                Some(&dialog_id),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect("send retained INVITE");
+        let sent_request = manager
+            .transaction_manager
+            .original_request(&transaction_id)
+            .await
+            .expect("request lookup")
+            .expect("request retained");
+        let response = SimpleResponseBuilder::response_from_request(
+            &sent_request,
+            rvoip_sip_core::StatusCode::RequestTerminated,
+            None,
+        )
+        .to("Bob", "sip:bob@example.com", Some("bob-cancel-terminal"))
+        .build();
+
+        manager
+            .cancel_invite_transaction_with_dialog(&transaction_id)
+            .await
+            .expect("send CANCEL");
+        let plan_id = manager
+            .invite_failover_attempts
+            .get(&transaction_id)
+            .expect("cancelled attempt remains indexed")
+            .plan_id;
+
+        manager
+            .process_global_transaction_event(TransactionEvent::FailureResponse {
+                transaction_id: transaction_id.clone(),
+                response: response.clone(),
+            })
+            .await;
+
+        let cancelled = tokio::time::timeout(Duration::from_millis(200), session_events.recv())
+            .await
+            .expect("CallCancelled must arrive")
+            .expect("session channel open");
+        assert!(matches!(
+            cancelled,
+            SessionCoordinationEvent::CallCancelled {
+                dialog_id: cancelled_dialog,
+                ..
+            } if cancelled_dialog == dialog_id
+        ));
+        let response_received =
+            tokio::time::timeout(Duration::from_millis(200), session_events.recv())
+                .await
+                .expect("ResponseReceived must arrive")
+                .expect("session channel open");
+        assert!(matches!(
+            response_received,
+            SessionCoordinationEvent::ResponseReceived {
+                dialog_id: response_dialog,
+                transaction_id: response_transaction,
+                ..
+            } if response_dialog == dialog_id && response_transaction == transaction_id
+        ));
+
+        let plan = manager
+            .invite_failover_plans
+            .get(&plan_id)
+            .expect("cancelled plan retained")
+            .value()
+            .clone();
+        let plan = plan.lock().await;
+        assert_eq!(plan.phase, InviteFailoverPlanPhase::Cancelled);
+        assert!(plan.current_transaction.is_none());
+        drop(plan);
+
+        manager
+            .process_global_transaction_event(TransactionEvent::FailureResponse {
+                transaction_id,
+                response,
+            })
+            .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), session_events.recv())
+                .await
+                .is_err(),
+            "duplicate 487 must not publish cancellation twice"
+        );
+    }
+
+    #[tokio::test]
     async fn cancel_and_timer_b_serialize_on_one_exact_current_attempt() {
         use crate::manager::transaction_integration::{
             CandidateWirePlan, InviteFailoverAttemptOutcome, InviteFailoverPlanPhase,

@@ -9,6 +9,7 @@
 //! the generic `CallFailed`).
 
 use std::env;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -28,8 +29,11 @@ fn cargo_bin() -> String {
 }
 
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
-    let mut cmd = Command::new(cargo_bin());
-    cmd.args(["run", "--quiet", "-p", "rvoip-sip", "--example", name]);
+    // The examples are built before launch. Running the executables directly
+    // avoids serializing Bob and Alice behind Cargo's artifact lock: Bob is a
+    // long-lived peer, so a second nested `cargo run` cannot start reliably
+    // until the very process it needs to call has exited.
+    let mut cmd = Command::new(example_binary(name));
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -37,6 +41,23 @@ fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
     cmd.spawn()
         .map(ChildGuard)
         .unwrap_or_else(|e| panic!("failed to spawn {}: {}", name, e))
+}
+
+fn example_binary(name: &str) -> PathBuf {
+    let test_binary = env::current_exe().expect("current integration-test binary");
+    let debug_dir = test_binary
+        .parent()
+        .and_then(Path::parent)
+        .expect("integration test runs from target/<profile>/deps");
+    let binary = debug_dir
+        .join("examples")
+        .join(format!("{name}{}", env::consts::EXE_SUFFIX));
+    assert!(
+        binary.is_file(),
+        "built example binary is missing: {}",
+        binary.display()
+    );
+    binary
 }
 
 fn build_examples() {
