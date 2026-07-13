@@ -123,6 +123,10 @@ fn redacted_invite_dispatch_error<E>(failure: InviteDispatchFailure, _source: E)
     SessionError::DialogError(failure.diagnostic().to_string())
 }
 
+fn redacted_dialog_operation_error<E>(operation: &'static str, _source: E) -> SessionError {
+    SessionError::DialogError(format!("{operation} failed (class=dialog-dispatch)"))
+}
+
 /// Minimal dialog adapter - just translates between dialog-core and state machine
 pub struct DialogAdapter {
     /// Dialog-core unified API
@@ -936,9 +940,14 @@ impl DialogAdapter {
                     },
                 )
                 .await
-                .map_err(|e| SessionError::DialogError(format!("Failed to send REFER: {}", e)))?;
+                .map_err(|error| redacted_dialog_operation_error("REFER", error))?;
 
-            tracing::info!("Sent REFER to {} for session {}", target, session_id.0);
+            tracing::info!(
+                session = %session_id.0,
+                target_present = !target.is_empty(),
+                target_bytes = target.len(),
+                "Sent REFER"
+            );
         } else {
             tracing::warn!("No session found for dialog {}", dialog_id);
         }
@@ -1694,7 +1703,7 @@ impl DialogAdapter {
         self.dialog_api
             .send_refer_with_options(&dialog_id, opts)
             .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to send REFER: {}", e)))?;
+            .map_err(|error| redacted_dialog_operation_error("REFER", error))?;
         Ok(())
     }
 
@@ -2169,9 +2178,14 @@ impl DialogAdapter {
                 },
             )
             .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to send REFER: {}", e)))?;
+            .map_err(|error| redacted_dialog_operation_error("REFER", error))?;
 
-        tracing::info!("Sent REFER to {} for session {}", refer_to, session_id.0);
+        tracing::info!(
+            session = %session_id.0,
+            target_present = !refer_to.is_empty(),
+            target_bytes = refer_to.len(),
+            "Sent REFER"
+        );
         Ok(())
     }
 
@@ -2277,11 +2291,11 @@ impl DialogAdapter {
 
         let dest_uri = match registrar_uri.parse::<rvoip_sip_core::Uri>() {
             Ok(uri) => uri,
-            Err(e) => {
+            Err(_) => {
                 tracing::warn!(
-                    "symmetric registered-flow: invalid registrar URI {}: {}",
-                    registrar_uri,
-                    e
+                    registrar_present = !registrar_uri.is_empty(),
+                    registrar_bytes = registrar_uri.len(),
+                    "symmetric registered-flow: invalid registrar URI"
                 );
                 return;
             }
@@ -2290,8 +2304,9 @@ impl DialogAdapter {
             rvoip_sip_dialog::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri).await
         else {
             tracing::warn!(
-                "symmetric registered-flow: could not resolve registrar URI {} for keep-alive",
-                registrar_uri
+                registrar_present = !registrar_uri.is_empty(),
+                registrar_bytes = registrar_uri.len(),
+                "symmetric registered-flow: could not resolve registrar URI for keep-alive"
             );
             return;
         };
@@ -2305,11 +2320,13 @@ impl DialogAdapter {
             destination,
         );
         tracing::info!(
-            "symmetric registered-flow: keep-alive ping started for AoR {} (reg-id={}, instance={}) → {}",
-            from_uri,
-            params.reg_id,
-            params.instance_urn,
-            destination
+            aor_present = !from_uri.is_empty(),
+            aor_bytes = from_uri.len(),
+            reg_id = params.reg_id,
+            instance_present = !params.instance_urn.is_empty(),
+            instance_bytes = params.instance_urn.len(),
+            destination = %destination,
+            "symmetric registered-flow: keep-alive ping started"
         );
     }
 
@@ -2699,10 +2716,11 @@ impl DialogAdapter {
         reason: &str,
     ) -> Result<()> {
         tracing::info!(
-            "Sending REFER NOTIFY for session {} with status {} {}",
-            session_id.0,
+            session = %session_id.0,
             status_code,
-            reason
+            reason_present = !reason.is_empty(),
+            reason_bytes = reason.len(),
+            "Sending REFER NOTIFY"
         );
 
         // Get dialog ID for this session
@@ -2716,9 +2734,7 @@ impl DialogAdapter {
         self.dialog_api
             .send_refer_notify(&dialog_id, status_code, reason)
             .await
-            .map_err(|e| {
-                SessionError::DialogError(format!("Failed to send REFER NOTIFY: {}", e))
-            })?;
+            .map_err(|error| redacted_dialog_operation_error("REFER NOTIFY", error))?;
 
         tracing::info!(
             "REFER NOTIFY sent successfully for session {}",

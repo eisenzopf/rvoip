@@ -133,6 +133,31 @@ fn is_missing_credentials_for_auth_error(
     )
 }
 
+fn action_diagnostic_class(action: &Action) -> &'static str {
+    match action {
+        Action::SendINVITEWithAuth => "invite-auth",
+        Action::SendRequestWithAuth => "request-auth",
+        Action::SendREGISTERWithAuth => "register-auth",
+        Action::StoreAuthChallenge => "store-auth-challenge",
+        _ => "state-machine-action",
+    }
+}
+
+fn action_error_diagnostic_class(
+    error: &(dyn std::error::Error + Send + Sync + 'static),
+) -> &'static str {
+    if is_missing_credentials_for_auth_error(error) {
+        "missing-credentials"
+    } else if error
+        .downcast_ref::<crate::errors::SessionError>()
+        .is_some()
+    {
+        "session-error"
+    } else {
+        "action-error"
+    }
+}
+
 /// Events that flow through the system
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
@@ -464,8 +489,12 @@ impl StateMachine {
                 session.transfer_notify_dialog = session.dialog_id.clone();
                 session.refer_transaction_id = Some(transaction_id.clone());
                 debug!(
-                    "Set transfer target from REFER: {}, type: {:?}, transaction: {}",
-                    refer_to, transfer_type, transaction_id
+                    target_present = !refer_to.is_empty(),
+                    target_bytes = refer_to.len(),
+                    transfer_type = ?transfer_type,
+                    transaction_present = !transaction_id.is_empty(),
+                    transaction_bytes = transaction_id.len(),
+                    "Set transfer state from REFER"
                 );
             }
             // StartAttendedTransfer event removed
@@ -697,11 +726,20 @@ impl StateMachine {
                     (true, None, None)
                 }
                 Err(e) => {
-                    let error_msg = format!("Failed to execute action {:?}: {}", action, e);
+                    let action_class = action_diagnostic_class(action);
+                    let error_class = action_error_diagnostic_class(e.as_ref());
+                    let error_msg =
+                        format!("action failed (action={action_class}, class={error_class})");
                     if is_missing_credentials_for_auth_error(e.as_ref()) {
-                        debug!("{}", error_msg);
+                        debug!(
+                            action = action_class,
+                            error_class, "State-machine action failed"
+                        );
                     } else {
-                        error!("{}", error_msg);
+                        error!(
+                            action = action_class,
+                            error_class, "State-machine action failed"
+                        );
                     }
                     errors.push(error_msg.clone());
                     (false, Some(error_msg), Some(e))

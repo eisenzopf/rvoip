@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 const REDACTED_AUTH_ACTION_ERROR: &str = "outbound authentication action failed";
 const REDACTED_AUTH_TRANSITION_ERROR: &str = "authentication transition failed";
+const REDACTED_ACTION_ERROR: &str = "state-machine action failed";
+const REDACTED_TRANSITION_ERROR: &str = "state-machine transition failed";
 
 fn safe_auth_method_label(method: &str) -> &'static str {
     match method.trim().to_ascii_uppercase().as_str() {
@@ -97,14 +99,26 @@ fn sanitize_transition_record(record: &mut TransitionRecord) {
     record.event = history_event_snapshot(&record.event);
 
     for action in &mut record.actions_executed {
-        if is_auth_action(&action.action) && action.error.is_some() {
-            action.error = Some(REDACTED_AUTH_ACTION_ERROR.to_string());
+        if action.error.is_some() {
+            action.error = Some(
+                if is_auth_action(&action.action) {
+                    REDACTED_AUTH_ACTION_ERROR
+                } else {
+                    REDACTED_ACTION_ERROR
+                }
+                .to_string(),
+            );
         }
     }
-    if auth_transition && !record.errors.is_empty() {
-        record
-            .errors
-            .fill(REDACTED_AUTH_TRANSITION_ERROR.to_string());
+    if !record.errors.is_empty() {
+        record.errors.fill(
+            if auth_transition {
+                REDACTED_AUTH_TRANSITION_ERROR
+            } else {
+                REDACTED_TRANSITION_ERROR
+            }
+            .to_string(),
+        );
     }
 }
 
@@ -568,6 +582,47 @@ mod tests {
                     "history leaked {secret}: {rendered}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn default_history_never_retains_arbitrary_action_or_transition_errors() {
+        const SECRET: &str = "generic-action-provider-secret-canary";
+        let mut history = SessionHistory::new(HistoryConfig::default());
+        history.record_transition(TransitionRecord {
+            timestamp: Instant::now(),
+            timestamp_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            sequence: 0,
+            from_state: CallState::Active,
+            event: EventType::HangupCall,
+            to_state: Some(CallState::Terminating),
+            guards_evaluated: vec![],
+            actions_executed: vec![ActionRecord {
+                action: Action::SendBYE,
+                success: false,
+                execution_time_us: 1,
+                error: Some(format!("provider failed: {SECRET}")),
+            }],
+            events_published: vec![],
+            duration_ms: 1,
+            errors: vec![format!("provider failed: {SECRET}")],
+        });
+
+        let record = history.get_recent(1).pop().expect("history record");
+        assert_eq!(
+            record.actions_executed[0].error.as_deref(),
+            Some(REDACTED_ACTION_ERROR)
+        );
+        assert_eq!(record.errors, vec![REDACTED_TRANSITION_ERROR]);
+        for rendered in [
+            format!("{record:?}"),
+            history.export_json(),
+            history.export_csv(),
+        ] {
+            assert!(!rendered.contains(SECRET), "leaked error value: {rendered}");
         }
     }
 

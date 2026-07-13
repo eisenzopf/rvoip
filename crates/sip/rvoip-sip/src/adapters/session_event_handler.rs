@@ -133,6 +133,18 @@ impl CallFailureDiagnostics {
 /// RFC 5626 §4.4.1 (flow recovery should not storm the registrar).
 const OUTBOUND_FLOW_REFRESH_DEBOUNCE: Duration = Duration::from_secs(1);
 
+fn transaction_id_diagnostics(value: &str) -> (&'static str, usize) {
+    let class = if value
+        .parse::<rvoip_sip_dialog::transaction::TransactionKey>()
+        .is_ok()
+    {
+        "valid"
+    } else {
+        "invalid"
+    };
+    (class, value.len())
+}
+
 fn sip_trace_owner_matches(configured_owner_id: Option<&str>, event_owner_id: &str) -> bool {
     configured_owner_id.is_some_and(|owner_id| owner_id == event_owner_id)
 }
@@ -1675,13 +1687,7 @@ impl SessionCrossCrateEventHandler {
     ) -> Result<()> {
         let transaction_id = transaction_id
             .parse::<rvoip_sip_dialog::transaction::TransactionKey>()
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "server admission limit reached, but inbound transaction id '{}' is invalid: {}",
-                    transaction_id,
-                    e
-                )
-            })?;
+            .map_err(|_| anyhow::anyhow!("server admission transaction id is invalid"))?;
 
         let mut response = self
             .dialog_adapter
@@ -1692,13 +1698,7 @@ impl SessionCrossCrateEventHandler {
                 None,
             )
             .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to build server overload response for transaction {}: {}",
-                    transaction_id,
-                    e
-                )
-            })?;
+            .map_err(|_| anyhow::anyhow!("failed to build server overload response"))?;
 
         if let Some(seconds) = self.server_overload_retry_after_secs {
             response
@@ -1712,13 +1712,7 @@ impl SessionCrossCrateEventHandler {
             .dialog_api
             .send_response(&transaction_id, response)
             .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to send server overload response for transaction {}: {}",
-                    transaction_id,
-                    e
-                )
-            })?;
+            .map_err(|_| anyhow::anyhow!("failed to send server overload response"))?;
 
         warn!(
             observed_sessions,
@@ -1834,10 +1828,12 @@ impl SessionCrossCrateEventHandler {
                             .core()
                             .cleanup_transaction_receiver(&transaction_id);
                     }
-                    Err(err) => {
+                    Err(_) => {
+                        let (transaction_class, transaction_bytes) =
+                            transaction_id_diagnostics(transaction_id);
                         warn!(
-                            transaction_id,
-                            error = %err,
+                            transaction_class,
+                            transaction_bytes,
                             "Rejected inbound INVITE for overload without a parseable transaction id; route cleanup skipped"
                         );
                     }
@@ -1870,10 +1866,14 @@ impl SessionCrossCrateEventHandler {
             Ok(transaction_id) => {
                 session.pending_inbound_invite_transaction_id = Some(transaction_id);
             }
-            Err(e) => {
+            Err(_) => {
+                let (transaction_class, transaction_bytes) =
+                    transaction_id_diagnostics(&transaction_id);
                 debug!(
-                    "IncomingCall for session {} carried unparsable transaction id {}: {}",
-                    session_id, transaction_id, e
+                    session = %session_id,
+                    transaction_class,
+                    transaction_bytes,
+                    "IncomingCall carried an unparsable transaction id"
                 );
             }
         }
@@ -2402,10 +2402,14 @@ impl SessionCrossCrateEventHandler {
             Ok(transaction_id) => {
                 session.pending_inbound_invite_transaction_id = Some(transaction_id);
             }
-            Err(e) => {
+            Err(_) => {
+                let (transaction_class, transaction_bytes) =
+                    transaction_id_diagnostics(&transaction_id);
                 debug!(
-                    "IncomingCall for session {} carried unparsable transaction id {}: {}",
-                    session_id, transaction_id, e
+                    session = %session_id,
+                    transaction_class,
+                    transaction_bytes,
+                    "IncomingCall carried an unparsable transaction id"
                 );
             }
         }
@@ -3164,10 +3168,12 @@ impl SessionCrossCrateEventHandler {
         {
             if now.duration_since(prev) < OUTBOUND_FLOW_REFRESH_DEBOUNCE {
                 debug!(
-                    "OutboundFlowFailed (aor={}, reason={}) debounced - prior refresh {}ms ago",
-                    aor,
-                    reason,
-                    now.duration_since(prev).as_millis()
+                    aor_present = !aor.is_empty(),
+                    aor_bytes = aor.len(),
+                    reason_present = !reason.is_empty(),
+                    reason_bytes = reason.len(),
+                    elapsed_ms = now.duration_since(prev).as_millis(),
+                    "OutboundFlowFailed debounced"
                 );
                 return Ok(());
             }
@@ -3184,8 +3190,9 @@ impl SessionCrossCrateEventHandler {
 
         let Some(session_id) = matching_session_id else {
             warn!(
-                "OutboundFlowFailed (aor={}) but no registration session found - dropping",
-                aor
+                aor_present = !aor.is_empty(),
+                aor_bytes = aor.len(),
+                "OutboundFlowFailed had no matching registration session; dropping"
             );
             return Ok(());
         };
@@ -3423,10 +3430,12 @@ impl SessionCrossCrateEventHandler {
         {
             if now.duration_since(prev) < OUTBOUND_FLOW_REFRESH_DEBOUNCE {
                 debug!(
-                    "OutboundFlowFailed (aor={}, reason={}) debounced — prior refresh {}ms ago",
-                    aor,
-                    reason,
-                    now.duration_since(prev).as_millis()
+                    aor_present = !aor.is_empty(),
+                    aor_bytes = aor.len(),
+                    reason_present = !reason.is_empty(),
+                    reason_bytes = reason.len(),
+                    elapsed_ms = now.duration_since(prev).as_millis(),
+                    "OutboundFlowFailed debounced"
                 );
                 return Ok(());
             }
@@ -3446,15 +3455,20 @@ impl SessionCrossCrateEventHandler {
 
         let Some(session_id) = matching_session_id else {
             warn!(
-                "OutboundFlowFailed (aor={}) but no registration session found — dropping",
-                aor
+                aor_present = !aor.is_empty(),
+                aor_bytes = aor.len(),
+                "OutboundFlowFailed had no matching registration session; dropping"
             );
             return Ok(());
         };
 
         info!(
-            "🔄 OutboundFlowFailed (aor={}, reason={}) — triggering re-REGISTER for session {}",
-            aor, reason, session_id
+            aor_present = !aor.is_empty(),
+            aor_bytes = aor.len(),
+            reason_present = !reason.is_empty(),
+            reason_bytes = reason.len(),
+            session = %session_id,
+            "OutboundFlowFailed triggered re-REGISTER"
         );
         if let Err(e) = self
             .state_machine
