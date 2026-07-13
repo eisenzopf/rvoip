@@ -18,6 +18,11 @@ use crate::errors::{ConnectError, Result};
 /// Handle to a running bidirectional bridge. Dropping it (or calling
 /// [`StreamBridge::stop`]) aborts both pump tasks.
 pub struct StreamBridge {
+    // Source streams own their transport drivers and single-consumer channel
+    // lifetimes. MediaGraph owns only the acquired receivers/sink senders, so
+    // the bridge must retain both public stream owners until teardown.
+    _a_stream: Arc<dyn MediaStream>,
+    _b_stream: Arc<dyn MediaStream>,
     a_graph: MediaGraphHandle,
     b_graph: MediaGraphHandle,
     a_to_b: rvoip_core::ids::MediaRouteId,
@@ -88,6 +93,8 @@ pub fn bridge_streams(a: Arc<dyn MediaStream>, b: Arc<dyn MediaStream>) -> Resul
     };
 
     Ok(StreamBridge {
+        _a_stream: a,
+        _b_stream: b,
         a_graph,
         b_graph,
         a_to_b,

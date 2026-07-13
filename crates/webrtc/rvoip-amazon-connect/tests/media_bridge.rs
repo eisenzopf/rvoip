@@ -273,3 +273,25 @@ fn unsupported_codec_is_rejected_before_either_receiver_is_taken() {
     assert!(supported.input_receiver_is_available());
     assert!(unsupported.input_receiver_is_available());
 }
+
+#[tokio::test]
+async fn bridge_retains_stream_owners_until_teardown() {
+    let sip = MockMediaStream::new("pcmu", 8_000);
+    let connect = MockMediaStream::new("opus", 48_000);
+    let sip_weak = Arc::downgrade(&sip);
+    let connect_weak = Arc::downgrade(&connect);
+
+    let bridge = bridge_streams(
+        Arc::clone(&sip) as Arc<dyn MediaStream>,
+        Arc::clone(&connect) as Arc<dyn MediaStream>,
+    )
+    .expect("create retained bridge");
+    drop(sip);
+    drop(connect);
+
+    assert!(sip_weak.upgrade().is_some());
+    assert!(connect_weak.upgrade().is_some());
+    bridge.stop();
+    assert!(sip_weak.upgrade().is_none());
+    assert!(connect_weak.upgrade().is_none());
+}
