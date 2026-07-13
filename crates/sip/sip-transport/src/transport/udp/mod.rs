@@ -831,6 +831,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn udp_complete_datagram_accepts_missing_content_length_as_empty_body() {
+        let packet = Bytes::from_static(
+            b"OPTIONS sip:service.example SIP/2.0\r\nVia : SIP/2.0/UDP edge.example\r\n\r\n",
+        );
+        let source = "127.0.0.1:5060".parse().unwrap();
+        let local_addr = "127.0.0.1:5061".parse().unwrap();
+        let datagram = UdpDatagram {
+            packet: packet.clone(),
+            source,
+            local_addr,
+            timing: None,
+        };
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+
+        process_udp_datagram(0, datagram, &events_tx).await;
+
+        let event = events_rx.recv().await.expect("UDP parse event");
+        let TransportEvent::MessageReceived {
+            message, raw_bytes, ..
+        } = event
+        else {
+            panic!("message event expected");
+        };
+        let Message::Request(request) = message else {
+            panic!("request expected");
+        };
+        assert!(request.body().is_empty());
+        assert_eq!(raw_bytes.as_deref(), Some(packet.as_ref()));
+    }
+
+    #[tokio::test]
     async fn typed_send_rejects_unsafe_fields_but_raw_send_remains_verbatim() {
         let capture = tokio::net::UdpSocket::bind("127.0.0.1:0")
             .await

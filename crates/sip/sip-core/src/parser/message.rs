@@ -7,7 +7,7 @@ use crate::types::{Message, Request, Response};
 use crate::parser::request::parse_request_line;
 // use crate::parser::utils::crlf;
 use crate::error::{Error, Result};
-use crate::framing::{inspect_sip_frame, SipFrameStatus};
+use crate::framing::{inspect_sip_frame_with_policy, SipFrameStatus, SipFramingPolicy};
 use crate::parser::common::ParseResult;
 use crate::parser::response::parse_status_line;
 use crate::parser::separators::hcolon;
@@ -129,7 +129,7 @@ pub fn header_value_better(input: &[u8]) -> ParseResult<'_, &[u8]> {
 /// 5. The message body is parsed from that authoritative frame boundary
 #[cfg(test)]
 fn full_message_parser(input: &[u8], mode: ParseMode) -> IResult<&[u8], Message> {
-    match inspect_sip_frame(input) {
+    match inspect_sip_frame_with_policy(input, SipFramingPolicy::CompleteMessage) {
         Ok(SipFrameStatus::Complete(frame)) => {
             full_message_parser_with_content_length(input, mode, frame.body_bytes)
         }
@@ -238,7 +238,7 @@ pub fn parse_message_with_mode(input: &[u8], mode: ParseMode) -> Result<Message>
     eprintln!("Input as hex: {:02x?}", input);
     eprintln!("===========================");*/
 
-    let frame = match inspect_sip_frame(input) {
+    let frame = match inspect_sip_frame_with_policy(input, SipFramingPolicy::CompleteMessage) {
         Ok(SipFrameStatus::Complete(frame)) => frame,
         Ok(SipFrameStatus::Incomplete { .. }) => {
             tracing::debug!("SIP frame incomplete");
@@ -732,8 +732,9 @@ mod tests {
     }
 
     #[test]
-    fn test_message_missing_content_length_is_rejected() {
-        // One authoritative Content-Length is required at every framing boundary.
+    fn test_complete_message_without_content_length_has_an_empty_body() {
+        // Datagram and transport-neutral complete-message parsing retain the
+        // RFC 3261 compatibility rule that an absent length means no body.
         let input = b"INVITE sip:bob@biloxi.com SIP/2.0\r\n\
                      Via: SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds\r\n\
                      To: Bob <sip:bob@biloxi.com>\r\n\
@@ -743,9 +744,23 @@ mod tests {
                      \r\n\
                      This content should be ignored";
 
+        let (remainder, message) = full_message_parser(input, ParseMode::Lenient)
+            .expect("complete-message parser accepts an omitted length");
+        assert_eq!(remainder, b"This content should be ignored");
+        let Message::Request(request) = message else {
+            panic!("request expected");
+        };
+        assert!(request.body().is_empty());
+
+        let parsed = parse_message(input).expect("public complete-message parser");
+        let Message::Request(request) = parsed else {
+            panic!("request expected");
+        };
+        assert!(request.body().is_empty());
+
         assert!(
-            full_message_parser(input, ParseMode::Lenient).is_err(),
-            "missing Content-Length must never make the trailing bytes ambiguous"
+            parse_message_with_mode(input, ParseMode::Strict).is_err(),
+            "strict complete-message parsing rejects bytes beyond the zero-byte body"
         );
     }
 

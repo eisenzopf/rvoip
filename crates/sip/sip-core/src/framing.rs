@@ -38,6 +38,21 @@ pub enum SipFrameStatus {
     Complete(SipFrame),
 }
 
+/// Policy for interpreting a message that omits `Content-Length`.
+///
+/// RFC 3261 gives stream transports no external message boundary, so they
+/// must require an explicit length. A transport-neutral parser (including a
+/// UDP datagram parser) already owns a complete-message boundary and retains
+/// the historical SIP behavior of treating an omitted length as an empty
+/// body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SipFramingPolicy {
+    /// Require exactly one `Content-Length` (or compact `l`) header.
+    Stream,
+    /// Treat an omitted `Content-Length` as a zero-byte body.
+    CompleteMessage,
+}
+
 /// Fixed-class framing failures. No rejected header value is retained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SipFramingError {
@@ -85,13 +100,25 @@ impl fmt::Display for SipFramingError {
 
 impl std::error::Error for SipFramingError {}
 
-/// Inspect the first SIP message in `input` without consuming it.
+/// Inspect a transport-neutral complete SIP message without consuming it.
 ///
-/// Exactly one case-insensitive `Content-Length` or compact `l` header is
-/// required. Duplicate values are rejected even when equal so all peers make
-/// one unambiguous framing decision. Via, Route, Record-Route, and every other
-/// repeatable SIP header are only counted and otherwise remain untouched.
+/// This compatibility entry point treats an omitted `Content-Length` as a
+/// zero-byte body. Stream transports must use
+/// [`inspect_sip_frame_with_policy`] with [`SipFramingPolicy::Stream`].
 pub fn inspect_sip_frame(input: &[u8]) -> Result<SipFrameStatus, SipFramingError> {
+    inspect_sip_frame_with_policy(input, SipFramingPolicy::CompleteMessage)
+}
+
+/// Inspect the first SIP message in `input` under an explicit boundary policy.
+///
+/// Duplicate case-insensitive `Content-Length`/compact `l` values are rejected
+/// even when equal so all peers make one unambiguous framing decision. Via,
+/// Route, Record-Route, and every other repeatable SIP header are only counted
+/// and otherwise remain untouched.
+pub fn inspect_sip_frame_with_policy(
+    input: &[u8],
+    policy: SipFramingPolicy,
+) -> Result<SipFrameStatus, SipFramingError> {
     let Some(header_end) = find_double_crlf(input) else {
         validate_incomplete_header_prefix(input)?;
         return Ok(SipFrameStatus::Incomplete {
@@ -105,7 +132,12 @@ pub fn inspect_sip_frame(input: &[u8]) -> Result<SipFrameStatus, SipFramingError
         return Err(SipFramingError::HeaderTooLarge);
     }
 
-    let body_bytes = parse_headers(&input[..header_end])?;
+    let content_length = parse_headers(&input[..header_end])?;
+    let body_bytes = match (content_length, policy) {
+        (Some(body_bytes), _) => body_bytes,
+        (None, SipFramingPolicy::CompleteMessage) => 0,
+        (None, SipFramingPolicy::Stream) => return Err(SipFramingError::MissingContentLength),
+    };
     if body_bytes > MAX_SIP_BODY_BYTES {
         return Err(SipFramingError::BodyTooLarge);
     }
@@ -162,7 +194,7 @@ fn validate_incomplete_header_prefix(input: &[u8]) -> Result<(), SipFramingError
     validate_line_len(&input[cursor..])
 }
 
-fn parse_headers(header_block: &[u8]) -> Result<usize, SipFramingError> {
+fn parse_headers(header_block: &[u8]) -> Result<Option<usize>, SipFramingError> {
     let mut cursor = 0;
     let mut line_index = 0;
     let mut header_count = 0;
@@ -205,7 +237,14 @@ fn parse_headers(header_block: &[u8]) -> Result<usize, SipFramingError> {
             let Some(colon) = line.iter().position(|byte| *byte == b':') else {
                 return Err(SipFramingError::InvalidHeaderSyntax);
             };
-            let name = &line[..colon];
+            // RFC 3261 HCOLON permits SP/HTAB between the field-name and
+            // colon. Trim only that grammar-sanctioned suffix; whitespace
+            // inside the name (or any other byte) still fails validation.
+            let name_end = line[..colon]
+                .iter()
+                .rposition(|byte| !matches!(byte, b' ' | b'\t'))
+                .map_or(0, |index| index + 1);
+            let name = &line[..name_end];
             if !is_header_name(name) {
                 return Err(SipFramingError::InvalidHeaderName);
             }
@@ -227,7 +266,7 @@ fn parse_headers(header_block: &[u8]) -> Result<usize, SipFramingError> {
     }
 
     finish_content_length(&mut current_content_length, &mut content_length)?;
-    content_length.ok_or(SipFramingError::MissingContentLength)
+    Ok(content_length)
 }
 
 fn validate_line_len(line: &[u8]) -> Result<(), SipFramingError> {
@@ -322,14 +361,23 @@ mod tests {
     }
 
     #[test]
-    fn accepts_canonical_and_compact_content_length() {
-        for header in [b"Content-Length: 4".as_slice(), b"L:\t4".as_slice()] {
+    fn accepts_canonical_compact_and_hcolon_content_length() {
+        for header in [
+            b"Content-Length: 4".as_slice(),
+            b"L:\t4".as_slice(),
+            b"Content-Length \t : 4".as_slice(),
+            b"l\t:\t4".as_slice(),
+        ] {
             let message = request(header, b"body");
-            let SipFrameStatus::Complete(frame) = inspect_sip_frame(&message).unwrap() else {
-                panic!("complete frame expected");
-            };
-            assert_eq!(frame.body_bytes, 4);
-            assert_eq!(frame.total_bytes, message.len());
+            for policy in [SipFramingPolicy::CompleteMessage, SipFramingPolicy::Stream] {
+                let SipFrameStatus::Complete(frame) =
+                    inspect_sip_frame_with_policy(&message, policy).unwrap()
+                else {
+                    panic!("complete frame expected");
+                };
+                assert_eq!(frame.body_bytes, 4);
+                assert_eq!(frame.total_bytes, message.len());
+            }
         }
     }
 
@@ -340,32 +388,58 @@ mod tests {
             b"Content-Length: 0\r\nl: 0".as_slice(),
             b"l: 0\r\nCONTENT-LENGTH: 0".as_slice(),
             b"l: 0\r\nL: 1".as_slice(),
+            b"Content-Length \t: 0\r\nl : 0".as_slice(),
         ] {
-            assert_eq!(
-                inspect_sip_frame(&request(headers, b"")),
-                Err(SipFramingError::DuplicateContentLength)
-            );
+            for policy in [SipFramingPolicy::CompleteMessage, SipFramingPolicy::Stream] {
+                assert_eq!(
+                    inspect_sip_frame_with_policy(&request(headers, b""), policy),
+                    Err(SipFramingError::DuplicateContentLength)
+                );
+            }
         }
     }
 
     #[test]
-    fn rejects_missing_invalid_non_utf8_and_overflow_content_length() {
+    fn applies_explicit_missing_content_length_policy() {
         let missing = b"OPTIONS sip:service.example SIP/2.0\r\nVia: x\r\n\r\n";
         assert_eq!(
-            inspect_sip_frame(missing),
+            inspect_sip_frame_with_policy(missing, SipFramingPolicy::Stream),
             Err(SipFramingError::MissingContentLength)
         );
+        let SipFrameStatus::Complete(frame) =
+            inspect_sip_frame_with_policy(missing, SipFramingPolicy::CompleteMessage).unwrap()
+        else {
+            panic!("complete message expected");
+        };
+        assert_eq!(frame.body_bytes, 0);
+        assert_eq!(frame.total_bytes, missing.len());
+        assert_eq!(
+            inspect_sip_frame(missing),
+            Ok(SipFrameStatus::Complete(frame))
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_non_utf8_and_overflow_content_length_in_both_modes() {
         for header in [
             b"Content-Length: nope".as_slice(),
             b"Content-Length: \xff".as_slice(),
             b"Content-Length: 184467440737095516160".as_slice(),
+            b"Content Length: 0".as_slice(),
         ] {
             let expected = if header.ends_with(b"160") {
                 SipFramingError::ContentLengthOverflow
+            } else if header.starts_with(b"Content Length") {
+                SipFramingError::InvalidHeaderName
             } else {
                 SipFramingError::InvalidContentLength
             };
-            assert_eq!(inspect_sip_frame(&request(header, b"")), Err(expected));
+            for policy in [SipFramingPolicy::CompleteMessage, SipFramingPolicy::Stream] {
+                assert_eq!(
+                    inspect_sip_frame_with_policy(&request(header, b""), policy),
+                    Err(expected)
+                );
+            }
         }
     }
 
@@ -436,5 +510,22 @@ mod tests {
                 .expect_err("public parser must enforce framing singleton policy");
             assert!(error.to_string().contains(class), "{error}");
         }
+    }
+
+    #[test]
+    fn public_parser_accepts_hcolon_and_missing_length_as_zero_body() {
+        let message = request(b"Content-Length \t : 4", b"body");
+        let parsed = crate::parse_message(&message).expect("HCOLON message");
+        let crate::Message::Request(request) = parsed else {
+            panic!("request expected");
+        };
+        assert_eq!(request.body(), b"body");
+
+        let missing = b"OPTIONS sip:service.example SIP/2.0\r\nVia : x\r\n\r\n";
+        let parsed = crate::parse_message(missing).expect("missing length means empty body");
+        let crate::Message::Request(request) = parsed else {
+            panic!("request expected");
+        };
+        assert!(request.body().is_empty());
     }
 }

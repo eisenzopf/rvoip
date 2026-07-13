@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
-use rvoip_sip_core::framing::{inspect_sip_frame, SipFrameStatus};
+use rvoip_sip_core::framing::{inspect_sip_frame_with_policy, SipFrameStatus, SipFramingPolicy};
 use rvoip_sip_core::types::uri::Host;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -1345,7 +1345,7 @@ fn try_parse_one(buffer: &mut BytesMut) -> Result<Option<(rvoip_sip_core::Messag
         return Ok(None);
     }
 
-    let frame = match inspect_sip_frame(buffer) {
+    let frame = match inspect_sip_frame_with_policy(buffer, SipFramingPolicy::Stream) {
         Ok(SipFrameStatus::Incomplete { .. }) => return Ok(None),
         Ok(SipFrameStatus::Complete(frame)) => frame,
         Err(error) => {
@@ -1392,18 +1392,20 @@ mod inbound_framing_tests {
     }
 
     #[test]
-    fn tls_framing_accepts_compact_content_length() {
-        let message = minimal_request(b"l: 4", b"body");
-        let mut buffer = BytesMut::from(message.as_slice());
-        let (parsed, raw) = try_parse_one(&mut buffer)
-            .unwrap()
-            .expect("compact Content-Length frame");
-        assert!(buffer.is_empty());
-        assert_eq!(raw.as_ref(), message);
-        let rvoip_sip_core::Message::Request(request) = parsed else {
-            panic!("request expected");
-        };
-        assert_eq!(request.body(), b"body");
+    fn tls_framing_accepts_compact_and_hcolon_content_length() {
+        for header in [b"l: 4".as_slice(), b"Content-Length \t : 4".as_slice()] {
+            let message = minimal_request(header, b"body");
+            let mut buffer = BytesMut::from(message.as_slice());
+            let (parsed, raw) = try_parse_one(&mut buffer)
+                .unwrap()
+                .expect("Content-Length frame");
+            assert!(buffer.is_empty());
+            assert_eq!(raw.as_ref(), message);
+            let rvoip_sip_core::Message::Request(request) = parsed else {
+                panic!("request expected");
+            };
+            assert_eq!(request.body(), b"body");
+        }
     }
 
     #[test]
@@ -1417,6 +1419,10 @@ mod inbound_framing_tests {
             ),
             (
                 b"Content-Length: 0\r\nl: 1".as_slice(),
+                "duplicate-content-length",
+            ),
+            (
+                b"Content-Length \t: 0\r\nl : 1".as_slice(),
                 "duplicate-content-length",
             ),
             (

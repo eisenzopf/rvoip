@@ -1,7 +1,7 @@
 use crate::error::{Error, Result};
 use crate::transport::validate_typed_outbound_message;
 use bytes::{Buf, BufMut, BytesMut};
-use rvoip_sip_core::framing::{inspect_sip_frame, SipFrameStatus};
+use rvoip_sip_core::framing::{inspect_sip_frame_with_policy, SipFrameStatus, SipFramingPolicy};
 use rvoip_sip_core::{parse_message, Message};
 use std::io;
 use std::net::SocketAddr;
@@ -279,7 +279,7 @@ impl TcpConnection {
             return Ok(None);
         }
 
-        let frame = match inspect_sip_frame(buffer) {
+        let frame = match inspect_sip_frame_with_policy(buffer, SipFramingPolicy::Stream) {
             Ok(SipFrameStatus::Incomplete { .. }) => return Ok(None),
             Ok(SipFrameStatus::Complete(frame)) => frame,
             Err(error) => {
@@ -585,22 +585,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tcp_framing_accepts_compact_content_length() {
-        let (connection, _peer) = buffered_test_connection().await;
-        let message = minimal_request(b"L: 4", b"body");
-        let mut buffer = BytesMut::from(message.as_slice());
+    async fn tcp_framing_accepts_compact_and_hcolon_content_length() {
+        for header in [b"L: 4".as_slice(), b"Content-Length \t : 4".as_slice()] {
+            let (connection, _peer) = buffered_test_connection().await;
+            let message = minimal_request(header, b"body");
+            let mut buffer = BytesMut::from(message.as_slice());
 
-        let (parsed, raw) = connection
-            .try_parse_message(&mut buffer)
-            .unwrap()
-            .expect("compact Content-Length frame");
-        assert!(buffer.is_empty());
-        assert_eq!(raw.as_ref(), message);
-        let Message::Request(request) = parsed else {
-            panic!("request expected");
-        };
-        assert_eq!(request.body(), b"body");
-        assert!(!connection.is_closed());
+            let (parsed, raw) = connection
+                .try_parse_message(&mut buffer)
+                .unwrap()
+                .expect("Content-Length frame");
+            assert!(buffer.is_empty());
+            assert_eq!(raw.as_ref(), message);
+            let Message::Request(request) = parsed else {
+                panic!("request expected");
+            };
+            assert_eq!(request.body(), b"body");
+            assert!(!connection.is_closed());
+        }
     }
 
     #[tokio::test]
@@ -614,6 +616,10 @@ mod tests {
             ),
             (
                 b"Content-Length: 0\r\nl: 1".as_slice(),
+                "duplicate-content-length",
+            ),
+            (
+                b"Content-Length \t: 0\r\nl : 1".as_slice(),
                 "duplicate-content-length",
             ),
             (
