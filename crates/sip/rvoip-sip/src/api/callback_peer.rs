@@ -133,7 +133,7 @@ pub enum CallHandlerDecision {
 // ===== EndReason =====
 
 /// Why a call ended.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum EndReason {
     /// Clean BYE exchange.
     Normal,
@@ -145,6 +145,21 @@ pub enum EndReason {
     NetworkError,
     /// Other reason (check the string for details).
     Other(String),
+}
+
+impl std::fmt::Debug for EndReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Normal => formatter.write_str("Normal"),
+            Self::Rejected => formatter.write_str("Rejected"),
+            Self::Timeout => formatter.write_str("Timeout"),
+            Self::NetworkError => formatter.write_str("NetworkError"),
+            Self::Other(reason) => formatter
+                .debug_struct("Other")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+        }
+    }
 }
 
 impl From<String> for EndReason {

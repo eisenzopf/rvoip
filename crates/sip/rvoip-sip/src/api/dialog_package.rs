@@ -7,9 +7,10 @@
 //! re-parsing XML.
 
 use crate::errors::{Result, SessionError};
+use std::fmt;
 
 /// RFC 4235 dialog state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum DialogPackageState {
     /// `trying` — INVITE sent, no provisional response yet.
     Trying,
@@ -24,6 +25,22 @@ pub enum DialogPackageState {
     /// Vendor-specific state outside the RFC 4235 enum; the raw value is
     /// preserved verbatim.
     Unknown(String),
+}
+
+impl fmt::Debug for DialogPackageState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Trying => formatter.write_str("Trying"),
+            Self::Proceeding => formatter.write_str("Proceeding"),
+            Self::Early => formatter.write_str("Early"),
+            Self::Confirmed => formatter.write_str("Confirmed"),
+            Self::Terminated => formatter.write_str("Terminated"),
+            Self::Unknown(value) => formatter
+                .debug_struct("Unknown")
+                .field("bytes", &value.len())
+                .finish(),
+        }
+    }
 }
 
 impl DialogPackageState {
@@ -49,7 +66,7 @@ impl DialogPackageState {
 
 /// RFC 4235 dialog-state event/cause carried on the `event` attribute of a
 /// `<state>` element.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum DialogPackageEvent {
     /// `cancelled` — UAC sent CANCEL before answer.
     Cancelled,
@@ -71,6 +88,24 @@ pub enum DialogPackageEvent {
     Unknown(String),
 }
 
+impl fmt::Debug for DialogPackageEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled => formatter.write_str("Cancelled"),
+            Self::Rejected => formatter.write_str("Rejected"),
+            Self::Replaced => formatter.write_str("Replaced"),
+            Self::LocalBye => formatter.write_str("LocalBye"),
+            Self::RemoteBye => formatter.write_str("RemoteBye"),
+            Self::Error => formatter.write_str("Error"),
+            Self::Timeout => formatter.write_str("Timeout"),
+            Self::Unknown(value) => formatter
+                .debug_struct("Unknown")
+                .field("bytes", &value.len())
+                .finish(),
+        }
+    }
+}
+
 impl DialogPackageEvent {
     /// Parse a `state` element's `event` attribute into a typed
     /// [`DialogPackageEvent`]. Unknown values are surfaced via
@@ -90,7 +125,7 @@ impl DialogPackageEvent {
 }
 
 /// One `<dialog>` entry from an RFC 4235 `dialog-info` document.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DialogInfo {
     /// Value of the `id` attribute on `<dialog>`.
     pub id: String,
@@ -119,6 +154,25 @@ pub struct DialogInfo {
     pub raw_event: Option<String>,
 }
 
+impl fmt::Debug for DialogInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DialogInfo")
+            .field("id_bytes", &self.id.len())
+            .field("call_id_present", &self.call_id.is_some())
+            .field("local_tag_present", &self.local_tag.is_some())
+            .field("remote_tag_present", &self.remote_tag.is_some())
+            .field("direction_present", &self.direction.is_some())
+            .field("state", &self.state)
+            .field("event", &self.event)
+            .field("local_uri_present", &self.local_uri.is_some())
+            .field("remote_uri_present", &self.remote_uri.is_some())
+            .field("raw_state_bytes", &self.raw_state.len())
+            .field("raw_event_present", &self.raw_event.is_some())
+            .finish()
+    }
+}
+
 impl DialogInfo {
     /// True iff the underlying dialog state is `terminated`.
     pub fn is_terminated(&self) -> bool {
@@ -127,7 +181,7 @@ impl DialogInfo {
 }
 
 /// Parsed RFC 4235 `dialog-info` document.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DialogInfoDocument {
     /// `entity` attribute on the root `<dialog-info>` element — usually the
     /// monitored AOR.
@@ -138,6 +192,18 @@ pub struct DialogInfoDocument {
     pub state: Option<String>,
     /// One entry per `<dialog>` child.
     pub dialogs: Vec<DialogInfo>,
+}
+
+impl fmt::Debug for DialogInfoDocument {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DialogInfoDocument")
+            .field("entity_present", &self.entity.is_some())
+            .field("version", &self.version)
+            .field("state_present", &self.state.is_some())
+            .field("dialogs", &self.dialogs)
+            .finish()
+    }
 }
 
 /// Parse an RFC 4235 `application/dialog-info+xml` NOTIFY body.
@@ -263,5 +329,8 @@ mod tests {
             parsed.dialogs[0].event,
             Some(DialogPackageEvent::Unknown("vendor-cause".to_string()))
         );
+        let rendered = format!("{parsed:?}");
+        assert!(!rendered.contains("vendor-state"));
+        assert!(!rendered.contains("vendor-cause"));
     }
 }

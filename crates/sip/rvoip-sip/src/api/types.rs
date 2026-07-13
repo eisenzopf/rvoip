@@ -97,8 +97,17 @@ pub use rvoip_sip_core::StatusCode;
 pub use crate::errors::SessionError as Error;
 
 /// Unique identifier for a session
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
+
+impl fmt::Debug for SessionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionId")
+            .field("bytes", &self.0.len())
+            .finish()
+    }
+}
 
 impl SessionId {
     /// Create a new random session ID
@@ -143,7 +152,7 @@ pub type Session = CallSession;
 
 /// Represents a prepared outgoing call with allocated resources
 /// This is created before initiating the actual SIP INVITE
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PreparedCall {
     /// The session ID for this call
     pub session_id: SessionId,
@@ -157,8 +166,21 @@ pub struct PreparedCall {
     pub local_rtp_port: u16,
 }
 
+impl fmt::Debug for PreparedCall {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedCall")
+            .field("session_id", &self.session_id)
+            .field("from_bytes", &self.from.len())
+            .field("to_bytes", &self.to.len())
+            .field("sdp_offer_bytes", &self.sdp_offer.len())
+            .field("local_rtp_port", &self.local_rtp_port)
+            .finish()
+    }
+}
+
 /// Represents an active call session
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CallSession {
     /// Session identifier for this call.
     pub id: SessionId,
@@ -172,6 +194,24 @@ pub struct CallSession {
     pub started_at: Option<Instant>,
     /// SIP Call-ID header value that uniquely identifies this call across UAC and UAS
     pub sip_call_id: Option<String>,
+}
+
+impl fmt::Debug for CallSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CallSession")
+            .field("id", &self.id)
+            .field("from_bytes", &self.from.len())
+            .field("to_bytes", &self.to.len())
+            .field("state", &self.state)
+            .field("started", &self.started_at.is_some())
+            .field("sip_call_id_present", &self.sip_call_id.is_some())
+            .field(
+                "sip_call_id_bytes",
+                &self.sip_call_id.as_ref().map_or(0, String::len),
+            )
+            .finish()
+    }
 }
 
 impl CallSession {
@@ -266,7 +306,7 @@ impl CallSession {
 }
 
 /// Represents an incoming call that needs to be handled
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct IncomingCall {
     /// Session identifier assigned to this incoming call.
     pub id: SessionId,
@@ -284,6 +324,25 @@ pub struct IncomingCall {
     pub sip_call_id: Option<String>,
     // Coordinator reference for accept/reject operations (set by handler)
     // pub(crate) coordinator: Option<Arc<crate::coordinator::SessionCoordinator>>, // Removed - use UnifiedCoordinator
+}
+
+impl fmt::Debug for IncomingCall {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IncomingCall")
+            .field("id", &self.id)
+            .field("from_bytes", &self.from.len())
+            .field("to_bytes", &self.to.len())
+            .field("sdp_present", &self.sdp.is_some())
+            .field("sdp_bytes", &self.sdp.as_ref().map_or(0, String::len))
+            .field("header_count", &self.headers.len())
+            .field("sip_call_id_present", &self.sip_call_id.is_some())
+            .field(
+                "sip_call_id_bytes",
+                &self.sip_call_id.as_ref().map_or(0, String::len),
+            )
+            .finish()
+    }
 }
 
 impl IncomingCall {
@@ -351,7 +410,7 @@ impl IncomingCall {
 }
 
 /// Decision on how to handle an incoming call
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum CallDecision {
     /// Accept the call immediately, optionally with SDP answer
     Accept(Option<String>),
@@ -361,6 +420,27 @@ pub enum CallDecision {
     Defer,
     /// Forward the call to another destination
     Forward(String),
+}
+
+impl fmt::Debug for CallDecision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Accept(sdp) => formatter
+                .debug_struct("Accept")
+                .field("sdp_present", &sdp.is_some())
+                .field("sdp_bytes", &sdp.as_ref().map_or(0, String::len))
+                .finish(),
+            Self::Reject(reason) => formatter
+                .debug_struct("Reject")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::Defer => formatter.write_str("Defer"),
+            Self::Forward(target) => formatter
+                .debug_struct("Forward")
+                .field("target_bytes", &target.len())
+                .finish(),
+        }
+    }
 }
 
 impl CallDecision {
@@ -399,7 +479,7 @@ pub struct SessionStats {
 }
 
 /// Media information for a session
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MediaInfo {
     /// Local SDP (offer or answer) for the session, if negotiated.
     pub local_sdp: Option<String>,
@@ -415,6 +495,28 @@ pub struct MediaInfo {
     // pub quality_metrics: Option<crate::media::stats::QualityMetrics>, // TODO: Re-add when media stats are implemented
 }
 
+impl fmt::Debug for MediaInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MediaInfo")
+            .field("local_sdp_present", &self.local_sdp.is_some())
+            .field(
+                "local_sdp_bytes",
+                &self.local_sdp.as_ref().map_or(0, String::len),
+            )
+            .field("remote_sdp_present", &self.remote_sdp.is_some())
+            .field(
+                "remote_sdp_bytes",
+                &self.remote_sdp.as_ref().map_or(0, String::len),
+            )
+            .field("local_rtp_port", &self.local_rtp_port)
+            .field("remote_rtp_port", &self.remote_rtp_port)
+            .field("codec_present", &self.codec.is_some())
+            .field("codec_bytes", &self.codec.as_ref().map_or(0, String::len))
+            .finish()
+    }
+}
+
 /// Call direction
 #[derive(Debug, Clone, PartialEq)]
 pub enum CallDirection {
@@ -425,7 +527,7 @@ pub enum CallDirection {
 }
 
 /// Call termination reason
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum TerminationReason {
     /// Normal hangup by local party
     LocalHangup,
@@ -437,6 +539,24 @@ pub enum TerminationReason {
     Error(String),
     /// Call timed out
     Timeout,
+}
+
+impl fmt::Debug for TerminationReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LocalHangup => formatter.write_str("LocalHangup"),
+            Self::RemoteHangup => formatter.write_str("RemoteHangup"),
+            Self::Rejected(reason) => formatter
+                .debug_struct("Rejected")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::Error(error) => formatter
+                .debug_struct("Error")
+                .field("error_bytes", &error.len())
+                .finish(),
+            Self::Timeout => formatter.write_str("Timeout"),
+        }
+    }
 }
 
 impl fmt::Display for TerminationReason {
@@ -452,7 +572,7 @@ impl fmt::Display for TerminationReason {
 }
 
 /// Parsed SDP information for easier handling
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SdpInfo {
     /// Connection IP address
     pub ip: String,
@@ -460,6 +580,17 @@ pub struct SdpInfo {
     pub port: u16,
     /// List of supported codecs
     pub codecs: Vec<String>,
+}
+
+impl fmt::Debug for SdpInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SdpInfo")
+            .field("ip_bytes", &self.ip.len())
+            .field("port", &self.port)
+            .field("codec_count", &self.codecs.len())
+            .finish()
+    }
 }
 
 /// Parse SDP connection information
@@ -610,7 +741,7 @@ impl AudioStreamConfig {
 /// consultation session and pass its formatted form to
 /// [`SessionHandle::transfer_attended`](crate::api::handle::SessionHandle::transfer_attended)
 /// on the original session.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DialogIdentity {
     /// SIP `Call-ID` header value.
     pub call_id: String,
@@ -620,6 +751,25 @@ pub struct DialogIdentity {
     /// To-tag from the remote side. `None` until a 2xx (or reliable 1xx)
     /// has been received and dialog is confirmed.
     pub remote_tag: Option<String>,
+}
+
+impl fmt::Debug for DialogIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DialogIdentity")
+            .field("call_id_bytes", &self.call_id.len())
+            .field("local_tag_present", &self.local_tag.is_some())
+            .field(
+                "local_tag_bytes",
+                &self.local_tag.as_ref().map_or(0, String::len),
+            )
+            .field("remote_tag_present", &self.remote_tag.is_some())
+            .field(
+                "remote_tag_bytes",
+                &self.remote_tag.as_ref().map_or(0, String::len),
+            )
+            .finish()
+    }
 }
 
 impl DialogIdentity {
@@ -646,12 +796,20 @@ impl DialogIdentity {
 /// This is the lower-level subscriber used by the coordinator. Most
 /// application code should prefer [`SessionHandle::audio`](crate::SessionHandle::audio),
 /// which wraps this in an [`AudioStream`](crate::AudioStream).
-#[derive(Debug)]
 pub struct AudioFrameSubscriber {
     /// The session ID this subscriber is associated with
     session_id: SessionId,
     /// Receiver for audio frames (async tokio channel for non-blocking operation)
     receiver: tokio::sync::mpsc::Receiver<AudioFrame>,
+}
+
+impl fmt::Debug for AudioFrameSubscriber {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AudioFrameSubscriber")
+            .field("session_id", &self.session_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AudioFrameSubscriber {
@@ -715,5 +873,40 @@ mod tests {
             CallState::Failed(FailureReason::Timeout).to_string(),
             "Failed(Timeout)"
         );
+    }
+
+    #[test]
+    fn public_call_type_debug_is_payload_free() {
+        const SECRET: &str = "public-call-type-secret-canary";
+        let incoming = IncomingCall::new_test(
+            SessionId(SECRET.to_string()),
+            SECRET.to_string(),
+            SECRET.to_string(),
+            Some(SECRET.to_string()),
+            std::collections::HashMap::from([("Authorization".to_string(), SECRET.to_string())]),
+            Some(SECRET.to_string()),
+        );
+        let prepared = PreparedCall {
+            session_id: SessionId(SECRET.to_string()),
+            from: SECRET.to_string(),
+            to: SECRET.to_string(),
+            sdp_offer: SECRET.to_string(),
+            local_rtp_port: 5004,
+        };
+        let dialog = DialogIdentity {
+            call_id: SECRET.to_string(),
+            local_tag: Some(SECRET.to_string()),
+            remote_tag: Some(SECRET.to_string()),
+        };
+        for rendered in [
+            format!("{:?}", SessionId(SECRET.to_string())),
+            format!("{incoming:?}"),
+            format!("{prepared:?}"),
+            format!("{:?}", CallDecision::Accept(Some(SECRET.to_string()))),
+            format!("{:?}", TerminationReason::Error(SECRET.to_string())),
+            format!("{dialog:?}"),
+        ] {
+            assert!(!rendered.contains(SECRET), "debug leaked: {rendered}");
+        }
     }
 }

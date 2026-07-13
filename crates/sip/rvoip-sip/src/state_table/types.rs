@@ -14,8 +14,17 @@ use std::collections::{HashMap, HashSet};
 /// let id2: CallId = id.as_str().to_string().into();
 /// assert_eq!(id, id2);
 /// ```
-#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionId(pub String);
+
+impl std::fmt::Debug for SessionId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionId")
+            .field("bytes", &self.0.len())
+            .finish()
+    }
+}
 
 impl SessionId {
     /// Generate a fresh, random session id.

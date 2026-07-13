@@ -9,6 +9,7 @@
 #![deny(missing_docs)]
 
 use rvoip_media_core::types::AudioFrame;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -49,7 +50,7 @@ pub enum TransferWaitMode {
 /// This is the ergonomic application-facing view of REFER lifecycle events.
 /// `ReferCompleted` means the REFER subscription reported a final successful
 /// referenced request; it does not by itself prove replacement-call lifecycle.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum TransferOutcome {
     /// A final successful REFER NOTIFY was received.
     ReferCompleted {
@@ -98,6 +99,57 @@ pub enum TransferOutcome {
         /// Human-readable failure reason.
         reason: String,
     },
+}
+
+impl fmt::Debug for TransferOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReferCompleted {
+                status_code,
+                reason,
+                target,
+                ..
+            } => formatter
+                .debug_struct("ReferCompleted")
+                .field("target_bytes", &target.len())
+                .field("status_code", status_code)
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::TargetRinging {
+                status_code,
+                reason,
+                ..
+            } => formatter
+                .debug_struct("TargetRinging")
+                .field("status_code", status_code)
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::TargetAnswered {
+                target_uri,
+                evidence,
+                ..
+            } => formatter
+                .debug_struct("TargetAnswered")
+                .field("target_uri_bytes", &target_uri.len())
+                .field("evidence", evidence)
+                .finish(),
+            Self::ReplacementTerminated { dialog, reason, .. } => formatter
+                .debug_struct("ReplacementTerminated")
+                .field("dialog", dialog)
+                .field("reason_present", &reason.is_some())
+                .field("reason_bytes", &reason.as_ref().map_or(0, String::len))
+                .finish(),
+            Self::Failed {
+                status_code,
+                reason,
+                ..
+            } => formatter
+                .debug_struct("Failed")
+                .field("status_code", status_code)
+                .field("reason_bytes", &reason.len())
+                .finish(),
+        }
+    }
 }
 
 impl TryFrom<Event> for TransferOutcome {

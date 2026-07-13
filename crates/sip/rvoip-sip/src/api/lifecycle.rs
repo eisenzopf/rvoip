@@ -33,7 +33,7 @@ fn unix_time_millis() -> u64 {
 }
 
 /// Provisional call-progress evidence observed for a call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CallProgressInfo {
     /// Session identifier for the call.
     pub call_id: SessionId,
@@ -43,6 +43,19 @@ pub struct CallProgressInfo {
     pub reason: String,
     /// SDP body carried by the provisional response, if present.
     pub sdp: Option<String>,
+}
+
+impl std::fmt::Debug for CallProgressInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CallProgressInfo")
+            .field("call_id", &self.call_id)
+            .field("status_code", &self.status_code)
+            .field("reason_bytes", &self.reason.len())
+            .field("sdp_present", &self.sdp.is_some())
+            .field("sdp_bytes", &self.sdp.as_ref().map_or(0, String::len))
+            .finish()
+    }
 }
 
 impl CallProgressInfo {
@@ -74,12 +87,23 @@ impl CallProgressInfo {
 }
 
 /// Answer evidence observed for a call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CallAnsweredInfo {
     /// Session identifier for the answered call.
     pub call_id: SessionId,
     /// SDP body from the answer, if present.
     pub sdp: Option<String>,
+}
+
+impl std::fmt::Debug for CallAnsweredInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CallAnsweredInfo")
+            .field("call_id", &self.call_id)
+            .field("sdp_present", &self.sdp.is_some())
+            .field("sdp_bytes", &self.sdp.as_ref().map_or(0, String::len))
+            .finish()
+    }
 }
 
 impl CallAnsweredInfo {
@@ -95,7 +119,7 @@ impl CallAnsweredInfo {
 }
 
 /// Terminal lifecycle evidence for a call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum CallTerminalInfo {
     /// Normal call end.
     Ended {
@@ -111,6 +135,26 @@ pub enum CallTerminalInfo {
     },
     /// Caller cancelled the call before answer.
     Cancelled,
+}
+
+impl std::fmt::Debug for CallTerminalInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ended { reason } => formatter
+                .debug_struct("Ended")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::Failed {
+                status_code,
+                reason,
+            } => formatter
+                .debug_struct("Failed")
+                .field("status_code", status_code)
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::Cancelled => formatter.write_str("Cancelled"),
+        }
+    }
 }
 
 impl CallTerminalInfo {
@@ -151,7 +195,7 @@ impl CallTerminalInfo {
 }
 
 /// Current typed lifecycle view for one call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CallLifecycleSnapshot {
     /// Session identifier for this snapshot.
     pub call_id: SessionId,
@@ -167,6 +211,21 @@ pub struct CallLifecycleSnapshot {
     pub terminal: Option<CallTerminalInfo>,
     /// Latest typed transfer outcome observed for this call, if any.
     pub latest_transfer_outcome: Option<TransferOutcome>,
+}
+
+impl std::fmt::Debug for CallLifecycleSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CallLifecycleSnapshot")
+            .field("call_id", &self.call_id)
+            .field("state", &self.state)
+            .field("progress", &self.progress)
+            .field("answered", &self.answered)
+            .field("media_security", &self.media_security)
+            .field("terminal", &self.terminal)
+            .field("latest_transfer_outcome", &self.latest_transfer_outcome)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -692,6 +751,32 @@ fn cleanup_label_for_event(event: &Event) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_debug_is_payload_free() {
+        const SECRET: &str = "lifecycle-debug-secret-canary";
+        let progress = CallProgressInfo {
+            call_id: SessionId::from_string(SECRET),
+            status_code: 183,
+            reason: SECRET.to_string(),
+            sdp: Some(SECRET.to_string()),
+        };
+        let answered = CallAnsweredInfo {
+            call_id: SessionId::from_string(SECRET),
+            sdp: Some(SECRET.to_string()),
+        };
+        let terminal = CallTerminalInfo::Failed {
+            status_code: 500,
+            reason: SECRET.to_string(),
+        };
+        for rendered in [
+            format!("{progress:?}"),
+            format!("{answered:?}"),
+            format!("{terminal:?}"),
+        ] {
+            assert!(!rendered.contains(SECRET), "debug leaked: {rendered}");
+        }
+    }
 
     #[test]
     fn lifecycle_records_progress_and_terminal() {

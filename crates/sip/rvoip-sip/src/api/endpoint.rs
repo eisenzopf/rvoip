@@ -693,7 +693,7 @@ pub enum EndpointEvent {
 }
 
 /// Endpoint-level SIP trace event.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EndpointSipTrace {
     /// Inbound or outbound at the local transport boundary.
     pub direction: crate::api::events::SipTraceDirection,
@@ -722,9 +722,38 @@ pub struct EndpointSipTrace {
     pub redacted: bool,
 }
 
+impl fmt::Debug for EndpointSipTrace {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EndpointSipTrace")
+            .field("direction", &self.direction)
+            .field("transport_bytes", &self.transport.len())
+            .field("local_addr_bytes", &self.local_addr.len())
+            .field("remote_addr_bytes", &self.remote_addr.len())
+            .field("timestamp_unix_millis", &self.timestamp_unix_millis)
+            .field("start_line_bytes", &self.start_line.len())
+            .field("sip_call_id_present", &self.sip_call_id.is_some())
+            .field("session_id_present", &self.session_id.is_some())
+            .field("raw_message_bytes", &self.raw_message.len())
+            .field("original_len", &self.original_len)
+            .field("truncated", &self.truncated)
+            .field("redacted", &self.redacted)
+            .finish()
+    }
+}
+
 /// Opaque call identifier for Endpoint applications.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct EndpointCallId(CallId);
+
+impl fmt::Debug for EndpointCallId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EndpointCallId")
+            .field("bytes", &self.0.as_str().len())
+            .finish()
+    }
+}
 
 impl fmt::Display for EndpointCallId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -974,7 +1003,7 @@ impl EndpointAudioReceiver {
 }
 
 /// Mono or interleaved PCM16 audio frame used by Endpoint audio.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct EndpointAudioFrame {
     /// PCM16 samples, interleaved when channels is greater than one.
     pub samples: Vec<i16>,
@@ -984,6 +1013,18 @@ pub struct EndpointAudioFrame {
     pub channels: u8,
     /// RTP-style timestamp.
     pub timestamp: u32,
+}
+
+impl fmt::Debug for EndpointAudioFrame {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EndpointAudioFrame")
+            .field("sample_count", &self.samples.len())
+            .field("sample_rate", &self.sample_rate)
+            .field("channels", &self.channels)
+            .field("timestamp", &self.timestamp)
+            .finish()
+    }
 }
 
 impl EndpointAudioFrame {
@@ -1046,7 +1087,7 @@ pub enum EndpointRegistrationStatus {
 }
 
 /// Registration lifecycle snapshot exposed by Endpoint.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EndpointRegistrationInfo {
     /// Coarse registration status.
     pub status: EndpointRegistrationStatus,
@@ -1064,6 +1105,26 @@ pub struct EndpointRegistrationInfo {
     pub retry_count: u32,
     /// Last failure, if any.
     pub last_failure: Option<String>,
+}
+
+impl fmt::Debug for EndpointRegistrationInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EndpointRegistrationInfo")
+            .field("status", &self.status)
+            .field("registrar_present", &self.registrar.is_some())
+            .field("contact_present", &self.contact.is_some())
+            .field("expires_secs", &self.expires_secs)
+            .field("accepted_expires_secs", &self.accepted_expires_secs)
+            .field("next_refresh_in", &self.next_refresh_in)
+            .field("retry_count", &self.retry_count)
+            .field("last_failure_present", &self.last_failure.is_some())
+            .field(
+                "last_failure_bytes",
+                &self.last_failure.as_ref().map_or(0, String::len),
+            )
+            .finish()
+    }
 }
 
 impl From<RegistrationInfo> for EndpointRegistrationInfo {
@@ -2904,6 +2965,44 @@ mod tests {
         assert!(endpoint_config_debug.contains("profile: Some(CarrierSbc)"));
         assert!(endpoint_config_debug.contains("account_configured: true"));
         assert_eq!(custom_profile_debug, "Custom");
+    }
+
+    #[test]
+    fn endpoint_runtime_debug_is_payload_free() {
+        let trace = EndpointSipTrace {
+            direction: crate::api::events::SipTraceDirection::Inbound,
+            transport: DEBUG_SECRET.to_string(),
+            local_addr: DEBUG_SECRET.to_string(),
+            remote_addr: DEBUG_SECRET.to_string(),
+            timestamp_unix_millis: 1,
+            start_line: DEBUG_SECRET.to_string(),
+            sip_call_id: Some(DEBUG_SECRET.to_string()),
+            session_id: Some(EndpointCallId(CallId::from_string(DEBUG_SECRET))),
+            raw_message: DEBUG_SECRET.to_string(),
+            original_len: DEBUG_SECRET.len(),
+            truncated: false,
+            redacted: false,
+        };
+        let registration = EndpointRegistrationInfo {
+            status: EndpointRegistrationStatus::Failed,
+            registrar: Some(DEBUG_SECRET.to_string()),
+            contact: Some(DEBUG_SECRET.to_string()),
+            expires_secs: Some(60),
+            accepted_expires_secs: None,
+            next_refresh_in: None,
+            retry_count: 1,
+            last_failure: Some(DEBUG_SECRET.to_string()),
+        };
+        let frame = EndpointAudioFrame::new(vec![42, -42], 8_000, 1, 7);
+
+        for rendered in [
+            format!("{trace:?}"),
+            format!("{registration:?}"),
+            format!("{frame:?}"),
+        ] {
+            assert_debug_redacted(&rendered);
+            assert!(!rendered.contains("42"), "audio samples leaked: {rendered}");
+        }
     }
 
     #[test]
