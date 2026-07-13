@@ -13,6 +13,10 @@ struct AssuranceOnlyValidator;
 
 struct ExpiredAssuranceValidator;
 
+struct AnonymousAssuranceValidator;
+
+struct IdentifiedAssuranceValidator;
+
 #[test]
 fn validated_bearer_is_public_at_root_and_module_paths() {
     fn root_path(_: Option<rvoip_auth_core::ValidatedBearer>) {}
@@ -42,6 +46,22 @@ impl BearerValidator for ExpiredAssuranceValidator {
             task_id: "task-expired".into(),
             scopes: vec!["calls:read".into()],
             expires_at: Utc::now() - Duration::seconds(1),
+        })
+    }
+}
+
+#[async_trait]
+impl BearerValidator for AnonymousAssuranceValidator {
+    async fn validate(&self, _token: &str) -> Result<IdentityAssurance, BearerAuthError> {
+        Ok(IdentityAssurance::Anonymous)
+    }
+}
+
+#[async_trait]
+impl BearerValidator for IdentifiedAssuranceValidator {
+    async fn validate(&self, _token: &str) -> Result<IdentityAssurance, BearerAuthError> {
+        Ok(IdentityAssurance::Identified {
+            credential_kind: rvoip_core_traits::identity::CredentialKind::Oidc,
         })
     }
 }
@@ -81,6 +101,28 @@ async fn default_bearer_mapping_rejects_expired_assurance() {
     assert!(
         matches!(result, Err(BearerAuthError::Invalid(ref reason)) if reason.contains("expired"))
     );
+}
+
+#[tokio::test]
+async fn default_bearer_mapping_rejects_anonymous_ownership_collision() {
+    for token in ["credential-a", "credential-b"] {
+        let result = AnonymousAssuranceValidator.validate_principal(token).await;
+        assert!(
+            matches!(result, Err(BearerAuthError::Invalid(ref reason)) if reason.contains("anonymous") && reason.contains("principal identity")),
+            "validate-only Bearer providers must not map unrelated credentials to one anonymous owner"
+        );
+    }
+}
+
+#[tokio::test]
+async fn default_bearer_mapping_rejects_identified_ownership_collision() {
+    for token in ["credential-a", "credential-b"] {
+        let result = IdentifiedAssuranceValidator.validate_principal(token).await;
+        assert!(
+            matches!(result, Err(BearerAuthError::Invalid(ref reason)) if reason.contains("identified") && reason.contains("unique principal identity")),
+            "credential-kind-only Bearer assurances must not merge unrelated credentials"
+        );
+    }
 }
 
 #[test]

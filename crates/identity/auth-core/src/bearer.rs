@@ -201,6 +201,15 @@ pub trait BearerValidator: Send + Sync {
         token: &str,
     ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
         let assurance = self.validate(token).await?;
+        if matches!(
+            assurance,
+            IdentityAssurance::Anonymous | IdentityAssurance::Identified { .. }
+        ) {
+            return Err(BearerAuthError::Invalid(format!(
+                "bearer validator returned {} assurance without a unique principal identity",
+                assurance.kind()
+            )));
+        }
         ensure_principal_active(AuthenticatedPrincipal::from_assurance(assurance))
     }
 
