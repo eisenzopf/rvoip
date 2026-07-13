@@ -177,8 +177,15 @@ fn full_message_parser(input: &[u8], mode: ParseMode) -> IResult<&[u8], Message>
         // that scales linearly with header count.
         match TypedHeader::try_from(&header) {
             Ok(typed) => typed_headers.push(typed),
-            Err(e) => {
-                tracing::debug!("header parse error (keeping as Other): {}", e);
+            Err(_) => {
+                let header_value_len = match &header.value {
+                    HeaderValue::Raw(value) => value.len(),
+                    _ => 0,
+                };
+                tracing::debug!(
+                    header_value_len,
+                    "SIP header conversion failed; retaining unparsed header"
+                );
                 typed_headers.push(TypedHeader::Other(header.name, header.value));
             }
         }
@@ -431,6 +438,19 @@ mod tests {
         assert!(
             matches!(header.value, HeaderValue::Raw(ref v) if v == b"Alice <sip:alice@atlanta.com> ;tag=123")
         );
+    }
+
+    #[test]
+    fn header_conversion_diagnostics_do_not_format_error_or_header_values() {
+        let source = include_str!("message.rs");
+        for fragments in [
+            ["header parse error (keeping as Other)", ": {}"],
+            ["header parse error (keeping as Other)", ": {:?}"],
+            ["error = ", "%e"],
+        ] {
+            assert!(!source.contains(&fragments.concat()));
+        }
+        assert!(source.contains("header_value_len"));
     }
 
     #[test]

@@ -235,14 +235,18 @@ impl fmt::Display for LocationAwareError {
 // This allows using `?` with nom parsers in functions returning `Result<T>`.
 impl<'a> From<nom::Err<NomError<&'a [u8]>>> for Error {
     fn from(err: nom::Err<NomError<&'a [u8]>>) -> Self {
-        Error::ParseError(format!("Nom parsing error: {:?}", err))
+        nom_byte_error(err)
     }
 }
 
 // Add conversion from NomError directly if needed within map_res closures
 impl<'a> From<NomError<&'a [u8]>> for Error {
     fn from(err: NomError<&'a [u8]>) -> Self {
-        Error::ParseError(format!("Nom error detail: {:?}", err))
+        Error::ParseError(format!(
+            "SIP parser rejected input (class={:?}, remaining_bytes={})",
+            err.code,
+            err.input.len()
+        ))
     }
 }
 
@@ -256,13 +260,72 @@ impl From<std::num::ParseIntError> for Error {
 // Convert owned Nom errors (Vec<u8>) to our custom Error type
 impl From<nom::Err<NomError<Vec<u8>>>> for Error {
     fn from(err: nom::Err<NomError<Vec<u8>>>) -> Self {
-        // We lose positional info here as Vec<u8> doesn't track original input slice easily
-        Error::ParseError(format!("Nom parsing error (owned): {:?}", err))
+        match err {
+            nom::Err::Error(error) | nom::Err::Failure(error) => Error::ParseError(format!(
+                "SIP parser rejected owned input (class={:?}, remaining_bytes={})",
+                error.code,
+                error.input.len()
+            )),
+            nom::Err::Incomplete(needed) => {
+                Error::IncompleteParse(format!("SIP parser needs more input (needed={needed:?})"))
+            }
+        }
+    }
+}
+
+fn nom_byte_error(err: nom::Err<NomError<&[u8]>>) -> Error {
+    match err {
+        nom::Err::Error(error) | nom::Err::Failure(error) => Error::ParseError(format!(
+            "SIP parser rejected input (class={:?}, remaining_bytes={})",
+            error.code,
+            error.input.len()
+        )),
+        nom::Err::Incomplete(needed) => {
+            Error::IncompleteParse(format!("SIP parser needs more input (needed={needed:?})"))
+        }
     }
 }
 
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
         Error::IoError(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_safety_tests {
+    use super::*;
+    use nom::error::ErrorKind;
+
+    #[test]
+    fn byte_nom_error_conversions_never_embed_input() {
+        const SECRET: &[u8] = b"Digest username=alice,response=credential-secret";
+
+        let borrowed = Error::from(nom::Err::Failure(NomError::new(SECRET, ErrorKind::Verify)));
+        let owned = Error::from(nom::Err::Failure(NomError::new(
+            SECRET.to_vec(),
+            ErrorKind::Verify,
+        )));
+        let direct = Error::from(NomError::new(SECRET, ErrorKind::Verify));
+
+        for error in [borrowed, owned, direct] {
+            let rendered = format!("{error:?} {error}");
+            assert!(!rendered.contains("credential-secret"));
+            assert!(!rendered.contains("username=alice"));
+            assert!(rendered.contains(&format!("remaining_bytes={}", SECRET.len())));
+            assert!(rendered.contains("Verify"));
+        }
+    }
+
+    #[test]
+    fn source_never_debug_formats_nom_byte_input() {
+        let source = include_str!("error.rs");
+        for fragments in [
+            ["Nom parsing error", ": {:?}"],
+            ["Nom parsing error (owned)", ": {:?}"],
+            ["Nom error detail", ": {:?}"],
+        ] {
+            assert!(!source.contains(&fragments.concat()));
+        }
     }
 }

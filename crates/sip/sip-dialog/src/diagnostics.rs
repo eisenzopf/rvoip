@@ -400,7 +400,8 @@ pub struct TransactionDispatchWorkerSnapshot {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct CallTimingTraceSnapshot {
-    pub call_id: String,
+    /// Per-process opaque correlation derived from the SIP Call-ID.
+    pub call_correlation: String,
     pub first_uac_invite_2xx_response_epoch_us: Option<u64>,
     pub last_uac_invite_2xx_response_epoch_us: Option<u64>,
     pub first_uac_ack_attempt_epoch_us: Option<u64>,
@@ -694,9 +695,9 @@ impl CallTimingTraceCounts {
         );
     }
 
-    fn snapshot(&self, call_id: String) -> CallTimingTraceSnapshot {
+    fn snapshot(&self, call_correlation: String) -> CallTimingTraceSnapshot {
         CallTimingTraceSnapshot {
-            call_id,
+            call_correlation,
             first_uac_invite_2xx_response_epoch_us: self.first_uac_invite_2xx_response_epoch_us,
             last_uac_invite_2xx_response_epoch_us: self.last_uac_invite_2xx_response_epoch_us,
             first_uac_ack_attempt_epoch_us: self.first_uac_ack_attempt_epoch_us,
@@ -1899,16 +1900,17 @@ fn record_call_timing_trace(call_id: &str, update: impl FnOnce(&mut CallTimingTr
         return;
     }
 
+    let call_correlation = rvoip_sip_core::diagnostics::opaque_call_correlation(call_id);
     let Ok(mut traces) = CALL_TIMING_TRACES.lock() else {
         return;
     };
-    if !traces.contains_key(call_id) && traces.len() >= MAX_CALL_TIMING_TRACE_ENTRIES {
+    if !traces.contains_key(&call_correlation) && traces.len() >= MAX_CALL_TIMING_TRACE_ENTRIES {
         CALL_TIMING_TRACE_OVERFLOW.fetch_add(1, Ordering::Relaxed);
         return;
     }
 
     let now_us = epoch_us();
-    let trace = traces.entry(call_id.to_string()).or_default();
+    let trace = traces.entry(call_correlation).or_default();
     update(trace, now_us);
 }
 
@@ -1919,9 +1921,9 @@ fn call_timing_trace_snapshots() -> Vec<CallTimingTraceSnapshot> {
 
     let mut rows = traces
         .iter()
-        .map(|(call_id, trace)| trace.snapshot(call_id.clone()))
+        .map(|(call_correlation, trace)| trace.snapshot(call_correlation.clone()))
         .collect::<Vec<_>>();
-    rows.sort_by(|left, right| left.call_id.cmp(&right.call_id));
+    rows.sort_by(|left, right| left.call_correlation.cmp(&right.call_correlation));
     rows
 }
 
@@ -2305,7 +2307,10 @@ mod tests {
         assert_eq!(first_snapshot.call_timing_trace_overflow, 0);
         assert_eq!(first_snapshot.call_timing_traces.len(), 1);
         let trace = &first_snapshot.call_timing_traces[0];
-        assert_eq!(trace.call_id, "call-a");
+        assert_eq!(
+            trace.call_correlation,
+            rvoip_sip_core::diagnostics::opaque_call_correlation("call-a")
+        );
         assert!(trace.first_uac_invite_2xx_response_epoch_us.is_some());
         assert!(
             trace.last_uac_invite_2xx_response_epoch_us
@@ -2322,6 +2327,39 @@ mod tests {
 
         reset();
         assert!(snapshot().call_timing_traces.is_empty());
+    }
+
+    #[test]
+    fn call_timing_snapshots_never_retain_or_serialize_raw_call_id() {
+        const RAW_CALL_ID: &str = "private-call\r\nProxy-Authorization: Digest dialog-secret";
+        set_enabled_for_tests(true);
+        reset();
+
+        record_call_timing_uac_ack_attempt(RAW_CALL_ID);
+        record_call_timing_uac_ack_success(RAW_CALL_ID);
+
+        let snapshot = snapshot();
+        assert_eq!(snapshot.call_timing_traces.len(), 1);
+        let trace = &snapshot.call_timing_traces[0];
+        assert_eq!(
+            trace.call_correlation,
+            rvoip_sip_core::diagnostics::opaque_call_correlation(RAW_CALL_ID)
+        );
+        assert_eq!(trace.call_correlation.len(), 20);
+        let debug = format!("{snapshot:?}");
+        let json = serde_json::to_string(&snapshot).unwrap();
+        for rendered in [debug, json] {
+            assert!(!rendered.contains(RAW_CALL_ID));
+            assert!(!rendered.contains("dialog-secret"));
+        }
+
+        let source = include_str!("diagnostics.rs");
+        for fragments in [
+            ["traces.entry(call_id", ".to_string())"],
+            ["pub call_id", ": String"],
+        ] {
+            assert!(!source.contains(&fragments.concat()));
+        }
     }
 
     #[test]

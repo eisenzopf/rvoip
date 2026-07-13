@@ -1,6 +1,5 @@
 use crate::error::{Error, Result};
 use chrono::{DateTime, FixedOffset};
-use log::debug;
 use nom::combinator::all_consuming;
 use ordered_float::NotNan;
 use serde::{Deserialize, Serialize};
@@ -914,7 +913,7 @@ impl TryFrom<&Header> for TypedHeader {
         };
 
         // Use all_consuming to ensure the specific parser consumes the entire value
-        let parse_result = match &header.name {
+        let parse_result = (|| match &header.name {
             // Address Headers
             HeaderName::From => all_consuming(parser::headers::parse_from)(value_bytes)
                 .map_err(Error::from)
@@ -962,7 +961,6 @@ impl TryFrom<&Header> for TypedHeader {
                             Ok((_, call_id)) => Ok(TypedHeader::CallId(call_id)),
                             Err(e) => {
                                 // For Call-ID, we'll be lenient - create it directly from bytes
-                                debug!("Warning: CallId parse error: {:?}, using raw value", e);
                                 match String::from_utf8(value_bytes.to_vec()) {
                                     Ok(s) => Ok(TypedHeader::CallId(CallId(s.trim().to_string()))),
                                     Err(_) => Err(Error::from(e.to_owned())),
@@ -1007,7 +1005,6 @@ impl TryFrom<&Header> for TypedHeader {
                     })
             }
             HeaderName::ContentDisposition => {
-                debug!("ContentDisposition header: {:?}", header);
                 match all_consuming(parser::headers::content_disposition::parse_content_disposition)(
                     value_bytes,
                 ) {
@@ -1051,14 +1048,6 @@ impl TryFrom<&Header> for TypedHeader {
                                 _ => {} // Skip other parameter types
                             }
                         }
-
-                        debug!(
-                            "Created ContentDisposition: {:?}",
-                            ContentDisposition {
-                                disposition_type: disposition_type.clone(),
-                                params: params.clone(),
-                            }
-                        );
 
                         Ok(TypedHeader::ContentDisposition(ContentDisposition {
                             disposition_type,
@@ -1614,9 +1603,14 @@ impl TryFrom<&Header> for TypedHeader {
                 header.name.clone(),
                 HeaderValue::Raw(value_bytes.to_vec()),
             )),
-        };
+        })();
 
-        parse_result
+        parse_result.map_err(|_| {
+            Error::ParseError(format!(
+                "SIP typed-header conversion failed (class=invalid-value, value_bytes={})",
+                value_bytes.len()
+            ))
+        })
     }
 }
 
@@ -1658,5 +1652,51 @@ mod tests {
             HeaderValue::Raw(VALUE.as_bytes().to_vec()),
         );
         assert!(format!("{header:?}").contains(VALUE));
+    }
+
+    #[test]
+    fn conversion_source_never_logs_header_values_or_parser_input() {
+        let source = include_str!("typed_header.rs");
+        for fragments in [
+            ["CallId parse error", ": {:?}"],
+            ["ContentDisposition header", ": {:?}"],
+            ["Created ContentDisposition", ": {:?}"],
+        ] {
+            assert!(!source.contains(&fragments.concat()));
+        }
+    }
+
+    #[test]
+    fn conversion_errors_report_only_fixed_class_and_value_extent() {
+        for (name, value, secret) in [
+            (
+                HeaderName::Authorization,
+                b"\xffauthorization-secret".as_slice(),
+                "authorization-secret",
+            ),
+            (
+                HeaderName::ProxyAuthorization,
+                b"\xffproxy-authorization-secret".as_slice(),
+                "proxy-authorization-secret",
+            ),
+            (
+                HeaderName::ContentDisposition,
+                b"\xffcontent-disposition-secret".as_slice(),
+                "content-disposition-secret",
+            ),
+            (
+                HeaderName::Warning,
+                b"\xffarbitrary-warning-secret".as_slice(),
+                "arbitrary-warning-secret",
+            ),
+        ] {
+            let header = Header::new(name, HeaderValue::Raw(value.to_vec()));
+            let error = TypedHeader::try_from(header)
+                .expect_err("malformed sensitive header must fail typed conversion");
+            let rendered = format!("{error:?} {error}");
+            assert!(!rendered.contains(secret));
+            assert!(rendered.contains("class=invalid-value"));
+            assert!(rendered.contains(&format!("value_bytes={}", value.len())));
+        }
     }
 }

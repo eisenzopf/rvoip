@@ -651,7 +651,13 @@ impl TlsTransport {
             }
         }
 
-        debug!("TLS dial → {} (SNI {:?})", remote_addr, server_name);
+        let (sni_present, sni_len) = sni_diagnostic_metadata(&server_name);
+        debug!(
+            destination = %remote_addr,
+            sni_present,
+            sni_len,
+            "TLS dial"
+        );
 
         let tcp_stream = TcpStream::connect(remote_addr)
             .await
@@ -712,6 +718,14 @@ impl TlsTransport {
             remote_addr
         );
         Ok(())
+    }
+}
+
+fn sni_diagnostic_metadata(server_name: &ServerName<'_>) -> (bool, usize) {
+    match server_name {
+        ServerName::DnsName(name) => (true, name.as_ref().len()),
+        ServerName::IpAddress(_) => (false, 0),
+        _ => (false, 0),
     }
 }
 
@@ -846,6 +860,27 @@ mod auth_boundary_tests {
             assert!(!error.to_string().contains("X-Injected"));
         }
         transport.close().await.unwrap();
+    }
+
+    #[test]
+    fn tls_dial_diagnostics_expose_only_sni_presence_and_length() {
+        const SECRET_SNI: &str = "tenant-secret.sip.example";
+        let server_name = ServerName::try_from(SECRET_SNI.to_string()).unwrap();
+        assert_eq!(
+            sni_diagnostic_metadata(&server_name),
+            (true, SECRET_SNI.len())
+        );
+
+        let source = include_str!("mod.rs");
+        for fragments in [
+            ["SNI ", "{:?}"],
+            ["server_name = ", "?"],
+            ["%server", "_name"],
+        ] {
+            assert!(!source.contains(&fragments.concat()));
+        }
+        assert!(source.contains("sni_present"));
+        assert!(source.contains("sni_len"));
     }
 }
 

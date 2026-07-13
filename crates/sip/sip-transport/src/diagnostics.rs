@@ -259,7 +259,8 @@ pub struct ReceiveLoopEndpointSnapshot {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CallTraceSnapshot {
-    pub call_id: String,
+    /// Per-process opaque correlation derived from the SIP Call-ID.
+    pub call_correlation: String,
     pub inbound_invite: u64,
     pub inbound_ack: u64,
     pub inbound_bye: u64,
@@ -581,8 +582,8 @@ pub(crate) fn record_inbound_message(
     record_endpoint_kind(&INBOUND_BY_SOURCE, source, kind);
     record_endpoint_kind(&INBOUND_BY_LOCAL, local_addr, kind);
 
-    if let Some(call_id) = message_call_id(message) {
-        record_call_trace(&call_id, |trace| {
+    if let Some(call_correlation) = message_call_correlation(message) {
+        record_call_trace(&call_correlation, |trace| {
             trace.record_inbound(kind, source, local_addr);
         });
     }
@@ -711,9 +712,9 @@ pub(crate) fn record_outbound_message(
             }
         }
     }
-    if let Some(call_id) = message_call_id(message) {
+    if let Some(call_correlation) = message_call_correlation(message) {
         let kind = WireKind::from_message(message);
-        record_call_trace(&call_id, |trace| {
+        record_call_trace(&call_correlation, |trace| {
             trace.record_outbound(kind, local_addr, destination, false, failed);
         });
     }
@@ -736,9 +737,9 @@ pub(crate) fn record_outbound_raw(
     }
     record_send_latency(elapsed);
     if let Ok(message) = rvoip_sip_core::parse_message(bytes) {
-        if let Some(call_id) = message_call_id(&message) {
+        if let Some(call_correlation) = message_call_correlation(&message) {
             let kind = WireKind::from_message(&message);
-            record_call_trace(&call_id, |trace| {
+            record_call_trace(&call_correlation, |trace| {
                 trace.record_outbound(kind, local_addr, destination, true, failed);
             });
         }
@@ -769,25 +770,26 @@ fn record_endpoint_kind(
     }
 }
 
-fn record_call_trace(call_id: &str, update: impl FnOnce(&mut CallTraceCounts)) {
+fn record_call_trace(call_correlation: &str, update: impl FnOnce(&mut CallTraceCounts)) {
     let Ok(mut traces) = CALL_TRACES.lock() else {
         return;
     };
-    if !traces.contains_key(call_id) && traces.len() >= MAX_CALL_TRACE_ENTRIES {
+    if !traces.contains_key(call_correlation) && traces.len() >= MAX_CALL_TRACE_ENTRIES {
         CALL_TRACE_OVERFLOW.fetch_add(1, Ordering::Relaxed);
         return;
     }
-    let trace = traces.entry(call_id.to_string()).or_default();
+    let trace = traces.entry(call_correlation.to_string()).or_default();
     update(trace);
 }
 
-fn message_call_id(message: &Message) -> Option<String> {
-    match message {
-        Message::Request(request) => request.call_id().map(|call_id| call_id.value().to_string()),
-        Message::Response(response) => response
-            .call_id()
-            .map(|call_id| call_id.value().to_string()),
-    }
+fn message_call_correlation(message: &Message) -> Option<String> {
+    let call_id = match message {
+        Message::Request(request) => request.call_id(),
+        Message::Response(response) => response.call_id(),
+    }?;
+    Some(rvoip_sip_core::diagnostics::opaque_call_correlation(
+        call_id.as_str(),
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1080,9 +1082,9 @@ impl CallTraceCounts {
         );
     }
 
-    fn snapshot(&self, call_id: String) -> CallTraceSnapshot {
+    fn snapshot(&self, call_correlation: String) -> CallTraceSnapshot {
         CallTraceSnapshot {
-            call_id,
+            call_correlation,
             inbound_invite: self.inbound_invite,
             inbound_ack: self.inbound_ack,
             inbound_bye: self.inbound_bye,
@@ -1180,9 +1182,9 @@ fn call_trace_snapshot() -> Vec<CallTraceSnapshot> {
     };
     let mut rows = traces
         .iter()
-        .map(|(call_id, trace)| trace.snapshot(call_id.clone()))
+        .map(|(call_correlation, trace)| trace.snapshot(call_correlation.clone()))
         .collect::<Vec<_>>();
-    rows.sort_by(|a, b| a.call_id.cmp(&b.call_id));
+    rows.sort_by(|a, b| a.call_correlation.cmp(&b.call_correlation));
     rows
 }
 
@@ -1494,6 +1496,49 @@ mod tests {
         assert!(format_summary(&snapshot).contains("in_req_invite=1"));
         assert!(format_summary(&snapshot).contains("udp_read_to_worker_queue=[count=1"));
         assert!(format_summary(&snapshot).contains("udp_receive_loop_gap=[count=1"));
+    }
+
+    #[test]
+    fn call_traces_store_only_consistent_opaque_correlations() {
+        const RAW_CALL_ID: &str = "private-call\r\nAuthorization: Bearer transport-secret";
+        set_enabled_for_tests(true);
+        reset();
+
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("a"))
+            .to("Bob", "sip:bob@example.com", None)
+            .call_id(RAW_CALL_ID)
+            .cseq(1)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-opaque"))
+            .build();
+        let local_addr = "127.0.0.1:5060".parse().unwrap();
+        let peer_addr = "127.0.0.1:5070".parse().unwrap();
+        let message = Message::Request(request);
+
+        record_inbound_message(&message, peer_addr, local_addr);
+        record_inbound_message(&message, peer_addr, local_addr);
+
+        let snapshot = snapshot();
+        assert_eq!(snapshot.call_traces.len(), 1);
+        let trace = &snapshot.call_traces[0];
+        assert_eq!(trace.inbound_invite, 2);
+        assert_eq!(
+            trace.call_correlation,
+            rvoip_sip_core::diagnostics::opaque_call_correlation(RAW_CALL_ID)
+        );
+        assert_eq!(trace.call_correlation.len(), 20);
+        let rendered = format!("{snapshot:?}");
+        assert!(!rendered.contains(RAW_CALL_ID));
+        assert!(!rendered.contains("transport-secret"));
+
+        let source = include_str!("diagnostics.rs");
+        for fragments in [
+            ["traces.entry(call_id", ".to_string())"],
+            ["pub call_id", ": String"],
+        ] {
+            assert!(!source.contains(&fragments.concat()));
+        }
     }
 
     #[test]

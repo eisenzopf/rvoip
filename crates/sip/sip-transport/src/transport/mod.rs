@@ -237,7 +237,9 @@ impl fmt::Debug for TransportEvent {
             }
             Self::Error { error } => formatter
                 .debug_struct("Error")
-                .field("error", error)
+                .field("error_present", &!error.is_empty())
+                .field("error_len", &error.len())
+                .field("error_class", &"transport-reported")
                 .finish(),
             Self::Closed => formatter.write_str("Closed"),
             Self::KeepAlivePongReceived {
@@ -261,6 +263,31 @@ impl fmt::Debug for TransportEvent {
             Self::ShutdownNow => formatter.write_str("ShutdownNow"),
             Self::ShutdownComplete => formatter.write_str("ShutdownComplete"),
         }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_safety_tests {
+    use super::*;
+
+    #[test]
+    fn transport_error_debug_reports_only_fixed_metadata() {
+        const SECRET: &str = "resolver failed for secret.example; Authorization: Bearer token";
+        let event = TransportEvent::Error {
+            error: SECRET.to_string(),
+        };
+
+        let rendered = format!("{event:?}");
+        assert!(!rendered.contains(SECRET));
+        assert!(!rendered.contains("secret.example"));
+        assert!(!rendered.contains("Bearer token"));
+        assert!(rendered.contains("error_present: true"));
+        assert!(rendered.contains(&format!("error_len: {}", SECRET.len())));
+
+        let TransportEvent::Error { error } = event else {
+            panic!("expected error event");
+        };
+        assert_eq!(error, SECRET, "functional error payload must be retained");
     }
 }
 
