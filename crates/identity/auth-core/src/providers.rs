@@ -494,6 +494,12 @@ pub trait AuthAuditSink: Send + Sync {
 #[non_exhaustive]
 #[derive(Clone, PartialEq, Eq)]
 pub enum AuthRateLimitKind {
+    /// Protocol-normal initial SIP authentication challenge issuance.
+    ///
+    /// This is deliberately separate from credential validation so providers
+    /// can apply a bounded per-peer challenge budget without consuming a
+    /// subject's invalid-credential budget before a subject is known.
+    SipChallenge,
     /// SIP REGISTER attempts.
     SipRegister,
     /// SIP request authentication outside REGISTER.
@@ -517,6 +523,7 @@ pub enum AuthRateLimitKind {
 impl fmt::Debug for AuthRateLimitKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SipChallenge => formatter.write_str("SipChallenge"),
             Self::SipRegister => formatter.write_str("SipRegister"),
             Self::SipRequest => formatter.write_str("SipRequest"),
             Self::BasicPassword => formatter.write_str("BasicPassword"),

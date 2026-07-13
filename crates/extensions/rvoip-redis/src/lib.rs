@@ -20,8 +20,9 @@ use redis::aio::ConnectionLike;
 use redis::{AsyncCommands, Cmd, RedisFuture, Value};
 use rvoip_auth_core::{
     AuthAttemptAdmission, AuthAttemptReservation, AuthAuditOutcome, AuthRateLimitKey,
-    AuthRateLimitVerdict, AuthRateLimiter, CredentialAuthError, DigestNonceStatus,
-    DigestReplayStore, TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
+    AuthRateLimitKind, AuthRateLimitVerdict, AuthRateLimiter, CredentialAuthError,
+    DigestNonceStatus, DigestReplayStore, TokenRevocationChecker, TokenRevocationContext,
+    TokenRevocationStatus,
 };
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -30,6 +31,11 @@ use thiserror::Error;
 pub const MAX_REDIS_AUTH_RATE_LIMIT_COHORTS: usize = 1_000_000;
 /// Hard upper bound for configured incomplete auth-attempt reservations.
 pub const MAX_REDIS_AUTH_RATE_LIMIT_RESERVATIONS: usize = 1_000_000;
+
+// Redis auth-attempt keys are an internal persistence protocol. Version the
+// schema explicitly so Rust Debug output or a future enum rename cannot split
+// or merge live security cohorts accidentally.
+const AUTH_RATE_LIMIT_KEY_SCHEMA: &str = "v1";
 
 const RATE_LIMIT_RESERVE_SCRIPT: &str = r#"
 local function cleanup(values, expiry, now)
@@ -391,6 +397,12 @@ pub struct RedisAuthConfig {
     pub rate_limit_window: Duration,
     /// Maximum failed attempts accepted in one rate-limit window.
     pub max_failures_per_window: u32,
+    /// Maximum protocol-normal initial SIP challenges accepted from one peer
+    /// in one rate-limit window.
+    ///
+    /// Challenge issuance has no authenticated subject yet, so it uses this
+    /// independent per-peer budget instead of the credential-failure budget.
+    pub max_initial_challenges_per_window: u32,
 }
 
 impl fmt::Debug for RedisAuthConfig {
@@ -404,6 +416,10 @@ impl fmt::Debug for RedisAuthConfig {
             .field("token_revocation_ttl", &self.token_revocation_ttl)
             .field("rate_limit_window", &self.rate_limit_window)
             .field("max_failures_per_window", &self.max_failures_per_window)
+            .field(
+                "max_initial_challenges_per_window",
+                &self.max_initial_challenges_per_window,
+            )
             .finish()
     }
 }
@@ -466,6 +482,7 @@ impl RedisAuthConfig {
             token_revocation_ttl: Duration::from_secs(24 * 60 * 60),
             rate_limit_window: Duration::from_secs(60),
             max_failures_per_window: 10,
+            max_initial_challenges_per_window: 120,
         }
     }
 
@@ -502,6 +519,13 @@ impl RedisAuthConfig {
     /// Set the maximum failed attempts permitted in one rate-limit window.
     pub fn with_max_failures_per_window(mut self, max_failures: u32) -> Self {
         self.max_failures_per_window = max_failures;
+        self
+    }
+
+    /// Set the bounded per-peer budget for protocol-normal initial SIP
+    /// authentication challenges.
+    pub fn with_max_initial_challenges_per_window(mut self, max_challenges: u32) -> Self {
+        self.max_initial_challenges_per_window = max_challenges;
         self
     }
 }
@@ -598,6 +622,10 @@ impl fmt::Debug for RedisAuthProvider {
             .field(
                 "max_failures_per_window",
                 &self.config.max_failures_per_window,
+            )
+            .field(
+                "max_initial_challenges_per_window",
+                &self.config.max_initial_challenges_per_window,
             )
             .field("digest_limits", &self.digest_limits)
             .field("runtime", &self.runtime)
@@ -994,9 +1022,10 @@ impl RedisAuthProvider {
 
     fn rate_pool_prefix(&self) -> String {
         format!(
-            "{}:{{{}}}:rate",
+            "{}:{{{}}}:rate:{}",
             self.config.namespace,
-            digest_key(&self.config.namespace)
+            digest_key(&self.config.namespace),
+            AUTH_RATE_LIMIT_KEY_SCHEMA,
         )
     }
 
@@ -1024,21 +1053,47 @@ impl RedisAuthProvider {
         format!("{}:reservation-expiry", self.rate_pool_prefix())
     }
 
-    fn rate_limit_cohorts(&self, key: &AuthRateLimitKey) -> (String, String) {
+    fn rate_limit_cohorts(
+        &self,
+        key: &AuthRateLimitKey,
+    ) -> Result<(String, String), CredentialAuthError> {
         // The provider namespace is the trusted tenant boundary. `realm` is
         // supplied before credential validation and can be attacker-chosen,
         // so including it here would let realm rotation bypass both limits.
-        let peer = format!(
-            "kind={:?}|peer={}",
-            key.kind,
-            key.peer.as_deref().unwrap_or("_")
-        );
-        let subject = format!(
-            "kind={:?}|subject={}",
-            key.kind,
-            key.subject.as_deref().unwrap_or("_")
-        );
-        (digest_key(&peer), digest_key(&subject))
+        // A missing dimension must never collapse into a tenant-global
+        // sentinel. Derive it from the dimension we do know, preserving a
+        // bounded cohort for initial challenges and partially parsed
+        // credentials. With neither dimension there is no safe aggregate, so
+        // fail closed before touching Redis.
+        let kind = stable_rate_limit_kind_tag(&key.kind)?;
+        let peer_dimension = key.peer.as_deref().filter(|value| !value.trim().is_empty());
+        let subject_dimension = key
+            .subject
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
+        let peer = match (peer_dimension, subject_dimension) {
+            (Some(peer), _) if !peer.is_empty() => format!("{kind}|peer={peer}"),
+            (None, Some(subject)) if !subject.is_empty() => {
+                format!("{kind}|peer-bound-to-subject={subject}")
+            }
+            _ => {
+                return Err(CredentialAuthError::PolicyRejected(
+                    "auth rate-limit key requires a peer or subject".to_string(),
+                ));
+            }
+        };
+        let subject = match (subject_dimension, peer_dimension) {
+            (Some(subject), _) if !subject.is_empty() => format!("{kind}|subject={subject}"),
+            (None, Some(peer)) if !peer.is_empty() => {
+                format!("{kind}|subject-bound-to-peer={peer}")
+            }
+            _ => {
+                return Err(CredentialAuthError::PolicyRejected(
+                    "auth rate-limit key requires a peer or subject".to_string(),
+                ));
+            }
+        };
+        Ok((digest_key(&peer), digest_key(&subject)))
     }
 }
 
@@ -1379,7 +1434,11 @@ impl AuthRateLimiter for RedisAuthProvider {
         &self,
         key: &AuthRateLimitKey,
     ) -> Result<AuthAttemptAdmission, CredentialAuthError> {
-        if self.config.max_failures_per_window == 0 {
+        let max_attempts_per_window = match key.kind {
+            AuthRateLimitKind::SipChallenge => self.config.max_initial_challenges_per_window,
+            _ => self.config.max_failures_per_window,
+        };
+        if max_attempts_per_window == 0 {
             return Ok(AuthAttemptAdmission::Denied {
                 retry_after: Some(self.config.rate_limit_window),
             });
@@ -1391,7 +1450,7 @@ impl AuthRateLimiter for RedisAuthProvider {
             CredentialAuthError::PolicyRejected("auth rate-limit window is too large".to_string())
         })?;
         let reservation_id = uuid::Uuid::new_v4().simple().to_string();
-        let (peer_cohort, subject_cohort) = self.rate_limit_cohorts(key);
+        let (peer_cohort, subject_cohort) = self.rate_limit_cohorts(key)?;
         let mut connection = self.connection().await.map_credential_error()?;
         let (admitted, retry_after): (i32, u64) = redis::Script::new(RATE_LIMIT_RESERVE_SCRIPT)
             .key(self.rate_peer_values_key())
@@ -1407,7 +1466,7 @@ impl AuthRateLimiter for RedisAuthProvider {
             .arg(&reservation_id)
             .arg(now)
             .arg(expires)
-            .arg(self.config.max_failures_per_window)
+            .arg(max_attempts_per_window)
             .arg(self.rate_limit_limits.peer_cohorts)
             .arg(self.rate_limit_limits.subject_cohorts)
             .arg(self.rate_limit_limits.reservations)
@@ -1554,6 +1613,33 @@ fn digest_key(input: &str) -> String {
     output
 }
 
+fn stable_rate_limit_kind_tag(kind: &AuthRateLimitKind) -> Result<String, CredentialAuthError> {
+    let tag = match kind {
+        AuthRateLimitKind::SipChallenge => "sip-challenge",
+        AuthRateLimitKind::SipRegister => "sip-register",
+        AuthRateLimitKind::SipRequest => "sip-request",
+        AuthRateLimitKind::BasicPassword => "basic-password",
+        AuthRateLimitKind::Password => "password",
+        AuthRateLimitKind::ApiKey => "api-key",
+        AuthRateLimitKind::BearerToken => "bearer-token",
+        AuthRateLimitKind::TokenIssuance => "token-issuance",
+        AuthRateLimitKind::Digest => "digest",
+        AuthRateLimitKind::Other(value) => {
+            return Ok(format!(
+                "{}:other:{}",
+                AUTH_RATE_LIMIT_KEY_SCHEMA,
+                digest_key(value)
+            ));
+        }
+        _ => {
+            return Err(CredentialAuthError::PolicyRejected(
+                "unsupported auth rate-limit kind for Redis key schema".to_string(),
+            ));
+        }
+    };
+    Ok(format!("{}:{tag}", AUTH_RATE_LIMIT_KEY_SCHEMA))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1567,6 +1653,85 @@ mod tests {
         );
         assert_eq!(provider.config().redis_url, "redis://127.0.0.1:6379");
         assert_eq!(provider.runtime_config(), RedisAuthRuntimeConfig::default());
+        assert_eq!(provider.config().max_initial_challenges_per_window, 120);
+    }
+
+    #[test]
+    fn rate_limit_missing_dimensions_bind_to_the_known_dimension() {
+        let provider = RedisAuthProvider::new("redis://127.0.0.1:6379").unwrap();
+
+        let peer_only = AuthRateLimitKey::new(AuthRateLimitKind::SipChallenge)
+            .with_realm("attacker-controlled-a")
+            .with_peer("198.51.100.10");
+        let same_peer_rotated_realm = AuthRateLimitKey::new(AuthRateLimitKind::SipChallenge)
+            .with_realm("attacker-controlled-b")
+            .with_peer("198.51.100.10");
+        let other_peer =
+            AuthRateLimitKey::new(AuthRateLimitKind::SipChallenge).with_peer("198.51.100.11");
+        let peer_cohorts = provider.rate_limit_cohorts(&peer_only).unwrap();
+        assert_eq!(
+            peer_cohorts,
+            provider
+                .rate_limit_cohorts(&same_peer_rotated_realm)
+                .unwrap(),
+            "realm rotation must not create a fresh initial-challenge budget"
+        );
+        assert_ne!(
+            peer_cohorts,
+            provider.rate_limit_cohorts(&other_peer).unwrap(),
+            "missing subjects must not share one tenant-global cohort"
+        );
+
+        let subject_only = AuthRateLimitKey::new(AuthRateLimitKind::Digest)
+            .with_subject("alice")
+            .with_realm("attacker-controlled-a");
+        let same_subject_rotated_realm = AuthRateLimitKey::new(AuthRateLimitKind::Digest)
+            .with_subject("alice")
+            .with_realm("attacker-controlled-b");
+        let other_subject = AuthRateLimitKey::new(AuthRateLimitKind::Digest).with_subject("bob");
+        let subject_cohorts = provider.rate_limit_cohorts(&subject_only).unwrap();
+        assert_eq!(
+            subject_cohorts,
+            provider
+                .rate_limit_cohorts(&same_subject_rotated_realm)
+                .unwrap(),
+            "realm rotation must not create a fresh subject-bound budget"
+        );
+        assert_ne!(
+            subject_cohorts,
+            provider.rate_limit_cohorts(&other_subject).unwrap(),
+            "missing peers must bind to the known subject"
+        );
+
+        let missing = AuthRateLimitKey::new(AuthRateLimitKind::SipRequest);
+        assert!(matches!(
+            provider.rate_limit_cohorts(&missing),
+            Err(CredentialAuthError::PolicyRejected(_))
+        ));
+        let blank = AuthRateLimitKey::new(AuthRateLimitKind::SipRequest)
+            .with_peer("  ")
+            .with_subject("\t");
+        assert!(matches!(
+            provider.rate_limit_cohorts(&blank),
+            Err(CredentialAuthError::PolicyRejected(_))
+        ));
+    }
+
+    #[test]
+    fn rate_limit_kind_tags_are_stable_versioned_and_redacted() {
+        assert_eq!(
+            stable_rate_limit_kind_tag(&AuthRateLimitKind::SipChallenge).unwrap(),
+            "v1:sip-challenge"
+        );
+        assert_eq!(
+            stable_rate_limit_kind_tag(&AuthRateLimitKind::Digest).unwrap(),
+            "v1:digest"
+        );
+        let tag =
+            stable_rate_limit_kind_tag(&AuthRateLimitKind::Other("future-kind-canary".to_string()))
+                .unwrap();
+        assert!(tag.starts_with("v1:other:"));
+        assert!(!tag.contains("future-kind-canary"));
     }
 
     #[test]

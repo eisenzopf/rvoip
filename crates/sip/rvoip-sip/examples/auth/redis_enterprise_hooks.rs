@@ -29,7 +29,8 @@ async fn main() -> anyhow::Result<()> {
         RedisAuthConfig::new(redis_url)
             .with_namespace("rvoip:example:auth")
             .with_rate_limit_window(Duration::from_secs(60))
-            .with_max_failures_per_window(2),
+            .with_max_failures_per_window(2)
+            .with_max_initial_challenges_per_window(120),
     )?);
     redis.clear_namespace_for_tests().await?;
 

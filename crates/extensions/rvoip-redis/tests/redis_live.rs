@@ -360,6 +360,160 @@ async fn rate_limiter_concurrent_reservations_are_atomic_and_idempotent() {
 }
 
 #[tokio::test]
+async fn rate_limiter_missing_dimensions_are_isolated_atomic_and_recover() {
+    let Ok(redis_url) = std::env::var("RVOIP_REDIS_URL") else {
+        return;
+    };
+    let namespace = format!(
+        "rvoip:test:rate-missing-dimensions:{}",
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let config = RedisAuthConfig::new(redis_url)
+        .with_namespace(namespace)
+        .with_rate_limit_window(Duration::from_secs(1))
+        .with_max_failures_per_window(1)
+        .with_max_initial_challenges_per_window(2);
+    // Independent providers model separate workers racing on one clustered
+    // tenant namespace rather than clones sharing one cached connection.
+    let first = RedisAuthProvider::from_config(config.clone()).unwrap();
+    let second = RedisAuthProvider::from_config(config).unwrap();
+    first.clear_namespace_for_tests().await.unwrap();
+
+    let challenge = AuthRateLimitKey::new(AuthRateLimitKind::SipChallenge)
+        .with_realm("rotating-realm-a.example.test")
+        .with_peer("198.51.100.40");
+    let mut tasks = Vec::new();
+    for index in 0..16 {
+        let provider = if index % 2 == 0 {
+            first.clone()
+        } else {
+            second.clone()
+        };
+        let key = challenge.clone();
+        tasks.push(tokio::spawn(async move {
+            provider.reserve_auth_attempt(&key).await.unwrap()
+        }));
+    }
+    let mut admitted = Vec::new();
+    let mut denied = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            AuthAttemptAdmission::Reserved(reservation) => admitted.push(reservation),
+            AuthAttemptAdmission::Denied { .. } => denied += 1,
+        }
+    }
+    assert_eq!(admitted.len(), 2, "the explicit challenge budget is atomic");
+    assert_eq!(denied, 14);
+    for reservation in admitted {
+        first
+            .complete_auth_attempt(
+                &reservation,
+                &AuthAuditOutcome::Failure(AuthFailureReason::MissingCredential),
+            )
+            .await
+            .unwrap();
+    }
+    let rotated_realm = AuthRateLimitKey::new(AuthRateLimitKind::SipChallenge)
+        .with_realm("rotating-realm-b.example.test")
+        .with_peer("198.51.100.40");
+    assert!(matches!(
+        second.reserve_auth_attempt(&rotated_realm).await.unwrap(),
+        AuthAttemptAdmission::Denied { .. }
+    ));
+
+    let other_peer =
+        AuthRateLimitKey::new(AuthRateLimitKind::SipChallenge).with_peer("198.51.100.41");
+    let AuthAttemptAdmission::Reserved(other_peer_reservation) =
+        first.reserve_auth_attempt(&other_peer).await.unwrap()
+    else {
+        panic!("a missing subject must not consume a tenant-global cohort");
+    };
+    first
+        .complete_auth_attempt(
+            &other_peer_reservation,
+            &AuthAuditOutcome::Failure(AuthFailureReason::MissingCredential),
+        )
+        .await
+        .unwrap();
+
+    // Initial challenges have their own budget and cannot exhaust the same
+    // peer's credential-validation budget.
+    let digest = AuthRateLimitKey::new(AuthRateLimitKind::Digest)
+        .with_subject("alice")
+        .with_realm("rotating-realm-a.example.test")
+        .with_peer("198.51.100.40");
+    let AuthAttemptAdmission::Reserved(digest_failure) =
+        second.reserve_auth_attempt(&digest).await.unwrap()
+    else {
+        panic!("challenge and credential budgets must remain independent");
+    };
+    second
+        .complete_auth_attempt(
+            &digest_failure,
+            &AuthAuditOutcome::Failure(AuthFailureReason::InvalidCredential),
+        )
+        .await
+        .unwrap();
+    let rotated_source_and_realm = AuthRateLimitKey::new(AuthRateLimitKind::Digest)
+        .with_subject("alice")
+        .with_realm("rotating-realm-b.example.test")
+        .with_peer("198.51.100.99");
+    assert!(matches!(
+        first
+            .reserve_auth_attempt(&rotated_source_and_realm)
+            .await
+            .unwrap(),
+        AuthAttemptAdmission::Denied { .. }
+    ));
+
+    let subject_without_peer = AuthRateLimitKey::new(AuthRateLimitKind::Digest)
+        .with_subject("bob")
+        .with_realm("rotating-realm-a.example.test");
+    let AuthAttemptAdmission::Reserved(subject_failure) = second
+        .reserve_auth_attempt(&subject_without_peer)
+        .await
+        .unwrap()
+    else {
+        panic!("a known subject must supply a bounded fallback cohort");
+    };
+    second
+        .complete_auth_attempt(
+            &subject_failure,
+            &AuthAuditOutcome::Failure(AuthFailureReason::InvalidCredential),
+        )
+        .await
+        .unwrap();
+    let subject_rotated_realm = AuthRateLimitKey::new(AuthRateLimitKind::Digest)
+        .with_subject("bob")
+        .with_realm("rotating-realm-b.example.test");
+    assert!(matches!(
+        first
+            .reserve_auth_attempt(&subject_rotated_realm)
+            .await
+            .unwrap(),
+        AuthAttemptAdmission::Denied { .. }
+    ));
+
+    assert!(matches!(
+        first
+            .reserve_auth_attempt(&AuthRateLimitKey::new(AuthRateLimitKind::SipRequest))
+            .await,
+        Err(CredentialAuthError::PolicyRejected(_))
+    ));
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(matches!(
+        second.reserve_auth_attempt(&challenge).await.unwrap(),
+        AuthAttemptAdmission::Reserved(_)
+    ));
+
+    first.clear_namespace_for_tests().await.unwrap();
+}
+
+#[tokio::test]
 async fn rate_limiter_aggregates_peers_and_subjects_without_cross_release() {
     let Some(provider) = live_provider("rate_limit_aggregates") else {
         return;

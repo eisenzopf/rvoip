@@ -54,13 +54,22 @@ idempotent. This avoids check-then-record races, double counting, username
 or realm rotation around peer limits, and peer or realm rotation around
 subject limits. The configured provider namespace is the trusted tenant
 boundary; pre-authentication realm values never shard these aggregates.
+When a subject is not known yet, its aggregate is derived from the known peer;
+when a peer is unavailable, its aggregate is derived from the known subject.
+A key missing both dimensions fails closed instead of entering a shared global
+sentinel cohort. Protocol-normal initial SIP challenges use the distinct
+`SipChallenge` kind and a configurable per-peer budget set with
+`with_max_initial_challenges_per_window` (120 per window by default), so they
+do not consume the invalid-credential budget.
 
 Rate-limit state uses a fixed set of Redis keys with bounded peer, subject,
 and incomplete-reservation cohorts. Configure those bounds with
 `with_auth_rate_limit_limits` and inspect aggregate-safe counts with
 `auth_rate_limit_cardinality`. Explicit limits also have a hard one-million
 entry ceiling, so a mistaken deployment value cannot turn the bounded design
-back into unlimited state. The legacy `check_auth_attempt` and
+back into unlimited state. Redis key and rate-kind encodings use an explicit
+internal schema version rather than Rust debug strings. The legacy
+`check_auth_attempt` and
 `record_auth_result` entry points now fail closed on this provider because
 they cannot provide atomic admission.
 

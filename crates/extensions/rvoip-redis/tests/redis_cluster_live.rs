@@ -64,7 +64,8 @@ fn provider_for_namespace(namespace: String, seed_urls: Vec<String>) -> RedisAut
         .with_nonce_count_ttl(Duration::from_secs(30))
         .with_token_revocation_ttl(Duration::from_secs(30))
         .with_rate_limit_window(Duration::from_secs(30))
-        .with_max_failures_per_window(1);
+        .with_max_failures_per_window(1)
+        .with_max_initial_challenges_per_window(1);
     if seed_urls.iter().all(|url| url.starts_with("rediss://")) {
         RedisAuthProvider::from_cluster_config_with_tls(config, seed_urls, tls_config())
             .expect("configured TLS Redis Cluster provider must construct")
@@ -457,6 +458,43 @@ async fn redis_cluster_routes_digest_lua_and_single_key_auth_state() {
     assert!(matches!(
         provider.reserve_auth_attempt(&rate_key).await.unwrap(),
         AuthAttemptAdmission::Denied { .. }
+    ));
+
+    let first_challenge =
+        AuthRateLimitKey::new(AuthRateLimitKind::SipChallenge).with_peer("198.51.100.43");
+    let AuthAttemptAdmission::Reserved(challenge_reservation) = provider
+        .reserve_auth_attempt(&first_challenge)
+        .await
+        .unwrap()
+    else {
+        panic!("first peer challenge must reserve capacity");
+    };
+    provider
+        .complete_auth_attempt(
+            &challenge_reservation,
+            &AuthAuditOutcome::Failure(AuthFailureReason::MissingCredential),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        provider
+            .reserve_auth_attempt(
+                &AuthRateLimitKey::new(AuthRateLimitKind::SipChallenge)
+                    .with_realm("rotated.example.test")
+                    .with_peer("198.51.100.43")
+            )
+            .await
+            .unwrap(),
+        AuthAttemptAdmission::Denied { .. }
+    ));
+    assert!(matches!(
+        provider
+            .reserve_auth_attempt(
+                &AuthRateLimitKey::new(AuthRateLimitKind::SipChallenge).with_peer("198.51.100.44")
+            )
+            .await
+            .unwrap(),
+        AuthAttemptAdmission::Reserved(_)
     ));
 }
 

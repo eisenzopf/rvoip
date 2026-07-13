@@ -917,7 +917,8 @@ impl AuthAttemptScheme {
             Self::Bearer => AuthRateLimitKind::BearerToken,
             Self::Basic => AuthRateLimitKind::BasicPassword,
             Self::Aka => AuthRateLimitKind::SipRequest,
-            Self::Unknown | Self::Missing => AuthRateLimitKind::SipRequest,
+            Self::Unknown => AuthRateLimitKind::SipRequest,
+            Self::Missing => AuthRateLimitKind::SipChallenge,
         }
     }
 }
@@ -2212,7 +2213,13 @@ impl SipAuthService {
         context: &SipAuthContext,
     ) -> AuthRateLimitKey {
         let (subject, realm) = subject_realm_from_authorization(authorization);
-        let kind = if method.eq_ignore_ascii_case("REGISTER") {
+        // An absent Authorization header is the protocol-normal first leg of
+        // challenge authentication, including REGISTER. Keep it in a distinct
+        // per-peer budget instead of charging a not-yet-known subject or the
+        // invalid-credential budget.
+        let kind = if matches!(attempt, AuthAttemptScheme::Missing) {
+            AuthRateLimitKind::SipChallenge
+        } else if method.eq_ignore_ascii_case("REGISTER") {
             AuthRateLimitKind::SipRegister
         } else {
             attempt.rate_limit_kind()
@@ -4217,6 +4224,10 @@ mod tests {
         fn results(&self) -> Vec<AuthAuditOutcome> {
             self.results.lock().unwrap().clone()
         }
+
+        fn checked(&self) -> Vec<AuthRateLimitKey> {
+            self.checked.lock().unwrap().clone()
+        }
     }
 
     #[async_trait::async_trait]
@@ -5468,6 +5479,47 @@ mod tests {
                 "audit metadata must not contain credentials: {event:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn initial_challenges_use_a_distinct_peer_bound_rate_budget() {
+        let limiter = TestRateLimiter::allow();
+        let service = SipAuthService::new()
+            .with_digest_provider("example.test", Arc::new(StaticDigestProvider))
+            .with_rate_limiter(limiter.clone().into_arc());
+        let context = SipAuthContext::new().with_peer("192.0.2.10");
+
+        for method in ["INVITE", "REGISTER"] {
+            let decision = service
+                .authenticate_authorization_with_context(
+                    None,
+                    method,
+                    "sip:bob@example.test",
+                    None,
+                    SipAuthSource::Origin,
+                    false,
+                    &context,
+                )
+                .await
+                .expect("protocol-normal initial challenge");
+            assert!(matches!(decision, SipAuthDecision::Rejected { .. }));
+        }
+
+        let checked = limiter.checked();
+        assert_eq!(checked.len(), 2);
+        for key in checked {
+            assert_eq!(key.kind, AuthRateLimitKind::SipChallenge);
+            assert_eq!(key.peer.as_deref(), Some("192.0.2.10"));
+            assert_eq!(key.subject, None);
+            assert_eq!(key.realm, None);
+        }
+        assert_eq!(
+            limiter.results(),
+            vec![
+                AuthAuditOutcome::Failure(AuthFailureReason::MissingCredential),
+                AuthAuditOutcome::Failure(AuthFailureReason::MissingCredential),
+            ]
+        );
     }
 
     #[tokio::test]
