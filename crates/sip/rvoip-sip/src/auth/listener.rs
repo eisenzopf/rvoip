@@ -352,7 +352,10 @@ impl SipRequestIngressAuthorizer for SipListenerAuthPolicy {
             ),
         };
         let auth_context = SipAuthContext::new()
-            .with_peer(context.source.to_string())
+            // Source ports are ephemeral and attacker-controlled. Aggregate
+            // auth attempts by source IP so reconnecting or rotating ports
+            // cannot bypass the listener's peer rate limit.
+            .with_peer(rate_limit_peer(context.source))
             .with_metadata("transport", context.transport_type.to_string());
         let body = (!request.body().is_empty()).then(|| request.body());
 
@@ -392,6 +395,10 @@ impl SipRequestIngressAuthorizer for SipListenerAuthPolicy {
             ),
         }
     }
+}
+
+fn rate_limit_peer(source: std::net::SocketAddr) -> String {
+    source.ip().to_string()
 }
 
 fn validated_listener_tenant(tenant: String) -> crate::errors::Result<String> {
@@ -495,6 +502,14 @@ mod tests {
             "192.0.2.20:5060".parse().unwrap(),
             transport_type,
         )
+    }
+
+    #[test]
+    fn rate_limit_peer_ignores_attacker_controlled_source_ports() {
+        let first: std::net::SocketAddr = "192.0.2.42:5060".parse().unwrap();
+        let rotated: std::net::SocketAddr = "192.0.2.42:65000".parse().unwrap();
+        assert_eq!(rate_limit_peer(first), "192.0.2.42");
+        assert_eq!(rate_limit_peer(first), rate_limit_peer(rotated));
     }
 
     #[test]
