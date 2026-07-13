@@ -16,7 +16,7 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
 /// All UCTP envelope types defined by the v0 wire spec.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum MessageType {
     // --- Auth (§5) ---
     AuthHello,
@@ -102,7 +102,29 @@ pub enum MessageType {
     Unknown(String),
 }
 
+impl fmt::Debug for MessageType {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown(value) => formatter
+                .debug_struct("MessageType::Unknown")
+                .field("bytes", &value.len())
+                .finish(),
+            known => formatter.write_str(known.as_wire_str()),
+        }
+    }
+}
+
 impl MessageType {
+    /// Aggregate-safe label for logs and metrics. Unknown extension spellings
+    /// remain available through [`Self::as_wire_str`] for protocol routing but
+    /// never become attacker-controlled diagnostic labels.
+    pub fn diagnostic_label(&self) -> &str {
+        match self {
+            Self::Unknown(_) => "unknown",
+            known => known.as_wire_str(),
+        }
+    }
+
     /// Returns the wire-format dotted string for this variant.
     pub fn as_wire_str(&self) -> &str {
         match self {

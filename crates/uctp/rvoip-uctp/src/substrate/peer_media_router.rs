@@ -21,10 +21,16 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// A core Session/Connection pair sharing one authenticated UCTP peer.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PeerMediaConnectionKey {
     pub session_id: SessionId,
     pub connection_id: ConnectionId,
+}
+
+impl fmt::Debug for PeerMediaConnectionKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PeerMediaConnectionKey")
+    }
 }
 
 impl PeerMediaConnectionKey {
@@ -37,11 +43,17 @@ impl PeerMediaConnectionKey {
 }
 
 /// Exact core route represented by a peer-local UCTP media identifier.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PeerMediaRouteKey {
     pub session_id: SessionId,
     pub connection_id: ConnectionId,
     pub stream_id: StreamId,
+}
+
+impl fmt::Debug for PeerMediaRouteKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PeerMediaRouteKey")
+    }
 }
 
 impl PeerMediaRouteKey {
@@ -64,11 +76,17 @@ impl PeerMediaRouteKey {
 /// streams have a local route but no publisher fanout key, while a future
 /// forwarding route may intentionally deliver locally under a different
 /// Stream ID than the publisher registry uses.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PeerMediaFanoutKey {
     pub session_id: SessionId,
     pub publisher_connection_id: ConnectionId,
     pub stream_id: StreamId,
+}
+
+impl fmt::Debug for PeerMediaFanoutKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PeerMediaFanoutKey")
+    }
 }
 
 impl PeerMediaFanoutKey {
@@ -120,10 +138,8 @@ impl fmt::Debug for PeerMediaRegistration {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PeerMediaRegistration")
-            .field("owner", &self.owner)
-            .field("route", &self.route)
-            .field("fanout", &self.fanout)
-            .field("stream_id", &self.stream.id())
+            .field("fanout_present", &self.fanout.is_some())
+            .field("stream_kind", &self.stream.kind())
             .finish_non_exhaustive()
     }
 }
@@ -198,16 +214,14 @@ impl fmt::Debug for PeerMediaBinding {
         formatter
             .debug_struct("PeerMediaBinding")
             .field("local_id", &self.local_id)
-            .field("owner", &self.owner)
-            .field("route", &self.route)
-            .field("fanout", &self.fanout)
+            .field("fanout_present", &self.fanout.is_some())
             .field("cancelled", &self.cancel.is_cancelled())
             .finish_non_exhaustive()
     }
 }
 
 /// Immutable diagnostics for one committed route.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PeerMediaBindingSnapshot {
     pub local_id: NonZeroU16,
     pub owner: PrincipalOwnershipKey,
@@ -222,8 +236,25 @@ pub struct PeerMediaBindingSnapshot {
     pub cancelled: bool,
 }
 
+impl fmt::Debug for PeerMediaBindingSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PeerMediaBindingSnapshot")
+            .field("local_id", &self.local_id)
+            .field("fanout_present", &self.fanout.is_some())
+            .field("kind", &self.kind)
+            .field("codec_present", &!self.codec.name.is_empty())
+            .field("direction", &self.direction)
+            .field("ingress_capacity", &self.ingress_capacity)
+            .field("ingress_max_capacity", &self.ingress_max_capacity)
+            .field("ingress_closed", &self.ingress_closed)
+            .field("cancelled", &self.cancelled)
+            .finish()
+    }
+}
+
 /// Aggregate-safe peer media diagnostics.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PeerMediaRouterSnapshot {
     pub shutdown: bool,
     /// Count of identifiers issued during this peer lifetime, including
@@ -235,29 +266,66 @@ pub struct PeerMediaRouterSnapshot {
     pub connection_count: usize,
 }
 
-#[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
+impl fmt::Debug for PeerMediaRouterSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PeerMediaRouterSnapshot")
+            .field("shutdown", &self.shutdown)
+            .field("issued_local_ids", &self.issued_local_ids)
+            .field("reserved_local_id_count", &self.reserved_local_ids.len())
+            .field("binding_count", &self.bindings.len())
+            .field("session_count", &self.session_count)
+            .field("connection_count", &self.connection_count)
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub enum PeerMediaRouterError {
-    #[error("peer media router is shutting down")]
     ShuttingDown,
-    #[error("peer media stream-local-id namespace is exhausted")]
     LocalIdExhausted,
-    #[error("peer media reservation no longer exists")]
     ReservationLost,
-    #[error("peer media router was dropped before reservation commit")]
     RouterDropped,
-    #[error("route {route:?} is already bound to local ID {existing_local_id}")]
     DuplicateRoute {
         route: PeerMediaRouteKey,
         existing_local_id: NonZeroU16,
     },
-    #[error("registration stream ID {actual} does not match route stream ID {expected}")]
     StreamIdMismatch {
         expected: StreamId,
         actual: StreamId,
     },
-    #[error("media route owner does not match the authenticated principal")]
     OwnerMismatch,
 }
+
+impl fmt::Debug for PeerMediaRouterError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ShuttingDown => "PeerMediaRouterError::ShuttingDown",
+            Self::LocalIdExhausted => "PeerMediaRouterError::LocalIdExhausted",
+            Self::ReservationLost => "PeerMediaRouterError::ReservationLost",
+            Self::RouterDropped => "PeerMediaRouterError::RouterDropped",
+            Self::DuplicateRoute { .. } => "PeerMediaRouterError::DuplicateRoute",
+            Self::StreamIdMismatch { .. } => "PeerMediaRouterError::StreamIdMismatch",
+            Self::OwnerMismatch => "PeerMediaRouterError::OwnerMismatch",
+        })
+    }
+}
+
+impl fmt::Display for PeerMediaRouterError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ShuttingDown => "peer media router is shutting down",
+            Self::LocalIdExhausted => "peer media stream namespace is exhausted",
+            Self::ReservationLost => "peer media reservation no longer exists",
+            Self::RouterDropped => "peer media router is unavailable",
+            Self::DuplicateRoute { .. } => "peer media route is already bound",
+            Self::StreamIdMismatch { .. } => "peer media stream identity mismatch",
+            Self::OwnerMismatch => "peer media route owner mismatch",
+        })
+    }
+}
+
+impl std::error::Error for PeerMediaRouterError {}
 
 #[derive(Default)]
 struct RouterState {

@@ -44,8 +44,18 @@ pub fn validate_envelope_id(value: &str) -> Result<(), &'static str> {
 /// bounded URI-unreserved grammar documented by [`validate_envelope_id`] so
 /// replay keys and correlation lookups cannot retain attacker-controlled
 /// strings of arbitrary size.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Eq, Hash, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct EnvelopeId(pub String);
+
+impl fmt::Debug for EnvelopeId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EnvelopeId")
+            .field("bytes", &self.0.len())
+            .field("valid", &self.validate().is_ok())
+            .finish()
+    }
+}
 
 impl EnvelopeId {
     pub fn new() -> Self {

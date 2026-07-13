@@ -9,12 +9,13 @@
 //! opaque payload is a complete RTP packet.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use std::fmt;
 
 use crate::compatibility::UCTP_DATAGRAM_VERSION;
 use crate::errors::SubstrateError;
 
 /// RTP fields recovered from a UCTP media datagram body.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RtpMediaPayload {
     pub payload: Bytes,
     pub payload_type: u8,
@@ -23,17 +24,39 @@ pub struct RtpMediaPayload {
     pub ssrc: u32,
 }
 
+impl fmt::Debug for RtpMediaPayload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RtpMediaPayload")
+            .field("payload_bytes", &self.payload.len())
+            .field("payload_type", &self.payload_type)
+            .finish()
+    }
+}
+
 /// A validated UCTP media datagram containing one complete RTP packet.
 ///
 /// This is the typed shape applications and adapters should use. The codec
 /// bytes belong in [`RtpMediaPayload::payload`]; the RTP header is generated
 /// and parsed by [`pack_rtp_datagram`] and [`unpack_rtp_datagram`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RtpDatagram {
     pub flags: u8,
     pub stream_local_id: u16,
     pub seq: u32,
     pub rtp: RtpMediaPayload,
+}
+
+impl fmt::Debug for RtpDatagram {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RtpDatagram")
+            .field("flags", &self.flags)
+            .field("stream_local_id", &self.stream_local_id)
+            .field("sequence", &self.seq)
+            .field("rtp", &self.rtp)
+            .finish()
+    }
 }
 
 /// Construct the complete RTP packet required by UCTP §10.1.
@@ -108,13 +131,25 @@ pub fn unpack_rtp_datagram(input: &[u8]) -> Result<RtpDatagram, SubstrateError> 
 ///
 /// This unchecked compatibility shape treats `payload` as opaque bytes. New
 /// media code should use [`RtpDatagram`] instead.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[doc(hidden)]
 pub struct MediaDatagram {
     pub flags: u8,
     pub stream_local_id: u16,
     pub seq: u32,
     pub payload: Bytes,
+}
+
+impl fmt::Debug for MediaDatagram {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MediaDatagram")
+            .field("flags", &self.flags)
+            .field("stream_local_id", &self.stream_local_id)
+            .field("sequence", &self.seq)
+            .field("payload_bytes", &self.payload.len())
+            .finish()
+    }
 }
 
 /// Serialize a [`MediaDatagram`] to its wire bytes.

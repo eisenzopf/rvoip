@@ -890,7 +890,11 @@ impl UctpCoordinator {
     }
 
     async fn dispatch(&self, env: UctpEnvelope) -> Result<()> {
-        self.metric("uctp_envelopes_total", "in", env.msg_type.as_wire_str());
+        self.metric(
+            "uctp_envelopes_total",
+            "in",
+            env.msg_type.diagnostic_label(),
+        );
         let invalid_id = crate::ids::validate_envelope_id(&env.id)
             .err()
             .map(|reason| ("id", env.id.len(), reason))
@@ -904,7 +908,7 @@ impl UctpCoordinator {
         if let Some((field, length, reason)) = invalid_id {
             warn!(
                 transport = %self.transport,
-                envelope = %env.msg_type,
+                envelope = env.msg_type.diagnostic_label(),
                 %field,
                 %length,
                 %reason,
@@ -913,14 +917,14 @@ impl UctpCoordinator {
             self.metric(
                 "uctp_envelopes_invalid_id_rejected_total",
                 "in",
-                env.msg_type.as_wire_str(),
+                env.msg_type.diagnostic_label(),
             );
             return Ok(());
         }
         let span = info_span!(
             "uctp.envelope.in",
-            r#type = %env.msg_type,
-            id = %env.id,
+            r#type = env.msg_type.diagnostic_label(),
+            id_bytes = env.id.len(),
             transport = %self.transport,
         );
         self.dispatch_inner(env).instrument(span).await
@@ -942,15 +946,15 @@ impl UctpCoordinator {
         if let Err(reason) = cache.check_and_record(&env.id) {
             warn!(
                 transport = %self.transport,
-                envelope = %env.msg_type,
-                id = %env.id,
+                envelope = env.msg_type.diagnostic_label(),
+                id_bytes = env.id.len(),
                 %reason,
                 "uctp.coordinator: rejecting replayed envelope"
             );
             self.metric(
                 "uctp_envelopes_replay_rejected_total",
                 "in",
-                env.msg_type.as_wire_str(),
+                env.msg_type.diagnostic_label(),
             );
             return false;
         }
@@ -966,7 +970,7 @@ impl UctpCoordinator {
             warn!(
                 transport = %self.transport,
                 got_v = env.v,
-                envelope = %env.msg_type,
+                envelope = env.msg_type.diagnostic_label(),
                 "uctp.coordinator: rejecting envelope with unsupported protocol version"
             );
             return self
@@ -1026,8 +1030,8 @@ impl UctpCoordinator {
                         };
                         warn!(
                             transport = %self.transport,
-                            envelope = %env.msg_type,
-                            env_id = %env.id,
+                            envelope = env.msg_type.diagnostic_label(),
+                            env_id_bytes = env.id.len(),
                             %reason,
                             "uctp.coordinator: sig9421 verify rejected envelope"
                         );
@@ -1040,8 +1044,8 @@ impl UctpCoordinator {
                 None if required => {
                     warn!(
                         transport = %self.transport,
-                        envelope = %env.msg_type,
-                        env_id = %env.id,
+                        envelope = env.msg_type.diagnostic_label(),
+                        env_id_bytes = env.id.len(),
                         "uctp.coordinator: required signature missing"
                     );
                     return self
@@ -1238,7 +1242,7 @@ impl UctpCoordinator {
         }
         warn!(
             transport = %self.transport,
-            envelope = %env.msg_type,
+            envelope = env.msg_type.diagnostic_label(),
             "uctp.coordinator: refusing envelope from un-authed peer"
         );
         self.emit_error_full(
@@ -1268,7 +1272,7 @@ impl UctpCoordinator {
         }
         warn!(
             transport = %self.transport,
-            envelope = %env.msg_type,
+            envelope = env.msg_type.diagnostic_label(),
             required_scope_present = !required_scope.is_empty(),
             "uctp.coordinator: refusing envelope without required scope"
         );
@@ -1462,16 +1466,17 @@ impl UctpCoordinator {
     async fn send_out(&self, env: UctpEnvelope) -> Result<()> {
         let span = debug_span!(
             "uctp.envelope.out",
-            r#type = %env.msg_type,
-            id = %env.id,
-            in_reply_to = ?env.in_reply_to,
+            r#type = env.msg_type.diagnostic_label(),
+            id_bytes = env.id.len(),
+            in_reply_to_present = env.in_reply_to.is_some(),
+            in_reply_to_bytes = env.in_reply_to.as_ref().map_or(0, String::len),
             transport = %self.transport,
         );
         self.send_out_inner(env).instrument(span).await
     }
 
     async fn send_out_inner(&self, env: UctpEnvelope) -> Result<()> {
-        let msg_type_label = env.msg_type.as_wire_str().to_string();
+        let msg_type_label = env.msg_type.diagnostic_label().to_string();
         self.metric("uctp_envelopes_total", "out", &msg_type_label);
         // Backpressure (§3.5): signaling channel never drops; await
         // with a soft timeout. If the substrate writer is wedged for

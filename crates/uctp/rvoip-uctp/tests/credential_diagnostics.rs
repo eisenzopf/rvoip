@@ -1,4 +1,5 @@
 use rvoip_auth_core::EnvelopeSignature;
+use rvoip_uctp::adapter_helpers::ConnectionBindingError;
 use rvoip_uctp::payloads::auth::{AuthChallenge, AuthRefresh, AuthResponse};
 use rvoip_uctp::payloads::capability::CapabilityAdvertise;
 use rvoip_uctp::payloads::connection::{ConnectionOffer, WebRtcSubstrateSetup};
@@ -8,6 +9,9 @@ use rvoip_uctp::payloads::message::{Attachment, BodyEncoding, MessageSend};
 use rvoip_uctp::payloads::session::SessionInvite;
 use rvoip_uctp::payloads::stream::StreamInfo;
 use rvoip_uctp::state::{ResourceBindingError, SubscriptionOutcome, UctpScopePolicy};
+use rvoip_uctp::substrate::{
+    MediaDatagram, PeerMediaRouteKey, PeerMediaRouterError, RtpDatagram, RtpMediaPayload,
+};
 use rvoip_uctp::{MessageType, SubstrateError, UctpEnvelope, UctpError};
 
 const CANARY: &str = "uctp-credential-malicious-canary\r\nAuthorization: exposed";
@@ -217,6 +221,59 @@ fn public_payload_structs_do_not_regain_derived_debug() {
                 "public payload struct regained derived Debug: {line}"
             );
         }
+    }
+}
+
+#[test]
+fn identifiers_media_routes_and_datagrams_do_not_expose_retained_values() {
+    let connection = rvoip_uctp::ConnectionId::from_string(CANARY);
+    let attempted = rvoip_uctp::ConnectionId::from_string(format!("attempted-{CANARY}"));
+    let binding_error = ConnectionBindingError::AlreadyBound {
+        existing: connection.clone(),
+        attempted,
+    };
+    let route = PeerMediaRouteKey::new(
+        rvoip_uctp::SessionId::from_string(CANARY),
+        connection,
+        rvoip_core::StreamId::from_string(CANARY),
+    );
+    let route_error = PeerMediaRouterError::DuplicateRoute {
+        route: route.clone(),
+        existing_local_id: std::num::NonZeroU16::new(7).unwrap(),
+    };
+    let payload = bytes::Bytes::copy_from_slice(CANARY.as_bytes());
+    let rtp = RtpMediaPayload {
+        payload: payload.clone(),
+        payload_type: 111,
+        sequence_number: 9,
+        timestamp: 10,
+        ssrc: 11,
+    };
+    let datagram = RtpDatagram {
+        flags: 0,
+        stream_local_id: 7,
+        seq: 12,
+        rtp,
+    };
+    let raw = MediaDatagram {
+        flags: 0,
+        stream_local_id: 7,
+        seq: 12,
+        payload,
+    };
+    let envelope_id = rvoip_uctp::EnvelopeId::from_string(CANARY);
+    let unknown = MessageType::Unknown(CANARY.into());
+
+    for rendered in [
+        format!("{binding_error:?} {binding_error}"),
+        format!("{route:?}"),
+        format!("{route_error:?} {route_error}"),
+        format!("{datagram:?}"),
+        format!("{raw:?}"),
+        format!("{envelope_id:?}"),
+        format!("{unknown:?}"),
+    ] {
+        assert!(!rendered.contains(CANARY), "state leaked: {rendered}");
     }
 }
 

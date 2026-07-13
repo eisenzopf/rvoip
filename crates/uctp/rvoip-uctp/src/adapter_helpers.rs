@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::{error::Error, fmt};
 
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::error::{Result as CoreResult, RvoipError};
@@ -43,26 +44,58 @@ pub const DEFAULT_RENEGOTIATE_TIMEOUT: Duration = Duration::from_secs(5);
 /// tenant, and subject and refuses both ownership switches and wire-ID
 /// rebinding. All UCTP substrates use this type so their authorization and
 /// outbound-ID behavior cannot drift.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AuthenticatedConnectionBinding {
     owner: PrincipalOwnershipKey,
     wire_connection_id: Arc<parking_lot::RwLock<Option<ConnectionId>>>,
 }
 
-#[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
+impl fmt::Debug for AuthenticatedConnectionBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthenticatedConnectionBinding")
+            .field(
+                "wire_connection_bound",
+                &self.wire_connection_id.read().is_some(),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub enum ConnectionBindingError {
-    #[error("route has not established an authenticated wire connection ID")]
     NotBound,
-    #[error("authenticated principal is expired")]
     PrincipalExpired,
-    #[error("wire connection owner does not match route owner")]
     OwnerMismatch,
-    #[error("route is already bound to wire connection {existing}; cannot bind {attempted}")]
     AlreadyBound {
         existing: ConnectionId,
         attempted: ConnectionId,
     },
 }
+
+impl fmt::Debug for ConnectionBindingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::NotBound => "ConnectionBindingError::NotBound",
+            Self::PrincipalExpired => "ConnectionBindingError::PrincipalExpired",
+            Self::OwnerMismatch => "ConnectionBindingError::OwnerMismatch",
+            Self::AlreadyBound { .. } => "ConnectionBindingError::AlreadyBound",
+        })
+    }
+}
+
+impl fmt::Display for ConnectionBindingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::NotBound => "authenticated wire connection is not bound",
+            Self::PrincipalExpired => "authenticated principal is expired",
+            Self::OwnerMismatch => "wire connection owner mismatch",
+            Self::AlreadyBound { .. } => "wire connection is already bound",
+        })
+    }
+}
+
+impl Error for ConnectionBindingError {}
 
 impl AuthenticatedConnectionBinding {
     pub fn new(principal: &AuthenticatedPrincipal) -> Self {
