@@ -2,10 +2,13 @@ use futures_util::stream::SplitStream;
 use futures_util::StreamExt;
 #[cfg(feature = "ws")]
 use http::HeaderValue;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
+#[cfg(feature = "ws")]
+use tokio::task::JoinSet;
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 #[cfg(feature = "ws")]
@@ -18,6 +21,7 @@ use tokio_rustls::TlsAcceptor;
 use super::connection::{sip_websocket_config, WebSocketConnection};
 use super::{SipWsStream, SIP_WS_SUBPROTOCOL};
 use crate::error::{Error, Result};
+use crate::transport::runtime::ConnectionLifecycleConfig;
 #[cfg(feature = "wss")]
 use crate::transport::tls::TlsServerClientAuthConfig;
 use crate::transport::HandshakeAdmissionConfig;
@@ -50,11 +54,11 @@ pub struct WebSocketListener {
     /// the same cert chain + session resumption cache).
     #[cfg(feature = "wss")]
     tls_acceptor: Option<TlsAcceptor>,
-    /// Admission and complete TLS/HTTP deadline used by the public `accept`
-    /// API. The transport supervisor uses the lower-level crate-private split
-    /// boundary with the same policy.
+    /// Admission and complete TLS/HTTP deadline used by the supervised public
+    /// server and the transport's internal accept loop.
     handshake_admission: HandshakeAdmissionConfig,
     handshake_semaphore: Arc<Semaphore>,
+    established_semaphore: Arc<Semaphore>,
 }
 
 impl WebSocketListener {
@@ -81,7 +85,7 @@ impl WebSocketListener {
     }
 
     /// Bind with explicit admission and an end-to-end TLS/HTTP upgrade
-    /// deadline for callers of [`Self::accept`].
+    /// deadline for supervised sessions.
     pub async fn bind_with_handshake_config(
         addr: SocketAddr,
         secure: bool,
@@ -128,7 +132,7 @@ impl WebSocketListener {
         .await
     }
 
-    /// Bind with both WSS client authentication and public-accept admission.
+    /// Bind with both WSS client authentication and supervised admission.
     #[cfg(feature = "wss")]
     pub async fn bind_with_client_auth_and_handshake(
         addr: SocketAddr,
@@ -268,6 +272,10 @@ impl WebSocketListener {
             tls_acceptor,
             handshake_admission,
             handshake_semaphore: Arc::new(Semaphore::new(handshake_admission.max_concurrent)),
+            established_semaphore: Arc::new(Semaphore::new(
+                ConnectionLifecycleConfig::from_handshake(handshake_admission)
+                    .max_established_per_direction,
+            )),
         })
     }
 
@@ -296,6 +304,10 @@ impl WebSocketListener {
             key_path: key_path.map(String::from),
             handshake_admission,
             handshake_semaphore: Arc::new(Semaphore::new(handshake_admission.max_concurrent)),
+            established_semaphore: Arc::new(Semaphore::new(
+                ConnectionLifecycleConfig::from_handshake(handshake_admission)
+                    .max_established_per_direction,
+            )),
         })
     }
 
@@ -306,27 +318,118 @@ impl WebSocketListener {
             .map_err(|e| Error::LocalAddrFailed(e))
     }
 
-    /// Accepts one WebSocket connection under the listener's configured
-    /// concurrency limit and complete TLS/HTTP upgrade deadline.
+    /// Disabled compatibility entry point.
+    ///
+    /// Returning an independently owned reader makes it impossible for the
+    /// listener to enforce idle/authentication expiry or to account for the
+    /// underlying socket after the read half escapes. The method remains only
+    /// to give existing source code a clear migration error; new and existing
+    /// servers must use [`Self::serve_concurrent`].
     #[cfg(feature = "ws")]
+    #[deprecated(
+        since = "0.2.5",
+        note = "disabled: use Arc<WebSocketListener>::serve_concurrent for bounded supervised sessions"
+    )]
     pub async fn accept(
         &self,
     ) -> Result<(
         WebSocketConnection,
         SplitStream<WebSocketStream<SipWsStream>>,
     )> {
-        let _permit = self
-            .handshake_semaphore
-            .acquire()
-            .await
-            .map_err(|_| Error::TransportClosed)?;
-        let (stream, peer_addr) = self.accept_tcp().await?;
-        tokio::time::timeout(
-            self.handshake_admission.timeout,
-            self.upgrade_tcp(stream, peer_addr),
-        )
-        .await
-        .map_err(|_| Error::ConnectionTimeout(peer_addr))?
+        Err(Error::InvalidState(
+            "WebSocketListener::accept is disabled; use serve_concurrent for supervised sessions"
+                .into(),
+        ))
+    }
+
+    /// Concurrent, supervised public listener API.
+    ///
+    /// Raw sockets are accepted continuously and each TLS/HTTP upgrade runs in
+    /// a separately supervised task under the configured deadline. Handshake
+    /// and established-session permits are distinct; dropping this future
+    /// aborts every child task through `JoinSet` ownership.
+    #[cfg(feature = "ws")]
+    pub async fn serve_concurrent<F, Fut>(self: Arc<Self>, handler: F) -> Result<()>
+    where
+        F: Fn(Arc<WebSocketConnection>, SplitStream<WebSocketStream<SipWsStream>>) -> Fut
+            + Send
+            + Sync
+            + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let handler = Arc::new(handler);
+        let lifecycle = ConnectionLifecycleConfig::from_handshake(self.handshake_admission);
+        let mut tasks = JoinSet::new();
+        loop {
+            while let Some(completed) = tasks.try_join_next() {
+                if let Err(error) = completed {
+                    if !error.is_cancelled() {
+                        error!("supervised WebSocket connection task failed: {error}");
+                    }
+                }
+            }
+            let handshake_permit = self
+                .handshake_semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| Error::TransportClosed)?;
+            let (stream, peer_addr) = self.accept_tcp().await?;
+            let listener = self.clone();
+            let handler = handler.clone();
+            tasks.spawn(async move {
+                let upgraded = tokio::time::timeout(
+                    listener.handshake_admission.timeout,
+                    listener.upgrade_tcp(stream, peer_addr),
+                )
+                .await;
+                drop(handshake_permit);
+                let (connection, reader) = match upgraded {
+                    Ok(Ok(connection)) => connection,
+                    Ok(Err(error)) => {
+                        debug!(source = %peer_addr, "supervised WebSocket upgrade rejected: {error}");
+                        return;
+                    }
+                    Err(_) => {
+                        debug!(source = %peer_addr, "supervised WebSocket upgrade timed out");
+                        return;
+                    }
+                };
+                let established_permit =
+                    match listener.established_semaphore.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            let _ = connection.close().await;
+                            return;
+                        }
+                    };
+                let connection = Arc::new(connection);
+                let mut activity = connection.activity_receiver();
+                let mut writer_closed = connection.writer_closed_receiver();
+                let established_at = tokio::time::Instant::now();
+                let handler = handler(connection.clone(), reader);
+                tokio::pin!(handler);
+                loop {
+                    if *writer_closed.borrow() {
+                        break;
+                    }
+                    let deadline =
+                        lifecycle.next_deadline(*activity.borrow(), established_at);
+                    tokio::select! {
+                        _ = &mut handler => break,
+                        _ = writer_closed.changed() => break,
+                        changed = activity.changed() => {
+                            if changed.is_err() {
+                                break;
+                            }
+                        }
+                        _ = tokio::time::sleep_until(deadline) => break,
+                    }
+                }
+                let _ = connection.close().await;
+                drop(established_permit);
+            });
+        }
     }
 
     /// Accept one TCP socket without performing TLS or HTTP/WebSocket work.
@@ -447,12 +550,15 @@ impl WebSocketListener {
         let (ws_writer, ws_reader) = ws_stream.split();
 
         // Create a WebSocket connection
-        let connection = WebSocketConnection::from_writer_with_metadata(
+        let lifecycle = ConnectionLifecycleConfig::from_handshake(self.handshake_admission);
+        let connection = WebSocketConnection::from_writer_with_runtime(
             ws_writer,
             peer_addr,
             self.secure,
             subprotocol,
             connection_metadata,
+            lifecycle.writer_queue_capacity,
+            lifecycle.write_timeout,
         );
 
         Ok((connection, ws_reader))
@@ -541,7 +647,80 @@ mod tests {
 
     #[cfg(feature = "ws")]
     #[tokio::test]
-    async fn public_accept_times_out_slow_upgrade_and_releases_admission() {
+    #[allow(deprecated)]
+    async fn deprecated_accept_fails_closed_and_requires_supervisor_migration() {
+        let listener = WebSocketListener::bind_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            HandshakeAdmissionConfig::new(std::time::Duration::from_secs(1), 1),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            listener.accept().await,
+            Err(Error::InvalidState(message)) if message.contains("serve_concurrent")
+        ));
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn public_supervisor_accepts_valid_peer_while_slow_peer_is_pending() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let listener = Arc::new(
+            WebSocketListener::bind_with_handshake_config(
+                "127.0.0.1:0".parse().unwrap(),
+                false,
+                None,
+                None,
+                HandshakeAdmissionConfig::new(std::time::Duration::from_secs(1), 2),
+            )
+            .await
+            .unwrap(),
+        );
+        let destination = listener.local_addr().unwrap();
+        let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::channel(1);
+        let supervisor = {
+            let listener = listener.clone();
+            tokio::spawn(async move {
+                listener
+                    .serve_concurrent(move |connection, _reader| {
+                        let accepted_tx = accepted_tx.clone();
+                        async move {
+                            let _ = accepted_tx.send(connection.peer_addr()).await;
+                            let _ = connection.close().await;
+                        }
+                    })
+                    .await
+            })
+        };
+
+        let stalled = TcpStream::connect(destination).await.unwrap();
+        let mut request = format!("ws://{destination}/")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            http::HeaderValue::from_static("sip"),
+        );
+        let (client, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_millis(250), accepted_rx.recv())
+            .await
+            .expect("valid peer was serialized behind Slowloris socket")
+            .expect("supervisor stopped before dispatch");
+
+        drop(client);
+        drop(stalled);
+        supervisor.abort();
+        let _ = supervisor.await;
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn public_supervisor_drops_idle_reader_and_releases_established_capacity() {
+        use futures_util::StreamExt as _;
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
         let listener = Arc::new(
@@ -556,39 +735,47 @@ mod tests {
             .unwrap(),
         );
         let destination = listener.local_addr().unwrap();
-        let accepting = {
+        let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::channel(2);
+        let supervisor = {
             let listener = listener.clone();
-            tokio::spawn(async move { listener.accept().await })
+            tokio::spawn(async move {
+                listener
+                    .serve_concurrent(move |connection, _reader| {
+                        let accepted_tx = accepted_tx.clone();
+                        async move {
+                            let _ = accepted_tx.send(connection.peer_addr()).await;
+                            std::future::pending::<()>().await;
+                        }
+                    })
+                    .await
+            })
         };
-        let stalled = TcpStream::connect(destination).await.unwrap();
-        let error = match accepting.await.unwrap() {
-            Ok(_) => panic!("slow WebSocket upgrade unexpectedly succeeded"),
-            Err(error) => error,
+        let request = || {
+            let mut request = format!("ws://{destination}/")
+                .into_client_request()
+                .unwrap();
+            request.headers_mut().insert(
+                "Sec-WebSocket-Protocol",
+                http::HeaderValue::from_static("sip"),
+            );
+            request
         };
-        assert!(matches!(
-            error,
-            Error::ConnectionTimeout(address) if address == stalled.local_addr().unwrap()
-        ));
 
-        // A timed-out peer releases the only permit, so another public accept
-        // can immediately service a valid RFC 7118 client.
-        let accepting = {
-            let listener = listener.clone();
-            tokio::spawn(async move { listener.accept().await })
-        };
-        let request = format!("ws://{destination}/")
-            .into_client_request()
-            .unwrap();
-        let mut request = request;
-        request.headers_mut().insert(
-            "Sec-WebSocket-Protocol",
-            http::HeaderValue::from_static("sip"),
-        );
-        let (client, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-        let (connection, _reader) = accepting.await.unwrap().unwrap();
-        connection.close().await.unwrap();
-        drop(client);
-        drop(stalled);
+        let (mut first_client, _) = tokio_tungstenite::connect_async(request()).await.unwrap();
+        accepted_rx.recv().await.expect("first handler not started");
+        tokio::time::timeout(std::time::Duration::from_secs(2), first_client.next())
+            .await
+            .expect("idle supervised reader/socket remained live");
+
+        let (second_client, _) = tokio_tungstenite::connect_async(request()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_millis(250), accepted_rx.recv())
+            .await
+            .expect("idle session retained established capacity")
+            .expect("supervisor stopped before second handler");
+
+        drop(second_client);
+        supervisor.abort();
+        let _ = supervisor.await;
     }
 
     /// Test binding a secure WebSocket listener.

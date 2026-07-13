@@ -2,8 +2,11 @@ use futures_util::stream::SplitSink;
 use futures_util::SinkExt;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::Mutex;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
+use tokio::task::{AbortHandle, JoinHandle};
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 #[cfg(feature = "ws")]
@@ -26,6 +29,11 @@ const SIP_WS_SUBPROTOCOL: &str = "sip";
 // message. Bound both the WebSocket codec and this application boundary so a
 // peer cannot make every connection reserve tungstenite's 64 MiB default.
 pub(super) const MAX_MESSAGE_SIZE: usize = 65_535;
+const DEFAULT_WRITER_QUEUE_CAPACITY: usize = 64;
+const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const WRITER_OPEN: u8 = 0;
+const WRITER_CLOSING: u8 = 1;
+const WRITER_CLOSED: u8 = 2;
 
 #[cfg(feature = "ws")]
 pub(super) fn sip_websocket_config() -> tungstenite::protocol::WebSocketConfig {
@@ -39,13 +47,25 @@ pub(super) fn sip_websocket_config() -> tungstenite::protocol::WebSocketConfig {
 
 /// WebSocket connection for SIP messages
 pub struct WebSocketConnection {
-    /// The WebSocket stream (writer half)
     #[cfg(feature = "ws")]
-    ws_writer: Mutex<SplitSink<WebSocketStream<SipWsStream>, WsMessage>>,
+    writer_tx: mpsc::Sender<WriterCommand>,
+    #[cfg(feature = "ws")]
+    writer_task: Mutex<Option<JoinHandle<()>>>,
+    #[cfg(feature = "ws")]
+    writer_abort: AbortHandle,
+    #[cfg(feature = "ws")]
+    writer_state: Arc<AtomicU8>,
+    #[cfg(feature = "ws")]
+    writer_closed: watch::Sender<bool>,
+    #[cfg(feature = "ws")]
+    activity: watch::Sender<tokio::time::Instant>,
+    #[cfg(feature = "ws")]
+    write_timeout: Duration,
     /// The peer's address
     peer_addr: SocketAddr,
     /// Whether the connection is closed
-    closed: AtomicBool,
+    #[cfg(not(feature = "ws"))]
+    closed: std::sync::atomic::AtomicBool,
     /// Whether this is a secure WebSocket connection
     secure: bool,
     /// The selected RFC 7118 subprotocol (`sip` for both WS and WSS)
@@ -53,6 +73,16 @@ pub struct WebSocketConnection {
     /// Verified TLS client identity retained for every message on an inbound
     /// WSS connection.
     connection_metadata: Option<TransportConnectionMetadata>,
+}
+
+#[cfg(feature = "ws")]
+enum WriterCommand {
+    Send {
+        message: WsMessage,
+        deadline: tokio::time::Instant,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Close(oneshot::Sender<Result<()>>),
 }
 
 impl WebSocketConnection {
@@ -64,23 +94,50 @@ impl WebSocketConnection {
         secure: bool,
         subprotocol: String,
     ) -> Self {
-        Self::from_writer_with_metadata(ws_writer, peer_addr, secure, subprotocol, None)
+        Self::from_writer_with_runtime(
+            ws_writer,
+            peer_addr,
+            secure,
+            subprotocol,
+            None,
+            DEFAULT_WRITER_QUEUE_CAPACITY,
+            DEFAULT_WRITE_TIMEOUT,
+        )
     }
 
-    /// Creates a WebSocket connection with verified transport metadata from
-    /// the completed inbound WSS handshake.
     #[cfg(feature = "ws")]
-    pub(crate) fn from_writer_with_metadata(
+    pub(crate) fn from_writer_with_runtime(
         ws_writer: SplitSink<WebSocketStream<SipWsStream>, WsMessage>,
         peer_addr: SocketAddr,
         secure: bool,
         subprotocol: String,
         connection_metadata: Option<TransportConnectionMetadata>,
+        writer_queue_capacity: usize,
+        write_timeout: Duration,
     ) -> Self {
-        Self {
-            ws_writer: Mutex::new(ws_writer),
+        let (writer_tx, writer_rx) = mpsc::channel(writer_queue_capacity.max(1));
+        let writer_state = Arc::new(AtomicU8::new(WRITER_OPEN));
+        let (writer_closed, _) = watch::channel(false);
+        let (activity, _) = watch::channel(tokio::time::Instant::now());
+        let task = tokio::spawn(writer_loop(
+            ws_writer,
+            writer_rx,
             peer_addr,
-            closed: AtomicBool::new(false),
+            write_timeout,
+            writer_state.clone(),
+            writer_closed.clone(),
+            activity.clone(),
+        ));
+        let writer_abort = task.abort_handle();
+        Self {
+            writer_tx,
+            writer_task: Mutex::new(Some(task)),
+            writer_abort,
+            writer_state,
+            writer_closed,
+            activity,
+            write_timeout,
+            peer_addr,
             secure,
             subprotocol,
             connection_metadata,
@@ -141,32 +198,7 @@ impl WebSocketConnection {
             Err(error) => WsMessage::Binary(bytes::Bytes::from(error.into_bytes())),
         };
 
-        // Acquire lock on the writer
-        let mut writer = self.ws_writer.lock().await;
-
-        // Send the message
-        writer.send(ws_message).await.map_err(|e| {
-            self.closed.store(true, Ordering::Relaxed);
-            match e {
-                tungstenite::Error::ConnectionClosed => {
-                    Error::ConnectionClosedByPeer(self.peer_addr)
-                }
-                tungstenite::Error::Protocol(msg) => Error::WebSocketProtocolError(msg.to_string()),
-                tungstenite::Error::Io(io_err) => {
-                    if io_err.kind() == io::ErrorKind::BrokenPipe
-                        || io_err.kind() == io::ErrorKind::ConnectionReset
-                    {
-                        Error::ConnectionReset
-                    } else {
-                        Error::SendFailed(self.peer_addr, io_err)
-                    }
-                }
-                _ => Error::SendFailed(
-                    self.peer_addr,
-                    io::Error::new(io::ErrorKind::Other, e.to_string()),
-                ),
-            }
-        })?;
+        self.send_writer_message(ws_message).await?;
 
         trace!("Sent SIP message over WebSocket to {}", self.peer_addr);
         Ok(())
@@ -192,31 +224,7 @@ impl WebSocketConnection {
         // payload from a previous capture).
         let ws_message = WsMessage::Binary(bytes);
 
-        let mut writer = self.ws_writer.lock().await;
-        writer.send(ws_message).await.map_err(|e| {
-            self.closed.store(true, Ordering::Relaxed);
-            match e {
-                tungstenite::Error::ConnectionClosed => {
-                    Error::ConnectionClosedByPeer(self.peer_addr)
-                }
-                tungstenite::Error::Protocol(msg) => Error::WebSocketProtocolError(msg.to_string()),
-                tungstenite::Error::Io(io_err) => {
-                    if io_err.kind() == io::ErrorKind::BrokenPipe
-                        || io_err.kind() == io::ErrorKind::ConnectionReset
-                    {
-                        Error::ConnectionReset
-                    } else {
-                        Error::SendFailed(self.peer_addr, io_err)
-                    }
-                }
-                _ => Error::SendFailed(
-                    self.peer_addr,
-                    io::Error::new(io::ErrorKind::Other, e.to_string()),
-                ),
-            }
-        })?;
-
-        Ok(())
+        self.send_writer_message(ws_message).await
     }
 
     /// Processes a WebSocket message and attempts to parse it as a SIP message.
@@ -229,6 +237,7 @@ impl WebSocketConnection {
         &self,
         ws_message: WsMessage,
     ) -> Result<Option<(Message, bytes::Bytes)>> {
+        self.activity.send_replace(tokio::time::Instant::now());
         match ws_message {
             WsMessage::Text(text) => {
                 // RFC 7118 section 7: SIP messages are sent as text frames
@@ -290,7 +299,12 @@ impl WebSocketConnection {
             }
             WsMessage::Close(_) => {
                 debug!("Received close frame from {}", self.peer_addr);
-                self.closed.store(true, Ordering::Relaxed);
+                let _ = self.writer_state.compare_exchange(
+                    WRITER_OPEN,
+                    WRITER_CLOSING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
                 Ok(None)
             }
             WsMessage::Frame(_) => {
@@ -304,33 +318,166 @@ impl WebSocketConnection {
     /// Closes the WebSocket connection
     #[cfg(feature = "ws")]
     pub async fn close(&self) -> Result<()> {
-        if self.closed.swap(true, Ordering::Relaxed) {
-            // Already closed
-            return Ok(());
+        if self.writer_state.load(Ordering::Acquire) != WRITER_CLOSED
+            && self
+                .writer_state
+                .compare_exchange(
+                    WRITER_OPEN,
+                    WRITER_CLOSING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+        {
+            let (reply, _ignored) = oneshot::channel();
+            if self
+                .writer_tx
+                .try_send(WriterCommand::Close(reply))
+                .is_err()
+            {
+                // A saturated writer queue must not hold drain hostage.
+                self.writer_abort.abort();
+            }
         }
 
-        let mut writer = self.ws_writer.lock().await;
-
-        // Send a close frame
-        if let Err(e) = writer.send(WsMessage::Close(None)).await {
-            // If we can't send a close frame, just log it
-            warn!("Failed to send close frame to {}: {}", self.peer_addr, e);
+        let mut task_slot = self.writer_task.lock().await;
+        if let Some(mut task) = task_slot.take() {
+            if tokio::time::timeout(self.write_timeout, &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+                let _ = task.await;
+            }
+        } else if !*self.writer_closed.borrow() {
+            let mut closed = self.writer_closed.subscribe();
+            if tokio::time::timeout(self.write_timeout, closed.changed())
+                .await
+                .is_err()
+            {
+                self.writer_abort.abort();
+            }
         }
-
-        // Close the sink
-        if let Err(e) = writer.close().await {
-            return Err(Error::IoError(io::Error::new(
-                io::ErrorKind::Other,
-                e.to_string(),
-            )));
-        }
-
+        self.writer_state.store(WRITER_CLOSED, Ordering::Release);
+        self.writer_closed.send_replace(true);
         Ok(())
     }
 
     /// Returns whether the connection is closed
     pub fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Relaxed)
+        self.writer_state.load(Ordering::Acquire) != WRITER_OPEN
+    }
+
+    #[cfg(feature = "ws")]
+    pub(crate) fn activity_receiver(&self) -> watch::Receiver<tokio::time::Instant> {
+        self.activity.subscribe()
+    }
+
+    #[cfg(feature = "ws")]
+    pub(crate) fn writer_closed_receiver(&self) -> watch::Receiver<bool> {
+        self.writer_closed.subscribe()
+    }
+
+    #[cfg(feature = "ws")]
+    async fn send_writer_message(&self, message: WsMessage) -> Result<()> {
+        if self.writer_state.load(Ordering::Acquire) != WRITER_OPEN {
+            return Err(Error::TransportClosed);
+        }
+        let deadline = tokio::time::Instant::now() + self.write_timeout;
+        let (reply, result) = oneshot::channel();
+        self.writer_tx
+            .try_send(WriterCommand::Send {
+                message,
+                deadline,
+                reply,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => Error::BufferCapacityExceeded,
+                mpsc::error::TrySendError::Closed(_) => Error::TransportClosed,
+            })?;
+        tokio::time::timeout_at(deadline, result)
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|_| Error::TransportClosed)?
+    }
+}
+
+#[cfg(feature = "ws")]
+async fn writer_loop(
+    mut writer: SplitSink<WebSocketStream<SipWsStream>, WsMessage>,
+    mut commands: mpsc::Receiver<WriterCommand>,
+    peer_addr: SocketAddr,
+    write_timeout: Duration,
+    state: Arc<AtomicU8>,
+    closed: watch::Sender<bool>,
+    activity: watch::Sender<tokio::time::Instant>,
+) {
+    while let Some(command) = commands.recv().await {
+        match command {
+            WriterCommand::Send {
+                message,
+                deadline,
+                reply,
+            } => {
+                // A caller that timed out or was cancelled must not leave a
+                // queued SIP mutation that executes later and is then retried.
+                if reply.is_closed() || tokio::time::Instant::now() >= deadline {
+                    continue;
+                }
+                let result = match tokio::time::timeout_at(deadline, writer.send(message)).await {
+                    Ok(Ok(())) => {
+                        activity.send_replace(tokio::time::Instant::now());
+                        Ok(())
+                    }
+                    Ok(Err(error)) => Err(map_writer_error(peer_addr, error)),
+                    Err(_) => Err(Error::Timeout),
+                };
+                let failed = result.is_err();
+                let _ = reply.send(result);
+                if failed {
+                    break;
+                }
+            }
+            WriterCommand::Close(reply) => {
+                let result = match tokio::time::timeout(write_timeout, async {
+                    writer.send(WsMessage::Close(None)).await?;
+                    writer.close().await
+                })
+                .await
+                {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(error)) => Err(map_writer_error(peer_addr, error)),
+                    Err(_) => Err(Error::Timeout),
+                };
+                let _ = reply.send(result);
+                break;
+            }
+        }
+    }
+    state.store(WRITER_CLOSED, Ordering::Release);
+    closed.send_replace(true);
+}
+
+#[cfg(feature = "ws")]
+fn map_writer_error(peer_addr: SocketAddr, error: tungstenite::Error) -> Error {
+    match error {
+        tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => {
+            Error::ConnectionClosedByPeer(peer_addr)
+        }
+        tungstenite::Error::Protocol(message) => Error::WebSocketProtocolError(message.to_string()),
+        tungstenite::Error::Io(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            Error::ConnectionReset
+        }
+        tungstenite::Error::Io(error) => Error::SendFailed(peer_addr, error),
+        other => Error::SendFailed(
+            peer_addr,
+            io::Error::new(io::ErrorKind::Other, other.to_string()),
+        ),
     }
 }
 
@@ -345,7 +492,7 @@ impl WebSocketConnection {
     ) -> Self {
         Self {
             peer_addr,
-            closed: AtomicBool::new(false),
+            closed: std::sync::atomic::AtomicBool::new(false),
             secure,
             subprotocol,
             connection_metadata: None,
@@ -368,6 +515,10 @@ impl WebSocketConnection {
 
 impl Drop for WebSocketConnection {
     fn drop(&mut self) {
+        #[cfg(feature = "ws")]
+        {
+            self.writer_abort.abort();
+        }
         if !self.is_closed() {
             // The connection is being dropped without being closed
             debug!(
@@ -388,7 +539,86 @@ mod tests {
     use rvoip_sip_core::{
         CallId, Message, Method, Request, Response, StatusCode, TypedHeader, Uri,
     };
+    use std::sync::atomic::AtomicBool;
     use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn blocked_writer_cannot_hold_connection_drain() {
+        use futures_util::StreamExt as _;
+        use tokio_tungstenite::tungstenite::protocol::Role;
+
+        let (transport_side, _blocked_peer) = tokio::io::duplex(1);
+        let stream = WebSocketStream::from_raw_socket(
+            SipWsStream::Test(transport_side),
+            Role::Client,
+            Some(sip_websocket_config()),
+        )
+        .await;
+        let (writer, _reader) = stream.split();
+        let connection = Arc::new(WebSocketConnection::from_writer_with_runtime(
+            writer,
+            "127.0.0.1:5060".parse().unwrap(),
+            false,
+            "sip".into(),
+            None,
+            1,
+            Duration::from_millis(40),
+        ));
+        let sending = {
+            let connection = connection.clone();
+            tokio::spawn(async move {
+                connection
+                    .send_raw_bytes(bytes::Bytes::from(vec![b'x'; 4_096]))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        tokio::time::timeout(Duration::from_millis(200), connection.close())
+            .await
+            .expect("blocked WebSocket writer held drain")
+            .unwrap();
+        assert!(connection.is_closed());
+        assert!(sending.await.unwrap().is_err());
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn writer_failure_notifies_reader_supervision_immediately() {
+        use futures_util::StreamExt as _;
+        use tokio_tungstenite::tungstenite::protocol::Role;
+
+        let (transport_side, peer) = tokio::io::duplex(64);
+        let stream = WebSocketStream::from_raw_socket(
+            SipWsStream::Test(transport_side),
+            Role::Client,
+            Some(sip_websocket_config()),
+        )
+        .await;
+        let (writer, _reader) = stream.split();
+        let connection = WebSocketConnection::from_writer_with_runtime(
+            writer,
+            "127.0.0.1:5060".parse().unwrap(),
+            false,
+            "sip".into(),
+            None,
+            1,
+            Duration::from_millis(100),
+        );
+        let mut writer_closed = connection.writer_closed_receiver();
+        drop(peer);
+
+        assert!(connection
+            .send_raw_bytes(bytes::Bytes::from_static(b"dead peer"))
+            .await
+            .is_err());
+        tokio::time::timeout(Duration::from_millis(100), writer_closed.changed())
+            .await
+            .expect("writer failure did not wake reader supervision")
+            .expect("writer lifecycle sender disappeared without notification");
+        assert!(*writer_closed.borrow());
+    }
 
     // For testing only: a simplified WebSocketConnection without real WebSocket dependencies
     #[cfg(feature = "ws")]

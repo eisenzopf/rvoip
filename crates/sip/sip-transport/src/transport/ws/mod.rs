@@ -8,19 +8,23 @@ pub(crate) use stream::SipWsStream;
 
 use crate::error::{Error, Result};
 use crate::transport::{
-    runtime::{OutboundHandshakeAdmission, TransportTaskSet},
+    runtime::{
+        next_trust_context, ConnectionDirection, ConnectionLifecycleConfig, DialAdmission,
+        OutboundDialCoordinator, TransportTaskSet,
+    },
     safe_method_label, validate_typed_outbound_message, HandshakeAdmissionConfig, Transport,
     TransportEvent, TransportType,
 };
 use futures_util::StreamExt;
+use rvoip_sip_core::types::uri::Host;
 use rvoip_sip_core::Message;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
-use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore};
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite;
 use tracing::{debug, error, info, warn};
@@ -51,14 +55,19 @@ pub struct WebSocketTransport {
 struct WebSocketTransportInner {
     local_addr: SocketAddr,
     secure: bool,
-    connections: Mutex<HashMap<SocketAddr, WebSocketConnectionRecord>>,
+    connections: Mutex<HashMap<WebSocketConnectionKey, WebSocketConnectionRecord>>,
     next_connection_generation: AtomicU64,
     closed: AtomicBool,
     close_gate: Mutex<()>,
     events_tx: mpsc::Sender<TransportEvent>,
     tasks: Arc<TransportTaskSet>,
     handshake_admission: HandshakeAdmissionConfig,
-    outbound_handshakes: Arc<OutboundHandshakeAdmission>,
+    lifecycle: ConnectionLifecycleConfig,
+    outbound_dials: Arc<OutboundDialCoordinator<WebSocketConnectionKey>>,
+    inbound_established: Arc<Semaphore>,
+    outbound_established: Arc<Semaphore>,
+    inbound_trust_context: u64,
+    outbound_trust_context: u64,
     /// `TlsConnector` used by outbound `wss://` dials. `None` when
     /// `secure=false` or when no `TlsClientConfig` was supplied at
     /// bind time — `connect_to()` then errors with `NotImplemented`
@@ -71,6 +80,159 @@ struct WebSocketTransportInner {
 struct WebSocketConnectionRecord {
     generation: u64,
     connection: Arc<WebSocketConnection>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum WebSocketAuthorityHost {
+    Dns(String),
+    Ip(IpAddr),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct WebSocketAuthority {
+    host: WebSocketAuthorityHost,
+    port: u16,
+}
+
+impl WebSocketAuthority {
+    fn for_message(message: &Message, destination: SocketAddr) -> Self {
+        let host = match message {
+            Message::Request(request) => match &request.uri().host {
+                Host::Domain(domain) => {
+                    WebSocketAuthorityHost::Dns(domain.trim_end_matches('.').to_ascii_lowercase())
+                }
+                Host::Address(address) => WebSocketAuthorityHost::Ip(*address),
+            },
+            Message::Response(_) => return Self::for_address(destination),
+        };
+        Self {
+            host,
+            port: destination.port(),
+        }
+    }
+
+    fn for_address(destination: SocketAddr) -> Self {
+        let host = if destination.ip().is_loopback() {
+            WebSocketAuthorityHost::Dns("localhost".into())
+        } else {
+            WebSocketAuthorityHost::Ip(destination.ip())
+        };
+        Self {
+            host,
+            port: destination.port(),
+        }
+    }
+
+    fn http_authority(&self) -> String {
+        match self.host {
+            WebSocketAuthorityHost::Dns(ref domain) => format!("{domain}:{}", self.port),
+            WebSocketAuthorityHost::Ip(IpAddr::V4(address)) => {
+                format!("{address}:{}", self.port)
+            }
+            WebSocketAuthorityHost::Ip(IpAddr::V6(address)) => {
+                format!("[{address}]:{}", self.port)
+            }
+        }
+    }
+
+    #[cfg(feature = "wss")]
+    fn server_name(&self) -> Result<tokio_rustls::rustls::pki_types::ServerName<'static>> {
+        match &self.host {
+            WebSocketAuthorityHost::Dns(domain) => {
+                tokio_rustls::rustls::pki_types::ServerName::try_from(domain.clone())
+                    .map_err(|_| Error::InvalidAddress("invalid WSS authority".into()))
+            }
+            WebSocketAuthorityHost::Ip(address) => Ok((*address).into()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct WebSocketConnectionKey {
+    remote_addr: SocketAddr,
+    direction: ConnectionDirection,
+    authority: WebSocketAuthority,
+    trust_context: u64,
+    secure: bool,
+}
+
+impl WebSocketConnectionKey {
+    fn outbound(
+        remote_addr: SocketAddr,
+        authority: WebSocketAuthority,
+        trust_context: u64,
+        secure: bool,
+    ) -> Self {
+        Self {
+            remote_addr,
+            direction: ConnectionDirection::Outbound,
+            authority,
+            trust_context,
+            secure,
+        }
+    }
+
+    fn inbound(
+        remote_addr: SocketAddr,
+        local_addr: SocketAddr,
+        trust_context: u64,
+        secure: bool,
+    ) -> Self {
+        Self {
+            remote_addr,
+            direction: ConnectionDirection::Inbound,
+            authority: WebSocketAuthority::for_address(local_addr),
+            trust_context,
+            secure,
+        }
+    }
+}
+
+fn select_unambiguous_websocket_flow(
+    connections: &HashMap<WebSocketConnectionKey, WebSocketConnectionRecord>,
+    destination: SocketAddr,
+) -> Result<Option<Arc<WebSocketConnection>>> {
+    if let Some(inbound) = connections.iter().find_map(|(key, record)| {
+        (key.remote_addr == destination
+            && key.direction == ConnectionDirection::Inbound
+            && !record.connection.is_closed())
+        .then(|| record.connection.clone())
+    }) {
+        return Ok(Some(inbound));
+    }
+
+    let mut outbound = connections.iter().filter(|(key, record)| {
+        key.remote_addr == destination
+            && key.direction == ConnectionDirection::Outbound
+            && !record.connection.is_closed()
+    });
+    let first = outbound.next().map(|(_, record)| record.connection.clone());
+    if outbound.next().is_some() {
+        return Err(Error::InvalidState(format!(
+            "Multiple authenticated WebSocket flows exist for {destination}; an explicit authority is required"
+        )));
+    }
+    Ok(first)
+}
+
+async fn close_websocket_connections(
+    connections: Vec<(WebSocketConnectionKey, WebSocketConnectionRecord)>,
+) {
+    // Start every bounded close at once. Drain duration is therefore one
+    // writer deadline, not connection_count × writer deadline.
+    let close_results =
+        futures_util::future::join_all(connections.iter().map(|(key, record)| async move {
+            (key.remote_addr, record.connection.close().await)
+        }))
+        .await;
+    for (remote_addr, result) in close_results {
+        if let Err(error) = result {
+            error!(
+                "Error closing WebSocket connection to {}: {}",
+                remote_addr, error
+            );
+        }
+    }
 }
 
 impl WebSocketTransport {
@@ -238,6 +400,7 @@ impl WebSocketTransport {
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         let handshake_admission =
             handshake_admission.validate(if secure { "WSS" } else { "WS" })?;
+        let lifecycle = ConnectionLifecycleConfig::from_handshake(handshake_admission);
         // Create the event channel
         let capacity = channel_capacity.unwrap_or(DEFAULT_CHANNEL_CAPACITY);
         let (events_tx, events_rx) = mpsc::channel(capacity);
@@ -276,9 +439,20 @@ impl WebSocketTransport {
                 events_tx: events_tx.clone(),
                 tasks: TransportTaskSet::new(),
                 handshake_admission,
-                outbound_handshakes: OutboundHandshakeAdmission::new(
+                lifecycle,
+                outbound_dials: OutboundDialCoordinator::new(
                     handshake_admission.max_concurrent,
+                    lifecycle.max_pending_dials,
+                    lifecycle.failure_backoff,
                 ),
+                inbound_established: Arc::new(Semaphore::new(
+                    lifecycle.max_established_per_direction,
+                )),
+                outbound_established: Arc::new(Semaphore::new(
+                    lifecycle.max_established_per_direction,
+                )),
+                inbound_trust_context: next_trust_context(),
+                outbound_trust_context: next_trust_context(),
                 tls_connector,
             }),
         };
@@ -302,6 +476,7 @@ impl WebSocketTransport {
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         let handshake_admission =
             handshake_admission.validate(if secure { "WSS" } else { "WS" })?;
+        let lifecycle = ConnectionLifecycleConfig::from_handshake(handshake_admission);
         let capacity = channel_capacity.unwrap_or(DEFAULT_CHANNEL_CAPACITY);
         let (events_tx, events_rx) = mpsc::channel(capacity);
 
@@ -332,9 +507,20 @@ impl WebSocketTransport {
                 events_tx: events_tx.clone(),
                 tasks: TransportTaskSet::new(),
                 handshake_admission,
-                outbound_handshakes: OutboundHandshakeAdmission::new(
+                lifecycle,
+                outbound_dials: OutboundDialCoordinator::new(
                     handshake_admission.max_concurrent,
+                    lifecycle.max_pending_dials,
+                    lifecycle.failure_backoff,
                 ),
+                inbound_established: Arc::new(Semaphore::new(
+                    lifecycle.max_established_per_direction,
+                )),
+                outbound_established: Arc::new(Semaphore::new(
+                    lifecycle.max_established_per_direction,
+                )),
+                inbound_trust_context: next_trust_context(),
+                outbound_trust_context: next_trust_context(),
             }),
         };
 
@@ -394,15 +580,12 @@ impl WebSocketTransport {
                     let weak_inner_for_handshake = weak_inner.clone();
                     let _ = tasks
                         .spawn(async move {
-                            let upgraded = tokio::time::timeout(
-                                admission.timeout,
+                            let deadline = tokio::time::Instant::now() + admission.timeout;
+                            let upgraded = tokio::time::timeout_at(
+                                deadline,
                                 listener.upgrade_tcp(stream, peer_addr),
                             )
                             .await;
-                            // A permit protects only unauthenticated handshake
-                            // work, never an established connection or event
-                            // channel send.
-                            drop(permit);
 
                             let (connection, reader) = match upgraded {
                                 Ok(Ok(upgraded)) => upgraded,
@@ -439,18 +622,55 @@ impl WebSocketTransport {
                                 return;
                             }
 
+                            let established_permit =
+                                match inner.inbound_established.clone().try_acquire_owned() {
+                                    Ok(permit) => permit,
+                                    Err(_) => {
+                                        drop(inner);
+                                        warn!(
+                                            source = %peer_addr,
+                                            "WebSocket established inbound connection limit reached"
+                                        );
+                                        let _ = connection.close().await;
+                                        return;
+                                    }
+                                };
+
                             debug!("Accepted WebSocket connection from {}", peer_addr);
                             let connection = Arc::new(connection);
                             let generation = inner
                                 .next_connection_generation
                                 .fetch_add(1, Ordering::Relaxed);
-                            inner.connections.lock().await.insert(
+                            let key = WebSocketConnectionKey::inbound(
                                 peer_addr,
+                                inner.local_addr,
+                                inner.inbound_trust_context,
+                                inner.secure,
+                            );
+                            let lifecycle = inner.lifecycle;
+                            let mut connections =
+                                match tokio::time::timeout_at(deadline, inner.connections.lock())
+                                    .await
+                                {
+                                    Ok(connections) => connections,
+                                    Err(_) => {
+                                        let _ = connection.close().await;
+                                        warn!(
+                                            source = %peer_addr,
+                                            "WebSocket registration timed out"
+                                        );
+                                        return;
+                                    }
+                                };
+                            connections.insert(
+                                key.clone(),
                                 WebSocketConnectionRecord {
                                     generation,
                                     connection: connection.clone(),
                                 },
                             );
+                            drop(connections);
+                            drop(permit);
                             drop(inner);
 
                             Self::run_connection_reader(
@@ -458,6 +678,9 @@ impl WebSocketTransport {
                                 connection,
                                 reader,
                                 generation,
+                                key,
+                                lifecycle,
+                                established_permit,
                             )
                             .await;
                         })
@@ -484,20 +707,47 @@ impl WebSocketTransport {
             tokio_tungstenite::WebSocketStream<SipWsStream>,
         >,
         generation: u64,
+        key: WebSocketConnectionKey,
+        lifecycle: ConnectionLifecycleConfig,
+        _established_permit: OwnedSemaphorePermit,
     ) {
         let peer_addr = connection.peer_addr();
+        let mut activity = connection.activity_receiver();
+        let mut writer_closed = connection.writer_closed_receiver();
+        let established_at = tokio::time::Instant::now();
 
         loop {
             let Some(inner) = weak_inner.upgrade() else {
                 break;
             };
-            if inner.closed.load(Ordering::Acquire) || connection.is_closed() {
+            if inner.closed.load(Ordering::Acquire)
+                || connection.is_closed()
+                || *writer_closed.borrow()
+            {
                 break;
             }
             drop(inner);
 
+            let deadline = lifecycle.next_deadline(*activity.borrow(), established_at);
+            let next_message = tokio::select! {
+                message = reader.next() => Some(message),
+                changed = activity.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    None
+                }
+                _ = writer_closed.changed() => break,
+                _ = tokio::time::sleep_until(deadline) => {
+                    debug!(destination = %peer_addr, "WebSocket connection lifecycle deadline reached");
+                    break;
+                }
+            };
+            let Some(next_message) = next_message else {
+                continue;
+            };
             // Read the next WebSocket message
-            let ws_message = match reader.next().await {
+            let ws_message = match next_message {
                 Some(Ok(msg)) => msg,
                 Some(Err(e)) => {
                     // Distinguish "peer disconnected" from a real
@@ -536,15 +786,9 @@ impl WebSocketTransport {
                             peer_addr, e
                         );
                         if let Some(inner) = weak_inner.upgrade() {
-                            let _ = inner
-                                .events_tx
-                                .send(TransportEvent::Error {
-                                    error: format!(
-                                        "WebSocket read error from {}: {}",
-                                        peer_addr, e
-                                    ),
-                                })
-                                .await;
+                            let _ = inner.events_tx.try_send(TransportEvent::Error {
+                                error: format!("WebSocket read error from {}: {}", peer_addr, e),
+                            });
                         }
                     }
 
@@ -584,8 +828,12 @@ impl WebSocketTransport {
                         connection_metadata: connection.connection_metadata().cloned(),
                     };
 
-                    if let Err(e) = inner.events_tx.send(event).await {
-                        error!("Error sending event: {}", e);
+                    if let Err(e) = inner.events_tx.try_send(event) {
+                        warn!(
+                            source = %peer_addr,
+                            error = %e,
+                            "WebSocket event queue unavailable; closing flow instead of blocking lifecycle cleanup"
+                        );
                         break;
                     }
                 }
@@ -600,12 +848,9 @@ impl WebSocketTransport {
                     );
 
                     if let Some(inner) = weak_inner.upgrade() {
-                        let _ = inner
-                            .events_tx
-                            .send(TransportEvent::Error {
-                                error: format!("WebSocket message processing error: {}", e),
-                            })
-                            .await;
+                        let _ = inner.events_tx.try_send(TransportEvent::Error {
+                            error: format!("WebSocket message processing error: {}", e),
+                        });
                     }
                 }
             }
@@ -615,10 +860,10 @@ impl WebSocketTransport {
         if let Some(inner) = weak_inner.upgrade() {
             let mut connections = inner.connections.lock().await;
             if connections
-                .get(&peer_addr)
+                .get(&key)
                 .is_some_and(|record| record.generation == generation)
             {
-                connections.remove(&peer_addr);
+                connections.remove(&key);
             }
         }
 
@@ -650,32 +895,35 @@ impl WebSocketTransport {
     ///    its reader so inbound messages from the server reach
     ///    `TransportEvent::MessageReceived`.
     ///
-    /// Idempotent: a second call for the same `addr` returns the
-    /// existing connection if it's still open.
-    ///
-    /// `server_name_hint` is the SNI override for the WSS handshake.
-    /// When `None`, falls back to `ip_to_server_name(addr)` (loopback
-    /// → `"localhost"`, otherwise an IP-typed `ServerName`). Callers
-    /// with a known DNS hostname (the URI's host) should pass it
-    /// through so production CA-validated WSS handshakes resolve
-    /// correctly. The plain-WS path ignores this argument.
+    /// Idempotent only for the complete pool identity: remote address,
+    /// normalized HTTP/TLS authority, direction, security mode, and trust
+    /// context. WSS derives both `Host` and SNI from that one authority, so a
+    /// connection authenticated for one virtual host is never reused for a
+    /// different virtual host on the same address.
     #[cfg(feature = "ws")]
     async fn connect_to(
         &self,
         addr: SocketAddr,
-        #[cfg(feature = "wss")] server_name_hint: Option<
-            tokio_rustls::rustls::pki_types::ServerName<'static>,
-        >,
-        #[cfg(not(feature = "wss"))] _server_name_hint: (),
+        authority: WebSocketAuthority,
     ) -> Result<Arc<WebSocketConnection>> {
-        // Check if we already have an open connection
+        let deadline = tokio::time::Instant::now() + self.inner.handshake_admission.timeout;
+        let key = WebSocketConnectionKey::outbound(
+            addr,
+            authority.clone(),
+            self.inner.outbound_trust_context,
+            self.inner.secure,
+        );
         {
-            let connections = self.inner.connections.lock().await;
-            if let Some(record) = connections.get(&addr) {
-                if !record.connection.is_closed() {
-                    return Ok(record.connection.clone());
-                }
+            let mut connections = tokio::time::timeout_at(deadline, self.inner.connections.lock())
+                .await
+                .map_err(|_| Error::ConnectionTimeout(addr))?;
+            if connections
+                .get(&key)
+                .is_some_and(|record| !record.connection.is_closed())
+            {
+                return Ok(connections[&key].connection.clone());
             }
+            connections.remove(&key);
         }
 
         // Pre-flight: for WSS dials, the TlsConnector must have been
@@ -694,170 +942,256 @@ impl WebSocketTransport {
 
         let inner = self.inner.clone();
         let managed_tasks = self.inner.tasks.clone();
-        let timeout = self.inner.handshake_admission.timeout;
-        let admission = self.inner.outbound_handshakes.clone();
+        let coordinator = self.inner.outbound_dials.clone();
 
-        managed_tasks
-            .run(async move {
-                use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-
-                let deadline = tokio::time::Instant::now() + timeout;
-                let permit = tokio::time::timeout_at(deadline, admission.acquire(addr))
+        match coordinator.begin(key.clone())? {
+            DialAdmission::Follower { outcome, .. } => {
+                OutboundDialCoordinator::<WebSocketConnectionKey>::wait(outcome, deadline, addr)
+                    .await?;
+                tokio::time::timeout_at(deadline, self.inner.connections.lock())
                     .await
-                    .map_err(|_| Error::ConnectionTimeout(addr))??;
+                    .map_err(|_| Error::ConnectionTimeout(addr))?
+                    .get(&key)
+                    .filter(|record| !record.connection.is_closed())
+                    .map(|record| record.connection.clone())
+                    .ok_or(Error::TransportClosed)
+            }
+            DialAdmission::Leader {
+                key,
+                flight,
+                _pending,
+                cancellation,
+            } => {
+                let coordinator_for_task = coordinator.clone();
+                let pending_permit = _pending;
+                managed_tasks
+                    .run(async move {
+                        let mut cancellation = cancellation;
+                        let _pending_permit = pending_permit;
+                        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-                // Recheck under destination ownership. Concurrent callers now
-                // share the leader's connection instead of opening a second
-                // TCP/TLS/HTTP handshake.
-                {
-                    let mut connections = inner.connections.lock().await;
-                    if let Some(record) = connections.get(&addr) {
-                        if !record.connection.is_closed() {
-                            return Ok(record.connection.clone());
-                        }
-                    }
-                    connections.remove(&addr);
-                }
-
-                let (ws_stream, selected_subprotocol) = tokio::time::timeout_at(deadline, async {
-                    // Step 1 — open TCP. The destination IP/port were resolved
-                    // by the upper layer; we don't do DNS here.
-                    let tcp_stream = tokio::net::TcpStream::connect(addr)
-                        .await
-                        .map_err(|e| Error::ConnectFailed(addr, e))?;
-
-                    // Step 2 — for WSS, complete TLS before the HTTP upgrade.
-                    let (stream, subprotocol_advertised, url_scheme): (
-                        SipWsStream,
-                        &'static str,
-                        &'static str,
-                    ) = if inner.secure {
-                        #[cfg(feature = "wss")]
-                        {
-                            let connector = inner
-                                .tls_connector
-                                .as_ref()
-                                .expect("pre-flight guarantees tls_connector is Some when secure");
-                            let server_name = server_name_hint
-                                .unwrap_or_else(|| crate::transport::tls::ip_to_server_name(addr));
-                            let tls_stream = connector
-                                .connect(server_name, tcp_stream)
+                        let result = async {
+                            let _handshake = coordinator_for_task
+                                .acquire_handshake(deadline, addr)
+                                .await?;
+                            {
+                                let mut connections = tokio::time::timeout_at(
+                                    deadline,
+                                    inner.connections.lock(),
+                                )
                                 .await
-                                .map_err(|error| {
-                                    crate::transport::tls::classify_tls_runtime_error(
-                                        error,
-                                        format!("WSS client TLS handshake failed for {addr}"),
-                                    )
-                                })?;
-                            (
-                                SipWsStream::ClientTls(tls_stream),
-                                SIP_WS_SUBPROTOCOL,
-                                "wss",
+                                .map_err(|_| Error::ConnectionTimeout(addr))?;
+                                if let Some(record) = connections.get(&key) {
+                                    if !record.connection.is_closed() {
+                                        return Ok(record.connection.clone());
+                                    }
+                                }
+                                connections.remove(&key);
+                            }
+                            let established_permit = inner
+                                .outbound_established
+                                .clone()
+                                .try_acquire_owned()
+                                .map_err(|_| Error::ConnectionPoolExhausted)?;
+
+                            let (ws_stream, selected_subprotocol) =
+                                tokio::time::timeout_at(deadline, async {
+                                    let tcp_stream = tokio::net::TcpStream::connect(addr)
+                                        .await
+                                        .map_err(|e| Error::ConnectFailed(addr, e))?;
+
+                                    let (stream, subprotocol_advertised, url_scheme): (
+                                        SipWsStream,
+                                        &'static str,
+                                        &'static str,
+                                    ) = if inner.secure {
+                                        #[cfg(feature = "wss")]
+                                        {
+                                            let connector = inner.tls_connector.as_ref().expect(
+                                                "pre-flight guarantees configured WSS connector",
+                                            );
+                                            let server_name = authority.server_name()?;
+                                            let tls_stream = connector
+                                                .connect(server_name, tcp_stream)
+                                                .await
+                                                .map_err(|error| {
+                                                    crate::transport::tls::classify_tls_runtime_error(
+                                                        error,
+                                                        format!(
+                                                            "WSS client TLS handshake failed for {addr}"
+                                                        ),
+                                                    )
+                                                })?;
+                                            (
+                                                SipWsStream::ClientTls(tls_stream),
+                                                SIP_WS_SUBPROTOCOL,
+                                                "wss",
+                                            )
+                                        }
+                                        #[cfg(not(feature = "wss"))]
+                                        {
+                                            return Err(Error::NotImplemented(
+                                                "WSS client requires the `wss` cargo feature"
+                                                    .into(),
+                                            ));
+                                        }
+                                    } else {
+                                        (
+                                            SipWsStream::Plain(tcp_stream),
+                                            SIP_WS_SUBPROTOCOL,
+                                            "ws",
+                                        )
+                                    };
+
+                                    // HTTP Host and TLS SNI are derived from
+                                    // the same normalized authority.
+                                    let url = format!(
+                                        "{}://{}/",
+                                        url_scheme,
+                                        authority.http_authority()
+                                    );
+                                    let mut request =
+                                        url.into_client_request().map_err(|_error| {
+                                            Error::WebSocketHandshakeFailed(format!(
+                                                "WebSocket client request construction failed for {addr}"
+                                            ))
+                                        })?;
+                                    request.headers_mut().insert(
+                                        "Sec-WebSocket-Protocol",
+                                        http::HeaderValue::from_static(subprotocol_advertised),
+                                    );
+                                    let (ws_stream, response) =
+                                        tokio_tungstenite::client_async_with_config(
+                                            request,
+                                            stream,
+                                            Some(connection::sip_websocket_config()),
+                                        )
+                                        .await
+                                        .map_err(|_error| {
+                                            Error::WebSocketHandshakeFailed(format!(
+                                                "WebSocket client handshake failed for {addr}"
+                                            ))
+                                        })?;
+                                    let selected = response
+                                        .headers()
+                                        .get("Sec-WebSocket-Protocol")
+                                        .and_then(|value| value.to_str().ok());
+                                    if !selected_subprotocol_is_exact(
+                                        selected,
+                                        subprotocol_advertised,
+                                    ) {
+                                        return Err(Error::WebSocketHandshakeFailed(format!(
+                                            "WebSocket peer did not negotiate required subprotocol for {addr}"
+                                        )));
+                                    }
+                                    Ok::<_, Error>((
+                                        ws_stream,
+                                        subprotocol_advertised.to_string(),
+                                    ))
+                                })
+                                .await
+                                .map_err(|_| Error::ConnectionTimeout(addr))??;
+
+                            let (ws_writer, ws_reader) = ws_stream.split();
+                            let connection_arc = Arc::new(
+                                WebSocketConnection::from_writer_with_runtime(
+                                    ws_writer,
+                                    addr,
+                                    inner.secure,
+                                    selected_subprotocol,
+                                    None,
+                                    inner.lifecycle.writer_queue_capacity,
+                                    inner.lifecycle.write_timeout,
+                                ),
+                            );
+                            if inner.closed.load(Ordering::Acquire) {
+                                let _ = connection_arc.close().await;
+                                return Err(Error::TransportClosed);
+                            }
+
+                            let generation = inner
+                                .next_connection_generation
+                                .fetch_add(1, Ordering::Relaxed);
+                            let weak_inner = Arc::downgrade(&inner);
+                            let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+                            let reader_connection = connection_arc.clone();
+                            let reader_key = key.clone();
+                            let lifecycle = inner.lifecycle;
+                            let reader_task = tokio::time::timeout_at(
+                                deadline,
+                                inner.tasks.spawn(async move {
+                                    if start_rx.await.is_ok() {
+                                        Self::run_connection_reader(
+                                            weak_inner,
+                                            reader_connection,
+                                            ws_reader,
+                                            generation,
+                                            reader_key,
+                                            lifecycle,
+                                            established_permit,
+                                        )
+                                        .await;
+                                    }
+                                }),
                             )
+                            .await
+                            .map_err(|_| Error::ConnectionTimeout(addr))?
+                            .ok_or(Error::TransportClosed)?;
+
+                            let mut connections = match tokio::time::timeout_at(
+                                deadline,
+                                inner.connections.lock(),
+                            )
+                            .await
+                            {
+                                Ok(connections) => connections,
+                                Err(_) => {
+                                    reader_task.abort();
+                                    let _ = connection_arc.close().await;
+                                    return Err(Error::ConnectionTimeout(addr));
+                                }
+                            };
+                            connections.insert(
+                                key.clone(),
+                                WebSocketConnectionRecord {
+                                    generation,
+                                    connection: connection_arc.clone(),
+                                },
+                            );
+                            drop(connections);
+                            if start_tx.send(()).is_err() {
+                                reader_task.abort();
+                                let mut connections = inner.connections.lock().await;
+                                if connections
+                                    .get(&key)
+                                    .is_some_and(|record| record.generation == generation)
+                                {
+                                    connections.remove(&key);
+                                }
+                                drop(connections);
+                                let _ = connection_arc.close().await;
+                                return Err(Error::TransportClosed);
+                            }
+
+                            debug!(
+                                "WebSocket client connected to {} (subprotocol={})",
+                                addr,
+                                connection_arc.subprotocol()
+                            );
+                            Ok(connection_arc)
                         }
-                        #[cfg(not(feature = "wss"))]
-                        {
-                            return Err(Error::NotImplemented(
-                                "WSS client requires the `wss` cargo feature (rustls plumbing)"
-                                    .into(),
-                            ));
-                        }
-                    } else {
-                        (SipWsStream::Plain(tcp_stream), SIP_WS_SUBPROTOCOL, "ws")
-                    };
-
-                    // Steps 3/4 — advertise exactly `sip` and complete HTTP.
-                    let url = format!("{}://{}/", url_scheme, addr);
-                    let mut request = url.into_client_request().map_err(|_error| {
-                        Error::WebSocketHandshakeFailed(format!(
-                            "WebSocket client request construction failed for {addr}"
-                        ))
-                    })?;
-                    request.headers_mut().insert(
-                        "Sec-WebSocket-Protocol",
-                        http::HeaderValue::from_static(subprotocol_advertised),
-                    );
-                    let (ws_stream, response) = tokio_tungstenite::client_async_with_config(
-                        request,
-                        stream,
-                        Some(connection::sip_websocket_config()),
-                    )
+                        .await;
+                        coordinator_for_task.complete(
+                            &key,
+                            &flight,
+                            &result,
+                            &mut cancellation,
+                        );
+                        result
+                    })
                     .await
-                    .map_err(|_error| {
-                        Error::WebSocketHandshakeFailed(format!(
-                            "WebSocket client handshake failed for {addr}"
-                        ))
-                    })?;
-                    let selected = response
-                        .headers()
-                        .get("Sec-WebSocket-Protocol")
-                        .and_then(|value| value.to_str().ok());
-                    if !selected_subprotocol_is_exact(selected, subprotocol_advertised) {
-                        return Err(Error::WebSocketHandshakeFailed(format!(
-                            "WebSocket peer did not negotiate required subprotocol for {addr}"
-                        )));
-                    }
-                    Ok::<_, Error>((ws_stream, subprotocol_advertised.to_string()))
-                })
-                .await
-                .map_err(|_| Error::ConnectionTimeout(addr))??;
-
-                let (ws_writer, ws_reader) = ws_stream.split();
-                let connection_arc = Arc::new(WebSocketConnection::from_writer(
-                    ws_writer,
-                    addr,
-                    inner.secure,
-                    selected_subprotocol,
-                ));
-                if inner.closed.load(Ordering::Acquire) {
-                    let _ = connection_arc.close().await;
-                    return Err(Error::TransportClosed);
-                }
-
-                let generation = inner
-                    .next_connection_generation
-                    .fetch_add(1, Ordering::Relaxed);
-                inner.connections.lock().await.insert(
-                    addr,
-                    WebSocketConnectionRecord {
-                        generation,
-                        connection: connection_arc.clone(),
-                    },
-                );
-
-                let weak_inner = Arc::downgrade(&inner);
-                if inner
-                    .tasks
-                    .spawn(Self::run_connection_reader(
-                        weak_inner,
-                        connection_arc.clone(),
-                        ws_reader,
-                        generation,
-                    ))
-                    .await
-                    .is_none()
-                {
-                    let mut connections = inner.connections.lock().await;
-                    if connections
-                        .get(&addr)
-                        .is_some_and(|record| record.generation == generation)
-                    {
-                        connections.remove(&addr);
-                    }
-                    drop(connections);
-                    let _ = connection_arc.close().await;
-                    return Err(Error::TransportClosed);
-                }
-                drop(permit);
-
-                debug!(
-                    "WebSocket client connected to {} (subprotocol={})",
-                    addr,
-                    connection_arc.subprotocol()
-                );
-                Ok(connection_arc)
-            })
-            .await
+            }
+        }
     }
 }
 
@@ -885,20 +1219,17 @@ impl Transport for WebSocketTransport {
 
         #[cfg(feature = "ws")]
         {
-            // For WSS, derive SNI from the request's next-hop URI
-            // host so production CA-validated handshakes resolve.
-            // Mirrors the TLS transport's `tls_server_name_for_message`
-            // pattern. Plain WS ignores this.
-            #[cfg(feature = "wss")]
-            let server_name = if self.inner.secure {
-                crate::transport::tls::tls_server_name_for_message(&message, destination)
-            } else {
-                None
-            };
-            #[cfg(not(feature = "wss"))]
-            let server_name = ();
-
-            let connection = self.connect_to(destination, server_name).await?;
+            if matches!(message, Message::Response(_)) {
+                let existing = {
+                    let connections = self.inner.connections.lock().await;
+                    select_unambiguous_websocket_flow(&connections, destination)?
+                };
+                if let Some(connection) = existing {
+                    return connection.send_message(&message).await;
+                }
+            }
+            let authority = WebSocketAuthority::for_message(&message, destination);
+            let connection = self.connect_to(destination, authority).await?;
 
             // Send the message
             connection.send_message(&message).await
@@ -922,16 +1253,16 @@ impl Transport for WebSocketTransport {
 
         #[cfg(feature = "ws")]
         {
-            // Raw-bytes send doesn't have a parsed message to derive
-            // SNI from. Fall back to IP-derived ServerName.
-            #[cfg(feature = "wss")]
-            let server_name: Option<
-                tokio_rustls::rustls::pki_types::ServerName<'static>,
-            > = None;
-            #[cfg(not(feature = "wss"))]
-            let server_name = ();
-
-            let connection = self.connect_to(destination, server_name).await?;
+            let existing = {
+                let connections = self.inner.connections.lock().await;
+                select_unambiguous_websocket_flow(&connections, destination)?
+            };
+            if let Some(connection) = existing {
+                return connection.send_raw_bytes(bytes).await;
+            }
+            let connection = self
+                .connect_to(destination, WebSocketAuthority::for_address(destination))
+                .await?;
             connection.send_raw_bytes(bytes).await
         }
 
@@ -944,17 +1275,16 @@ impl Transport for WebSocketTransport {
     async fn close(&self) -> Result<()> {
         let _close_guard = self.inner.close_gate.lock().await;
         let already_closed = self.inner.closed.swap(true, Ordering::AcqRel);
+        self.inner.outbound_dials.close();
+        self.inner.inbound_established.close();
+        self.inner.outbound_established.close();
         self.inner.tasks.close().await;
         if already_closed {
             return Ok(());
         }
 
         let connections: Vec<_> = self.inner.connections.lock().await.drain().collect();
-        for (addr, record) in connections {
-            if let Err(e) = record.connection.close().await {
-                error!("Error closing WebSocket connection to {}: {}", addr, e);
-            }
-        }
+        close_websocket_connections(connections).await;
 
         // Never block shutdown behind a full application event channel.
         let _ = self.inner.events_tx.try_send(TransportEvent::Closed);
@@ -982,14 +1312,9 @@ mod tests {
         transport: &WebSocketTransport,
         destination: SocketAddr,
     ) -> Result<Arc<WebSocketConnection>> {
-        #[cfg(feature = "wss")]
-        {
-            transport.connect_to(destination, None).await
-        }
-        #[cfg(not(feature = "wss"))]
-        {
-            transport.connect_to(destination, ()).await
-        }
+        transport
+            .connect_to(destination, WebSocketAuthority::for_address(destination))
+            .await
     }
 
     #[test]
@@ -1143,6 +1468,280 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(client.inner.connections.lock().await.len(), 1);
         assert_eq!(server.inner.connections.lock().await.len(), 1);
+
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn same_address_different_websocket_authorities_never_share_connection() {
+        let (server, _server_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, _client_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+        let first_authority = WebSocketAuthority {
+            host: WebSocketAuthorityHost::Dns("authority-a.example".into()),
+            port: destination.port(),
+        };
+        let second_authority = WebSocketAuthority {
+            host: WebSocketAuthorityHost::Dns("authority-b.example".into()),
+            port: destination.port(),
+        };
+
+        let first = client
+            .connect_to(destination, first_authority)
+            .await
+            .unwrap();
+        let second = client
+            .connect_to(destination, second_authority)
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(client.inner.connections.lock().await.len(), 2);
+        assert!(matches!(
+            client
+                .send_message(
+                    Message::Response(Response::new(StatusCode::Ok)),
+                    destination,
+                )
+                .await,
+            Err(Error::InvalidState(_))
+        ));
+
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn response_reuses_sole_authenticated_outbound_websocket_flow() {
+        let (server, _server_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, _client_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+        client
+            .connect_to(
+                destination,
+                WebSocketAuthority {
+                    host: WebSocketAuthorityHost::Dns("sip.example.test".into()),
+                    port: destination.port(),
+                },
+            )
+            .await
+            .unwrap();
+
+        client
+            .send_message(
+                Message::Response(Response::new(StatusCode::Ok)),
+                destination,
+            )
+            .await
+            .unwrap();
+        assert_eq!(client.inner.connections.lock().await.len(), 1);
+
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn websocket_drain_deadline_does_not_multiply_by_connection_count() {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        use tokio_tungstenite::WebSocketStream;
+
+        let mut peers = Vec::new();
+        let mut sends = Vec::new();
+        let mut connections = Vec::new();
+        for index in 0..4u16 {
+            let (transport_side, blocked_peer) = tokio::io::duplex(1);
+            peers.push(blocked_peer);
+            let stream = WebSocketStream::from_raw_socket(
+                SipWsStream::Test(transport_side),
+                Role::Client,
+                Some(connection::sip_websocket_config()),
+            )
+            .await;
+            let (writer, _reader) = stream.split();
+            let remote_addr: SocketAddr = format!("127.0.0.1:{}", 5100 + index).parse().unwrap();
+            let connection = Arc::new(WebSocketConnection::from_writer_with_runtime(
+                writer,
+                remote_addr,
+                false,
+                "sip".into(),
+                None,
+                1,
+                Duration::from_millis(40),
+            ));
+            let sending_connection = connection.clone();
+            sends.push(tokio::spawn(async move {
+                sending_connection
+                    .send_raw_bytes(bytes::Bytes::from(vec![b'x'; 4_096]))
+                    .await
+            }));
+            connections.push((
+                WebSocketConnectionKey::outbound(
+                    remote_addr,
+                    WebSocketAuthority::for_address(remote_addr),
+                    1,
+                    false,
+                ),
+                WebSocketConnectionRecord {
+                    generation: u64::from(index),
+                    connection,
+                },
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let started = tokio::time::Instant::now();
+        close_websocket_connections(connections).await;
+        assert!(
+            started.elapsed() < Duration::from_millis(130),
+            "connection drain was serialized: {:?}",
+            started.elapsed()
+        );
+        for send in sends {
+            assert!(send.await.unwrap().is_err());
+        }
+        drop(peers);
+    }
+
+    #[cfg(feature = "wss")]
+    #[test]
+    fn wss_http_host_and_sni_share_one_normalized_authority() {
+        let authority = WebSocketAuthority {
+            host: WebSocketAuthorityHost::Dns("sip.example.test".into()),
+            port: 7443,
+        };
+        assert_eq!(authority.http_authority(), "sip.example.test:7443");
+        let server_name = authority.server_name().unwrap();
+        assert!(matches!(
+            server_name,
+            tokio_rustls::rustls::pki_types::ServerName::DnsName(name)
+                if name.as_ref() == "sip.example.test"
+        ));
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn websocket_connection_registry_lock_is_inside_dial_deadline() {
+        let (client, _events) = WebSocketTransport::bind_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            None,
+            HandshakeAdmissionConfig::new(Duration::from_millis(40), 1),
+        )
+        .await
+        .unwrap();
+        let destination = "127.0.0.1:9".parse().unwrap();
+        let _registry_guard = client.inner.connections.lock().await;
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            connect_plain(&client, destination).await,
+            Err(Error::ConnectionTimeout(address)) if address == destination
+        ));
+        assert!(started.elapsed() < Duration::from_millis(250));
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn websocket_established_caps_hold_for_both_directions() {
+        let config = HandshakeAdmissionConfig::new(Duration::from_secs(1), 1);
+        let (server, _server_events) = WebSocketTransport::bind_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            None,
+            config,
+        )
+        .await
+        .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (first_client, _events) = WebSocketTransport::bind_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            None,
+            config,
+        )
+        .await
+        .unwrap();
+
+        connect_plain(&first_client, destination).await.unwrap();
+        let second_authority = WebSocketAuthority {
+            host: WebSocketAuthorityHost::Dns("second.example".into()),
+            port: destination.port(),
+        };
+        assert!(matches!(
+            first_client.connect_to(destination, second_authority).await,
+            Err(Error::ConnectionPoolExhausted)
+        ));
+
+        let (second_client, _events) = WebSocketTransport::bind_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            None,
+            config,
+        )
+        .await
+        .unwrap();
+        let _second_flow = connect_plain(&second_client, destination).await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(server.inner.connections.lock().await.len(), 1);
+
+        second_client.close().await.unwrap();
+        first_client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn idle_websocket_connections_are_evicted_and_release_permits() {
+        let config = HandshakeAdmissionConfig::new(Duration::from_millis(50), 2);
+        let (server, _server_events) = WebSocketTransport::bind_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            None,
+            config,
+        )
+        .await
+        .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, _events) = WebSocketTransport::bind_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            None,
+            config,
+        )
+        .await
+        .unwrap();
+        connect_plain(&client, destination).await.unwrap();
+        assert_eq!(client.inner.connections.lock().await.len(), 1);
+
+        tokio::time::sleep(Duration::from_millis(1_650)).await;
+        assert!(client.inner.connections.lock().await.is_empty());
+        assert!(server.inner.connections.lock().await.is_empty());
 
         client.close().await.unwrap();
         server.close().await.unwrap();

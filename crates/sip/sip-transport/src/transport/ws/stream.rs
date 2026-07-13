@@ -35,6 +35,10 @@ pub enum SipWsStream {
     /// client-side `Plain` variant of `MaybeTlsStream` before Phase 4
     /// existed.
     Plain(TcpStream),
+    /// Deterministic bounded in-memory stream used by writer cancellation
+    /// tests. It is never present in production builds.
+    #[cfg(test)]
+    Test(tokio::io::DuplexStream),
     /// Client-side TLS, after a `TlsConnector::connect()` handshake.
     /// Built by `WebSocketTransport::connect_to()` for outbound
     /// `wss://` (currently NotImplemented; reserved here so the type
@@ -42,7 +46,7 @@ pub enum SipWsStream {
     #[cfg(feature = "wss")]
     ClientTls(ClientTlsStream<TcpStream>),
     /// Server-side TLS, after a `TlsAcceptor::accept()` handshake.
-    /// Built by `WebSocketListener::accept()` for inbound `wss://`.
+    /// Built by the WebSocket listener supervisor for inbound `wss://`.
     #[cfg(feature = "wss")]
     ServerTls(ServerTlsStream<TcpStream>),
 }
@@ -55,6 +59,8 @@ impl AsyncRead for SipWsStream {
     ) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
             SipWsStream::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            #[cfg(test)]
+            SipWsStream::Test(s) => Pin::new(s).poll_read(cx, buf),
             #[cfg(feature = "wss")]
             SipWsStream::ClientTls(s) => Pin::new(s).poll_read(cx, buf),
             #[cfg(feature = "wss")]
@@ -71,6 +77,8 @@ impl AsyncWrite for SipWsStream {
     ) -> Poll<std::io::Result<usize>> {
         match self.get_mut() {
             SipWsStream::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            #[cfg(test)]
+            SipWsStream::Test(s) => Pin::new(s).poll_write(cx, buf),
             #[cfg(feature = "wss")]
             SipWsStream::ClientTls(s) => Pin::new(s).poll_write(cx, buf),
             #[cfg(feature = "wss")]
@@ -81,6 +89,8 @@ impl AsyncWrite for SipWsStream {
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
             SipWsStream::Plain(s) => Pin::new(s).poll_flush(cx),
+            #[cfg(test)]
+            SipWsStream::Test(s) => Pin::new(s).poll_flush(cx),
             #[cfg(feature = "wss")]
             SipWsStream::ClientTls(s) => Pin::new(s).poll_flush(cx),
             #[cfg(feature = "wss")]
@@ -91,6 +101,8 @@ impl AsyncWrite for SipWsStream {
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
             SipWsStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            #[cfg(test)]
+            SipWsStream::Test(s) => Pin::new(s).poll_shutdown(cx),
             #[cfg(feature = "wss")]
             SipWsStream::ClientTls(s) => Pin::new(s).poll_shutdown(cx),
             #[cfg(feature = "wss")]
