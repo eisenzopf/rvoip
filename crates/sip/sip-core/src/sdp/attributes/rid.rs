@@ -7,6 +7,7 @@
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 
 /// RID Direction
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,7 +19,7 @@ pub enum RidDirection {
 }
 
 /// RID Attribute
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RidAttribute {
     /// RID identifier string
     pub id: String,
@@ -28,6 +29,18 @@ pub struct RidAttribute {
     pub formats: Vec<String>,
     /// Key-value parameter restrictions
     pub restrictions: HashMap<String, String>,
+}
+
+impl fmt::Debug for RidAttribute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RidAttribute")
+            .field("id_bytes", &self.id.len())
+            .field("direction", &self.direction)
+            .field("format_count", &self.formats.len())
+            .field("restriction_count", &self.restrictions.len())
+            .finish()
+    }
 }
 
 /// Parse a RID (Restriction IDentifier) attribute as defined in RFC 8851.

@@ -831,7 +831,7 @@ mod tests {
                 format!("{:?}", Message::Response(response.clone())),
             ] {
                 assert!(!debug.contains(SECRET));
-                assert!(debug.contains("[redacted]"));
+                assert!(debug.contains("header_count"));
             }
             assert!(request.to_string().contains(SECRET));
             assert!(response.to_string().contains(SECRET));
@@ -893,8 +893,7 @@ mod tests {
                 assert!(!debug.contains(name));
             }
             assert!(!debug.contains(SECRET));
-            assert!(debug.contains("[invalid header name]"));
-            assert!(debug.contains("[redacted]"));
+            assert!(debug.contains("header_count"));
         }
     }
 

@@ -173,8 +173,13 @@ impl RegistrarService {
         let external_password = if let Some(provider) = &self.credential_provider {
             match AddressOfRecord::parse(uri) {
                 Ok(aor) => provider.sip_digest_secret(&aor).await?,
-                Err(error) => {
-                    warn!("Unable to parse AOR for credential lookup: {}", error);
+                Err(_) => {
+                    warn!(
+                        stage = "credential-lookup",
+                        uri_present = !uri.is_empty(),
+                        uri_bytes = uri.len(),
+                        "Unable to parse AOR for credential lookup"
+                    );
                     None
                 }
             }
@@ -186,7 +191,12 @@ impl RegistrarService {
             .as_ref()
             .and_then(|user_store| user_store.get_password(username));
         let Some(password) = external_password.or(local_password) else {
-            warn!("Registration attempt for unknown user: {}", username);
+            warn!(
+                stage = "credential-lookup",
+                username_present = !username.is_empty(),
+                username_bytes = username.len(),
+                "Registration credential was not found"
+            );
             // Still send challenge (don't reveal user doesn't exist)
             let challenge = auth.generate_challenge();
             let www_auth = auth.format_www_authenticate(&challenge);
@@ -205,13 +215,19 @@ impl RegistrarService {
 
             // Validate digest response
             info!(
-                "🔍 Validating digest for user={}, realm={}, nonce={}, uri={}",
-                digest_response.username,
-                digest_response.realm,
-                digest_response.nonce,
-                digest_response.uri
+                stage = "digest-validation",
+                username_present = !digest_response.username.is_empty(),
+                username_bytes = digest_response.username.len(),
+                realm_present = !digest_response.realm.is_empty(),
+                realm_bytes = digest_response.realm.len(),
+                nonce_present = !digest_response.nonce.is_empty(),
+                nonce_bytes = digest_response.nonce.len(),
+                uri_present = !digest_response.uri.is_empty(),
+                uri_bytes = digest_response.uri.len(),
+                response_present = !digest_response.response.is_empty(),
+                response_bytes = digest_response.response.len(),
+                "Validating SIP digest response"
             );
-            info!("🔍 Client response hash: {}", digest_response.response);
 
             let is_valid = auth
                 .validate_response(&digest_response, method, &password)
@@ -222,15 +238,26 @@ impl RegistrarService {
                     ))
                 })?;
 
-            info!("🔍 Validation result: {}", is_valid);
+            info!(
+                stage = "digest-validation",
+                accepted = is_valid,
+                "SIP digest validation completed"
+            );
 
             if is_valid {
-                info!("✅ User {} authenticated successfully", username);
+                info!(
+                    stage = "digest-validation",
+                    username_present = !username.is_empty(),
+                    username_bytes = username.len(),
+                    "SIP registration authenticated"
+                );
                 Ok((true, None))
             } else {
                 warn!(
-                    "❌ Authentication failed for user {} - digest mismatch",
-                    username
+                    stage = "digest-validation",
+                    username_present = !username.is_empty(),
+                    username_bytes = username.len(),
+                    "SIP registration authentication failed"
                 );
                 let challenge = auth.generate_challenge();
                 let www_auth = auth.format_www_authenticate(&challenge);
@@ -627,3 +654,51 @@ impl From<ExtendedStatus> for PresenceStatus {
 }
 
 use crate::types::ExtendedStatus;
+
+#[cfg(test)]
+mod diagnostic_source_tests {
+    #[test]
+    fn register_authentication_logs_only_structural_metadata() {
+        let source = include_str!("mod.rs");
+        let start = source.find("pub async fn authenticate_register").unwrap();
+        let end = source[start..]
+            .find("pub async fn register_user")
+            .map(|offset| start + offset)
+            .unwrap();
+        let authenticate_source = &source[start..end];
+
+        for fragments in [
+            ["Validating digest for ", "user={}"],
+            ["Client response", " hash"],
+            ["unknown user", ": {}"],
+            ["User {}", " authenticated"],
+            ["failed for ", "user {}"],
+            ["Unable to parse AOR for credential lookup", ": {}"],
+        ] {
+            let forbidden = fragments.concat();
+            assert!(
+                !authenticate_source.contains(&forbidden),
+                "REGISTER authentication regained value-bearing log: {forbidden}"
+            );
+        }
+        for required in [
+            "stage = \"credential-lookup\"",
+            "stage = \"digest-validation\"",
+            "username_present",
+            "username_bytes",
+            "realm_present",
+            "realm_bytes",
+            "nonce_present",
+            "nonce_bytes",
+            "uri_present",
+            "uri_bytes",
+            "response_present",
+            "response_bytes",
+        ] {
+            assert!(
+                authenticate_source.contains(required),
+                "REGISTER authentication log lost structural field: {required}"
+            );
+        }
+    }
+}

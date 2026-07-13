@@ -180,31 +180,53 @@ pub enum TypedHeader {
 
 impl fmt::Debug for TypedHeader {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Authorization(value) => {
-                formatter.debug_tuple("Authorization").field(value).finish()
+        let canonical_name = self.name().canonical_wire_name();
+        let (name, extension_name_bytes) = match &canonical_name {
+            HeaderName::Other(value) if canonical_name.is_valid_wire_name() => {
+                ("extension", value.len())
             }
-            Self::ProxyAuthorization(value) => formatter
-                .debug_tuple("ProxyAuthorization")
-                .field(value)
-                .finish(),
-            Self::Other(name, _) if name.is_authorization_credentials() => formatter
-                .debug_tuple("Other")
-                .field(name)
-                .field(&"[redacted]")
-                .finish(),
-            Self::Other(name, _) if !name.is_valid_wire_name() => formatter
-                .debug_tuple("Other")
-                .field(&"[invalid header name]")
-                .field(&"[redacted]")
-                .finish(),
-            // Preserve diagnostic visibility for unrelated headers. Debug
-            // formatting is intentionally not the wire contract; Display is.
-            other => formatter
-                .debug_tuple("TypedHeader")
-                .field(&format_args!("{other}"))
-                .finish(),
+            HeaderName::Other(value) => ("[invalid header name]", value.len()),
+            known => (known.as_str(), 0),
+        };
+        let mut debug = formatter.debug_struct("TypedHeader");
+        debug.field("name", &name);
+        if extension_name_bytes != 0 {
+            debug.field("extension_name_bytes", &extension_name_bytes);
         }
+
+        match self {
+            Self::Authorization(_) | Self::ProxyAuthorization(_) => {
+                debug.field("credentials_present", &true);
+            }
+            Self::WwwAuthenticate(value) => {
+                debug.field("value", value);
+            }
+            Self::ProxyAuthenticate(value) => {
+                debug.field("value", value);
+            }
+            Self::AuthenticationInfo(value) => {
+                debug.field("value", value);
+            }
+            Self::Warning(values) => {
+                debug.field("item_count", &values.len());
+            }
+            Self::Server(values) | Self::UserAgent(values) => {
+                debug.field("item_count", &values.len());
+                debug.field("item_bytes", &values.iter().map(String::len).sum::<usize>());
+            }
+            Self::Other(_, HeaderValue::Raw(value)) => {
+                debug.field("value_kind", &"raw");
+                debug.field("value_present", &!value.is_empty());
+                debug.field("value_bytes", &value.len());
+            }
+            Self::Other(_, _) => {
+                debug.field("value_kind", &"structured");
+                debug.field("value_present", &true);
+            }
+            _ => {}
+        }
+
+        debug.finish()
     }
 }
 
@@ -1686,19 +1708,147 @@ mod tests {
             let header = TypedHeader::Other(name, HeaderValue::Raw(SECRET.as_bytes().to_vec()));
             let debug = format!("{header:?}");
             assert!(!debug.contains(SECRET));
-            assert!(debug.contains("[redacted]"));
+            assert!(debug.contains("value_bytes"));
             assert!(header.to_string().contains(SECRET));
         }
     }
 
     #[test]
-    fn unrelated_raw_header_debug_keeps_its_value() {
+    fn unrelated_raw_header_debug_is_metadata_only() {
         const VALUE: &str = "ordinary-debug-value";
         let header = TypedHeader::Other(
             HeaderName::Other("X-Diagnostic".into()),
             HeaderValue::Raw(VALUE.as_bytes().to_vec()),
         );
-        assert!(format!("{header:?}").contains(VALUE));
+        let debug = format!("{header:?}");
+        assert!(!debug.contains(VALUE));
+        assert!(!debug.contains("X-Diagnostic"));
+        assert!(debug.contains("extension_name_bytes"));
+        assert!(header.to_string().contains(VALUE));
+    }
+
+    #[test]
+    fn challenge_and_authentication_info_debug_are_safe_directly_and_when_enclosed() {
+        use crate::types::auth::{Algorithm, AuthenticationInfoParam, Challenge, DigestParam, Qop};
+
+        const REALM: &str = "realm-direct-debug-canary";
+        const NONCE: &str = "nonce-direct-debug-canary";
+        const ALGORITHM: &str = "algorithm-direct-debug-canary";
+        const NEXT_NONCE: &str = "next-nonce-direct-debug-canary";
+        const RESPONSE_AUTH: &str = "response-auth-direct-debug-canary";
+        const CLIENT_NONCE: &str = "client-nonce-direct-debug-canary";
+        const BEARER_SCOPE: &str = "bearer-scope-direct-debug-canary";
+        const OTHER_SCHEME: &str = "other-scheme-direct-debug-canary";
+
+        let challenge = Challenge::Digest {
+            params: vec![
+                DigestParam::Realm(REALM.into()),
+                DigestParam::Nonce(NONCE.into()),
+                DigestParam::Algorithm(Algorithm::Other(ALGORITHM.into())),
+            ],
+        };
+        let www = WwwAuthenticate(vec![challenge.clone()]);
+        let proxy = ProxyAuthenticate(vec![challenge]);
+        let bearer = Challenge::Bearer {
+            realm: REALM.into(),
+            scope: Some(BEARER_SCOPE.into()),
+            error: Some("bearer-error-direct-debug-canary".into()),
+            error_description: Some("bearer-description-direct-debug-canary".into()),
+        };
+        let other = Challenge::Other {
+            scheme: OTHER_SCHEME.into(),
+            params: vec![crate::types::auth::AuthParam {
+                name: "other-param-name-direct-debug-canary".into(),
+                value: "other-param-value-direct-debug-canary".into(),
+            }],
+        };
+        let info = AuthenticationInfo(vec![
+            AuthenticationInfoParam::NextNonce(NEXT_NONCE.into()),
+            AuthenticationInfoParam::ResponseAuth(RESPONSE_AUTH.into()),
+            AuthenticationInfoParam::Cnonce(CLIENT_NONCE.into()),
+            AuthenticationInfoParam::Qop(Qop::Other("qop-direct-debug-canary".into())),
+        ]);
+
+        for debug in [
+            format!("{:?}", &www.0[0]),
+            format!("{bearer:?}"),
+            format!("{other:?}"),
+            format!("{www:?}"),
+            format!("{proxy:?}"),
+            format!("{info:?}"),
+            format!("{:?}", TypedHeader::WwwAuthenticate(www.clone())),
+            format!("{:?}", TypedHeader::ProxyAuthenticate(proxy.clone())),
+            format!("{:?}", TypedHeader::AuthenticationInfo(info.clone())),
+        ] {
+            for secret in [
+                REALM,
+                NONCE,
+                ALGORITHM,
+                NEXT_NONCE,
+                RESPONSE_AUTH,
+                CLIENT_NONCE,
+                "qop-direct-debug-canary",
+                BEARER_SCOPE,
+                "bearer-error-direct-debug-canary",
+                "bearer-description-direct-debug-canary",
+                OTHER_SCHEME,
+                "other-param-name-direct-debug-canary",
+                "other-param-value-direct-debug-canary",
+            ] {
+                assert!(!debug.contains(secret), "debug reflected {secret}: {debug}");
+            }
+        }
+
+        assert!(www.to_string().contains(REALM));
+        assert!(proxy.to_string().contains(NONCE));
+        assert!(info.to_string().contains(RESPONSE_AUTH));
+        assert!(bearer.to_string().contains(BEARER_SCOPE));
+        assert!(other.to_string().contains(OTHER_SCHEME));
+        assert!(serde_json::to_string(&www).unwrap().contains(REALM));
+    }
+
+    #[test]
+    fn typed_header_debug_never_uses_wire_rendering() {
+        let source = include_str!("typed_header.rs");
+        let debug_start = source.find("impl fmt::Debug for TypedHeader").unwrap();
+        let debug_end = source[debug_start..]
+            .find("impl TypedHeader")
+            .map(|offset| debug_start + offset)
+            .unwrap();
+        let debug_source = &source[debug_start..debug_end];
+        for forbidden in ["format_args!", ".to_string()", "write!(", "Display"] {
+            assert!(
+                !debug_source.contains(forbidden),
+                "TypedHeader Debug regained wire rendering through {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn auth_challenge_containers_cannot_regain_derived_debug() {
+        for (source, declaration) in [
+            (include_str!("../auth/challenge.rs"), "pub enum Challenge"),
+            (
+                include_str!("../auth/www_authenticate.rs"),
+                "pub struct WwwAuthenticate",
+            ),
+            (
+                include_str!("../auth/proxy_authenticate.rs"),
+                "pub struct ProxyAuthenticate",
+            ),
+            (
+                include_str!("../auth/authentication_info.rs"),
+                "pub struct AuthenticationInfo",
+            ),
+        ] {
+            let declaration_offset = source.find(declaration).unwrap();
+            let derive_offset = source[..declaration_offset].rfind("#[derive(").unwrap();
+            let derive = &source[derive_offset..declaration_offset];
+            assert!(
+                !derive.contains("Debug"),
+                "{declaration} regained raw derived Debug: {derive}"
+            );
+        }
     }
 
     #[test]
