@@ -25,7 +25,10 @@ fn cfg(name: &str, port: u16) -> Config {
         include_body: false,
         ..SipTraceConfig::default()
     };
-    c
+    // These loopback-only assertions intentionally use the trace event as a
+    // packet-capture oracle. Production-safe traces remain redacted unless a
+    // caller makes this explicit development-only opt-in.
+    c.trace_passthrough_for_development()
 }
 
 async fn wait_for_inbound_response_status(
