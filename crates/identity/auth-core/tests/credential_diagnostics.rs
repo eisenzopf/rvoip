@@ -128,6 +128,8 @@ fn decoded_claim_containers_do_not_regain_derived_debug() {
         (include_str!("../src/jwt.rs"), "struct RoleAccess"),
         (include_str!("../src/jwks.rs"), "struct TokenClaims"),
         (include_str!("../src/jwks.rs"), "struct RoleAccess"),
+        (include_str!("../src/jwks.rs"), "struct JwksDocument"),
+        (include_str!("../src/jwks.rs"), "struct JwksKey"),
         (
             include_str!("../src/introspection.rs"),
             "struct IntrospectionResponse",

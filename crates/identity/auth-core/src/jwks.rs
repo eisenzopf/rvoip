@@ -50,12 +50,21 @@ pub const DEFAULT_JWKS_CACHE_TTL: Duration = Duration::from_secs(3600);
 /// without paying for an unbounded cache.
 const JWKS_CACHE_MAX_CAPACITY: u64 = 64;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct JwksDocument {
     keys: Vec<JwksKey>,
 }
 
-#[derive(Debug, Deserialize)]
+impl fmt::Debug for JwksDocument {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JwksDocument")
+            .field("key_count", &self.keys.len())
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 struct JwksKey {
     kty: String,
     kid: Option<String>,
@@ -67,6 +76,45 @@ struct JwksKey {
     crv: Option<String>,
     x: Option<String>,
     y: Option<String>,
+}
+
+impl fmt::Debug for JwksKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JwksKey")
+            .field("key_type_class", &jwk_key_type_class(&self.kty))
+            .field("key_id_present", &self.kid.is_some())
+            .field("key_id_bytes", &self.kid.as_ref().map_or(0, String::len))
+            .field("rsa_modulus_present", &self.n.is_some())
+            .field("rsa_modulus_bytes", &self.n.as_ref().map_or(0, String::len))
+            .field("rsa_exponent_present", &self.e.is_some())
+            .field(
+                "rsa_exponent_bytes",
+                &self.e.as_ref().map_or(0, String::len),
+            )
+            .field("curve_present", &self.crv.is_some())
+            .field("curve_bytes", &self.crv.as_ref().map_or(0, String::len))
+            .field("x_coordinate_present", &self.x.is_some())
+            .field(
+                "x_coordinate_bytes",
+                &self.x.as_ref().map_or(0, String::len),
+            )
+            .field("y_coordinate_present", &self.y.is_some())
+            .field(
+                "y_coordinate_bytes",
+                &self.y.as_ref().map_or(0, String::len),
+            )
+            .finish()
+    }
+}
+
+fn jwk_key_type_class(key_type: &str) -> &'static str {
+    match key_type {
+        "RSA" => "rsa",
+        "EC" => "ec",
+        "oct" => "symmetric",
+        _ => "other",
+    }
 }
 
 #[derive(Deserialize)]
@@ -608,6 +656,35 @@ mod diagnostic_tests {
     use super::*;
 
     const CANARY: &str = "jwks-claims-malicious-canary\r\nAuthorization: exposed";
+
+    #[test]
+    fn decoded_jwks_keys_keep_exact_values_out_of_debug() {
+        let document: JwksDocument = serde_json::from_value(serde_json::json!({
+            "keys": [{
+                "kty": CANARY,
+                "kid": CANARY,
+                "n": CANARY,
+                "e": CANARY,
+                "crv": CANARY,
+                "x": CANARY,
+                "y": CANARY,
+            }]
+        }))
+        .unwrap();
+
+        let key = &document.keys[0];
+        for rendered in [format!("{document:?}"), format!("{key:?}")] {
+            assert!(!rendered.contains(CANARY), "JWKS value leaked: {rendered}");
+        }
+        assert_eq!(key.kty, CANARY);
+        assert_eq!(key.kid.as_deref(), Some(CANARY));
+        assert_eq!(key.n.as_deref(), Some(CANARY));
+        assert_eq!(key.e.as_deref(), Some(CANARY));
+        assert_eq!(key.crv.as_deref(), Some(CANARY));
+        assert_eq!(key.x.as_deref(), Some(CANARY));
+        assert_eq!(key.y.as_deref(), Some(CANARY));
+        assert_eq!(jwk_key_type_class(&key.kty), "other");
+    }
 
     #[test]
     fn decoded_claims_keep_values_out_of_debug() {

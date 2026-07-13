@@ -44,12 +44,26 @@ pub struct PasswordConfig {
 }
 
 /// TLS/HTTPS configuration
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct TlsSettings {
     pub enabled: bool,
     pub cert_path: String,
     pub key_path: String,
     pub require_tls: bool, // If true, refuse to start without TLS
+}
+
+impl std::fmt::Debug for TlsSettings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TlsSettings")
+            .field("enabled", &self.enabled)
+            .field("cert_path_present", &!self.cert_path.is_empty())
+            .field("cert_path_bytes", &self.cert_path.len())
+            .field("key_path_present", &!self.key_path.is_empty())
+            .field("key_path_bytes", &self.key_path.len())
+            .field("require_tls", &self.require_tls)
+            .finish()
+    }
 }
 
 impl Default for TlsSettings {

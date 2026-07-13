@@ -1658,7 +1658,9 @@ impl UctpCoordinator {
         } else {
             let bearer_span = info_span!(
                 "uctp.auth.bearer",
-                method = %payload.method,
+                method_class = auth_method_diagnostic_class(&payload.method),
+                method_present = !payload.method.is_empty(),
+                method_bytes = payload.method.len(),
                 transport = %self.transport,
             );
             self.bearer
@@ -2739,7 +2741,9 @@ impl UctpCoordinator {
 
         let refresh_span = info_span!(
             "uctp.auth.refresh",
-            method = %payload.method,
+            method_class = auth_method_diagnostic_class(&payload.method),
+            method_present = !payload.method.is_empty(),
+            method_bytes = payload.method.len(),
             transport = %self.transport,
         );
         let validation = if payload.method == "aauth" {
@@ -2888,6 +2892,19 @@ fn resource_binding_error_category(code: u16) -> &'static str {
     }
 }
 
+/// Bounded auth method class for logs and traces. The wire value remains
+/// available to routing, but unknown peer-controlled spellings never become
+/// diagnostic fields or metric labels.
+fn auth_method_diagnostic_class(method: &str) -> &'static str {
+    match method {
+        "bearer" => "bearer",
+        "oauth2-dpop" => "oauth2-dpop",
+        "passkey" => "passkey",
+        "aauth" => "aauth",
+        _ => "other",
+    }
+}
+
 fn with_effective_uctp_expiry(
     mut principal: AuthenticatedPrincipal,
 ) -> std::result::Result<AuthenticatedPrincipal, BearerAuthError> {
@@ -2912,5 +2929,28 @@ fn assurance_label(a: &rvoip_core::identity::IdentityAssurance) -> &'static str 
         // real-world identity, so on the wire it maps to "pseudonymous"
         // (matches `AssuranceLevel::from_core`).
         DtlsFingerprint { .. } => "pseudonymous",
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::auth_method_diagnostic_class;
+
+    #[test]
+    fn auth_method_diagnostic_class_is_bounded_for_malicious_values() {
+        for (method, expected) in [
+            ("bearer", "bearer"),
+            ("oauth2-dpop", "oauth2-dpop"),
+            ("passkey", "passkey"),
+            ("aauth", "aauth"),
+            ("unknown", "other"),
+        ] {
+            assert_eq!(auth_method_diagnostic_class(method), expected);
+        }
+
+        let canary = "uctp-method-malicious-canary\r\nAuthorization: exposed";
+        let rendered = auth_method_diagnostic_class(canary);
+        assert_eq!(rendered, "other");
+        assert!(!rendered.contains(canary));
     }
 }

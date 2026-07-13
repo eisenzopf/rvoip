@@ -401,11 +401,30 @@ pub fn create_make_service_with_state(state: ApiState) -> ApiMakeService {
 }
 
 /// TLS configuration
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TlsConfig {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
     pub enabled: bool,
+}
+
+impl std::fmt::Debug for TlsConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TlsConfig")
+            .field("cert_path_present", &!self.cert_path.as_os_str().is_empty())
+            .field(
+                "cert_path_component_count",
+                &self.cert_path.components().count(),
+            )
+            .field("key_path_present", &!self.key_path.as_os_str().is_empty())
+            .field(
+                "key_path_component_count",
+                &self.key_path.components().count(),
+            )
+            .field("enabled", &self.enabled)
+            .finish()
+    }
 }
 
 /// Create and start the API server with optional TLS
@@ -423,9 +442,15 @@ pub async fn create_server_with_tls(
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to load TLS config: {}", e))?;
 
-            tracing::info!("🔒 Starting HTTPS server on https://{}", addr);
-            tracing::info!("   Certificate: {}", tls.cert_path.display());
-            tracing::info!("   Private key: {}", tls.key_path.display());
+            tracing::info!(
+                stage = "tls-server-start",
+                bind_address = %addr,
+                cert_path_present = !tls.cert_path.as_os_str().is_empty(),
+                cert_path_component_count = tls.cert_path.components().count(),
+                key_path_present = !tls.key_path.as_os_str().is_empty(),
+                key_path_component_count = tls.key_path.components().count(),
+                "starting HTTPS server"
+            );
 
             axum_server::bind_rustls(addr, config)
                 .serve(into_peer_aware_make_service(app))

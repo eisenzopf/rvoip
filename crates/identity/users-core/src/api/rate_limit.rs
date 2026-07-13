@@ -9,6 +9,7 @@ use axum::{
 use ipnet::IpNet;
 use serde::Deserialize;
 use std::collections::{hash_map::RandomState, HashMap};
+use std::fmt;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -126,10 +127,19 @@ impl RateLimitCapacity {
 /// Forwarding headers are ignored unless the immediate socket peer matches a
 /// configured CIDR.
 #[non_exhaustive]
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 pub struct TrustedProxyConfig {
     #[serde(default)]
     pub cidrs: Vec<String>,
+}
+
+impl fmt::Debug for TrustedProxyConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TrustedProxyConfig")
+            .field("cidr_count", &self.cidrs.len())
+            .finish()
+    }
 }
 
 impl TrustedProxyConfig {

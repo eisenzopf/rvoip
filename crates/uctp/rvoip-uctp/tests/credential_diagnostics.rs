@@ -19,22 +19,22 @@ const CANARY: &str = "uctp-credential-malicious-canary\r\nAuthorization: exposed
 #[test]
 fn direct_auth_and_control_payloads_redact_but_serialize_exactly() {
     let response = AuthResponse {
-        method: "bearer".into(),
+        method: CANARY.into(),
         credential: CANARY.into(),
         actor_token: Some(CANARY.into()),
     };
     let refresh = AuthRefresh {
-        method: "oauth2-dpop".into(),
+        method: CANARY.into(),
         credential: CANARY.into(),
         actor_token: Some(CANARY.into()),
     };
     let challenge = AuthChallenge {
         nonce: CANARY.into(),
-        accepted_methods: vec!["bearer".into()],
+        accepted_methods: vec![CANARY.into()],
         server_capabilities: serde_json::json!({"proof": CANARY}),
     };
     let step_up = IdentityStepUpResponse {
-        method: "bearer".into(),
+        method: CANARY.into(),
         credential: CANARY.into(),
     };
 
@@ -55,7 +55,9 @@ fn direct_auth_and_control_payloads_redact_but_serialize_exactly() {
     let step_up: IdentityStepUpResponse =
         serde_json::from_str(&serde_json::to_string(&step_up).unwrap()).unwrap();
     assert_eq!(response.credential, CANARY);
+    assert_eq!(response.method, CANARY);
     assert_eq!(refresh.credential, CANARY);
+    assert_eq!(refresh.method, CANARY);
     assert_eq!(challenge.nonce, CANARY);
     assert_eq!(step_up.credential, CANARY);
 }
@@ -119,6 +121,20 @@ fn coordinator_never_logs_raw_auth_provider_errors() {
     assert!(!source.contains("asserted_participant = %"));
     assert!(!source.contains("authenticated_participant = %"));
     assert!(!source.contains("reason = %error.reason"));
+    assert!(!source.contains("method = %payload.method"));
+    assert_eq!(
+        source
+            .matches("method_class = auth_method_diagnostic_class(&payload.method)")
+            .count(),
+        2,
+        "both auth.response and auth.refresh spans must classify method values"
+    );
+    assert_eq!(
+        source
+            .matches("method_bytes = payload.method.len()")
+            .count(),
+        2
+    );
     assert!(source.contains("error_class = \"credential-validation\""));
     assert!(source.contains("error_class = \"resource-binding-authorization\""));
 }

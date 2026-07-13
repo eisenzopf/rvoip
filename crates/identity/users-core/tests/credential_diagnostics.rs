@@ -1,11 +1,13 @@
 use chrono::Utc;
-use users_core::api::rate_limit::RateLimitIdentifier;
+use std::path::PathBuf;
+use users_core::api::rate_limit::{RateLimitIdentifier, TrustedProxyConfig};
 use users_core::api::{
     ApiKeyResponse, AuthContext, AuthType, ChangePasswordRequest, CreateApiKeyResponse,
-    ErrorDetail, ErrorResponse, LoginRequest, LoginResponse, RefreshRequest, UpdateRolesRequest,
-    UserResponse,
+    ErrorDetail, ErrorResponse, LoginRequest, LoginResponse, RefreshRequest, TlsConfig,
+    UpdateRolesRequest, UserResponse,
 };
 use users_core::api_keys::{ApiKey, CreateApiKeyRequest};
+use users_core::config::TlsSettings;
 use users_core::jwt::{JwtConfig, RefreshTokenClaims, UserClaims};
 use users_core::validation::ValidatedCreateUserRequest;
 use users_core::{
@@ -396,4 +398,73 @@ fn rate_limit_identities_keep_values_out_of_debug() {
             .contains("Debug"),
         "RateLimitIdentifier regained derived Debug"
     );
+}
+
+#[test]
+fn trusted_proxy_and_tls_configs_keep_values_out_of_diagnostics() {
+    let trusted_proxies: TrustedProxyConfig = serde_json::from_value(serde_json::json!({
+        "cidrs": [CANARY],
+    }))
+    .unwrap();
+    let tls_settings: TlsSettings = serde_json::from_value(serde_json::json!({
+        "enabled": true,
+        "cert_path": CANARY,
+        "key_path": CANARY,
+        "require_tls": true,
+    }))
+    .unwrap();
+    let tls_config = TlsConfig {
+        cert_path: PathBuf::from(CANARY),
+        key_path: PathBuf::from(CANARY),
+        enabled: true,
+    };
+    let mut enclosing = UsersConfig::default();
+    enclosing.tls = tls_settings.clone();
+
+    for rendered in [
+        format!("{trusted_proxies:?}"),
+        format!("{tls_settings:?}"),
+        format!("{tls_config:?}"),
+        format!("{enclosing:?}"),
+    ] {
+        assert!(!rendered.contains(CANARY), "TLS config leaked: {rendered}");
+    }
+
+    assert_eq!(trusted_proxies.cidrs, [CANARY]);
+    assert_eq!(tls_settings.cert_path, CANARY);
+    assert_eq!(tls_settings.key_path, CANARY);
+    assert_eq!(tls_config.cert_path, PathBuf::from(CANARY));
+    assert_eq!(tls_config.key_path, PathBuf::from(CANARY));
+    assert_eq!(enclosing.tls.cert_path, CANARY);
+}
+
+#[test]
+fn proxy_and_tls_config_sources_cannot_regain_value_bearing_diagnostics() {
+    for (source, declaration) in [
+        (
+            include_str!("../src/api/rate_limit.rs"),
+            "pub struct TrustedProxyConfig",
+        ),
+        (
+            include_str!("../src/config/mod.rs"),
+            "pub struct TlsSettings",
+        ),
+        (include_str!("../src/api/mod.rs"), "pub struct TlsConfig"),
+    ] {
+        let declaration_offset = source.find(declaration).unwrap();
+        let prefix = &source[..declaration_offset];
+        let attributes = prefix.rsplit("\n\n").next().unwrap_or_default();
+        assert!(
+            !attributes.contains("Debug"),
+            "{declaration} regained derived Debug"
+        );
+    }
+
+    let api_source = include_str!("../src/api/mod.rs");
+    assert!(!api_source.contains("tls.cert_path.display()"));
+    assert!(!api_source.contains("tls.key_path.display()"));
+    assert!(!api_source.contains("Certificate: {}"));
+    assert!(!api_source.contains("Private key: {}"));
+    assert!(api_source.contains("cert_path_component_count"));
+    assert!(api_source.contains("key_path_component_count"));
 }
