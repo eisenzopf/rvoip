@@ -14,7 +14,7 @@
 //! or mostly-dropped.
 
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -66,9 +66,28 @@ fn build_examples() {
     assert!(build_status.success(), "cargo build failed");
 }
 
+fn example_binary(name: &str) -> PathBuf {
+    let test_binary = env::current_exe().expect("current integration-test binary");
+    let debug_dir = test_binary
+        .parent()
+        .and_then(Path::parent)
+        .expect("integration test runs from target/<profile>/deps");
+    let binary = debug_dir
+        .join("examples")
+        .join(format!("{name}{}", env::consts::EXE_SUFFIX));
+    assert!(
+        binary.is_file(),
+        "built example binary is missing: {}",
+        binary.display()
+    );
+    binary
+}
+
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
-    let mut cmd = Command::new(cargo_bin());
-    cmd.args(["run", "--quiet", "-p", "rvoip-sip", "--example", name]);
+    // `build_examples` has already materialized the executables. Launch them
+    // directly: two nested `cargo run` processes serialize on Cargo's artifact
+    // lock, leaving the second peer unable to start until the first exits.
+    let mut cmd = Command::new(example_binary(name));
     for (k, v) in envs {
         cmd.env(k, v);
     }
