@@ -1,11 +1,13 @@
 //! End-to-end test for the `_with_headers` outbound-INVITE variants on
 //! every public API surface.
 //!
-//! Each test spins up two coordinators on UDP. The *receiver* enables
-//! `SipTraceConfig` so the inbound INVITE is published as
-//! [`Event::SipTrace`] with the unredacted wire bytes intact. The test
-//! asserts that the caller-supplied extra headers (a custom `Call-Info`
-//! URI and a vendor `X-Tenant-ID` header) appear in those bytes.
+//! Each test spins up two coordinators on UDP. The *receiver* explicitly
+//! enables the development-only trace passthrough so the inbound INVITE is
+//! published as [`Event::SipTrace`] with the unredacted packet bytes intact.
+//! The test asserts that the caller-supplied extra headers (a custom
+//! `Call-Info` URI and a vendor `X-Tenant-ID` header) appear in those bytes;
+//! the latter is serialized with the builder's canonical `X-Tenant-Id`
+//! spelling because SIP header identity is case-insensitive.
 //!
 //! The four "appears on wire" tests prove the parameter actually threads
 //! through; `pai_appears_before_extra_headers` proves the documented
@@ -36,13 +38,14 @@ const PAIR_ENDPOINT: (u16, u16) = (15760, 15770);
 const PAIR_ORDERING: (u16, u16) = (15780, 15790);
 const PAIR_DEFAULT: (u16, u16) = (15800, 15810);
 
-const TENANT_HEADER_NAME: &str = "X-Tenant-ID";
+const TENANT_HEADER_INPUT_NAME: &str = "X-Tenant-ID";
+const TENANT_HEADER_WIRE_NAME: &str = "X-Tenant-Id";
 const TENANT_HEADER_VALUE: &str = "acme-prod";
 const CALL_INFO_URI: &str = "<sip:helpdesk@example.com>;purpose=info";
 
 fn extra_headers_fixture() -> Vec<TypedHeader> {
     let tenant = TypedHeader::Other(
-        HeaderName::Other(TENANT_HEADER_NAME.to_string()),
+        HeaderName::Other(TENANT_HEADER_INPUT_NAME.to_string()),
         HeaderValue::text(TENANT_HEADER_VALUE),
     );
     let call_info = TypedHeader::Other(HeaderName::CallInfo, HeaderValue::text(CALL_INFO_URI));
@@ -57,7 +60,10 @@ fn receiver_config(name: &str, port: u16) -> Config {
         include_body: true,
         ..SipTraceConfig::default()
     };
-    cfg
+    // Treat this loopback-only integration trace as a packet-capture oracle.
+    // The compatibility booleans alone intentionally retain production-safe
+    // redaction; verbatim header values require this explicit opt-in.
+    cfg.trace_passthrough_for_development()
 }
 
 async fn wait_for_inbound_invite(
@@ -76,6 +82,7 @@ async fn wait_for_inbound_invite(
                 if trace.direction == SipTraceDirection::Inbound
                     && trace.start_line.starts_with("INVITE")
                 {
+                    assert_verbatim_packet(&trace);
                     return Some(trace);
                 }
             }
@@ -92,19 +99,48 @@ async fn boot_receiver(port: u16, name: &str) -> Arc<UnifiedCoordinator> {
     bob
 }
 
+fn wire_headers(raw_message: &str) -> impl Iterator<Item = (&str, &str)> {
+    raw_message
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.trim_end_matches('\r').split_once(':'))
+        .map(|(name, value)| (name, value.trim_start()))
+}
+
+fn find_wire_header<'a>(
+    raw_message: &'a str,
+    expected_name: &str,
+) -> Option<(usize, &'a str, &'a str)> {
+    wire_headers(raw_message)
+        .enumerate()
+        .find_map(|(index, (name, value))| {
+            name.eq_ignore_ascii_case(expected_name)
+                .then_some((index, name, value))
+        })
+}
+
+fn assert_verbatim_packet(trace: &rvoip_sip::SipTrace) {
+    assert!(!trace.redacted, "packet-capture trace must be verbatim");
+    assert!(
+        !trace.truncated,
+        "packet-capture trace must not be truncated"
+    );
+}
+
 fn assert_contains_extras(raw_message: &str) {
-    assert!(
-        raw_message.contains(TENANT_HEADER_NAME),
-        "expected `{TENANT_HEADER_NAME}` on the wire; got:\n{raw_message}"
+    let (_, tenant_name, tenant_value) = find_wire_header(raw_message, TENANT_HEADER_INPUT_NAME)
+        .unwrap_or_else(|| panic!("expected tenant header on the wire; got:\n{raw_message}"));
+    assert_eq!(
+        tenant_name, TENANT_HEADER_WIRE_NAME,
+        "custom header must use the builder's canonical wire spelling"
     );
-    assert!(
-        raw_message.contains(TENANT_HEADER_VALUE),
-        "expected tenant value `{TENANT_HEADER_VALUE}` on the wire; got:\n{raw_message}"
-    );
-    assert!(
-        raw_message.contains(CALL_INFO_URI),
-        "expected Call-Info URI on the wire; got:\n{raw_message}"
-    );
+    assert_eq!(tenant_value, TENANT_HEADER_VALUE);
+
+    let (_, call_info_name, call_info_value) = find_wire_header(raw_message, "Call-Info")
+        .unwrap_or_else(|| panic!("expected Call-Info on the wire; got:\n{raw_message}"));
+    assert_eq!(call_info_name, "Call-Info");
+    assert_eq!(call_info_value, CALL_INFO_URI);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -290,16 +326,19 @@ async fn pai_appears_before_extra_headers_on_wire() {
         .expect("bob did not see inbound INVITE trace");
 
     let raw = &trace.raw_message;
-    let pai_idx = raw
-        .find("P-Asserted-Identity")
+    let (pai_idx, pai_name, pai_value) = find_wire_header(raw, "P-Asserted-Identity")
         .unwrap_or_else(|| panic!("expected P-Asserted-Identity on wire; got:\n{raw}"));
-    let tenant_idx = raw
-        .find(TENANT_HEADER_NAME)
-        .unwrap_or_else(|| panic!("expected {TENANT_HEADER_NAME} on wire; got:\n{raw}"));
+    assert_eq!(pai_name, "P-Asserted-Identity");
+    assert_eq!(pai_value, format!("<{pai_uri}>"));
+
+    let (tenant_idx, tenant_name, tenant_value) = find_wire_header(raw, TENANT_HEADER_INPUT_NAME)
+        .unwrap_or_else(|| panic!("expected tenant header on wire; got:\n{raw}"));
+    assert_eq!(tenant_name, TENANT_HEADER_WIRE_NAME);
+    assert_eq!(tenant_value, TENANT_HEADER_VALUE);
     assert!(
         pai_idx < tenant_idx,
-        "P-Asserted-Identity (offset {pai_idx}) must precede caller-supplied \
-         {TENANT_HEADER_NAME} (offset {tenant_idx}). Raw:\n{raw}"
+        "P-Asserted-Identity (header index {pai_idx}) must precede caller-supplied \
+         {TENANT_HEADER_WIRE_NAME} (header index {tenant_idx}). Raw:\n{raw}"
     );
 
     bob.terminate_current_session().await.ok();
@@ -332,13 +371,13 @@ async fn default_make_call_omits_extra_headers() {
         .expect("bob did not see inbound INVITE trace");
 
     assert!(
-        !trace.raw_message.contains(TENANT_HEADER_NAME),
-        "plain invite must not include {TENANT_HEADER_NAME}; got:\n{}",
+        find_wire_header(&trace.raw_message, TENANT_HEADER_INPUT_NAME).is_none(),
+        "plain invite must not include the tenant header; got:\n{}",
         trace.raw_message
     );
     assert!(
-        !trace.raw_message.contains(CALL_INFO_URI),
-        "plain invite must not include the Call-Info fixture URI; got:\n{}",
+        find_wire_header(&trace.raw_message, "Call-Info").is_none(),
+        "plain invite must not include Call-Info; got:\n{}",
         trace.raw_message
     );
 
