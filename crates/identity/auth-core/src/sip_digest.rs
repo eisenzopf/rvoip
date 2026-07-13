@@ -17,6 +17,7 @@ use crate::providers::DigestSecret;
 use hex;
 use rand::Rng;
 use sha2::{Digest as Sha2Digest, Sha256, Sha512_256};
+use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Digest authentication algorithm.
@@ -151,7 +152,7 @@ fn parse_qop_options(value: &str) -> Vec<String> {
 }
 
 /// Digest challenge issued by server (401/407 response).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DigestChallenge {
     pub realm: String,
     pub nonce: String,
@@ -160,18 +161,44 @@ pub struct DigestChallenge {
     pub opaque: Option<String>,
 }
 
+impl fmt::Debug for DigestChallenge {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DigestChallenge")
+            .field("realm_present", &!self.realm.is_empty())
+            .field("realm_bytes", &self.realm.len())
+            .field("nonce_present", &!self.nonce.is_empty())
+            .field("nonce_bytes", &self.nonce.len())
+            .field("algorithm", &self.algorithm)
+            .field("qop_count", &self.qop.as_ref().map_or(0, Vec::len))
+            .field("opaque_present", &self.opaque.is_some())
+            .field("opaque_bytes", &self.opaque.as_ref().map_or(0, String::len))
+            .finish()
+    }
+}
+
 /// Parsed digest challenge plus metadata that is useful for negotiation.
 ///
 /// This is additive to keep [`DigestChallenge`] source-compatible for
 /// callers that construct challenge literals.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DigestChallengeDetails {
     pub challenge: DigestChallenge,
     pub stale: bool,
 }
 
+impl fmt::Debug for DigestChallengeDetails {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DigestChallengeDetails")
+            .field("challenge", &self.challenge)
+            .field("stale", &self.stale)
+            .finish()
+    }
+}
+
 /// Parsed Authorization header on the server side.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DigestResponse {
     pub username: String,
     pub realm: String,
@@ -185,12 +212,37 @@ pub struct DigestResponse {
     pub opaque: Option<String>,
 }
 
+impl fmt::Debug for DigestResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DigestResponse")
+            .field("username_bytes", &self.username.len())
+            .field("realm_bytes", &self.realm.len())
+            .field("nonce_bytes", &self.nonce.len())
+            .field("uri_bytes", &self.uri.len())
+            .field("response_bytes", &self.response.len())
+            .field("algorithm", &self.algorithm)
+            .field("cnonce_present", &self.cnonce.is_some())
+            .field("cnonce_bytes", &self.cnonce.as_ref().map_or(0, String::len))
+            .field("qop_present", &self.qop.is_some())
+            .field("qop_bytes", &self.qop.as_ref().map_or(0, String::len))
+            .field("nonce_count_present", &self.nc.is_some())
+            .field(
+                "nonce_count_bytes",
+                &self.nc.as_ref().map_or(0, String::len),
+            )
+            .field("opaque_present", &self.opaque.is_some())
+            .field("opaque_bytes", &self.opaque.as_ref().map_or(0, String::len))
+            .finish()
+    }
+}
+
 /// Result of computing a digest response with explicit state.
 ///
 /// Returned by [`DigestClient::compute_response_with_state`] so the
 /// caller can fold the same `nc` and `qop` values into the
 /// Authorization header without duplicating the qop-selection logic.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DigestComputed {
     pub response: String,
     pub cnonce: Option<String>,
@@ -202,11 +254,40 @@ pub struct DigestComputed {
     pub qop: Option<String>,
 }
 
+impl fmt::Debug for DigestComputed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DigestComputed")
+            .field("response_bytes", &self.response.len())
+            .field("cnonce_present", &self.cnonce.is_some())
+            .field("cnonce_bytes", &self.cnonce.as_ref().map_or(0, String::len))
+            .field("nonce_count_present", &self.nc.is_some())
+            .field(
+                "nonce_count_bytes",
+                &self.nc.as_ref().map_or(0, String::len),
+            )
+            .field("qop_present", &self.qop.is_some())
+            .field("qop_bytes", &self.qop.as_ref().map_or(0, String::len))
+            .finish()
+    }
+}
+
 /// SIP Digest authenticator for generating challenges and validating responses.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DigestAuthenticator {
     realm: String,
     algorithm: DigestAlgorithm,
+}
+
+impl fmt::Debug for DigestAuthenticator {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DigestAuthenticator")
+            .field("realm_present", &!self.realm.is_empty())
+            .field("realm_bytes", &self.realm.len())
+            .field("algorithm", &self.algorithm)
+            .finish()
+    }
 }
 
 impl DigestAuthenticator {
@@ -1145,10 +1226,14 @@ mod tests {
         )
         .expect_err("unsupported qop must fail");
 
-        assert!(
-            err.to_string().contains("supported qop"),
-            "unexpected error: {err}"
+        assert_eq!(
+            err.to_string(),
+            "authentication failed (class=invalid-challenge)"
         );
+        match err {
+            AuthError::InvalidChallenge(detail) => assert!(detail.contains("supported qop")),
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     #[test]

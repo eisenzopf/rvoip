@@ -84,13 +84,35 @@ pub mod uctp {
 /// matches the `Credential` enum in `rvoip-core-traits::identity`,
 /// but is re-defined locally so the client crate doesn't depend on
 /// the orchestrator's identity model directly.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum Credential {
     Bearer(String),
     OAuth2Dpop {
         access_token: String,
         dpop_proof: String,
     },
+}
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bearer(token) => formatter
+                .debug_struct("Bearer")
+                .field("token_present", &!token.is_empty())
+                .field("token_len", &token.len())
+                .finish(),
+            Self::OAuth2Dpop {
+                access_token,
+                dpop_proof,
+            } => formatter
+                .debug_struct("OAuth2Dpop")
+                .field("access_token_present", &!access_token.is_empty())
+                .field("access_token_len", &access_token.len())
+                .field("dpop_proof_present", &!dpop_proof.is_empty())
+                .field("dpop_proof_len", &dpop_proof.len())
+                .finish(),
+        }
+    }
 }
 
 /// Options for `Client::connect_with_options`.

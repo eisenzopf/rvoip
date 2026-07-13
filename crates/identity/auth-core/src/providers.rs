@@ -7,30 +7,57 @@
 //! custom database.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use rvoip_core_traits::identity::IdentityAssurance;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 use crate::sip_digest::DigestAlgorithm;
 
 /// Error returned by provider-backed credential checks.
-#[derive(Debug, Error)]
 pub enum CredentialAuthError {
     /// Credentials were present but did not authenticate.
-    #[error("invalid credentials")]
     Invalid,
 
     /// The backing provider could not answer the request.
-    #[error("credential provider unavailable: {0}")]
     Unavailable(String),
 
     /// A configured security policy rejected the credential or request.
-    #[error("credential policy rejected request: {0}")]
     PolicyRejected(String),
 }
+
+impl CredentialAuthError {
+    fn diagnostic_class(&self) -> &'static str {
+        match self {
+            Self::Invalid => "invalid",
+            Self::Unavailable(_) => "provider-unavailable",
+            Self::PolicyRejected(_) => "policy-rejected",
+        }
+    }
+}
+
+impl fmt::Display for CredentialAuthError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "credential authentication failed (class={})",
+            self.diagnostic_class()
+        )
+    }
+}
+
+impl fmt::Debug for CredentialAuthError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CredentialAuthError")
+            .field("class", &self.diagnostic_class())
+            .finish()
+    }
+}
+
+impl std::error::Error for CredentialAuthError {}
 
 /// Password verifier for Basic-style username/password authentication.
 ///
@@ -47,7 +74,7 @@ pub trait PasswordVerifier: Send + Sync {
 }
 
 /// Secret material usable for SIP Digest validation.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum DigestSecret {
     /// Plaintext SIP Digest password.
     PlaintextPassword(String),
@@ -56,6 +83,21 @@ pub enum DigestSecret {
     ///
     /// For `-sess` algorithms this is the base HA1 before nonce/cnonce folding.
     Ha1(String),
+}
+
+impl fmt::Debug for DigestSecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PlaintextPassword(value) => formatter
+                .debug_struct("PlaintextPassword")
+                .field("secret_bytes", &value.len())
+                .finish(),
+            Self::Ha1(value) => formatter
+                .debug_struct("Ha1")
+                .field("secret_bytes", &value.len())
+                .finish(),
+        }
+    }
 }
 
 /// Provider for SIP Digest credential material.
@@ -93,7 +135,7 @@ pub enum TokenRevocationStatus {
 }
 
 /// Redacted context supplied to a token revocation checker.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TokenRevocationContext {
     /// Token identifier, usually the JWT `jti` claim.
     pub token_id: String,
@@ -105,6 +147,20 @@ pub struct TokenRevocationContext {
     pub issued_at: Option<SystemTime>,
     /// Token expiry time when present.
     pub expires_at: Option<SystemTime>,
+}
+
+impl fmt::Debug for TokenRevocationContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TokenRevocationContext")
+            .field("token_id_present", &!self.token_id.is_empty())
+            .field("token_id_bytes", &self.token_id.len())
+            .field("subject_present", &self.subject.is_some())
+            .field("issuer_present", &self.issuer.is_some())
+            .field("issued_at_present", &self.issued_at.is_some())
+            .field("expires_at_present", &self.expires_at.is_some())
+            .finish()
+    }
 }
 
 impl TokenRevocationContext {
@@ -200,7 +256,7 @@ pub trait DigestReplayStore: Send + Sync {
 
 /// Auth scheme associated with an audit event.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthAuditScheme {
     /// SIP Digest authentication.
     Digest,
@@ -220,9 +276,27 @@ pub enum AuthAuditScheme {
     Other(String),
 }
 
+impl fmt::Debug for AuthAuditScheme {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Digest => formatter.write_str("Digest"),
+            Self::Bearer => formatter.write_str("Bearer"),
+            Self::Basic => formatter.write_str("Basic"),
+            Self::Aka => formatter.write_str("Aka"),
+            Self::ApiKey => formatter.write_str("ApiKey"),
+            Self::Password => formatter.write_str("Password"),
+            Self::Token => formatter.write_str("Token"),
+            Self::Other(value) => formatter
+                .debug_struct("Other")
+                .field("value_len", &value.len())
+                .finish(),
+        }
+    }
+}
+
 /// Security-relevant reason for an authentication failure.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthFailureReason {
     /// No credential was supplied.
     MissingCredential,
@@ -248,8 +322,29 @@ pub enum AuthFailureReason {
     Other(String),
 }
 
+impl fmt::Debug for AuthFailureReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingCredential => formatter.write_str("MissingCredential"),
+            Self::MalformedCredential => formatter.write_str("MalformedCredential"),
+            Self::InvalidCredential => formatter.write_str("InvalidCredential"),
+            Self::UnsupportedScheme => formatter.write_str("UnsupportedScheme"),
+            Self::PolicyRejected => formatter.write_str("PolicyRejected"),
+            Self::TokenExpired => formatter.write_str("TokenExpired"),
+            Self::TokenRevoked => formatter.write_str("TokenRevoked"),
+            Self::StaleNonce => formatter.write_str("StaleNonce"),
+            Self::ReplayRejected => formatter.write_str("ReplayRejected"),
+            Self::ProviderUnavailable => formatter.write_str("ProviderUnavailable"),
+            Self::Other(value) => formatter
+                .debug_struct("Other")
+                .field("value_len", &value.len())
+                .finish(),
+        }
+    }
+}
+
 /// Result captured by an auth audit event.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthAuditOutcome {
     /// Authentication succeeded.
     Success,
@@ -257,12 +352,21 @@ pub enum AuthAuditOutcome {
     Failure(AuthFailureReason),
 }
 
+impl fmt::Debug for AuthAuditOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Success => formatter.write_str("Success"),
+            Self::Failure(reason) => formatter.debug_tuple("Failure").field(reason).finish(),
+        }
+    }
+}
+
 /// Redacted audit event for auth/security logging.
 ///
 /// Events intentionally carry identifiers and metadata, not credential values.
 /// Do not put passwords, HA1 values, bearer tokens, API keys, full
 /// Authorization headers, or full JWTs into `metadata`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthAuditEvent {
     /// Scheme or auth subsystem involved.
     pub scheme: AuthAuditScheme,
@@ -276,6 +380,20 @@ pub struct AuthAuditEvent {
     pub peer: Option<String>,
     /// Additional non-secret attributes.
     pub metadata: BTreeMap<String, String>,
+}
+
+impl fmt::Debug for AuthAuditEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthAuditEvent")
+            .field("scheme", &self.scheme)
+            .field("outcome", &self.outcome)
+            .field("subject_present", &self.subject.is_some())
+            .field("realm_present", &self.realm.is_some())
+            .field("peer_present", &self.peer.is_some())
+            .field("metadata_entry_count", &self.metadata.len())
+            .finish()
+    }
 }
 
 impl AuthAuditEvent {
@@ -329,7 +447,7 @@ pub trait AuthAuditSink: Send + Sync {
 
 /// Authentication operation subject to rate limits or lockout policy.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum AuthRateLimitKind {
     /// SIP REGISTER attempts.
     SipRegister,
@@ -351,9 +469,28 @@ pub enum AuthRateLimitKind {
     Other(String),
 }
 
+impl fmt::Debug for AuthRateLimitKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SipRegister => formatter.write_str("SipRegister"),
+            Self::SipRequest => formatter.write_str("SipRequest"),
+            Self::BasicPassword => formatter.write_str("BasicPassword"),
+            Self::Password => formatter.write_str("Password"),
+            Self::ApiKey => formatter.write_str("ApiKey"),
+            Self::BearerToken => formatter.write_str("BearerToken"),
+            Self::TokenIssuance => formatter.write_str("TokenIssuance"),
+            Self::Digest => formatter.write_str("Digest"),
+            Self::Other(value) => formatter
+                .debug_struct("Other")
+                .field("value_len", &value.len())
+                .finish(),
+        }
+    }
+}
+
 /// Rate-limit key. Fields are optional so applications can key by peer, realm,
 /// subject, or any combination their deployment supports.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AuthRateLimitKey {
     /// Operation category.
     pub kind: AuthRateLimitKind,
@@ -363,6 +500,18 @@ pub struct AuthRateLimitKey {
     pub realm: Option<String>,
     /// Source peer, IP, connection id, or SIP source when known.
     pub peer: Option<String>,
+}
+
+impl fmt::Debug for AuthRateLimitKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthRateLimitKey")
+            .field("kind", &self.kind)
+            .field("subject_present", &self.subject.is_some())
+            .field("realm_present", &self.realm.is_some())
+            .field("peer_present", &self.peer.is_some())
+            .finish()
+    }
 }
 
 impl AuthRateLimitKey {

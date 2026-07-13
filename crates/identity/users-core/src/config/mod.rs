@@ -4,7 +4,7 @@ use crate::jwt::JwtConfig;
 use serde::Deserialize;
 
 /// Main configuration
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct UsersConfig {
     pub database_url: String,
     pub jwt: JwtConfig,
@@ -12,6 +12,22 @@ pub struct UsersConfig {
     pub api_bind_address: String,
     #[serde(default)]
     pub tls: TlsSettings,
+}
+
+impl std::fmt::Debug for UsersConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UsersConfig")
+            .field("database_url_present", &!self.database_url.is_empty())
+            .field("jwt", &self.jwt)
+            .field("password", &self.password)
+            .field(
+                "api_bind_address_present",
+                &!self.api_bind_address.is_empty(),
+            )
+            .field("tls", &self.tls)
+            .finish()
+    }
 }
 
 /// Password configuration

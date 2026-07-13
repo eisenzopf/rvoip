@@ -371,10 +371,11 @@ pub(crate) enum AuthFailureStage {
     ReplayNonceRecord,
     ReplayNonceStatus,
     ReplayNonceCount,
+    ErasedCredentialProvider,
 }
 
 impl AuthFailureStage {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::CorePrimitive,
         Self::AkaClientProvider,
         Self::PrincipalProjection,
@@ -388,6 +389,7 @@ impl AuthFailureStage {
         Self::ReplayNonceRecord,
         Self::ReplayNonceStatus,
         Self::ReplayNonceCount,
+        Self::ErasedCredentialProvider,
     ];
 
     pub(crate) const fn message(self) -> &'static str {
@@ -405,6 +407,9 @@ impl AuthFailureStage {
             Self::ReplayNonceRecord => "authentication failed (stage=replay-nonce-record)",
             Self::ReplayNonceStatus => "authentication failed (stage=replay-nonce-status)",
             Self::ReplayNonceCount => "authentication failed (stage=replay-nonce-count)",
+            Self::ErasedCredentialProvider => {
+                "authentication failed (stage=erased-credential-provider)"
+            }
         }
     }
 }
@@ -480,8 +485,7 @@ impl From<crate::api::headers::HeaderPolicyViolation> for SessionError {
 impl SessionError {
     /// True if this error means "the session is already gone from the
     /// registry" — covers both the typed `SessionNotFound` variant and the
-    /// stringly-wrapped `Other("Session not found: …")` form that falls out
-    /// of the `From<Box<dyn Error>>` flatteners above.
+    /// legacy stringly-wrapped `Other("Session not found: …")` form.
     ///
     /// Useful for fire-and-forget teardown paths (e.g. `SessionHandle::hangup`)
     /// that race against a natural call-ended cleanup: if the race is lost,
@@ -495,19 +499,41 @@ impl SessionError {
 
 impl From<Box<dyn std::error::Error>> for SessionError {
     fn from(err: Box<dyn std::error::Error>) -> Self {
-        match err.downcast::<SessionError>() {
-            Ok(session_error) => *session_error,
-            Err(_lower) => SessionError::Other("lower-layer error".to_string()),
+        let err = match err.downcast::<SessionError>() {
+            Ok(error) => return *error,
+            Err(error) => error,
+        };
+        let err = match err.downcast::<rvoip_auth_core::AuthError>() {
+            Ok(error) => return SessionError::from(*error),
+            Err(error) => error,
+        };
+        if err
+            .downcast_ref::<rvoip_auth_core::CredentialAuthError>()
+            .is_some()
+        {
+            return redacted_auth_failure(AuthFailureStage::ErasedCredentialProvider, ());
         }
+        SessionError::Other("lower-layer operation failed (class=opaque-erased)".to_string())
     }
 }
 
 impl From<Box<dyn std::error::Error + Send + Sync>> for SessionError {
     fn from(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
-        match err.downcast::<SessionError>() {
-            Ok(session_error) => *session_error,
-            Err(_lower) => SessionError::Other("lower-layer error".to_string()),
+        let err = match err.downcast::<SessionError>() {
+            Ok(error) => return *error,
+            Err(error) => error,
+        };
+        let err = match err.downcast::<rvoip_auth_core::AuthError>() {
+            Ok(error) => return SessionError::from(*error),
+            Err(error) => error,
+        };
+        if err
+            .downcast_ref::<rvoip_auth_core::CredentialAuthError>()
+            .is_some()
+        {
+            return redacted_auth_failure(AuthFailureStage::ErasedCredentialProvider, ());
         }
+        SessionError::Other("lower-layer operation failed (class=opaque-erased)".to_string())
     }
 }
 
@@ -764,5 +790,78 @@ mod outbound_auth_redaction_tests {
             assert_eq!(mapped.to_string(), expected.to_string());
             assert!(!mapped.to_string().contains(PROVIDER_SECRET));
         }
+    }
+}
+
+#[cfg(test)]
+mod erased_error_boundary_tests {
+    use super::*;
+
+    const CANARY: &str = "erased-lower-error-canary\r\nAuthorization: exposed";
+
+    #[derive(Debug)]
+    struct ArbitraryLowerError;
+
+    impl fmt::Display for ArbitraryLowerError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str(CANARY)
+        }
+    }
+
+    impl std::error::Error for ArbitraryLowerError {}
+
+    fn assert_no_canary(error: &SessionError) {
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            assert!(!rendered.contains(CANARY), "lower error leaked: {rendered}");
+        }
+    }
+
+    #[test]
+    fn arbitrary_erased_errors_collapse_to_fixed_class() {
+        let plain: SessionError =
+            (Box::new(ArbitraryLowerError) as Box<dyn std::error::Error>).into();
+        let send_sync: SessionError =
+            (Box::new(ArbitraryLowerError) as Box<dyn std::error::Error + Send + Sync>).into();
+        for error in [plain, send_sync] {
+            assert_no_canary(&error);
+            assert!(matches!(
+                error,
+                SessionError::Other(ref value)
+                    if value == "lower-layer operation failed (class=opaque-erased)"
+            ));
+        }
+    }
+
+    #[test]
+    fn erased_auth_errors_are_downcast_and_classified() {
+        let core: SessionError =
+            (Box::new(rvoip_auth_core::AuthError::ProviderError(CANARY.into()))
+                as Box<dyn std::error::Error>)
+                .into();
+        let provider = Box::new(rvoip_auth_core::CredentialAuthError::Unavailable(
+            CANARY.into(),
+        )) as Box<dyn std::error::Error + Send + Sync>;
+        let provider = SessionError::from(provider);
+
+        assert_no_canary(&core);
+        assert_no_canary(&provider);
+        assert!(matches!(
+            core,
+            SessionError::AuthError(ref value)
+                if value == "authentication failed (stage=core-primitive)"
+        ));
+        assert!(matches!(
+            provider,
+            SessionError::AuthError(ref value)
+                if value == "authentication failed (stage=erased-credential-provider)"
+        ));
+    }
+
+    #[test]
+    fn boxed_session_errors_keep_their_typed_variant() {
+        let error: SessionError = (Box::new(SessionError::SessionNotFound("call-1".into()))
+            as Box<dyn std::error::Error + Send + Sync>)
+            .into();
+        assert!(matches!(error, SessionError::SessionNotFound(ref id) if id == "call-1"));
     }
 }

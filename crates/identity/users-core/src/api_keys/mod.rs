@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// API key
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ApiKey {
     pub id: String,
     pub user_id: String,
@@ -18,6 +18,23 @@ pub struct ApiKey {
     pub expires_at: Option<DateTime<Utc>>,
     pub last_used: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for ApiKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ApiKey")
+            .field("id_present", &!self.id.is_empty())
+            .field("user_present", &!self.user_id.is_empty())
+            .field("name_len", &self.name.len())
+            .field("key_hash_present", &!self.key_hash.is_empty())
+            .field("key_hash_len", &self.key_hash.len())
+            .field("permission_count", &self.permissions.len())
+            .field("active", &self.active)
+            .field("expires_at_present", &self.expires_at.is_some())
+            .field("last_used_present", &self.last_used.is_some())
+            .finish()
+    }
 }
 
 /// API key storage trait

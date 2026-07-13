@@ -84,7 +84,7 @@ impl Default for PasswordPolicy {
 }
 
 /// Validated create user request
-#[derive(Debug, Validate)]
+#[derive(Validate)]
 pub struct ValidatedCreateUserRequest {
     #[validate(
         length(min = 3, max = 32),
@@ -103,6 +103,21 @@ pub struct ValidatedCreateUserRequest {
 
     #[validate(custom(function = "validate_roles"))]
     pub roles: Vec<String>,
+}
+
+impl std::fmt::Debug for ValidatedCreateUserRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ValidatedCreateUserRequest")
+            .field("username_present", &!self.username.is_empty())
+            .field("username_len", &self.username.len())
+            .field("password_present", &!self.password.is_empty())
+            .field("password_len", &self.password.len())
+            .field("email_present", &self.email.is_some())
+            .field("display_name_present", &self.display_name.is_some())
+            .field("role_count", &self.roles.len())
+            .finish()
+    }
 }
 
 /// Validate username format

@@ -1,5 +1,6 @@
 use rvoip_core::capability::CapabilityDescriptor;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use crate::identity::DtlsFingerprint;
 
@@ -34,13 +35,26 @@ impl MdnsCandidatePolicy {
 }
 
 /// STUN/TURN server entry with optional long-term credentials.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IceServerConfig {
     pub urls: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
+}
+
+impl fmt::Debug for IceServerConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IceServerConfig")
+            .field("url_count", &self.urls.len())
+            .field("username_present", &self.username.is_some())
+            .field("username_len", &self.username.as_deref().map(str::len))
+            .field("credential_present", &self.credential.is_some())
+            .field("credential_len", &self.credential.as_deref().map(str::len))
+            .finish()
+    }
 }
 
 impl IceServerConfig {
@@ -66,7 +80,7 @@ impl IceServerConfig {
 }
 
 /// ICE / media configuration shared by peer connections and the adapter.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WebRtcConfig {
     /// UDP bind address passed to `PeerConnectionBuilder::with_udp_addrs`.
     /// Use `"0.0.0.0:0"` or `"127.0.0.1:0"` for ephemeral ports.
@@ -178,6 +192,30 @@ pub struct WebRtcConfig {
     /// the historical audio-only outbound offer shape.
     #[serde(default)]
     pub originate_include_video: bool,
+}
+
+impl fmt::Debug for WebRtcConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WebRtcConfig")
+            .field("udp_bind_present", &!self.udp_bind.is_empty())
+            .field("ice_server_count", &self.ice_servers.len())
+            .field("gather_timeout_secs", &self.gather_timeout_secs)
+            .field("handler_channel_capacity", &self.handler_channel_capacity)
+            .field("inbound_send_deadline_ms", &self.inbound_send_deadline_ms)
+            .field("session_idle_ttl_secs", &self.session_idle_ttl_secs)
+            .field("trickle_ice", &self.trickle_ice)
+            .field("hold_renegotiate", &self.hold_renegotiate)
+            .field("max_concurrent_sessions", &self.max_concurrent_sessions)
+            .field("cors_origin_count", &self.cors_origins.len())
+            .field("ws_max_message_size", &self.ws_max_message_size)
+            .field("ws_keepalive_secs", &self.ws_keepalive_secs)
+            .field("whip_per_ip_per_min", &self.whip_per_ip_per_min)
+            .field("mdns_candidate_policy", &self.mdns_candidate_policy)
+            .field("ice_transport_policy", &self.ice_transport_policy)
+            .field("originate_include_video", &self.originate_include_video)
+            .finish_non_exhaustive()
+    }
 }
 
 /// G12 — Opus encoder/decoder hints carried in the SDP fmtp line for

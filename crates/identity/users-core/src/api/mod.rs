@@ -62,13 +62,25 @@ impl Default for Metrics {
 }
 
 // Request/Response types
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
 }
 
-#[derive(Debug, Serialize)]
+impl std::fmt::Debug for LoginRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LoginRequest")
+            .field("username_present", &!self.username.is_empty())
+            .field("username_len", &self.username.len())
+            .field("password_present", &!self.password.is_empty())
+            .field("password_len", &self.password.len())
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
 pub struct LoginResponse {
     pub access_token: String,
     pub refresh_token: String,
@@ -76,15 +88,51 @@ pub struct LoginResponse {
     pub expires_in: u64,
 }
 
-#[derive(Debug, Deserialize)]
+impl std::fmt::Debug for LoginResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LoginResponse")
+            .field("access_token_present", &!self.access_token.is_empty())
+            .field("access_token_len", &self.access_token.len())
+            .field("refresh_token_present", &!self.refresh_token.is_empty())
+            .field("refresh_token_len", &self.refresh_token.len())
+            .field("token_type_len", &self.token_type.len())
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 pub struct RefreshRequest {
     pub refresh_token: String,
 }
 
-#[derive(Debug, Deserialize)]
+impl std::fmt::Debug for RefreshRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RefreshRequest")
+            .field("refresh_token_present", &!self.refresh_token.is_empty())
+            .field("refresh_token_len", &self.refresh_token.len())
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 pub struct ChangePasswordRequest {
     pub old_password: String,
     pub new_password: String,
+}
+
+impl std::fmt::Debug for ChangePasswordRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChangePasswordRequest")
+            .field("old_password_present", &!self.old_password.is_empty())
+            .field("old_password_len", &self.old_password.len())
+            .field("new_password_present", &!self.new_password.is_empty())
+            .field("new_password_len", &self.new_password.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,10 +164,21 @@ pub struct ApiKeyResponse {
     pub last_used: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct CreateApiKeyResponse {
     pub key: String,
     pub key_info: ApiKeyResponse,
+}
+
+impl std::fmt::Debug for CreateApiKeyResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreateApiKeyResponse")
+            .field("key_present", &!self.key.is_empty())
+            .field("key_len", &self.key.len())
+            .field("key_info_present", &true)
+            .finish()
+    }
 }
 
 // Error response

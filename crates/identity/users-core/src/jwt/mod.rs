@@ -17,7 +17,7 @@ pub struct JwtIssuer {
 }
 
 /// JWT claims for user tokens
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UserClaims {
     // Standard claims
     pub iss: String,      // Issuer
@@ -34,8 +34,27 @@ pub struct UserClaims {
     pub scope: String,
 }
 
+impl std::fmt::Debug for UserClaims {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UserClaims")
+            .field("issuer_present", &!self.iss.is_empty())
+            .field("subject_present", &!self.sub.is_empty())
+            .field("audience_count", &self.aud.len())
+            .field("expires_at", &self.exp)
+            .field("issued_at", &self.iat)
+            .field("token_id_present", &!self.jti.is_empty())
+            .field("username_present", &!self.username.is_empty())
+            .field("email_present", &self.email.is_some())
+            .field("role_count", &self.roles.len())
+            .field("scope_present", &!self.scope.is_empty())
+            .field("scope_len", &self.scope.len())
+            .finish()
+    }
+}
+
 /// Refresh token claims (minimal)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RefreshTokenClaims {
     pub iss: String,
     pub sub: String, // User ID
@@ -44,8 +63,21 @@ pub struct RefreshTokenClaims {
     pub iat: u64,
 }
 
+impl std::fmt::Debug for RefreshTokenClaims {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RefreshTokenClaims")
+            .field("issuer_present", &!self.iss.is_empty())
+            .field("subject_present", &!self.sub.is_empty())
+            .field("token_id_present", &!self.jti.is_empty())
+            .field("expires_at", &self.exp)
+            .field("issued_at", &self.iat)
+            .finish()
+    }
+}
+
 /// JWT configuration
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct JwtConfig {
     pub issuer: String,
     pub audience: Vec<String>,
@@ -54,6 +86,24 @@ pub struct JwtConfig {
     pub algorithm: String,
     #[serde(skip)]
     pub signing_key: Option<String>, // Will be set programmatically
+}
+
+impl std::fmt::Debug for JwtConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("JwtConfig")
+            .field("issuer_present", &!self.issuer.is_empty())
+            .field("audience_count", &self.audience.len())
+            .field("access_ttl_seconds", &self.access_ttl_seconds)
+            .field("refresh_ttl_seconds", &self.refresh_ttl_seconds)
+            .field("algorithm_len", &self.algorithm.len())
+            .field("signing_key_present", &self.signing_key.is_some())
+            .field(
+                "signing_key_len",
+                &self.signing_key.as_deref().map(str::len),
+            )
+            .finish()
+    }
 }
 
 impl Default for JwtConfig {

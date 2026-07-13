@@ -77,7 +77,7 @@ impl From<rvoip_auth_core::DigestAlgorithm> for SipDigestAlgorithmFamily {
 }
 
 /// Stored SIP Digest credential.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SipDigestCredential {
     pub id: String,
     pub user_id: String,
@@ -90,8 +90,23 @@ pub struct SipDigestCredential {
     pub updated_at: DateTime<Utc>,
 }
 
+impl std::fmt::Debug for SipDigestCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SipDigestCredential")
+            .field("id_present", &!self.id.is_empty())
+            .field("user_present", &!self.user_id.is_empty())
+            .field("sip_username_present", &!self.sip_username.is_empty())
+            .field("realm_present", &!self.realm.is_empty())
+            .field("algorithm", &self.algorithm)
+            .field("ha1_present", &!self.ha1.is_empty())
+            .field("ha1_len", &self.ha1.len())
+            .finish()
+    }
+}
+
 /// Request to create or replace a SIP Digest credential.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct CreateSipDigestCredentialRequest {
     pub user_id: String,
     pub sip_username: String,
@@ -99,6 +114,20 @@ pub struct CreateSipDigestCredentialRequest {
     pub algorithm: SipDigestAlgorithmFamily,
     #[serde(skip_serializing)]
     pub password: String,
+}
+
+impl std::fmt::Debug for CreateSipDigestCredentialRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreateSipDigestCredentialRequest")
+            .field("user_present", &!self.user_id.is_empty())
+            .field("sip_username_present", &!self.sip_username.is_empty())
+            .field("realm_present", &!self.realm.is_empty())
+            .field("algorithm", &self.algorithm)
+            .field("password_present", &!self.password.is_empty())
+            .field("password_len", &self.password.len())
+            .finish()
+    }
 }
 
 impl AuthenticationService {

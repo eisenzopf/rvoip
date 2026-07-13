@@ -689,7 +689,7 @@ impl PlaybackHandle {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SignatureHeaders {
     pub signature: String,
     pub signature_input: String,
@@ -697,10 +697,24 @@ pub struct SignatureHeaders {
     pub signature_agent: Option<Jwk>,
 }
 
+impl fmt::Debug for SignatureHeaders {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SignatureHeaders")
+            .field("signature_present", &!self.signature.is_empty())
+            .field("signature_bytes", &self.signature.len())
+            .field("signature_input_present", &!self.signature_input.is_empty())
+            .field("signature_input_bytes", &self.signature_input.len())
+            .field("signature_key_present", &self.signature_key.is_some())
+            .field("signature_agent_present", &self.signature_agent.is_some())
+            .finish()
+    }
+}
+
 /// Adapter-native event surface. `rvoip-core` normalizes these into the
 /// orchestration event vocabulary; consumers wanting protocol-native
 /// access can subscribe directly to the adapter.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub enum AdapterEvent {
     InboundConnection {
@@ -756,6 +770,57 @@ pub enum AdapterEvent {
         kind: &'static str,
         detail: String,
     },
+}
+
+impl fmt::Debug for AdapterEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InboundConnection { .. } => formatter.write_str("InboundConnection"),
+            Self::Connected { .. } => formatter.write_str("Connected"),
+            Self::Authenticated { .. } => formatter.write_str("Authenticated"),
+            Self::PrincipalAuthenticated { .. } => formatter.write_str("PrincipalAuthenticated"),
+            Self::Ended { .. } => formatter.write_str("Ended"),
+            Self::Failed { detail, .. } => formatter
+                .debug_struct("Failed")
+                .field("detail_present", &!detail.is_empty())
+                .field("detail_bytes", &detail.len())
+                .finish(),
+            Self::Dtmf {
+                digits,
+                duration_ms,
+                ..
+            } => formatter
+                .debug_struct("Dtmf")
+                .field("digit_count", &digits.chars().count())
+                .field("duration_ms", duration_ms)
+                .finish(),
+            Self::Quality { .. } => formatter.write_str("Quality"),
+            Self::Message { text, .. } => formatter
+                .debug_struct("Message")
+                .field("text_present", &!text.is_empty())
+                .field("text_bytes", &text.len())
+                .finish(),
+            Self::DataMessage { message, .. } => formatter
+                .debug_struct("DataMessage")
+                .field("body_bytes", &message.bytes.len())
+                .finish(),
+            Self::StepUpResponse {
+                method, credential, ..
+            } => formatter
+                .debug_struct("StepUpResponse")
+                .field("method_present", &!method.is_empty())
+                .field("method_bytes", &method.len())
+                .field("credential_present", &!credential.is_empty())
+                .field("credential_bytes", &credential.len())
+                .finish(),
+            Self::Native { kind, detail } => formatter
+                .debug_struct("Native")
+                .field("kind", kind)
+                .field("detail_present", &!detail.is_empty())
+                .field("detail_bytes", &detail.len())
+                .finish(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -965,5 +1030,30 @@ mod tests {
             OutboundActivation::new(too_many).unwrap_err(),
             ExternalConnectionReferenceError::TooManyReferences
         );
+    }
+
+    #[test]
+    fn signature_and_step_up_debug_never_render_credential_values() {
+        const CANARY: &str = "adapter-credential-canary\r\nAuthorization: exposed";
+        let headers = SignatureHeaders {
+            signature: CANARY.into(),
+            signature_input: CANARY.into(),
+            signature_key: None,
+            signature_agent: None,
+        };
+        let event = AdapterEvent::StepUpResponse {
+            connection_id: ConnectionId::new(),
+            method: "bearer".into(),
+            credential: CANARY.into(),
+        };
+
+        for rendered in [format!("{headers:?}"), format!("{event:?}")] {
+            assert!(!rendered.contains(CANARY), "credential leaked: {rendered}");
+        }
+        assert_eq!(headers.signature, CANARY);
+        match event {
+            AdapterEvent::StepUpResponse { credential, .. } => assert_eq!(credential, CANARY),
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 }

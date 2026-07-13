@@ -1656,7 +1656,11 @@ impl UctpCoordinator {
             Ok(principal) => {
                 if let Some(bindings) = self.resource_bindings.get() {
                     if let Err(error) = bindings.authenticate(principal.clone()) {
-                        warn!(%error, "auth.bearer: resource binding rejected principal");
+                        warn!(
+                            error_class = "resource-binding-authorization",
+                            status_code = error.code,
+                            "auth.bearer: resource binding rejected principal"
+                        );
                         return self
                             .emit_error(
                                 env.id,
@@ -1698,8 +1702,11 @@ impl UctpCoordinator {
                 })
                 .await
             }
-            Err(e) => {
-                warn!(error = %e, "auth.bearer: validation failed");
+            Err(_) => {
+                warn!(
+                    error_class = "credential-validation",
+                    "auth.bearer: validation failed"
+                );
                 self.emit_error(env.id, 401, "auth", "bearer-validation-failed")
                     .await
             }
@@ -2734,7 +2741,11 @@ impl UctpCoordinator {
             Ok(principal) => {
                 if let Some(bindings) = self.resource_bindings.get() {
                     if let Err(error) = bindings.authenticate(principal.clone()) {
-                        warn!(%error, "auth.refresh: resource binding rejected refreshed principal");
+                        warn!(
+                            error_class = "resource-binding-authorization",
+                            status_code = error.code,
+                            "auth.refresh: resource binding rejected refreshed principal"
+                        );
                         return self
                             .emit_error(
                                 env.id,
@@ -2774,8 +2785,11 @@ impl UctpCoordinator {
                 })
                 .await
             }
-            Err(e) => {
-                warn!(error = %e, "auth.refresh: validation failed; existing session preserved");
+            Err(_) => {
+                warn!(
+                    error_class = "credential-validation",
+                    "auth.refresh: validation failed; existing session preserved"
+                );
                 // 401 with a distinct reason so the peer can
                 // distinguish a failed refresh from a failed initial
                 // auth. Existing PeerAuthState is intentionally left

@@ -10,6 +10,7 @@ use crate::vcon::VconRef;
 use crate::DataMessage;
 use chrono::{DateTime, Utc};
 use rvoip_infra_common::events::cross_crate::{RvoipCoreCrossCrateEvent, RvoipCrossCrateEvent};
+use std::fmt;
 
 /// Normalized event vocabulary emitted by rvoip-core. Adapters produce
 /// `AdapterEvent`s, which are translated into these by the orchestrator.
@@ -22,7 +23,7 @@ use rvoip_infra_common::events::cross_crate::{RvoipCoreCrossCrateEvent, RvoipCro
 /// (`tenant_id`/`conversation_id`/`session_id`/`connection_id`/`correlation_id`)
 /// are added by the cross-crate envelope wrapper at publish time, per
 /// INTERFACE_DESIGN §5.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub enum Event {
     // --- Conversation lifecycle ---
@@ -319,6 +320,146 @@ pub enum Event {
         audio_level_dbov: i8,
         at: DateTime<Utc>,
     },
+}
+
+impl fmt::Debug for Event {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ConversationOpened { .. } => formatter.write_str("ConversationOpened"),
+            Self::ConversationClosed { .. } => formatter.write_str("ConversationClosed"),
+            Self::SessionStarted { .. } => formatter.write_str("SessionStarted"),
+            Self::SessionEnded { report, .. } => formatter
+                .debug_struct("SessionEnded")
+                .field("quality_report_present", &report.is_some())
+                .finish(),
+            Self::SessionFailed { detail, .. } => formatter
+                .debug_struct("SessionFailed")
+                .field("detail_present", &!detail.is_empty())
+                .field("detail_bytes", &detail.len())
+                .finish(),
+            Self::ConnectionInbound { .. } => formatter.write_str("ConnectionInbound"),
+            Self::ConnectionOutbound { .. } => formatter.write_str("ConnectionOutbound"),
+            Self::ConnectionConnected { .. } => formatter.write_str("ConnectionConnected"),
+            Self::ConnectionAuthenticated { .. } => formatter.write_str("ConnectionAuthenticated"),
+            Self::ConnectionPrincipalAuthenticated { .. } => {
+                formatter.write_str("ConnectionPrincipalAuthenticated")
+            }
+            Self::ConnectionProgress { kind, .. } => formatter
+                .debug_struct("ConnectionProgress")
+                .field("kind", kind)
+                .finish(),
+            Self::ConnectionEnded { .. } => formatter.write_str("ConnectionEnded"),
+            Self::ConnectionFailed { detail, .. } => formatter
+                .debug_struct("ConnectionFailed")
+                .field("detail_present", &!detail.is_empty())
+                .field("detail_bytes", &detail.len())
+                .finish(),
+            Self::ConnectionsBridged { .. } => formatter.write_str("ConnectionsBridged"),
+            Self::ConnectionsUnbridged { .. } => formatter.write_str("ConnectionsUnbridged"),
+            Self::ConnectionTransferred { .. } => formatter.write_str("ConnectionTransferred"),
+            Self::ParticipantJoined { .. } => formatter.write_str("ParticipantJoined"),
+            Self::ParticipantLeft { .. } => formatter.write_str("ParticipantLeft"),
+            Self::AiAttached { provider_ref, .. } => formatter
+                .debug_struct("AiAttached")
+                .field("provider_ref_present", &!provider_ref.is_empty())
+                .field("provider_ref_bytes", &provider_ref.len())
+                .finish(),
+            Self::AiDetached { .. } => formatter.write_str("AiDetached"),
+            Self::ListenerAttached { .. } => formatter.write_str("ListenerAttached"),
+            Self::ListenerDetached { .. } => formatter.write_str("ListenerDetached"),
+            Self::MessageReceived { .. } => formatter.write_str("MessageReceived"),
+            Self::DataMessageReceived { message, .. } => formatter
+                .debug_struct("DataMessageReceived")
+                .field("body_bytes", &message.bytes.len())
+                .finish(),
+            Self::MessageSent { .. } => formatter.write_str("MessageSent"),
+            Self::MessageDelivered { .. } => formatter.write_str("MessageDelivered"),
+            Self::MessageRead { .. } => formatter.write_str("MessageRead"),
+            Self::DtmfReceived { digits, .. } => formatter
+                .debug_struct("DtmfReceived")
+                .field("digit_count", &digits.chars().count())
+                .finish(),
+            Self::TranscriptTurn {
+                text,
+                speaker,
+                confidence,
+                is_final,
+                assigned_provider,
+                ..
+            } => formatter
+                .debug_struct("TranscriptTurn")
+                .field("speaker_present", &speaker.is_some())
+                .field("text_bytes", &text.len())
+                .field("confidence", confidence)
+                .field("is_final", is_final)
+                .field("assigned_provider_present", &assigned_provider.is_some())
+                .finish(),
+            Self::RecordingStarted { .. } => formatter.write_str("RecordingStarted"),
+            Self::RecordingStopped { .. } => formatter.write_str("RecordingStopped"),
+            Self::RecordingComplete { sink, vcon_ref, .. } => formatter
+                .debug_struct("RecordingComplete")
+                .field("sink_present", &!sink.is_empty())
+                .field("sink_bytes", &sink.len())
+                .field("vcon_ref_present", &vcon_ref.is_some())
+                .finish(),
+            Self::VconReady { .. } => formatter.write_str("VconReady"),
+            Self::VconRedacted { .. } => formatter.write_str("VconRedacted"),
+            Self::IdentityAssuranceChanged { identity_id, .. } => formatter
+                .debug_struct("IdentityAssuranceChanged")
+                .field("identity_present", &identity_id.is_some())
+                .finish(),
+            Self::IdentityStepUpRequested { .. } => formatter.write_str("IdentityStepUpRequested"),
+            Self::IdentityStepUpResponseReceived {
+                method, credential, ..
+            } => formatter
+                .debug_struct("IdentityStepUpResponseReceived")
+                .field("method_present", &!method.is_empty())
+                .field("method_bytes", &method.len())
+                .field("credential_present", &!credential.is_empty())
+                .field("credential_bytes", &credential.len())
+                .finish(),
+            Self::RegistrationChanged { .. } => formatter.write_str("RegistrationChanged"),
+            Self::RegistrationHeartbeat { .. } => formatter.write_str("RegistrationHeartbeat"),
+            Self::CapacityReport {
+                tenant_id,
+                active_connections,
+                active_bridges,
+                admission_in_use,
+                ..
+            } => formatter
+                .debug_struct("CapacityReport")
+                .field("tenant_present", &tenant_id.is_some())
+                .field("active_connections", active_connections)
+                .field("active_bridges", active_bridges)
+                .field("admission_in_use", admission_in_use)
+                .finish(),
+            Self::UsageRecord { kind, units, .. } => formatter
+                .debug_struct("UsageRecord")
+                .field("kind", kind)
+                .field("units", units)
+                .finish(),
+            Self::Anomaly {
+                kind,
+                connection_id,
+                detail,
+                ..
+            } => formatter
+                .debug_struct("Anomaly")
+                .field("kind", kind)
+                .field("connection_present", &connection_id.is_some())
+                .field("detail_present", &!detail.is_empty())
+                .field("detail_bytes", &detail.len())
+                .finish(),
+            Self::MediaQuality { .. } => formatter.write_str("MediaQuality"),
+            Self::BargeInDetected { .. } => formatter.write_str("BargeInDetected"),
+            Self::ActiveSpeakerChanged {
+                audio_level_dbov, ..
+            } => formatter
+                .debug_struct("ActiveSpeakerChanged")
+                .field("audio_level_dbov", audio_level_dbov)
+                .finish(),
+        }
+    }
 }
 
 /// P9 — per-Session quality + accounting report carried on
@@ -689,5 +830,29 @@ impl Event {
             }
         };
         RvoipCrossCrateEvent::Core(inner)
+    }
+}
+
+#[cfg(test)]
+mod credential_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn enclosing_step_up_event_redacts_credential_and_keeps_live_value() {
+        const CANARY: &str = "core-event-credential-canary\r\nAuthorization: exposed";
+        let event = Event::IdentityStepUpResponseReceived {
+            connection_id: ConnectionId::new(),
+            method: "bearer".into(),
+            credential: CANARY.into(),
+            at: Utc::now(),
+        };
+        let rendered = format!("{event:?}");
+        assert!(!rendered.contains(CANARY), "credential leaked: {rendered}");
+        match event {
+            Event::IdentityStepUpResponseReceived { credential, .. } => {
+                assert_eq!(credential, CANARY)
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 }

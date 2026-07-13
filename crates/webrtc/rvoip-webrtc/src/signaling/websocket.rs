@@ -104,10 +104,23 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
 
 type WsSink<S> = Arc<AsyncMutex<SplitSink<WebSocketStream<S>, Message>>>;
 
-#[derive(Debug)]
 struct HandshakeMetadata {
     subprotocols: Vec<String>,
     query_token: Option<String>,
+}
+
+impl std::fmt::Debug for HandshakeMetadata {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HandshakeMetadata")
+            .field("subprotocol_count", &self.subprotocols.len())
+            .field("query_token_present", &self.query_token.is_some())
+            .field(
+                "query_token_len",
+                &self.query_token.as_deref().map(str::len),
+            )
+            .finish()
+    }
 }
 
 /// Accept WebSocket connections and exchange JSON signaling messages.
@@ -720,5 +733,17 @@ mod tests {
             select_response_protocol(&requested, &PrivateHintAuth).as_deref(),
             Some("rvoip.webrtc.v1")
         );
+    }
+
+    #[test]
+    fn handshake_metadata_debug_redacts_query_tokens_and_subprotocol_values() {
+        const CANARY: &str = "ws-query-token-canary";
+        let metadata = HandshakeMetadata {
+            subprotocols: vec![CANARY.into()],
+            query_token: Some(CANARY.into()),
+        };
+        let rendered = format!("{metadata:?}");
+        assert!(!rendered.contains(CANARY), "credential leaked: {rendered}");
+        assert_eq!(metadata.query_token.as_deref(), Some(CANARY));
     }
 }

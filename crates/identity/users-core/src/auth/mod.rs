@@ -24,7 +24,6 @@ pub struct AuthenticationService {
 }
 
 /// Result of authentication
-#[derive(Debug)]
 pub struct AuthenticationResult {
     pub user: User,
     pub access_token: String,
@@ -32,20 +31,58 @@ pub struct AuthenticationResult {
     pub expires_in: std::time::Duration,
 }
 
+impl std::fmt::Debug for AuthenticationResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthenticationResult")
+            .field("user", &self.user)
+            .field("access_token_present", &!self.access_token.is_empty())
+            .field("access_token_len", &self.access_token.len())
+            .field("refresh_token_present", &!self.refresh_token.is_empty())
+            .field("refresh_token_len", &self.refresh_token.len())
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
 /// Token pair for refresh
-#[derive(Debug)]
 pub struct TokenPair {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_in: std::time::Duration,
 }
 
+impl std::fmt::Debug for TokenPair {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TokenPair")
+            .field("access_token_present", &!self.access_token.is_empty())
+            .field("access_token_len", &self.access_token.len())
+            .field("refresh_token_present", &!self.refresh_token.is_empty())
+            .field("refresh_token_len", &self.refresh_token.len())
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
 /// Context describing why users-core issued tokens for a user.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TokenIssueContext {
     pub source: String,
     pub provider_id: Option<String>,
     pub external_subject: Option<String>,
+}
+
+impl std::fmt::Debug for TokenIssueContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TokenIssueContext")
+            .field("source_present", &!self.source.is_empty())
+            .field("source_len", &self.source.len())
+            .field("provider_present", &self.provider_id.is_some())
+            .field("external_subject_present", &self.external_subject.is_some())
+            .finish()
+    }
 }
 
 impl TokenIssueContext {

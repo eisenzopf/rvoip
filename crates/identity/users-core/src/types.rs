@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// User account
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct User {
     pub id: String,
     pub username: String,
@@ -20,14 +20,46 @@ pub struct User {
     pub last_login: Option<DateTime<Utc>>,
 }
 
+impl std::fmt::Debug for User {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("User")
+            .field("id_present", &!self.id.is_empty())
+            .field("username_present", &!self.username.is_empty())
+            .field("email_present", &self.email.is_some())
+            .field("display_name_present", &self.display_name.is_some())
+            .field("password_hash_present", &!self.password_hash.is_empty())
+            .field("password_hash_len", &self.password_hash.len())
+            .field("role_count", &self.roles.len())
+            .field("active", &self.active)
+            .field("last_login_present", &self.last_login.is_some())
+            .finish()
+    }
+}
+
 /// Request to create a new user
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct CreateUserRequest {
     pub username: String,
     pub password: String,
     pub email: Option<String>,
     pub display_name: Option<String>,
     pub roles: Vec<String>,
+}
+
+impl std::fmt::Debug for CreateUserRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreateUserRequest")
+            .field("username_present", &!self.username.is_empty())
+            .field("username_len", &self.username.len())
+            .field("password_present", &!self.password.is_empty())
+            .field("password_len", &self.password.len())
+            .field("email_present", &self.email.is_some())
+            .field("display_name_present", &self.display_name.is_some())
+            .field("role_count", &self.roles.len())
+            .finish()
+    }
 }
 
 /// Request to update an existing user
