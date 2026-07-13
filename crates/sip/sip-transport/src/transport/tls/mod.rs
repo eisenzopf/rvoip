@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
@@ -29,13 +30,36 @@ use tokio_rustls::rustls::{
     DigitallySignedStruct, SignatureScheme,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::error::{Error, Result};
 use crate::transport::{
-    runtime::TransportTaskSet, validate_typed_outbound_message, HandshakeAdmissionConfig,
-    TlsPeerIdentity, Transport, TransportConnectionMetadata, TransportEvent, TransportType,
+    runtime::{OutboundHandshakeAdmission, TransportTaskSet},
+    validate_typed_outbound_message, HandshakeAdmissionConfig, TlsPeerIdentity, Transport,
+    TransportConnectionMetadata, TransportEvent, TransportType,
 };
+
+#[derive(Clone, Debug)]
+struct TlsConnectionRecord {
+    generation: u64,
+    sender: mpsc::Sender<Bytes>,
+}
+
+fn remove_tls_connection_if_generation(
+    connections: &mut HashMap<SocketAddr, TlsConnectionRecord>,
+    remote_addr: SocketAddr,
+    generation: u64,
+) -> bool {
+    if connections
+        .get(&remote_addr)
+        .is_some_and(|record| record.generation == generation)
+    {
+        connections.remove(&remote_addr);
+        true
+    } else {
+        false
+    }
+}
 
 /// Builder-friendly TLS client configuration. Mirrors the knobs we
 /// expect to expose through `session-core::Config` once Step 1C wires
@@ -152,7 +176,11 @@ pub struct TlsTransport {
     /// `send_message` to find the right write-side mpsc channel.
     /// Connection-lifetime: removed by the per-connection reader task
     /// on EOF/error.
-    connections: Arc<tokio::sync::Mutex<Vec<(SocketAddr, mpsc::Sender<Bytes>)>>>,
+    connections: Arc<tokio::sync::Mutex<HashMap<SocketAddr, TlsConnectionRecord>>>,
+
+    /// Monotonic identity used to prevent an old reader from removing a
+    /// replacement connection to the same destination.
+    next_connection_generation: Arc<AtomicU64>,
 
     /// Transport event sender.
     event_tx: Option<mpsc::Sender<TransportEvent>>,
@@ -168,8 +196,13 @@ pub struct TlsTransport {
     /// cleanup after managed tasks have stopped.
     close_gate: Arc<Mutex<()>>,
 
-    /// Inbound unauthenticated TLS handshake admission policy.
+    /// Inbound and outbound TLS handshake admission policy. Bidirectional
+    /// transports maintain independent concurrency budgets for each direction.
     handshake_admission: HandshakeAdmissionConfig,
+
+    /// Global bounded admission plus per-destination single-flight for
+    /// outbound TCP/TLS establishment.
+    outbound_handshakes: Arc<OutboundHandshakeAdmission>,
 }
 
 impl fmt::Debug for TlsTransport {
@@ -205,8 +238,8 @@ impl TlsTransport {
         .await
     }
 
-    /// Bind with explicit admission for inbound unauthenticated TLS
-    /// handshakes. Outbound certificate validation keeps its existing policy.
+    /// Bind with explicit admission for inbound and outbound TLS handshakes.
+    /// Outbound certificate validation keeps its existing policy.
     pub async fn bind_with_handshake_config(
         local_addr: SocketAddr,
         cert_path: &Path,
@@ -269,7 +302,7 @@ impl TlsTransport {
     }
 
     /// Bind a bidirectional TLS transport with explicit client/server TLS
-    /// policies and inbound handshake admission.
+    /// policies and inbound/outbound handshake admission.
     pub async fn bind_with_configs_and_handshake(
         local_addr: SocketAddr,
         cert_path: &Path,
@@ -338,7 +371,7 @@ impl TlsTransport {
     }
 
     /// Bind a server-only TLS listener with explicit client/server TLS policy
-    /// and inbound handshake admission.
+    /// and inbound/outbound handshake admission.
     pub async fn bind_server_only_with_configs_and_handshake(
         local_addr: SocketAddr,
         cert_path: &Path,
@@ -405,12 +438,16 @@ impl TlsTransport {
             local_addr: actual_addr,
             acceptor: Some(acceptor),
             connector,
-            connections: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            connections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            next_connection_generation: Arc::new(AtomicU64::new(1)),
             event_tx: Some(tx),
             closed: Arc::new(AtomicBool::new(false)),
             tasks: tasks.clone(),
             close_gate: Arc::new(Mutex::new(())),
             handshake_admission,
+            outbound_handshakes: OutboundHandshakeAdmission::new(
+                handshake_admission.max_concurrent,
+            ),
         };
 
         let started = tasks
@@ -422,6 +459,7 @@ impl TlsTransport {
                     .clone()
                     .expect("TLS listener mode must have an acceptor"),
                 transport.connections.clone(),
+                transport.next_connection_generation.clone(),
                 transport.event_tx.clone().unwrap(),
                 Arc::downgrade(&tasks),
                 handshake_admission,
@@ -449,6 +487,25 @@ impl TlsTransport {
         event_tx: Option<mpsc::Sender<TransportEvent>>,
         client_cfg: TlsClientConfig,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::client_only_with_handshake_config(
+            local_addr,
+            event_tx,
+            client_cfg,
+            HandshakeAdmissionConfig::default(),
+        )
+        .await
+    }
+
+    /// Create a client-only transport with bounded, end-to-end outbound
+    /// TCP/TLS establishment. The concurrency limit is global to this
+    /// transport and same-destination dials are always single-flight.
+    pub async fn client_only_with_handshake_config(
+        local_addr: SocketAddr,
+        event_tx: Option<mpsc::Sender<TransportEvent>>,
+        client_cfg: TlsClientConfig,
+        handshake_admission: HandshakeAdmissionConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        let handshake_admission = handshake_admission.validate("TLS")?;
         let connector = TlsConnector::from(Arc::new(build_client_config(&client_cfg)?));
 
         let (tx, rx) = if let Some(tx) = event_tx {
@@ -468,12 +525,16 @@ impl TlsTransport {
                 local_addr,
                 acceptor: None,
                 connector,
-                connections: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                connections: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                next_connection_generation: Arc::new(AtomicU64::new(1)),
                 event_tx: Some(tx),
                 closed: Arc::new(AtomicBool::new(false)),
                 tasks: TransportTaskSet::new(),
                 close_gate: Arc::new(Mutex::new(())),
-                handshake_admission: HandshakeAdmissionConfig::default(),
+                handshake_admission,
+                outbound_handshakes: OutboundHandshakeAdmission::new(
+                    handshake_admission.max_concurrent,
+                ),
             },
             rx,
         ))
@@ -484,7 +545,8 @@ impl TlsTransport {
         listener: TcpListener,
         addr: SocketAddr,
         acceptor: TlsAcceptor,
-        connections: Arc<tokio::sync::Mutex<Vec<(SocketAddr, mpsc::Sender<Bytes>)>>>,
+        connections: Arc<tokio::sync::Mutex<HashMap<SocketAddr, TlsConnectionRecord>>>,
+        next_connection_generation: Arc<AtomicU64>,
         event_tx: mpsc::Sender<TransportEvent>,
         weak_tasks: Weak<TransportTaskSet>,
         handshake_admission: HandshakeAdmissionConfig,
@@ -501,6 +563,7 @@ impl TlsTransport {
                     let acceptor = acceptor.clone();
                     let connections = connections.clone();
                     let event_tx = event_tx.clone();
+                    let next_connection_generation = next_connection_generation.clone();
                     let local_addr = addr;
                     let weak_tasks_for_connection = weak_tasks.clone();
                     let Some(tasks) = weak_tasks.upgrade() else {
@@ -537,6 +600,8 @@ impl TlsTransport {
                                         event_tx,
                                         connection_metadata,
                                         weak_tasks_for_connection,
+                                        next_connection_generation.fetch_add(1, Ordering::Relaxed),
+                                        None,
                                     )
                                     .await;
                                 }
@@ -584,10 +649,12 @@ impl TlsTransport {
         tls_stream: S,
         remote_addr: SocketAddr,
         local_addr: SocketAddr,
-        connections: Arc<tokio::sync::Mutex<Vec<(SocketAddr, mpsc::Sender<Bytes>)>>>,
+        connections: Arc<tokio::sync::Mutex<HashMap<SocketAddr, TlsConnectionRecord>>>,
         event_tx: mpsc::Sender<TransportEvent>,
         connection_metadata: Option<TransportConnectionMetadata>,
         weak_tasks: Weak<TransportTaskSet>,
+        generation: u64,
+        registered: Option<tokio::sync::oneshot::Sender<()>>,
     ) where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
@@ -618,7 +685,16 @@ impl TlsTransport {
 
         {
             let mut connections_guard = connections.lock().await;
-            connections_guard.push((remote_addr, tx.clone()));
+            connections_guard.insert(
+                remote_addr,
+                TlsConnectionRecord {
+                    generation,
+                    sender: tx.clone(),
+                },
+            );
+        }
+        if let Some(registered) = registered {
+            let _ = registered.send(());
         }
 
         // Buffered read loop with RFC 3261 §18.3 Content-Length framing,
@@ -710,7 +786,7 @@ impl TlsTransport {
 
         {
             let mut connections_guard = connections.lock().await;
-            connections_guard.retain(|(addr, _)| *addr != remote_addr);
+            remove_tls_connection_if_generation(&mut connections_guard, remote_addr, generation);
         }
 
         debug!("TLS connection closed: {}", remote_addr);
@@ -730,8 +806,8 @@ impl TlsTransport {
         // auto-dial fallback when the channel is closed.
         {
             let connections_guard = self.connections.lock().await;
-            if let Some((_, tx)) = connections_guard.iter().find(|(a, _)| *a == addr) {
-                if tx.send(data.clone()).await.is_ok() {
+            if let Some(record) = connections_guard.get(&addr) {
+                if record.sender.send(data.clone()).await.is_ok() {
                     return Ok(());
                 }
                 // Sender closed — fall through to reconnect.
@@ -752,15 +828,15 @@ impl TlsTransport {
         }
 
         let connections_guard = self.connections.lock().await;
-        let (_, tx) = connections_guard
-            .iter()
-            .find(|(a, _)| *a == addr)
+        let tx = &connections_guard
+            .get(&addr)
             .ok_or_else(|| {
                 Error::Other(format!(
                     "TLS auto-dial succeeded but no connection registered for {}",
                     addr
                 ))
-            })?;
+            })?
+            .sender;
         tx.send(data).await.map_err(|_| {
             Error::Other(format!(
                 "Failed to push bytes to TLS write channel for {}",
@@ -793,17 +869,6 @@ impl TlsTransport {
             return Err(Error::TransportClosed);
         }
 
-        // Already connected? — short-circuit.
-        {
-            let connections_guard = self.connections.lock().await;
-            if connections_guard
-                .iter()
-                .any(|(addr, _)| *addr == remote_addr)
-            {
-                return Ok(());
-            }
-        }
-
         let (sni_present, sni_len) = sni_diagnostic_metadata(&server_name);
         debug!(
             destination = %remote_addr,
@@ -812,73 +877,85 @@ impl TlsTransport {
             "TLS dial"
         );
 
-        let tcp_stream = TcpStream::connect(remote_addr)
-            .await
-            .map_err(|e| Error::ConnectFailed(remote_addr, e))?;
-
-        let tls_stream = self
-            .connector
-            .connect(server_name, tcp_stream)
-            .await
-            .map_err(|error| {
-                classify_tls_runtime_error(
-                    error,
-                    format!("TLS client handshake failed for {remote_addr}"),
-                )
-            })?;
-
-        info!("TLS handshake to {} succeeded", remote_addr);
-
+        let connector = self.connector.clone();
         let connections = self.connections.clone();
         let event_tx = self
             .event_tx
             .clone()
             .ok_or_else(|| Error::TlsHandshakeFailed("TLS transport has no event sender".into()))?;
         let local_addr = self.local_addr;
+        let admission = self.outbound_handshakes.clone();
+        let timeout = self.handshake_admission.timeout;
+        let next_generation = self.next_connection_generation.clone();
+        let managed_tasks = self.tasks.clone();
+        let connection_tasks = self.tasks.clone();
 
-        // Register the same managed read/write loop used for inbound
-        // connections. Shutdown owns and joins this task as well.
-        let weak_tasks = Arc::downgrade(&self.tasks);
-        if self
-            .tasks
-            .spawn(Self::handle_connection(
-                tls_stream,
-                remote_addr,
-                local_addr,
-                connections,
-                event_tx,
-                None,
-                weak_tasks,
-            ))
-            .await
-            .is_none()
-        {
-            return Err(Error::TransportClosed);
-        }
+        managed_tasks
+            .run(async move {
+                let deadline = tokio::time::Instant::now() + timeout;
+                let permit = tokio::time::timeout_at(deadline, admission.acquire(remote_addr))
+                    .await
+                    .map_err(|_| Error::ConnectionTimeout(remote_addr))??;
 
-        // Wait briefly for the spawned task to register the connection
-        // before we return; otherwise a back-to-back
-        // `connect` + `send_message` race can lose the very first
-        // outgoing bytes.
-        for _ in 0..50 {
-            {
-                let connections_guard = self.connections.lock().await;
-                if connections_guard
-                    .iter()
-                    .any(|(addr, _)| *addr == remote_addr)
+                // Recheck after obtaining per-destination ownership. Every
+                // follower observes the leader's registered connection.
                 {
-                    return Ok(());
+                    let mut guard = connections.lock().await;
+                    if guard
+                        .get(&remote_addr)
+                        .is_some_and(|record| !record.sender.is_closed())
+                    {
+                        return Ok(());
+                    }
+                    guard.remove(&remote_addr);
                 }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        }
-        // Even if the timing race lost, the registration will land
-        // shortly; subsequent sends will succeed.
-        trace!(
-            "TLS connect to {} returned before reader task registered",
-            remote_addr
-        );
-        Ok(())
+
+                let tls_stream = tokio::time::timeout_at(deadline, async {
+                    let tcp_stream = TcpStream::connect(remote_addr)
+                        .await
+                        .map_err(|e| Error::ConnectFailed(remote_addr, e))?;
+                    connector
+                        .connect(server_name, tcp_stream)
+                        .await
+                        .map_err(|error| {
+                            classify_tls_runtime_error(
+                                error,
+                                format!("TLS client handshake failed for {remote_addr}"),
+                            )
+                        })
+                })
+                .await
+                .map_err(|_| Error::ConnectionTimeout(remote_addr))??;
+                if connection_tasks.is_closing() {
+                    return Err(Error::TransportClosed);
+                }
+                info!("TLS handshake to {} succeeded", remote_addr);
+
+                let generation = next_generation.fetch_add(1, Ordering::Relaxed);
+                let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
+                let weak_tasks = Arc::downgrade(&connection_tasks);
+                if connection_tasks
+                    .spawn(Self::handle_connection(
+                        tls_stream,
+                        remote_addr,
+                        local_addr,
+                        connections,
+                        event_tx,
+                        None,
+                        weak_tasks,
+                        generation,
+                        Some(registered_tx),
+                    ))
+                    .await
+                    .is_none()
+                {
+                    return Err(Error::TransportClosed);
+                }
+                registered_rx.await.map_err(|_| Error::TransportClosed)?;
+                drop(permit);
+                Ok(())
+            })
+            .await
     }
 }
 
@@ -974,7 +1051,7 @@ impl Transport for TlsTransport {
         // is acceptable to report `false` (the multiplexer will fall
         // through to its default transport).
         match self.connections.try_lock() {
-            Ok(guard) => guard.iter().any(|(addr, _)| *addr == remote_addr),
+            Ok(guard) => guard.contains_key(&remote_addr),
             Err(_) => false,
         }
     }
@@ -988,13 +1065,13 @@ impl Transport for TlsTransport {
         // A fresh dial would defeat the purpose — the flow we'd keep
         // alive is already gone.
         let connections_guard = self.connections.lock().await;
-        let Some((_, tx)) = connections_guard.iter().find(|(a, _)| *a == destination) else {
+        let Some(record) = connections_guard.get(&destination) else {
             return Err(Error::InvalidState(format!(
                 "No active TLS connection to {} for send_raw",
                 destination
             )));
         };
-        tx.send(data).await.map_err(|_| {
+        record.sender.send(data).await.map_err(|_| {
             Error::Other(format!(
                 "Failed to push raw bytes to TLS write channel for {}",
                 destination
@@ -1019,6 +1096,26 @@ mod auth_boundary_tests {
     use rvoip_sip_core::builder::SimpleRequestBuilder;
     use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
     use rvoip_sip_core::{CallId, Message, Method, Request, Response, StatusCode, Uri};
+    use std::time::Duration;
+
+    fn write_test_certificate() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        use std::io::Write;
+
+        let directory = tempfile::tempdir().unwrap();
+        let cert_path = directory.path().join("server.pem");
+        let key_path = directory.path().join("server.key");
+        let certificate =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        std::fs::File::create(&cert_path)
+            .unwrap()
+            .write_all(certificate.cert.pem().as_bytes())
+            .unwrap();
+        std::fs::File::create(&key_path)
+            .unwrap()
+            .write_all(certificate.signing_key.serialize_pem().as_bytes())
+            .unwrap();
+        (directory, cert_path, key_path)
+    }
 
     #[tokio::test]
     async fn typed_tls_send_rejects_auth_before_connect() {
@@ -1063,6 +1160,121 @@ mod auth_boundary_tests {
             assert!(!error.to_string().contains("X-Injected"));
         }
         transport.close().await.unwrap();
+    }
+
+    #[test]
+    fn stale_tls_reader_cannot_evict_replacement() {
+        let destination = "127.0.0.1:5061".parse().unwrap();
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut connections = HashMap::from([(
+            destination,
+            TlsConnectionRecord {
+                generation: 2,
+                sender,
+            },
+        )]);
+
+        assert!(!remove_tls_connection_if_generation(
+            &mut connections,
+            destination,
+            1,
+        ));
+        assert_eq!(connections[&destination].generation, 2);
+        assert!(remove_tls_connection_if_generation(
+            &mut connections,
+            destination,
+            2,
+        ));
+    }
+
+    #[tokio::test]
+    async fn outbound_tls_handshake_has_end_to_end_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = listener.local_addr().unwrap();
+        let stalled = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let (transport, _events) = TlsTransport::client_only_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            None,
+            TlsClientConfig::default(),
+            HandshakeAdmissionConfig::new(Duration::from_millis(50), 1),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            transport.connect(destination).await,
+            Err(Error::ConnectionTimeout(address)) if address == destination
+        ));
+        transport.close().await.unwrap();
+        stalled.abort();
+    }
+
+    #[tokio::test]
+    async fn close_cancels_and_joins_outbound_tls_handshake() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let stalled = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            let _ = accepted_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let (transport, _events) = TlsTransport::client_only_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            None,
+            TlsClientConfig::default(),
+            HandshakeAdmissionConfig::new(Duration::from_secs(30), 1),
+        )
+        .await
+        .unwrap();
+        let transport = Arc::new(transport);
+        let dialing = {
+            let transport = transport.clone();
+            tokio::spawn(async move { transport.connect(destination).await })
+        };
+        accepted_rx.await.unwrap();
+        transport.close().await.unwrap();
+
+        assert!(matches!(
+            dialing.await.unwrap(),
+            Err(Error::TransportClosed)
+        ));
+        stalled.abort();
+    }
+
+    #[tokio::test]
+    async fn concurrent_tls_dials_to_one_destination_are_singleflight() {
+        let (_directory, cert_path, key_path) = write_test_certificate();
+        let (server, _server_events) =
+            TlsTransport::bind("127.0.0.1:0".parse().unwrap(), &cert_path, &key_path, None)
+                .await
+                .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, _client_events) = TlsTransport::client_only_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            None,
+            TlsClientConfig {
+                extra_ca_path: Some(cert_path),
+                ..TlsClientConfig::default()
+            },
+            HandshakeAdmissionConfig::new(Duration::from_secs(2), 8),
+        )
+        .await
+        .unwrap();
+
+        let (first, second) =
+            tokio::join!(client.connect(destination), client.connect(destination));
+        assert!(first.is_ok(), "first dial failed: {first:?}");
+        assert!(second.is_ok(), "second dial failed: {second:?}");
+        tokio::task::yield_now().await;
+        assert_eq!(client.connections.lock().await.len(), 1);
+        assert_eq!(server.connections.lock().await.len(), 1);
+
+        client.close().await.unwrap();
+        server.close().await.unwrap();
     }
 
     #[test]

@@ -5,6 +5,7 @@ use http::HeaderValue;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 #[cfg(feature = "ws")]
@@ -19,6 +20,7 @@ use super::{SipWsStream, SIP_WS_SUBPROTOCOL};
 use crate::error::{Error, Result};
 #[cfg(feature = "wss")]
 use crate::transport::tls::TlsServerClientAuthConfig;
+use crate::transport::HandshakeAdmissionConfig;
 
 #[cfg(feature = "ws")]
 fn select_sip_subprotocol(offered: Option<&str>, _secure: bool) -> Option<&'static str> {
@@ -48,6 +50,11 @@ pub struct WebSocketListener {
     /// the same cert chain + session resumption cache).
     #[cfg(feature = "wss")]
     tls_acceptor: Option<TlsAcceptor>,
+    /// Admission and complete TLS/HTTP deadline used by the public `accept`
+    /// API. The transport supervisor uses the lower-level crate-private split
+    /// boundary with the same policy.
+    handshake_admission: HandshakeAdmissionConfig,
+    handshake_semaphore: Arc<Semaphore>,
 }
 
 impl WebSocketListener {
@@ -63,20 +70,40 @@ impl WebSocketListener {
         cert_path: Option<&str>,
         key_path: Option<&str>,
     ) -> Result<Self> {
+        Self::bind_with_handshake_config(
+            addr,
+            secure,
+            cert_path,
+            key_path,
+            HandshakeAdmissionConfig::default(),
+        )
+        .await
+    }
+
+    /// Bind with explicit admission and an end-to-end TLS/HTTP upgrade
+    /// deadline for callers of [`Self::accept`].
+    pub async fn bind_with_handshake_config(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        handshake_admission: HandshakeAdmissionConfig,
+    ) -> Result<Self> {
         #[cfg(feature = "wss")]
         {
-            return Self::bind_with_client_auth(
+            return Self::bind_with_client_auth_and_handshake(
                 addr,
                 secure,
                 cert_path,
                 key_path,
                 TlsServerClientAuthConfig::default(),
+                handshake_admission,
             )
             .await;
         }
         #[cfg(not(feature = "wss"))]
         {
-            Self::bind_inner(addr, secure, cert_path, key_path).await
+            Self::bind_inner(addr, secure, cert_path, key_path, handshake_admission).await
         }
     }
 
@@ -90,7 +117,36 @@ impl WebSocketListener {
         key_path: Option<&str>,
         client_auth: TlsServerClientAuthConfig,
     ) -> Result<Self> {
-        Self::bind_inner_with_client_auth(addr, secure, cert_path, key_path, client_auth).await
+        Self::bind_with_client_auth_and_handshake(
+            addr,
+            secure,
+            cert_path,
+            key_path,
+            client_auth,
+            HandshakeAdmissionConfig::default(),
+        )
+        .await
+    }
+
+    /// Bind with both WSS client authentication and public-accept admission.
+    #[cfg(feature = "wss")]
+    pub async fn bind_with_client_auth_and_handshake(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        client_auth: TlsServerClientAuthConfig,
+        handshake_admission: HandshakeAdmissionConfig,
+    ) -> Result<Self> {
+        Self::bind_inner_with_client_auth(
+            addr,
+            secure,
+            cert_path,
+            key_path,
+            client_auth,
+            handshake_admission,
+        )
+        .await
     }
 
     #[cfg(feature = "wss")]
@@ -100,8 +156,17 @@ impl WebSocketListener {
         cert_path: Option<&str>,
         key_path: Option<&str>,
         client_auth: TlsServerClientAuthConfig,
+        handshake_admission: HandshakeAdmissionConfig,
     ) -> Result<Self> {
-        Self::bind_inner_impl(addr, secure, cert_path, key_path, Some(client_auth)).await
+        Self::bind_inner_impl(
+            addr,
+            secure,
+            cert_path,
+            key_path,
+            Some(client_auth),
+            handshake_admission,
+        )
+        .await
     }
 
     #[cfg(not(feature = "wss"))]
@@ -110,8 +175,9 @@ impl WebSocketListener {
         secure: bool,
         cert_path: Option<&str>,
         key_path: Option<&str>,
+        handshake_admission: HandshakeAdmissionConfig,
     ) -> Result<Self> {
-        Self::bind_inner_impl(addr, secure, cert_path, key_path).await
+        Self::bind_inner_impl(addr, secure, cert_path, key_path, handshake_admission).await
     }
 
     #[cfg(feature = "wss")]
@@ -121,9 +187,18 @@ impl WebSocketListener {
         cert_path: Option<&str>,
         key_path: Option<&str>,
         client_auth: Option<TlsServerClientAuthConfig>,
+        handshake_admission: HandshakeAdmissionConfig,
     ) -> Result<Self> {
         let client_auth = client_auth.unwrap_or_default();
-        Self::bind_configured(addr, secure, cert_path, key_path, &client_auth).await
+        Self::bind_configured(
+            addr,
+            secure,
+            cert_path,
+            key_path,
+            &client_auth,
+            handshake_admission,
+        )
+        .await
     }
 
     #[cfg(not(feature = "wss"))]
@@ -132,8 +207,9 @@ impl WebSocketListener {
         secure: bool,
         cert_path: Option<&str>,
         key_path: Option<&str>,
+        handshake_admission: HandshakeAdmissionConfig,
     ) -> Result<Self> {
-        Self::bind_configured(addr, secure, cert_path, key_path).await
+        Self::bind_configured(addr, secure, cert_path, key_path, handshake_admission).await
     }
 
     #[cfg(feature = "wss")]
@@ -143,7 +219,10 @@ impl WebSocketListener {
         cert_path: Option<&str>,
         key_path: Option<&str>,
         client_auth: &TlsServerClientAuthConfig,
+        handshake_admission: HandshakeAdmissionConfig,
     ) -> Result<Self> {
+        let handshake_admission =
+            handshake_admission.validate(if secure { "WSS" } else { "WS" })?;
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|e| Error::BindFailed(addr, e))?;
@@ -187,6 +266,8 @@ impl WebSocketListener {
             key_path: key_path.map(String::from),
             #[cfg(feature = "wss")]
             tls_acceptor,
+            handshake_admission,
+            handshake_semaphore: Arc::new(Semaphore::new(handshake_admission.max_concurrent)),
         })
     }
 
@@ -196,7 +277,10 @@ impl WebSocketListener {
         secure: bool,
         cert_path: Option<&str>,
         key_path: Option<&str>,
+        handshake_admission: HandshakeAdmissionConfig,
     ) -> Result<Self> {
+        let handshake_admission =
+            handshake_admission.validate(if secure { "WSS" } else { "WS" })?;
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|e| Error::BindFailed(addr, e))?;
@@ -210,6 +294,8 @@ impl WebSocketListener {
             secure,
             cert_path: cert_path.map(String::from),
             key_path: key_path.map(String::from),
+            handshake_admission,
+            handshake_semaphore: Arc::new(Semaphore::new(handshake_admission.max_concurrent)),
         })
     }
 
@@ -220,7 +306,8 @@ impl WebSocketListener {
             .map_err(|e| Error::LocalAddrFailed(e))
     }
 
-    /// Accepts a new WebSocket connection
+    /// Accepts one WebSocket connection under the listener's configured
+    /// concurrency limit and complete TLS/HTTP upgrade deadline.
     #[cfg(feature = "ws")]
     pub async fn accept(
         &self,
@@ -228,8 +315,18 @@ impl WebSocketListener {
         WebSocketConnection,
         SplitStream<WebSocketStream<SipWsStream>>,
     )> {
+        let _permit = self
+            .handshake_semaphore
+            .acquire()
+            .await
+            .map_err(|_| Error::TransportClosed)?;
         let (stream, peer_addr) = self.accept_tcp().await?;
-        self.upgrade_tcp(stream, peer_addr).await
+        tokio::time::timeout(
+            self.handshake_admission.timeout,
+            self.upgrade_tcp(stream, peer_addr),
+        )
+        .await
+        .map_err(|_| Error::ConnectionTimeout(peer_addr))?
     }
 
     /// Accept one TCP socket without performing TLS or HTTP/WebSocket work.
@@ -440,6 +537,58 @@ mod tests {
         assert!(bound_addr.port() > 0); // Random port assigned
         assert_eq!(bound_addr.ip(), addr.ip());
         assert!(!listener.is_secure());
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn public_accept_times_out_slow_upgrade_and_releases_admission() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let listener = Arc::new(
+            WebSocketListener::bind_with_handshake_config(
+                "127.0.0.1:0".parse().unwrap(),
+                false,
+                None,
+                None,
+                HandshakeAdmissionConfig::new(std::time::Duration::from_millis(50), 1),
+            )
+            .await
+            .unwrap(),
+        );
+        let destination = listener.local_addr().unwrap();
+        let accepting = {
+            let listener = listener.clone();
+            tokio::spawn(async move { listener.accept().await })
+        };
+        let stalled = TcpStream::connect(destination).await.unwrap();
+        let error = match accepting.await.unwrap() {
+            Ok(_) => panic!("slow WebSocket upgrade unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            Error::ConnectionTimeout(address) if address == stalled.local_addr().unwrap()
+        ));
+
+        // A timed-out peer releases the only permit, so another public accept
+        // can immediately service a valid RFC 7118 client.
+        let accepting = {
+            let listener = listener.clone();
+            tokio::spawn(async move { listener.accept().await })
+        };
+        let request = format!("ws://{destination}/")
+            .into_client_request()
+            .unwrap();
+        let mut request = request;
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            http::HeaderValue::from_static("sip"),
+        );
+        let (client, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        let (connection, _reader) = accepting.await.unwrap().unwrap();
+        connection.close().await.unwrap();
+        drop(client);
+        drop(stalled);
     }
 
     /// Test binding a secure WebSocket listener.

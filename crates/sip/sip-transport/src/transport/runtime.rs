@@ -1,25 +1,28 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{AbortHandle, JoinHandle};
 
 use crate::error::{Error, Result};
 
-/// Admission policy for unauthenticated TLS and WebSocket handshakes.
+/// Admission policy for TLS and WebSocket handshakes.
 ///
-/// The limit applies before accepting another TCP socket, leaving excess
-/// connections in the kernel backlog instead of allocating an unbounded task
-/// and userspace buffers for each slow peer.
+/// Inbound transports apply the limit before accepting another TCP socket,
+/// leaving excess connections in the kernel backlog. Outbound transports use
+/// the same policy for a global dial budget plus per-destination singleflight.
+/// Bidirectional transports keep independent inbound and outbound budgets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HandshakeAdmissionConfig {
     /// Maximum time allowed for the complete transport handshake. For WSS this
     /// includes both TLS and the HTTP WebSocket upgrade.
     pub timeout: Duration,
-    /// Maximum number of handshakes concurrently admitted by one listener.
+    /// Maximum number of handshakes concurrently admitted in one direction.
     pub max_concurrent: usize,
 }
 
@@ -53,6 +56,56 @@ impl Default for HandshakeAdmissionConfig {
             timeout: Duration::from_secs(10),
             max_concurrent: 128,
         }
+    }
+}
+
+/// Bounded admission and single-flight coordination for outbound handshakes.
+///
+/// A fixed set of destination locks avoids an attacker-controlled map whose
+/// keys grow with every dial target. Hash collisions only serialize unrelated
+/// destinations; they never permit two handshakes to the same destination.
+pub(crate) struct OutboundHandshakeAdmission {
+    global: Arc<Semaphore>,
+    destination_locks: Box<[Arc<Mutex<()>>]>,
+}
+
+pub(crate) struct OutboundHandshakePermit {
+    _destination: OwnedMutexGuard<()>,
+    _global: OwnedSemaphorePermit,
+}
+
+impl OutboundHandshakeAdmission {
+    const DESTINATION_LOCK_STRIPES: usize = 256;
+
+    pub(crate) fn new(max_concurrent: usize) -> Arc<Self> {
+        let destination_locks = (0..Self::DESTINATION_LOCK_STRIPES)
+            .map(|_| Arc::new(Mutex::new(())))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Arc::new(Self {
+            global: Arc::new(Semaphore::new(max_concurrent)),
+            destination_locks,
+        })
+    }
+
+    pub(crate) async fn acquire(&self, destination: SocketAddr) -> Result<OutboundHandshakePermit> {
+        let mut hasher = DefaultHasher::new();
+        destination.hash(&mut hasher);
+        let index = hasher.finish() as usize % self.destination_locks.len();
+
+        // Acquire destination ownership first so duplicate dials cannot occupy
+        // all global permits while waiting behind their leader.
+        let destination = self.destination_locks[index].clone().lock_owned().await;
+        let global = self
+            .global
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::TransportClosed)?;
+        Ok(OutboundHandshakePermit {
+            _destination: destination,
+            _global: global,
+        })
     }
 }
 
@@ -121,6 +174,29 @@ impl TransportTaskSet {
             return None;
         }
         Some(abort_handle)
+    }
+
+    /// Run an operation as a managed task and return its result.
+    ///
+    /// This is used for caller-awaited connection establishment. The work is
+    /// still owned by the transport, so `close()` aborts and joins it and the
+    /// waiting caller deterministically receives `TransportClosed`.
+    pub(crate) async fn run<F, T>(self: &Arc<Self>, future: F) -> Result<T>
+    where
+        F: Future<Output = Result<T>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let (result_tx, result_rx) = oneshot::channel();
+        if self
+            .spawn(async move {
+                let _ = result_tx.send(future.await);
+            })
+            .await
+            .is_none()
+        {
+            return Err(Error::TransportClosed);
+        }
+        result_rx.await.unwrap_or(Err(Error::TransportClosed))
     }
 
     /// Idempotently stop and join all managed tasks.
@@ -197,5 +273,41 @@ mod tests {
             .expect("task future dropped before close returned");
         tasks.close().await;
         assert!(tasks.spawn(async {}).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn managed_result_is_cancelled_by_close() {
+        let tasks = TransportTaskSet::new();
+        let runner = {
+            let tasks = tasks.clone();
+            tokio::spawn(async move {
+                tasks
+                    .run(async {
+                        std::future::pending::<()>().await;
+                        Ok::<_, Error>(())
+                    })
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        tasks.close().await;
+        assert!(matches!(runner.await.unwrap(), Err(Error::TransportClosed)));
+    }
+
+    #[tokio::test]
+    async fn outbound_admission_serializes_one_destination() {
+        let admission = OutboundHandshakeAdmission::new(2);
+        let first = admission
+            .acquire("127.0.0.1:5061".parse().unwrap())
+            .await
+            .unwrap();
+        let blocked = {
+            let admission = admission.clone();
+            tokio::spawn(async move { admission.acquire("127.0.0.1:5061".parse().unwrap()).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!blocked.is_finished());
+        drop(first);
+        assert!(blocked.await.unwrap().is_ok());
     }
 }
