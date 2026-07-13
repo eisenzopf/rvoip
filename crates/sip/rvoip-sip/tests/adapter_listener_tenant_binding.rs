@@ -22,7 +22,7 @@ use rvoip_sip::{
 use rvoip_sip_core::types::headers::HeaderAccess;
 use rvoip_sip_core::{parse_message, HeaderName, Message, StatusCode};
 use rvoip_sip_transport::transport::tls::{TlsClientConfig, TlsTransport};
-use rvoip_sip_transport::Transport;
+use rvoip_sip_transport::{Transport, TransportEvent};
 use serial_test::serial;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -94,7 +94,7 @@ fn invite_wire(
          Call-ID: {call_id}\r\n\
          CSeq: {cseq} INVITE\r\n\
          Max-Forwards: 70\r\n\
-         Contact: <sip:caller@127.0.0.1:5099>\r\n",
+         Contact: <{scheme}:caller@127.0.0.1:5099>\r\n",
         destination.port(),
         transport.to_ascii_lowercase(),
         destination.port(),
@@ -141,6 +141,29 @@ async fn assert_no_authenticated_event(
     })
     .await;
     assert!(!matches!(received, Ok(true)));
+}
+
+async fn await_rejected_tls_flow(
+    events: &mut tokio::sync::mpsc::Receiver<TransportEvent>,
+    destination: SocketAddr,
+) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match events.recv().await.expect("TLS client event stream closed") {
+                TransportEvent::ConnectionClosed { remote_addr, .. }
+                    if remote_addr == destination =>
+                {
+                    return;
+                }
+                TransportEvent::MessageReceived { .. } => {
+                    panic!("certificate-rejected TLS flow received a SIP message")
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for certificate-rejected TLS flow to close");
 }
 
 struct AlwaysDenyAuthRateLimiter {
@@ -537,7 +560,7 @@ async fn verified_mtls_certificate_reaches_adapter_and_unverified_peers_do_not()
         .try_subscribe_atomic_events()
         .expect("adapter event stream");
 
-    let (anonymous, _) = TlsTransport::client_only(
+    let (anonymous, mut anonymous_events) = TlsTransport::client_only(
         "127.0.0.1:0".parse().unwrap(),
         None,
         pki.client_config(None),
@@ -547,30 +570,39 @@ async fn verified_mtls_certificate_reaches_adapter_and_unverified_peers_do_not()
     // A TLS 1.3 client may finish its first write before observing the
     // server's certificate-required alert. The security boundary is that no
     // request from that connection reaches the authenticated adapter handoff.
-    let _ = tokio::time::timeout(
+    let anonymous_send = tokio::time::timeout(
         Duration::from_secs(3),
         anonymous.send_message(tls_invite(tls_bind, "anonymous"), tls_bind),
     )
     .await
     .expect("anonymous handshake deadline");
+    if anonymous_send.is_ok() {
+        await_rejected_tls_flow(&mut anonymous_events, tls_bind).await;
+    }
     assert_no_authenticated_event(&mut events).await;
 
-    let (untrusted, _) = TlsTransport::client_only(
+    let (untrusted, mut untrusted_events) = TlsTransport::client_only(
         "127.0.0.1:0".parse().unwrap(),
         None,
         pki.client_config(Some((&pki.untrusted_cert, &pki.untrusted_key))),
     )
     .await
     .expect("untrusted TLS client configuration");
-    let _ = tokio::time::timeout(
+    let untrusted_send = tokio::time::timeout(
         Duration::from_secs(3),
         untrusted.send_message(tls_invite(tls_bind, "untrusted"), tls_bind),
     )
     .await
     .expect("untrusted handshake deadline");
+    if untrusted_send.is_ok() {
+        await_rejected_tls_flow(&mut untrusted_events, tls_bind).await;
+    }
     assert_no_authenticated_event(&mut events).await;
 
-    let (trusted, _) = TlsTransport::client_only(
+    // Retain the transport's event receiver for the whole positive handoff.
+    // Dropping it closes the test client as soon as the server's first SIP
+    // response is delivered, racing the later adapter observation.
+    let (trusted, _trusted_events) = TlsTransport::client_only(
         "127.0.0.1:0".parse().unwrap(),
         None,
         pki.client_config(Some((&pki.client_cert, &pki.client_key))),

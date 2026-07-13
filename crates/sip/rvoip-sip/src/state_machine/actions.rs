@@ -13,6 +13,77 @@ use crate::{
     state_table::{Action, Condition},
 };
 
+const SIP_RESPONSE_DISPATCH_JOIN_FAILURE: &str = "SIP response dispatch task failed (class=join)";
+
+/// Owns a spawned SIP response task and cancels it unless it has been joined.
+///
+/// Awaiting the response on a fresh Tokio task gives the deeply nested dialog,
+/// transaction, transport, and TLS poll chain a fresh worker stack. The handle
+/// remains structurally owned by the state-machine action so cancellation never
+/// detaches response I/O.
+struct AbortSipResponseTaskOnDrop<T> {
+    handle: tokio::task::JoinHandle<T>,
+    armed: bool,
+}
+
+impl<T> AbortSipResponseTaskOnDrop<T> {
+    fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+        Self {
+            handle,
+            armed: true,
+        }
+    }
+
+    async fn join(mut self) -> std::result::Result<T, tokio::task::JoinError> {
+        let result = (&mut self.handle).await;
+        self.armed = false;
+        result
+    }
+}
+
+impl<T> Drop for AbortSipResponseTaskOnDrop<T> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.handle.abort();
+        }
+    }
+}
+
+enum SipResponseTarget {
+    Session,
+    Transaction(rvoip_sip_dialog::transaction::TransactionKey),
+}
+
+async fn join_sip_response_task(
+    task: AbortSipResponseTaskOnDrop<crate::errors::Result<()>>,
+) -> crate::errors::Result<()> {
+    task.join().await.map_err(|_| {
+        crate::errors::SessionError::InternalError(SIP_RESPONSE_DISPATCH_JOIN_FAILURE.to_string())
+    })?
+}
+
+async fn send_sip_response_on_fresh_task(
+    dialog_adapter: Arc<DialogAdapter>,
+    session_id: SessionId,
+    target: SipResponseTarget,
+    code: u16,
+    sdp: Option<String>,
+) -> crate::errors::Result<()> {
+    let task = AbortSipResponseTaskOnDrop::new(tokio::spawn(async move {
+        match target {
+            SipResponseTarget::Session => {
+                dialog_adapter.send_response(&session_id, code, sdp).await
+            }
+            SipResponseTarget::Transaction(transaction_id) => {
+                dialog_adapter
+                    .send_response_for_transaction(&session_id, &transaction_id, code, sdp)
+                    .await
+            }
+        }
+    }));
+    join_sip_response_task(task).await
+}
+
 /// Result of a state-table action.
 ///
 /// Actions may enqueue internal follow-up events, but they must not call
@@ -639,14 +710,14 @@ pub(crate) async fn execute_action(
                         .core()
                         .transaction_manager()
                         .take_inbound_timing(&transaction_id);
-                    dialog_adapter
-                        .send_response_for_transaction(
-                            &session.session_id,
-                            &transaction_id,
-                            *code,
-                            session.local_sdp.clone(),
-                        )
-                        .await?;
+                    send_sip_response_on_fresh_task(
+                        Arc::clone(dialog_adapter),
+                        session.session_id.clone(),
+                        SipResponseTarget::Transaction(transaction_id),
+                        *code,
+                        session.local_sdp.clone(),
+                    )
+                    .await?;
                     if let Some(timing) = udp_receive_timing {
                         if let Some(received_at) = timing.received_at {
                             rvoip_sip_dialog::diagnostics::record_udp_receive_to_invite_200(
@@ -655,18 +726,28 @@ pub(crate) async fn execute_action(
                         }
                     }
                 } else {
-                    dialog_adapter
-                        .send_response(&session.session_id, *code, session.local_sdp.clone())
-                        .await?;
+                    send_sip_response_on_fresh_task(
+                        Arc::clone(dialog_adapter),
+                        session.session_id.clone(),
+                        SipResponseTarget::Session,
+                        *code,
+                        session.local_sdp.clone(),
+                    )
+                    .await?;
                 }
                 if let Some(started_at) = response_started_at {
                     rvoip_sip_dialog::diagnostics::record_200_ok_invite_first();
                     rvoip_sip_dialog::diagnostics::record_first_invite_to_200(started_at.elapsed());
                 }
             } else {
-                dialog_adapter
-                    .send_response(&session.session_id, *code, session.local_sdp.clone())
-                    .await?;
+                send_sip_response_on_fresh_task(
+                    Arc::clone(dialog_adapter),
+                    session.session_id.clone(),
+                    SipResponseTarget::Session,
+                    *code,
+                    session.local_sdp.clone(),
+                )
+                .await?;
             }
             // RFC 3261: Dialog is established when UAS sends 200 OK to INVITE
             if *code == 200 {
@@ -3249,6 +3330,61 @@ fn publish_transfer_event(dialog_adapter: &Arc<DialogAdapter>, api_event: Event)
             tracing::warn!("Failed to publish Transfer* event (class=coordination)");
         }
     });
+}
+
+#[cfg(test)]
+mod sip_response_task_tests {
+    use super::*;
+    use tokio::sync::oneshot;
+
+    struct DropSignal(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(signal) = self.0.take() {
+                let _ = signal.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_response_join_aborts_the_owned_io_task() {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let task = AbortSipResponseTaskOnDrop::new(tokio::spawn(async move {
+            let _drop_signal = DropSignal(Some(dropped_tx));
+            let _ = started_tx.send(());
+            std::future::pending::<crate::errors::Result<()>>().await
+        }));
+
+        started_rx.await.expect("response task started");
+        let join = Box::pin(task.join());
+        drop(join);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("cancelled response task did not stop")
+            .expect("response task drop signal closed");
+    }
+
+    #[tokio::test]
+    async fn response_task_panics_map_to_a_fixed_internal_error_class() {
+        let task = AbortSipResponseTaskOnDrop::new(tokio::spawn(async {
+            panic!("synthetic response dispatch panic");
+            #[allow(unreachable_code)]
+            crate::errors::Result::<()>::Ok(())
+        }));
+
+        let error = join_sip_response_task(task)
+            .await
+            .expect_err("panicked response task must fail");
+        match error {
+            crate::errors::SessionError::InternalError(detail) => {
+                assert_eq!(detail, SIP_RESPONSE_DISPATCH_JOIN_FAILURE);
+            }
+            other => panic!("unexpected response task error: {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]
