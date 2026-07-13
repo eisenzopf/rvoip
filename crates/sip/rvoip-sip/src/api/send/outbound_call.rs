@@ -68,9 +68,8 @@ impl fmt::Debug for ProxyOverride {
 /// `OutboundCallOptions` is an rvoip-sip-side struct (not in
 /// rvoip-sip-dialog) because INVITE carries rvoip-sip concerns rvoip-sip-dialog
 /// doesn't need: PAI mode, credentials, transfer-leg tracking,
-/// `supported_100rel`. The state machine unpacks it at the
-/// DialogAdapter boundary and calls rvoip-sip-dialog's existing
-/// `make_call_with_extra_headers_for_session`.
+/// `supported_100rel`. The state machine unpacks it at the DialogAdapter
+/// boundary into rvoip-sip-dialog's structural `InviteRequestOptions`.
 ///
 /// `Debug` intentionally exposes only operational flags and counts; retained
 /// URIs, SDP, credentials, authorization, and application headers are redacted.
@@ -392,6 +391,25 @@ impl OutboundCallBuilder {
             topology_hiding: self.topology_hiding,
         });
 
+        // Validate the complete wire-facing option set before allocating a
+        // SessionState or media resources. This catches semantic stack-owned
+        // headers (including `TypedHeader::Other` aliases), malformed Contact,
+        // auth, proxy and singleton collisions without mutating any runtime
+        // state or performing DNS.
+        let (preflight_opts, _) = crate::state_machine::actions::materialize_invite_options(
+            &snapshot,
+            pai_uri.as_deref(),
+            snapshot.sdp.clone(),
+        )
+        .map_err(|error| crate::errors::SessionError::InvalidInput(error.to_string()))?;
+        rvoip_sip_dialog::api::unified::validate_initial_invite_options(&preflight_opts).map_err(
+            |_| {
+                crate::errors::SessionError::InvalidInput(
+                    "initial INVITE options failed preflight validation".to_string(),
+                )
+            },
+        )?;
+
         // Create the session up front — Idle UAC. Then mirror
         // `make_call_inner`'s pre-event field plumbing so a fast
         // loopback 180 Ringing can't beat our state update: credentials,
@@ -419,73 +437,83 @@ impl OutboundCallBuilder {
             create_session_started.elapsed(),
         );
 
-        if snapshot.credentials.is_some()
-            || snapshot.auth.is_some()
-            || pai_uri.is_some()
-            || snapshot.transfer_leg.is_some()
-            || !snapshot.extra_headers.is_empty()
-        {
+        let setup_result: Result<()> = async {
+            if snapshot.credentials.is_some()
+                || snapshot.auth.is_some()
+                || pai_uri.is_some()
+                || snapshot.transfer_leg.is_some()
+                || !snapshot.extra_headers.is_empty()
+            {
+                #[cfg(feature = "perf-call-setup-diagnostics")]
+                let pre_event_state_update_started = std::time::Instant::now();
+                let mut session = self.coord.session_state(&session_id).await?;
+                if let Some(c) = snapshot.credentials.clone() {
+                    session.credentials = Some(c);
+                }
+                if let Some(auth) = snapshot.auth.clone() {
+                    session.auth = Some(auth);
+                }
+                if let Some(pai) = pai_uri {
+                    session.pai_uri = Some(pai);
+                }
+                if let Some(transferor) = snapshot.transfer_leg.clone() {
+                    session.transferor_session_id = Some(transferor);
+                    session.is_transfer_call = true;
+                }
+                if !snapshot.extra_headers.is_empty() {
+                    session.extra_headers = snapshot.extra_headers.clone();
+                }
+                self.coord
+                    .helpers
+                    .state_machine
+                    .store
+                    .update_session(session)
+                    .await?;
+                #[cfg(feature = "perf-call-setup-diagnostics")]
+                crate::call_setup_diag::record_stage(
+                    &session_id,
+                    "outbound_send.pre_event_state_update",
+                    pre_event_state_update_started.elapsed(),
+                );
+            }
+
             #[cfg(feature = "perf-call-setup-diagnostics")]
-            let pre_event_state_update_started = std::time::Instant::now();
-            let mut session = self.coord.session_state(&session_id).await?;
-            if let Some(c) = snapshot.credentials.clone() {
-                session.credentials = Some(c);
-            }
-            if let Some(auth) = snapshot.auth.clone() {
-                session.auth = Some(auth);
-            }
-            if let Some(pai) = pai_uri {
-                session.pai_uri = Some(pai);
-            }
-            if let Some(transferor) = snapshot.transfer_leg.clone() {
-                session.transferor_session_id = Some(transferor);
-                session.is_transfer_call = true;
-            }
-            if !snapshot.extra_headers.is_empty() {
-                session.extra_headers = snapshot.extra_headers.clone();
-            }
+            let stage_options_started = std::time::Instant::now();
             self.coord
-                .helpers
-                .state_machine
-                .store
-                .update_session(session)
+                .stage_outbound_options(
+                    &session_id,
+                    crate::state_machine::executor::PendingOptionsSlot::Invite(Arc::clone(
+                        &snapshot,
+                    )),
+                )
                 .await?;
             #[cfg(feature = "perf-call-setup-diagnostics")]
             crate::call_setup_diag::record_stage(
                 &session_id,
-                "outbound_send.pre_event_state_update",
-                pre_event_state_update_started.elapsed(),
+                "outbound_send.stage_options",
+                stage_options_started.elapsed(),
             );
+            #[cfg(feature = "perf-call-setup-diagnostics")]
+            let dispatch_started = std::time::Instant::now();
+            self.coord
+                .dispatch_outbound(
+                    &session_id,
+                    crate::state_table::EventType::SendOutboundInvite,
+                )
+                .await?;
+            #[cfg(feature = "perf-call-setup-diagnostics")]
+            crate::call_setup_diag::record_stage(
+                &session_id,
+                "outbound_send.dispatch_outbound",
+                dispatch_started.elapsed(),
+            );
+            Ok(())
         }
-
-        #[cfg(feature = "perf-call-setup-diagnostics")]
-        let stage_options_started = std::time::Instant::now();
-        self.coord
-            .stage_outbound_options(
-                &session_id,
-                crate::state_machine::executor::PendingOptionsSlot::Invite(snapshot),
-            )
-            .await?;
-        #[cfg(feature = "perf-call-setup-diagnostics")]
-        crate::call_setup_diag::record_stage(
-            &session_id,
-            "outbound_send.stage_options",
-            stage_options_started.elapsed(),
-        );
-        #[cfg(feature = "perf-call-setup-diagnostics")]
-        let dispatch_started = std::time::Instant::now();
-        self.coord
-            .dispatch_outbound(
-                &session_id,
-                crate::state_table::EventType::SendOutboundInvite,
-            )
-            .await?;
-        #[cfg(feature = "perf-call-setup-diagnostics")]
-        crate::call_setup_diag::record_stage(
-            &session_id,
-            "outbound_send.dispatch_outbound",
-            dispatch_started.elapsed(),
-        );
+        .await;
+        if let Err(error) = setup_result {
+            self.coord.rollback_outbound_setup(&session_id).await;
+            return Err(error);
+        }
         #[cfg(feature = "perf-call-setup-diagnostics")]
         let schedule_timeout_started = std::time::Instant::now();
         self.coord

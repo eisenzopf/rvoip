@@ -55,6 +55,37 @@ impl fmt::Debug for PendingReinvite {
     }
 }
 
+/// Credential header retained across chained initial-INVITE challenges.
+/// Values are intentionally never included in `SessionState` diagnostics.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InviteCredentialKind {
+    Origin,
+    Proxy,
+}
+
+#[derive(Clone)]
+pub(crate) struct InviteAuthorizationCredential {
+    pub(crate) kind: InviteCredentialKind,
+    pub(crate) protection_target: String,
+    pub(crate) realm: String,
+    pub(crate) nonce: Option<String>,
+    pub(crate) stale_refreshes: u8,
+    pub(crate) value: String,
+}
+
+impl Drop for InviteAuthorizationCredential {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+
+        self.protection_target.zeroize();
+        self.realm.zeroize();
+        if let Some(nonce) = self.nonce.as_mut() {
+            nonce.zeroize();
+        }
+        self.value.zeroize();
+    }
+}
+
 /// Transfer state tracking
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransferState {
@@ -180,10 +211,15 @@ pub struct SessionState {
     // counter is sufficient.
     pub request_auth_retry_count: u8,
 
-    // RFC 3261 §22.2 — INVITE auth retry counter, capped at 1 (two attempts
-    // total: initial + one authenticated retry). Prevents infinite loops when
-    // the server keeps re-challenging with the same nonce.
+    // RFC 3261 §22.2 — diagnostic count of authenticated INVITE retries.
+    // Enforcement is protection-space based: origin and proxy challenges are
+    // independent, and each permits at most one changed-nonce stale refresh.
     pub invite_auth_retry_count: u8,
+
+    /// Accumulated origin and proxy credentials for the current initial
+    /// INVITE. This supports a 407 followed by a 401 without dropping the
+    /// proxy credential on the second retry. Bounded by the action layer.
+    pub(crate) invite_authorization_credentials: Vec<InviteAuthorizationCredential>,
 
     // 3xx redirect follow-up state (RFC 3261 §8.1.3.4)
     // Remaining redirect targets to try (first = highest priority); popped
@@ -285,18 +321,18 @@ pub struct SessionState {
     pub auth: Option<crate::auth::SipClientAuth>, // General UAC auth for 401/407 retries
     /// Optional `P-Asserted-Identity` URI (RFC 3325 §9.1) to attach to the
     /// outgoing INVITE for this session. When `Some`, the `SendINVITE` action
-    /// routes through `dialog_adapter.send_invite_with_extra_headers` so the
-    /// header lands on the very first wire transmission. Carrier trunks
-    /// commonly require this for caller-ID assertion.
+    /// adds the typed header to the structural initial-INVITE options so it
+    /// lands on the very first wire transmission. Carrier trunks commonly
+    /// require this for caller-ID assertion.
     pub pai_uri: Option<String>,
     /// Caller-supplied extra typed headers to attach to the very first
     /// outgoing INVITE for this session. Populated by the
     /// `_with_headers` variants on the public API surfaces; consumed by
     /// `Action::SendINVITE`, which appends them to the `extras` vector after
     /// any synthesized `P-Asserted-Identity`. Empty by default — the
-    /// outbound-proxy Route prepended inside
-    /// `DialogAdapter::send_invite_with_extra_headers` still runs after this,
-    /// so a configured outbound proxy stays first on the wire.
+    /// outbound proxy is planned separately as a structural first hop, so it
+    /// stays ahead of application headers and REGISTER-learned Service-Route
+    /// entries on the wire.
     pub extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     pub is_registered: bool, // Whether registration is complete
     pub auth_challenge: Option<crate::auth::DigestChallenge>, // Cached authentication challenge from 401
@@ -449,6 +485,10 @@ impl fmt::Debug for SessionState {
             )
             .field("request_auth_retry_count", &self.request_auth_retry_count)
             .field("invite_auth_retry_count", &self.invite_auth_retry_count)
+            .field(
+                "invite_authorization_credential_count",
+                &self.invite_authorization_credentials.len(),
+            )
             .field("redirect_target_count", &self.redirect_targets.len())
             .field("redirect_attempts", &self.redirect_attempts)
             .field("pending_reinvite", &pending_reinvite)
@@ -637,6 +677,7 @@ impl SessionState {
             pending_auth_transport: None,
             request_auth_retry_count: 0,
             invite_auth_retry_count: 0,
+            invite_authorization_credentials: Vec::new(),
             redirect_targets: Vec::new(),
             redirect_attempts: 0,
             pending_reinvite: None,

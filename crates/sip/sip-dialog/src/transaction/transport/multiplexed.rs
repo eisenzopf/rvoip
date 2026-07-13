@@ -21,7 +21,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use rvoip_sip_core::{types::uri::Host, HeaderName, Message, Method, Request, TypedHeader, Uri};
+use rvoip_sip_core::{
+    types::uri::Host, HeaderName, HeaderValue, Message, Method, Request, TypedHeader, Uri,
+};
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{
     error::{Error as TransportError, Result as TransportResult},
@@ -60,6 +62,43 @@ pub fn next_hop_uri_for_request(request: &Request) -> Uri {
     top_route_uri(request).unwrap_or_else(|| request.uri().clone())
 }
 
+/// Returns the exact URI that determines the next hop, rejecting a Route
+/// header that is present but cannot be interpreted structurally. Callers
+/// that allocate a transaction or resolve DNS must use this fallible form;
+/// treating an unusable Route as absent can bypass an explicitly selected
+/// proxy and send credentials or signaling to the Request-URI instead.
+pub fn exact_next_hop_uri_for_request(request: &Request) -> TransportResult<Uri> {
+    for header in &request.headers {
+        if !header.name().wire_eq(&HeaderName::Route) {
+            continue;
+        }
+        let next_hop = match header {
+            TypedHeader::Route(route) => route.first().map(|entry| {
+                let mut uri = entry.0.uri.clone();
+                for param in &entry.0.params {
+                    uri = uri.with_parameter(param.clone());
+                }
+                uri
+            }),
+            TypedHeader::Other(_, HeaderValue::Route(entries)) => entries.first().map(|entry| {
+                let mut uri = entry.0.uri.clone();
+                for param in &entry.0.params {
+                    uri = uri.with_parameter(param.clone());
+                }
+                uri
+            }),
+            _ => None,
+        };
+        return next_hop.ok_or_else(|| {
+            TransportError::UnsupportedTransport(
+                "outbound request contains an unusable Route header".into(),
+            )
+        });
+    }
+
+    Ok(request.uri().clone())
+}
+
 /// Returns the top Route URI for an outbound request, when a route set is
 /// present.
 pub fn top_route_uri(request: &Request) -> Option<Uri> {
@@ -67,7 +106,7 @@ pub fn top_route_uri(request: &Request) -> Option<Uri> {
         .headers
         .iter()
         .filter_map(|header| {
-            if header.name() == HeaderName::Route {
+            if header.name().wire_eq(&HeaderName::Route) {
                 match header {
                     TypedHeader::Route(route) => route.first().map(|entry| {
                         let mut uri = entry.0.uri.clone();
@@ -76,6 +115,15 @@ pub fn top_route_uri(request: &Request) -> Option<Uri> {
                         }
                         uri
                     }),
+                    TypedHeader::Other(_, HeaderValue::Route(entries)) => {
+                        entries.first().map(|entry| {
+                            let mut uri = entry.0.uri.clone();
+                            for param in &entry.0.params {
+                                uri = uri.with_parameter(param.clone());
+                            }
+                            uri
+                        })
+                    }
                     _ => None,
                 }
             } else {
@@ -131,12 +179,15 @@ pub(crate) fn validate_request_route_security(
 ) -> TransportResult<()> {
     use rvoip_sip_core::types::uri::Scheme;
 
-    let next_hop = next_hop_uri_for_request(request);
+    let next_hop = exact_next_hop_uri_for_request(request)?;
     validate_next_hop_transport(&next_hop)?;
-    if matches!(next_hop.scheme(), Scheme::Sips)
-        && route
-            .transport_type
-            .is_some_and(|transport| !matches!(transport, TransportType::Tls | TransportType::Wss))
+    let selected_transport = route
+        .transport_type
+        .unwrap_or_else(|| select_transport_for_uri(&next_hop));
+    // A sips Request-URI is an end-to-end confidentiality requirement. A
+    // plaintext `sip:` top Route must not downgrade its first hop.
+    if (matches!(request.uri().scheme(), Scheme::Sips) || matches!(next_hop.scheme(), Scheme::Sips))
+        && !matches!(selected_transport, TransportType::Tls | TransportType::Wss)
     {
         return Err(TransportError::UnsupportedTransport(
             "sips: request route cannot use a plaintext transport".into(),
@@ -150,7 +201,7 @@ pub fn transport_route_for_request(
     request: &Request,
     destination: SocketAddr,
 ) -> TransportResult<TransportRoute> {
-    let next_hop = next_hop_uri_for_request(request);
+    let next_hop = exact_next_hop_uri_for_request(request)?;
     validate_next_hop_transport(&next_hop)?;
     let authority = match &next_hop.host {
         Host::Domain(domain) => TransportAuthority::dns(domain.clone())?,
@@ -963,6 +1014,73 @@ mod tests {
         assert_eq!(udp.count(), 0);
         assert_eq!(tcp.count(), 0);
         assert_eq!(tls.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn plaintext_top_route_cannot_downgrade_sips_request_uri() {
+        use rvoip_sip_core::builder::SimpleRequestBuilder;
+        use rvoip_sip_core::types::route::Route;
+
+        let udp = CountingTransport::new("udp");
+        let tls = CountingTransport::new("tls");
+        let mut by_flavour: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
+        by_flavour.insert(TransportType::Udp, udp.clone());
+        by_flavour.insert(TransportType::Tls, tls.clone());
+        let mux = MultiplexedTransport::new(udp.clone(), by_flavour, None).unwrap();
+        let proxy: Uri = "sip:proxy.example.com;lr;transport=udp".parse().unwrap();
+        let request = SimpleRequestBuilder::new(Method::Invite, "sips:bob@example.com")
+            .unwrap()
+            .from("alice", "sips:alice@example.com", Some("tagA"))
+            .to("bob", "sips:bob@example.com", None)
+            .call_id("sips-route-downgrade")
+            .cseq(1)
+            .header(TypedHeader::Route(Route::with_uri(proxy)))
+            .build();
+
+        let error = mux
+            .send_message_via(
+                Message::Request(request),
+                TransportRoute::new("127.0.0.1:5060".parse().unwrap())
+                    .with_transport_type(TransportType::Udp),
+            )
+            .await
+            .expect_err("sips Request-URI requires a secure first hop");
+        assert!(matches!(error, TransportError::UnsupportedTransport(_)));
+        assert_eq!(udp.count(), 0);
+        assert_eq!(tls.count(), 0);
+    }
+
+    #[test]
+    fn semantic_other_route_is_used_and_unstructured_route_is_rejected() {
+        use rvoip_sip_core::builder::SimpleRequestBuilder;
+        use rvoip_sip_core::types::route::Route;
+
+        let route: Uri = "sips:proxy.example.com:5061;lr".parse().unwrap();
+        let mut request = SimpleRequestBuilder::new(Method::Options, "sip:target.example.com")
+            .unwrap()
+            .from("alice", "sip:alice@example.com", Some("tagA"))
+            .to("target", "sip:target.example.com", None)
+            .call_id("semantic-other-route")
+            .cseq(1)
+            .build();
+        request.headers.push(TypedHeader::Other(
+            HeaderName::Other("rOuTe".into()),
+            HeaderValue::Route(Route::with_uri(route.clone()).0),
+        ));
+        assert_eq!(top_route_uri(&request), Some(route));
+
+        request.headers.pop();
+        request.headers.push(TypedHeader::Other(
+            HeaderName::Other("Route".into()),
+            HeaderValue::Raw(b"<sip:unparsed.example.com;lr>".to_vec()),
+        ));
+        let error = validate_request_route_security(
+            &request,
+            &TransportRoute::new("127.0.0.1:5060".parse().unwrap())
+                .with_transport_type(TransportType::Udp),
+        )
+        .expect_err("unstructured semantic Route must fail closed");
+        assert!(matches!(error, TransportError::UnsupportedTransport(_)));
     }
 
     #[tokio::test]

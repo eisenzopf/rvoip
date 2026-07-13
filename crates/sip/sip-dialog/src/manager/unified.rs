@@ -459,6 +459,8 @@ impl UnifiedDialogManager {
             Vec::new(),
             None,
             None,
+            None,
+            false,
         )
         .await
     }
@@ -479,6 +481,8 @@ impl UnifiedDialogManager {
             Vec::new(),
             None,
             None,
+            None,
+            false,
         )
         .await
     }
@@ -800,6 +804,8 @@ impl UnifiedDialogManager {
             extra_headers,
             None,
             None,
+            None,
+            false,
         )
         .await
     }
@@ -825,6 +831,8 @@ impl UnifiedDialogManager {
             extra_headers,
             None,
             None,
+            None,
+            false,
         )
         .await
     }
@@ -838,6 +846,8 @@ impl UnifiedDialogManager {
         opts: crate::api::unified::InviteRequestOptions,
     ) -> ApiResult<CallHandle> {
         use rvoip_sip_core::types::header::HeaderName;
+
+        crate::api::unified::validate_initial_invite_options(&opts)?;
 
         let mut extra_headers = opts.extra_headers;
         if let Some(auth) = opts.precomputed_authorization {
@@ -865,6 +875,8 @@ impl UnifiedDialogManager {
             extra_headers,
             opts.from_display,
             opts.contact_uri,
+            opts.outbound_proxy_uri,
+            opts.supported_100rel,
         )
         .await
     }
@@ -880,6 +892,8 @@ impl UnifiedDialogManager {
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
         from_display: Option<String>,
         contact_override: Option<String>,
+        outbound_proxy_uri: Option<Uri>,
+        supported_100rel: bool,
     ) -> ApiResult<CallHandle> {
         // Check if outgoing calls are supported
         if !self.config.supports_outgoing_calls() {
@@ -891,6 +905,21 @@ impl UnifiedDialogManager {
                 message: "Outgoing calls not supported in Server mode".to_string(),
             });
         }
+
+        crate::api::unified::validate_initial_invite_options(
+            &crate::api::unified::InviteRequestOptions {
+                from_uri: from_uri.to_string(),
+                to_uri: to_uri.to_string(),
+                sdp: sdp_offer.clone(),
+                call_id: call_id.clone(),
+                from_display: from_display.clone(),
+                contact_uri: contact_override.clone(),
+                precomputed_authorization: None,
+                outbound_proxy_uri: outbound_proxy_uri.clone(),
+                supported_100rel,
+                extra_headers: extra_headers.clone(),
+            },
+        )?;
 
         info!("Making outgoing call with caller and target URIs present");
 
@@ -955,46 +984,50 @@ impl UnifiedDialogManager {
         // `send_initial_invite_with_extra_headers` path so the headers ride
         // on the very first wire INVITE; otherwise the generic path is fine.
         let body_bytes = sdp_offer.map(|s| bytes::Bytes::from(s));
-        let send_result =
-            if extra_headers.is_empty() && from_display.is_none() && contact_override.is_none() {
-                self.core
-                    .send_request(&dialog_id, Method::Invite, body_bytes)
-                    .await
-            } else {
-                self.core
-                    .send_initial_invite_with_extra_headers(
-                        &dialog_id,
-                        body_bytes,
-                        extra_headers,
-                        from_display,
-                        contact_override,
-                    )
-                    .await
-            };
+        let send_result = if extra_headers.is_empty()
+            && from_display.is_none()
+            && contact_override.is_none()
+            && outbound_proxy_uri.is_none()
+            && !supported_100rel
+        {
+            self.core
+                .send_request(&dialog_id, Method::Invite, body_bytes)
+                .await
+        } else {
+            self.core
+                .send_initial_invite_with_extra_headers(
+                    &dialog_id,
+                    body_bytes,
+                    extra_headers,
+                    from_display,
+                    contact_override,
+                    outbound_proxy_uri,
+                    supported_100rel,
+                )
+                .await
+        };
         let _transaction_key = match send_result {
             Ok(tx_key) => tx_key,
-            Err(e) => {
-                // RFC 3261 Section 17.1.1.3: INVITE client transactions terminate after
-                // receiving 2xx responses and sending ACK. This is normal behavior, not an error.
-                let error_msg = e.to_string();
-                if error_msg.contains("Transaction terminated after timeout")
-                    || error_msg.contains("Transaction terminated")
-                {
-                    debug!(
-                        "INVITE transaction terminated normally after 2xx response (RFC 3261 compliant)"
-                    );
-                    // This is expected behavior - the SIP call flow completed successfully
-                    info!(
-                        "Created outgoing call with dialog ID: {} (transaction completed per RFC 3261)",
-                        dialog_id
-                    );
-                    return Ok(CallHandle::new(
-                        dialog_id.clone(),
-                        Arc::new(self.core.clone()),
-                    ));
-                }
-
+            Err(_error) => {
                 error!("Failed to send INVITE for call {}", dialog_id);
+                // The caller never received a usable handle. Compensate every
+                // allocation made above so a synchronous build/route/transport
+                // failure cannot strand dialog indexes, a pre-registered
+                // session mapping, transactions, or the active-dialog gauge.
+                self.core
+                    .cleanup_dialog_storage_and_transactions(&dialog_id)
+                    .await;
+                {
+                    let mut stats = self.stats.write().await;
+                    stats.active_dialogs = stats.active_dialogs.saturating_sub(1);
+                    stats.failed_calls = stats.failed_calls.saturating_add(1);
+                }
+                self.core
+                    .emit_dialog_event(DialogEvent::Terminated {
+                        dialog_id: dialog_id.clone(),
+                        reason: "initial INVITE dispatch failed".to_string(),
+                    })
+                    .await;
                 return Err(ApiError::Dialog {
                     message: "INVITE send failed".to_string(),
                 });
@@ -1609,6 +1642,29 @@ impl UnifiedDialogManager {
             .map_err(ApiError::from)
     }
 
+    /// Authenticated initial-INVITE retry with accumulated origin/proxy
+    /// credentials and the original structural routing/body policy.
+    pub async fn send_invite_with_auth_options(
+        &self,
+        dialog_id: &DialogId,
+        opts: crate::api::unified::InviteAuthRetryOptions,
+    ) -> ApiResult<TransactionKey> {
+        let body = opts.sdp.map(bytes::Bytes::from);
+        self.core
+            .send_invite_with_auth_options(
+                dialog_id,
+                body,
+                opts.authorization_headers,
+                opts.extra_headers,
+                opts.from_display,
+                opts.contact_uri,
+                opts.outbound_proxy_uri,
+                opts.supported_100rel,
+            )
+            .await
+            .map_err(ApiError::from)
+    }
+
     /// RFC 4028 §6 — resend an INVITE with a per-call `Session-Expires` /
     /// `Min-SE` override after a 422 Session Interval Too Small. The timer
     /// headers on the retry bypass [`DialogManagerConfig`]'s global values
@@ -1624,6 +1680,21 @@ impl UnifiedDialogManager {
         let body = sdp.map(bytes::Bytes::from);
         self.core
             .send_invite_with_session_timer_override(dialog_id, body, session_secs, min_se)
+            .await
+            .map_err(ApiError::from)
+    }
+
+    /// Structural 422 retry retaining the original INVITE options and any
+    /// accumulated proxy/origin credentials.
+    pub async fn send_invite_with_session_timer_options(
+        &self,
+        dialog_id: &DialogId,
+        opts: crate::api::unified::InviteAuthRetryOptions,
+        session_secs: u32,
+        min_se: u32,
+    ) -> ApiResult<TransactionKey> {
+        self.core
+            .send_invite_with_session_timer_options(dialog_id, opts, session_secs, min_se)
             .await
             .map_err(ApiError::from)
     }

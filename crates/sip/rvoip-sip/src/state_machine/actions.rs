@@ -1,5 +1,6 @@
 use crate::adapters::dialog_adapter::RegisterAttemptOutcome;
 use crate::state_table::types::{EventType, SessionId};
+use rvoip_sip_core::types::{HeaderName, TypedHeader};
 use std::fmt;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -43,7 +44,7 @@ enum RegisterActionMode {
 /// parser's source error. Diagnostics expose only a fixed field label, whether
 /// the field was present, its byte length, and a validation class.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum InviteOptionsMaterializationError {
+pub(crate) enum InviteOptionsMaterializationError {
     InvalidPAssertedIdentityUri { bytes: usize },
     InvalidOutboundProxyUri { bytes: usize },
 }
@@ -348,11 +349,67 @@ async fn execute_register_action(
 /// ([`Action::SendINVITEWithOptions`]) and the 401/407 retry
 /// ([`Action::SendINVITEWithAuth`]) so the authenticated retry's wire form
 /// matches the initial INVITE — the root cause of per-call overrides vanishing
-/// on the challenge retry. `P-Asserted-Identity` / outbound-proxy `Route` /
-/// `Subject` ride `extra_headers` (the designed appended-header channel); the
-/// `From` display name, `Contact`, and pre-computed `Authorization` are typed
-/// structural fields the dialog builder constructs directly.
-fn materialize_invite_options(
+/// on the challenge retry. `P-Asserted-Identity` / `Subject` ride
+/// `extra_headers`; outbound proxy, `From` display name, `Contact`, and
+/// pre-computed `Authorization` are typed structural fields.
+fn authoritative_invite_sdp(
+    snapshot: Option<&crate::api::send::outbound_call::OutboundCallOptionsSnapshot>,
+    generated_sdp: Option<&str>,
+) -> Option<String> {
+    snapshot
+        .and_then(|options| options.sdp.clone())
+        .or_else(|| generated_sdp.map(str::to_owned))
+}
+
+fn invite_proxy_protection_target(
+    snapshot: Option<&crate::api::send::outbound_call::OutboundCallOptionsSnapshot>,
+    dialog_adapter: &DialogAdapter,
+    request_uri: &str,
+) -> String {
+    match snapshot.map(|snapshot| &snapshot.outbound_proxy_override) {
+        Some(crate::api::send::ProxyOverride::Use(uri)) => uri.clone(),
+        Some(crate::api::send::ProxyOverride::Suppress) => request_uri.to_string(),
+        Some(crate::api::send::ProxyOverride::Default) | None => dialog_adapter
+            .outbound_proxy_uri
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| request_uri.to_string()),
+    }
+}
+
+fn retained_invite_authorization_headers(
+    session: &SessionState,
+    origin_target: &str,
+    proxy_target: &str,
+) -> Result<Vec<TypedHeader>, crate::errors::SessionError> {
+    use crate::session_store::state::InviteCredentialKind;
+
+    session
+        .invite_authorization_credentials
+        .iter()
+        .filter(|credential| match credential.kind {
+            InviteCredentialKind::Origin => credential.protection_target == origin_target,
+            InviteCredentialKind::Proxy => credential.protection_target == proxy_target,
+        })
+        .map(|credential| {
+            let name = match credential.kind {
+                InviteCredentialKind::Origin => HeaderName::Authorization,
+                InviteCredentialKind::Proxy => HeaderName::ProxyAuthorization,
+            };
+            rvoip_sip_core::validation::validated_authorization_header(
+                name,
+                credential.value.clone(),
+            )
+            .map_err(|_| {
+                crate::errors::SessionError::ProtocolError(
+                    "retained INVITE authorization failed validation".to_string(),
+                )
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn materialize_invite_options(
     snapshot: &crate::api::send::outbound_call::OutboundCallOptionsSnapshot,
     session_pai_uri: Option<&str>,
     sdp_for_wire: Option<String>,
@@ -385,22 +442,22 @@ fn materialize_invite_options(
         }
     }
 
-    // Per-call outbound-proxy `Route` override (`with_outbound_proxy`).
-    let route_override = match &snapshot.outbound_proxy_override {
-        ProxyOverride::Use(uri) => Some(uri.clone()),
-        ProxyOverride::Default | ProxyOverride::Suppress => None,
-    };
-    if let Some(uri_str) = route_override {
-        use rvoip_sip_core::types::{route::Route, uri::Uri};
-        match Uri::from_str(&uri_str) {
-            Ok(uri) => extras.insert(0, TypedHeader::Route(Route::with_uri(uri))),
-            Err(_) => {
-                return Err(InviteOptionsMaterializationError::InvalidOutboundProxyUri {
-                    bytes: uri_str.len(),
-                })
+    // Per-call outbound proxy is structural. It must stay ahead of any
+    // REGISTER-learned Service-Route and survive authenticated retries.
+    let outbound_proxy_uri = match &snapshot.outbound_proxy_override {
+        ProxyOverride::Use(uri_str) => {
+            use rvoip_sip_core::types::uri::Uri;
+            match Uri::from_str(uri_str) {
+                Ok(uri) => Some(uri),
+                Err(_) => {
+                    return Err(InviteOptionsMaterializationError::InvalidOutboundProxyUri {
+                        bytes: uri_str.len(),
+                    })
+                }
             }
         }
-    }
+        ProxyOverride::Default | ProxyOverride::Suppress => None,
+    };
     let suppress_global_proxy = matches!(
         &snapshot.outbound_proxy_override,
         ProxyOverride::Suppress | ProxyOverride::Use(_)
@@ -420,6 +477,8 @@ fn materialize_invite_options(
         from_display: snapshot.from_display.clone(),
         contact_uri: snapshot.contact_uri.clone(),
         precomputed_authorization: snapshot.precomputed_auth.clone(),
+        outbound_proxy_uri,
+        supported_100rel: snapshot.supported_100rel,
         extra_headers: extras,
     };
     Ok((opts, suppress_global_proxy))
@@ -805,6 +864,13 @@ pub(crate) async fn execute_action(
             session.redirect_attempts += 1;
             session.remote_uri = Some(next_target.clone());
 
+            // A redirect changes the origin protection target. Never replay
+            // an Authorization value (including caller-supplied precomputed
+            // Basic/Bearer/Digest material) to the new Contact. Proxy auth is
+            // also cleared and may be re-established by a fresh 407.
+            session.invite_authorization_credentials.clear();
+            session.invite_auth_retry_count = 0;
+
             // Reset readiness flags so the state machine treats this as a fresh
             // call attempt (media session was already cleaned up by CleanupMedia
             // earlier in this transition's action sequence).
@@ -817,17 +883,38 @@ pub(crate) async fn execute_action(
                 .clone()
                 .ok_or_else(|| "local_uri not set for redirect retry".to_string())?;
             info!(
-                "🔀 Following 3xx redirect (attempt {}/{}) from {} to {}",
-                session.redirect_attempts, MAX_REDIRECTS, from, next_target
+                attempt = session.redirect_attempts,
+                max_attempts = MAX_REDIRECTS,
+                from_bytes = from.len(),
+                target_bytes = next_target.len(),
+                "Following 3xx redirect"
             );
 
-            dialog_adapter
-                .send_invite_with_details(
-                    &session.session_id,
-                    &from,
-                    &next_target,
-                    session.local_sdp.clone(),
+            let (invite_opts, apply_global_proxy) = if let Some(snapshot) =
+                session.pending_invite_options.as_ref()
+            {
+                let mut redirected = (**snapshot).clone();
+                redirected.to = next_target.clone();
+                redirected.precomputed_auth = None;
+                let sdp = authoritative_invite_sdp(Some(&redirected), session.local_sdp.as_deref());
+                let (options, suppress_global_proxy) =
+                    materialize_invite_options(&redirected, session.pai_uri.as_deref(), sdp)?;
+                session.pending_invite_options = Some(Arc::new(redirected));
+                (options, !suppress_global_proxy)
+            } else {
+                (
+                    rvoip_sip_dialog::api::unified::InviteRequestOptions {
+                        from_uri: from,
+                        to_uri: next_target,
+                        sdp: session.local_sdp.clone(),
+                        ..Default::default()
+                    },
+                    true,
                 )
+            };
+
+            dialog_adapter
+                .send_invite_with_options(&session.session_id, invite_opts, apply_global_proxy)
                 .await?;
             if let Some(real_dialog_id) = dialog_adapter.session_to_dialog.get(&session.session_id)
             {
@@ -1601,147 +1688,243 @@ pub(crate) async fn execute_action(
             }
         }
         Action::SendINVITEWithAuth => {
-            // RFC 3261 §22.2 — compute an Authorization header and
-            // re-issue the INVITE on the same dialog (same Call-ID, bumped
-            // CSeq) via DialogAdapter::resend_invite_with_auth. Capped at one
-            // retry to prevent loops when credentials are wrong.
-            info!(
-                "Action::SendINVITEWithAuth for session {}",
-                session.session_id
-            );
-            const CAP: u8 = 1;
-            if !auth_retry_allowed(
-                session.invite_auth_retry_count,
-                CAP,
-                session.auth_challenge.as_ref(),
-                session.auth_challenge_stale,
-                session.auth_challenge_replaces_nonce.as_deref(),
-            ) {
-                return Err(Box::new(
-                    crate::errors::SessionError::InviteAuthRetryExhausted,
-                ));
-            }
-            session.invite_auth_retry_count += 1;
-
-            let (status, challenge_raw) = session
-                .pending_auth
-                .clone()
-                .unwrap_or_else(|| (401, session.auth_challenge_raw.clone().unwrap_or_default()));
-            if challenge_raw.is_empty() {
-                return Err(format!(
-                    "SendINVITEWithAuth: no auth challenge on session {}",
+            Box::pin(async {
+                // RFC 3261 §22.2 — compute an Authorization header and
+                // re-issue the INVITE on the same dialog (same Call-ID, bumped
+                // CSeq) via DialogAdapter::resend_invite_with_auth. Origin and
+                // proxy protection spaces are tracked independently so a 407 may
+                // be followed by a 401 while retaining both credentials.
+                info!(
+                    "Action::SendINVITEWithAuth for session {}",
                     session.session_id
-                )
-                .into());
-            }
-            let auth = session
-                .auth
-                .clone()
-                .or_else(|| session.credentials.clone().map(Into::into))
-                .ok_or_else(|| {
-                    Box::new(crate::errors::SessionError::MissingCredentialsForInviteAuth)
-                        as Box<dyn std::error::Error + Send + Sync>
-                })?;
-            let request_uri = session.remote_uri.clone().ok_or_else(|| {
-                format!(
-                    "SendINVITEWithAuth: no remote_uri on session {}",
-                    session.session_id
-                )
-            })?;
-
-            // RFC 7616 §3.4.5 — increment the per-(realm, nonce) NC
-            // counter before computing. A carrier reusing the same
-            // nonce across multiple requests rejects `nc` repeats as
-            // replays, so the counter must monotonically grow.
-            let digest_challenge_for_nc = session.auth_challenge.clone().or_else(|| {
-                rvoip_auth_core::DigestAuthenticator::parse_challenge(&challenge_raw).ok()
-            });
-            let nc_value = if let Some(challenge) = digest_challenge_for_nc.as_ref() {
-                let nc_key = (challenge.realm.clone(), challenge.nonce.clone());
-                *session
-                    .digest_nc
-                    .entry(nc_key)
-                    .and_modify(|n| *n += 1)
-                    .or_insert(1)
-            } else {
-                1
-            };
-            // INVITE body is the local SDP offer — fold it into HA2
-            // when the server's challenge offers `qop=auth-int`. RFC
-            // 7616 §3.4.3.
-            let body_owned = session.local_sdp.clone();
-            let body_bytes = body_owned.as_deref().map(|s| s.as_bytes());
-            let transport_context = session
-                .pending_auth_transport
-                .clone()
-                .unwrap_or_else(|| dialog_adapter.outbound_transport_context_for_uri(&request_uri));
-            let selected_auth = auth
-                .authorization_for_challenge_with_transport_context(
-                    &challenge_raw,
-                    "INVITE",
-                    &request_uri,
-                    nc_value,
-                    body_bytes,
-                    &transport_context,
-                )
-                .map_err(|error| {
-                    crate::errors::redacted_outbound_auth_error(
-                        crate::errors::OutboundAuthOperation::Invite,
-                        error,
+                );
+                let (status, challenge_raw) = session.pending_auth.clone().unwrap_or_else(|| {
+                    (401, session.auth_challenge_raw.clone().unwrap_or_default())
+                });
+                if challenge_raw.is_empty() {
+                    return Err(format!(
+                        "SendINVITEWithAuth: no auth challenge on session {}",
+                        session.session_id
+                    )
+                    .into());
+                }
+                let request_uri = session.remote_uri.clone().ok_or_else(|| {
+                    format!(
+                        "SendINVITEWithAuth: no remote_uri on session {}",
+                        session.session_id
                     )
                 })?;
-            let header_value = selected_auth.value;
+                let invite_snapshot = session
+                    .pending_invite_options
+                    .as_ref()
+                    .map(|snapshot| (**snapshot).clone());
 
-            session.pending_auth.take();
-            session.pending_auth_transport = None;
-            let header_name = if status == 407 {
-                "Proxy-Authorization"
-            } else {
-                "Authorization"
-            };
+                use crate::session_store::state::{
+                    InviteAuthorizationCredential, InviteCredentialKind,
+                };
+                let credential_kind = if status == 407 {
+                    InviteCredentialKind::Proxy
+                } else {
+                    InviteCredentialKind::Origin
+                };
+                let proxy_target = invite_proxy_protection_target(
+                    invite_snapshot.as_ref(),
+                    dialog_adapter,
+                    &request_uri,
+                );
+                let protection_target = if credential_kind == InviteCredentialKind::Proxy {
+                    proxy_target.clone()
+                } else {
+                    request_uri.clone()
+                };
+                let auth = session
+                    .auth
+                    .clone()
+                    .or_else(|| session.credentials.clone().map(Into::into))
+                    .ok_or_else(|| {
+                        Box::new(crate::errors::SessionError::MissingCredentialsForInviteAuth)
+                            as Box<dyn std::error::Error + Send + Sync>
+                    })?;
+                // The builder-supplied body snapshot is the wire authority. SDP
+                // generation may also populate `session.local_sdp`, but an
+                // auth-int retry must hash and retransmit the exact original bytes.
+                let body_owned = authoritative_invite_sdp(
+                    invite_snapshot.as_ref(),
+                    session.local_sdp.as_deref(),
+                );
+                let body_bytes = body_owned.as_deref().map(|s| s.as_bytes());
+                let transport_context =
+                    session.pending_auth_transport.clone().unwrap_or_else(|| {
+                        dialog_adapter.outbound_transport_context_for_uri(&request_uri)
+                    });
 
-            // SIP_API_DESIGN_2 §7.3 / Phase B — rebuild the FULL per-call
-            // override set from the persisted INVITE stash so the authenticated
-            // retry's wire form matches the initial INVITE. The snapshot
-            // survives the auth-retry hop (the stash isn't consumed until the
-            // final response), so we re-run the same `materialize_invite_options`
-            // mapping rather than forwarding raw `extra_headers` alone — which
-            // is what used to drop with_pai / with_subject / with_from_display /
-            // with_contact_uri on the 401/407 retry that actually completes the
-            // call. Transfer-leg / internal paths leave the stash empty.
-            let (auth_extras, from_display, contact_override) =
-                match session.pending_invite_options.as_ref() {
-                    Some(opts_arc) => {
-                        let snapshot = (**opts_arc).clone();
-                        let (invite_opts, _suppress) = materialize_invite_options(
-                            &snapshot,
-                            session.pai_uri.as_deref(),
-                            session.local_sdp.clone(),
-                        )?;
-                        (
-                            invite_opts.extra_headers,
-                            invite_opts.from_display,
-                            invite_opts.contact_uri,
-                        )
-                    }
-                    None => (Vec::new(), None, None),
+                // Select the challenge first. A response can advertise several
+                // schemes and several Digest algorithms; session.auth_challenge is
+                // only a legacy parse cache and may describe a different member of
+                // that set. Protection-space, stale, and nonce-count bookkeeping
+                // must follow the challenge actually selected by SipClientAuth.
+                let preview_auth = auth
+                    .authorization_for_challenge_with_transport_context(
+                        &challenge_raw,
+                        "INVITE",
+                        &request_uri,
+                        1,
+                        body_bytes,
+                        &transport_context,
+                    )
+                    .map_err(redacted_invite_auth_error)?;
+                let realm = selected_invite_auth_realm(&preview_auth);
+                let challenge_nonce = preview_auth
+                    .digest_challenge
+                    .as_ref()
+                    .map(|challenge| challenge.nonce.clone());
+                let existing_credential = invite_credential_slot_for_challenge(
+                    &session.invite_authorization_credentials,
+                    credential_kind,
+                    &protection_target,
+                    &realm,
+                    challenge_nonce.as_deref(),
+                    preview_auth.stale,
+                )
+                .map_err(|()| crate::errors::SessionError::InviteAuthRetryExhausted)?;
+
+                // RFC 7616 §3.4.5 — increment the counter for the selected
+                // (realm, nonce), not whichever challenge happened to be parsed
+                // first by the state-machine cache.
+                let nc_value = if let Some(challenge) = preview_auth.digest_challenge.as_ref() {
+                    let nc_key = (challenge.realm.clone(), challenge.nonce.clone());
+                    *session
+                        .digest_nc
+                        .entry(nc_key)
+                        .and_modify(|n| *n += 1)
+                        .or_insert(1)
+                } else {
+                    1
+                };
+                let selected_auth = if preview_auth.digest_challenge.is_some() && nc_value != 1 {
+                    auth.authorization_for_challenge_with_transport_context(
+                        &challenge_raw,
+                        "INVITE",
+                        &request_uri,
+                        nc_value,
+                        body_bytes,
+                        &transport_context,
+                    )
+                    .map_err(redacted_invite_auth_error)?
+                } else {
+                    preview_auth
+                };
+                session.invite_auth_retry_count = session.invite_auth_retry_count.saturating_add(1);
+                let header_value = selected_auth.value;
+
+                let stale_refreshes = existing_credential
+                    .map(|index| {
+                        session.invite_authorization_credentials[index]
+                            .stale_refreshes
+                            .saturating_add(1)
+                    })
+                    .unwrap_or(0);
+                let credential = InviteAuthorizationCredential {
+                    kind: credential_kind,
+                    protection_target,
+                    realm,
+                    nonce: challenge_nonce,
+                    stale_refreshes,
+                    value: header_value,
+                };
+                if let Some(index) = existing_credential {
+                    session.invite_authorization_credentials[index] = credential;
+                } else {
+                    session.invite_authorization_credentials.push(credential);
+                }
+
+                session.pending_auth.take();
+                session.pending_auth_transport = None;
+                let header_name = if status == 407 {
+                    "Proxy-Authorization"
+                } else {
+                    "Authorization"
                 };
 
-            dialog_adapter
-                .resend_invite_with_auth(
-                    &session.session_id,
-                    session.local_sdp.clone(),
-                    header_name,
-                    header_value,
-                    auth_extras,
-                    from_display,
-                    contact_override,
-                )
-                .await?;
-            info!(
-                "Auth-retry INVITE sent for session {} (retry #{}, header {})",
-                session.session_id, session.invite_auth_retry_count, header_name
-            );
+                // SIP_API_DESIGN_2 §7.3 / Phase B — rebuild the FULL per-call
+                // override set from the persisted INVITE stash so the authenticated
+                // retry's wire form matches the initial INVITE. The snapshot
+                // survives the auth-retry hop (the stash isn't consumed until the
+                // final response), so we re-run the same `materialize_invite_options`
+                // mapping rather than forwarding raw `extra_headers` alone — which
+                // is what used to drop with_pai / with_subject / with_from_display /
+                // with_contact_uri on the 401/407 retry that actually completes the
+                // call. Transfer-leg / internal paths leave the stash empty.
+                let mut authorization_headers =
+                    retained_invite_authorization_headers(session, &request_uri, &proxy_target)?;
+
+                let invite_opts = match invite_snapshot.as_ref() {
+                    Some(snapshot) => {
+                        if !session
+                            .invite_authorization_credentials
+                            .iter()
+                            .any(|credential| {
+                                credential.kind == InviteCredentialKind::Origin
+                                    && credential.protection_target == request_uri
+                            })
+                            && snapshot.to == request_uri
+                        {
+                            if let Some(precomputed) = snapshot.precomputed_auth.clone() {
+                                authorization_headers.push(
+                                    rvoip_sip_core::validation::validated_authorization_header(
+                                        rvoip_sip_core::types::HeaderName::Authorization,
+                                        precomputed,
+                                    )
+                                    .map_err(|_| {
+                                        crate::errors::SessionError::ProtocolError(
+                                            "precomputed INVITE authorization failed validation"
+                                                .to_string(),
+                                        )
+                                    })?,
+                                );
+                            }
+                        }
+                        materialize_invite_options(
+                            snapshot,
+                            session.pai_uri.as_deref(),
+                            body_owned.clone(),
+                        )?
+                        .0
+                    }
+                    None => rvoip_sip_dialog::api::unified::InviteRequestOptions {
+                        sdp: body_owned.clone(),
+                        ..Default::default()
+                    },
+                };
+                let apply_global_proxy = invite_snapshot.as_ref().is_none_or(|snapshot| {
+                    matches!(
+                        snapshot.outbound_proxy_override,
+                        crate::api::send::ProxyOverride::Default
+                    )
+                });
+
+                dialog_adapter
+                    .resend_invite_with_auth(
+                        &session.session_id,
+                        rvoip_sip_dialog::api::unified::InviteAuthRetryOptions {
+                            sdp: body_owned,
+                            authorization_headers,
+                            extra_headers: invite_opts.extra_headers,
+                            from_display: invite_opts.from_display,
+                            contact_uri: invite_opts.contact_uri,
+                            outbound_proxy_uri: invite_opts.outbound_proxy_uri,
+                            supported_100rel: invite_opts.supported_100rel,
+                        },
+                        apply_global_proxy,
+                    )
+                    .await?;
+                info!(
+                    "Auth-retry INVITE sent for session {} (retry #{}, header {})",
+                    session.session_id, session.invite_auth_retry_count, header_name
+                );
+                Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+            })
+            .await?;
         }
 
         Action::SendRequestWithAuth => {
@@ -2015,6 +2198,7 @@ pub(crate) async fn execute_action(
         }
 
         Action::SendINVITEWithBumpedSessionExpires => {
+            Box::pin(async {
             // RFC 4028 §6 — on 422 Session Interval Too Small the UAS's
             // `Min-SE` header dictates the required floor. Bump the retry
             // counter, enforce the 2-attempt cap, and re-issue the INVITE
@@ -2046,14 +2230,80 @@ pub(crate) async fn execute_action(
                 session.session_id, min_se, min_se, session.session_timer_retry_count, CAP
             );
 
+            let request_uri = session.remote_uri.clone().ok_or_else(|| {
+                format!(
+                    "SendINVITEWithBumpedSessionExpires: no remote_uri on session {}",
+                    session.session_id
+                )
+            })?;
+            let snapshot = session
+                .pending_invite_options
+                .as_ref()
+                .map(|snapshot| (**snapshot).clone());
+            let body = authoritative_invite_sdp(snapshot.as_ref(), session.local_sdp.as_deref());
+            let proxy_target =
+                invite_proxy_protection_target(snapshot.as_ref(), dialog_adapter, &request_uri);
+            let mut authorization_headers =
+                retained_invite_authorization_headers(session, &request_uri, &proxy_target)?;
+            let invite_opts = if let Some(snapshot) = snapshot.as_ref() {
+                if !session
+                    .invite_authorization_credentials
+                    .iter()
+                    .any(|credential| {
+                        credential.kind == crate::session_store::state::InviteCredentialKind::Origin
+                            && credential.protection_target == request_uri
+                    })
+                    && snapshot.to == request_uri
+                {
+                    if let Some(precomputed) = snapshot.precomputed_auth.clone() {
+                        authorization_headers.push(
+                            rvoip_sip_core::validation::validated_authorization_header(
+                                HeaderName::Authorization,
+                                precomputed,
+                            )
+                            .map_err(|_| {
+                                crate::errors::SessionError::ProtocolError(
+                                    "precomputed INVITE authorization failed validation"
+                                        .to_string(),
+                                )
+                            })?,
+                        );
+                    }
+                }
+                materialize_invite_options(snapshot, session.pai_uri.as_deref(), body.clone())?.0
+            } else {
+                rvoip_sip_dialog::api::unified::InviteRequestOptions {
+                    sdp: body.clone(),
+                    ..Default::default()
+                }
+            };
+            let apply_global_proxy = snapshot.as_ref().is_none_or(|snapshot| {
+                matches!(
+                    snapshot.outbound_proxy_override,
+                    crate::api::send::ProxyOverride::Default
+                )
+            });
+
             dialog_adapter
                 .resend_invite_with_session_timer_override(
                     &session.session_id,
-                    session.local_sdp.clone(),
+                    rvoip_sip_dialog::api::unified::InviteAuthRetryOptions {
+                        sdp: body,
+                        authorization_headers,
+                        extra_headers: invite_opts.extra_headers,
+                        from_display: invite_opts.from_display,
+                        contact_uri: invite_opts.contact_uri,
+                        outbound_proxy_uri: invite_opts.outbound_proxy_uri,
+                        supported_100rel: invite_opts.supported_100rel,
+                    },
+                    apply_global_proxy,
                     min_se,
                     min_se,
                 )
                 .await?;
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+            })
+            .await?;
         }
         Action::ProcessRegistrationResponse => {
             debug!(
@@ -2717,7 +2967,8 @@ pub(crate) async fn execute_action(
                 // SDP precedence: builder-supplied `snapshot.sdp` wins;
                 // otherwise fall back to `session.local_sdp` populated by the
                 // preceding `GenerateLocalSDP` action.
-                let sdp_for_wire = snapshot.sdp.clone().or_else(|| session.local_sdp.clone());
+                let sdp_for_wire =
+                    authoritative_invite_sdp(Some(&snapshot), session.local_sdp.as_deref());
 
                 // `with_topology_hiding(true)` is a no-op on the fresh-INVITE
                 // build path (Via/Contact are stamped from scratch); the flag
@@ -2777,6 +3028,8 @@ pub(crate) async fn execute_action(
         // ──────────────────────────────────────────────────────────────
         Action::ClearPendingINVITEOptions => {
             session.pending_invite_options = None;
+            session.invite_authorization_credentials.clear();
+            session.invite_auth_retry_count = 0;
         }
         Action::ClearPendingReINVITEOptions => {
             session.pending_reinvite_options = None;
@@ -2905,6 +3158,59 @@ fn auth_retry_allowed(
         return false;
     };
     replaces_nonce.is_some_and(|previous| previous != challenge.nonce)
+}
+
+const MAX_INVITE_PROTECTION_SPACES: usize = 8;
+
+fn selected_invite_auth_realm(selected: &crate::auth::ClientAuthHeader) -> String {
+    if let Some(challenge) = selected.digest_challenge.as_ref() {
+        return challenge.realm.clone();
+    }
+
+    // Non-Digest ClientAuthHeader variants do not expose a parsed realm yet.
+    // Keep schemes in distinct protection spaces and, critically, never use
+    // the first token from the unselected aggregate challenge string.
+    match &selected.scheme {
+        crate::auth::SipAuthScheme::Digest => "digest".to_string(),
+        crate::auth::SipAuthScheme::Bearer => "bearer".to_string(),
+        crate::auth::SipAuthScheme::Basic => "basic".to_string(),
+        crate::auth::SipAuthScheme::Aka => "aka".to_string(),
+        crate::auth::SipAuthScheme::Other(_) => "other".to_string(),
+    }
+}
+
+fn redacted_invite_auth_error<E>(source: E) -> crate::errors::SessionError {
+    crate::errors::redacted_outbound_auth_error(
+        crate::errors::OutboundAuthOperation::Invite,
+        source,
+    )
+}
+
+fn invite_credential_slot_for_challenge(
+    credentials: &[crate::session_store::state::InviteAuthorizationCredential],
+    kind: crate::session_store::state::InviteCredentialKind,
+    protection_target: &str,
+    realm: &str,
+    nonce: Option<&str>,
+    stale: bool,
+) -> std::result::Result<Option<usize>, ()> {
+    let existing = credentials.iter().position(|credential| {
+        credential.kind == kind
+            && credential.protection_target == protection_target
+            && credential.realm == realm
+    });
+    match existing {
+        Some(index) => {
+            let credential = &credentials[index];
+            if stale && credential.stale_refreshes == 0 && credential.nonce.as_deref() != nonce {
+                Ok(Some(index))
+            } else {
+                Err(())
+            }
+        }
+        None if credentials.len() >= MAX_INVITE_PROTECTION_SPACES => Err(()),
+        None => Ok(None),
+    }
 }
 
 /// SIP_API_DESIGN_2 R2 — pick the request-URI to fold into HA2 for the
@@ -3070,17 +3376,37 @@ mod invite_option_diagnostic_tests {
         assert_eq!(options.to_uri, format!("sip:{SECRET}@target.invalid"));
         assert_eq!(options.sdp.as_deref(), Some("v=0\r\n"));
         assert!(suppress_global_proxy);
-        assert_eq!(options.extra_headers.len(), 4);
-        assert_eq!(options.extra_headers[0].name(), HeaderName::Route);
         assert_eq!(
-            options.extra_headers[1].name(),
+            options.outbound_proxy_uri.as_ref().map(ToString::to_string),
+            Some("sip:proxy.example.com;lr".to_string())
+        );
+        assert_eq!(options.extra_headers.len(), 3);
+        assert_eq!(
+            options.extra_headers[0].name(),
             HeaderName::PAssertedIdentity
         );
         assert_eq!(
-            options.extra_headers[2].name(),
+            options.extra_headers[1].name(),
             HeaderName::Other("X-Application-Context".to_string())
         );
-        assert_eq!(options.extra_headers[3].name(), HeaderName::Subject);
+        assert_eq!(options.extra_headers[2].name(), HeaderName::Subject);
+    }
+
+    #[test]
+    fn caller_sdp_is_the_authoritative_initial_and_auth_int_body() {
+        let mut snapshot = OutboundCallOptionsSnapshot::default();
+        snapshot.sdp = Some("v=0\r\na=x-caller-byte-for-byte\r\n".into());
+        let generated = "v=0\r\na=x-generated-different\r\n";
+        assert_eq!(
+            authoritative_invite_sdp(Some(&snapshot), Some(generated)),
+            snapshot.sdp.clone()
+        );
+
+        snapshot.sdp = None;
+        assert_eq!(
+            authoritative_invite_sdp(Some(&snapshot), Some(generated)).as_deref(),
+            Some(generated)
+        );
     }
 
     #[test]
@@ -3119,5 +3445,95 @@ mod invite_option_diagnostic_tests {
             assert!(rendered.contains("extension"));
             assert!(!rendered.contains(METHOD_SECRET));
         }
+    }
+
+    #[test]
+    fn invite_auth_slots_are_independent_bounded_and_allow_one_stale_refresh() {
+        use crate::session_store::state::{InviteAuthorizationCredential, InviteCredentialKind};
+
+        let proxy = InviteAuthorizationCredential {
+            kind: InviteCredentialKind::Proxy,
+            protection_target: "proxy.example".into(),
+            realm: "edge".into(),
+            nonce: Some("nonce-one".into()),
+            stale_refreshes: 0,
+            value: "redacted".into(),
+        };
+        let credentials = vec![proxy];
+        assert_eq!(
+            invite_credential_slot_for_challenge(
+                &credentials,
+                InviteCredentialKind::Origin,
+                "origin.example",
+                "uas",
+                Some("origin-nonce"),
+                false,
+            ),
+            Ok(None),
+            "a proxy credential must not consume the origin retry slot"
+        );
+        assert_eq!(
+            invite_credential_slot_for_challenge(
+                &credentials,
+                InviteCredentialKind::Proxy,
+                "proxy.example",
+                "edge",
+                Some("nonce-two"),
+                true,
+            ),
+            Ok(Some(0))
+        );
+        assert!(invite_credential_slot_for_challenge(
+            &credentials,
+            InviteCredentialKind::Proxy,
+            "proxy.example",
+            "edge",
+            Some("nonce-one"),
+            true,
+        )
+        .is_err());
+
+        let saturated = (0..MAX_INVITE_PROTECTION_SPACES)
+            .map(|index| InviteAuthorizationCredential {
+                kind: InviteCredentialKind::Origin,
+                protection_target: format!("target-{index}"),
+                realm: format!("realm-{index}"),
+                nonce: None,
+                stale_refreshes: 0,
+                value: "redacted".into(),
+            })
+            .collect::<Vec<_>>();
+        assert!(invite_credential_slot_for_challenge(
+            &saturated,
+            InviteCredentialKind::Proxy,
+            "new-target",
+            "new-realm",
+            None,
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn invite_auth_protection_space_uses_the_selected_digest_challenge() {
+        let selected = crate::auth::SipClientAuth::digest("alice", "secret")
+            .authorization_for_challenge(
+                r#"Basic realm="legacy", Digest realm="weak-realm", nonce="weak", algorithm=MD5, Digest realm="strong-realm", nonce="strong", algorithm=SHA-512-256, qop="auth""#,
+                "INVITE",
+                "sip:bob@example.test",
+                1,
+                Some(b"v=0\r\n"),
+                false,
+            )
+            .expect("select strongest Digest challenge");
+
+        assert_eq!(selected_invite_auth_realm(&selected), "strong-realm");
+        assert_eq!(
+            selected
+                .digest_challenge
+                .as_ref()
+                .map(|challenge| challenge.nonce.as_str()),
+            Some("strong")
+        );
     }
 }

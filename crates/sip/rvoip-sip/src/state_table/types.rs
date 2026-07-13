@@ -630,8 +630,9 @@ pub enum Action {
     PrepareEarlyMediaSDP,
     /// RFC 3261 §22.2 — compute an Authorization (or Proxy-Authorization)
     /// header from the cached challenge plus configured UAC auth and resend
-    /// the INVITE via `DialogAdapter::resend_invite_with_auth`. Bumps
-    /// `session.invite_auth_retry_count`; errors if the cap is exceeded.
+    /// the INVITE via `DialogAdapter::resend_invite_with_auth`. Retains
+    /// independent origin/proxy credentials and rejects repeated challenges
+    /// outside the bounded protection-space and stale-refresh policy.
     SendINVITEWithAuth,
     /// SIP_API_DESIGN_2 R2 — auth-retry for non-INVITE/non-REGISTER
     /// methods. Reads `session.pending_auth_method` to discriminate

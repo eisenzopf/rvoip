@@ -711,15 +711,17 @@ impl StateMachine {
             session.call_state = new_state;
             session.entered_state_at = Instant::now();
 
-            // SIP_API_DESIGN_2 §7.3 invariant #2 — Terminated backstop.
+            // SIP_API_DESIGN_2 §7.3 invariant #2 — final-state backstop.
             // Clear every pending-options slot unconditionally on entry
-            // to `Terminated` so a YAML row that forgets to emit the
+            // to any final state so a YAML row that forgets to emit the
             // matching `ClearPending*Options` action can never leave a
             // stash permanently occupied. The per-method clear actions
             // emitted on final-response transitions are the primary
             // mechanism; this is the safety net.
-            if new_state == crate::types::CallState::Terminated {
+            if new_state.is_final() {
                 session.pending_invite_options = None;
+                session.invite_authorization_credentials.clear();
+                session.invite_auth_retry_count = 0;
                 session.pending_reinvite_options = None;
                 session.pending_register_options = None;
                 session.pending_refer_options = None;

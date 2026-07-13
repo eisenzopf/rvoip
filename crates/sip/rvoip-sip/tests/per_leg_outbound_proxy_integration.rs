@@ -15,9 +15,10 @@ use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use rvoip_sip::{SipTraceConfig, SipTraceDirection};
 
 const PAIR: (u16, u16) = (17800, 17801);
-// Both proxy URIs point at bob's loopback port so the INVITE still
-// reaches him with the Route header populated; only the labels differ.
-const CONFIG_PROXY: &str = "sip:config-proxy@127.0.0.1:17801;lr";
+// The configured proxy is deliberately unreachable. Receiving the INVITE on
+// Bob proves the per-call structural override won without relying on trace
+// output that correctly redacts Route values.
+const CONFIG_PROXY: &str = "sip:config-proxy@127.0.0.1:17999;lr";
 const BUILDER_PROXY: &str = "sip:builder-proxy@127.0.0.1:17801;lr";
 
 fn cfg(name: &str, port: u16, outbound_proxy: Option<&str>) -> Config {
@@ -82,10 +83,12 @@ async fn builder_outbound_proxy_overrides_config_for_single_call() {
         .await
         .expect("inbound INVITE trace");
 
-    // Builder override Route must be on the wire; Config Route must NOT.
+    // Route values are security-redacted even in development traces. The
+    // inbound delivery above proves the builder route selected Bob rather
+    // than the unreachable configured proxy; retain a shape assertion too.
     assert!(
-        raw.contains("builder-proxy@127.0.0.1"),
-        "builder outbound-proxy must appear on wire; trace:\n{raw}"
+        raw.contains("Route: <redacted>"),
+        "builder outbound-proxy Route must appear on wire; trace:\n{raw}"
     );
     assert!(
         !raw.contains("config-proxy@127.0.0.1"),

@@ -10,7 +10,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tracing::debug;
 
-use rvoip_sip_core::{HeaderName, Method, Request, Response, StatusCode, TypedHeader, Uri};
+use rvoip_sip_core::{
+    types::uri::Scheme, HeaderName, Method, Request, Response, StatusCode, TypedHeader, Uri,
+};
 
 use crate::transaction::utils::DialogRequestTemplate;
 
@@ -52,6 +54,13 @@ pub struct Dialog {
 
     /// Remote target URI (where to send requests)
     pub remote_target: Uri,
+
+    /// End-to-end SIPS confidentiality requirement inherited from the
+    /// dialog-forming request. This survives Contact target refreshes so a
+    /// later `sip:` Contact cannot silently downgrade an established secure
+    /// dialog.
+    #[serde(default)]
+    pub secure_transport_required: bool,
 
     /// Route set for this dialog
     pub route_set: Vec<Uri>,
@@ -142,6 +151,7 @@ impl fmt::Debug for Dialog {
             .field("local_cseq", &self.local_cseq)
             .field("remote_cseq", &self.remote_cseq)
             .field("remote_target", &"[redacted]")
+            .field("secure_transport_required", &self.secure_transport_required)
             .field("route_count", &self.route_set.len())
             .field("is_initiator", &self.is_initiator)
             .field("last_known_remote_addr", &self.last_known_remote_addr)
@@ -171,6 +181,10 @@ impl Dialog {
         remote_tag: Option<String>,
         is_initiator: bool,
     ) -> Self {
+        let secure_transport_required = matches!(
+            (local_uri.scheme(), remote_uri.scheme()),
+            (Scheme::Sips, _) | (_, Scheme::Sips)
+        );
         Self {
             id: DialogId::new(),
             state: DialogState::Initial,
@@ -182,6 +196,7 @@ impl Dialog {
             local_cseq: 0,
             remote_cseq: 0,
             remote_target: remote_uri, // Initially same as remote URI
+            secure_transport_required,
             route_set: Vec::new(),
             is_initiator,
             last_known_remote_addr: None,
@@ -364,6 +379,13 @@ impl Dialog {
                 return None;
             }
         };
+        let secure_transport_required = matches!(request.uri().scheme(), Scheme::Sips)
+            || matches!(local_uri.scheme(), Scheme::Sips)
+            || matches!(remote_uri.scheme(), Scheme::Sips);
+        if secure_transport_required && !matches!(remote_target.scheme(), Scheme::Sips) {
+            debug!("Dialog creation failed: secure dialog received a non-SIPS Contact");
+            return None;
+        }
 
         // Extract Route set from Record-Route headers
         let route_set = extract_route_set(response, is_initiator);
@@ -379,6 +401,7 @@ impl Dialog {
             local_cseq: if is_initiator { cseq_number } else { 0 },
             remote_cseq: if is_initiator { 0 } else { cseq_number },
             remote_target,
+            secure_transport_required,
             route_set,
             is_initiator,
             last_known_remote_addr: None,
@@ -474,6 +497,13 @@ impl Dialog {
             }
             _ => return None,
         };
+        let secure_transport_required = matches!(request.uri().scheme(), Scheme::Sips)
+            || matches!(local_uri.scheme(), Scheme::Sips)
+            || matches!(remote_uri.scheme(), Scheme::Sips);
+        if secure_transport_required && !matches!(remote_target.scheme(), Scheme::Sips) {
+            debug!("Early dialog creation failed: secure dialog received a non-SIPS Contact");
+            return None;
+        }
 
         let route_set = extract_route_set(response, is_initiator);
 
@@ -488,6 +518,7 @@ impl Dialog {
             local_cseq: if is_initiator { cseq_number } else { 0 },
             remote_cseq: if is_initiator { 0 } else { cseq_number },
             remote_target,
+            secure_transport_required,
             route_set,
             is_initiator,
             last_known_remote_addr: None,
@@ -658,6 +689,20 @@ impl Dialog {
     /// Update dialog state from a 2xx response
     pub fn update_from_2xx(&mut self, response: &Response) -> bool {
         if self.state == DialogState::Early {
+            let refreshed_target = response
+                .header(&HeaderName::Contact)
+                .and_then(|header| match header {
+                    TypedHeader::Contact(contacts) => contacts.0.first(),
+                    _ => None,
+                })
+                .and_then(|contact| extract_uri_from_contact(contact).ok());
+            if refreshed_target.as_ref().is_some_and(|uri| {
+                self.secure_transport_required && !matches!(uri.scheme(), Scheme::Sips)
+            }) {
+                debug!("Rejected non-SIPS Contact refresh on a secure dialog");
+                return false;
+            }
+
             self.state = DialogState::Confirmed;
 
             // Update remote tag if not set
@@ -668,18 +713,25 @@ impl Dialog {
             }
 
             // Update remote target from Contact
-            if let Some(TypedHeader::Contact(contacts)) = response.header(&HeaderName::Contact) {
-                if let Some(contact) = contacts.0.first() {
-                    if let Ok(uri) = extract_uri_from_contact(contact) {
-                        self.remote_target = uri;
-                    }
-                }
+            if let Some(uri) = refreshed_target {
+                self.remote_target = uri;
             }
 
             true
         } else {
             false
         }
+    }
+
+    /// Update the remote target while preserving the dialog-forming SIPS
+    /// requirement. Returns `false` when the target would downgrade a secure
+    /// dialog and leaves the existing target unchanged.
+    pub fn update_remote_target(&mut self, remote_target: Uri) -> bool {
+        if self.secure_transport_required && !matches!(remote_target.scheme(), Scheme::Sips) {
+            return false;
+        }
+        self.remote_target = remote_target;
+        true
     }
 
     /// Terminate the dialog
@@ -783,6 +835,10 @@ fn extract_route_set(response: &Response, is_initiator: bool) -> Vec<Uri> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rvoip_sip_core::types::{
+        address::Address,
+        contact::{Contact, ContactParamInfo},
+    };
 
     #[test]
     fn test_dialog_creation() {
@@ -850,5 +906,31 @@ mod tests {
         dialog.terminate();
         assert!(dialog.is_terminated());
         assert_eq!(dialog.state, DialogState::Terminated);
+    }
+
+    #[test]
+    fn secure_dialog_rejects_non_sips_contact_refresh() {
+        let mut dialog = Dialog::new_early(
+            "secure-call".to_string(),
+            "sips:alice@example.com".parse().unwrap(),
+            "sips:bob@example.com".parse().unwrap(),
+            Some("local".to_string()),
+            Some("remote".to_string()),
+            true,
+        );
+        let original_target = dialog.remote_target.clone();
+        let mut response = Response::new(StatusCode::Ok);
+        response
+            .headers
+            .push(TypedHeader::Contact(Contact::new_params(vec![
+                ContactParamInfo {
+                    address: Address::new("sip:bob@downgrade.example.com".parse().unwrap()),
+                },
+            ])));
+
+        assert!(dialog.secure_transport_required);
+        assert!(!dialog.update_from_2xx(&response));
+        assert_eq!(dialog.state, DialogState::Early);
+        assert_eq!(dialog.remote_target, original_target);
     }
 }

@@ -67,6 +67,8 @@ const REQUEST_SINGLETON_HEADERS: &[(HeaderName, &str)] = &[
     (HeaderName::Event, "Event"),
     (HeaderName::SubscriptionState, "Subscription-State"),
     (HeaderName::RAck, "RAck"),
+    (HeaderName::SessionExpires, "Session-Expires"),
+    (HeaderName::MinSE, "Min-SE"),
 ];
 
 const RESPONSE_SINGLETON_HEADERS: &[(HeaderName, &str)] = &[
@@ -743,6 +745,13 @@ mod tests {
                 "Subscription-State",
             ),
             ("RAck", "rAcK", "1 1 INVITE", "RAck"),
+            (
+                "Session-Expires",
+                "session-expires",
+                "1800;refresher=uac",
+                "Session-Expires",
+            ),
+            ("Min-SE", "min-se", "90", "Min-SE"),
         ] {
             let mut request = valid_request();
             for name in [first_name, alias] {

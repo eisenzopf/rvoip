@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
+use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 
 use rvoip_sip::api::unified::Config;
@@ -34,6 +35,111 @@ const REDIRECTOR_PORT: u16 = 35200;
 const ACCEPTOR_PORT: u16 = 35201;
 const CLIENT_PORT: u16 = 35202;
 const UAS_REDIRECT_PORT: u16 = 35203;
+
+#[derive(Debug)]
+struct RedirectProxyInvite {
+    request_uri: String,
+    has_route: bool,
+    has_authorization: bool,
+}
+
+#[test]
+fn redirect_keeps_structural_proxy_but_drops_origin_authorization() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(16 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .expect("redirect test runtime");
+    runtime.block_on(async move {
+        tokio::spawn(async move {
+            let proxy_port = 35800 + (rand::random::<u16>() % 100);
+            let client_port = proxy_port + 200;
+            let socket = Arc::new(
+                UdpSocket::bind(format!("127.0.0.1:{proxy_port}"))
+                    .await
+                    .expect("redirect proxy bind"),
+            );
+            let seen = Arc::new(Mutex::new(Vec::<RedirectProxyInvite>::new()));
+            let socket_task = Arc::clone(&socket);
+            let seen_task = Arc::clone(&seen);
+            let server = tokio::spawn(async move {
+                let mut buffer = vec![0_u8; 8192];
+                loop {
+                    let (length, peer) = match socket_task.recv_from(&mut buffer).await {
+                        Ok(received) => received,
+                        Err(_) => return,
+                    };
+                    let request = match parse_message(&buffer[..length]) {
+                        Ok(Message::Request(request)) if request.method() == Method::Invite => {
+                            request
+                        }
+                        _ => continue,
+                    };
+                    let attempt = {
+                        let mut captured = seen_task.lock().await;
+                        let attempt = captured.len();
+                        captured.push(RedirectProxyInvite {
+                            request_uri: request.uri().to_string(),
+                            has_route: request.raw_header_value(&HeaderName::Route).is_some(),
+                            has_authorization: request
+                                .raw_header_value(&HeaderName::Authorization)
+                                .is_some(),
+                        });
+                        attempt
+                    };
+                    let response = if attempt == 0 {
+                        let mut response = create_response(&request, StatusCode::MovedTemporarily);
+                        response.headers.push(TypedHeader::Other(
+                            HeaderName::Contact,
+                            HeaderValue::Raw(b"<sip:bob@redirected-origin.invalid>".to_vec()),
+                        ));
+                        response
+                    } else {
+                        create_response(&request, StatusCode::BusyHere)
+                    };
+                    let _ = socket_task
+                        .send_to(&Message::Response(response).to_bytes(), peer)
+                        .await;
+                }
+            });
+
+            let mut config = Config::local("alice", client_port);
+            config.media_port_start = 40400;
+            config.media_port_end = 40500;
+            let peer = StreamPeer::with_config(config).await.expect("peer");
+            peer.invite("sip:bob@original-origin.invalid")
+                .with_outbound_proxy(format!("sip:127.0.0.1:{proxy_port};lr"))
+                .with_precomputed_authorization("Bearer redirect-origin-secret")
+                .send()
+                .await
+                .expect("initial redirected INVITE");
+
+            timeout(Duration::from_secs(8), async {
+                while seen.lock().await.len() < 2 {
+                    sleep(Duration::from_millis(40)).await;
+                }
+            })
+            .await
+            .expect("redirected INVITE traversed configured proxy");
+
+            let captured = seen.lock().await;
+            assert_eq!(captured.len(), 2);
+            assert_eq!(captured[0].request_uri, "sip:bob@original-origin.invalid");
+            assert_eq!(captured[1].request_uri, "sip:bob@redirected-origin.invalid");
+            assert!(captured.iter().all(|invite| invite.has_route));
+            assert!(captured[0].has_authorization);
+            assert!(
+                !captured[1].has_authorization,
+                "origin authorization must not cross a redirect boundary"
+            );
+
+            server.abort();
+        })
+        .await
+        .expect("redirect scenario task");
+    })
+}
 
 #[tokio::test]
 async fn uac_follows_302_and_reissues_invite_to_new_contact() {

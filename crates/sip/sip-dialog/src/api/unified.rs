@@ -276,7 +276,7 @@ pub struct RegisterRequestOptions {
 // ─────────────────────────────────────────────────────────────────────────
 
 use bytes::Bytes;
-use rvoip_sip_core::types::TypedHeader;
+use rvoip_sip_core::types::{uri::Uri, HeaderName, TypedHeader};
 use std::time::Duration;
 
 /// REFER options (RFC 3515 + 3891 Replaces + 4538 Target-Dialog).
@@ -348,8 +348,9 @@ pub struct ReInviteRequestOptions {
 /// constructs *specially* — the `From` display name and the single
 /// `Contact` — as typed values instead of smuggling them through
 /// `extra_headers` (a second `From`/`Contact` would be malformed). Everything
-/// the builder simply appends (PAI, Route, Subject, Privacy, X-*) still rides
-/// `extra_headers`, the designed application-header channel.
+/// the builder simply appends (PAI, Subject, Privacy, X-*) still rides
+/// `extra_headers`, the designed application-header channel. Via, Route,
+/// Record-Route, Contact and other stack-owned structural fields are rejected.
 #[derive(Default, Clone)]
 pub struct InviteRequestOptions {
     pub from_uri: String,
@@ -364,8 +365,124 @@ pub struct InviteRequestOptions {
     /// Pre-computed `Authorization:` value — rides the initial INVITE to
     /// bypass a 401-driven digest round-trip.
     pub precomputed_authorization: Option<String>,
+    /// First-hop outbound proxy. This is deliberately structural rather than
+    /// an application `Route` header so it remains first in front of any
+    /// registration Service-Route and can be replayed on authenticated sends.
+    pub outbound_proxy_uri: Option<Uri>,
+    /// Advertise RFC 3262 support for this call even when the manager-wide
+    /// policy is `NotSupported`.
+    pub supported_100rel: bool,
     /// Headers appended after the stack stamps Call-ID/CSeq/Via/Max-Forwards.
     pub extra_headers: Vec<TypedHeader>,
+}
+
+/// Structural inputs for an authenticated retry of an initial INVITE.
+///
+/// Authorization headers are a vector because a request may need to retain a
+/// proxy credential after a 407 and add an origin credential after a later
+/// 401. Only `Authorization` and `Proxy-Authorization` are accepted here.
+#[derive(Default, Clone)]
+pub struct InviteAuthRetryOptions {
+    pub sdp: Option<String>,
+    pub authorization_headers: Vec<TypedHeader>,
+    pub extra_headers: Vec<TypedHeader>,
+    pub from_display: Option<String>,
+    pub contact_uri: Option<String>,
+    pub outbound_proxy_uri: Option<Uri>,
+    pub supported_100rel: bool,
+}
+
+fn is_stack_owned_initial_invite_header(header: &TypedHeader) -> bool {
+    [
+        HeaderName::Via,
+        HeaderName::Route,
+        HeaderName::RecordRoute,
+        HeaderName::Contact,
+        HeaderName::From,
+        HeaderName::To,
+        HeaderName::CallId,
+        HeaderName::CSeq,
+        HeaderName::MaxForwards,
+        HeaderName::ContentLength,
+        HeaderName::ContentType,
+        HeaderName::SessionExpires,
+        HeaderName::MinSE,
+    ]
+    .iter()
+    .any(|name| header.name().wire_eq(name))
+}
+
+/// Validate every caller-controlled initial-INVITE value without allocating a
+/// dialog, session, transaction, media stream, or performing DNS.
+///
+/// A synthetic request is intentionally built through the same `InviteBuilder`
+/// and final wire validator used by dispatch. Public callers cannot inject
+/// stack-owned Via/Route/Record-Route/Contact fields (including semantic
+/// `TypedHeader::Other` aliases); Contact must use `contact_uri` so it cannot
+/// be silently reduced from a richer header representation.
+pub fn validate_initial_invite_options(opts: &InviteRequestOptions) -> ApiResult<()> {
+    use crate::transaction::client::builders::InviteBuilder;
+
+    if opts
+        .extra_headers
+        .iter()
+        .any(is_stack_owned_initial_invite_header)
+    {
+        return Err(ApiError::protocol(
+            "initial INVITE application headers contain a stack-owned field",
+        ));
+    }
+
+    let from_uri = opts
+        .from_uri
+        .parse::<Uri>()
+        .map_err(|_| ApiError::protocol("initial INVITE has an invalid From URI"))?;
+    let to_uri = opts
+        .to_uri
+        .parse::<Uri>()
+        .map_err(|_| ApiError::protocol("initial INVITE has an invalid target URI"))?;
+    if let Some(contact) = opts.contact_uri.as_deref() {
+        contact
+            .parse::<Uri>()
+            .map_err(|_| ApiError::protocol("initial INVITE has an invalid Contact URI"))?;
+    }
+
+    let mut builder = InviteBuilder::new()
+        .from_detailed(
+            opts.from_display.as_deref().or(Some("User")),
+            from_uri.to_string(),
+            Some("preflight"),
+        )
+        .to_detailed(Some("User"), to_uri.to_string(), None)
+        .call_id(opts.call_id.as_deref().unwrap_or("preflight@invalid"))
+        .cseq(1)
+        .request_uri(to_uri.to_string())
+        .local_address("127.0.0.1:5060".parse().expect("static socket address"));
+    if let Some(proxy) = opts.outbound_proxy_uri.clone() {
+        builder = builder.add_route(proxy);
+    }
+    if let Some(contact) = opts.contact_uri.clone() {
+        builder = builder.contact(contact);
+    }
+    if let Some(sdp) = opts.sdp.clone() {
+        builder = builder.with_sdp(sdp);
+    }
+    if let Some(authorization) = opts.precomputed_authorization.clone() {
+        let header = rvoip_sip_core::validation::validated_authorization_header(
+            HeaderName::Authorization,
+            authorization,
+        )
+        .map_err(|_| ApiError::protocol("initial INVITE Authorization is invalid"))?;
+        builder = builder.header(header);
+    }
+    for header in opts.extra_headers.iter().cloned() {
+        builder = builder.header(header);
+    }
+    let request = builder
+        .build()
+        .map_err(|_| ApiError::protocol("initial INVITE options cannot form a request"))?;
+    rvoip_sip_core::validation::validate_wire_request(&request)
+        .map_err(|_| ApiError::protocol("initial INVITE failed wire-safety validation"))
 }
 
 /// SUBSCRIBE options (RFC 6665).
@@ -527,6 +644,27 @@ impl fmt::Debug for ReInviteRequestOptions {
     }
 }
 
+impl fmt::Debug for InviteAuthRetryOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InviteAuthRetryOptions")
+            .field("sdp_present", &self.sdp.is_some())
+            .field(
+                "authorization_header_count",
+                &self.authorization_headers.len(),
+            )
+            .field("extra_header_count", &self.extra_headers.len())
+            .field("from_display_present", &self.from_display.is_some())
+            .field("contact_uri_present", &self.contact_uri.is_some())
+            .field(
+                "outbound_proxy_uri_present",
+                &self.outbound_proxy_uri.is_some(),
+            )
+            .field("supported_100rel", &self.supported_100rel)
+            .finish()
+    }
+}
+
 impl fmt::Debug for InviteRequestOptions {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -541,6 +679,11 @@ impl fmt::Debug for InviteRequestOptions {
                 "precomputed_authorization_present",
                 &self.precomputed_authorization.is_some(),
             )
+            .field(
+                "outbound_proxy_uri_present",
+                &self.outbound_proxy_uri.is_some(),
+            )
+            .field("supported_100rel", &self.supported_100rel)
             .field("extra_header_count", &self.extra_headers.len())
             .finish()
     }
@@ -685,6 +828,8 @@ mod retained_request_debug_tests {
             from_display: Some(SECRET.into()),
             contact_uri: Some(format!("sip:{SECRET}@contact.invalid")),
             precomputed_authorization: Some(format!("Bearer {SECRET}")),
+            outbound_proxy_uri: Some(format!("sip:{SECRET}@proxy.invalid").parse().unwrap()),
+            supported_100rel: true,
             extra_headers: vec![secret_header()],
         };
         let subscribe = SubscribeRequestOptions {
@@ -744,6 +889,61 @@ mod retained_request_debug_tests {
         assert!(invite_debug.contains("sdp_present: true"));
         let message_debug = format!("{message:?}");
         assert!(message_debug.contains(&format!("body_len: {}", SECRET.len())));
+    }
+
+    fn valid_invite_options() -> InviteRequestOptions {
+        InviteRequestOptions {
+            from_uri: "sip:alice@example.test".into(),
+            to_uri: "sip:bob@example.test".into(),
+            contact_uri: Some("sip:alice@127.0.0.1:5060".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn invite_preflight_rejects_stack_owned_semantic_aliases() {
+        for name in [
+            "Via",
+            "v",
+            "Route",
+            "Record-Route",
+            "Contact",
+            "m",
+            "From",
+            "To",
+            "Call-ID",
+            "CSeq",
+            "Max-Forwards",
+            "Content-Length",
+            "Content-Type",
+            "Session-Expires",
+            "Min-SE",
+        ] {
+            let mut options = valid_invite_options();
+            options.extra_headers.push(TypedHeader::Other(
+                HeaderName::Other(name.into()),
+                HeaderValue::Raw(b"caller-controlled".to_vec()),
+            ));
+            assert!(
+                validate_initial_invite_options(&options).is_err(),
+                "{name} must remain stack-owned"
+            );
+        }
+    }
+
+    #[test]
+    fn invite_preflight_accepts_structural_proxy_and_rejects_bad_contact() {
+        let mut options = valid_invite_options();
+        options.outbound_proxy_uri = Some("sips:proxy.example.test;lr".parse().unwrap());
+        options.supported_100rel = true;
+        options.extra_headers.push(TypedHeader::Other(
+            HeaderName::Other("X-Context".into()),
+            HeaderValue::Raw(b"safe".to_vec()),
+        ));
+        validate_initial_invite_options(&options).expect("valid structural INVITE options");
+
+        options.contact_uri = Some("sip:alice@example.test\r\nX-Injected: yes".into());
+        assert!(validate_initial_invite_options(&options).is_err());
     }
 }
 
@@ -1319,6 +1519,18 @@ impl UnifiedDialogApi {
             .await
     }
 
+    /// Retry an initial INVITE while retaining every credential and the exact
+    /// structural route/body policy from the first attempt.
+    pub async fn send_invite_with_auth_options(
+        &self,
+        dialog_id: &DialogId,
+        opts: InviteAuthRetryOptions,
+    ) -> ApiResult<TransactionKey> {
+        self.manager
+            .send_invite_with_auth_options(dialog_id, opts)
+            .await
+    }
+
     /// RFC 4028 §6 — resend an INVITE with a per-call `Session-Expires` /
     /// `Min-SE` override after a 422 Session Interval Too Small. The timer
     /// headers on the retry bypass [`DialogManagerConfig`]'s global values
@@ -1333,6 +1545,20 @@ impl UnifiedDialogApi {
     ) -> ApiResult<TransactionKey> {
         self.manager
             .send_invite_with_session_timer_override(dialog_id, sdp, session_secs, min_se)
+            .await
+    }
+
+    /// Structural 422 retry retaining the original INVITE route, application
+    /// headers, exact body and accumulated credentials.
+    pub async fn send_invite_with_session_timer_options(
+        &self,
+        dialog_id: &DialogId,
+        opts: InviteAuthRetryOptions,
+        session_secs: u32,
+        min_se: u32,
+    ) -> ApiResult<TransactionKey> {
+        self.manager
+            .send_invite_with_session_timer_options(dialog_id, opts, session_secs, min_se)
             .await
     }
 
@@ -2231,41 +2457,25 @@ impl UnifiedDialogApi {
         _method: Method,
         request: rvoip_sip_core::Request,
     ) -> ApiResult<TransactionKey> {
-        let fallback_destination = {
-            let dialog = self
-                .manager
-                .inner_manager()
-                .get_dialog(dialog_id)
-                .map_err(ApiError::from)?;
-            dialog
-                .get_remote_target_address()
-                .await
-                .ok_or_else(|| ApiError::protocol("No remote target address".to_string()))?
-        };
-        let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
-            &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
-        )
-        .await
-        .unwrap_or(fallback_destination);
-
-        let transaction_id = self
+        let next_hop =
+            crate::transaction::transport::multiplexed::exact_next_hop_uri_for_request(&request)
+                .map_err(|_| ApiError::protocol("Invalid in-dialog Route header"))?;
+        let candidates = self
             .manager
             .inner_manager()
-            .transaction_manager()
-            .create_non_invite_client_transaction(request, destination)
-            .await
-            .map_err(|_error| ApiError::internal("Failed to create transaction"))?;
-
-        self.manager
+            .resolve_uri_to_candidates(&next_hop)
+            .await;
+        if candidates.is_empty() {
+            return Err(ApiError::protocol(
+                "Failed to resolve exact in-dialog request next hop",
+            ));
+        }
+        let (transaction_id, _) = self
+            .manager
             .inner_manager()
-            .link_transaction_to_dialog_indexed(&transaction_id, &dialog_id);
-
-        self.manager
-            .inner_manager()
-            .transaction_manager()
-            .send_request(&transaction_id)
+            .send_request_with_candidate_failover(request, candidates, Some(dialog_id))
             .await
-            .map_err(|_error| ApiError::internal("Failed to send request"))?;
+            .map_err(ApiError::from)?;
 
         Ok(transaction_id)
     }

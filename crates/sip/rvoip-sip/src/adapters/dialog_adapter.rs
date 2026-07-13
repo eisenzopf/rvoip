@@ -46,6 +46,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Deterministic SIP Call-ID used by every outbound dialog construction path.
+/// Media routing may derive its lookup key before dialog-core returns, so this
+/// function is the single source of truth shared with the adapter layer.
+pub(crate) fn deterministic_outbound_call_id(session_id: &SessionId) -> String {
+    format!("{}@rvoip-sip", session_id.0)
+}
+
 /// Registrar metadata returned on a successful REGISTER 2xx response.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RegistrationResponseMetadata {
@@ -984,16 +991,11 @@ impl DialogAdapter {
     /// the previous inline REGISTER-auth shortcut (`handle_401_challenge`) was
     /// retired when INVITE auth landed. See `default.yaml`'s `Initiating` /
     /// `Registering` + `AuthRequired` transitions.
-    #[allow(clippy::too_many_arguments)]
     pub async fn resend_invite_with_auth(
         &self,
         session_id: &SessionId,
-        sdp: Option<String>,
-        auth_header_name: &str,
-        auth_header_value: String,
-        extras: Vec<rvoip_sip_core::types::TypedHeader>,
-        from_display: Option<String>,
-        contact_override: Option<String>,
+        mut opts: rvoip_sip_dialog::api::unified::InviteAuthRetryOptions,
+        apply_global_proxy: bool,
     ) -> Result<()> {
         // Fast-RTT race: an auth challenge can arrive while the original
         // `SendINVITE` action is still awaiting dialog-core's
@@ -1013,21 +1015,14 @@ impl DialogAdapter {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
 
-        // SIP_API_DESIGN_2 §7.3 — the application extras vector flows
-        // from `pending_invite_options.extra_headers` so the retry wire
-        // form matches the initial send. The §5.4 policy and the §6.1
-        // outbound-proxy Route already ran when the original snapshot
-        // was staged; the extras are passed through verbatim.
+        // Legacy/internal paths may not have a persisted per-call override.
+        // In that case retain the configured global proxy structurally; never
+        // synthesize it as a transient application Route header.
+        if apply_global_proxy && opts.outbound_proxy_uri.is_none() {
+            opts.outbound_proxy_uri = self.outbound_proxy_uri.clone();
+        }
         self.dialog_api
-            .send_invite_with_auth(
-                &dialog_id,
-                sdp,
-                auth_header_name,
-                auth_header_value,
-                extras,
-                from_display,
-                contact_override,
-            )
+            .send_invite_with_auth_options(&dialog_id, opts)
             .await
             .map_err(|error| {
                 redacted_invite_dispatch_error(InviteDispatchFailure::AuthRetry, error)
@@ -1044,7 +1039,8 @@ impl DialogAdapter {
     pub async fn resend_invite_with_session_timer_override(
         &self,
         session_id: &SessionId,
-        sdp: Option<String>,
+        mut opts: rvoip_sip_dialog::api::unified::InviteAuthRetryOptions,
+        apply_global_proxy: bool,
         session_secs: u32,
         min_se: u32,
     ) -> Result<()> {
@@ -1067,8 +1063,11 @@ impl DialogAdapter {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
 
+        if apply_global_proxy && opts.outbound_proxy_uri.is_none() {
+            opts.outbound_proxy_uri = self.outbound_proxy_uri.clone();
+        }
         self.dialog_api
-            .send_invite_with_session_timer_override(&dialog_id, sdp, session_secs, min_se)
+            .send_invite_with_session_timer_options(&dialog_id, opts, session_secs, min_se)
             .await
             .map_err(|error| {
                 redacted_invite_dispatch_error(InviteDispatchFailure::SessionTimerRetry, error)
@@ -1123,7 +1122,22 @@ impl DialogAdapter {
         sdp: Option<String>,
     ) -> Result<()> {
         // Use make_call_with_id to control the Call-ID
-        let call_id = format!("{}@rvoip-sip", session_id.0);
+        let call_id = deterministic_outbound_call_id(session_id);
+
+        // Fail before publishing any adapter lookup state. Dialog-core repeats
+        // this validation as a defence-in-depth gate, but the adapter's
+        // Call-ID mapping is itself an allocation that must not survive a
+        // malformed request.
+        rvoip_sip_dialog::api::unified::validate_initial_invite_options(
+            &rvoip_sip_dialog::api::unified::InviteRequestOptions {
+                from_uri: from.to_string(),
+                to_uri: to.to_string(),
+                sdp: sdp.clone(),
+                call_id: Some(call_id.clone()),
+                ..Default::default()
+            },
+        )
+        .map_err(|error| redacted_invite_dispatch_error(InviteDispatchFailure::Initial, error))?;
 
         // Store Call-ID mapping BEFORE making the call to avoid race condition
         // This ensures any events that come back immediately can find the session
@@ -1137,13 +1151,20 @@ impl DialogAdapter {
         // the async `StoreDialogMapping` below has populated the lookup
         // tables — which would otherwise cause the CallFailed event to be
         // silently dropped by `event_hub::convert_coordination_to_cross_crate`.
-        let call_handle = self
+        let call_handle = match self
             .dialog_api
             .make_call_for_session(&session_id.0, from, to, sdp, Some(call_id.clone()))
             .await
-            .map_err(|error| {
-                redacted_invite_dispatch_error(InviteDispatchFailure::Initial, error)
-            })?;
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.callid_to_session.remove(&call_id);
+                return Err(redacted_invite_dispatch_error(
+                    InviteDispatchFailure::Initial,
+                    error,
+                ));
+            }
+        };
 
         let dialog_id = call_handle.call_id().clone();
 
@@ -1158,12 +1179,21 @@ impl DialogAdapter {
             session_id: session_id.0.clone(),
             dialog_id: dialog_id.to_string(),
         };
-        self.global_coordinator
+        if let Err(_error) = self
+            .global_coordinator
             .publish(Arc::new(RvoipCrossCrateEvent::SessionToDialog(event)))
             .await
-            .map_err(|e| {
-                SessionError::InternalError(format!("Failed to publish StoreDialogMapping: {}", e))
-            })?;
+        {
+            // Dialog-core already pre-registered this exact mapping before the
+            // INVITE went on wire and the adapter maps above are live. Treat
+            // this compatibility notification as best-effort: returning an
+            // error here would make the caller tear down local state without
+            // sending CANCEL to a UAS that may already be ringing.
+            tracing::warn!(
+                session_id = %session_id,
+                "StoreDialogMapping compatibility notification failed after INVITE dispatch"
+            );
+        }
 
         tracing::info!(
             "Published StoreDialogMapping for session {} -> dialog {}",
@@ -1216,8 +1246,7 @@ impl DialogAdapter {
 
     /// SIP_API_DESIGN_2 §6.1 — variant used by builder dispatch when
     /// the builder has set its own per-call `with_outbound_proxy(uri)`
-    /// override (already prepended as a `Route:` in
-    /// `Action::SendINVITEWithOptions`). Skips the global
+    /// structural override in `Action::SendINVITEWithOptions`. Skips the global
     /// `Config.outbound_proxy_uri` so the wire doesn't end up with two
     /// stacked proxy Routes when the caller meant to override the
     /// default.
@@ -1242,45 +1271,61 @@ impl DialogAdapter {
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
         apply_global_proxy: bool,
     ) -> Result<()> {
-        let call_id = format!("{}@rvoip-sip", session_id.0);
+        let call_id = deterministic_outbound_call_id(session_id);
 
-        self.callid_to_session
-            .insert(call_id.clone(), session_id.clone());
-
-        // E4 / RFC 3261 §8.1.2: when an outbound proxy is configured, pre-load
-        // it as the first Route header on the INVITE so the request traverses
-        // the proxy regardless of the Request-URI target. We preserve caller-
-        // supplied extras (e.g. `P-Asserted-Identity` from B1) by prepending,
-        // not replacing.
-        let headers = if apply_global_proxy {
-            prepend_outbound_proxy_route(extra_headers, self.outbound_proxy_uri.as_ref())
+        // The proxy is a structural first hop, not an application Route
+        // header. This guarantees it precedes REGISTER Service-Route entries
+        // and lets dialog-core reject caller-controlled Route injection.
+        let outbound_proxy_uri = if apply_global_proxy {
+            self.outbound_proxy_uri.clone()
         } else {
-            extra_headers
+            None
         };
         if apply_global_proxy && self.outbound_proxy_uri.is_some() {
             tracing::debug!(
-                "E4 outbound proxy: prepended Route to INVITE for session {}",
+                "E4 outbound proxy: staged structural first-hop route for INVITE session {}",
                 session_id.0
             );
         }
 
-        let call_handle = self
-            .dialog_api
-            .make_call_with_extra_headers_for_session(
-                &session_id.0,
-                from,
-                to,
-                sdp,
-                Some(call_id.clone()),
-                headers,
-            )
-            .await
-            .map_err(|error| {
+        let opts = rvoip_sip_dialog::api::unified::InviteRequestOptions {
+            from_uri: from.to_string(),
+            to_uri: to.to_string(),
+            sdp,
+            call_id: Some(call_id.clone()),
+            from_display: None,
+            contact_uri: None,
+            precomputed_authorization: None,
+            outbound_proxy_uri,
+            supported_100rel: false,
+            extra_headers,
+        };
+        rvoip_sip_dialog::api::unified::validate_initial_invite_options(&opts).map_err(
+            |error| {
                 redacted_invite_dispatch_error(
                     InviteDispatchFailure::InitialWithExtraHeaders,
                     error,
                 )
-            })?;
+            },
+        )?;
+
+        self.callid_to_session
+            .insert(call_id.clone(), session_id.clone());
+
+        let call_handle = match self
+            .dialog_api
+            .send_invite_with_options_for_session(&session_id.0, opts)
+            .await
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.callid_to_session.remove(&call_id);
+                return Err(redacted_invite_dispatch_error(
+                    InviteDispatchFailure::InitialWithExtraHeaders,
+                    error,
+                ));
+            }
+        };
 
         let dialog_id = call_handle.call_id().clone();
 
@@ -1293,12 +1338,16 @@ impl DialogAdapter {
             session_id: session_id.0.clone(),
             dialog_id: dialog_id.to_string(),
         };
-        self.global_coordinator
+        if let Err(_error) = self
+            .global_coordinator
             .publish(Arc::new(RvoipCrossCrateEvent::SessionToDialog(event)))
             .await
-            .map_err(|e| {
-                SessionError::InternalError(format!("Failed to publish StoreDialogMapping: {}", e))
-            })?;
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                "StoreDialogMapping compatibility notification failed after INVITE dispatch"
+            );
+        }
 
         tracing::info!(
             "send_invite_with_extra_headers: published StoreDialogMapping for session {} -> dialog {} ({} extra header(s))",
@@ -1318,37 +1367,49 @@ impl DialogAdapter {
     /// the `From` display name and `Contact` as typed fields instead of
     /// smuggling them through `extra_headers`. `apply_global_proxy` follows the
     /// same rule as [`Self::send_invite_with_extra_headers`] — skip the global
-    /// `Config.outbound_proxy_uri` Route when the builder set a per-call
-    /// override (already a `Route:` in `opts.extra_headers`).
+    /// `Config.outbound_proxy_uri` when the builder set a structural per-call
+    /// override in `opts.outbound_proxy_uri`.
     pub async fn send_invite_with_options(
         &self,
         session_id: &SessionId,
         mut opts: rvoip_sip_dialog::api::unified::InviteRequestOptions,
         apply_global_proxy: bool,
     ) -> Result<()> {
-        let call_id = format!("{}@rvoip-sip", session_id.0);
-        self.callid_to_session
-            .insert(call_id.clone(), session_id.clone());
+        let call_id = deterministic_outbound_call_id(session_id);
 
-        if apply_global_proxy {
-            opts.extra_headers =
-                prepend_outbound_proxy_route(opts.extra_headers, self.outbound_proxy_uri.as_ref());
-            if self.outbound_proxy_uri.is_some() {
+        if apply_global_proxy && opts.outbound_proxy_uri.is_none() {
+            opts.outbound_proxy_uri = self.outbound_proxy_uri.clone();
+            if opts.outbound_proxy_uri.is_some() {
                 tracing::debug!(
-                    "E4 outbound proxy: prepended Route to INVITE for session {}",
+                    "E4 outbound proxy: staged structural first-hop route for INVITE session {}",
                     session_id.0
                 );
             }
         }
         opts.call_id = Some(call_id.clone());
+        rvoip_sip_dialog::api::unified::validate_initial_invite_options(&opts).map_err(
+            |error| {
+                redacted_invite_dispatch_error(InviteDispatchFailure::InitialWithOptions, error)
+            },
+        )?;
 
-        let call_handle = self
+        self.callid_to_session
+            .insert(call_id.clone(), session_id.clone());
+
+        let call_handle = match self
             .dialog_api
             .send_invite_with_options_for_session(&session_id.0, opts)
             .await
-            .map_err(|error| {
-                redacted_invite_dispatch_error(InviteDispatchFailure::InitialWithOptions, error)
-            })?;
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.callid_to_session.remove(&call_id);
+                return Err(redacted_invite_dispatch_error(
+                    InviteDispatchFailure::InitialWithOptions,
+                    error,
+                ));
+            }
+        };
 
         let dialog_id = call_handle.call_id().clone();
         self.session_to_dialog
@@ -1360,12 +1421,16 @@ impl DialogAdapter {
             session_id: session_id.0.clone(),
             dialog_id: dialog_id.to_string(),
         };
-        self.global_coordinator
+        if let Err(_error) = self
+            .global_coordinator
             .publish(Arc::new(RvoipCrossCrateEvent::SessionToDialog(event)))
             .await
-            .map_err(|e| {
-                SessionError::InternalError(format!("Failed to publish StoreDialogMapping: {}", e))
-            })?;
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                "StoreDialogMapping compatibility notification failed after INVITE dispatch"
+            );
+        }
 
         Ok(())
     }

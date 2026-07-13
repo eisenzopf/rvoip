@@ -13,6 +13,7 @@ use crate::dialog::dialog_utils::extract_uri_from_contact;
 use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
+use rvoip_sip_core::types::uri::Scheme;
 use rvoip_sip_core::types::TypedHeader;
 use rvoip_sip_core::HeaderName;
 use rvoip_sip_core::{Request, Uri};
@@ -132,8 +133,13 @@ impl DialogStore for DialogManager {
             remote_tag, // remote_tag (from their From header)
             false,      // is_initiator = false (incoming request, we are UAS)
         );
+        dialog.secure_transport_required |= matches!(request.uri().scheme(), Scheme::Sips);
         if let Some(remote_target) = remote_target_from_request(request) {
-            dialog.remote_target = remote_target;
+            if !dialog.update_remote_target(remote_target) {
+                return Err(DialogError::protocol_error(
+                    "Secure dialog-forming request contains a non-SIPS Contact",
+                ));
+            }
         }
 
         let dialog_id = dialog.id.clone();
@@ -569,8 +575,13 @@ impl DialogLookup for DialogManager {
             remote_tag, // remote_tag (from the From header)
             false,      // is_initiator = false (we're UAS)
         );
+        dialog.secure_transport_required |= matches!(request.uri().scheme(), Scheme::Sips);
         if let Some(remote_target) = remote_target_from_request(request) {
-            dialog.remote_target = remote_target;
+            if !dialog.update_remote_target(remote_target) {
+                return Err(DialogError::protocol_error(
+                    "Secure INVITE contains a non-SIPS Contact",
+                ));
+            }
         }
 
         let dialog_id = dialog.id.clone();

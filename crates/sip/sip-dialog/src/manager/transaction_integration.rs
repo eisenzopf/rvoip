@@ -21,7 +21,7 @@ use crate::protocol::response_handler::response_has_auth_challenge;
 use crate::transaction::builders::dialog_quick;
 use crate::transaction::dialog::{request_builder_from_dialog_template, DialogRequestTemplate};
 use crate::transaction::{TransactionEvent, TransactionKey, TransactionState};
-use rvoip_sip_core::{HeaderName, HeaderValue, Method, Request, Response, TypedHeader};
+use rvoip_sip_core::{HeaderName, Method, Request, Response, TypedHeader};
 use std::net::SocketAddr;
 use tracing::{debug, error, info, warn};
 
@@ -50,69 +50,194 @@ struct InitialInviteHeaderPlan {
     appended: Vec<TypedHeader>,
 }
 
-fn contact_uri_from_initial_header(header: &TypedHeader) -> Option<String> {
-    use rvoip_sip_core::types::contact::ContactValue;
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CandidateWirePlan {
+    /// The request's Contact was synthesized by the stack and may be
+    /// regenerated to match each resolver-selected transport candidate.
+    pub regenerate_stack_default_contact: bool,
+}
 
-    match header {
-        TypedHeader::Contact(contact) if contact.0.len() == 1 => match &contact.0[0] {
-            ContactValue::Params(values) if values.len() == 1 => {
-                Some(values[0].address.uri.to_string())
-            }
-            _ => None,
-        },
-        TypedHeader::Other(_, HeaderValue::Contact(ContactValue::Params(values)))
-            if values.len() == 1 =>
-        {
-            Some(values[0].address.uri.to_string())
-        }
-        _ => None,
+fn candidate_transport_token(
+    transport: rvoip_sip_transport::transport::TransportType,
+) -> &'static str {
+    use rvoip_sip_transport::transport::TransportType;
+    match transport {
+        TransportType::Udp => "UDP",
+        TransportType::Tcp => "TCP",
+        TransportType::Tls => "TLS",
+        TransportType::Ws => "WS",
+        TransportType::Wss => "WSS",
     }
+}
+
+fn finalize_request_for_candidate(
+    manager: &DialogManager,
+    request: &Request,
+    target: &rvoip_sip_transport::resolver::ResolvedTarget,
+    wire_plan: CandidateWirePlan,
+) -> DialogResult<Request> {
+    use rvoip_sip_core::types::{
+        address::Address,
+        contact::{Contact, ContactParamInfo},
+        uri::{Host, Scheme},
+        Param,
+    };
+
+    let mut request = request.clone();
+    let local_address = manager.local_address_for_transport(target.transport);
+    let branch = (request.method() != Method::Cancel)
+        .then(crate::transaction::utils::dialog_utils::generate_branch);
+    let mut stamped_via = false;
+    for header in &mut request.headers {
+        if !header.name().wire_eq(&HeaderName::Via) {
+            continue;
+        }
+        let TypedHeader::Via(via) = header else {
+            return Err(crate::errors::DialogError::protocol_error(
+                "outbound request contains an unstructured Via header",
+            ));
+        };
+        let Some(top_via) = via.0.first_mut() else {
+            return Err(crate::errors::DialogError::protocol_error(
+                "outbound request has an empty Via header",
+            ));
+        };
+        top_via.sent_protocol.transport = candidate_transport_token(target.transport).to_string();
+        top_via.sent_by_host = Host::Address(local_address.ip());
+        top_via.sent_by_port = Some(local_address.port());
+        if let Some(branch) = branch.as_ref() {
+            top_via
+                .params
+                .retain(|param| !matches!(param, Param::Branch(_)));
+            top_via.params.push(Param::branch(branch.clone()));
+        }
+        stamped_via = true;
+        break;
+    }
+    if !stamped_via {
+        return Err(crate::errors::DialogError::protocol_error(
+            "candidate-planned request is missing a structured Via header",
+        ));
+    }
+
+    if !wire_plan.regenerate_stack_default_contact {
+        return Ok(request);
+    }
+
+    let user = request
+        .from()
+        .and_then(|from| from.uri().user.as_ref())
+        .map(ToString::to_string)
+        .filter(|user| !user.is_empty())
+        .unwrap_or_else(|| "user".to_string());
+    let (scheme, transport_parameter) = match target.transport {
+        rvoip_sip_transport::transport::TransportType::Udp => ("sip", None),
+        rvoip_sip_transport::transport::TransportType::Tcp => ("sip", Some("tcp")),
+        rvoip_sip_transport::transport::TransportType::Tls => ("sips", Some("tls")),
+        rvoip_sip_transport::transport::TransportType::Ws => ("sip", Some("ws")),
+        rvoip_sip_transport::transport::TransportType::Wss => ("sips", Some("wss")),
+    };
+    let suffix = transport_parameter
+        .map(|transport| format!(";transport={transport}"))
+        .unwrap_or_default();
+    let contact_uri: rvoip_sip_core::Uri = format!("{scheme}:{user}@{local_address}{suffix}")
+        .parse()
+        .map_err(|_| {
+            crate::errors::DialogError::protocol_error(
+                "failed to plan the stack-default Contact for a candidate",
+            )
+        })?;
+    if matches!(request.uri().scheme(), Scheme::Sips)
+        && !matches!(contact_uri.scheme(), Scheme::Sips)
+    {
+        return Err(crate::errors::DialogError::routing_error(
+            "secure request candidate produced a non-SIPS Contact",
+        ));
+    }
+    let replacement = TypedHeader::Contact(Contact::new_params(vec![ContactParamInfo {
+        address: Address::new(contact_uri),
+    }]));
+    let Some(contact) = request
+        .headers
+        .iter_mut()
+        .find(|header| header.name().wire_eq(&HeaderName::Contact))
+    else {
+        return Err(crate::errors::DialogError::protocol_error(
+            "stack-default Contact plan has no Contact header",
+        ));
+    };
+    *contact = replacement;
+    Ok(request)
+}
+
+fn planned_initial_invite_routes(
+    outbound_proxy_uri: Option<&rvoip_sip_core::types::uri::Uri>,
+    service_routes: &[rvoip_sip_core::types::uri::Uri],
+) -> Vec<rvoip_sip_core::types::uri::Uri> {
+    outbound_proxy_uri
+        .into_iter()
+        .cloned()
+        .chain(service_routes.iter().cloned())
+        .collect()
+}
+
+fn is_stack_owned_initial_invite_header(header: &TypedHeader) -> bool {
+    [
+        HeaderName::Via,
+        HeaderName::Route,
+        HeaderName::RecordRoute,
+        HeaderName::Contact,
+        HeaderName::From,
+        HeaderName::To,
+        HeaderName::CallId,
+        HeaderName::CSeq,
+        HeaderName::MaxForwards,
+        HeaderName::ContentLength,
+        HeaderName::ContentType,
+        HeaderName::SessionExpires,
+        HeaderName::MinSE,
+    ]
+    .iter()
+    .any(|name| header.name().wire_eq(name))
 }
 
 fn plan_initial_invite_headers(
     contact_override: Option<String>,
     headers: Vec<TypedHeader>,
 ) -> DialogResult<InitialInviteHeaderPlan> {
-    let mut caller_contact = None;
     let mut appended = Vec::with_capacity(headers.len());
 
     for header in headers {
-        if header.name().wire_eq(&HeaderName::Contact) {
-            if caller_contact.is_some() {
-                return Err(crate::errors::DialogError::protocol_error(
-                    "initial INVITE contains multiple Contact headers",
-                ));
-            }
-            caller_contact = Some(contact_uri_from_initial_header(&header).ok_or_else(|| {
-                crate::errors::DialogError::protocol_error(
-                    "initial INVITE Contact must contain one structured address",
-                )
-            })?);
-        } else {
-            appended.push(header);
+        if is_stack_owned_initial_invite_header(&header) {
+            return Err(crate::errors::DialogError::protocol_error(
+                "initial INVITE application headers contain a stack-owned field",
+            ));
         }
-    }
-
-    if contact_override.is_some() && caller_contact.is_some() {
-        return Err(crate::errors::DialogError::protocol_error(
-            "initial INVITE Contact override collides with an extra Contact header",
-        ));
+        appended.push(header);
     }
 
     Ok(InitialInviteHeaderPlan {
-        contact_uri: contact_override.or(caller_contact),
+        contact_uri: contact_override,
         appended,
     })
 }
 
 fn append_validated_initial_invite_headers(
     request: &mut Request,
-    authorization: Option<TypedHeader>,
+    authorization: Vec<TypedHeader>,
     headers: Vec<TypedHeader>,
 ) -> DialogResult<()> {
-    if let Some(authorization) = authorization {
-        request.headers.push(authorization);
+    for header in &authorization {
+        if !matches!(
+            header.name(),
+            HeaderName::Authorization | HeaderName::ProxyAuthorization
+        ) {
+            return Err(crate::errors::DialogError::protocol_error(
+                "INVITE auth retry contains a non-authorization credential header",
+            ));
+        }
     }
+    request.headers.extend(authorization);
     request.headers.extend(headers);
     rvoip_sip_core::validation::validate_wire_request(request).map_err(|_| {
         crate::errors::DialogError::protocol_error(
@@ -300,13 +425,8 @@ impl DialogManager {
 
         // Get dialog context and build the request. Destination is resolved
         // from the final request next hop after Route headers are present.
-        let (fallback_destination, candidates, request) = {
+        let (candidates, request, wire_plan) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
-
-            let fallback_destination =
-                dialog.get_remote_target_address().await.ok_or_else(|| {
-                    crate::errors::DialogError::routing_error("No remote target address available")
-                })?;
 
             // Convert body to String if provided
             let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
@@ -660,13 +780,27 @@ impl DialogManager {
                 }
             }
 
-            let candidates = self
-                .resolve_uri_to_candidates(
-                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+            let next_hop =
+                crate::transaction::transport::multiplexed::exact_next_hop_uri_for_request(
+                    &request,
                 )
-                .await;
+                .map_err(|_| {
+                    crate::errors::DialogError::routing_error(
+                        "Outbound request contains an unusable Route header",
+                    )
+                })?;
+            let candidates = self.resolve_uri_to_candidates(&next_hop).await;
 
-            (fallback_destination, candidates, request)
+            if candidates.is_empty() {
+                return Err(crate::errors::DialogError::routing_error(
+                    "No address candidates for the exact request next hop",
+                ));
+            }
+            let wire_plan = CandidateWirePlan {
+                regenerate_stack_default_contact: request.header(&HeaderName::Contact).is_some()
+                    && self.local_contact_uri().is_none(),
+            };
+            (candidates, request, wire_plan)
         };
 
         // RFC 3263 §4.3 multi-candidate failover. STIR/SHAKEN signing
@@ -676,12 +810,7 @@ impl DialogManager {
         // methods (BYE / REFER / UPDATE / etc.) still surface real
         // transport failures.
         let (transaction_id, _addr) = self
-            .send_request_with_candidate_failover(
-                request,
-                candidates,
-                fallback_destination,
-                Some(dialog_id),
-            )
+            .send_request_with_candidate_wire_plan(request, candidates, Some(dialog_id), wire_plan)
             .await?;
 
         debug!(
@@ -807,6 +936,7 @@ impl DialogManager {
 #[cfg(test)]
 mod outward_error_redaction_tests {
     use super::*;
+    use rvoip_sip_core::HeaderValue;
     use std::str::FromStr;
 
     const LOWER_ERROR_SECRET: &str = "lower-builder-parser-secret";
@@ -872,8 +1002,8 @@ mod outward_error_redaction_tests {
 
         assert_eq!(
             production.matches("e.to_string()").count(),
-            1,
-            "the sole lower error string conversion is the existing internal benign-termination classifier"
+            0,
+            "lower transaction errors must never be classified by string contents"
         );
     }
 
@@ -908,7 +1038,7 @@ mod outward_error_redaction_tests {
         assert_eq!(plan.appended.len(), 3);
 
         let mut request = valid_initial_invite();
-        append_validated_initial_invite_headers(&mut request, None, plan.appended).unwrap();
+        append_validated_initial_invite_headers(&mut request, Vec::new(), plan.appended).unwrap();
         let values = request
             .headers
             .iter()
@@ -946,11 +1076,24 @@ mod outward_error_redaction_tests {
     }
 
     #[test]
+    fn outbound_proxy_precedes_registration_service_routes() {
+        let proxy: rvoip_sip_core::Uri = "sips:edge.example.test;lr".parse().unwrap();
+        let service_one: rvoip_sip_core::Uri = "sip:service-one.example.test;lr".parse().unwrap();
+        let service_two: rvoip_sip_core::Uri = "sip:service-two.example.test;lr".parse().unwrap();
+        let planned = planned_initial_invite_routes(
+            Some(&proxy),
+            &[service_one.clone(), service_two.clone()],
+        );
+        assert_eq!(planned, vec![proxy, service_one, service_two]);
+    }
+
+    #[test]
     fn final_initial_invite_append_rejects_singleton_alias_before_send() {
         let mut request = valid_initial_invite();
         let duplicate = application_header("i", "other-call-id@example.test");
         assert!(
-            append_validated_initial_invite_headers(&mut request, None, vec![duplicate],).is_err()
+            append_validated_initial_invite_headers(&mut request, Vec::new(), vec![duplicate],)
+                .is_err()
         );
     }
 }
@@ -1040,11 +1183,6 @@ impl DialogManager {
         from_display: Option<String>,
         contact_override: Option<String>,
     ) -> DialogResult<TransactionKey> {
-        use crate::transaction::client::builders::InviteBuilder;
-
-        // Validate generated Digest/AKA/Bearer material and caller headers
-        // before mutating dialog CSeq state, resolving DNS, allocating a
-        // transaction, or touching a transport.
         let header_name = rvoip_sip_core::validation::authorization_header_name(auth_header_name)
             .map_err(|_| {
             crate::errors::DialogError::protocol_error(
@@ -1060,22 +1198,81 @@ impl DialogManager {
                 "INVITE authorization failed wire-safety validation",
             )
         })?;
+        self.send_invite_with_auth_options(
+            dialog_id,
+            body,
+            vec![authorization],
+            extras,
+            from_display,
+            contact_override,
+            None,
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_invite_with_auth_options(
+        &self,
+        dialog_id: &DialogId,
+        body: Option<bytes::Bytes>,
+        authorization_headers: Vec<TypedHeader>,
+        extras: Vec<TypedHeader>,
+        from_display: Option<String>,
+        contact_override: Option<String>,
+        outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
+        supported_100rel: bool,
+    ) -> DialogResult<TransactionKey> {
+        use crate::transaction::client::builders::InviteBuilder;
+
+        // Reject structural/header errors before CSeq mutation or DNS.
+        for header in &authorization_headers {
+            if !matches!(
+                header.name(),
+                HeaderName::Authorization | HeaderName::ProxyAuthorization
+            ) {
+                return Err(crate::errors::DialogError::protocol_error(
+                    "INVITE auth retry contains a non-authorization credential header",
+                ));
+            }
+        }
+        let preview_dialog = self.get_dialog(dialog_id)?;
+        let mut preview_headers = authorization_headers.clone();
+        preview_headers.extend(extras.iter().cloned());
+        crate::api::unified::validate_initial_invite_options(
+            &crate::api::unified::InviteRequestOptions {
+                from_uri: preview_dialog.local_uri.to_string(),
+                to_uri: preview_dialog.remote_uri.to_string(),
+                sdp: body
+                    .as_ref()
+                    .map(|bytes| String::from_utf8_lossy(bytes).into_owned()),
+                call_id: Some(preview_dialog.call_id.clone()),
+                from_display: from_display.clone(),
+                contact_uri: contact_override.clone(),
+                precomputed_authorization: None,
+                outbound_proxy_uri: outbound_proxy_uri.clone(),
+                supported_100rel,
+                extra_headers: preview_headers,
+            },
+        )
+        .map_err(|_| {
+            crate::errors::DialogError::protocol_error(
+                "authenticated INVITE failed preflight validation",
+            )
+        })?;
         let InitialInviteHeaderPlan {
             contact_uri,
             appended,
         } = plan_initial_invite_headers(contact_override, extras)?;
+        let wire_plan = CandidateWirePlan {
+            regenerate_stack_default_contact: contact_uri.is_none()
+                && self.local_contact_uri().is_none(),
+        };
 
         debug!("Resending INVITE with auth for dialog {}", dialog_id);
 
-        let (fallback_destination, candidates, request) = {
+        let (candidates, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
-
-            let fallback_destination =
-                dialog.get_remote_target_address().await.ok_or_else(|| {
-                    crate::errors::DialogError::routing_error(
-                        "No remote target address available for auth retry",
-                    )
-                })?;
 
             let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
 
@@ -1096,8 +1293,10 @@ impl DialogManager {
             // The challenge was a final response on the original INVITE, so no
             // remote tag was established. Rebuild as an initial INVITE with
             // the same Call-ID (dialog.create_request_template carries it).
+            let planned_routes =
+                planned_initial_invite_routes(outbound_proxy_uri.as_ref(), &template.route_set);
             let local_address =
-                self.local_address_for_target_and_routes(&template.target_uri, &template.route_set);
+                self.local_address_for_target_and_routes(&template.target_uri, &planned_routes);
             let mut invite_builder = InviteBuilder::new()
                 .from_detailed(
                     from_display.as_deref().or(Some("User")),
@@ -1110,7 +1309,9 @@ impl DialogManager {
                 .request_uri(template.target_uri.to_string())
                 .local_address(local_address);
 
-            for route in &template.route_set {
+            // The explicit outbound proxy is always the top Route. REGISTER
+            // Service-Route entries follow it in their learned order.
+            for route in &planned_routes {
                 invite_builder = invite_builder.add_route(route.clone());
             }
 
@@ -1134,6 +1335,9 @@ impl DialogManager {
             // Re-inject the negotiated policy headers (100rel, session-timer)
             // just like the initial send does.
             inject_100rel_policy(&mut request, self.config_100rel_policy());
+            if supported_100rel {
+                inject_100rel_policy(&mut request, RelUsage::Supported);
+            }
             if let Some((secs, min_se)) = self.config_session_timer_settings() {
                 inject_session_timer_headers(&mut request, secs, min_se);
             }
@@ -1143,27 +1347,33 @@ impl DialogManager {
             // extras live in `pending_invite_options` on session-core's
             // SessionState; the caller forwards them here so the retry
             // wire form matches the initial send.
-            append_validated_initial_invite_headers(&mut request, Some(authorization), appended)?;
+            append_validated_initial_invite_headers(&mut request, authorization_headers, appended)?;
 
-            let candidates = self
-                .resolve_uri_to_candidates(
-                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+            let next_hop =
+                crate::transaction::transport::multiplexed::exact_next_hop_uri_for_request(
+                    &request,
                 )
-                .await;
+                .map_err(|_| {
+                    crate::errors::DialogError::routing_error(
+                        "Authenticated INVITE contains an unusable Route header",
+                    )
+                })?;
+            let candidates = self.resolve_uri_to_candidates(&next_hop).await;
 
-            (fallback_destination, candidates, request)
+            if candidates.is_empty() {
+                return Err(crate::errors::DialogError::routing_error(
+                    "No address candidates for the exact INVITE next hop",
+                ));
+            }
+
+            (candidates, request)
         };
 
         // RFC 3263 §4.3 multi-candidate failover. The auth-retry path
         // re-signs the PASSporT per attempt (fresh Via/branch) — the
         // helper fires `pre_send_request` inside the retry loop.
         let (transaction_id, _addr) = self
-            .send_request_with_candidate_failover(
-                request,
-                candidates,
-                fallback_destination,
-                Some(dialog_id),
-            )
+            .send_request_with_candidate_wire_plan(request, candidates, Some(dialog_id), wire_plan)
             .await?;
 
         debug!(dialog=%dialog_id, transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Auth-retry INVITE sent via candidate failover path");
@@ -1188,24 +1398,77 @@ impl DialogManager {
         session_secs: u32,
         min_se: u32,
     ) -> DialogResult<TransactionKey> {
+        self.send_invite_with_session_timer_options(
+            dialog_id,
+            crate::api::unified::InviteAuthRetryOptions {
+                sdp: body.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+                ..Default::default()
+            },
+            session_secs,
+            min_se,
+        )
+        .await
+    }
+
+    /// Structural 422 retry that retains the initial INVITE's routing,
+    /// application headers, accumulated credentials and exact body.
+    pub async fn send_invite_with_session_timer_options(
+        &self,
+        dialog_id: &DialogId,
+        opts: crate::api::unified::InviteAuthRetryOptions,
+        session_secs: u32,
+        min_se: u32,
+    ) -> DialogResult<TransactionKey> {
         use crate::transaction::client::builders::InviteBuilder;
+
+        for header in &opts.authorization_headers {
+            if !matches!(
+                header.name(),
+                HeaderName::Authorization | HeaderName::ProxyAuthorization
+            ) {
+                return Err(crate::errors::DialogError::protocol_error(
+                    "422 INVITE retry contains a non-authorization credential header",
+                ));
+            }
+        }
+        let preview_dialog = self.get_dialog(dialog_id)?;
+        let mut preview_headers = opts.authorization_headers.clone();
+        preview_headers.extend(opts.extra_headers.iter().cloned());
+        crate::api::unified::validate_initial_invite_options(
+            &crate::api::unified::InviteRequestOptions {
+                from_uri: preview_dialog.local_uri.to_string(),
+                to_uri: preview_dialog.remote_uri.to_string(),
+                sdp: opts.sdp.clone(),
+                call_id: Some(preview_dialog.call_id.clone()),
+                from_display: opts.from_display.clone(),
+                contact_uri: opts.contact_uri.clone(),
+                precomputed_authorization: None,
+                outbound_proxy_uri: opts.outbound_proxy_uri.clone(),
+                supported_100rel: opts.supported_100rel,
+                extra_headers: preview_headers,
+            },
+        )
+        .map_err(|_| {
+            crate::errors::DialogError::protocol_error(
+                "422 INVITE retry failed preflight validation",
+            )
+        })?;
+        let InitialInviteHeaderPlan {
+            contact_uri,
+            appended,
+        } = plan_initial_invite_headers(opts.contact_uri, opts.extra_headers)?;
+        let wire_plan = CandidateWirePlan {
+            regenerate_stack_default_contact: contact_uri.is_none()
+                && self.local_contact_uri().is_none(),
+        };
 
         debug!(
             "Resending INVITE with session-timer override (SE={}, Min-SE={}) for dialog {}",
             session_secs, min_se, dialog_id
         );
 
-        let (fallback_destination, candidates, request) = {
+        let (candidates, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
-
-            let fallback_destination =
-                dialog.get_remote_target_address().await.ok_or_else(|| {
-                    crate::errors::DialogError::routing_error(
-                        "No remote target address available for 422 retry",
-                    )
-                })?;
-
-            let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
 
             let template = dialog.create_request_template(Method::Invite);
             dialog.invite_cseq = Some(template.cseq_number);
@@ -1219,11 +1482,15 @@ impl DialogManager {
                 }
             };
 
+            let planned_routes = planned_initial_invite_routes(
+                opts.outbound_proxy_uri.as_ref(),
+                &template.route_set,
+            );
             let local_address =
-                self.local_address_for_target_and_routes(&template.target_uri, &template.route_set);
+                self.local_address_for_target_and_routes(&template.target_uri, &planned_routes);
             let mut invite_builder = InviteBuilder::new()
                 .from_detailed(
-                    Some("User"),
+                    opts.from_display.as_deref().or(Some("User")),
                     template.local_uri.to_string(),
                     Some(&local_tag),
                 )
@@ -1233,15 +1500,17 @@ impl DialogManager {
                 .request_uri(template.target_uri.to_string())
                 .local_address(local_address);
 
-            for route in &template.route_set {
+            for route in &planned_routes {
                 invite_builder = invite_builder.add_route(route.clone());
             }
 
-            if let Some(contact) = self.local_contact_uri() {
+            if let Some(contact) = contact_uri {
+                invite_builder = invite_builder.contact(contact);
+            } else if let Some(contact) = self.local_contact_uri() {
                 invite_builder = invite_builder.contact(contact);
             }
 
-            if let Some(sdp_content) = body_string {
+            if let Some(sdp_content) = opts.sdp {
                 invite_builder = invite_builder.with_sdp(sdp_content);
             }
 
@@ -1260,15 +1529,33 @@ impl DialogManager {
             // use the per-call overrides so the retry carries the peer's
             // required Min-SE floor.
             inject_100rel_policy(&mut request, self.config_100rel_policy());
+            if opts.supported_100rel {
+                inject_100rel_policy(&mut request, RelUsage::Supported);
+            }
             inject_session_timer_headers(&mut request, session_secs, min_se);
+            append_validated_initial_invite_headers(
+                &mut request,
+                opts.authorization_headers,
+                appended,
+            )?;
 
-            let candidates = self
-                .resolve_uri_to_candidates(
-                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+            let next_hop =
+                crate::transaction::transport::multiplexed::exact_next_hop_uri_for_request(
+                    &request,
                 )
-                .await;
+                .map_err(|_| {
+                    crate::errors::DialogError::routing_error(
+                        "422 retry contains an unusable Route header",
+                    )
+                })?;
+            let candidates = self.resolve_uri_to_candidates(&next_hop).await;
 
-            (fallback_destination, candidates, request)
+            if candidates.is_empty() {
+                return Err(crate::errors::DialogError::routing_error(
+                    "No address candidates for the exact 422-retry next hop",
+                ));
+            }
+            (candidates, request)
         };
 
         // RFC 3263 §4.3 multi-candidate failover. STIR/SHAKEN re-signs
@@ -1276,12 +1563,7 @@ impl DialogManager {
         // new CSeq + adjusted Session-Expires (the original PASSporT
         // no longer covers the canonical form).
         let (transaction_id, _addr) = self
-            .send_request_with_candidate_failover(
-                request,
-                candidates,
-                fallback_destination,
-                Some(dialog_id),
-            )
+            .send_request_with_candidate_wire_plan(request, candidates, Some(dialog_id), wire_plan)
             .await?;
 
         debug!(dialog=%dialog_id, transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), session_secs, min_se, "422-retry INVITE sent via candidate failover path");
@@ -1314,6 +1596,8 @@ impl DialogManager {
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
         from_display: Option<String>,
         contact_override: Option<String>,
+        outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
+        supported_100rel: bool,
     ) -> DialogResult<TransactionKey> {
         use crate::transaction::client::builders::InviteBuilder;
 
@@ -1325,6 +1609,10 @@ impl DialogManager {
             contact_uri,
             appended,
         } = plan_initial_invite_headers(contact_override, extra_headers)?;
+        let wire_plan = CandidateWirePlan {
+            regenerate_stack_default_contact: contact_uri.is_none()
+                && self.local_contact_uri().is_none(),
+        };
 
         debug!(
             "Sending initial INVITE with {} extra header(s) for dialog {}",
@@ -1332,15 +1620,8 @@ impl DialogManager {
             dialog_id
         );
 
-        let (fallback_destination, candidates, request) = {
+        let (candidates, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
-
-            let fallback_destination =
-                dialog.get_remote_target_address().await.ok_or_else(|| {
-                    crate::errors::DialogError::routing_error(
-                        "No remote target address available for initial INVITE",
-                    )
-                })?;
 
             let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
 
@@ -1356,8 +1637,10 @@ impl DialogManager {
                 }
             };
 
+            let planned_routes =
+                planned_initial_invite_routes(outbound_proxy_uri.as_ref(), &template.route_set);
             let local_address =
-                self.local_address_for_target_and_routes(&template.target_uri, &template.route_set);
+                self.local_address_for_target_and_routes(&template.target_uri, &planned_routes);
             let mut invite_builder = InviteBuilder::new()
                 .from_detailed(
                     from_display.as_deref().or(Some("User")),
@@ -1370,7 +1653,7 @@ impl DialogManager {
                 .request_uri(template.target_uri.to_string())
                 .local_address(local_address);
 
-            for route in &template.route_set {
+            for route in &planned_routes {
                 invite_builder = invite_builder.add_route(route.clone());
             }
 
@@ -1397,19 +1680,33 @@ impl DialogManager {
             // Re-inject the negotiated policy headers (100rel, session-timer),
             // mirroring `send_request_in_dialog`'s initial-INVITE arm.
             inject_100rel_policy(&mut request, self.config_100rel_policy());
+            if supported_100rel {
+                inject_100rel_policy(&mut request, RelUsage::Supported);
+            }
             if let Some((secs, min_se)) = self.config_session_timer_settings() {
                 inject_session_timer_headers(&mut request, secs, min_se);
             }
 
-            append_validated_initial_invite_headers(&mut request, None, appended)?;
+            append_validated_initial_invite_headers(&mut request, Vec::new(), appended)?;
 
-            let candidates = self
-                .resolve_uri_to_candidates(
-                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+            let next_hop =
+                crate::transaction::transport::multiplexed::exact_next_hop_uri_for_request(
+                    &request,
                 )
-                .await;
+                .map_err(|_| {
+                    crate::errors::DialogError::routing_error(
+                        "Initial INVITE contains an unusable Route header",
+                    )
+                })?;
+            let candidates = self.resolve_uri_to_candidates(&next_hop).await;
 
-            (fallback_destination, candidates, request)
+            if candidates.is_empty() {
+                return Err(crate::errors::DialogError::routing_error(
+                    "No address candidates for the exact INVITE next hop",
+                ));
+            }
+
+            (candidates, request)
         };
 
         // RFC 3263 §4.3 multi-candidate failover. Walks the resolved
@@ -1420,12 +1717,7 @@ impl DialogManager {
         // auth retry and other fast-response paths can locate the
         // dialog without racing.
         let (transaction_id, _addr) = self
-            .send_request_with_candidate_failover(
-                request,
-                candidates,
-                fallback_destination,
-                Some(dialog_id),
-            )
+            .send_request_with_candidate_wire_plan(request, candidates, Some(dialog_id), wire_plan)
             .await?;
 
         debug!(dialog=%dialog_id, transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Initial INVITE-with-extras sent");
@@ -1455,10 +1747,11 @@ impl DialogManager {
     /// [`SocketAddr`] that succeeded. Caller is responsible for
     /// registering it into `transaction_to_dialog`.
     ///
-    /// When `candidates` is empty, makes a single attempt against
-    /// `fallback`. RFC 3261 §17.1.1.3 normal-termination after 2xx
-    /// on a fast loopback is treated as success (matches the
-    /// suppression already in [`Self::send_initial_invite_with_extra_headers`]).
+    /// An empty candidate set fails closed. The caller must resolve the exact
+    /// next-hop URI (top Route when present, otherwise Request-URI); falling
+    /// back to an independently resolved remote target could bypass a proxy.
+    /// RFC 3261 §17.1.1.3 normal-termination after 2xx on a fast loopback is
+    /// treated as success.
     ///
     /// `tx_to_dialog`, when supplied, is the dialog id to register
     /// against the freshly-created transaction *before* `send_request`
@@ -1472,28 +1765,41 @@ impl DialogManager {
         &self,
         request: rvoip_sip_core::Request,
         candidates: Vec<rvoip_sip_transport::resolver::ResolvedTarget>,
-        fallback: std::net::SocketAddr,
         tx_to_dialog: Option<&DialogId>,
     ) -> DialogResult<(TransactionKey, std::net::SocketAddr)> {
+        self.send_request_with_candidate_wire_plan(
+            request,
+            candidates,
+            tx_to_dialog,
+            CandidateWirePlan::default(),
+        )
+        .await
+    }
+
+    /// Candidate failover with explicit ownership of stack-generated wire
+    /// fields. Application-authored Contact values must use the default plan.
+    pub async fn send_request_with_candidate_wire_plan(
+        &self,
+        request: rvoip_sip_core::Request,
+        candidates: Vec<rvoip_sip_transport::resolver::ResolvedTarget>,
+        tx_to_dialog: Option<&DialogId>,
+        wire_plan: CandidateWirePlan,
+    ) -> DialogResult<(TransactionKey, std::net::SocketAddr)> {
         use crate::manager::RequestLifecycle;
-        use rvoip_sip_transport::resolver::ResolvedTarget;
 
         let method = request.method();
-        let candidates: Vec<ResolvedTarget> = if candidates.is_empty() {
-            let next_hop =
-                crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request);
-            let transport = rvoip_sip_transport::resolver::select_transport_for_uri(&next_hop);
-            vec![ResolvedTarget::immediate(fallback, transport)]
-        } else {
-            candidates
-        };
+        if candidates.is_empty() {
+            return Err(crate::errors::DialogError::routing_error(
+                "No address candidates for the exact request next hop",
+            ));
+        }
 
         let total = candidates.len();
         let mut last_err: Option<crate::errors::DialogError> = None;
 
         for (idx, target) in candidates.iter().enumerate() {
             let attempt = idx + 1;
-            let mut req = request.clone();
+            let mut req = finalize_request_for_candidate(self, &request, target, wire_plan)?;
 
             if method == Method::Invite {
                 if let Err(e) = self.pre_send_request(&mut req, target.addr).await {
@@ -1556,33 +1862,6 @@ impl DialogManager {
                     return Ok((tx_id, target.addr));
                 }
                 Err(e) => {
-                    let msg = e.to_string();
-                    let benign_terminate = method == Method::Invite
-                        && (msg.contains("Transaction terminated after timeout")
-                            || msg.contains("Transaction terminated"));
-                    if benign_terminate {
-                        // RFC 3261 §17.1.1.3 — INVITE client transitions
-                        // Calling → Terminated on automatic ACK for 2xx;
-                        // treat as success and don't fail over.
-                        self.record_outbound_transport_context(
-                            &tx_id,
-                            request_key,
-                            target.transport,
-                            target.addr,
-                        );
-                        self.post_send_request(&sent_request, target.addr).await?;
-                        if attempt > 1 {
-                            debug!(
-                                "RFC 3263 §4.3: candidate {}/{} ({}) succeeded after {} prior failure(s) (benign terminate)",
-                                attempt,
-                                total,
-                                target.addr,
-                                attempt - 1
-                            );
-                        }
-                        return Ok((tx_id, target.addr));
-                    }
-
                     let is_transport_failure =
                         matches!(&e, crate::transaction::error::Error::TransportError { .. });
                     if is_transport_failure && idx + 1 < total {
@@ -1599,6 +1878,14 @@ impl DialogManager {
                         if tx_to_dialog.is_some() {
                             self.unlink_transaction_from_dialog_indexed(&tx_id);
                         }
+                        if let Err(_cleanup_error) =
+                            self.transaction_manager.terminate_transaction(&tx_id).await
+                        {
+                            debug!(
+                                transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id),
+                                "Failed candidate transaction was already retired"
+                            );
+                        }
                         last_err = Some(crate::errors::DialogError::TransactionError {
                             message: safe_method_operation_failure(
                                 "candidate_request_send",
@@ -1607,6 +1894,18 @@ impl DialogManager {
                             ),
                         });
                         continue;
+                    }
+
+                    if tx_to_dialog.is_some() {
+                        self.unlink_transaction_from_dialog_indexed(&tx_id);
+                    }
+                    if let Err(_cleanup_error) =
+                        self.transaction_manager.terminate_transaction(&tx_id).await
+                    {
+                        debug!(
+                            transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id),
+                            "Failed client transaction was already retired"
+                        );
                     }
 
                     return Err(crate::errors::DialogError::TransactionError {
@@ -2662,15 +2961,8 @@ impl DialogManager {
             dialog_id, rseq
         );
 
-        let (destination, request) = {
+        let (candidates, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
-
-            let fallback_destination =
-                dialog.get_remote_target_address().await.ok_or_else(|| {
-                    crate::errors::DialogError::routing_error(
-                        "No remote target address available for PRACK",
-                    )
-                })?;
 
             let invite_cseq = dialog.invite_cseq.ok_or_else(|| {
                 crate::errors::DialogError::protocol_error(
@@ -2719,44 +3011,28 @@ impl DialogManager {
                 context: None,
             })?;
 
-            let destination = self
-                .resolve_uri_to_socketaddr(
-                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+            let next_hop =
+                crate::transaction::transport::multiplexed::exact_next_hop_uri_for_request(
+                    &request,
                 )
-                .await
-                .unwrap_or(fallback_destination);
+                .map_err(|_| {
+                    crate::errors::DialogError::routing_error(
+                        "PRACK contains an unusable Route header",
+                    )
+                })?;
+            let candidates = self.resolve_uri_to_candidates(&next_hop).await;
+            if candidates.is_empty() {
+                return Err(crate::errors::DialogError::routing_error(
+                    "No address candidates for the exact PRACK next hop",
+                ));
+            }
 
-            (destination, request)
+            (candidates, request)
         };
 
-        let request_key = crate::manager::core::outbound_request_key(&request);
-        let next_hop =
-            crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request);
-        let selected_transport = self
-            .transaction_manager
-            .get_best_transport_for_uri(&next_hop);
-        let transaction_id = self
-            .transaction_manager
-            .create_non_invite_client_transaction(request, destination)
-            .await
-            .map_err(|_error| crate::errors::DialogError::TransactionError {
-                message: safe_operation_failure("prack_transaction_create", "transaction_error"),
-            })?;
-
-        self.link_transaction_to_dialog_indexed(&transaction_id, dialog_id);
-
-        self.transaction_manager
-            .send_request(&transaction_id)
-            .await
-            .map_err(|_error| crate::errors::DialogError::TransactionError {
-                message: safe_operation_failure("prack_send", "transaction_error"),
-            })?;
-        self.record_outbound_transport_context(
-            &transaction_id,
-            request_key,
-            selected_transport,
-            destination,
-        );
+        let (transaction_id, _) = self
+            .send_request_with_candidate_failover(request, candidates, Some(dialog_id))
+            .await?;
 
         info!(dialog=%dialog_id, transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), rseq, "Sent PRACK");
         Ok(transaction_id)

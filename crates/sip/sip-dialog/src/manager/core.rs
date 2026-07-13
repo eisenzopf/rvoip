@@ -2168,6 +2168,21 @@ impl DialogManager {
         }
     }
 
+    /// Advertised sent-by address for a resolver-selected transport
+    /// candidate. Candidate failover can change the transport selected from
+    /// the same SIP URI, so Via and stack-generated Contact values must be
+    /// planned from the actual candidate rather than the URI default.
+    pub fn local_address_for_transport(&self, transport: TransportType) -> SocketAddr {
+        if matches!(transport, TransportType::Tls | TransportType::Wss) {
+            self.tls_advertised_local_address()
+                .or_else(|| self.tls_local_address())
+                .unwrap_or(self.local_address)
+        } else {
+            self.advertised_local_address()
+                .unwrap_or(self.local_address)
+        }
+    }
+
     /// Local sent-by address for an outbound request with an optional route
     /// set. The top Route URI is the next hop when present; otherwise the
     /// Request-URI determines the transport and advertised sent-by address.
@@ -3166,13 +3181,8 @@ impl DialogManager {
 
         debug!("Sending BYE with Reason header for dialog {}", dialog_id);
 
-        let (destination, request) = {
+        let (candidates, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
-
-            let fallback_destination = dialog
-                .get_remote_target_address()
-                .await
-                .ok_or_else(|| DialogError::routing_error("No remote target address available"))?;
 
             let template = dialog.create_request_template(Method::Bye);
 
@@ -3213,48 +3223,24 @@ impl DialogManager {
                 context: None,
             })?;
 
-            let destination = self
-                .resolve_uri_to_socketaddr(
-                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+            let next_hop =
+                crate::transaction::transport::multiplexed::exact_next_hop_uri_for_request(
+                    &request,
                 )
-                .await
-                .unwrap_or(fallback_destination);
+                .map_err(|_| DialogError::routing_error("BYE contains an unusable Route header"))?;
+            let candidates = self.resolve_uri_to_candidates(&next_hop).await;
+            if candidates.is_empty() {
+                return Err(DialogError::routing_error(
+                    "No address candidates for the exact BYE next hop",
+                ));
+            }
 
-            (destination, request)
+            (candidates, request)
         };
 
-        let request_key = outbound_request_key(&request);
-        let next_hop =
-            crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request);
-        let selected_transport = self
-            .transaction_manager
-            .get_best_transport_for_uri(&next_hop);
-        let transaction_id = self
-            .transaction_manager
-            .create_non_invite_client_transaction(request, destination)
-            .await
-            .map_err(|_error| DialogError::TransactionError {
-                message: "Failed to create BYE transaction".to_string(),
-            })?;
-
-        self.link_transaction_to_dialog_indexed(&transaction_id, dialog_id);
-        debug!(
-            "Associated BYE-with-Reason transaction with dialog {}",
-            dialog_id
-        );
-
-        self.transaction_manager
-            .send_request(&transaction_id)
-            .await
-            .map_err(|_error| DialogError::TransactionError {
-                message: "Failed to send BYE".to_string(),
-            })?;
-        self.record_outbound_transport_context(
-            &transaction_id,
-            request_key,
-            selected_transport,
-            destination,
-        );
+        let (transaction_id, _) = self
+            .send_request_with_candidate_failover(request, candidates, Some(dialog_id))
+            .await?;
 
         Ok(transaction_id)
     }
@@ -3278,13 +3264,8 @@ impl DialogManager {
             content_type, dialog_id
         );
 
-        let (destination, request) = {
+        let (candidates, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
-
-            let fallback_destination = dialog
-                .get_remote_target_address()
-                .await
-                .ok_or_else(|| DialogError::routing_error("No remote target address available"))?;
 
             let template = dialog.create_request_template(Method::Info);
 
@@ -3326,44 +3307,26 @@ impl DialogManager {
                 context: None,
             })?;
 
-            let destination = self
-                .resolve_uri_to_socketaddr(
-                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+            let next_hop =
+                crate::transaction::transport::multiplexed::exact_next_hop_uri_for_request(
+                    &request,
                 )
-                .await
-                .unwrap_or(fallback_destination);
+                .map_err(|_| {
+                    DialogError::routing_error("INFO contains an unusable Route header")
+                })?;
+            let candidates = self.resolve_uri_to_candidates(&next_hop).await;
+            if candidates.is_empty() {
+                return Err(DialogError::routing_error(
+                    "No address candidates for the exact INFO next hop",
+                ));
+            }
 
-            (destination, request)
+            (candidates, request)
         };
 
-        let request_key = outbound_request_key(&request);
-        let next_hop =
-            crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request);
-        let selected_transport = self
-            .transaction_manager
-            .get_best_transport_for_uri(&next_hop);
-        let transaction_id = self
-            .transaction_manager
-            .create_non_invite_client_transaction(request, destination)
-            .await
-            .map_err(|_error| DialogError::TransactionError {
-                message: "Failed to create INFO transaction".to_string(),
-            })?;
-
-        self.link_transaction_to_dialog_indexed(&transaction_id, dialog_id);
-
-        self.transaction_manager
-            .send_request(&transaction_id)
-            .await
-            .map_err(|_error| DialogError::TransactionError {
-                message: "Failed to send INFO".to_string(),
-            })?;
-        self.record_outbound_transport_context(
-            &transaction_id,
-            request_key,
-            selected_transport,
-            destination,
-        );
+        let (transaction_id, _) = self
+            .send_request_with_candidate_failover(request, candidates, Some(dialog_id))
+            .await?;
 
         Ok(transaction_id)
     }

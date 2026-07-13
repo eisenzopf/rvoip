@@ -5016,6 +5016,18 @@ impl UnifiedCoordinator {
         release_guard.finish_success();
     }
 
+    /// Compensate an outbound setup that failed after session allocation but
+    /// before `OutboundCallBuilder::send` could return a usable call id.
+    /// Cleanup is deliberately best-effort and idempotent; the original
+    /// dispatch error remains the public result.
+    pub(crate) async fn rollback_outbound_setup(&self, session_id: &SessionId) {
+        tracing::debug!(
+            session_id = %session_id,
+            "rolling back partially allocated outbound setup"
+        );
+        self.release_after_observed_terminal(session_id).await;
+    }
+
     pub(crate) async fn schedule_outbound_setup_timeout(&self, session_id: &SessionId) {
         self.schedule_setup_teardown_timeout_if_current(
             session_id,

@@ -132,7 +132,8 @@ transitions:
   # SendINVITEWithAuth computes the configured UAC auth response and
   # re-issues the INVITE with Authorization / Proxy-Authorization through
   # DialogAdapter::resend_invite_with_auth. Self-loop keeps us in
-  # Initiating until either the retry succeeds or the cap trips.
+  # Initiating until either the retry succeeds or the bounded per-protection-
+  # space policy rejects a repeated challenge.
   - role: "UAC"
     state: "Initiating"
     event:
@@ -267,6 +268,10 @@ transitions:
       # normal calls; required when the transferred call receives 183 before
       # final answer.
       - type: "SendTransferNotifySuccess"
+      # Final response for the initial INVITE. Release request options and
+      # retained authentication material even when 183 established early
+      # media before the 200 response.
+      - type: "ClearPendingINVITEOptions"
     conditions:
       dialog_established: true
       sdp_negotiated: true
