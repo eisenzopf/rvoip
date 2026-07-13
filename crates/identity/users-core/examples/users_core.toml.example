@@ -15,6 +15,7 @@ api_bind_address = "127.0.0.1:8081"
 # JWT token configuration
 issuer = "https://users.rvoip.local"           # Your domain
 audience = ["rvoip-api", "rvoip-sip"]          # Valid audiences
+tenant_id = "tenant-example"                    # Fixed tenant for every access token
 access_ttl_seconds = 900                        # 15 minutes
 refresh_ttl_seconds = 2592000                   # 30 days
 # kid = "users-core-2024"                      # Optional: Key ID for JWKS

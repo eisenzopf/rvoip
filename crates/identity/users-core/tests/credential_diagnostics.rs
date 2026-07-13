@@ -179,6 +179,7 @@ fn every_users_core_token_password_and_hash_container_is_redacted() {
         email: Some(CANARY.into()),
         roles: vec![CANARY.into()],
         scope: CANARY.into(),
+        tenant_id: Some(CANARY.into()),
     };
     let refresh_claims = RefreshTokenClaims {
         iss: CANARY.into(),
@@ -193,6 +194,7 @@ fn every_users_core_token_password_and_hash_container_is_redacted() {
         access_ttl_seconds: 60,
         refresh_ttl_seconds: 120,
         algorithm: "HS256".into(),
+        tenant_id: None,
         signing_key: Some(CANARY.into()),
     };
     let mut config = UsersConfig::default();

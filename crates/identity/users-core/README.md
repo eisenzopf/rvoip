@@ -331,13 +331,17 @@ Retry-After: 900
 
 ### Important Notes
 
-1. **Currently not configurable**: Rate limits are hardcoded in the library. Future versions will add configuration options.
+1. **Programmatic configuration**: `RateLimitConfig`, `RateLimitCapacity`, and `create_router_with_state` configure limits and bounds. The default router uses the values above.
 
 2. **In-memory storage**: Rate limit tracking is stored in memory, so it resets when the server restarts.
 
 3. **Failed login tracking**: Failed login attempts are tracked by username (not IP) to prevent account-specific brute force attacks.
 
 4. **Automatic cleanup**: Old rate limit entries are automatically cleaned up every 5 minutes.
+
+5. **Bounded identity maps**: User, IP, and failed-login keyspaces each default to 16,384 active entries. New identities receive `429` when capacity is exhausted; active lockouts are not evicted.
+
+6. **Proxy-safe client identity**: The built-in HTTP and HTTPS servers attach the actual socket peer address. `X-Forwarded-For` and `X-Real-IP` are ignored unless the immediate peer belongs to a CIDR explicitly supplied with `EnhancedRateLimiter::with_trusted_proxies`.
 
 ### Programmatic Usage
 
@@ -356,7 +360,7 @@ let response = client.post("http://localhost:8081/auth/login")
 
 ### Future Enhancements
 
-- Configuration through `UsersConfig`
+- Declarative rate-limit and trusted-proxy configuration through `UsersConfig`
 - Redis-based storage for distributed deployments
 - Per-endpoint custom limits
 - API key-specific rate limits
@@ -458,6 +462,7 @@ When a user authenticates, their roles are included in the JWT token:
   "email": "alice@example.com",
   "roles": ["user", "admin"],
   "scope": "openid profile email admin",
+  "tenant_id": "tenant-example",
   "iat": 1735689600,
   "exp": 1735690500
 }
@@ -466,7 +471,7 @@ When a user authenticates, their roles are included in the JWT token:
 ### API Key Permissions vs Roles
 
 - **JWT tokens**: Include user roles and have full API access
-- **API keys**: Have specific permissions but no roles
+- **API keys**: Are attenuated by their own permissions. An admin owner's key only has administrative authority when the key itself includes `admin` or `*`, in addition to the operation-specific permission.
 
 API key permissions:
 - `read` - Read access to resources
@@ -474,6 +479,13 @@ API key permissions:
 - `delete` - Delete access
 - `admin` - Administrative operations
 - `*` - Wildcard (all permissions)
+
+For tenant-bound WebRTC/UCTP deployments, configure the issuer-owned
+`jwt.tenant_id` (or `RVOIP_USERS_JWT_TENANT_ID`). The value is copied into
+access tokens and cannot be selected by a login request. Use
+`UsersCoreAuthProvider::new_requiring_tenant` to fail startup when this binding
+is missing. Legacy tenantless claims remain parseable for non-tenant-bound
+consumers.
 
 ### Example: Admin-Only Operations
 

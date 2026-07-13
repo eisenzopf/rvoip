@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use jsonwebtoken::{encode, EncodingKey, Header};
 use rvoip_auth_core::{
     ApiKeyVerifier, AuthenticationMethod, BearerAuthError, BearerValidator, CredentialAuthError,
     DigestAlgorithm, DigestSecret, DigestSecretProvider, PasswordVerifier,
@@ -23,6 +24,7 @@ fn create_test_config(db_url: String) -> UsersConfig {
             access_ttl_seconds: 300,
             refresh_ttl_seconds: 3600,
             algorithm: "HS256".to_string(),
+            tenant_id: Some("tenant-standardcharter".to_string()),
             signing_key: Some("bridge-test-secret".to_string()),
         },
         password: PasswordConfig {
@@ -59,6 +61,7 @@ async fn users_core_provider_implements_auth_core_traits() {
         Some("https://users.rvoip.local")
     );
     assert_eq!(principal.method, AuthenticationMethod::Jwt);
+    assert_eq!(principal.tenant.as_deref(), Some("tenant-standardcharter"));
     assert!(principal.expires_at.is_some());
     assert!(!principal.scopes.is_empty());
 
@@ -93,6 +96,42 @@ async fn users_core_provider_implements_auth_core_traits() {
     .unwrap()
     .unwrap();
     assert!(matches!(digest, DigestSecret::Ha1(ha1) if !ha1.is_empty()));
+}
+
+#[tokio::test]
+async fn tenant_required_bridge_fails_closed_without_issuer_binding() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("tenantless.db");
+    let mut config = create_test_config(format!("sqlite://{}?mode=rwc", db_path.display()));
+    config.jwt.tenant_id = None;
+    let service = init(config).await.unwrap();
+
+    let result = UsersCoreAuthProvider::new_requiring_tenant(Arc::new(service));
+    assert!(matches!(result, Err(users_core::Error::Config(_))));
+}
+
+#[tokio::test]
+async fn configured_tenant_bridge_rejects_tenantless_signed_token() {
+    let seeded = seed_users_core().await;
+    let mut claims = seeded
+        .service
+        .jwt_issuer()
+        .validate_access_token(&seeded.access_token)
+        .unwrap();
+    claims.tenant_id = None;
+    let tenantless = encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(b"bridge-test-secret"),
+    )
+    .unwrap();
+    let provider = UsersCoreAuthProvider::shared(Arc::new(seeded.service));
+
+    let result = BearerValidator::validate_principal(provider.as_ref(), &tenantless).await;
+    assert!(
+        matches!(result, Err(BearerAuthError::Invalid(ref message)) if message.contains("tenant")),
+        "configured tenant bridge must reject a signed tenantless token: {result:?}"
+    );
 }
 
 #[tokio::test]

@@ -36,6 +36,7 @@ async fn service_without_security_store() -> (TempDir, AuthenticationService, us
         access_ttl_seconds: 300,
         refresh_ttl_seconds: 3600,
         algorithm: "HS256".into(),
+        tenant_id: None,
         signing_key: Some("fail-closed-test-signing-key".into()),
     })
     .unwrap();

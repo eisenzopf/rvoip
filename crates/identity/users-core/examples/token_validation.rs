@@ -249,6 +249,7 @@ fn create_expired_token(_auth_service: &users_core::AuthenticationService) -> Re
         email: None,
         roles: vec![],
         scope: "test".to_string(),
+        tenant_id: None,
     };
 
     // For this example, we'll just return a dummy token

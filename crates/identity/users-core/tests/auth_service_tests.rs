@@ -16,6 +16,7 @@ fn create_test_config(db_url: String) -> UsersConfig {
             access_ttl_seconds: 300,   // 5 minutes for tests
             refresh_ttl_seconds: 3600, // 1 hour for tests
             algorithm: "HS256".to_string(),
+            tenant_id: None,
             signing_key: None, // Will be auto-generated
         },
         password: PasswordConfig {

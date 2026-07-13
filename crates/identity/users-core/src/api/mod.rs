@@ -294,9 +294,18 @@ impl AuthContext {
         }
     }
 
-    /// Check if the user has admin role
+    /// Check whether this credential has administrative authority.
+    ///
+    /// API keys are attenuated credentials: an admin owner's role is
+    /// necessary but not sufficient; the key must also carry `admin` or `*`.
     pub fn is_admin(&self) -> bool {
-        self.roles.contains(&"admin".to_string())
+        let owner_is_admin = self.roles.iter().any(|role| role == "admin");
+        owner_is_admin
+            && (self.auth_type == AuthType::Jwt
+                || self
+                    .permissions
+                    .iter()
+                    .any(|permission| permission == "admin" || permission == "*"))
     }
 
     fn require_permission(&self, permission: &str) -> Result<(), AppError> {
@@ -396,7 +405,7 @@ pub async fn create_server_with_tls(
             tracing::info!("   Private key: {}", tls.key_path.display());
 
             axum_server::bind_rustls(addr, config)
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                 .await
                 .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
         }
@@ -414,9 +423,12 @@ pub async fn create_server_with_tls(
             let listener = tokio::net::TcpListener::bind(addr).await?;
             tracing::info!("Starting HTTP server on http://{}", addr);
 
-            axum::serve(listener, app)
-                .await
-                .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
         }
     }
     Ok(())
@@ -1209,6 +1221,43 @@ mod authorization_tests {
     }
 
     #[test]
+    fn api_key_does_not_inherit_admin_owners_cross_user_authority() {
+        let write_only_admin_key = auth(AuthType::ApiKey, &["admin"], &["write"]);
+        assert!(matches!(
+            authorize_user_update(&write_only_admin_key, "user-b", &update()),
+            Err(AppError::Forbidden)
+        ));
+
+        let mut privileged_update = update();
+        privileged_update.roles = Some(vec!["admin".into()]);
+        assert!(matches!(
+            authorize_user_update(&write_only_admin_key, "user-a", &privileged_update),
+            Err(AppError::Forbidden)
+        ));
+        privileged_update.roles = None;
+        privileged_update.active = Some(false);
+        assert!(matches!(
+            authorize_user_update(&write_only_admin_key, "user-a", &privileged_update),
+            Err(AppError::Forbidden)
+        ));
+    }
+
+    #[test]
+    fn explicitly_admin_scoped_api_key_can_use_admin_owner_authority() {
+        let admin_key = auth(AuthType::ApiKey, &["admin"], &["write", "admin"]);
+        assert!(authorize_user_update(&admin_key, "user-b", &update()).is_ok());
+
+        let mut privileged_update = update();
+        privileged_update.roles = Some(vec!["admin".into()]);
+        assert!(authorize_user_update(&admin_key, "user-b", &privileged_update).is_ok());
+
+        let wildcard_key = auth(AuthType::ApiKey, &["admin"], &["*"]);
+        privileged_update.roles = None;
+        privileged_update.active = Some(false);
+        assert!(authorize_user_update(&wildcard_key, "user-b", &privileged_update).is_ok());
+    }
+
+    #[test]
     fn api_key_permissions_are_enforced_even_for_admin_users() {
         let under_scoped = auth(AuthType::ApiKey, &["admin"], &["read"]);
         let mut request = api_key_request("user-a");
@@ -1261,7 +1310,7 @@ mod authorization_tests {
             Err(AppError::Forbidden)
         ));
 
-        let scoped_admin = auth(AuthType::ApiKey, &["admin"], &["read"]);
+        let scoped_admin = auth(AuthType::ApiKey, &["admin"], &["read", "admin"]);
         assert!(require_admin_permission(&scoped_admin, "read").is_ok());
     }
 

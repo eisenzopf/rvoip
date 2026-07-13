@@ -96,6 +96,9 @@ impl UsersConfig {
         if let Ok(value) = std::env::var("RVOIP_USERS_JWT_ALGORITHM") {
             config.jwt.algorithm = value;
         }
+        if let Ok(value) = std::env::var("RVOIP_USERS_JWT_TENANT_ID") {
+            config.jwt.tenant_id = Some(value);
+        }
         if let Ok(value) = std::env::var("RVOIP_USERS_JWT_SIGNING_KEY") {
             config.jwt.signing_key = Some(value);
         }

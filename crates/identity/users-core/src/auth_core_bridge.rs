@@ -22,6 +22,7 @@ use crate::{AuthenticationService, Error, SipDigestAlgorithmFamily, User};
 pub struct UsersCoreAuthProvider {
     auth_service: Arc<AuthenticationService>,
     jwt_validator: JwtValidator,
+    expected_tenant: Option<String>,
 }
 
 impl UsersCoreAuthProvider {
@@ -29,6 +30,7 @@ impl UsersCoreAuthProvider {
     /// [`AuthenticationService`].
     pub fn new(auth_service: Arc<AuthenticationService>) -> Self {
         let issuer = auth_service.jwt_issuer();
+        let expected_tenant = issuer.tenant_id().map(str::to_owned);
         let revocation_checker = Arc::new(UsersCoreTokenRevocationChecker {
             auth_service: auth_service.clone(),
         });
@@ -40,13 +42,33 @@ impl UsersCoreAuthProvider {
         Self {
             auth_service,
             jwt_validator,
+            expected_tenant,
         }
+    }
+
+    /// Construct a bridge for tenant-bound transports. This fails at startup
+    /// if users-core has no issuer-controlled single-tenant binding.
+    pub fn new_requiring_tenant(auth_service: Arc<AuthenticationService>) -> crate::Result<Self> {
+        let provider = Self::new(auth_service);
+        if provider.expected_tenant.is_none() {
+            return Err(Error::Config(
+                "tenant-bound auth bridge requires jwt.tenant_id".to_string(),
+            ));
+        }
+        Ok(provider)
     }
 
     /// Convenience constructor for sharing the bridge across multiple auth
     /// trait objects.
     pub fn shared(auth_service: Arc<AuthenticationService>) -> Arc<Self> {
         Arc::new(Self::new(auth_service))
+    }
+
+    /// Shared form of [`Self::new_requiring_tenant`].
+    pub fn shared_requiring_tenant(
+        auth_service: Arc<AuthenticationService>,
+    ) -> crate::Result<Arc<Self>> {
+        Self::new_requiring_tenant(auth_service).map(Arc::new)
     }
 
     pub fn auth_service(&self) -> &Arc<AuthenticationService> {
@@ -87,6 +109,13 @@ impl BearerValidator for UsersCoreAuthProvider {
         token: &str,
     ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
         let principal = self.jwt_validator.validate_principal(token).await?;
+        if let Some(expected) = self.expected_tenant.as_deref() {
+            if principal.tenant.as_deref() != Some(expected) {
+                return Err(BearerAuthError::Invalid(
+                    "users-core bearer token tenant does not match issuer binding".to_string(),
+                ));
+            }
+        }
         self.ensure_assurance_user_active(&principal.assurance)
             .await?;
         Ok(principal)

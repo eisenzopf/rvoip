@@ -22,6 +22,7 @@ async fn example_sip_register_flow() {
             access_ttl_seconds: 900,
             refresh_ttl_seconds: 2592000,
             algorithm: "HS256".to_string(),
+            tenant_id: None,
             signing_key: None,
         },
         password: PasswordConfig {

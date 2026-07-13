@@ -32,6 +32,15 @@ pub struct UserClaims {
     pub email: Option<String>,
     pub roles: Vec<String>,
     pub scope: String,
+    /// Issuer-controlled tenant binding. Optional while legacy tokens remain
+    /// parseable; tenant-bound consumers must require it explicitly.
+    #[serde(
+        default,
+        alias = "tenant",
+        alias = "tid",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tenant_id: Option<String>,
 }
 
 impl std::fmt::Debug for UserClaims {
@@ -49,6 +58,7 @@ impl std::fmt::Debug for UserClaims {
             .field("role_count", &self.roles.len())
             .field("scope_present", &!self.scope.is_empty())
             .field("scope_len", &self.scope.len())
+            .field("tenant_present", &self.tenant_id.is_some())
             .finish()
     }
 }
@@ -84,6 +94,10 @@ pub struct JwtConfig {
     pub access_ttl_seconds: u64,
     pub refresh_ttl_seconds: u64,
     pub algorithm: String,
+    /// Fixed tenant placed into every access token issued by this instance.
+    /// This value is configuration-owned and is never read from login input.
+    #[serde(default, alias = "tenant")]
+    pub tenant_id: Option<String>,
     #[serde(skip)]
     pub signing_key: Option<String>, // Will be set programmatically
 }
@@ -97,6 +111,7 @@ impl std::fmt::Debug for JwtConfig {
             .field("access_ttl_seconds", &self.access_ttl_seconds)
             .field("refresh_ttl_seconds", &self.refresh_ttl_seconds)
             .field("algorithm_len", &self.algorithm.len())
+            .field("tenant_present", &self.tenant_id.is_some())
             .field("signing_key_present", &self.signing_key.is_some())
             .field(
                 "signing_key_len",
@@ -114,6 +129,7 @@ impl Default for JwtConfig {
             access_ttl_seconds: 900,      // 15 minutes
             refresh_ttl_seconds: 2592000, // 30 days
             algorithm: "HS256".to_string(),
+            tenant_id: None,
             signing_key: None,
         }
     }
@@ -121,6 +137,18 @@ impl Default for JwtConfig {
 
 impl JwtIssuer {
     pub fn new(mut config: JwtConfig) -> Result<Self> {
+        if let Some(tenant) = config.tenant_id.as_ref() {
+            if tenant.is_empty()
+                || tenant.len() > 128
+                || tenant.trim() != tenant
+                || tenant.chars().any(char::is_control)
+            {
+                return Err(Error::Config(
+                    "JWT tenant_id must be 1-128 non-control characters without surrounding whitespace"
+                        .to_string(),
+                ));
+            }
+        }
         if config.signing_key.is_none() {
             match config.algorithm.as_str() {
                 "HS256" => config.signing_key = Some(Self::generate_hs256_secret()),
@@ -189,6 +217,7 @@ impl JwtIssuer {
             email: user.email.clone(),
             roles: user.roles.clone(),
             scope: self.roles_to_scope(&user.roles),
+            tenant_id: self.config.tenant_id.clone(),
         };
 
         encode(&self.header, &claims, &self.encoding_key).map_err(|e| Error::Jwt(e))
@@ -240,6 +269,11 @@ impl JwtIssuer {
     /// Audiences configured for generated access tokens.
     pub fn audience(&self) -> &[String] {
         &self.config.audience
+    }
+
+    /// Fixed tenant bound to access tokens from this issuer, when configured.
+    pub fn tenant_id(&self) -> Option<&str> {
+        self.config.tenant_id.as_deref()
     }
 
     /// Algorithm configured for issued JWTs.
@@ -323,5 +357,26 @@ mod tests {
         assert_eq!(config.issuer, "https://users.rvoip.local");
         assert_eq!(config.access_ttl_seconds, 900);
         assert_eq!(config.algorithm, "HS256");
+        assert!(config.tenant_id.is_none());
+    }
+
+    #[test]
+    fn legacy_claims_without_tenant_remain_parseable() {
+        let claims: UserClaims = serde_json::from_value(serde_json::json!({
+            "iss": "https://users.test",
+            "sub": "user-a",
+            "aud": ["rvoip-api"],
+            "exp": 1,
+            "iat": 1,
+            "jti": "token-a",
+            "username": "alice",
+            "email": null,
+            "roles": ["user"],
+            "scope": "openid"
+        }))
+        .unwrap();
+        assert!(claims.tenant_id.is_none());
+        let encoded = serde_json::to_value(claims).unwrap();
+        assert!(encoded.get("tenant_id").is_none());
     }
 }

@@ -56,6 +56,7 @@ pub async fn start_test_server() -> anyhow::Result<TestServer> {
             access_ttl_seconds: 300,  // 5 minutes for testing
             refresh_ttl_seconds: 600, // 10 minutes for testing
             algorithm: "HS256".to_string(),
+            tenant_id: None,
             signing_key: None, // Will generate a key
         },
         password: PasswordConfig {
