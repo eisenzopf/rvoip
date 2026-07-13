@@ -8,17 +8,12 @@
 //! `MediaFrame { payload: Bytes }` channels driven by `frames_in()` /
 //! `frames_out()`.
 //!
-//! **Payload contract — important.** The WebRTC adapter today places the
-//! full RTP wire image into `MediaFrame.payload` (see the inbound pump in
-//! `crates/webrtc/rvoip-webrtc/src/media/pump.rs`). The orchestrator's
-//! `Transcoder` (see `crates/media/media-core/src/codec/transcoding.rs`)
-//! expects **codec payload bytes** (no RTP header). The SIP side here
-//! emits codec payload bytes (G.711 μ-law) — the shape the transcoder
-//! consumes. End-to-end audio bridging from a SIP UA through the
-//! orchestrator to a WebRTC peer still requires aligning the WebRTC side
-//! to the same convention; tracking that work under follow-up
-//! `GAP_PLAN.md` §3.1 D4 follow-on (the contract reconciliation is a
-//! separate ~3-day refactor of `pump.rs`).
+//! **Payload contract — important.** `MediaFrame.payload` contains codec
+//! payload bytes only, never an RTP wire header. Both this SIP stream and the
+//! WebRTC inbound pump follow that contract; the orchestrator's `Transcoder`
+//! consumes the same representation. RTP timestamps and payload types travel
+//! in their dedicated `MediaFrame` fields, and each transport adapter creates
+//! its own outbound RTP packet at the network boundary.
 
 use std::sync::{Arc, Weak};
 
