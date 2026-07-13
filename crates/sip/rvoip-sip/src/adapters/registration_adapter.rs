@@ -48,22 +48,35 @@ impl RegistrationAdapter {
         expires: u32,
         authorization: Option<String>,
     ) -> Result<()> {
-        info!("🔐 Handling incoming REGISTER from {}", from_uri);
+        info!(
+            from_present = !from_uri.is_empty(),
+            from_len = from_uri.len(),
+            authorization_present = authorization.is_some(),
+            "Handling incoming REGISTER"
+        );
 
         let aor = Self::extract_aor(&from_uri)?;
         let username = aor.user().to_string();
-        debug!("Extracted username: {}", username);
+        debug!(
+            username_present = !username.is_empty(),
+            username_len = username.len(),
+            "Extracted registration identity metadata"
+        );
 
         // Call registrar-core to authenticate
         let (should_register, www_auth_challenge) = self
             .registrar
             .authenticate_register(&username, authorization.as_deref(), "REGISTER", &from_uri)
             .await
-            .map_err(|e| SessionError::RegistrationFailed(e.to_string()))?;
+            .map_err(Self::registrar_authentication_failure)?;
 
         if should_register {
             // Valid credentials - register user
-            info!("✅ Authentication successful for {}", username);
+            info!(
+                username_present = !username.is_empty(),
+                username_len = username.len(),
+                "REGISTER authentication succeeded"
+            );
 
             // Build ContactInfo
             let contact = ContactInfo {
@@ -87,7 +100,7 @@ impl RegistrationAdapter {
             self.registrar
                 .register_aor(&aor, contact, Some(expires))
                 .await
-                .map_err(|e| SessionError::RegistrationFailed(e.to_string()))?;
+                .map_err(Self::registrar_storage_failure)?;
 
             // Publish 200 OK response event
             let response_event =
@@ -108,14 +121,12 @@ impl RegistrationAdapter {
             self.global_coordinator
                 .publish(Arc::new(response_event))
                 .await
-                .map_err(|e| {
-                    SessionError::InternalError(format!("Failed to publish 200 OK: {}", e))
-                })?;
+                .map_err(Self::registration_response_publish_failure)?;
 
-            info!("✅ User {} registered, sent 200 OK", username);
+            info!("REGISTER accepted and response published");
         } else {
             // Need authentication - send 401 challenge
-            info!("🔐 Sending 401 challenge for {}", username);
+            info!("REGISTER rejected; publishing authentication challenge");
 
             let response_event =
                 RvoipCrossCrateEvent::SessionToDialog(SessionToDialogEvent::SendRegisterResponse {
@@ -135,11 +146,9 @@ impl RegistrationAdapter {
             self.global_coordinator
                 .publish(Arc::new(response_event))
                 .await
-                .map_err(|e| {
-                    SessionError::InternalError(format!("Failed to publish 401: {}", e))
-                })?;
+                .map_err(Self::registration_response_publish_failure)?;
 
-            info!("✅ Sent 401 challenge for {}", username);
+            info!("REGISTER authentication challenge published");
         }
 
         Ok(())
@@ -154,7 +163,7 @@ impl RegistrationAdapter {
             .global_coordinator
             .subscribe("dialog_to_session")
             .await
-            .map_err(|e| SessionError::InternalError(format!("Subscribe failed: {}", e)))?;
+            .map_err(Self::registration_event_subscription_failure)?;
 
         let handler = self.clone();
 
@@ -181,7 +190,12 @@ impl RegistrationAdapter {
                                 },
                             ) = concrete
                             {
-                                debug!("📩 Received IncomingRegister for {}", from_uri);
+                                debug!(
+                                    from_present = !from_uri.is_empty(),
+                                    from_len = from_uri.len(),
+                                    authorization_present = authorization.is_some(),
+                                    "Received IncomingRegister"
+                                );
 
                                 if let Err(e) = handler
                                     .handle_incoming_register(
@@ -213,7 +227,77 @@ impl RegistrationAdapter {
     }
 
     fn extract_aor(uri: &str) -> Result<AddressOfRecord> {
-        AddressOfRecord::parse(uri)
-            .map_err(|error| SessionError::InvalidInput(format!("Invalid AOR: {error}")))
+        AddressOfRecord::parse(uri).map_err(|_| {
+            SessionError::InvalidInput("invalid registration address-of-record".into())
+        })
+    }
+
+    fn registrar_authentication_failure<E>(_source: E) -> SessionError {
+        SessionError::RegistrationFailed("registrar authentication failed".into())
+    }
+
+    fn registrar_storage_failure<E>(_source: E) -> SessionError {
+        SessionError::RegistrationFailed("registrar storage failed".into())
+    }
+
+    fn registration_response_publish_failure<E>(_source: E) -> SessionError {
+        SessionError::InternalError("registration response publish failed".into())
+    }
+
+    fn registration_event_subscription_failure<E>(_source: E) -> SessionError {
+        SessionError::InternalError("registration event subscription failed".into())
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    const CANARY: &str = "peer-value\r\nX-Registration-Canary: exposed";
+
+    #[derive(Debug)]
+    struct MaliciousLowerError;
+
+    impl std::fmt::Display for MaliciousLowerError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str(CANARY)
+        }
+    }
+
+    impl std::error::Error for MaliciousLowerError {}
+
+    fn assert_redacted(error: SessionError, expected: &str) {
+        assert_eq!(error.to_string(), expected);
+        assert!(!error.to_string().contains(CANARY));
+        assert!(!format!("{error:?}").contains(CANARY));
+    }
+
+    #[test]
+    fn malformed_aor_error_does_not_echo_peer_input_or_parser_error() {
+        let error = RegistrationAdapter::extract_aor(CANARY).expect_err("malformed AOR");
+        assert_redacted(
+            error,
+            "Invalid input: invalid registration address-of-record",
+        );
+    }
+
+    #[test]
+    fn registrar_and_event_bus_errors_collapse_to_fixed_stage_classes() {
+        assert_redacted(
+            RegistrationAdapter::registrar_authentication_failure(MaliciousLowerError),
+            "Registration failed: registrar authentication failed",
+        );
+        assert_redacted(
+            RegistrationAdapter::registrar_storage_failure(MaliciousLowerError),
+            "Registration failed: registrar storage failed",
+        );
+        assert_redacted(
+            RegistrationAdapter::registration_response_publish_failure(MaliciousLowerError),
+            "Internal error: registration response publish failed",
+        );
+        assert_redacted(
+            RegistrationAdapter::registration_event_subscription_failure(MaliciousLowerError),
+            "Internal error: registration event subscription failed",
+        );
     }
 }

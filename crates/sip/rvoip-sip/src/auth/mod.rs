@@ -218,6 +218,7 @@ mod listener;
 pub use listener::SipListenerAuthPolicy;
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -298,7 +299,7 @@ pub struct AuthIdentity {
 
 /// Result of evaluating inbound UAS authentication across all enabled
 /// schemes in [`SipAuthService`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum SipAuthDecision {
     /// The inbound request carried acceptable credentials.
     Authorized(AuthIdentity),
@@ -311,7 +312,7 @@ pub enum SipAuthDecision {
 
 /// Listener-oriented authentication result retaining the complete canonical
 /// principal alongside the compatibility [`AuthIdentity`] view.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum SipPrincipalAuthDecision {
     /// The request authenticated successfully.
     Authorized {
@@ -332,7 +333,7 @@ pub enum SipPrincipalAuthDecision {
 ///
 /// Send [`value`](Self::value) in either `WWW-Authenticate` or
 /// `Proxy-Authenticate`, depending on [`source`](Self::source).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SipAuthChallenge {
     /// Scheme to advertise.
     pub scheme: SipAuthScheme,
@@ -340,6 +341,196 @@ pub struct SipAuthChallenge {
     pub value: String,
     /// Whether this is a proxy challenge (`407`) rather than origin (`401`).
     pub source: SipAuthSource,
+}
+
+/// Credential-free diagnostic view of an authentication scheme.
+///
+/// `SipAuthScheme::Other` is peer-controlled, so its spelling must never be
+/// rendered by an authentication result container.
+struct SipAuthSchemeDiagnostic<'a>(&'a SipAuthScheme);
+
+impl fmt::Debug for SipAuthSchemeDiagnostic<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl fmt::Display for SipAuthSchemeDiagnostic<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self.0 {
+            SipAuthScheme::Digest => "digest",
+            SipAuthScheme::Bearer => "bearer",
+            SipAuthScheme::Basic => "basic",
+            SipAuthScheme::Aka => "aka",
+            SipAuthScheme::Other(_) => "other",
+        })
+    }
+}
+
+struct AuthIdentityDiagnostic<'a>(&'a AuthIdentity);
+
+impl fmt::Debug for AuthIdentityDiagnostic<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthIdentity")
+            .field("scheme", &SipAuthSchemeDiagnostic(&self.0.scheme))
+            .field("source", &self.0.source)
+            .field("username_present", &self.0.username.is_some())
+            .field("subject_present", &self.0.subject.is_some())
+            .field("realm_present", &self.0.realm.is_some())
+            .field("scope_count", &self.0.scopes.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for SipAuthDecision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Authorized(identity) => formatter
+                .debug_tuple("Authorized")
+                .field(&AuthIdentityDiagnostic(identity))
+                .finish(),
+            Self::Rejected { challenges } => formatter
+                .debug_struct("Rejected")
+                .field("challenge_count", &challenges.len())
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Debug for SipPrincipalAuthDecision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Authorized {
+                identity,
+                principal,
+            } => formatter
+                .debug_struct("Authorized")
+                .field("identity", &AuthIdentityDiagnostic(identity))
+                .field("principal_method", &principal.method)
+                .field("principal_assurance", &principal.assurance.kind())
+                .field("principal_tenant_present", &principal.tenant.is_some())
+                .field("principal_issuer_present", &principal.issuer.is_some())
+                .field("principal_expiry_present", &principal.expires_at.is_some())
+                .field("principal_scope_count", &principal.scopes.len())
+                .finish(),
+            Self::Rejected { challenges } => formatter
+                .debug_struct("Rejected")
+                .field("challenge_count", &challenges.len())
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Debug for SipAuthChallenge {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SipAuthChallenge")
+            .field("scheme", &SipAuthSchemeDiagnostic(&self.scheme))
+            .field("source", &self.source)
+            .field("value_present", &!self.value.is_empty())
+            .field("value_len", &self.value.len())
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod auth_container_diagnostic_tests {
+    use super::*;
+
+    const IDENTITY_CANARY: &str = "identity\r\nX-Identity-Canary: exposed";
+    const CHALLENGE_CANARY: &str = "Digest realm=\"secret\", nonce=\"nonce-canary\"";
+    const SCHEME_CANARY: &str = "Scheme\r\nX-Scheme-Canary: exposed";
+
+    fn malicious_identity() -> AuthIdentity {
+        AuthIdentity {
+            scheme: SipAuthScheme::Other(SCHEME_CANARY.to_string()),
+            username: Some(IDENTITY_CANARY.to_string()),
+            subject: Some(format!("subject-{IDENTITY_CANARY}")),
+            realm: Some(format!("realm-{IDENTITY_CANARY}")),
+            scopes: vec![format!("scope-{IDENTITY_CANARY}")],
+            source: SipAuthSource::Proxy,
+        }
+    }
+
+    fn malicious_challenge() -> SipAuthChallenge {
+        SipAuthChallenge {
+            scheme: SipAuthScheme::Other(SCHEME_CANARY.to_string()),
+            value: CHALLENGE_CANARY.to_string(),
+            source: SipAuthSource::Origin,
+        }
+    }
+
+    fn assert_no_auth_canaries(rendered: &str) {
+        for canary in [IDENTITY_CANARY, CHALLENGE_CANARY, SCHEME_CANARY] {
+            assert!(
+                !rendered.contains(canary),
+                "authentication container leaked peer or credential data: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn auth_challenge_debug_retains_shape_without_challenge_content() {
+        let challenge = malicious_challenge();
+        let rendered = format!("{challenge:?}");
+
+        assert!(rendered.starts_with("SipAuthChallenge"));
+        assert!(rendered.contains("scheme: other"));
+        assert!(rendered.contains("source: Origin"));
+        assert!(rendered.contains("value_present: true"));
+        assert!(rendered.contains(&format!("value_len: {}", CHALLENGE_CANARY.len())));
+        assert_no_auth_canaries(&rendered);
+
+        // Diagnostic hardening must not change the live response value.
+        assert_eq!(challenge.value, CHALLENGE_CANARY);
+    }
+
+    #[test]
+    fn auth_decision_debug_retains_variant_and_metadata_only_identity_shape() {
+        let authorized = SipAuthDecision::Authorized(malicious_identity());
+        let rejected = SipAuthDecision::Rejected {
+            challenges: vec![malicious_challenge()],
+        };
+
+        let authorized_debug = format!("{authorized:?}");
+        assert!(authorized_debug.starts_with("Authorized(AuthIdentity"));
+        assert!(authorized_debug.contains("scheme: other"));
+        assert!(authorized_debug.contains("source: Proxy"));
+        assert!(authorized_debug.contains("username_present: true"));
+        assert!(authorized_debug.contains("scope_count: 1"));
+        assert_no_auth_canaries(&authorized_debug);
+
+        let rejected_debug = format!("{rejected:?}");
+        assert!(rejected_debug.starts_with("Rejected"));
+        assert!(rejected_debug.contains("challenge_count: 1"));
+        assert_no_auth_canaries(&rejected_debug);
+    }
+
+    #[test]
+    fn principal_decision_debug_omits_ownership_and_scope_values() {
+        let principal = AuthenticatedPrincipal {
+            subject: format!("principal-{IDENTITY_CANARY}"),
+            tenant: Some(format!("tenant-{IDENTITY_CANARY}")),
+            scopes: vec![format!("principal-scope-{IDENTITY_CANARY}")],
+            issuer: Some(format!("issuer-{IDENTITY_CANARY}")),
+            expires_at: Some(chrono::Utc::now()),
+            method: AuthenticationMethod::SipDigest,
+            assurance: IdentityAssurance::Anonymous,
+        };
+        let decision = SipPrincipalAuthDecision::Authorized {
+            identity: malicious_identity(),
+            principal,
+        };
+
+        let rendered = format!("{decision:?}");
+        assert!(rendered.starts_with("Authorized"));
+        assert!(rendered.contains("principal_method: SipDigest"));
+        assert!(rendered.contains("principal_assurance: \"anonymous\""));
+        assert!(rendered.contains("principal_tenant_present: true"));
+        assert!(rendered.contains("principal_scope_count: 1"));
+        assert_no_auth_canaries(&rendered);
+    }
 }
 
 /// Non-secret context supplied to UAS-side authentication.

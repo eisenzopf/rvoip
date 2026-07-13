@@ -17,9 +17,12 @@
 
 #![allow(missing_docs)] // policy module is internal infrastructure
 
+use std::fmt;
+
 use rvoip_sip_core::types::headers::{HeaderName, TypedHeader};
 use rvoip_sip_core::types::Method;
 
+use super::options::{HeaderNameDiagnostic, MethodDiagnostic};
 use super::ViolationReason;
 
 /// Role assigned to a header for a given SIP method.
@@ -39,11 +42,22 @@ pub enum HeaderRole {
 
 /// Validate-outbound result: the requested header is required for this
 /// method but missing from the staged set.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MissingRequiredHeader {
     pub method: Method,
     pub name: HeaderName,
     pub reason: &'static str,
+}
+
+impl fmt::Debug for MissingRequiredHeader {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MissingRequiredHeader")
+            .field("method", &MethodDiagnostic(&self.method))
+            .field("name", &HeaderNameDiagnostic(&self.name))
+            .field("reason", &self.reason)
+            .finish()
+    }
 }
 
 /// Classify a header for a given method. See module-level docs.
@@ -162,5 +176,33 @@ pub fn role_to_violation(role: &HeaderRole) -> Option<ViolationReason> {
         HeaderRole::StackManaged => Some(ViolationReason::StackManaged),
         HeaderRole::MethodShaped { setter } => Some(ViolationReason::UseDedicatedSetter(setter)),
         HeaderRole::ApplicationControlled => None,
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn missing_required_header_debug_redacts_extension_spellings() {
+        const METHOD_CANARY: &str = "CUSTOM\r\nX-Method-Canary: exposed";
+        const HEADER_CANARY: &str = "X-Header-Canary\r\nInjected";
+        let violation = MissingRequiredHeader {
+            method: Method::Extension(METHOD_CANARY.to_string()),
+            name: HeaderName::Other(HEADER_CANARY.to_string()),
+            reason: "fixed-policy-class",
+        };
+
+        let rendered = format!("{violation:?}");
+        assert!(rendered.starts_with("MissingRequiredHeader"));
+        assert!(rendered.contains(&format!("value_len: {}", METHOD_CANARY.len())));
+        assert!(rendered.contains(&format!("name_len: {}", HEADER_CANARY.len())));
+        assert!(!rendered.contains(METHOD_CANARY));
+        assert!(!rendered.contains(HEADER_CANARY));
+        assert_eq!(
+            violation.method,
+            Method::Extension(METHOD_CANARY.to_string())
+        );
+        assert_eq!(violation.name, HeaderName::Other(HEADER_CANARY.to_string()));
     }
 }

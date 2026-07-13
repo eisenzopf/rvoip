@@ -5,13 +5,17 @@
 //! `SessionHandle`). [`Result`] is the `Result<T, SessionError>` alias used
 //! throughout the crate.
 
+use std::fmt;
+
 use thiserror::Error;
+
+use crate::api::headers::options::{HeaderNameDiagnostic, HeaderNamesDiagnostic, MethodDiagnostic};
 
 /// Convenience alias for `Result<T, SessionError>` used across the crate's API.
 pub type Result<T> = std::result::Result<T, SessionError>;
 
 /// Errors returned by the `rvoip-sip` session layer.
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum SessionError {
     /// No session with the given identifier exists in the registry.
     #[error("Session not found: {0}")]
@@ -80,7 +84,10 @@ pub enum SessionError {
 
     /// RFC 3261 §22.2 — the server challenged an outbound request with 401/407
     /// but the request flow has no credentials on file.
-    #[error("server challenged {method} but no credentials are on file")]
+    #[error(
+        "server challenged {} but no credentials are on file",
+        MethodDiagnostic(.method)
+    )]
     MissingCredentialsForRequestAuth {
         /// SIP method that was challenged.
         method: rvoip_sip_core::Method,
@@ -94,7 +101,7 @@ pub enum SessionError {
 
     /// RFC 3261 §22.2 — outbound request auth has already been retried once and
     /// the server challenged again.
-    #[error("{method} auth retry limit exceeded")]
+    #[error("{} auth retry limit exceeded", MethodDiagnostic(.method))]
     RequestAuthRetryExhausted {
         /// SIP method whose auth retry limit was exceeded.
         method: rvoip_sip_core::Method,
@@ -148,7 +155,11 @@ pub enum SessionError {
     /// common case is staging a stack-managed name (Call-ID, CSeq,
     /// Via, Max-Forwards) or a method-shaped name that has a
     /// dedicated setter (e.g. Authorization -> `with_credentials` / `with_auth`).
-    #[error("header policy violation on {method}: {header} — {reason}")]
+    #[error(
+        "header policy violation on {}: {} — {reason}",
+        MethodDiagnostic(.method),
+        HeaderNameDiagnostic(.header)
+    )]
     HeaderPolicy {
         /// SIP method whose per-method header policy was violated.
         method: rvoip_sip_core::Method,
@@ -161,7 +172,11 @@ pub enum SessionError {
     /// SIP_API_DESIGN_2 §8 — `HeaderPolicy::validate_outbound`
     /// reported one or more required application-supplied headers
     /// were missing for the chosen method.
-    #[error("required application header(s) missing for {method}: {names:?}")]
+    #[error(
+        "required application header(s) missing for {}: {:?}",
+        MethodDiagnostic(.method),
+        HeaderNamesDiagnostic(.names)
+    )]
     MissingRequiredHeader {
         /// SIP method that requires the missing header(s).
         method: rvoip_sip_core::Method,
@@ -175,11 +190,118 @@ pub enum SessionError {
     /// in-flight prior `.send()`. Wait for the first future to
     /// complete (or drop cleanly) before starting another of the
     /// same method.
-    #[error("another {method} is already in flight on this session")]
+    #[error(
+        "another {} is already in flight on this session",
+        MethodDiagnostic(.method)
+    )]
     Conflict {
         /// SIP method whose in-flight `.send()` blocks a second concurrent send.
         method: rvoip_sip_core::Method,
     },
+}
+
+// Keep the established derived-Debug shape for every fixed/string variant,
+// while substituting diagnostic-only views for application-controlled SIP
+// method and header fields. The live error fields remain exact and matchable.
+impl fmt::Debug for SessionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SessionNotFound(value) => formatter
+                .debug_tuple("SessionNotFound")
+                .field(value)
+                .finish(),
+            Self::InvalidTransition(value) => formatter
+                .debug_tuple("InvalidTransition")
+                .field(value)
+                .finish(),
+            Self::DialogError(value) => formatter.debug_tuple("DialogError").field(value).finish(),
+            Self::MediaError(value) => formatter.debug_tuple("MediaError").field(value).finish(),
+            Self::MediaIntegration { reason } => formatter
+                .debug_struct("MediaIntegration")
+                .field("reason", reason)
+                .finish(),
+            Self::SDPNegotiationFailed(value) => formatter
+                .debug_tuple("SDPNegotiationFailed")
+                .field(value)
+                .finish(),
+            Self::ConfigurationError(value) => formatter
+                .debug_tuple("ConfigurationError")
+                .field(value)
+                .finish(),
+            Self::ConfigError(value) => formatter.debug_tuple("ConfigError").field(value).finish(),
+            Self::InvalidInput(value) => {
+                formatter.debug_tuple("InvalidInput").field(value).finish()
+            }
+            Self::Timeout(value) => formatter.debug_tuple("Timeout").field(value).finish(),
+            Self::NetworkError(value) => {
+                formatter.debug_tuple("NetworkError").field(value).finish()
+            }
+            Self::ProtocolError(value) => {
+                formatter.debug_tuple("ProtocolError").field(value).finish()
+            }
+            Self::UnreliableProvisionalsNotSupported => {
+                formatter.write_str("UnreliableProvisionalsNotSupported")
+            }
+            Self::MissingCredentialsForInviteAuth => {
+                formatter.write_str("MissingCredentialsForInviteAuth")
+            }
+            Self::MissingCredentialsForRequestAuth { method } => formatter
+                .debug_struct("MissingCredentialsForRequestAuth")
+                .field("method", &MethodDiagnostic(method))
+                .finish(),
+            Self::InviteAuthRetryExhausted => formatter.write_str("InviteAuthRetryExhausted"),
+            Self::RequestAuthRetryExhausted { method } => formatter
+                .debug_struct("RequestAuthRetryExhausted")
+                .field("method", &MethodDiagnostic(method))
+                .finish(),
+            Self::InternalError(value) => {
+                formatter.debug_tuple("InternalError").field(value).finish()
+            }
+            Self::IoError(value) => formatter.debug_tuple("IoError").field(value).finish(),
+            Self::NotImplemented(value) => formatter
+                .debug_tuple("NotImplemented")
+                .field(value)
+                .finish(),
+            Self::TransferFailed(value) => formatter
+                .debug_tuple("TransferFailed")
+                .field(value)
+                .finish(),
+            Self::AuthError(value) => formatter.debug_tuple("AuthError").field(value).finish(),
+            Self::InviteAuthConstructionFailed => {
+                formatter.write_str("InviteAuthConstructionFailed")
+            }
+            Self::RequestAuthConstructionFailed => {
+                formatter.write_str("RequestAuthConstructionFailed")
+            }
+            Self::RegisterAuthConstructionFailed => {
+                formatter.write_str("RegisterAuthConstructionFailed")
+            }
+            Self::RegistrationFailed(value) => formatter
+                .debug_tuple("RegistrationFailed")
+                .field(value)
+                .finish(),
+            Self::Other(value) => formatter.debug_tuple("Other").field(value).finish(),
+            Self::HeaderPolicy {
+                method,
+                header,
+                reason,
+            } => formatter
+                .debug_struct("HeaderPolicy")
+                .field("method", &MethodDiagnostic(method))
+                .field("header", &HeaderNameDiagnostic(header))
+                .field("reason", reason)
+                .finish(),
+            Self::MissingRequiredHeader { method, names } => formatter
+                .debug_struct("MissingRequiredHeader")
+                .field("method", &MethodDiagnostic(method))
+                .field("names", &HeaderNamesDiagnostic(names))
+                .finish(),
+            Self::Conflict { method } => formatter
+                .debug_struct("Conflict")
+                .field("method", &MethodDiagnostic(method))
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -243,6 +365,95 @@ impl From<Box<dyn std::error::Error + Send + Sync>> for SessionError {
 impl From<rvoip_auth_core::AuthError> for SessionError {
     fn from(err: rvoip_auth_core::AuthError) -> Self {
         SessionError::AuthError(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod method_diagnostic_tests {
+    use super::*;
+    use crate::api::headers::ViolationReason;
+    use rvoip_sip_core::types::headers::HeaderName;
+    use rvoip_sip_core::Method;
+
+    const METHOD_CANARY: &str = "CUSTOM\r\nX-Method-Canary: exposed";
+    const HEADER_CANARY: &str = "X-Header-Canary\r\nInjected";
+
+    fn assert_redacted(error: &SessionError) {
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            assert!(
+                !rendered.contains(METHOD_CANARY),
+                "extension method leaked: {rendered}"
+            );
+            assert!(
+                !rendered.contains(HEADER_CANARY),
+                "custom header leaked: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_method_bearing_error_redacts_extension_spelling() {
+        let extension = || Method::Extension(METHOD_CANARY.to_string());
+        let errors = [
+            SessionError::MissingCredentialsForRequestAuth {
+                method: extension(),
+            },
+            SessionError::RequestAuthRetryExhausted {
+                method: extension(),
+            },
+            SessionError::HeaderPolicy {
+                method: extension(),
+                header: HeaderName::Other(HEADER_CANARY.to_string()),
+                reason: ViolationReason::StackManaged,
+            },
+            SessionError::MissingRequiredHeader {
+                method: extension(),
+                names: vec![HeaderName::Other(HEADER_CANARY.to_string())],
+            },
+            SessionError::Conflict {
+                method: extension(),
+            },
+        ];
+
+        for error in &errors {
+            assert_redacted(error);
+            let display = error.to_string();
+            let debug = format!("{error:?}");
+            assert!(display.contains(&format!("extension(len={})", METHOD_CANARY.len())));
+            assert!(debug.contains(&format!("value_len: {}", METHOD_CANARY.len())));
+        }
+
+        match &errors[2] {
+            SessionError::HeaderPolicy { method, header, .. } => {
+                assert_eq!(method, &Method::Extension(METHOD_CANARY.to_string()));
+                assert_eq!(header, &HeaderName::Other(HEADER_CANARY.to_string()));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fixed_error_debug_shapes_remain_derived_compatible() {
+        assert_eq!(
+            format!("{:?}", SessionError::SessionNotFound("call-1".to_string())),
+            "SessionNotFound(\"call-1\")"
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                SessionError::MissingCredentialsForRequestAuth {
+                    method: Method::Invite,
+                }
+            ),
+            "MissingCredentialsForRequestAuth { method: Invite }"
+        );
+        assert_eq!(
+            SessionError::Conflict {
+                method: Method::Message,
+            }
+            .to_string(),
+            "another MESSAGE is already in flight on this session"
+        );
     }
 }
 

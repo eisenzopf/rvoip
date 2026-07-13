@@ -18,6 +18,71 @@ use rvoip_sip_core::types::Method;
 use super::policy::{self, HeaderRole};
 use super::view::SipHeaderView;
 
+/// Diagnostic-only method view that preserves standard-method names while
+/// reducing peer/application-controlled extension spellings to a bounded
+/// class and length.
+pub(crate) struct MethodDiagnostic<'a>(pub(crate) &'a Method);
+
+impl fmt::Display for MethodDiagnostic<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Method::Extension(value) => write!(formatter, "extension(len={})", value.len()),
+            method => fmt::Display::fmt(method, formatter),
+        }
+    }
+}
+
+impl fmt::Debug for MethodDiagnostic<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Method::Extension(value) => formatter
+                .debug_struct("Extension")
+                .field("value_len", &value.len())
+                .finish(),
+            method => fmt::Debug::fmt(method, formatter),
+        }
+    }
+}
+
+/// Diagnostic-only header-name view. Standard names are a fixed allowlist;
+/// custom spellings are reported only as a class and byte length.
+pub(crate) struct HeaderNameDiagnostic<'a>(pub(crate) &'a HeaderName);
+
+impl fmt::Display for HeaderNameDiagnostic<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            HeaderName::Other(value) => write!(formatter, "custom(len={})", value.len()),
+            name => formatter.write_str(name.as_str()),
+        }
+    }
+}
+
+impl fmt::Debug for HeaderNameDiagnostic<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            HeaderName::Other(value) => formatter
+                .debug_struct("Other")
+                .field("name_len", &value.len())
+                .finish(),
+            name => fmt::Debug::fmt(name, formatter),
+        }
+    }
+}
+
+/// Debug-list adapter used by errors that retain application-controlled
+/// header names as live fields.
+pub(crate) struct HeaderNamesDiagnostic<'a>(pub(crate) &'a [HeaderName]);
+
+impl fmt::Debug for HeaderNamesDiagnostic<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut list = formatter.debug_list();
+        for name in self.0 {
+            list.entry(&HeaderNameDiagnostic(name));
+        }
+        list.finish()
+    }
+}
+
 /// Shared per-builder state. Embedded by every concrete builder and
 /// surfaced to the trait defaults through
 /// [`SipRequestOptions::header_state_mut`].
@@ -85,7 +150,7 @@ impl fmt::Display for ViolationReason {
 
 /// Returned by [`SipRequestOptions::with_header`] (and friends) when a
 /// policy rule rejects the header.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HeaderPolicyViolation {
     /// The SIP method the offending builder targets.
     pub method: Method,
@@ -99,9 +164,22 @@ impl fmt::Display for HeaderPolicyViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "header policy violation on {}: {:?} — {}",
-            self.method, self.header, self.reason
+            "header policy violation on {}: {} — {}",
+            MethodDiagnostic(&self.method),
+            HeaderNameDiagnostic(&self.header),
+            self.reason
         )
+    }
+}
+
+impl fmt::Debug for HeaderPolicyViolation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HeaderPolicyViolation")
+            .field("method", &MethodDiagnostic(&self.method))
+            .field("header", &HeaderNameDiagnostic(&self.header))
+            .field("reason", &self.reason)
+            .finish()
     }
 }
 
@@ -110,12 +188,41 @@ impl std::error::Error for HeaderPolicyViolation {}
 /// Audit report returned by
 /// [`SipRequestOptions::with_headers_from`]: which inbound headers
 /// were copied through and which were filtered (and why).
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct HeaderCarryThroughReport {
     /// Headers that were copied through from the source.
     pub copied: Vec<HeaderName>,
     /// Headers that were filtered out, each paired with the reason.
     pub skipped: Vec<(HeaderName, ViolationReason)>,
+}
+
+impl fmt::Debug for HeaderCarryThroughReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let stack_managed_count = self
+            .skipped
+            .iter()
+            .filter(|(_, reason)| matches!(reason, ViolationReason::StackManaged))
+            .count();
+        let wrong_method_count = self
+            .skipped
+            .iter()
+            .filter(|(_, reason)| matches!(reason, ViolationReason::WrongMethod))
+            .count();
+        let dedicated_setter_count = self
+            .skipped
+            .iter()
+            .filter(|(_, reason)| matches!(reason, ViolationReason::UseDedicatedSetter(_)))
+            .count();
+
+        formatter
+            .debug_struct("HeaderCarryThroughReport")
+            .field("copied_count", &self.copied.len())
+            .field("skipped_count", &self.skipped.len())
+            .field("stack_managed_count", &stack_managed_count)
+            .field("wrong_method_count", &wrong_method_count)
+            .field("dedicated_setter_count", &dedicated_setter_count)
+            .finish()
+    }
 }
 
 /// The shared outbound-builder shape. See module docs.
@@ -157,8 +264,8 @@ pub trait SipRequestOptions: Sized + Send + Sync {
             }
             (HeaderRole::MethodShaped { setter }, BuilderStrictness::Lenient) => {
                 tracing::warn!(
-                    method = %method,
-                    header = ?name,
+                    method = %MethodDiagnostic(&method),
+                    header = %HeaderNameDiagnostic(&name),
                     setter = setter,
                     "Builder Lenient mode: dropping method-shaped header; \
                      use the dedicated setter instead",
@@ -322,5 +429,96 @@ mod tests {
         assert!(debug.contains("strictness: Lenient"));
         assert!(!debug.contains("X-Secret-Canary"));
         assert!(!debug.contains("builder-header-secret-canary"));
+    }
+
+    #[test]
+    fn header_policy_diagnostics_redact_extension_method_and_custom_header_spelling() {
+        const METHOD_CANARY: &str = "CUSTOM\r\nX-Method-Canary: exposed";
+        const HEADER_CANARY: &str = "X-Header-Canary\r\nInjected";
+        let violation = HeaderPolicyViolation {
+            method: Method::Extension(METHOD_CANARY.to_string()),
+            header: HeaderName::Other(HEADER_CANARY.to_string()),
+            reason: ViolationReason::StackManaged,
+        };
+
+        let display = violation.to_string();
+        let debug = format!("{violation:?}");
+        for rendered in [&display, &debug] {
+            assert!(
+                !rendered.contains(METHOD_CANARY),
+                "method leaked: {rendered}"
+            );
+            assert!(
+                !rendered.contains(HEADER_CANARY),
+                "header leaked: {rendered}"
+            );
+        }
+        assert!(display.contains(&format!("extension(len={})", METHOD_CANARY.len())));
+        assert!(display.contains(&format!("custom(len={})", HEADER_CANARY.len())));
+        assert!(debug.starts_with("HeaderPolicyViolation"));
+        assert!(debug.contains(&format!("value_len: {}", METHOD_CANARY.len())));
+        assert!(debug.contains(&format!("name_len: {}", HEADER_CANARY.len())));
+
+        // The application-facing fields remain intact for policy handling.
+        assert_eq!(
+            violation.method,
+            Method::Extension(METHOD_CANARY.to_string())
+        );
+        assert_eq!(
+            violation.header,
+            HeaderName::Other(HEADER_CANARY.to_string())
+        );
+    }
+
+    #[test]
+    fn standard_header_policy_debug_shape_remains_actionable() {
+        let violation = HeaderPolicyViolation {
+            method: Method::Invite,
+            header: HeaderName::CallId,
+            reason: ViolationReason::StackManaged,
+        };
+
+        assert_eq!(
+            violation.to_string(),
+            "header policy violation on INVITE: Call-ID — owned by the dialog/transaction layer"
+        );
+        assert_eq!(
+            format!("{violation:?}"),
+            "HeaderPolicyViolation { method: Invite, header: CallId, reason: StackManaged }"
+        );
+    }
+
+    #[test]
+    fn carry_through_report_debug_exposes_counts_not_custom_names() {
+        const COPIED_CANARY: &str = "X-Copied-Canary";
+        const SKIPPED_CANARY: &str = "X-Skipped-Canary";
+        let report = HeaderCarryThroughReport {
+            copied: vec![HeaderName::Other(COPIED_CANARY.to_string())],
+            skipped: vec![
+                (
+                    HeaderName::Other(SKIPPED_CANARY.to_string()),
+                    ViolationReason::StackManaged,
+                ),
+                (
+                    HeaderName::Authorization,
+                    ViolationReason::UseDedicatedSetter("with_credentials"),
+                ),
+            ],
+        };
+
+        let debug = format!("{report:?}");
+        assert!(debug.starts_with("HeaderCarryThroughReport"));
+        assert!(debug.contains("copied_count: 1"));
+        assert!(debug.contains("skipped_count: 2"));
+        assert!(debug.contains("stack_managed_count: 1"));
+        assert!(debug.contains("dedicated_setter_count: 1"));
+        assert!(!debug.contains(COPIED_CANARY));
+        assert!(!debug.contains(SKIPPED_CANARY));
+
+        // The report still carries exact names for application decisions.
+        assert_eq!(
+            report.copied[0],
+            HeaderName::Other(COPIED_CANARY.to_string())
+        );
     }
 }
