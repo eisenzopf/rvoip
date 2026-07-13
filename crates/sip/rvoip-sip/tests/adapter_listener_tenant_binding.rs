@@ -425,13 +425,15 @@ async fn verified_mtls_certificate_reaches_adapter_and_unverified_peers_do_not()
     )
     .await
     .expect("anonymous TLS client");
-    assert!(tokio::time::timeout(
+    // A TLS 1.3 client may finish its first write before observing the
+    // server's certificate-required alert. The security boundary is that no
+    // request from that connection reaches the authenticated adapter handoff.
+    let _ = tokio::time::timeout(
         Duration::from_secs(3),
         anonymous.send_message(tls_invite(tls_bind, "anonymous"), tls_bind),
     )
     .await
-    .expect("anonymous handshake deadline")
-    .is_err());
+    .expect("anonymous handshake deadline");
     assert_no_authenticated_event(&mut events).await;
 
     let (untrusted, _) = TlsTransport::client_only(
@@ -441,13 +443,12 @@ async fn verified_mtls_certificate_reaches_adapter_and_unverified_peers_do_not()
     )
     .await
     .expect("untrusted TLS client configuration");
-    assert!(tokio::time::timeout(
+    let _ = tokio::time::timeout(
         Duration::from_secs(3),
         untrusted.send_message(tls_invite(tls_bind, "untrusted"), tls_bind),
     )
     .await
-    .expect("untrusted handshake deadline")
-    .is_err());
+    .expect("untrusted handshake deadline");
     assert_no_authenticated_event(&mut events).await;
 
     let (trusted, _) = TlsTransport::client_only(
