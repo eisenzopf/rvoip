@@ -5,6 +5,7 @@
 //! physical peer's media router is the only safe allocation authority.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use crate::errors::UctpError;
 use crate::ids::StreamId;
@@ -16,7 +17,7 @@ use crate::ids::StreamId;
 /// is assigned at `connection.ready` and announced via `stream.opened`,
 /// so the chosen-codec / direction / kind from negotiation must be held
 /// here until the ready transition.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AcceptedStream {
     /// Wire-level Stream id (the offerer-chosen `id` from the
     /// `streams_offered[*]` entry — opaque to the server).
@@ -32,6 +33,19 @@ pub struct AcceptedStream {
     /// identity to the `SubscriptionHandler` for `from_participant`
     /// resolution.
     pub participant: String,
+}
+
+impl fmt::Debug for AcceptedStream {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AcceptedStream")
+            .field("stream_id_present", &!self.strm_id.is_empty())
+            .field("kind_present", &!self.kind.is_empty())
+            .field("direction_present", &!self.direction.is_empty())
+            .field("chosen_codec_present", &self.chosen_codec.is_some())
+            .field("participant_present", &!self.participant.is_empty())
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,7 +75,6 @@ pub enum ConnectionInput {
     EndReceived,
 }
 
-#[derive(Debug)]
 pub struct ConnectionMachine {
     state: UctpConnectionState,
     streams: HashMap<u16, StreamId>,
@@ -87,6 +100,18 @@ pub struct ConnectionMachine {
     /// [`tracing::Span::none`] for the no-tracing constructor so test
     /// code stays unchanged.
     lifetime_span: tracing::Span,
+}
+
+impl fmt::Debug for ConnectionMachine {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConnectionMachine")
+            .field("state", &self.state)
+            .field("bound_stream_count", &self.streams.len())
+            .field("pending_stream_count", &self.pending_streams.len())
+            .field("streams_announced", &self.streams_announced)
+            .finish()
+    }
 }
 
 impl ConnectionMachine {

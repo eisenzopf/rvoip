@@ -1,9 +1,22 @@
 //! Connection envelope payloads per CONVERSATION_PROTOCOL.md §7.4.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
+
+macro_rules! metadata_only_debug {
+    ($($type:ty),+ $(,)?) => {
+        $(
+            impl fmt::Debug for $type {
+                fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    formatter.write_str(stringify!($type))
+                }
+            }
+        )+
+    };
+}
 
 /// `connection.offer` (bidi) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ConnectionOffer {
     pub by_participant: String,
     pub substrate: String,
@@ -14,7 +27,7 @@ pub struct ConnectionOffer {
 }
 
 /// `connection.answer` (bidi) payload. Mirrors `connection.offer`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ConnectionAnswer {
     pub by_participant: String,
     pub substrate: String,
@@ -25,7 +38,7 @@ pub struct ConnectionAnswer {
 }
 
 /// `connection.update` (bidi) payload — hold, resume, mute, codec-renegotiate, etc.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ConnectionUpdate {
     pub action: String,
     #[serde(default)]
@@ -37,7 +50,7 @@ pub struct ConnectionUpdate {
 }
 
 /// `connection.end` (bidi) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ConnectionEnd {
     pub reason_code: u16,
     pub reason: String,
@@ -46,13 +59,13 @@ pub struct ConnectionEnd {
 /// `connection.quality` (bidi) payload — per-Stream quality snapshot.
 ///
 /// CONVERSATION_PROTOCOL.md §10.3.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ConnectionQuality {
     pub interval_ms: u32,
     pub streams: Vec<StreamQuality>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StreamOffer {
     pub id: String,
     pub kind: String,
@@ -60,7 +73,7 @@ pub struct StreamOffer {
     pub codec_preferences: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StreamAnswer {
     pub id: String,
     pub kind: String,
@@ -72,7 +85,7 @@ pub struct StreamAnswer {
 ///
 /// Per CONVERSATION_PROTOCOL.md §10.2.1. The full SDP carries ICE
 /// candidates + DTLS fingerprint inline (no trickle ICE in v0).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WebRtcSubstrateSetup {
     /// Always `"websocket+webrtc"`.
     pub kind: String,
@@ -96,7 +109,7 @@ impl WebRtcSubstrateSetup {
 /// Mirrors the browser-native `RTCIceCandidateInit` shape so JS clients
 /// can forward `pc.onicecandidate` events as-is. An empty `candidate`
 /// string signals end-of-candidates for the given `sdp_mid`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct IceCandidateInit {
     /// SDP `a=candidate:` attribute value, without the leading `a=`.
     /// An empty string signals end-of-candidates.
@@ -123,7 +136,7 @@ impl IceCandidateInit {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StreamQuality {
     pub strm_id: String,
     pub loss_pct: f32,
@@ -134,3 +147,16 @@ pub struct StreamQuality {
     pub packets_sent: u64,
     pub packets_received: u64,
 }
+
+metadata_only_debug!(
+    ConnectionOffer,
+    ConnectionAnswer,
+    ConnectionUpdate,
+    ConnectionEnd,
+    ConnectionQuality,
+    StreamOffer,
+    StreamAnswer,
+    WebRtcSubstrateSetup,
+    IceCandidateInit,
+    StreamQuality,
+);

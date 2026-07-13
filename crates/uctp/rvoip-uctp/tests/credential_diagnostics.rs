@@ -1,7 +1,13 @@
 use rvoip_auth_core::EnvelopeSignature;
 use rvoip_uctp::payloads::auth::{AuthChallenge, AuthRefresh, AuthResponse};
+use rvoip_uctp::payloads::capability::CapabilityAdvertise;
+use rvoip_uctp::payloads::connection::{ConnectionOffer, WebRtcSubstrateSetup};
 use rvoip_uctp::payloads::control::IdentityStepUpResponse;
-use rvoip_uctp::state::UctpScopePolicy;
+use rvoip_uctp::payloads::conversation::{ConversationCreate, ConversationPolicy};
+use rvoip_uctp::payloads::message::{Attachment, BodyEncoding, MessageSend};
+use rvoip_uctp::payloads::session::SessionInvite;
+use rvoip_uctp::payloads::stream::StreamInfo;
+use rvoip_uctp::state::{ResourceBindingError, SubscriptionOutcome, UctpScopePolicy};
 use rvoip_uctp::{MessageType, SubstrateError, UctpEnvelope, UctpError};
 
 const CANARY: &str = "uctp-credential-malicious-canary\r\nAuthorization: exposed";
@@ -108,8 +114,110 @@ fn coordinator_never_logs_raw_auth_provider_errors() {
     assert!(!source.contains("warn!(%error, \"auth.refresh"));
     assert!(!source.contains("asserted_participant = %"));
     assert!(!source.contains("authenticated_participant = %"));
+    assert!(!source.contains("reason = %error.reason"));
     assert!(source.contains("error_class = \"credential-validation\""));
     assert!(source.contains("error_class = \"resource-binding-authorization\""));
+}
+
+#[test]
+fn outer_payload_and_resource_error_diagnostics_are_metadata_only() {
+    let session = SessionInvite {
+        from: CANARY.into(),
+        to: vec![CANARY.into()],
+        medium: CANARY.into(),
+        intent: CANARY.into(),
+        capabilities_offer: serde_json::json!({"credential": CANARY}),
+    };
+    let connection = ConnectionOffer {
+        by_participant: CANARY.into(),
+        substrate: CANARY.into(),
+        capabilities: serde_json::json!({"credential": CANARY}),
+        streams_offered: Vec::new(),
+        substrate_setup: serde_json::json!({"sdp": CANARY}),
+    };
+    let webrtc = WebRtcSubstrateSetup::new(CANARY);
+    let conversation = ConversationCreate {
+        tenant_id: CANARY.into(),
+        policy: ConversationPolicy::Ephemeral,
+        idle_close_secs: Some(30),
+        metadata: serde_json::json!({"credential": CANARY}),
+        initial_participants: Vec::new(),
+    };
+    let message = MessageSend {
+        msg_id: CANARY.into(),
+        from: CANARY.into(),
+        to: serde_json::json!([CANARY]),
+        content_type: CANARY.into(),
+        label: CANARY.into(),
+        reliability: rvoip_core::DataReliability::ReliableOrdered,
+        body: CANARY.into(),
+        body_encoding: BodyEncoding::Utf8,
+        attachments: vec![Attachment {
+            id: CANARY.into(),
+            content_type: CANARY.into(),
+            url: Some(CANARY.into()),
+            size_bytes: 1,
+        }],
+        in_reply_to_msg: Some(CANARY.into()),
+    };
+    let stream = StreamInfo {
+        strm_id: CANARY.into(),
+        kind: CANARY.into(),
+        codec: serde_json::json!({"credential": CANARY}),
+        direction: CANARY.into(),
+        stream_local_id: 1,
+        opened_at: chrono::Utc::now(),
+    };
+    let capability = CapabilityAdvertise {
+        by_participant: CANARY.into(),
+        capabilities: serde_json::json!({"credential": CANARY}),
+        trigger: CANARY.into(),
+    };
+    let binding = ResourceBindingError::forbidden(CANARY);
+    let outcome = SubscriptionOutcome::reject(403, CANARY);
+
+    for rendered in [
+        format!("{session:?}"),
+        format!("{connection:?}"),
+        format!("{webrtc:?}"),
+        format!("{conversation:?}"),
+        format!("{message:?}"),
+        format!("{stream:?}"),
+        format!("{capability:?}"),
+        format!("{binding:?} {binding}"),
+        format!("{outcome:?}"),
+    ] {
+        assert!(!rendered.contains(CANARY), "payload leaked: {rendered}");
+    }
+
+    assert_eq!(session.from, CANARY);
+    assert_eq!(webrtc.sdp, CANARY);
+    assert_eq!(message.body, CANARY);
+    assert_eq!(binding.reason, CANARY);
+}
+
+#[test]
+fn public_payload_structs_do_not_regain_derived_debug() {
+    for source in [
+        include_str!("../src/payloads/capability.rs"),
+        include_str!("../src/payloads/connection.rs"),
+        include_str!("../src/payloads/conversation.rs"),
+        include_str!("../src/payloads/message.rs"),
+        include_str!("../src/payloads/session.rs"),
+        include_str!("../src/payloads/stream.rs"),
+    ] {
+        let lines = source.lines().collect::<Vec<_>>();
+        for (index, line) in lines.iter().enumerate() {
+            if !line.trim_start().starts_with("pub struct ") {
+                continue;
+            }
+            let attributes = lines[index.saturating_sub(4)..index].join("\n");
+            assert!(
+                !attributes.contains("Debug"),
+                "public payload struct regained derived Debug: {line}"
+            );
+        }
+    }
 }
 
 #[test]

@@ -2,9 +2,22 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+
+macro_rules! metadata_only_debug {
+    ($($type:ty),+ $(,)?) => {
+        $(
+            impl fmt::Debug for $type {
+                fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    formatter.write_str(stringify!($type))
+                }
+            }
+        )+
+    };
+}
 
 /// `conversation.create` (C→S) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ConversationCreate {
     pub tenant_id: String,
     pub policy: ConversationPolicy,
@@ -17,7 +30,7 @@ pub struct ConversationCreate {
 }
 
 /// `conversation.opened` (S→C) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ConversationOpened {
     pub tenant_id: String,
     pub policy: ConversationPolicy,
@@ -30,7 +43,7 @@ pub struct ConversationOpened {
 }
 
 /// `conversation.closed` (S→C) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ConversationClosed {
     pub reason_code: u16,
     pub reason: String,
@@ -38,7 +51,7 @@ pub struct ConversationClosed {
 }
 
 /// `conversation.list` (C→S) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ConversationList {
     #[serde(default)]
     pub filter: serde_json::Value,
@@ -55,13 +68,13 @@ pub enum ConversationPolicy {
     Persistent,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct InitialParticipant {
     pub identity_id: String,
     pub role: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Participant {
     pub participant_id: String,
     pub identity_id: String,
@@ -70,3 +83,12 @@ pub struct Participant {
     #[serde(default)]
     pub display_name: Option<String>,
 }
+
+metadata_only_debug!(
+    ConversationCreate,
+    ConversationOpened,
+    ConversationClosed,
+    ConversationList,
+    InitialParticipant,
+    Participant,
+);

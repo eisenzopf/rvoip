@@ -244,7 +244,7 @@ impl UctpCoordinatorCaps {
 /// already refuses session/connection envelopes from peers that haven't
 /// completed the `auth.hello → auth.response → auth.session` handshake.
 /// See plan §7 / G1.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 enum PeerAuthState {
     Unauthenticated,
     Authenticated {
@@ -259,6 +259,26 @@ enum PeerAuthState {
         assurance: IdentityAssurance,
         principal: AuthenticatedPrincipal,
     },
+}
+
+impl std::fmt::Debug for PeerAuthState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unauthenticated => formatter.write_str("PeerAuthState::Unauthenticated"),
+            Self::Authenticated {
+                identity_id,
+                participant_id,
+                assurance,
+                principal,
+            } => formatter
+                .debug_struct("PeerAuthState::Authenticated")
+                .field("identity_present", &!identity_id.is_empty())
+                .field("participant_present", &!participant_id.is_empty())
+                .field("assurance", &assurance.kind())
+                .field("principal_present", &!principal.subject.is_empty())
+                .finish(),
+        }
+    }
 }
 
 pub struct UctpCoordinator {
@@ -1797,7 +1817,9 @@ impl UctpCoordinator {
                     transport = %self.transport,
                     wire_sid = %sid,
                     code = error.code,
-                    reason = %error.reason,
+                    reason_present = !error.reason.is_empty(),
+                    reason_bytes = error.reason.len(),
+                    error_class = "resource-binding-authorization",
                     "uctp.coordinator: Session resource authorization rejected invite"
                 );
                 return self

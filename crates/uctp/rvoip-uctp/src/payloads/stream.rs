@@ -6,15 +6,28 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+
+macro_rules! metadata_only_debug {
+    ($($type:ty),+ $(,)?) => {
+        $(
+            impl fmt::Debug for $type {
+                fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    formatter.write_str(stringify!($type))
+                }
+            }
+        )+
+    };
+}
 
 /// `stream.opened` (S→C) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StreamOpened {
     pub stream: StreamInfo,
 }
 
 /// `stream.closed` (S→C) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StreamClosed {
     pub strm_id: String,
     pub closed_at: DateTime<Utc>,
@@ -28,20 +41,20 @@ pub struct StreamClosed {
 /// `error` 501 `multi-party-routing-not-implemented` per
 /// CONVERSATION_PROTOCOL.md §11.2 and `UCTP_IMPLEMENTATION_PLAN.md` §7.
 /// (Pre-v0.x servers used 503 here; v0.x distinguishes 501 from 503.)
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StreamSubscribe {
     pub by_participant: String,
     pub subscriptions: Vec<StreamSubscription>,
 }
 
 /// `stream.unsubscribe` (bidi) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StreamUnsubscribe {
     pub strm_ids: Vec<String>,
 }
 
 /// `stream.active-speaker` (S→C, advisory) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StreamActiveSpeaker {
     #[serde(default)]
     pub active_participant: Option<String>,
@@ -49,7 +62,7 @@ pub struct StreamActiveSpeaker {
     pub changed_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StreamInfo {
     pub strm_id: String,
     pub kind: String,
@@ -63,7 +76,7 @@ pub struct StreamInfo {
 /// a participant (optionally filtered by kind). The three shapes from
 /// the spec map to these three optional fields; consumers check which
 /// is set.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct StreamSubscription {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub strm_id: Option<String>,
@@ -72,3 +85,13 @@ pub struct StreamSubscription {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kinds: Vec<String>,
 }
+
+metadata_only_debug!(
+    StreamOpened,
+    StreamClosed,
+    StreamSubscribe,
+    StreamUnsubscribe,
+    StreamActiveSpeaker,
+    StreamInfo,
+    StreamSubscription,
+);

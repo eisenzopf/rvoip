@@ -17,6 +17,7 @@
 //! changes flow through the payload types, not through this trait.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -34,10 +35,24 @@ use crate::payloads::stream::{StreamSubscribe, StreamUnsubscribe};
 /// CONVERSATION_PROTOCOL.md §11.2 catalog: 404 (unknown participant /
 /// stream), 488 (capability mismatch), 501 (recognized but not wired
 /// in this build), 503 (transient capacity / not-ready).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum SubscriptionOutcome {
     Ok,
     Reject { code: u16, reason: String },
+}
+
+impl fmt::Debug for SubscriptionOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ok => formatter.write_str("SubscriptionOutcome::Ok"),
+            Self::Reject { code, reason } => formatter
+                .debug_struct("SubscriptionOutcome::Reject")
+                .field("code", code)
+                .field("reason_present", &!reason.is_empty())
+                .field("reason_bytes", &reason.len())
+                .finish(),
+        }
+    }
 }
 
 impl SubscriptionOutcome {
@@ -138,12 +153,36 @@ where
 }
 
 /// An explicit protocol-facing resource authorization failure.
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("{reason}")]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ResourceBindingError {
     pub code: u16,
     pub reason: String,
 }
+
+impl fmt::Debug for ResourceBindingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResourceBindingError")
+            .field("code", &self.code)
+            .field("reason_present", &!self.reason.is_empty())
+            .field("reason_bytes", &self.reason.len())
+            .finish()
+    }
+}
+
+impl fmt::Display for ResourceBindingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "resource binding rejected (code {}, reason_present={}, reason_bytes={})",
+            self.code,
+            !self.reason.is_empty(),
+            self.reason.len()
+        )
+    }
+}
+
+impl std::error::Error for ResourceBindingError {}
 
 impl ResourceBindingError {
     pub fn new(code: u16, reason: impl Into<String>) -> Self {

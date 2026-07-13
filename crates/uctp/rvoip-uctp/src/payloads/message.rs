@@ -5,6 +5,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use rvoip_core::{DataMessage, DataMessageValidationError, DataReliability, MessageId};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use thiserror::Error;
 
 const LEGACY_DATA_LABEL: &str = "rvoip-messages";
@@ -30,7 +31,7 @@ pub enum MessagePayloadError {
 }
 
 /// `message.send` (bidi) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MessageSend {
     pub msg_id: String,
     /// Legacy presentation field. Receivers MUST derive authoritative sender
@@ -54,6 +55,22 @@ pub struct MessageSend {
     /// Threading: reply to a prior message in the same Conversation.
     #[serde(default)]
     pub in_reply_to_msg: Option<String>,
+}
+
+impl fmt::Debug for MessageSend {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MessageSend")
+            .field("recipient_shape_present", &!self.to.is_null())
+            .field("content_type_present", &!self.content_type.is_empty())
+            .field("label_present", &!self.label.is_empty())
+            .field("reliability", &self.reliability)
+            .field("body_bytes", &self.body.len())
+            .field("body_encoding", &self.body_encoding)
+            .field("attachment_count", &self.attachments.len())
+            .field("in_reply_to_present", &self.in_reply_to_msg.is_some())
+            .finish()
+    }
 }
 
 impl MessageSend {
@@ -140,7 +157,7 @@ fn textual_content_type(content_type: &str) -> bool {
 }
 
 /// `message.delivered` (S→C) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MessageDelivered {
     pub msg_id: String,
     pub to_participant: String,
@@ -150,7 +167,7 @@ pub struct MessageDelivered {
 }
 
 /// `message.read` (bidi) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MessageRead {
     pub msg_id: String,
     pub by_participant: String,
@@ -158,7 +175,7 @@ pub struct MessageRead {
 }
 
 /// `message.history` (C→S) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MessageHistory {
     #[serde(default)]
     pub since: Option<DateTime<Utc>>,
@@ -174,13 +191,57 @@ pub struct MessageHistory {
     pub include_attachments: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Attachment {
     pub id: String,
     pub content_type: String,
     #[serde(default)]
     pub url: Option<String>,
     pub size_bytes: u64,
+}
+
+impl fmt::Debug for MessageDelivered {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MessageDelivered")
+            .field("delivered_at", &self.delivered_at)
+            .field("via_connection_present", &self.via_connection.is_some())
+            .finish()
+    }
+}
+
+impl fmt::Debug for MessageRead {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MessageRead")
+            .field("read_at", &self.read_at)
+            .finish()
+    }
+}
+
+impl fmt::Debug for MessageHistory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MessageHistory")
+            .field("since", &self.since)
+            .field("until", &self.until)
+            .field("since_message_present", &self.since_msg_id.is_some())
+            .field("cursor_present", &self.cursor.is_some())
+            .field("limit", &self.limit)
+            .field("include_attachments", &self.include_attachments)
+            .finish()
+    }
+}
+
+impl fmt::Debug for Attachment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Attachment")
+            .field("content_type_present", &!self.content_type.is_empty())
+            .field("url_present", &self.url.is_some())
+            .field("size_bytes", &self.size_bytes)
+            .finish()
+    }
 }
 
 #[cfg(test)]

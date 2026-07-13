@@ -5,11 +5,18 @@
 //! and the typed descriptor.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// `capability.advertise` (bidi) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CapabilityAdvertise {
     pub by_participant: String,
     pub capabilities: serde_json::Value,
     pub trigger: String,
+}
+
+impl fmt::Debug for CapabilityAdvertise {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CapabilityAdvertise")
+    }
 }
