@@ -67,6 +67,7 @@ pub(crate) const INVITE_FAILOVER_PRUNE_INTERVAL: usize = 1024;
 // orphan cleanup and serialized CANCEL targeting are covered by conformance
 // tests in this crate.
 const INVITE_TIMEOUT_FAILOVER_ENABLED: bool = true;
+const INVITE_CANDIDATE_COMPENSATION_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InviteFailoverPlanPhase {
@@ -106,8 +107,13 @@ pub(crate) struct InviteFailoverPlan {
     pub candidates: Vec<rvoip_sip_transport::resolver::ResolvedTarget>,
     pub wire_plan: CandidateWirePlan,
     pub next_candidate_index: usize,
+    /// Monotonic token assigned before candidate work leaves the plan mutex.
+    /// Completion may mutate the plan only while this generation is current.
+    pub next_send_generation: u64,
+    pub pending_candidate: Option<(u64, usize)>,
     pub current_transaction: Option<TransactionKey>,
     pub current_candidate_index: Option<usize>,
+    pub current_send_generation: Option<u64>,
     pub provisional_seen: bool,
     pub phase: InviteFailoverPlanPhase,
     pub attempts: Vec<InviteFailoverAttempt>,
@@ -116,6 +122,93 @@ pub(crate) struct InviteFailoverPlan {
     pub cleaned_fork_tags: std::collections::HashSet<String>,
     pub setup_deadline: Instant,
     pub expires_at: Instant,
+}
+
+struct InviteCandidateSendLease {
+    plan_id: u64,
+    dialog_id: DialogId,
+    generation: u64,
+    candidate_index: usize,
+    target: rvoip_sip_transport::resolver::ResolvedTarget,
+    request: Request,
+    wire_plan: CandidateWirePlan,
+    setup_deadline: Instant,
+    remaining_candidate_count: usize,
+}
+
+struct InviteCandidateCancellationGuard {
+    manager: DialogManager,
+    plan: std::sync::Arc<tokio::sync::Mutex<InviteFailoverPlan>>,
+    generation: u64,
+    transaction_id: Option<TransactionKey>,
+    armed: bool,
+}
+
+impl InviteCandidateCancellationGuard {
+    fn new(
+        manager: &DialogManager,
+        plan: &std::sync::Arc<tokio::sync::Mutex<InviteFailoverPlan>>,
+        generation: u64,
+    ) -> Self {
+        Self {
+            manager: manager.clone(),
+            plan: plan.clone(),
+            generation,
+            transaction_id: None,
+            armed: true,
+        }
+    }
+
+    fn set_transaction(&mut self, transaction_id: &TransactionKey) {
+        self.transaction_id = Some(transaction_id.clone());
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InviteCandidateCancellationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let transaction_id = self.transaction_id.clone();
+        if let Ok(mut plan) = self.plan.try_lock() {
+            let terminate = self.manager.abandon_invite_candidate_generation_locked(
+                &mut plan,
+                self.generation,
+                transaction_id.as_ref(),
+            );
+            drop(plan);
+            if let (Some(transaction_id), Ok(handle)) =
+                (terminate, tokio::runtime::Handle::try_current())
+            {
+                let manager = self.manager.clone();
+                let cleanup_operation = manager.enter_invite_failover_operation();
+                handle.spawn(async move {
+                    let _cleanup_operation = cleanup_operation;
+                    manager
+                        .compensate_invite_candidate_transaction(&transaction_id, false)
+                        .await;
+                });
+            }
+            return;
+        }
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let manager = self.manager.clone();
+            let plan = self.plan.clone();
+            let generation = self.generation;
+            let cleanup_operation = manager.enter_invite_failover_operation();
+            handle.spawn(async move {
+                let _cleanup_operation = cleanup_operation;
+                manager
+                    .abandon_invite_candidate_generation(&plan, generation, transaction_id.as_ref())
+                    .await;
+            });
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1252,9 +1345,20 @@ impl DialogManager {
         else {
             return;
         };
-        let Ok(plan_guard) = plan.try_lock() else {
+        let Ok(mut plan_guard) = plan.try_lock() else {
             return;
         };
+        let _registry = self
+            .invite_failover_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let still_registered = self
+            .invite_failover_plans
+            .get(&plan_id)
+            .is_some_and(|entry| std::sync::Arc::ptr_eq(entry.value(), &plan));
+        if !still_registered {
+            return;
+        }
         let expired = plan_guard.expires_at <= Instant::now();
         let evictable_overflow = plan_guard.phase != InviteFailoverPlanPhase::Active
             && self.invite_failover_plans.len() > self.invite_failover_plan_capacity;
@@ -1263,20 +1367,16 @@ impl DialogManager {
         }
         let dialog_id = plan_guard.dialog_id.clone();
         let candidate_count = plan_guard.candidates.len();
-        // Holding the plan mutex makes removal atomic with every event path
-        // that can extend its retention window. The Arc remains valid for an
-        // event that already acquired it before this bounded tombstone was
-        // unlinked.
-        if self.invite_failover_plans.remove(&plan_id).is_none() {
-            return;
-        }
-        drop(plan_guard);
 
-        Self::release_invite_failover_reservation(&self.invite_failover_plan_reservations, 1);
-        Self::release_invite_failover_reservation(
-            &self.invite_failover_attempt_reservations,
-            candidate_count,
-        );
+        // The plan remains locked until every owner/index is detached and its
+        // reservation is released. A worker that captured this Arc before the
+        // prune therefore observes a non-active generation and cannot advance
+        // an orphan after capacity has been returned.
+        if plan_guard.phase == InviteFailoverPlanPhase::Active {
+            plan_guard.phase = InviteFailoverPlanPhase::Closed;
+        }
+        plan_guard.pending_candidate = None;
+        plan_guard.current_send_generation = None;
         self.active_invite_failover_by_dialog
             .remove_if(&dialog_id, |_, active_plan_id| *active_plan_id == plan_id);
 
@@ -1290,6 +1390,14 @@ impl DialogManager {
             self.invite_failover_attempts.remove(&transaction_id);
             self.unlink_transaction_from_dialog_indexed(&transaction_id);
         }
+        if self.invite_failover_plans.remove(&plan_id).is_none() {
+            return;
+        }
+        Self::release_invite_failover_reservation(&self.invite_failover_plan_reservations, 1);
+        Self::release_invite_failover_reservation(
+            &self.invite_failover_attempt_reservations,
+            candidate_count,
+        );
     }
 
     pub(crate) fn remove_invite_failover_state_for_dialog(&self, dialog_id: &DialogId) {
@@ -1298,7 +1406,13 @@ impl DialogManager {
         // application removes a cancelled/failed dialog and still requires
         // an authenticated ACK followed by one BYE. Removing the active
         // ownership entry prevents any further candidate advancement.
-        self.active_invite_failover_by_dialog.remove(dialog_id);
+        {
+            let _registry = self
+                .invite_failover_registry_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.active_invite_failover_by_dialog.remove(dialog_id);
+        }
         let plan_ids: std::collections::HashSet<u64> = self
             .invite_failover_attempts
             .iter()
@@ -1349,7 +1463,13 @@ impl DialogManager {
         phase: InviteFailoverPlanPhase,
     ) {
         plan.phase = phase;
+        plan.pending_candidate = None;
+        plan.current_send_generation = None;
         plan.expires_at = Instant::now() + INVITE_FAILOVER_PLAN_TTL;
+        let _registry = self
+            .invite_failover_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.active_invite_failover_by_dialog
             .remove_if(&plan.dialog_id, |_, active_plan_id| {
                 *active_plan_id == plan.id
@@ -1358,23 +1478,55 @@ impl DialogManager {
 
     async fn advance_invite_failover_plan(
         &self,
-        plan: &mut InviteFailoverPlan,
+        plan: &std::sync::Arc<tokio::sync::Mutex<InviteFailoverPlan>>,
         completed_transaction: &TransactionKey,
         outcome: InviteFailoverAttemptOutcome,
     ) -> bool {
-        Self::set_invite_attempt_outcome(plan, completed_transaction, outcome);
-        plan.current_transaction = None;
-        plan.current_candidate_index = None;
-
-        while plan.next_candidate_index < plan.candidates.len() {
-            let candidate_index = plan.next_candidate_index;
-            match self
-                .send_invite_failover_candidate(plan, candidate_index)
-                .await
+        let Some(_operation) = self.enter_invite_failover_operation() else {
+            let mut plan = plan.lock().await;
+            if plan.phase == InviteFailoverPlanPhase::Active {
+                self.close_active_invite_failover_plan(&mut plan, InviteFailoverPlanPhase::Closed);
+            }
+            return false;
+        };
+        {
+            let mut plan = plan.lock().await;
+            let owner_is_current = self
+                .active_invite_failover_by_dialog
+                .get(&plan.dialog_id)
+                .is_some_and(|owner| *owner.value() == plan.id);
+            if plan.phase != InviteFailoverPlanPhase::Active
+                || !owner_is_current
+                || plan.current_transaction.as_ref() != Some(completed_transaction)
             {
+                return false;
+            }
+            Self::set_invite_attempt_outcome(&mut plan, completed_transaction, outcome);
+            plan.current_transaction = None;
+            plan.current_candidate_index = None;
+            plan.current_send_generation = None;
+        }
+
+        loop {
+            let candidate_index = {
+                let mut plan = plan.lock().await;
+                if plan.phase != InviteFailoverPlanPhase::Active {
+                    return false;
+                }
+                if plan.next_candidate_index >= plan.candidates.len() {
+                    self.close_active_invite_failover_plan(
+                        &mut plan,
+                        InviteFailoverPlanPhase::Exhausted,
+                    );
+                    return false;
+                }
+                plan.next_candidate_index
+            };
+            match self.send_invite_failover_candidate(plan).await {
                 Ok((transaction_id, destination)) => {
+                    let plan_id = plan.lock().await.id;
                     debug!(
-                        plan_id = plan.id,
+                        plan_id,
                         candidate_index,
                         transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id),
                         %destination,
@@ -1383,27 +1535,26 @@ impl DialogManager {
                     return true;
                 }
                 Err(InviteCandidateSendError::Recoverable(error)) => {
+                    let plan_id = plan.lock().await.id;
                     debug!(
-                        plan_id = plan.id,
+                        plan_id,
                         candidate_index,
                         error_class = error.diagnostic_class(),
                         "Retained initial-INVITE candidate failed at transport send"
                     );
                 }
                 Err(InviteCandidateSendError::Fatal(error)) => {
+                    let plan_id = plan.lock().await.id;
                     warn!(
-                        plan_id = plan.id,
+                        plan_id,
                         candidate_index,
                         error_class = error.diagnostic_class(),
                         "Retained initial-INVITE failover stopped on non-transport failure"
                     );
-                    break;
+                    return false;
                 }
             }
         }
-
-        self.close_active_invite_failover_plan(plan, InviteFailoverPlanPhase::Exhausted);
-        false
     }
 
     fn local_sent_by_for_request(request: &Request) -> Option<SocketAddr> {
@@ -1628,7 +1779,7 @@ impl DialogManager {
         else {
             return InviteFailoverEventDisposition::Continue;
         };
-        let Some(plan) = self
+        let Some(plan_arc) = self
             .invite_failover_plans
             .get(&attempt_index.plan_id)
             .map(|entry| entry.value().clone())
@@ -1636,7 +1787,7 @@ impl DialogManager {
             self.invite_failover_attempts.remove(transaction_id);
             return InviteFailoverEventDisposition::Continue;
         };
-        let mut plan = plan.lock().await;
+        let mut plan = plan_arc.lock().await;
         let known_attempt = plan.attempts.iter().any(|attempt| {
             &attempt.transaction_id == transaction_id
                 && attempt.candidate_index == attempt_index.candidate_index
@@ -1711,16 +1862,19 @@ impl DialogManager {
                 }
 
                 if response.status_code() == 503 && !plan.provisional_seen {
-                    if plan.next_candidate_index < plan.candidates.len()
-                        && self
+                    if plan.next_candidate_index < plan.candidates.len() {
+                        drop(plan);
+                        if self
                             .advance_invite_failover_plan(
-                                &mut plan,
+                                &plan_arc,
                                 transaction_id,
                                 InviteFailoverAttemptOutcome::ServiceUnavailable,
                             )
                             .await
-                    {
-                        return InviteFailoverEventDisposition::Consumed;
+                        {
+                            return InviteFailoverEventDisposition::Consumed;
+                        }
+                        return InviteFailoverEventDisposition::Continue;
                     }
                     Self::set_invite_attempt_outcome(
                         &mut plan,
@@ -1757,11 +1911,16 @@ impl DialogManager {
                 if INVITE_TIMEOUT_FAILOVER_ENABLED
                     && !plan.provisional_seen
                     && plan.next_candidate_index < plan.candidates.len()
-                    && self
-                        .advance_invite_failover_plan(&mut plan, transaction_id, outcome)
-                        .await
                 {
-                    InviteFailoverEventDisposition::Consumed
+                    drop(plan);
+                    if self
+                        .advance_invite_failover_plan(&plan_arc, transaction_id, outcome)
+                        .await
+                    {
+                        InviteFailoverEventDisposition::Consumed
+                    } else {
+                        InviteFailoverEventDisposition::Continue
+                    }
                 } else {
                     Self::set_invite_attempt_outcome(&mut plan, transaction_id, outcome);
                     self.close_active_invite_failover_plan(
@@ -2430,91 +2589,100 @@ impl DialogManager {
         wire_plan: CandidateWirePlan,
     ) -> DialogResult<std::sync::Arc<tokio::sync::Mutex<InviteFailoverPlan>>> {
         self.prune_invite_failover_state().await;
-        if self.invite_failover_plans.len() >= self.invite_failover_plan_capacity
-            || self
-                .invite_failover_attempts
-                .len()
-                .saturating_add(candidates.len())
-                > self.invite_failover_attempt_capacity
-        {
-            return Err(crate::errors::DialogError::TransactionError {
-                message: safe_operation_failure("invite_failover_admission", "capacity"),
-            });
-        }
-        if let Some(previous_plan_id) = self
-            .active_invite_failover_by_dialog
-            .get(dialog_id)
-            .map(|entry| *entry.value())
-        {
-            if let Some(previous) = self
-                .invite_failover_plans
-                .get(&previous_plan_id)
-                .map(|entry| entry.value().clone())
-            {
-                let mut previous = previous.lock().await;
-                if previous.phase == InviteFailoverPlanPhase::Active {
-                    previous.phase = InviteFailoverPlanPhase::Closed;
-                    previous.expires_at = Instant::now() + INVITE_FAILOVER_PLAN_TTL;
-                }
+        let (plan, inserts) = {
+            // Registration is one linearized ownership transition. Two callers
+            // cannot both replace the active owner for one dialog, and drain
+            // cannot begin between admission and index publication.
+            let _registry = self
+                .invite_failover_registry_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !self.is_accepting_work() {
+                return Err(crate::errors::DialogError::InvalidState {
+                    expected: "dialog manager running".to_string(),
+                    actual: "dialog manager draining or stopped".to_string(),
+                });
             }
-        }
+            if self
+                .active_invite_failover_by_dialog
+                .contains_key(dialog_id)
+            {
+                return Err(crate::errors::DialogError::InvalidState {
+                    expected: "no active initial INVITE operation".to_string(),
+                    actual: "active initial INVITE operation".to_string(),
+                });
+            }
+            if self.active_invite_failover_by_dialog.len()
+                >= self.invite_failover_active_plan_capacity
+                || self.invite_failover_plans.len() >= self.invite_failover_plan_capacity
+            {
+                return Err(crate::errors::DialogError::TransactionError {
+                    message: safe_operation_failure("invite_failover_admission", "capacity"),
+                });
+            }
 
-        // Reserve after the final await so cancellation cannot strand a
-        // counter without an inserted plan for the prune path to release.
-        if !Self::try_reserve_invite_failover_capacity(
-            &self.invite_failover_plan_reservations,
-            1,
-            self.invite_failover_plan_capacity,
-        ) {
-            return Err(crate::errors::DialogError::TransactionError {
-                message: safe_operation_failure("invite_failover_admission", "capacity"),
-            });
-        }
-        if !Self::try_reserve_invite_failover_capacity(
-            &self.invite_failover_attempt_reservations,
-            candidates.len(),
-            self.invite_failover_attempt_capacity,
-        ) {
-            Self::release_invite_failover_reservation(&self.invite_failover_plan_reservations, 1);
-            return Err(crate::errors::DialogError::TransactionError {
-                message: safe_operation_failure("invite_failover_admission", "capacity"),
-            });
-        }
+            if !Self::try_reserve_invite_failover_capacity(
+                &self.invite_failover_plan_reservations,
+                1,
+                self.invite_failover_plan_capacity,
+            ) {
+                return Err(crate::errors::DialogError::TransactionError {
+                    message: safe_operation_failure("invite_failover_admission", "capacity"),
+                });
+            }
+            if !Self::try_reserve_invite_failover_capacity(
+                &self.invite_failover_attempt_reservations,
+                candidates.len(),
+                self.invite_failover_attempt_capacity,
+            ) {
+                Self::release_invite_failover_reservation(
+                    &self.invite_failover_plan_reservations,
+                    1,
+                );
+                return Err(crate::errors::DialogError::TransactionError {
+                    message: safe_operation_failure("invite_failover_admission", "capacity"),
+                });
+            }
 
-        let plan_id = self
-            .next_invite_failover_plan_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let now = Instant::now();
-        let setup_deadline = now
-            + self
-                .transaction_manager
-                .timer_settings()
-                .transaction_timeout;
-        let plan = std::sync::Arc::new(tokio::sync::Mutex::new(InviteFailoverPlan {
-            id: plan_id,
-            dialog_id: dialog_id.clone(),
-            request,
-            candidates,
-            wire_plan,
-            next_candidate_index: 0,
-            current_transaction: None,
-            current_candidate_index: None,
-            provisional_seen: false,
-            phase: InviteFailoverPlanPhase::Active,
-            attempts: Vec::new(),
-            accepted_transaction: None,
-            accepted_to_tag: None,
-            cleaned_fork_tags: std::collections::HashSet::new(),
-            setup_deadline,
-            expires_at: setup_deadline + INVITE_FAILOVER_PLAN_TTL,
-        }));
-        self.invite_failover_plans.insert(plan_id, plan.clone());
-        self.active_invite_failover_by_dialog
-            .insert(dialog_id.clone(), plan_id);
-        let inserts = self
-            .invite_failover_insert_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
+            let plan_id = self
+                .next_invite_failover_plan_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let now = Instant::now();
+            let setup_deadline = now
+                + self
+                    .transaction_manager
+                    .timer_settings()
+                    .transaction_timeout;
+            let plan = std::sync::Arc::new(tokio::sync::Mutex::new(InviteFailoverPlan {
+                id: plan_id,
+                dialog_id: dialog_id.clone(),
+                request,
+                candidates,
+                wire_plan,
+                next_candidate_index: 0,
+                next_send_generation: 0,
+                pending_candidate: None,
+                current_transaction: None,
+                current_candidate_index: None,
+                current_send_generation: None,
+                provisional_seen: false,
+                phase: InviteFailoverPlanPhase::Active,
+                attempts: Vec::new(),
+                accepted_transaction: None,
+                accepted_to_tag: None,
+                cleaned_fork_tags: std::collections::HashSet::new(),
+                setup_deadline,
+                expires_at: setup_deadline + INVITE_FAILOVER_PLAN_TTL,
+            }));
+            self.invite_failover_plans.insert(plan_id, plan.clone());
+            self.active_invite_failover_by_dialog
+                .insert(dialog_id.clone(), plan_id);
+            let inserts = self
+                .invite_failover_insert_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            (plan, inserts)
+        };
         if inserts % INVITE_FAILOVER_PRUNE_INTERVAL == 0 {
             self.prune_invite_failover_state().await;
         }
@@ -2560,121 +2728,484 @@ impl DialogManager {
         }
     }
 
-    async fn send_invite_failover_candidate(
+    fn invite_setup_timeout(operation: &'static str) -> crate::errors::DialogError {
+        crate::errors::DialogError::TimeoutError {
+            operation: safe_operation_failure(operation, "setup_deadline"),
+        }
+    }
+
+    fn abandon_invite_candidate_generation_locked(
         &self,
         plan: &mut InviteFailoverPlan,
-        candidate_index: usize,
+        generation: u64,
+        transaction_hint: Option<&TransactionKey>,
+    ) -> Option<TransactionKey> {
+        let owns_pending = plan
+            .pending_candidate
+            .is_some_and(|(pending_generation, _)| pending_generation == generation);
+        let owns_current = plan.current_send_generation == Some(generation);
+        if !owns_pending && !owns_current {
+            // A transaction created just before another operation cancelled
+            // the pending generation was never published in the plan. It
+            // still needs compensation, whereas an indexed attempt now owned
+            // by a response/failover path must be left alone.
+            return transaction_hint
+                .filter(|transaction_id| {
+                    !plan
+                        .attempts
+                        .iter()
+                        .any(|attempt| &attempt.transaction_id == *transaction_id)
+                })
+                .cloned();
+        }
+
+        let _registry = self
+            .invite_failover_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let transaction_id = if owns_current {
+            plan.current_transaction
+                .clone()
+                .or_else(|| transaction_hint.cloned())
+        } else {
+            transaction_hint.cloned()
+        };
+        if let Some(transaction_id) = transaction_id.as_ref() {
+            Self::set_invite_attempt_outcome(
+                plan,
+                transaction_id,
+                InviteFailoverAttemptOutcome::TransportError,
+            );
+        }
+        if owns_pending {
+            plan.pending_candidate = None;
+        }
+        if owns_current {
+            plan.current_transaction = None;
+            plan.current_candidate_index = None;
+            plan.current_send_generation = None;
+        }
+        if plan.phase == InviteFailoverPlanPhase::Active {
+            plan.phase = InviteFailoverPlanPhase::Closed;
+            plan.expires_at = Instant::now() + INVITE_FAILOVER_PLAN_TTL;
+        }
+        self.active_invite_failover_by_dialog
+            .remove_if(&plan.dialog_id, |_, active_plan_id| {
+                *active_plan_id == plan.id
+            });
+        if let Some(transaction_id) = transaction_id.as_ref() {
+            self.invite_failover_attempts.remove(transaction_id);
+            self.unlink_transaction_from_dialog_indexed(transaction_id);
+        }
+        transaction_id
+    }
+
+    async fn abandon_invite_candidate_generation(
+        &self,
+        plan: &std::sync::Arc<tokio::sync::Mutex<InviteFailoverPlan>>,
+        generation: u64,
+        transaction_hint: Option<&TransactionKey>,
+    ) {
+        let terminate = {
+            let mut plan = plan.lock().await;
+            self.abandon_invite_candidate_generation_locked(&mut plan, generation, transaction_hint)
+        };
+        if let Some(transaction_id) = terminate {
+            self.compensate_invite_candidate_transaction(&transaction_id, false)
+                .await;
+        }
+    }
+
+    async fn close_pending_invite_candidate(
+        &self,
+        plan: &std::sync::Arc<tokio::sync::Mutex<InviteFailoverPlan>>,
+        generation: u64,
+        phase: InviteFailoverPlanPhase,
+    ) {
+        let mut plan = plan.lock().await;
+        if plan
+            .pending_candidate
+            .is_some_and(|(pending_generation, _)| pending_generation == generation)
+        {
+            plan.pending_candidate = None;
+            if plan.phase == InviteFailoverPlanPhase::Active {
+                self.close_active_invite_failover_plan(&mut plan, phase);
+            }
+        }
+    }
+
+    async fn compensate_invite_candidate_transaction(
+        &self,
+        transaction_id: &TransactionKey,
+        unlink_attempt: bool,
+    ) {
+        if unlink_attempt {
+            self.invite_failover_attempts.remove(transaction_id);
+            self.unlink_transaction_from_dialog_indexed(transaction_id);
+        }
+        if tokio::time::timeout(
+            INVITE_CANDIDATE_COMPENSATION_TIMEOUT,
+            self.transaction_manager
+                .terminate_transaction(transaction_id),
+        )
+        .await
+        .is_err()
+        {
+            warn!(
+                transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id),
+                "Timed out compensating an incomplete initial-INVITE candidate"
+            );
+        }
+    }
+
+    async fn fail_committed_invite_candidate(
+        &self,
+        plan: &std::sync::Arc<tokio::sync::Mutex<InviteFailoverPlan>>,
+        generation: u64,
+        transaction_id: &TransactionKey,
+        outcome: InviteFailoverAttemptOutcome,
+        terminal_phase: Option<InviteFailoverPlanPhase>,
+    ) -> bool {
+        let mut plan = plan.lock().await;
+        if plan.current_send_generation != Some(generation)
+            || plan.current_transaction.as_ref() != Some(transaction_id)
+        {
+            return false;
+        }
+        Self::set_invite_attempt_outcome(&mut plan, transaction_id, outcome);
+        plan.current_transaction = None;
+        plan.current_candidate_index = None;
+        plan.current_send_generation = None;
+        if let Some(phase) = terminal_phase {
+            self.close_active_invite_failover_plan(&mut plan, phase);
+        }
+        true
+    }
+
+    async fn send_invite_failover_candidate(
+        &self,
+        plan: &std::sync::Arc<tokio::sync::Mutex<InviteFailoverPlan>>,
     ) -> Result<(TransactionKey, SocketAddr), InviteCandidateSendError> {
         use crate::manager::RequestLifecycle;
 
-        let target = plan
-            .candidates
-            .get(candidate_index)
-            .cloned()
-            .ok_or_else(|| {
-                InviteCandidateSendError::Fatal(crate::errors::DialogError::routing_error(
-                    "INVITE candidate missing",
-                ))
-            })?;
-        let mut request =
-            finalize_request_for_candidate(self, &plan.request, &target, plan.wire_plan)
-                .map_err(InviteCandidateSendError::Fatal)?;
-        self.pre_send_request(&mut request, target.addr)
-            .await
-            .map_err(InviteCandidateSendError::Fatal)?;
+        let lease = {
+            let mut plan = plan.lock().await;
+            let owner_is_current = self
+                .active_invite_failover_by_dialog
+                .get(&plan.dialog_id)
+                .is_some_and(|owner| *owner.value() == plan.id);
+            if !self.is_accepting_work()
+                || plan.phase != InviteFailoverPlanPhase::Active
+                || !owner_is_current
+            {
+                return Err(InviteCandidateSendError::Fatal(
+                    crate::errors::DialogError::InvalidState {
+                        expected: "active initial INVITE plan on a running manager".to_string(),
+                        actual: "inactive plan or draining manager".to_string(),
+                    },
+                ));
+            }
+            if plan.pending_candidate.is_some() || plan.current_transaction.is_some() {
+                return Err(InviteCandidateSendError::Fatal(
+                    crate::errors::DialogError::InvalidState {
+                        expected: "idle initial INVITE candidate slot".to_string(),
+                        actual: "candidate operation already active".to_string(),
+                    },
+                ));
+            }
+            if plan.setup_deadline <= Instant::now() {
+                self.close_active_invite_failover_plan(
+                    &mut plan,
+                    InviteFailoverPlanPhase::Exhausted,
+                );
+                return Err(InviteCandidateSendError::Fatal(Self::invite_setup_timeout(
+                    "invite_candidate_reserve",
+                )));
+            }
+            let candidate_index = plan.next_candidate_index;
+            let Some(target) = plan.candidates.get(candidate_index).cloned() else {
+                self.close_active_invite_failover_plan(
+                    &mut plan,
+                    InviteFailoverPlanPhase::Exhausted,
+                );
+                return Err(InviteCandidateSendError::Fatal(
+                    crate::errors::DialogError::routing_error("INVITE candidate missing"),
+                ));
+            };
+            let generation = plan.next_send_generation.wrapping_add(1).max(1);
+            plan.next_send_generation = generation;
+            plan.next_candidate_index = candidate_index + 1;
+            plan.pending_candidate = Some((generation, candidate_index));
+            InviteCandidateSendLease {
+                plan_id: plan.id,
+                dialog_id: plan.dialog_id.clone(),
+                generation,
+                candidate_index,
+                target,
+                request: plan.request.clone(),
+                wire_plan: plan.wire_plan,
+                setup_deadline: plan.setup_deadline,
+                remaining_candidate_count: plan
+                    .candidates
+                    .len()
+                    .saturating_sub(candidate_index)
+                    .max(1),
+            }
+        };
+        let mut cancellation_guard =
+            InviteCandidateCancellationGuard::new(self, plan, lease.generation);
+
+        let mut request = match finalize_request_for_candidate(
+            self,
+            &lease.request,
+            &lease.target,
+            lease.wire_plan,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                self.close_pending_invite_candidate(
+                    plan,
+                    lease.generation,
+                    InviteFailoverPlanPhase::Closed,
+                )
+                .await;
+                return Err(InviteCandidateSendError::Fatal(error));
+            }
+        };
+        match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(lease.setup_deadline),
+            self.pre_send_request(&mut request, lease.target.addr),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                self.close_pending_invite_candidate(
+                    plan,
+                    lease.generation,
+                    InviteFailoverPlanPhase::Closed,
+                )
+                .await;
+                return Err(InviteCandidateSendError::Fatal(error));
+            }
+            Err(_) => {
+                self.close_pending_invite_candidate(
+                    plan,
+                    lease.generation,
+                    InviteFailoverPlanPhase::Exhausted,
+                )
+                .await;
+                return Err(InviteCandidateSendError::Fatal(Self::invite_setup_timeout(
+                    "invite_candidate_pre_send",
+                )));
+            }
+        }
 
         let sent_request = request.clone();
         let request_key = crate::manager::core::outbound_request_key(&sent_request);
-        let mut request_route = rvoip_sip_transport::TransportRoute::new(target.addr)
-            .with_transport_type(target.transport);
-        if let Some(authority) = target.authority.clone() {
+        let mut request_route = rvoip_sip_transport::TransportRoute::new(lease.target.addr)
+            .with_transport_type(lease.target.transport);
+        if let Some(authority) = lease.target.authority.clone() {
             request_route.authority = Some(authority);
         }
-        let remaining_setup_budget = plan
+        let Some(remaining_setup_budget) = lease
             .setup_deadline
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
-            .ok_or_else(|| {
-                InviteCandidateSendError::Fatal(crate::errors::DialogError::TransactionError {
-                    message: safe_operation_failure(
-                        "invite_candidate_transaction_create",
-                        "setup_deadline",
-                    ),
-                })
-            })?;
-        let remaining_candidate_count =
-            plan.candidates.len().saturating_sub(candidate_index).max(1);
-        let attempt_timeout = remaining_setup_budget / (remaining_candidate_count as u32);
-        let transaction_id = self
-            .transaction_manager
-            .create_client_transaction_on_route_with_timeout(
-                request,
-                request_route,
-                attempt_timeout,
+        else {
+            self.close_pending_invite_candidate(
+                plan,
+                lease.generation,
+                InviteFailoverPlanPhase::Exhausted,
             )
-            .await
-            .map_err(|_| crate::errors::DialogError::TransactionError {
-                message: safe_operation_failure(
-                    "invite_candidate_transaction_create",
-                    "transaction_error",
+            .await;
+            return Err(InviteCandidateSendError::Fatal(Self::invite_setup_timeout(
+                "invite_candidate_transaction_create",
+            )));
+        };
+        let attempt_timeout = remaining_setup_budget / (lease.remaining_candidate_count as u32);
+        let transaction_id = match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(lease.setup_deadline),
+            self.transaction_manager
+                .create_client_transaction_on_route_with_timeout(
+                    request,
+                    request_route,
+                    attempt_timeout,
                 ),
-            })
-            .map_err(InviteCandidateSendError::Fatal)?;
+        )
+        .await
+        {
+            Ok(Ok(transaction_id)) => transaction_id,
+            Ok(Err(_)) => {
+                self.close_pending_invite_candidate(
+                    plan,
+                    lease.generation,
+                    InviteFailoverPlanPhase::Closed,
+                )
+                .await;
+                return Err(InviteCandidateSendError::Fatal(
+                    crate::errors::DialogError::TransactionError {
+                        message: safe_operation_failure(
+                            "invite_candidate_transaction_create",
+                            "transaction_error",
+                        ),
+                    },
+                ));
+            }
+            Err(_) => {
+                self.close_pending_invite_candidate(
+                    plan,
+                    lease.generation,
+                    InviteFailoverPlanPhase::Exhausted,
+                )
+                .await;
+                return Err(InviteCandidateSendError::Fatal(Self::invite_setup_timeout(
+                    "invite_candidate_transaction_create",
+                )));
+            }
+        };
+        cancellation_guard.set_transaction(&transaction_id);
 
-        self.link_outbound_transaction_to_dialog_indexed(
-            &transaction_id,
-            &plan.dialog_id,
-            &sent_request,
-        );
-        self.invite_failover_attempts.insert(
-            transaction_id.clone(),
-            InviteFailoverAttemptIndex {
-                plan_id: plan.id,
-                dialog_id: plan.dialog_id.clone(),
-                candidate_index,
-            },
-        );
-        plan.current_transaction = Some(transaction_id.clone());
-        plan.current_candidate_index = Some(candidate_index);
-        plan.next_candidate_index = candidate_index + 1;
-        plan.provisional_seen = false;
-        plan.attempts.push(InviteFailoverAttempt {
-            transaction_id: transaction_id.clone(),
-            candidate_index,
-            outcome: InviteFailoverAttemptOutcome::Active,
-        });
+        let committed = {
+            let mut plan = plan.lock().await;
+            let _registry = self
+                .invite_failover_registry_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let owner_is_current = self
+                .active_invite_failover_by_dialog
+                .get(&lease.dialog_id)
+                .is_some_and(|owner| *owner.value() == lease.plan_id);
+            if self.is_accepting_work()
+                && owner_is_current
+                && plan.id == lease.plan_id
+                && plan.phase == InviteFailoverPlanPhase::Active
+                && plan.pending_candidate == Some((lease.generation, lease.candidate_index))
+                && plan.setup_deadline > Instant::now()
+            {
+                self.link_outbound_transaction_to_dialog_indexed(
+                    &transaction_id,
+                    &lease.dialog_id,
+                    &sent_request,
+                );
+                self.invite_failover_attempts.insert(
+                    transaction_id.clone(),
+                    InviteFailoverAttemptIndex {
+                        plan_id: lease.plan_id,
+                        dialog_id: lease.dialog_id.clone(),
+                        candidate_index: lease.candidate_index,
+                    },
+                );
+                plan.pending_candidate = None;
+                plan.current_transaction = Some(transaction_id.clone());
+                plan.current_candidate_index = Some(lease.candidate_index);
+                plan.current_send_generation = Some(lease.generation);
+                plan.provisional_seen = false;
+                plan.attempts.push(InviteFailoverAttempt {
+                    transaction_id: transaction_id.clone(),
+                    candidate_index: lease.candidate_index,
+                    outcome: InviteFailoverAttemptOutcome::Active,
+                });
+                true
+            } else {
+                false
+            }
+        };
+        if !committed {
+            self.close_pending_invite_candidate(
+                plan,
+                lease.generation,
+                InviteFailoverPlanPhase::Closed,
+            )
+            .await;
+            self.compensate_invite_candidate_transaction(&transaction_id, false)
+                .await;
+            return Err(InviteCandidateSendError::Fatal(
+                crate::errors::DialogError::InvalidState {
+                    expected: "current admitted initial INVITE generation".to_string(),
+                    actual: "stale generation or draining manager".to_string(),
+                },
+            ));
+        }
 
-        match self.transaction_manager.send_request(&transaction_id).await {
-            Ok(()) => {
+        let result = match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(lease.setup_deadline),
+            self.transaction_manager.send_request(&transaction_id),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
                 self.record_outbound_transport_context(
                     &transaction_id,
                     request_key,
-                    target.transport,
-                    target.addr,
+                    lease.target.transport,
+                    lease.target.addr,
                 );
-                self.post_send_request(&sent_request, target.addr)
-                    .await
-                    .map_err(InviteCandidateSendError::Fatal)?;
-                Ok((transaction_id, target.addr))
+                match tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(lease.setup_deadline),
+                    self.post_send_request(&sent_request, lease.target.addr),
+                )
+                .await
+                {
+                    Ok(Ok(())) => Ok((transaction_id, lease.target.addr)),
+                    Ok(Err(error)) => {
+                        let still_current = self
+                            .fail_committed_invite_candidate(
+                                plan,
+                                lease.generation,
+                                &transaction_id,
+                                InviteFailoverAttemptOutcome::TransportError,
+                                Some(InviteFailoverPlanPhase::Closed),
+                            )
+                            .await;
+                        if still_current {
+                            self.compensate_invite_candidate_transaction(&transaction_id, true)
+                                .await;
+                            Err(InviteCandidateSendError::Fatal(error))
+                        } else {
+                            Ok((transaction_id, lease.target.addr))
+                        }
+                    }
+                    Err(_) => {
+                        let still_current = self
+                            .fail_committed_invite_candidate(
+                                plan,
+                                lease.generation,
+                                &transaction_id,
+                                InviteFailoverAttemptOutcome::TransactionTimeout,
+                                Some(InviteFailoverPlanPhase::Exhausted),
+                            )
+                            .await;
+                        if still_current {
+                            self.compensate_invite_candidate_transaction(&transaction_id, true)
+                                .await;
+                            Err(InviteCandidateSendError::Fatal(Self::invite_setup_timeout(
+                                "invite_candidate_post_send",
+                            )))
+                        } else {
+                            Ok((transaction_id, lease.target.addr))
+                        }
+                    }
+                }
             }
-            Err(error) => {
-                Self::set_invite_attempt_outcome(
-                    plan,
-                    &transaction_id,
-                    InviteFailoverAttemptOutcome::ImmediateTransportFailure,
-                );
-                self.invite_failover_attempts.remove(&transaction_id);
-                self.unlink_transaction_from_dialog_indexed(&transaction_id);
-                let _ = self
-                    .transaction_manager
-                    .terminate_transaction(&transaction_id)
-                    .await;
-                plan.current_transaction = None;
-                plan.current_candidate_index = None;
-                if matches!(
+            Ok(Err(error)) => {
+                let is_transport_failure = matches!(
                     error,
                     crate::transaction::error::Error::TransportError { .. }
-                ) {
+                );
+                let terminal_phase =
+                    (!is_transport_failure).then_some(InviteFailoverPlanPhase::Closed);
+                self.fail_committed_invite_candidate(
+                    plan,
+                    lease.generation,
+                    &transaction_id,
+                    InviteFailoverAttemptOutcome::ImmediateTransportFailure,
+                    terminal_phase,
+                )
+                .await;
+                self.compensate_invite_candidate_transaction(&transaction_id, true)
+                    .await;
+                if is_transport_failure {
                     Err(InviteCandidateSendError::Recoverable(
                         crate::errors::DialogError::TransactionError {
                             message: safe_operation_failure(
@@ -2694,7 +3225,26 @@ impl DialogManager {
                     ))
                 }
             }
+            Err(_) => {
+                self.fail_committed_invite_candidate(
+                    plan,
+                    lease.generation,
+                    &transaction_id,
+                    InviteFailoverAttemptOutcome::TransactionTimeout,
+                    Some(InviteFailoverPlanPhase::Exhausted),
+                )
+                .await;
+                self.compensate_invite_candidate_transaction(&transaction_id, true)
+                    .await;
+                Err(InviteCandidateSendError::Fatal(Self::invite_setup_timeout(
+                    "invite_candidate_send",
+                )))
+            }
+        };
+        if result.is_ok() {
+            cancellation_guard.disarm();
         }
+        result
     }
 
     async fn send_initial_invite_plan(
@@ -2707,38 +3257,37 @@ impl DialogManager {
         let plan = self
             .register_invite_failover_plan(dialog_id, request, candidates, wire_plan)
             .await?;
-        let mut plan = plan.lock().await;
-        while plan.next_candidate_index < plan.candidates.len() {
-            let candidate_index = plan.next_candidate_index;
-            match self
-                .send_invite_failover_candidate(&mut plan, candidate_index)
-                .await
-            {
+        loop {
+            let candidate_index = plan.lock().await.next_candidate_index;
+            match self.send_invite_failover_candidate(&plan).await {
                 Ok(sent) => return Ok(sent),
-                Err(InviteCandidateSendError::Recoverable(error))
-                    if plan.next_candidate_index < plan.candidates.len() =>
-                {
-                    debug!(
-                        candidate_index,
-                        error_class = error.diagnostic_class(),
-                        "Initial INVITE candidate failed before send completion"
+                Err(InviteCandidateSendError::Recoverable(error)) => {
+                    let has_next = {
+                        let plan = plan.lock().await;
+                        plan.phase == InviteFailoverPlanPhase::Active
+                            && plan.next_candidate_index < plan.candidates.len()
+                    };
+                    if has_next {
+                        debug!(
+                            candidate_index,
+                            error_class = error.diagnostic_class(),
+                            "Initial INVITE candidate failed before send completion"
+                        );
+                        continue;
+                    }
+                    let mut plan = plan.lock().await;
+                    self.close_active_invite_failover_plan(
+                        &mut plan,
+                        InviteFailoverPlanPhase::Exhausted,
                     );
+                    return Err(error);
                 }
                 Err(error) => {
                     let error = error.into_dialog_error();
-                    plan.phase = InviteFailoverPlanPhase::Exhausted;
-                    plan.expires_at = Instant::now() + INVITE_FAILOVER_PLAN_TTL;
-                    self.active_invite_failover_by_dialog
-                        .remove_if(dialog_id, |_, active_plan_id| *active_plan_id == plan.id);
                     return Err(error);
                 }
             }
         }
-
-        self.close_active_invite_failover_plan(&mut plan, InviteFailoverPlanPhase::Exhausted);
-        Err(crate::errors::DialogError::TransactionError {
-            message: safe_operation_failure("invite_candidate_failover", "exhausted"),
-        })
     }
 
     /// Send a freshly-built request via a new client transaction,
@@ -2804,6 +3353,12 @@ impl DialogManager {
     ) -> DialogResult<(TransactionKey, std::net::SocketAddr)> {
         use crate::manager::RequestLifecycle;
 
+        let _operation = self.enter_invite_failover_operation().ok_or_else(|| {
+            crate::errors::DialogError::InvalidState {
+                expected: "dialog manager running".to_string(),
+                actual: "dialog manager draining or stopped".to_string(),
+            }
+        })?;
         let method = request.method();
         if candidates.is_empty() {
             return Err(crate::errors::DialogError::routing_error(
@@ -3908,6 +4463,12 @@ impl DialogManager {
         invite_tx_id: &TransactionKey,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> DialogResult<TransactionKey> {
+        let _operation = self.enter_invite_failover_operation().ok_or_else(|| {
+            crate::errors::DialogError::InvalidState {
+                expected: "dialog manager running".to_string(),
+                actual: "dialog manager draining or stopped".to_string(),
+            }
+        })?;
         debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(invite_tx_id), extra_header_count=extra_headers.len(), "Cancelling INVITE transaction with dialog cleanup");
         let pre_cancel_dialog_id = self
             .transaction_to_dialog
@@ -3925,65 +4486,98 @@ impl DialogManager {
                     .get(&plan_id)
                     .map(|entry| entry.value().clone())
                 {
-                    let mut plan = plan.lock().await;
-                    if plan.phase == InviteFailoverPlanPhase::Active {
-                        if let Some(current_transaction) = plan.current_transaction.clone() {
-                            // The plan mutex is the serialization point shared with
-                            // 503 and Timer-B failover. Whichever operation wins
-                            // selects the one exact INVITE transaction that CANCEL
-                            // is permitted to target.
-                            let cancel_transaction = self
-                                .transaction_manager
-                                .cancel_invite_transaction_with_extras(
-                                    &current_transaction,
-                                    extra_headers,
-                                )
-                                .await
-                                .map_err(|_| crate::errors::DialogError::TransactionError {
-                                    message: safe_operation_failure(
-                                        "invite_cancel",
-                                        "transaction_error",
-                                    ),
-                                })?;
-                            Self::set_invite_attempt_outcome(
-                                &mut plan,
-                                &current_transaction,
-                                InviteFailoverAttemptOutcome::Cancelled,
-                            );
+                    let selected = {
+                        let mut plan = plan.lock().await;
+                        if plan.phase == InviteFailoverPlanPhase::Active {
+                            let selected = plan
+                                .current_transaction
+                                .clone()
+                                .map(|transaction_id| (transaction_id, plan.setup_deadline));
+                            if let Some((current_transaction, _)) = selected.as_ref() {
+                                Self::set_invite_attempt_outcome(
+                                    &mut plan,
+                                    current_transaction,
+                                    InviteFailoverAttemptOutcome::Cancelled,
+                                );
+                            }
+                            // Commit logical cancellation before the external
+                            // transaction command. This wins atomically against
+                            // failover, while the bounded command itself runs
+                            // without monopolizing the plan mutex.
                             self.close_active_invite_failover_plan(
                                 &mut plan,
                                 InviteFailoverPlanPhase::Cancelled,
                             );
-                            drop(plan);
-
-                            if let Ok(mut dialog) = self.get_dialog_mut(dialog_id) {
-                                dialog.terminate();
-                                debug!(
-                                    %dialog_id,
-                                    "Terminated dialog after atomically cancelling current INVITE attempt"
-                                );
-                            }
-                            debug!(
-                                invite_transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&current_transaction),
-                                cancel_transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&cancel_transaction),
-                                plan_id,
-                                "Cancelled exact current retained initial-INVITE attempt"
-                            );
-                            return Ok(cancel_transaction);
+                            selected
+                        } else {
+                            None
                         }
+                    };
+                    if let Some((current_transaction, setup_deadline)) = selected {
+                        let cancel_transaction = match tokio::time::timeout_at(
+                            tokio::time::Instant::from_std(setup_deadline),
+                            self.transaction_manager
+                                .cancel_invite_transaction_with_extras(
+                                    &current_transaction,
+                                    extra_headers,
+                                ),
+                        )
+                        .await
+                        {
+                            Ok(Ok(transaction_id)) => transaction_id,
+                            Ok(Err(_)) => {
+                                return Err(crate::errors::DialogError::TransactionError {
+                                    message: safe_operation_failure(
+                                        "invite_cancel",
+                                        "transaction_error",
+                                    ),
+                                });
+                            }
+                            Err(_) => {
+                                return Err(Self::invite_setup_timeout("invite_cancel"));
+                            }
+                        };
+
+                        if let Ok(mut dialog) = self.get_dialog_mut(dialog_id) {
+                            dialog.terminate();
+                            debug!(
+                                %dialog_id,
+                                "Terminated dialog after atomically cancelling current INVITE attempt"
+                            );
+                        }
+                        debug!(
+                            invite_transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&current_transaction),
+                            cancel_transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&cancel_transaction),
+                            plan_id,
+                            "Cancelled exact current retained initial-INVITE attempt"
+                        );
+                        return Ok(cancel_transaction);
                     }
                 }
             }
         }
 
         // Cancel the transaction using transaction-core
-        let cancel_tx_id = self
-            .transaction_manager
-            .cancel_invite_transaction_with_extras(invite_tx_id, extra_headers)
-            .await
-            .map_err(|_error| crate::errors::DialogError::TransactionError {
-                message: safe_operation_failure("invite_cancel", "transaction_error"),
-            })?;
+        let cancel_deadline = tokio::time::Instant::now()
+            + self
+                .transaction_manager
+                .timer_settings()
+                .transaction_timeout;
+        let cancel_tx_id = match tokio::time::timeout_at(
+            cancel_deadline,
+            self.transaction_manager
+                .cancel_invite_transaction_with_extras(invite_tx_id, extra_headers),
+        )
+        .await
+        {
+            Ok(Ok(transaction_id)) => transaction_id,
+            Ok(Err(_)) => {
+                return Err(crate::errors::DialogError::TransactionError {
+                    message: safe_operation_failure("invite_cancel", "transaction_error"),
+                });
+            }
+            Err(_) => return Err(Self::invite_setup_timeout("invite_cancel")),
+        };
 
         if let Some(dialog_id) = pre_cancel_dialog_id {
             if let Ok(mut dialog) = self.get_dialog_mut(&dialog_id) {

@@ -1322,6 +1322,12 @@ impl TransactionManager {
         *self.flow_event_sender.write().await = Some(sender);
     }
 
+    /// Close the dialog-layer flow event channel during an orderly manager
+    /// drain so its consumer can be joined rather than detached.
+    pub(crate) async fn clear_flow_event_sender(&self) {
+        self.flow_event_sender.write().await.take();
+    }
+
     /// Creates a new transaction manager with default settings.
     ///
     /// This async constructor sets up the transaction manager with default timer settings

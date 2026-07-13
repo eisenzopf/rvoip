@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -57,8 +57,101 @@ const TERMINATED_BYE_LOOKUP_HARD_MAX_MULTIPLIER: usize = 16;
 const TERMINATED_BYE_PRUNE_INTERVAL: usize = 8_192;
 const MIN_DIALOG_INDEX_CAPACITY: usize = 1024;
 const DEFAULT_DIALOG_EVENT_DISPATCH_WORKERS: usize = 1;
+const INVITE_FAILOVER_RETAINED_PLAN_CAPACITY_MULTIPLIER: usize = 4;
+const QUALIFIED_INVITE_SETUP_RATE_PER_SECOND: usize = 10;
+const QUALIFIED_INVITE_RETAINED_GENERATIONS_PER_SETUP: usize = 4;
 const MIN_INVITE_FAILOVER_ATTEMPT_CAPACITY: usize = 65_536;
 const INVITE_FAILOVER_ATTEMPT_CAPACITY_MULTIPLIER: usize = 16;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum DialogManagerLifecycle {
+    Running = 0,
+    Draining = 1,
+    Stopped = 2,
+}
+
+impl DialogManagerLifecycle {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Running,
+            1 => Self::Draining,
+            _ => Self::Stopped,
+        }
+    }
+}
+
+struct InviteFailoverOperationTracker {
+    active: AtomicUsize,
+    idle: tokio::sync::Notify,
+}
+
+impl InviteFailoverOperationTracker {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            active: AtomicUsize::new(0),
+            idle: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn enter(self: &Arc<Self>, lifecycle: &AtomicU8) -> Option<InviteFailoverOperationGuard> {
+        if DialogManagerLifecycle::from_u8(lifecycle.load(Ordering::Acquire))
+            != DialogManagerLifecycle::Running
+        {
+            return None;
+        }
+        self.active.fetch_add(1, Ordering::AcqRel);
+        if DialogManagerLifecycle::from_u8(lifecycle.load(Ordering::Acquire))
+            != DialogManagerLifecycle::Running
+        {
+            self.finish_one();
+            return None;
+        }
+        Some(InviteFailoverOperationGuard {
+            tracker: Arc::clone(self),
+        })
+    }
+
+    fn finish_one(&self) {
+        if self.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.idle.notify_waiters();
+        }
+    }
+
+    async fn wait_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            if self.active.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+pub(crate) struct InviteFailoverOperationGuard {
+    tracker: Arc<InviteFailoverOperationTracker>,
+}
+
+impl Drop for InviteFailoverOperationGuard {
+    fn drop(&mut self) {
+        self.tracker.finish_one();
+    }
+}
+
+struct DialogManagerBackgroundTasks {
+    event_processor: Option<tokio::task::JoinHandle<()>>,
+    flow_consumer: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl DialogManagerBackgroundTasks {
+    fn new() -> Self {
+        Self {
+            event_processor: None,
+            flow_consumer: None,
+        }
+    }
+}
 
 /// Retained dialog-manager state counts used by release-gate leak checks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -97,8 +190,22 @@ fn terminated_bye_lookup_hard_max(index_capacity: usize) -> usize {
         .max(MIN_TERMINATED_BYE_LOOKUP_HARD_MAX)
 }
 
-fn invite_failover_attempt_capacity(index_capacity: usize) -> usize {
+fn invite_failover_retained_plan_capacity(index_capacity: usize) -> usize {
+    let qualification_floor = QUALIFIED_INVITE_SETUP_RATE_PER_SECOND
+        .saturating_mul(
+            super::transaction_integration::INVITE_FAILOVER_PLAN_TTL
+                .as_secs()
+                .try_into()
+                .unwrap_or(usize::MAX),
+        )
+        .saturating_mul(QUALIFIED_INVITE_RETAINED_GENERATIONS_PER_SETUP);
     index_capacity
+        .saturating_mul(INVITE_FAILOVER_RETAINED_PLAN_CAPACITY_MULTIPLIER)
+        .max(qualification_floor)
+}
+
+fn invite_failover_attempt_capacity(retained_plan_capacity: usize) -> usize {
+    retained_plan_capacity
         .saturating_mul(INVITE_FAILOVER_ATTEMPT_CAPACITY_MULTIPLIER)
         .max(MIN_INVITE_FAILOVER_ATTEMPT_CAPACITY)
 }
@@ -394,8 +501,23 @@ pub struct DialogManager {
     pub(crate) invite_failover_attempt_reservations: Arc<AtomicUsize>,
     pub(crate) next_invite_failover_plan_id: Arc<AtomicU64>,
     pub(crate) invite_failover_insert_count: Arc<AtomicUsize>,
+    /// Maximum simultaneously active logical INVITE operations.
+    pub(crate) invite_failover_active_plan_capacity: usize,
+    /// Maximum active plus retained late-response tombstones. This is sized
+    /// independently from concurrent dialogs so setup-rate history cannot
+    /// starve otherwise healthy calls during the 90-second retention window.
     pub(crate) invite_failover_plan_capacity: usize,
     pub(crate) invite_failover_attempt_capacity: usize,
+    /// Linearizes structural changes across the plan, active-owner and attempt
+    /// indexes. It is never held across an async suspension point.
+    pub(crate) invite_failover_registry_lock: Arc<std::sync::Mutex<()>>,
+    invite_failover_operations: Arc<InviteFailoverOperationTracker>,
+
+    /// One-way manager lifecycle used as the admission boundary for all new
+    /// dialog-layer sends and retained-plan work.
+    lifecycle: Arc<AtomicU8>,
+    stop_gate: Arc<tokio::sync::Mutex<()>>,
+    background_tasks: Arc<std::sync::Mutex<DialogManagerBackgroundTasks>>,
 
     /// Dialog to server transaction mapping. Session-level response APIs
     /// need this to select the pending UAS transaction without scanning the
@@ -624,15 +746,19 @@ fn start_dialog_event_dispatch_workers(
     manager: DialogManager,
     worker_count: usize,
     queue_capacity: usize,
-) -> Arc<Vec<mpsc::Sender<QueuedDialogTransactionEvent>>> {
+) -> (
+    Arc<Vec<mpsc::Sender<QueuedDialogTransactionEvent>>>,
+    Vec<tokio::task::JoinHandle<()>>,
+) {
     let worker_count = worker_count.clamp(1, super::MAX_DIALOG_EVENT_DISPATCH_WORKERS);
     let per_worker_capacity = (queue_capacity / worker_count).max(1);
     let mut senders = Vec::with_capacity(worker_count);
+    let mut handles = Vec::with_capacity(worker_count);
 
     for worker_id in 0..worker_count {
         let (tx, mut rx) = mpsc::channel::<QueuedDialogTransactionEvent>(per_worker_capacity);
         let manager_for_worker = manager.clone();
-        tokio::spawn(async move {
+        handles.push(tokio::spawn(async move {
             while let Some(queued) = rx.recv().await {
                 if let Some(queued_at) = queued.queued_at {
                     crate::diagnostics::record_dialog_event_dispatch_queue_delay(
@@ -647,7 +773,7 @@ fn start_dialog_event_dispatch_workers(
                 worker_id,
                 "Dialog transaction-event dispatch worker terminated"
             );
-        });
+        }));
         senders.push(tx);
     }
 
@@ -656,7 +782,7 @@ fn start_dialog_event_dispatch_workers(
         per_worker_capacity, "Dialog transaction-event dispatch workers enabled"
     );
 
-    Arc::new(senders)
+    (Arc::new(senders), handles)
 }
 
 async fn dispatch_dialog_transaction_event(
@@ -704,6 +830,18 @@ async fn dispatch_dialog_transaction_event(
 }
 
 impl DialogManager {
+    pub(crate) fn lifecycle(&self) -> DialogManagerLifecycle {
+        DialogManagerLifecycle::from_u8(self.lifecycle.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn is_accepting_work(&self) -> bool {
+        self.lifecycle() == DialogManagerLifecycle::Running
+    }
+
+    pub(crate) fn enter_invite_failover_operation(&self) -> Option<InviteFailoverOperationGuard> {
+        self.invite_failover_operations.enter(&self.lifecycle)
+    }
+
     /// Create a new dialog manager
     ///
     /// **ARCHITECTURE**: dialog-core receives TransactionManager via dependency injection.
@@ -738,7 +876,10 @@ impl DialogManager {
         );
 
         // Create shared stores
+        let active_plan_capacity = index_capacity.max(1);
         let index_capacity = index_capacity.max(MIN_DIALOG_INDEX_CAPACITY);
+        let retained_plan_capacity = invite_failover_retained_plan_capacity(active_plan_capacity);
+        let retained_attempt_capacity = invite_failover_attempt_capacity(retained_plan_capacity);
         let dialogs = Arc::new(DashMap::with_capacity(index_capacity));
         let dialog_lookup = Arc::new(DashMap::with_capacity(index_capacity.saturating_mul(2)));
 
@@ -764,17 +905,21 @@ impl DialogManager {
             outbound_transport_by_request_key: Arc::new(DashMap::with_capacity(index_capacity)),
             transaction_dialog_route_hash: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_invite_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
-            invite_failover_plans: Arc::new(DashMap::with_capacity(index_capacity)),
+            invite_failover_plans: Arc::new(DashMap::with_capacity(retained_plan_capacity)),
             active_invite_failover_by_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
-            invite_failover_attempts: Arc::new(DashMap::with_capacity(
-                invite_failover_attempt_capacity(index_capacity),
-            )),
+            invite_failover_attempts: Arc::new(DashMap::with_capacity(retained_attempt_capacity)),
             invite_failover_plan_reservations: Arc::new(AtomicUsize::new(0)),
             invite_failover_attempt_reservations: Arc::new(AtomicUsize::new(0)),
             next_invite_failover_plan_id: Arc::new(AtomicU64::new(1)),
             invite_failover_insert_count: Arc::new(AtomicUsize::new(0)),
-            invite_failover_plan_capacity: index_capacity,
-            invite_failover_attempt_capacity: invite_failover_attempt_capacity(index_capacity),
+            invite_failover_active_plan_capacity: active_plan_capacity,
+            invite_failover_plan_capacity: retained_plan_capacity,
+            invite_failover_attempt_capacity: retained_attempt_capacity,
+            invite_failover_registry_lock: Arc::new(std::sync::Mutex::new(())),
+            invite_failover_operations: InviteFailoverOperationTracker::new(),
+            lifecycle: Arc::new(AtomicU8::new(DialogManagerLifecycle::Running as u8)),
+            stop_gate: Arc::new(tokio::sync::Mutex::new(())),
+            background_tasks: Arc::new(std::sync::Mutex::new(DialogManagerBackgroundTasks::new())),
             dialog_server_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
             pending_response_transaction_by_dialog: Arc::new(DashMap::with_capacity(
                 index_capacity,
@@ -1362,7 +1507,10 @@ impl DialogManager {
         );
 
         // Create shared stores
+        let active_plan_capacity = index_capacity.max(1);
         let index_capacity = index_capacity.max(MIN_DIALOG_INDEX_CAPACITY);
+        let retained_plan_capacity = invite_failover_retained_plan_capacity(active_plan_capacity);
+        let retained_attempt_capacity = invite_failover_attempt_capacity(retained_plan_capacity);
         let dialogs = Arc::new(DashMap::with_capacity(index_capacity));
         let dialog_lookup = Arc::new(DashMap::with_capacity(index_capacity.saturating_mul(2)));
 
@@ -1388,17 +1536,21 @@ impl DialogManager {
             outbound_transport_by_request_key: Arc::new(DashMap::with_capacity(index_capacity)),
             transaction_dialog_route_hash: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_invite_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
-            invite_failover_plans: Arc::new(DashMap::with_capacity(index_capacity)),
+            invite_failover_plans: Arc::new(DashMap::with_capacity(retained_plan_capacity)),
             active_invite_failover_by_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
-            invite_failover_attempts: Arc::new(DashMap::with_capacity(
-                invite_failover_attempt_capacity(index_capacity),
-            )),
+            invite_failover_attempts: Arc::new(DashMap::with_capacity(retained_attempt_capacity)),
             invite_failover_plan_reservations: Arc::new(AtomicUsize::new(0)),
             invite_failover_attempt_reservations: Arc::new(AtomicUsize::new(0)),
             next_invite_failover_plan_id: Arc::new(AtomicU64::new(1)),
             invite_failover_insert_count: Arc::new(AtomicUsize::new(0)),
-            invite_failover_plan_capacity: index_capacity,
-            invite_failover_attempt_capacity: invite_failover_attempt_capacity(index_capacity),
+            invite_failover_active_plan_capacity: active_plan_capacity,
+            invite_failover_plan_capacity: retained_plan_capacity,
+            invite_failover_attempt_capacity: retained_attempt_capacity,
+            invite_failover_registry_lock: Arc::new(std::sync::Mutex::new(())),
+            invite_failover_operations: InviteFailoverOperationTracker::new(),
+            lifecycle: Arc::new(AtomicU8::new(DialogManagerLifecycle::Running as u8)),
+            stop_gate: Arc::new(tokio::sync::Mutex::new(())),
+            background_tasks: Arc::new(std::sync::Mutex::new(DialogManagerBackgroundTasks::new())),
             dialog_server_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
             pending_response_transaction_by_dialog: Arc::new(DashMap::with_capacity(
                 index_capacity,
@@ -1433,11 +1585,16 @@ impl DialogManager {
 
         // Spawn global transaction event processor
         let event_processor = manager.clone();
-        tokio::spawn(async move {
+        let event_processor_task = tokio::spawn(async move {
             event_processor
                 .process_global_transaction_events(transaction_events)
                 .await;
         });
+        manager
+            .background_tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .event_processor = Some(event_processor_task);
 
         // Wire up the RFC 5626 flow-event channel: the transaction
         // manager forwards transport-side pong + connection-closed
@@ -1452,7 +1609,7 @@ impl DialogManager {
             .set_flow_event_sender(flow_tx)
             .await;
         let flow_consumer = manager.clone();
-        tokio::spawn(async move {
+        let flow_consumer_task = tokio::spawn(async move {
             while let Some(event) = flow_rx.recv().await {
                 match event {
                     crate::manager::outbound_flow::FlowTransportEvent::PongReceived {
@@ -1475,6 +1632,11 @@ impl DialogManager {
             }
             debug!("RFC 5626 flow-event consumer channel closed");
         });
+        manager
+            .background_tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .flow_consumer = Some(flow_consumer_task);
 
         Ok(manager)
     }
@@ -1528,6 +1690,9 @@ impl DialogManager {
                 // Wait for shutdown signal
                 _ = self.shutdown_signal.notified() => {
                     info!("🛑 Global transaction event processor received shutdown signal");
+                    while let Ok(event) = events.try_recv() {
+                        self.process_timed_global_transaction_event(event).await;
+                    }
                     break;
                 }
             }
@@ -1542,7 +1707,7 @@ impl DialogManager {
         worker_count: usize,
         queue_capacity: usize,
     ) {
-        let dispatch_senders =
+        let (dispatch_senders, dispatch_workers) =
             start_dialog_event_dispatch_workers(self.clone(), worker_count, queue_capacity);
         let fallback_worker = AtomicUsize::new(0);
         let mut maintenance_interval = tokio::time::interval(Duration::from_secs(1));
@@ -1575,8 +1740,27 @@ impl DialogManager {
 
                 _ = self.shutdown_signal.notified() => {
                     info!("🛑 Sharded global transaction event processor received shutdown signal");
+                    while let Ok(event) = events.try_recv() {
+                        dispatch_dialog_transaction_event(
+                            self,
+                            event,
+                            &dispatch_senders,
+                            &fallback_worker,
+                        )
+                        .await;
+                    }
                     break;
                 }
+            }
+        }
+
+        // Closing every sender lets workers finish already-queued events, then
+        // joining them makes `stop` a real drain boundary rather than a timed
+        // best-effort clear.
+        drop(dispatch_senders);
+        for worker in dispatch_workers {
+            if let Err(error) = worker.await {
+                warn!(%error, "Dialog transaction-event dispatch worker failed during drain");
             }
         }
     }
@@ -2510,6 +2694,12 @@ impl DialogManager {
     /// Initializes the dialog manager for processing. This can include starting
     /// background tasks for dialog cleanup, recovery, and maintenance.
     pub async fn start(&self) -> DialogResult<()> {
+        if self.lifecycle() != DialogManagerLifecycle::Running {
+            return Err(DialogError::InvalidState {
+                expected: "new or running dialog manager".to_string(),
+                actual: "dialog manager has begun draining".to_string(),
+            });
+        }
         info!("DialogManager starting");
 
         // TODO: Start background processing tasks (cleanup, recovery, etc.)
@@ -2534,6 +2724,12 @@ impl DialogManager {
     /// 4. Clear internal state
     /// 5. Report completion via event
     pub async fn stop(&self) -> DialogResult<()> {
+        let _stop = self.stop_gate.lock().await;
+        if self.lifecycle() == DialogManagerLifecycle::Stopped {
+            return Ok(());
+        }
+        self.lifecycle
+            .store(DialogManagerLifecycle::Draining as u8, Ordering::Release);
         info!("DialogManager stopping gracefully - responding to shutdown event");
 
         // Step 0: Abort all RFC 5626 outbound-flow monitor tasks so
@@ -2558,8 +2754,33 @@ impl DialogManager {
         self.shutdown_signal.notify_one();
         debug!("Sent shutdown signal to global event processor");
 
-        // Give event processor time to process final messages
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Closing the flow sender lets its retained consumer finish naturally.
+        self.transaction_manager.clear_flow_event_sender().await;
+        let (event_processor, flow_consumer) = {
+            let mut tasks = self
+                .background_tasks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (tasks.event_processor.take(), tasks.flow_consumer.take())
+        };
+        let mut background_task_failed = false;
+        if let Some(event_processor) = event_processor {
+            if let Err(error) = event_processor.await {
+                background_task_failed = true;
+                warn!(%error, "Dialog event processor failed during drain");
+            }
+        }
+        if let Some(flow_consumer) = flow_consumer {
+            if let Err(error) = flow_consumer.await {
+                background_task_failed = true;
+                warn!(%error, "Dialog flow-event consumer failed during drain");
+            }
+        }
+
+        // Candidate work is caller-owned rather than spawned. The lifecycle
+        // latch rejects new entries, while each admitted operation is bounded
+        // by its logical setup deadline and drops this count on cancellation.
+        self.invite_failover_operations.wait_idle().await;
 
         // Step 3: Now terminate any remaining dialogs
         let dialog_ids: Vec<DialogId> = self
@@ -2588,15 +2809,35 @@ impl DialogManager {
         self.outbound_transport_by_request_key.clear();
         self.transaction_dialog_route_hash.clear();
         self.dialog_invite_transactions.clear();
-        self.invite_failover_plans.clear();
-        self.active_invite_failover_by_dialog.clear();
-        self.invite_failover_attempts.clear();
-        self.invite_failover_plan_reservations
-            .store(0, Ordering::Relaxed);
-        self.invite_failover_attempt_reservations
-            .store(0, Ordering::Relaxed);
-        self.invite_failover_insert_count
-            .store(0, Ordering::Relaxed);
+        {
+            let _registry = self
+                .invite_failover_registry_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Mark every retained Arc non-active before unlinking its indexes,
+            // so an event that captured the Arc before drain cannot resurrect
+            // a candidate after the reservation has been released.
+            for entry in self.invite_failover_plans.iter() {
+                if let Ok(mut plan) = entry.value().try_lock() {
+                    if plan.phase == super::transaction_integration::InviteFailoverPlanPhase::Active
+                    {
+                        plan.phase =
+                            super::transaction_integration::InviteFailoverPlanPhase::Closed;
+                    }
+                    plan.pending_candidate = None;
+                    plan.current_send_generation = None;
+                }
+            }
+            self.active_invite_failover_by_dialog.clear();
+            self.invite_failover_attempts.clear();
+            self.invite_failover_plans.clear();
+            self.invite_failover_plan_reservations
+                .store(0, Ordering::Release);
+            self.invite_failover_attempt_reservations
+                .store(0, Ordering::Release);
+            self.invite_failover_insert_count
+                .store(0, Ordering::Release);
+        }
         self.dialog_server_transactions.clear();
         self.pending_response_transaction_by_dialog.clear();
         self.session_to_dialog.clear();
@@ -2618,8 +2859,18 @@ impl DialogManager {
         // Since we're in dialog-core, we emit DialogEvent::ShutdownComplete
         self.emit_dialog_event(DialogEvent::ShutdownComplete).await;
 
+        self.lifecycle
+            .store(DialogManagerLifecycle::Stopped as u8, Ordering::Release);
+
         info!("DialogManager stopped successfully");
-        Ok(())
+        if background_task_failed {
+            Err(DialogError::InternalError {
+                message: "dialog background task failed during drain".to_string(),
+                context: None,
+            })
+        } else {
+            Ok(())
+        }
     }
 
     /// Get the transaction manager reference
@@ -3650,6 +3901,63 @@ mod outbound_flow_handler_tests {
         }
     }
 
+    struct BlockingSigner {
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    #[derive(Debug)]
+    struct BlockingSendTransport {
+        addr: SocketAddr,
+        entered: Arc<tokio::sync::Notify>,
+        closed: AtomicBool,
+    }
+
+    impl BlockingSendTransport {
+        fn new(entered: Arc<tokio::sync::Notify>) -> Arc<Self> {
+            Arc::new(Self {
+                addr: SocketAddr::from_str("127.0.0.1:5060").unwrap(),
+                entered,
+                closed: AtomicBool::new(false),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for BlockingSendTransport {
+        fn local_addr(&self) -> TransportResult<SocketAddr> {
+            Ok(self.addr)
+        }
+
+        async fn send_message(
+            &self,
+            _message: rvoip_sip_core::Message,
+            _destination: SocketAddr,
+        ) -> TransportResult<()> {
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+
+        async fn close(&self) -> TransportResult<()> {
+            self.closed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_closed(&self) -> bool {
+            self.closed.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::manager::PASSporTSigner for BlockingSigner {
+        async fn sign(
+            &self,
+            _claims: crate::manager::PassportClaimSummary,
+        ) -> Result<crate::manager::IdentityHeaderValue, crate::manager::SignerErrorKind> {
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+    }
+
     #[async_trait::async_trait]
     impl Transport for NoopTransport {
         fn local_addr(&self) -> TransportResult<SocketAddr> {
@@ -3688,6 +3996,526 @@ mod outbound_flow_handler_tests {
         *manager.session_coordinator.write().await = Some(sc_tx);
 
         (manager, sc_rx)
+    }
+
+    async fn make_manager_with_setup_timeout(
+        setup_timeout: Duration,
+        index_capacity: usize,
+    ) -> DialogManager {
+        let transport = NoopTransport::new();
+        let (_tx, transport_rx) = mpsc::channel::<TransportEvent>(16);
+        let mut timer_settings = crate::transaction::timer::TimerSettings::default();
+        timer_settings.transaction_timeout = setup_timeout;
+        let (tm, _events_rx) = TransactionManager::new_with_config(
+            transport,
+            transport_rx,
+            Some(16),
+            Some(timer_settings),
+        )
+        .await
+        .expect("build TransactionManager with setup timeout");
+        DialogManager::new_with_index_capacity(
+            Arc::new(tm),
+            SocketAddr::from_str("127.0.0.1:5060").unwrap(),
+            index_capacity,
+        )
+        .await
+        .expect("build DialogManager with setup timeout")
+    }
+
+    async fn make_manager_with_transport_and_setup_timeout(
+        transport: Arc<dyn Transport>,
+        setup_timeout: Duration,
+    ) -> DialogManager {
+        let (_tx, transport_rx) = mpsc::channel::<TransportEvent>(16);
+        let mut timer_settings = crate::transaction::timer::TimerSettings::default();
+        timer_settings.transaction_timeout = setup_timeout;
+        let (tm, _events_rx) = TransactionManager::new_with_config(
+            transport,
+            transport_rx,
+            Some(16),
+            Some(timer_settings),
+        )
+        .await
+        .expect("build TransactionManager with custom transport");
+        DialogManager::new_with_index_capacity(
+            Arc::new(tm),
+            SocketAddr::from_str("127.0.0.1:5060").unwrap(),
+            100,
+        )
+        .await
+        .expect("build DialogManager with custom transport")
+    }
+
+    #[test]
+    fn invite_failover_active_and_retained_capacities_are_independent() {
+        let active_capacity = 100;
+        let retained_capacity = invite_failover_retained_plan_capacity(active_capacity);
+        assert_eq!(retained_capacity, 3_600);
+        assert!(retained_capacity > active_capacity);
+        assert!(invite_failover_attempt_capacity(retained_capacity) >= 65_536);
+    }
+
+    #[tokio::test]
+    async fn concurrent_initial_invites_for_one_dialog_publish_one_owner() {
+        use crate::manager::transaction_integration::CandidateWirePlan;
+
+        let (manager, _rx) = make_manager().await;
+        let manager = Arc::new(manager);
+        let dialog_id = DialogId::new();
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-owner-race"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("invite-owner-race")
+            .cseq(1)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-owner-race-template"))
+            .max_forwards(70)
+            .build();
+        let candidates = vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+            dest_addr(5110),
+            rvoip_sip_transport::transport::TransportType::Udp,
+        )];
+
+        let first = manager.send_request_with_candidate_wire_plan(
+            request.clone(),
+            candidates.clone(),
+            Some(&dialog_id),
+            CandidateWirePlan::default(),
+        );
+        let second = manager.send_request_with_candidate_wire_plan(
+            request,
+            candidates,
+            Some(&dialog_id),
+            CandidateWirePlan::default(),
+        );
+        let (first, second) = tokio::join!(first, second);
+
+        assert_ne!(first.is_ok(), second.is_ok());
+        let rejected = first.err().or_else(|| second.err()).expect("one rejection");
+        assert_eq!(rejected.diagnostic_class(), "invalid-state");
+        assert_eq!(manager.active_invite_failover_by_dialog.len(), 1);
+        assert_eq!(manager.invite_failover_plans.len(), 1);
+        assert_eq!(manager.invite_failover_attempts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn draining_bounds_blocked_pre_send_and_rejects_post_stop_admission() {
+        use crate::manager::transaction_integration::CandidateWirePlan;
+
+        let manager =
+            Arc::new(make_manager_with_setup_timeout(Duration::from_millis(100), 100).await);
+        assert_eq!(manager.invite_failover_active_plan_capacity, 100);
+        assert_eq!(manager.invite_failover_plan_capacity, 3_600);
+        let signer_entered = Arc::new(tokio::sync::Notify::new());
+        manager.set_identity_signer(Some(Arc::new(BlockingSigner {
+            entered: signer_entered.clone(),
+        })));
+        let dialog_id = DialogId::new();
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-drain"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("invite-drain-deadline")
+            .cseq(1)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-drain-template"))
+            .max_forwards(70)
+            .build();
+        let candidates = vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+            dest_addr(5111),
+            rvoip_sip_transport::transport::TransportType::Udp,
+        )];
+        let send_manager = manager.clone();
+        let send_dialog = dialog_id.clone();
+        let send_request = request.clone();
+        let send_candidates = candidates.clone();
+        let send = tokio::spawn(async move {
+            send_manager
+                .send_request_with_candidate_wire_plan(
+                    send_request,
+                    send_candidates,
+                    Some(&send_dialog),
+                    CandidateWirePlan::default(),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), signer_entered.notified())
+            .await
+            .expect("pre-send signer entered");
+
+        let stop_manager = manager.clone();
+        let stop = tokio::spawn(async move { stop_manager.stop().await });
+        let send_error = tokio::time::timeout(Duration::from_secs(1), send)
+            .await
+            .expect("blocked send bounded")
+            .expect("send task joined")
+            .expect_err("setup deadline rejects blocked pre-send");
+        assert_eq!(send_error.diagnostic_class(), "timeout");
+        tokio::time::timeout(Duration::from_secs(1), stop)
+            .await
+            .expect("stop bounded")
+            .expect("stop task joined")
+            .expect("stop succeeds");
+
+        assert_eq!(manager.lifecycle(), DialogManagerLifecycle::Stopped);
+        assert!(manager.invite_failover_plans.is_empty());
+        assert!(manager.active_invite_failover_by_dialog.is_empty());
+        assert!(manager.invite_failover_attempts.is_empty());
+        assert_eq!(
+            manager
+                .transaction_manager
+                .retention_counts()
+                .active_transactions_total,
+            0
+        );
+        let post_stop = tokio::time::timeout(
+            Duration::from_millis(20),
+            manager.send_request_with_candidate_wire_plan(
+                request,
+                candidates,
+                Some(&DialogId::new()),
+                CandidateWirePlan::default(),
+            ),
+        )
+        .await
+        .expect("post-stop rejection is immediate")
+        .expect_err("stopped manager rejects admission");
+        assert_eq!(post_stop.diagnostic_class(), "invalid-state");
+    }
+
+    #[tokio::test]
+    async fn setup_deadline_compensates_a_blocked_transaction_send() {
+        use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};
+
+        let send_entered = Arc::new(tokio::sync::Notify::new());
+        let manager = make_manager_with_transport_and_setup_timeout(
+            BlockingSendTransport::new(send_entered.clone()),
+            Duration::from_millis(100),
+        )
+        .await;
+        let dialog_id = DialogId::new();
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from(
+                "Alice",
+                "sip:alice@example.com",
+                Some("alice-send-deadline"),
+            )
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("invite-send-deadline")
+            .cseq(1)
+            .via(
+                "127.0.0.1:5060",
+                "UDP",
+                Some("z9hG4bK-send-deadline-template"),
+            )
+            .max_forwards(70)
+            .build();
+        let send = manager.send_request_with_candidate_wire_plan(
+            request,
+            vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                dest_addr(5112),
+                rvoip_sip_transport::transport::TransportType::Udp,
+            )],
+            Some(&dialog_id),
+            CandidateWirePlan::default(),
+        );
+        tokio::pin!(send);
+        let (result, ()) = tokio::join!(
+            async {
+                tokio::time::timeout(Duration::from_secs(1), &mut send)
+                    .await
+                    .expect("send is bounded by setup deadline")
+            },
+            async {
+                tokio::time::timeout(Duration::from_secs(1), send_entered.notified())
+                    .await
+                    .expect("transport send entered");
+            }
+        );
+
+        let error = result.expect_err("blocked transport send times out");
+        assert_eq!(error.diagnostic_class(), "timeout");
+        assert!(!manager
+            .active_invite_failover_by_dialog
+            .contains_key(&dialog_id));
+        let plan = manager
+            .invite_failover_plans
+            .iter()
+            .next()
+            .expect("bounded tombstone retained")
+            .value()
+            .clone();
+        let plan = plan.lock().await;
+        assert_eq!(plan.phase, InviteFailoverPlanPhase::Exhausted);
+        assert!(plan.pending_candidate.is_none());
+        assert!(plan.current_transaction.is_none());
+        drop(plan);
+        assert!(manager.invite_failover_attempts.is_empty());
+        assert_eq!(
+            manager
+                .transaction_manager
+                .retention_counts()
+                .active_transactions_total,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn setup_deadline_compensates_a_blocked_post_send_hook() {
+        use crate::manager::request_lifecycle::test_hooks::{
+            install_post_send_gate, remove_post_send_gate,
+        };
+        use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};
+
+        const CALL_ID: &str = "invite-post-send-deadline";
+        let manager = make_manager_with_setup_timeout(Duration::from_millis(100), 100).await;
+        let gate = install_post_send_gate(CALL_ID);
+        let dialog_id = DialogId::new();
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from(
+                "Alice",
+                "sip:alice@example.com",
+                Some("alice-post-deadline"),
+            )
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id(CALL_ID)
+            .cseq(1)
+            .via(
+                "127.0.0.1:5060",
+                "UDP",
+                Some("z9hG4bK-post-deadline-template"),
+            )
+            .max_forwards(70)
+            .build();
+        let send = manager.send_request_with_candidate_wire_plan(
+            request,
+            vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                dest_addr(5113),
+                rvoip_sip_transport::transport::TransportType::Udp,
+            )],
+            Some(&dialog_id),
+            CandidateWirePlan::default(),
+        );
+        tokio::pin!(send);
+        let (result, ()) = tokio::join!(
+            async {
+                tokio::time::timeout(Duration::from_secs(1), &mut send)
+                    .await
+                    .expect("post-send hook is bounded by setup deadline")
+            },
+            async {
+                tokio::time::timeout(Duration::from_secs(1), gate.entered.notified())
+                    .await
+                    .expect("post-send hook entered");
+            }
+        );
+        remove_post_send_gate(CALL_ID);
+
+        let error = result.expect_err("blocked post-send hook times out");
+        assert_eq!(error.diagnostic_class(), "timeout");
+        assert!(!manager
+            .active_invite_failover_by_dialog
+            .contains_key(&dialog_id));
+        let plan = manager
+            .invite_failover_plans
+            .iter()
+            .next()
+            .expect("bounded tombstone retained")
+            .value()
+            .clone();
+        let plan = plan.lock().await;
+        assert_eq!(plan.phase, InviteFailoverPlanPhase::Exhausted);
+        assert!(plan.pending_candidate.is_none());
+        assert!(plan.current_transaction.is_none());
+        drop(plan);
+        assert!(manager.invite_failover_attempts.is_empty());
+        assert_eq!(
+            manager
+                .transaction_manager
+                .retention_counts()
+                .active_transactions_total,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn sharded_event_workers_and_flow_consumer_join_on_idempotent_stop() {
+        let transport = NoopTransport::new();
+        let (_tx, transport_rx) = mpsc::channel::<TransportEvent>(16);
+        let (tm, event_rx) = TransactionManager::new(transport, transport_rx, Some(16))
+            .await
+            .expect("build TransactionManager");
+        let local = SocketAddr::from_str("127.0.0.1:5060").unwrap();
+        let mut config = DialogManagerConfig::server(local).build();
+        if let DialogManagerConfig::Server(server) = &mut config {
+            server.dialog.event_dispatch_workers = Some(2);
+            server.dialog.event_dispatch_queue_capacity = Some(8);
+        }
+        let manager = DialogManager::with_global_events_and_index_capacity_and_config(
+            Arc::new(tm),
+            event_rx,
+            local,
+            100,
+            Some(config),
+        )
+        .await
+        .expect("build sharded DialogManager");
+
+        tokio::time::timeout(Duration::from_secs(1), manager.stop())
+            .await
+            .expect("first stop bounded")
+            .expect("first stop succeeds");
+        assert_eq!(manager.lifecycle(), DialogManagerLifecycle::Stopped);
+        {
+            let tasks = manager
+                .background_tasks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert!(tasks.event_processor.is_none());
+            assert!(tasks.flow_consumer.is_none());
+        }
+        tokio::time::timeout(Duration::from_millis(20), manager.stop())
+            .await
+            .expect("second stop is immediate")
+            .expect("second stop is idempotent");
+    }
+
+    #[tokio::test]
+    async fn aborting_blocked_candidate_stages_releases_active_ownership() {
+        use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};
+
+        let pre_manager =
+            Arc::new(make_manager_with_setup_timeout(Duration::from_secs(5), 100).await);
+        let signer_entered = Arc::new(tokio::sync::Notify::new());
+        pre_manager.set_identity_signer(Some(Arc::new(BlockingSigner {
+            entered: signer_entered.clone(),
+        })));
+        let pre_dialog = DialogId::new();
+        let pre_request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-abort-pre"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("invite-abort-pre")
+            .cseq(1)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-abort-pre"))
+            .max_forwards(70)
+            .build();
+        let pre_task_manager = pre_manager.clone();
+        let pre_task_dialog = pre_dialog.clone();
+        let pre_task = tokio::spawn(async move {
+            pre_task_manager
+                .send_request_with_candidate_wire_plan(
+                    pre_request,
+                    vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                        dest_addr(5114),
+                        rvoip_sip_transport::transport::TransportType::Udp,
+                    )],
+                    Some(&pre_task_dialog),
+                    CandidateWirePlan::default(),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), signer_entered.notified())
+            .await
+            .expect("blocked pre-send entered");
+        pre_task.abort();
+        assert!(pre_task
+            .await
+            .expect_err("pre-send task aborted")
+            .is_cancelled());
+        assert!(!pre_manager
+            .active_invite_failover_by_dialog
+            .contains_key(&pre_dialog));
+        let pre_plan = pre_manager
+            .invite_failover_plans
+            .iter()
+            .next()
+            .expect("pre-send tombstone")
+            .value()
+            .clone();
+        let pre_plan = pre_plan.lock().await;
+        assert_eq!(pre_plan.phase, InviteFailoverPlanPhase::Closed);
+        assert!(pre_plan.pending_candidate.is_none());
+        drop(pre_plan);
+
+        let send_entered = Arc::new(tokio::sync::Notify::new());
+        let send_manager = Arc::new(
+            make_manager_with_transport_and_setup_timeout(
+                BlockingSendTransport::new(send_entered.clone()),
+                Duration::from_secs(5),
+            )
+            .await,
+        );
+        let send_dialog = DialogId::new();
+        let send_request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-abort-send"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("invite-abort-send")
+            .cseq(1)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-abort-send"))
+            .max_forwards(70)
+            .build();
+        let send_task_manager = send_manager.clone();
+        let send_task_dialog = send_dialog.clone();
+        let send_task = tokio::spawn(async move {
+            send_task_manager
+                .send_request_with_candidate_wire_plan(
+                    send_request,
+                    vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                        dest_addr(5115),
+                        rvoip_sip_transport::transport::TransportType::Udp,
+                    )],
+                    Some(&send_task_dialog),
+                    CandidateWirePlan::default(),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), send_entered.notified())
+            .await
+            .expect("blocked transport send entered");
+        send_task.abort();
+        assert!(send_task
+            .await
+            .expect_err("send task aborted")
+            .is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if send_manager
+                    .transaction_manager
+                    .retention_counts()
+                    .active_transactions_total
+                    == 0
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("aborted send transaction compensated");
+        assert!(!send_manager
+            .active_invite_failover_by_dialog
+            .contains_key(&send_dialog));
+        assert!(send_manager.invite_failover_attempts.is_empty());
+        let send_plan = send_manager
+            .invite_failover_plans
+            .iter()
+            .next()
+            .expect("send tombstone")
+            .value()
+            .clone();
+        let send_plan = send_plan.lock().await;
+        assert_eq!(send_plan.phase, InviteFailoverPlanPhase::Closed);
+        assert!(send_plan.current_transaction.is_none());
     }
 
     fn test_key(n: u8) -> (String, u32, String) {
@@ -3869,34 +4697,43 @@ mod outbound_flow_handler_tests {
         );
 
         let plan_id = 77;
-        manager.invite_failover_plans.insert(
-            plan_id,
-            Arc::new(tokio::sync::Mutex::new(InviteFailoverPlan {
-                id: plan_id,
-                dialog_id: dialog_id.clone(),
-                request,
-                candidates: vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
-                    dest_addr(5090),
-                    rvoip_sip_transport::transport::TransportType::Udp,
-                )],
-                wire_plan: CandidateWirePlan::default(),
-                next_candidate_index: 1,
-                current_transaction: Some(first_transaction.clone()),
-                current_candidate_index: Some(0),
-                provisional_seen: false,
-                phase: InviteFailoverPlanPhase::Closed,
-                attempts: vec![InviteFailoverAttempt {
-                    transaction_id: first_transaction.clone(),
-                    candidate_index: 0,
-                    outcome: InviteFailoverAttemptOutcome::FinalResponse,
-                }],
-                accepted_transaction: None,
-                accepted_to_tag: None,
-                cleaned_fork_tags: std::collections::HashSet::new(),
-                setup_deadline: Instant::now() + Duration::from_secs(32),
-                expires_at: Instant::now() - Duration::from_millis(1),
-            })),
-        );
+        let captured_plan = Arc::new(tokio::sync::Mutex::new(InviteFailoverPlan {
+            id: plan_id,
+            dialog_id: dialog_id.clone(),
+            request,
+            candidates: vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                dest_addr(5090),
+                rvoip_sip_transport::transport::TransportType::Udp,
+            )],
+            wire_plan: CandidateWirePlan::default(),
+            next_candidate_index: 1,
+            next_send_generation: 1,
+            pending_candidate: None,
+            current_transaction: Some(first_transaction.clone()),
+            current_candidate_index: Some(0),
+            current_send_generation: Some(1),
+            provisional_seen: false,
+            phase: InviteFailoverPlanPhase::Closed,
+            attempts: vec![InviteFailoverAttempt {
+                transaction_id: first_transaction.clone(),
+                candidate_index: 0,
+                outcome: InviteFailoverAttemptOutcome::FinalResponse,
+            }],
+            accepted_transaction: None,
+            accepted_to_tag: None,
+            cleaned_fork_tags: std::collections::HashSet::new(),
+            setup_deadline: Instant::now() + Duration::from_secs(32),
+            expires_at: Instant::now() - Duration::from_millis(1),
+        }));
+        manager
+            .invite_failover_plans
+            .insert(plan_id, captured_plan.clone());
+        manager
+            .invite_failover_plan_reservations
+            .store(1, Ordering::Release);
+        manager
+            .invite_failover_attempt_reservations
+            .store(1, Ordering::Release);
         manager
             .active_invite_failover_by_dialog
             .insert(dialog_id.clone(), plan_id);
@@ -3924,6 +4761,23 @@ mod outbound_flow_handler_tests {
         assert!(!manager
             .transaction_dialog_route_hash
             .contains_key(&first_transaction));
+        assert_eq!(
+            captured_plan.lock().await.phase,
+            InviteFailoverPlanPhase::Closed,
+            "an event that captured the Arc before prune must observe a non-active tombstone"
+        );
+        assert_eq!(
+            manager
+                .invite_failover_plan_reservations
+                .load(Ordering::Acquire),
+            0
+        );
+        assert_eq!(
+            manager
+                .invite_failover_attempt_reservations
+                .load(Ordering::Acquire),
+            0
+        );
 
         manager.unlink_transaction_from_dialog_indexed(&second_transaction);
     }
@@ -4324,8 +5178,11 @@ mod outbound_flow_handler_tests {
                     candidates: Vec::new(),
                     wire_plan: CandidateWirePlan::default(),
                     next_candidate_index: 0,
+                    next_send_generation: 0,
+                    pending_candidate: None,
                     current_transaction: (offset == 0).then(|| retained_transaction.clone()),
                     current_candidate_index: (offset == 0).then_some(0),
+                    current_send_generation: (offset == 0).then_some(1),
                     provisional_seen: false,
                     phase: InviteFailoverPlanPhase::Active,
                     attempts,

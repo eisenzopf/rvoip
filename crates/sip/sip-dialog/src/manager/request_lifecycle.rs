@@ -40,6 +40,54 @@ use std::net::SocketAddr;
 use crate::diagnostics::safe_log::method_class;
 use crate::errors::DialogResult;
 
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock, Mutex};
+
+    pub(crate) struct PostSendGate {
+        pub(crate) entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    static POST_SEND_GATES: LazyLock<Mutex<HashMap<String, Arc<PostSendGate>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) fn install_post_send_gate(call_id: &str) -> Arc<PostSendGate> {
+        let gate = Arc::new(PostSendGate {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        POST_SEND_GATES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(call_id.to_string(), gate.clone());
+        gate
+    }
+
+    pub(crate) fn remove_post_send_gate(call_id: &str) {
+        POST_SEND_GATES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(call_id);
+    }
+
+    pub(crate) async fn wait_if_installed(request: &Request) {
+        let gate = request.call_id().and_then(|call_id| {
+            POST_SEND_GATES
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&call_id.value())
+                .cloned()
+        });
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
+}
+
 /// Request lifecycle hooks for dialog-creating outbound requests.
 ///
 /// Implementors receive the fully-built request (with all stack-
@@ -152,6 +200,16 @@ impl RequestLifecycle for crate::manager::DialogManager {
                 Ok(())
             }
         }
+    }
+
+    async fn post_send_request(
+        &self,
+        _request: &Request,
+        _destination: SocketAddr,
+    ) -> DialogResult<()> {
+        #[cfg(test)]
+        test_hooks::wait_if_installed(_request).await;
+        Ok(())
     }
 }
 
