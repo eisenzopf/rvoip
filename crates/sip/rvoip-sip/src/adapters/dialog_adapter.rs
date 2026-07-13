@@ -127,6 +127,16 @@ fn redacted_dialog_operation_error<E>(operation: &'static str, _source: E) -> Se
     SessionError::DialogError(format!("{operation} failed (class=dialog-dispatch)"))
 }
 
+fn register_auth_scheme_class(scheme: &crate::auth::SipAuthScheme) -> &'static str {
+    match scheme {
+        crate::auth::SipAuthScheme::Digest => "digest",
+        crate::auth::SipAuthScheme::Bearer => "bearer",
+        crate::auth::SipAuthScheme::Basic => "basic",
+        crate::auth::SipAuthScheme::Aka => "aka",
+        crate::auth::SipAuthScheme::Other(_) => "other",
+    }
+}
+
 /// Minimal dialog adapter - just translates between dialog-core and state machine
 pub struct DialogAdapter {
     /// Dialog-core unified API
@@ -2094,7 +2104,7 @@ impl DialogAdapter {
         self.dialog_api
             .send_register_with_options(opts)
             .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to send REGISTER: {}", e)))
+            .map_err(|error| redacted_dialog_operation_error("send REGISTER", error))
     }
 
     pub async fn send_cancel_with_options(
@@ -2348,10 +2358,16 @@ impl DialogAdapter {
         extras: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<RegisterAttemptOutcome> {
         tracing::info!(
-            "Sending REGISTER for session {} to {} (expires={})",
-            session_id.0,
-            registrar_uri,
-            expires
+            session_present = !session_id.0.is_empty(),
+            session_bytes = session_id.0.len(),
+            registrar_present = !registrar_uri.is_empty(),
+            registrar_bytes = registrar_uri.len(),
+            aor_present = !from_uri.is_empty(),
+            aor_bytes = from_uri.len(),
+            contact_present = !contact_uri.is_empty(),
+            contact_bytes = contact_uri.len(),
+            expires,
+            "outbound REGISTER starting"
         );
 
         // Build authorization header if auth material provided.
@@ -2389,9 +2405,10 @@ impl DialogAdapter {
                 self.store.update_session(session.clone()).await?;
 
                 tracing::info!(
-                    "🔍 CLIENT: Computing auth for REGISTER uri={}, nc={}",
-                    registrar_uri,
-                    nc_value
+                    registrar_present = !registrar_uri.is_empty(),
+                    registrar_bytes = registrar_uri.len(),
+                    nonce_count = nc_value,
+                    "outbound REGISTER authentication computing"
                 );
 
                 // REGISTER body is empty; pass `None` so the qop
@@ -2414,8 +2431,8 @@ impl DialogAdapter {
                     })?;
 
                 tracing::info!(
-                    "🔍 CLIENT: Computed REGISTER auth using {:?}",
-                    selected.scheme
+                    auth_scheme = register_auth_scheme_class(&selected.scheme),
+                    "outbound REGISTER authentication computed"
                 );
 
                 let status = session
@@ -2450,9 +2467,13 @@ impl DialogAdapter {
             let rewritten = rewrite_contact_host(contact_uri, public);
             if rewritten != contact_uri {
                 tracing::info!(
-                    "RFC 3581/5626: rewriting REGISTER Contact {} → {} (NAT-discovered)",
-                    contact_uri,
-                    rewritten
+                    contact_present = !contact_uri.is_empty(),
+                    contact_bytes = contact_uri.len(),
+                    rewritten_contact_present = !rewritten.is_empty(),
+                    rewritten_contact_bytes = rewritten.len(),
+                    public_address_family = if public.is_ipv4() { "ipv4" } else { "ipv6" },
+                    public_port = public.port(),
+                    "outbound REGISTER Contact rewritten from NAT discovery"
                 );
             }
             rewritten
@@ -2497,7 +2518,7 @@ impl DialogAdapter {
                 refresh: false,
             })
             .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to send REGISTER: {}", e)))?;
+            .map_err(|error| redacted_dialog_operation_error("send REGISTER", error))?;
 
         tracing::info!(
             "REGISTER response received: {} for session {}",
@@ -2930,6 +2951,37 @@ mod tests {
                 "lower error relay template returned: {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn register_diagnostics_never_format_live_uri_contact_or_scheme_values() {
+        let source = include_str!("dialog_adapter.rs");
+        for forbidden in [
+            ["Sending REGISTER for session {}", " to {}"].concat(),
+            ["Computing auth for REGISTER", " uri={}"].concat(),
+            ["Computed REGISTER auth", " using {:?}"].concat(),
+            ["rewriting REGISTER Contact", " {}"].concat(),
+            ["Failed to send REGISTER", ": {}"].concat(),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "live REGISTER diagnostic template returned: {forbidden}"
+            );
+        }
+
+        let scheme_canary = "SCHEME_CANARY_SECRET_19cf";
+        assert_eq!(
+            register_auth_scheme_class(&crate::auth::SipAuthScheme::Other(
+                scheme_canary.to_string()
+            )),
+            "other"
+        );
+        assert!(
+            !register_auth_scheme_class(&crate::auth::SipAuthScheme::Other(
+                scheme_canary.to_string()
+            ))
+            .contains(scheme_canary)
+        );
     }
 
     // ---- NAT-aware Contact rewrite (Sprint 1.A3) -------------------

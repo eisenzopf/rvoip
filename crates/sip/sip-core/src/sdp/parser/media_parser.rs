@@ -85,12 +85,15 @@ use crate::types::sdp::MediaDescription;
 ///
 /// - [RFC 8866 Section 5.14](https://datatracker.ietf.org/doc/html/rfc8866#section-5.14)
 pub fn parse_media_description_line(value: &str) -> Result<MediaDescription> {
+    let invalid_media_field = || {
+        Error::SdpParsingError(format!(
+            "class=media-field; line=0; field_bytes={}",
+            value.len()
+        ))
+    };
     let parts: Vec<&str> = value.split_whitespace().collect();
     if parts.len() < 4 {
-        return Err(Error::SdpParsingError(format!(
-            "Invalid media description format: {}",
-            value
-        )));
+        return Err(invalid_media_field());
     }
 
     // Parse media type
@@ -104,18 +107,15 @@ pub fn parse_media_description_line(value: &str) -> Result<MediaDescription> {
     let port_parts: Vec<&str> = parts[1].split('/').collect();
     let port = match port_parts[0].parse::<u16>() {
         Ok(p) => p,
-        Err(_) => {
-            return Err(Error::SdpParsingError(format!(
-                "Invalid port: {}",
-                port_parts[0]
-            )))
-        }
+        Err(_) => return Err(invalid_media_field()),
     };
 
     let port_count = if port_parts.len() > 1 {
-        Some(port_parts[1].parse::<u16>().map_err(|_| {
-            Error::SdpParsingError(format!("Invalid port count: {}", port_parts[1]))
-        })?)
+        Some(
+            port_parts[1]
+                .parse::<u16>()
+                .map_err(|_| invalid_media_field())?,
+        )
     } else {
         None
     };

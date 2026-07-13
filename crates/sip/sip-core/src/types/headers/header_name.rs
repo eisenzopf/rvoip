@@ -263,8 +263,34 @@ impl HeaderName {
     /// compatibility, so security-sensitive callers must compare its wire
     /// spelling case-insensitively as well as matching the typed variants.
     pub fn is_authorization_credentials(&self) -> bool {
-        self.as_str().eq_ignore_ascii_case("Authorization")
-            || self.as_str().eq_ignore_ascii_case("Proxy-Authorization")
+        matches!(
+            self.canonical_wire_name(),
+            HeaderName::Authorization | HeaderName::ProxyAuthorization
+        )
+    }
+
+    /// Return the typed identity for a recognized standard or compact header spelling.
+    ///
+    /// Public constructors can still produce `Other("call-id")`. Security and framing
+    /// boundaries must not let that spelling evade the policy attached to `CallId`, so this
+    /// helper applies the same case-insensitive and compact-name table as [`FromStr`]. Unknown
+    /// extension names remain unchanged.
+    pub fn canonical_wire_name(&self) -> HeaderName {
+        match self {
+            HeaderName::Other(name) => HeaderName::from_str(name).unwrap_or_else(|_| self.clone()),
+            _ => self.clone(),
+        }
+    }
+
+    /// Compare SIP header identities case-insensitively, including standard names smuggled
+    /// through [`HeaderName::Other`] and RFC compact spellings.
+    pub fn wire_eq(&self, other: &HeaderName) -> bool {
+        match (self.canonical_wire_name(), other.canonical_wire_name()) {
+            (HeaderName::Other(left), HeaderName::Other(right)) => {
+                left.eq_ignore_ascii_case(&right)
+            }
+            (left, right) => left == right,
+        }
     }
 }
 
@@ -429,6 +455,34 @@ mod tests {
 
         // Unsupported has no compact form — bare "u" must not land there.
         assert_ne!(HeaderName::from_str("u").unwrap(), HeaderName::Unsupported);
+    }
+
+    #[test]
+    fn canonical_wire_identity_covers_other_case_and_compact_aliases() {
+        for (alias, expected) in [
+            ("CALL-id", HeaderName::CallId),
+            ("I", HeaderName::CallId),
+            ("cSeQ", HeaderName::CSeq),
+            ("V", HeaderName::Via),
+            ("MAX-forwards", HeaderName::MaxForwards),
+            ("L", HeaderName::ContentLength),
+            ("F", HeaderName::From),
+            ("T", HeaderName::To),
+            ("M", HeaderName::Contact),
+            ("C", HeaderName::ContentType),
+            ("ROUTE", HeaderName::Route),
+            ("record-ROUTE", HeaderName::RecordRoute),
+            ("AUTHORIZATION", HeaderName::Authorization),
+            ("proxy-AUTHORIZATION", HeaderName::ProxyAuthorization),
+        ] {
+            let other = HeaderName::Other(alias.to_string());
+            assert_eq!(other.canonical_wire_name(), expected);
+            assert!(other.wire_eq(&expected));
+            assert!(expected.wire_eq(&other));
+        }
+
+        assert!(HeaderName::Other("x-trace".into()).wire_eq(&HeaderName::Other("X-Trace".into())));
+        assert!(!HeaderName::Other("x-trace".into()).wire_eq(&HeaderName::Route));
     }
 
     #[test]

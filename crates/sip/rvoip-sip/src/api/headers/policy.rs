@@ -62,10 +62,11 @@ impl fmt::Debug for MissingRequiredHeader {
 
 /// Classify a header for a given method. See module-level docs.
 pub fn classify(method: Method, name: &HeaderName) -> HeaderRole {
-    if is_always_stack_managed(name) {
+    let canonical_name = name.canonical_wire_name();
+    if is_always_stack_managed(&canonical_name) {
         return HeaderRole::StackManaged;
     }
-    if matches!(name, HeaderName::Route) {
+    if matches!(&canonical_name, HeaderName::Route) {
         // Route is stack-managed by the dialog route-set logic on every
         // outbound request. Applications use `with_outbound_proxy` /
         // `without_outbound_proxy` instead.
@@ -73,7 +74,7 @@ pub fn classify(method: Method, name: &HeaderName) -> HeaderRole {
     }
 
     // Method-shaped overrides.
-    if let Some(setter) = method_shaped_setter(method, name) {
+    if let Some(setter) = method_shaped_setter(method, &canonical_name) {
         return HeaderRole::MethodShaped { setter };
     }
 
@@ -85,7 +86,8 @@ pub fn classify(method: Method, name: &HeaderName) -> HeaderRole {
 /// always filtered; method-shaped names go through the normal policy
 /// check on the destination builder.
 pub fn forbidden_for_carry_through(name: &HeaderName) -> bool {
-    is_always_stack_managed(name) || matches!(name, HeaderName::Route)
+    let canonical_name = name.canonical_wire_name();
+    is_always_stack_managed(&canonical_name) || matches!(canonical_name, HeaderName::Route)
 }
 
 /// SIP_API_DESIGN_2 §5.4 — the load-bearing safety check at the
@@ -140,19 +142,15 @@ fn method_shaped_setter(method: Method, name: &HeaderName) -> Option<&'static st
     use HeaderName as H;
     use Method as M;
 
+    if matches!(name, H::Authorization | H::ProxyAuthorization) {
+        return Some("with_credentials");
+    }
+
     match (method, name) {
         // Contact: shaped on initial INVITE / REGISTER; SUBSCRIBE init.
         // (In-dialog re-INVITE / BYE / NOTIFY get Contact stack-managed,
         // but the builder-side classification only sees fresh requests.)
         (M::Invite | M::Register | M::Subscribe, H::Contact) => Some("with_contact_uri"),
-
-        // Authorization: shaped on every UAC request that accepts
-        // `with_credentials` or `with_auth`. The Bye/Cancel path doesn't expose creds
-        // (stack-managed on in-dialog) but is harmless to flag here.
-        (
-            M::Invite | M::Register | M::Subscribe | M::Message | M::Options | M::Refer,
-            H::Authorization,
-        ) => Some("with_credentials"),
 
         // Expires: shaped on REGISTER and SUBSCRIBE only.
         (M::Register | M::Subscribe, H::Expires) => Some("with_expires"),
@@ -204,5 +202,35 @@ mod diagnostic_tests {
             Method::Extension(METHOD_CANARY.to_string())
         );
         assert_eq!(violation.name, HeaderName::Other(HEADER_CANARY.to_string()));
+    }
+
+    #[test]
+    fn structural_other_aliases_cannot_bypass_stack_ownership() {
+        for alias in [
+            "call-ID",
+            "I",
+            "cSeQ",
+            "V",
+            "MAX-forwards",
+            "L",
+            "ROUTE",
+            "record-ROUTE",
+        ] {
+            let name = HeaderName::Other(alias.into());
+            assert_eq!(classify(Method::Invite, &name), HeaderRole::StackManaged);
+            assert!(forbidden_for_carry_through(&name));
+        }
+    }
+
+    #[test]
+    fn credential_other_aliases_require_the_dedicated_setter() {
+        for alias in ["AUTHORIZATION", "proxy-AUTHORIZATION"] {
+            assert_eq!(
+                classify(Method::Invite, &HeaderName::Other(alias.into())),
+                HeaderRole::MethodShaped {
+                    setter: "with_credentials"
+                }
+            );
+        }
     }
 }

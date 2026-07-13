@@ -246,6 +246,7 @@ pub trait SipRequestOptions: Sized + Send + Sync {
     /// method-shaped headers downgrade to a `warn!` log and the
     /// header is silently dropped (the call still returns `Ok(self)`).
     fn with_header(mut self, header: TypedHeader) -> Result<Self, HeaderPolicyViolation> {
+        let header = canonicalize_typed_header_name(header);
         let method = self.method();
         let name = header.name();
         let role = policy::classify(method.clone(), &name);
@@ -375,7 +376,19 @@ pub fn take_staged(state: &mut BuilderHeaderState) -> Vec<TypedHeader> {
 
 fn canonicalize_header_name(name: HeaderName) -> HeaderName {
     match name {
-        HeaderName::Other(s) => HeaderName::Other(canonicalize_other(&s)),
+        HeaderName::Other(s) => match s.parse::<HeaderName>() {
+            Ok(HeaderName::Other(_)) | Err(_) => HeaderName::Other(canonicalize_other(&s)),
+            Ok(known) => known,
+        },
+        other => other,
+    }
+}
+
+fn canonicalize_typed_header_name(header: TypedHeader) -> TypedHeader {
+    match header {
+        TypedHeader::Other(name, value) => {
+            TypedHeader::Other(canonicalize_header_name(name), value)
+        }
         other => other,
     }
 }
@@ -412,6 +425,34 @@ mod tests {
         assert_eq!(canonicalize_other("x-customer-id"), "X-Customer-Id");
         assert_eq!(canonicalize_other("X-CUSTOMER-ID"), "X-Customer-Id");
         assert_eq!(canonicalize_other("history-info"), "History-Info");
+    }
+
+    #[test]
+    fn canonicalize_recognized_other_names_to_typed_identity() {
+        for (alias, expected) in [
+            ("call-ID", HeaderName::CallId),
+            ("i", HeaderName::CallId),
+            ("V", HeaderName::Via),
+            ("l", HeaderName::ContentLength),
+            ("route", HeaderName::Route),
+            ("AUTHORIZATION", HeaderName::Authorization),
+            ("Proxy-AUTHORIZATION", HeaderName::ProxyAuthorization),
+        ] {
+            assert_eq!(
+                canonicalize_header_name(HeaderName::Other(alias.into())),
+                expected
+            );
+        }
+        assert_eq!(
+            canonicalize_header_name(HeaderName::Other("x-CUSTOM".into())),
+            HeaderName::Other("X-Custom".into())
+        );
+
+        let header = canonicalize_typed_header_name(TypedHeader::Other(
+            HeaderName::Other("sUbJeCt".into()),
+            HeaderValue::Raw(b"hello".to_vec()),
+        ));
+        assert_eq!(header.name(), HeaderName::Subject);
     }
 
     #[test]

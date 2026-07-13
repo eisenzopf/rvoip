@@ -45,11 +45,14 @@ fn validation_error(message: impl Into<String>) -> Error {
 }
 
 fn has_header(headers: &[TypedHeader], name: HeaderName) -> bool {
-    headers.iter().any(|h| h.name() == name)
+    headers.iter().any(|header| header.name().wire_eq(&name))
 }
 
 fn header_count(headers: &[TypedHeader], name: HeaderName) -> usize {
-    headers.iter().filter(|h| h.name() == name).count()
+    headers
+        .iter()
+        .filter(|header| header.name().wire_eq(&name))
+        .count()
 }
 
 fn contains_forbidden_inline_control(value: &str) -> bool {
@@ -183,6 +186,27 @@ fn validate_outbound_header_fields(headers: &[TypedHeader]) -> Result<()> {
             return Err(validation_error(
                 "SIP typed header rendered an unexpected field name",
             ));
+        }
+    }
+
+    // These fields are emitted once by this stack's typed dialog/transaction path. Count by
+    // semantic wire identity so `Other("i")` cannot bypass a typed `CallId`, and reject at the
+    // final typed transport boundary before any packet is written. Via, Route, and Record-Route
+    // are intentionally absent: their ordered multiplicity is part of SIP routing semantics.
+    for (name, label) in [
+        (HeaderName::From, "From"),
+        (HeaderName::To, "To"),
+        (HeaderName::CallId, "Call-ID"),
+        (HeaderName::CSeq, "CSeq"),
+        (HeaderName::MaxForwards, "Max-Forwards"),
+        (HeaderName::ContentLength, "Content-Length"),
+        (HeaderName::ContentType, "Content-Type"),
+    ] {
+        let count = header_count(headers, name);
+        if count > 1 {
+            return Err(validation_error(format!(
+                "SIP message must not contain duplicate {label} headers"
+            )));
         }
     }
     Ok(())
@@ -426,26 +450,23 @@ fn content_length_value(headers: &[TypedHeader]) -> Result<Option<u32>> {
         .find_map(|h| match h {
             TypedHeader::ContentLength(content_length) => Some(Ok(content_length.0)),
             TypedHeader::Other(name, HeaderValue::ContentLength(content_length))
-                if *name == HeaderName::ContentLength =>
+                if name.wire_eq(&HeaderName::ContentLength) =>
             {
                 Some(Ok(content_length.0))
             }
             TypedHeader::Other(name, HeaderValue::Raw(raw))
-                if *name == HeaderName::ContentLength =>
+                if name.wire_eq(&HeaderName::ContentLength) =>
             {
                 let value = std::str::from_utf8(raw).map_err(|_| {
                     validation_error("SIP message Content-Length header is not valid UTF-8")
                 });
                 Some(value.and_then(|value| {
                     value.trim().parse::<u32>().map_err(|_| {
-                        validation_error(format!(
-                            "SIP message Content-Length header is not a valid integer: {}",
-                            value.trim()
-                        ))
+                        validation_error("SIP message Content-Length header is not a valid integer")
                     })
                 }))
             }
-            _ if h.name() == HeaderName::ContentLength => Some(Err(validation_error(
+            _ if h.name().wire_eq(&HeaderName::ContentLength) => Some(Err(validation_error(
                 "SIP message Content-Length header has unsupported value type",
             ))),
             _ => None,
@@ -456,6 +477,12 @@ fn content_length_value(headers: &[TypedHeader]) -> Result<Option<u32>> {
 /// Validate that a SIP message's Content-Length header is present and matches
 /// the body length in bytes.
 pub fn validate_content_length(headers: &[TypedHeader], body_len: usize) -> Result<()> {
+    let count = header_count(headers, HeaderName::ContentLength);
+    if count != 1 {
+        return Err(validation_error(format!(
+            "SIP message must contain exactly one Content-Length header, found {count}"
+        )));
+    }
     let Some(content_length) = content_length_value(headers)? else {
         return Err(validation_error(
             "SIP message missing Content-Length header",
@@ -481,18 +508,24 @@ pub fn validate_wire_request(request: &Request) -> Result<()> {
     validate_outbound_header_fields(headers)?;
     validate_authorization_headers(headers)?;
 
+    if !has_header(headers, HeaderName::Via) {
+        return Err(validation_error(format!(
+            "{} request missing Via header",
+            request.method
+        )));
+    }
     for (name, label) in [
-        (HeaderName::Via, "Via"),
         (HeaderName::From, "From"),
         (HeaderName::To, "To"),
         (HeaderName::CallId, "Call-ID"),
         (HeaderName::CSeq, "CSeq"),
         (HeaderName::MaxForwards, "Max-Forwards"),
     ] {
-        if !has_header(headers, name) {
+        let count = header_count(headers, name);
+        if count != 1 {
             return Err(validation_error(format!(
-                "{} request missing {} header",
-                request.method, label
+                "{} request must contain exactly one {} header, found {}",
+                request.method, label, count
             )));
         }
     }
@@ -502,6 +535,12 @@ pub fn validate_wire_request(request: &Request) -> Result<()> {
     if !request.body.is_empty() && !has_header(headers, HeaderName::ContentType) {
         return Err(validation_error(format!(
             "{} request with body missing Content-Type header",
+            request.method
+        )));
+    }
+    if header_count(headers, HeaderName::ContentType) > 1 {
+        return Err(validation_error(format!(
+            "{} request must not contain duplicate Content-Type headers",
             request.method
         )));
     }
@@ -558,18 +597,25 @@ pub fn validate_wire_response(response: &Response) -> Result<()> {
     validate_outbound_header_fields(headers)?;
     validate_authorization_headers(headers)?;
 
+    if !has_header(headers, HeaderName::Via) {
+        return Err(validation_error(format!(
+            "{} response missing Via header",
+            response.status_code()
+        )));
+    }
     for (name, label) in [
-        (HeaderName::Via, "Via"),
         (HeaderName::From, "From"),
         (HeaderName::To, "To"),
         (HeaderName::CallId, "Call-ID"),
         (HeaderName::CSeq, "CSeq"),
     ] {
-        if !has_header(headers, name) {
+        let count = header_count(headers, name);
+        if count != 1 {
             return Err(validation_error(format!(
-                "{} response missing {} header",
+                "{} response must contain exactly one {} header, found {}",
                 response.status_code(),
-                label
+                label,
+                count
             )));
         }
     }
@@ -579,6 +625,12 @@ pub fn validate_wire_response(response: &Response) -> Result<()> {
     if !response.body.is_empty() && !has_header(headers, HeaderName::ContentType) {
         return Err(validation_error(format!(
             "{} response with body missing Content-Type header",
+            response.status_code()
+        )));
+    }
+    if header_count(headers, HeaderName::ContentType) > 1 {
+        return Err(validation_error(format!(
+            "{} response must not contain duplicate Content-Type headers",
             response.status_code()
         )));
     }
@@ -614,6 +666,58 @@ mod tests {
     #[test]
     fn accepts_valid_empty_request() {
         assert!(validate_wire_request(&valid_request()).is_ok());
+    }
+
+    #[test]
+    fn structural_other_aliases_cannot_serialize_a_second_singleton() {
+        for (alias, value, label) in [
+            ("F", "<sip:other@example.com>;tag=other", "From"),
+            ("T", "<sip:other@example.com>", "To"),
+            ("I", "duplicate-call-id", "Call-ID"),
+            ("cSeQ", "99 REGISTER", "CSeq"),
+            ("MAX-forwards", "69", "Max-Forwards"),
+            ("L", "0", "Content-Length"),
+        ] {
+            let mut request = valid_request();
+            request.headers.push(TypedHeader::Other(
+                HeaderName::Other(alias.into()),
+                HeaderValue::Raw(value.as_bytes().to_vec()),
+            ));
+            let error = validate_wire_request(&request).unwrap_err();
+            assert!(error.to_string().contains(label), "{alias}: {error}");
+            assert!(error.to_string().contains("duplicate"), "{alias}: {error}");
+        }
+    }
+
+    #[test]
+    fn repeatable_route_fields_keep_wire_order_and_multiplicity() {
+        let mut request = valid_request();
+        for (name, value) in [
+            ("V", "SIP/2.0/UDP 127.0.0.1:5098;branch=first"),
+            ("via", "SIP/2.0/UDP 127.0.0.1:5099;branch=second"),
+            ("rOuTe", "<sip:edge-one.example.com;lr>"),
+            ("ROUTE", "<sip:edge-two.example.com;lr>"),
+            ("record-route", "<sip:record-one.example.com;lr>"),
+            ("Record-ROUTE", "<sip:record-two.example.com;lr>"),
+        ] {
+            request.headers.push(TypedHeader::Other(
+                HeaderName::Other(name.into()),
+                HeaderValue::Raw(value.as_bytes().to_vec()),
+            ));
+        }
+
+        validate_wire_request(&request).expect("repeatable routing fields remain valid");
+        let wire = request.to_string();
+        let positions = [
+            "127.0.0.1:5098;branch=first",
+            "127.0.0.1:5099;branch=second",
+            "<sip:edge-one.example.com;lr>",
+            "<sip:edge-two.example.com;lr>",
+            "<sip:record-one.example.com;lr>",
+            "<sip:record-two.example.com;lr>",
+        ]
+        .map(|needle| wire.find(needle).expect("routing value serialized"));
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]

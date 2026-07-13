@@ -35,6 +35,12 @@ const AUDIO_RECEIVER_CHANNEL_FRAMES: usize = 128;
 static SRTP_DIAGNOSTICS: AtomicU8 = AtomicU8::new(DIAG_OFF);
 static MEDIA_SDP_DIAGNOSTICS: AtomicU8 = AtomicU8::new(DIAG_OFF);
 
+fn bounded_sdp_failure(stage: &'static str, class: &'static str) -> SessionError {
+    SessionError::SDPNegotiationFailed(format!(
+        "SDP negotiation failed (stage={stage}, class={class})"
+    ))
+}
+
 #[cfg(feature = "perf-infra-memory-diagnostics")]
 fn spawn_memory_tracked<F>(kind: &'static str, future: F) -> tokio::task::JoinHandle<F::Output>
 where
@@ -333,12 +339,7 @@ pub(crate) fn build_port_zero_rejection_sdp(
         .formats(&["0"])
         .done()
         .build()
-        .map_err(|e| {
-            SessionError::SDPNegotiationFailed(format!(
-                "SdpBuilder failed to build port-zero rejection answer: {}",
-                e
-            ))
-        })?;
+        .map_err(|_| bounded_sdp_failure("answer-build", "builder"))?;
     Ok(session.to_string())
 }
 
@@ -873,12 +874,8 @@ impl MediaAdapter {
         // which the executor turns into terminal `CallFailed`.
         if let Some((_, offerer_state)) = self.pending_srtp_offerers.remove(session_id) {
             // We did offer SRTP. Look for a matching `a=crypto:` in the answer.
-            let parsed = SdpSession::from_str(remote_sdp).map_err(|e| {
-                SessionError::SDPNegotiationFailed(format!(
-                    "Failed to parse remote SDP for SDES answer extraction: {}",
-                    e
-                ))
-            })?;
+            let parsed = SdpSession::from_str(remote_sdp)
+                .map_err(|_| bounded_sdp_failure("remote-answer", "syntax"))?;
             let attrs = Self::extract_audio_crypto(&parsed);
             if let Some(chosen) = attrs.first() {
                 let pair = offerer_state.accept_answer(chosen)?;
@@ -1015,9 +1012,8 @@ impl MediaAdapter {
     ) -> Result<(String, NegotiatedConfig)> {
         // Parse remote SDP — typed parse for both connection extraction
         // and SDES handling.
-        let parsed_offer = SdpSession::from_str(remote_sdp).map_err(|e| {
-            SessionError::SDPNegotiationFailed(format!("Failed to parse remote SDP: {}", e))
-        })?;
+        let parsed_offer = SdpSession::from_str(remote_sdp)
+            .map_err(|_| bounded_sdp_failure("remote-offer", "syntax"))?;
         let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
         let srtp_diagnostics = srtp_diagnostics_enabled();
         if sdp_diagnostics_enabled() {
@@ -1274,12 +1270,7 @@ impl MediaAdapter {
             .attribute(direction_attribute(answer_direction), None::<String>)
             .done()
             .build()
-            .map_err(|e| {
-                SessionError::SDPNegotiationFailed(format!(
-                    "SdpBuilder failed to build answer: {}",
-                    e
-                ))
-            })?;
+            .map_err(|_| bounded_sdp_failure("answer-build", "builder"))?;
         let sdp_answer = session.to_string();
 
         let config = NegotiatedConfig {
@@ -1867,12 +1858,7 @@ impl MediaAdapter {
             .attribute(direction_attribute(direction), None::<String>)
             .done()
             .build()
-            .map_err(|e| {
-                SessionError::SDPNegotiationFailed(format!(
-                    "SdpBuilder failed to build offer: {}",
-                    e
-                ))
-            })?;
+            .map_err(|_| bounded_sdp_failure("offer-build", "builder"))?;
 
         let sdp = session.to_string();
         tracing::info!(
@@ -2123,13 +2109,7 @@ impl MediaAdapter {
             .attribute(direction_attribute(direction), None::<String>)
             .done()
             .build()
-            .map_err(|e| {
-                SessionError::SDPNegotiationFailed(format!(
-                    "SdpBuilder failed to build {} SDP: {}",
-                    direction_attribute(direction),
-                    e
-                ))
-            })?;
+            .map_err(|_| bounded_sdp_failure("directional-build", "builder"))?;
         Ok(session.to_string())
     }
 
@@ -2415,12 +2395,7 @@ impl MediaAdapter {
             .attribute(direction_attribute(direction), None::<String>)
             .done()
             .build()
-            .map_err(|e| {
-                SessionError::SDPNegotiationFailed(format!(
-                    "SdpBuilder failed to build signaling-only offer: {}",
-                    e
-                ))
-            })?;
+            .map_err(|_| bounded_sdp_failure("signaling-offer-build", "builder"))?;
 
         tracing::info!(
             "signaling-only media mode: generated SDP for session {} with advertised port {}",
@@ -2453,9 +2428,8 @@ impl MediaAdapter {
     /// Per RFC 8866 §5.7 the m-section's own `c=` line (if present)
     /// overrides the session-level `c=`. We honour that.
     fn parse_sdp_connection(&self, sdp: &str) -> Result<(IpAddr, u16)> {
-        let session = SdpSession::from_str(sdp).map_err(|e| {
-            SessionError::SDPNegotiationFailed(format!("Failed to parse SDP: {}", e))
-        })?;
+        let session = SdpSession::from_str(sdp)
+            .map_err(|_| bounded_sdp_failure("connection-extract", "syntax"))?;
 
         let media = session
             .media_descriptions
@@ -2465,7 +2439,7 @@ impl MediaAdapter {
                 SessionError::SDPNegotiationFailed("SDP has no audio m= section".into())
             })?;
 
-        let port = media.port as u16;
+        let port = media.port;
 
         // Prefer the per-media c= line; fall back to session-level.
         let conn = media
@@ -2478,14 +2452,10 @@ impl MediaAdapter {
                 )
             })?;
 
-        let ip = match &conn.connection_address {
-            host_str => host_str.parse::<IpAddr>().map_err(|e| {
-                SessionError::SDPNegotiationFailed(format!(
-                    "SDP c= address {:?} is not a valid IP: {}",
-                    host_str, e
-                ))
-            })?,
-        };
+        let ip = conn
+            .connection_address
+            .parse::<IpAddr>()
+            .map_err(|_| bounded_sdp_failure("connection-extract", "address"))?;
 
         Ok((ip, port))
     }
@@ -2757,7 +2727,7 @@ pub(crate) fn compute_answer_formats(
         require_srtp: srtp_required,
     };
     let m = rvoip_sip_dialog::sdp::match_offer(offer, &caps)
-        .map_err(|e| SessionError::SDPNegotiationFailed(format!("{}", e)))?;
+        .map_err(|_| bounded_sdp_failure("format-match", "policy"))?;
     let line = m
         .media_lines
         .iter()
@@ -2785,6 +2755,38 @@ mod sdp_format_tests {
     //! second fixture for that case.
 
     use super::*;
+
+    #[tokio::test]
+    async fn remote_offer_parse_failure_is_bounded_before_state_machine_logging() {
+        use crate::session_store::SessionStore;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let adapter = MediaAdapter::new(
+            Arc::new(MediaSessionController::new()),
+            Arc::new(SessionStore::new()),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16000,
+            16100,
+        );
+        let canary = "FAST_AUTOACCEPT_SDP_CANARY_5ed91b";
+        let malformed_offer = format!(
+            "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=x\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {canary} RTP/AVP 0\r\n"
+        );
+
+        let error = adapter
+            .negotiate_sdp_as_uas(&SessionId("bounded-sdp-error".into()), &malformed_offer)
+            .await
+            .unwrap_err();
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        assert_eq!(
+            display,
+            "SDP negotiation failed: SDP negotiation failed (stage=remote-offer, class=syntax)"
+        );
+        assert!(!display.contains(canary));
+        assert!(!debug.contains(canary));
+    }
 
     #[test]
     fn offer_direction_maps_to_correct_answer_direction() {

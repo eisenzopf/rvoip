@@ -863,12 +863,27 @@ mod tests {
         ));
         let invalid_reason =
             Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: udp-reason-secret");
+        let mut duplicate_structural =
+            SimpleRequestBuilder::new(Method::Options, "sip:example.com")
+                .unwrap()
+                .build();
+        duplicate_structural.headers.extend([
+            TypedHeader::Other(
+                HeaderName::CallId,
+                HeaderValue::Raw(b"first-call-id".to_vec()),
+            ),
+            TypedHeader::Other(
+                HeaderName::Other("I".into()),
+                HeaderValue::Raw(b"second-call-id".to_vec()),
+            ),
+        ]);
 
         for message in [
             Message::Request(request),
             Message::Response(response),
             Message::Request(malformed_name),
             Message::Response(invalid_reason),
+            Message::Request(duplicate_structural),
         ] {
             let error = transport
                 .send_message(message, destination)

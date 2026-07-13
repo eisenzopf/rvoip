@@ -144,16 +144,33 @@ pub fn parse_sdp_strict(content: &Bytes) -> Result<SdpSession> {
     parse_sdp_with_mode(content, SdpParseMode::Strict)
 }
 
+/// Construct a bounded SDP parsing diagnostic.
+///
+/// SDP commonly carries credentials, network addresses, and application metadata. Parser
+/// errors therefore report only a fixed parser class, the one-based line number (or zero when
+/// no line applies), and the byte extent of the rejected field. Never add the rejected bytes to
+/// this diagnostic.
+fn bounded_parse_error(class: &'static str, line: usize, field_bytes: usize) -> Error {
+    Error::SdpParsingError(format!(
+        "class={class}; line={line}; field_bytes={field_bytes}"
+    ))
+}
+
 /// Parses SDP content using the requested parse mode.
 pub fn parse_sdp_with_mode(content: &Bytes, mode: SdpParseMode) -> Result<SdpSession> {
+    parse_sdp_with_mode_inner(content, mode).map_err(|error| match error {
+        Error::SdpParsingError(message) if message.starts_with("class=") => {
+            Error::SdpParsingError(message)
+        }
+        _ => bounded_parse_error("session-syntax", 0, content.len()),
+    })
+}
+
+fn parse_sdp_with_mode_inner(content: &Bytes, mode: SdpParseMode) -> Result<SdpSession> {
     // Convert bytes to string first
     let sdp_str = match str::from_utf8(content) {
         Ok(s) => s,
-        Err(_) => {
-            return Err(Error::SdpParsingError(
-                "SDP content is not valid UTF-8".to_string(),
-            ))
-        }
+        Err(_) => return Err(bounded_parse_error("utf8", 0, content.len())),
     };
 
     // Split the content into lines
@@ -182,6 +199,7 @@ pub fn parse_sdp_with_mode(content: &Bytes, mode: SdpParseMode) -> Result<SdpSes
     // Process each line of the SDP content
     let mut i = 0;
     while i < lines.len() {
+        let line_number = i + 1;
         let line = lines[i].trim();
         i += 1; // Move to the next line
 
@@ -193,12 +211,7 @@ pub fn parse_sdp_with_mode(content: &Bytes, mode: SdpParseMode) -> Result<SdpSes
         // Parse the line into key and value
         let (key, value) = match parse_sdp_line(line) {
             Ok((_, result)) => result,
-            Err(_) => {
-                return Err(Error::SdpParsingError(format!(
-                    "Failed to parse SDP line: {}",
-                    line
-                )))
-            }
+            Err(_) => return Err(bounded_parse_error("line-syntax", line_number, line.len())),
         };
 
         // Process the line based on its type
@@ -212,10 +225,11 @@ pub fn parse_sdp_with_mode(content: &Bytes, mode: SdpParseMode) -> Result<SdpSes
                 }
 
                 if value != "0" {
-                    return Err(Error::SdpParsingError(format!(
-                        "Unsupported SDP version: {}",
-                        value
-                    )));
+                    return Err(bounded_parse_error(
+                        "version-field",
+                        line_number,
+                        value.len(),
+                    ));
                 }
 
                 session.version = value.to_string();
@@ -230,7 +244,8 @@ pub fn parse_sdp_with_mode(content: &Bytes, mode: SdpParseMode) -> Result<SdpSes
                     ));
                 }
 
-                let origin = session_parser::parse_origin_line(value)?;
+                let origin = session_parser::parse_origin_line(value)
+                    .map_err(|_| bounded_parse_error("origin-field", line_number, value.len()))?;
                 session.origin = origin;
                 found_origin = true;
             }
@@ -314,12 +329,16 @@ pub fn parse_sdp_with_mode(content: &Bytes, mode: SdpParseMode) -> Result<SdpSes
                     }
                     if session.connection_info.is_none() {
                         session.connection_info =
-                            Some(session_parser::parse_connection_line(value)?);
+                            Some(session_parser::parse_connection_line(value).map_err(|_| {
+                                bounded_parse_error("connection-field", line_number, value.len())
+                            })?);
                     }
                 }
                 SdpParseSection::MediaDescription => {
                     if let Some(md) = &mut current_media_description {
-                        let conn = session_parser::parse_connection_line(value)?;
+                        let conn = session_parser::parse_connection_line(value).map_err(|_| {
+                            bounded_parse_error("connection-field", line_number, value.len())
+                        })?;
                         if md.connection_info.is_none() {
                             md.connection_info = Some(conn.clone());
                         }
@@ -334,7 +353,9 @@ pub fn parse_sdp_with_mode(content: &Bytes, mode: SdpParseMode) -> Result<SdpSes
 
             // b= (Bandwidth Information)
             'b' => {
-                let bandwidth = parse_session_bandwidth_line(value)?;
+                let bandwidth = parse_session_bandwidth_line(value).map_err(|_| {
+                    bounded_parse_error("bandwidth-field", line_number, value.len())
+                })?;
                 match parse_section {
                     SdpParseSection::SessionHeader => {
                         session.generic_attributes.push(bandwidth);
@@ -353,7 +374,8 @@ pub fn parse_sdp_with_mode(content: &Bytes, mode: SdpParseMode) -> Result<SdpSes
 
             // t= (Timing)
             't' => {
-                let time_desc = parse_time_description_line(value)?;
+                let time_desc = parse_time_description_line(value)
+                    .map_err(|_| bounded_parse_error("time-field", line_number, value.len()))?;
                 session.time_descriptions.push(time_desc);
             }
 
@@ -366,7 +388,8 @@ pub fn parse_sdp_with_mode(content: &Bytes, mode: SdpParseMode) -> Result<SdpSes
                 }
 
                 let last_timing = session.time_descriptions.last_mut().unwrap();
-                let repeat_time = parse_repeat_time_line(value)?;
+                let repeat_time = parse_repeat_time_line(value)
+                    .map_err(|_| bounded_parse_error("repeat-field", line_number, value.len()))?;
                 last_timing.repeat_times.push(repeat_time);
             }
 
@@ -425,7 +448,8 @@ pub fn parse_sdp_with_mode(content: &Bytes, mode: SdpParseMode) -> Result<SdpSes
                     key,
                     val,
                     mode,
-                )?;
+                )
+                .map_err(|_| bounded_parse_error("attribute-field", line_number, value.len()))?;
             }
 
             // m= (Media Description)
@@ -436,7 +460,10 @@ pub fn parse_sdp_with_mode(content: &Bytes, mode: SdpParseMode) -> Result<SdpSes
                 }
 
                 // Start a new media section
-                current_media_description = Some(parse_media_description_line(value)?);
+                current_media_description =
+                    Some(parse_media_description_line(value).map_err(|_| {
+                        bounded_parse_error("media-field", line_number, value.len())
+                    })?);
                 parse_section = SdpParseSection::MediaDescription;
             }
 
@@ -473,7 +500,8 @@ pub fn parse_sdp_with_mode(content: &Bytes, mode: SdpParseMode) -> Result<SdpSes
     }
 
     // Validate the resulting SDP session
-    validation::validate_sdp(&session)?;
+    validation::validate_sdp(&session)
+        .map_err(|_| bounded_parse_error("session-validation", 0, content.len()))?;
 
     Ok(session)
 }
@@ -491,7 +519,7 @@ fn validate_strict_field_order(lines: &[&str]) -> Result<()> {
     let mut saw_time_description = false;
     let mut saw_nonempty = false;
 
-    for raw_line in lines {
+    for (line_index, raw_line) in lines.iter().enumerate() {
         let line = raw_line.trim();
         if line.is_empty() {
             continue;
@@ -500,10 +528,11 @@ fn validate_strict_field_order(lines: &[&str]) -> Result<()> {
         let (key, _) = match parse_sdp_line(line) {
             Ok((_, result)) => result,
             Err(_) => {
-                return Err(Error::SdpParsingError(format!(
-                    "Failed to parse SDP line: {}",
-                    line
-                )))
+                return Err(bounded_parse_error(
+                    "line-syntax",
+                    line_index + 1,
+                    line.len(),
+                ))
             }
         };
 
@@ -1379,5 +1408,33 @@ t=0 0
 ";
         assert!(parse_sdp(&Bytes::from(sdp_str)).is_ok());
         assert!(parse_sdp_strict(&Bytes::from(sdp_str)).is_err());
+    }
+
+    #[test]
+    fn parser_errors_never_echo_malformed_line_or_media_value() {
+        let line_canary = "LINE_CANARY_AUTH_TOKEN_79f63d";
+        let malformed_line = format!("v=0\no=- 1 1 IN IP4 127.0.0.1\ns=x\n{line_canary}\nt=0 0\n");
+        let line_error = parse_sdp(&Bytes::from(malformed_line)).unwrap_err();
+        let line_display = line_error.to_string();
+        let line_debug = format!("{line_error:?}");
+        assert!(line_display.contains("class=line-syntax"));
+        assert!(line_display.contains("line=4"));
+        assert!(line_display.contains(&format!("field_bytes={}", line_canary.len())));
+        assert!(!line_display.contains(line_canary));
+        assert!(!line_debug.contains(line_canary));
+
+        let media_canary = "MEDIA_CANARY_BEARER_8a274c";
+        let media_value = format!("audio {media_canary} RTP/AVP 0");
+        let malformed_media = format!(
+            "v=0\no=- 1 1 IN IP4 127.0.0.1\ns=x\nc=IN IP4 127.0.0.1\nt=0 0\nm={media_value}\n"
+        );
+        let media_error = parse_sdp(&Bytes::from(malformed_media)).unwrap_err();
+        let media_display = media_error.to_string();
+        let media_debug = format!("{media_error:?}");
+        assert!(media_display.contains("class=media-field"));
+        assert!(media_display.contains("line=6"));
+        assert!(media_display.contains(&format!("field_bytes={}", media_value.len())));
+        assert!(!media_display.contains(media_canary));
+        assert!(!media_debug.contains(media_canary));
     }
 }
