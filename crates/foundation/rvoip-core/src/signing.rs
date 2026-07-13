@@ -8,19 +8,33 @@
 
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
+use std::fmt;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// Parsed shape of an RFC 9421 `Signature-Input` line. v1 skeleton —
 /// the parser captures the covered components but defers the full
 /// HTTP-shape semantics to `rvoip-identity`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct SignatureSpec {
     pub key_id: Option<String>,
     pub algorithm: Option<String>,
     pub created: Option<u64>,
     pub expires: Option<u64>,
     pub covered_components: Vec<String>,
+}
+
+impl fmt::Debug for SignatureSpec {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SignatureSpec")
+            .field("key_id_present", &self.key_id.is_some())
+            .field("algorithm_present", &self.algorithm.is_some())
+            .field("created", &self.created)
+            .field("expires", &self.expires)
+            .field("covered_component_count", &self.covered_components.len())
+            .finish()
+    }
 }
 
 /// RFC 8785 (JSON Canonical Form) over a `serde_json::Value`. Used
