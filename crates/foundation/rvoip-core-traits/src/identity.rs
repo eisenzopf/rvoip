@@ -363,20 +363,31 @@ impl AuthenticatedPrincipal {
                 task_id,
                 scopes,
                 expires_at,
-            } => (
-                format!("task-scoped:identity:{identity}:task:{task_id}"),
-                scopes.clone(),
-                Some(*expires_at),
-            ),
+            } => {
+                let mut binding = Vec::with_capacity(16 + identity.as_str().len() + task_id.len());
+                append_length_prefixed(&mut binding, identity.as_str().as_bytes());
+                append_length_prefixed(&mut binding, task_id.as_bytes());
+                (
+                    hashed_subject("task-scoped", &binding),
+                    scopes.clone(),
+                    Some(*expires_at),
+                )
+            }
             IdentityAssurance::UserAuthorized {
                 identity,
                 user_id,
                 scopes,
-            } => (
-                format!("user-authorized:identity:{identity}:user:{user_id}"),
-                scopes.clone(),
-                None,
-            ),
+            } => {
+                let mut binding =
+                    Vec::with_capacity(16 + identity.as_str().len() + user_id.as_str().len());
+                append_length_prefixed(&mut binding, identity.as_str().as_bytes());
+                append_length_prefixed(&mut binding, user_id.as_str().as_bytes());
+                (
+                    hashed_subject("user-authorized", &binding),
+                    scopes.clone(),
+                    None,
+                )
+            }
             IdentityAssurance::DtlsFingerprint { algorithm, value } => {
                 let algorithm = algorithm.to_ascii_lowercase();
                 let mut binding = Vec::with_capacity(16 + algorithm.len() + value.len());
@@ -693,8 +704,39 @@ mod tests {
 
         assert_ne!(task.subject, other_task.subject);
         assert_ne!(task.subject, user.subject);
-        assert!(task.subject.starts_with("task-scoped:identity:"));
-        assert!(user.subject.starts_with("user-authorized:identity:"));
+        assert!(task.subject.starts_with("task-scoped:sha256:"));
+        assert!(user.subject.starts_with("user-authorized:sha256:"));
+    }
+
+    #[test]
+    fn composite_assurance_subjects_resist_delimiter_collisions() {
+        let expires_at = Utc::now() + chrono::Duration::minutes(1);
+        let task_left = AuthenticatedPrincipal::from_assurance(IdentityAssurance::TaskScoped {
+            identity: IdentityId::from_string("a"),
+            task_id: "b:task:c".into(),
+            scopes: vec![],
+            expires_at,
+        });
+        let task_right = AuthenticatedPrincipal::from_assurance(IdentityAssurance::TaskScoped {
+            identity: IdentityId::from_string("a:task:b"),
+            task_id: "c".into(),
+            scopes: vec![],
+            expires_at,
+        });
+        assert_ne!(task_left.subject, task_right.subject);
+
+        let user_left = AuthenticatedPrincipal::from_assurance(IdentityAssurance::UserAuthorized {
+            identity: IdentityId::from_string("a"),
+            user_id: IdentityId::from_string("b:user:c"),
+            scopes: vec![],
+        });
+        let user_right =
+            AuthenticatedPrincipal::from_assurance(IdentityAssurance::UserAuthorized {
+                identity: IdentityId::from_string("a:user:b"),
+                user_id: IdentityId::from_string("c"),
+                scopes: vec![],
+            });
+        assert_ne!(user_left.subject, user_right.subject);
     }
 
     #[test]

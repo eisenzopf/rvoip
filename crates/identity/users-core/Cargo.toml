@@ -91,6 +91,7 @@ tempfile = "3.14"
 reqwest = { version = "0.12", features = ["json"] }
 serde_json = "1.0"
 futures = "0.3"
+tower = { version = "0.5", features = ["util"] }
 
 [[example]]
 name = "users_core_basic_usage"

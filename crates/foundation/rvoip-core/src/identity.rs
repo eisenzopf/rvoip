@@ -147,6 +147,22 @@ pub trait IdentityProvider: Send + Sync {
     async fn reachable_via(&self, identity_id: IdentityId) -> Result<Vec<ReachabilityHint>>;
     async fn authenticate(&self, credential: Credential)
         -> Result<(IdentityId, IdentityAssurance)>;
+
+    /// Authenticate a credential into the complete ownership-bound principal
+    /// needed for security-sensitive upgrades.
+    ///
+    /// The legacy [`Self::authenticate`] result omits issuer, tenant, subject,
+    /// and expiry and therefore cannot safely authorize a step-up on an
+    /// existing connection. Existing providers remain source compatible, but
+    /// step-up fails closed until they implement this additive method.
+    async fn authenticate_principal(
+        &self,
+        _credential: Credential,
+    ) -> Result<AuthenticatedPrincipal> {
+        Err(crate::error::RvoipError::NotImplemented(
+            "IdentityProvider::authenticate_principal",
+        ))
+    }
     async fn assurance_level(&self, id: IdentityId) -> Result<IdentityAssurance>;
     fn subscribe_reachability(&self) -> mpsc::Receiver<ReachabilityChange>;
 

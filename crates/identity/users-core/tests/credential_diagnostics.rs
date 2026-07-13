@@ -8,10 +8,10 @@ use users_core::api_keys::{ApiKey, CreateApiKeyRequest};
 use users_core::jwt::{JwtConfig, RefreshTokenClaims, UserClaims};
 use users_core::validation::ValidatedCreateUserRequest;
 use users_core::{
-    AuthenticationResult, CreateSipDigestCredentialRequest, CreateUserRequest, ExternalIdentity,
-    PasskeyCredential, SipDigestAlgorithmFamily, SipDigestCredential, TokenIssueContext, TokenPair,
-    UpdateUserRequest, UpsertExternalIdentityRequest, UpsertPasskeyCredentialRequest, User,
-    UserFilter, UsersConfig,
+    AuthenticationResult, CreateSipDigestCredentialRequest, CreateUserRequest, Error,
+    ExternalIdentity, PasskeyCredential, SipDigestAlgorithmFamily, SipDigestCredential,
+    TokenIssueContext, TokenPair, UpdateUserRequest, UpsertExternalIdentityRequest,
+    UpsertPasskeyCredentialRequest, User, UserFilter, UsersConfig,
 };
 
 const CANARY: &str = "users-credential-canary\r\nAuthorization: exposed";
@@ -239,8 +239,6 @@ fn authorization_and_identity_diagnostics_never_expose_boundary_values() {
         roles: vec![CANARY.into()],
         permissions: vec![CANARY.into()],
         auth_type: AuthType::ApiKey,
-        access_token_id: Some(CANARY.into()),
-        access_token_expires_at: Some(now),
     };
     let update = UpdateUserRequest {
         email: Some(CANARY.into()),
@@ -348,4 +346,20 @@ fn authorization_and_identity_diagnostics_never_expose_boundary_values() {
     assert_eq!(passkey.public_key, CANARY);
     assert_eq!(key_request.user_id, CANARY);
     assert_eq!(error.error.message, CANARY);
+}
+
+#[test]
+fn security_store_and_exchange_errors_are_class_only() {
+    for rendered in [
+        format!(
+            "{:?}",
+            Error::SecurityStoreUnavailable { operation: CANARY }
+        ),
+        format!(
+            "{:?}",
+            Error::ApiKeyTokenExchangeDisabled { contract: CANARY }
+        ),
+    ] {
+        assert!(!rendered.contains(CANARY), "boundary leaked: {rendered}");
+    }
 }

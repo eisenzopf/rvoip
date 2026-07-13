@@ -73,10 +73,7 @@ async fn default_bearer_mapping_preserves_available_assurance_claims() {
         .await
         .unwrap();
 
-    assert_eq!(
-        principal.subject,
-        "task-scoped:identity:task-subject:task:task-1"
-    );
+    assert!(principal.subject.starts_with("task-scoped:sha256:"));
     assert_eq!(principal.scopes, vec!["broadcast:subscribe"]);
     assert_eq!(principal.method, AuthenticationMethod::Bearer);
     assert!(principal.expires_at.is_some());
@@ -90,9 +87,11 @@ async fn existing_validate_only_implementations_gain_empty_credential_metadata()
         .await
         .unwrap();
 
-    assert_eq!(
-        credential.principal.subject,
-        "task-scoped:identity:task-subject:task:task-1"
+    assert!(
+        credential
+            .principal
+            .subject
+            .starts_with("task-scoped:sha256:")
     );
     assert!(credential.token_id.is_none());
     assert!(credential.issued_at.is_none());

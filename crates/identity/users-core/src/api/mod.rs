@@ -260,11 +260,20 @@ pub struct AuthContext {
     pub roles: Vec<String>,
     pub permissions: Vec<String>, // For API key auth
     pub auth_type: AuthType,
-    /// JWT identifier retained only for access-token revocation.
-    pub access_token_id: Option<String>,
-    /// Validated JWT expiry paired with `access_token_id`.
-    pub access_token_expires_at: Option<DateTime<Utc>>,
 }
+
+#[derive(Clone)]
+struct AccessTokenSession {
+    token_id: String,
+    expires_at: DateTime<Utc>,
+}
+
+struct RequestAuthentication {
+    context: AuthContext,
+    access_token: Option<AccessTokenSession>,
+}
+
+struct LogoutAuthentication(RequestAuthentication);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuthType {
@@ -306,11 +315,6 @@ impl std::fmt::Debug for AuthContext {
             .field("role_count", &self.roles.len())
             .field("permission_count", &self.permissions.len())
             .field("auth_type", &self.auth_type)
-            .field("access_token_id_present", &self.access_token_id.is_some())
-            .field(
-                "access_token_expires_at_present",
-                &self.access_token_expires_at.is_some(),
-            )
             .finish()
     }
 }
@@ -474,15 +478,22 @@ async fn login(
     }))
 }
 
-async fn logout(State(state): State<ApiState>, auth: AuthContext) -> Result<StatusCode, AppError> {
-    state.auth_service.revoke_tokens(&auth.user_id).await?;
-    if let (Some(token_id), Some(expires_at)) = (
-        auth.access_token_id.as_deref(),
-        auth.access_token_expires_at,
-    ) {
+async fn logout(
+    State(state): State<ApiState>,
+    LogoutAuthentication(auth): LogoutAuthentication,
+) -> Result<StatusCode, AppError> {
+    state
+        .auth_service
+        .revoke_tokens(&auth.context.user_id)
+        .await?;
+    if let Some(access_token) = auth.access_token {
         state
             .auth_service
-            .revoke_access_token_jti(token_id, Some(&auth.user_id), expires_at)
+            .revoke_access_token_jti(
+                &access_token.token_id,
+                Some(&auth.context.user_id),
+                access_token.expires_at,
+            )
             .await?;
     }
     Ok(StatusCode::NO_CONTENT)
@@ -743,6 +754,22 @@ fn authorize_api_key_creation(
 ) -> Result<(), AppError> {
     auth.require_permission("write")?;
     if auth.user_id != path_user_id && !auth.is_admin() {
+        return Err(AppError::Forbidden);
+    }
+    let requests_privileged_grant = request
+        .permissions
+        .iter()
+        .any(|permission| permission == "*" || permission == "admin");
+    let has_non_key_admin_authority = auth.auth_type == AuthType::Jwt && auth.is_admin();
+    if requests_privileged_grant && !has_non_key_admin_authority {
+        return Err(AppError::Forbidden);
+    }
+    if auth.auth_type == AuthType::ApiKey
+        && request
+            .permissions
+            .iter()
+            .any(|permission| !auth.has_permission(permission))
+    {
         return Err(AppError::Forbidden);
     }
     // The authorized path identity is authoritative. Never let a body field
@@ -1007,91 +1034,123 @@ where
         parts: &mut axum::http::request::Parts,
         state: &S,
     ) -> Result<Self, Self::Rejection> {
-        // Check for Bearer token first
-        if let Some(auth_header) = parts
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-        {
-            if let Some(token) = auth_header.strip_prefix("Bearer ") {
-                let api_state = ApiState::from_ref(state);
+        Ok(extract_request_authentication(parts, state).await?.context)
+    }
+}
 
-                let claims = api_state
-                    .auth_service
-                    .jwt_issuer()
-                    .validate_access_token(token)
-                    .map_err(|_| AppError::Forbidden)?;
-                if api_state
-                    .auth_service
-                    .is_access_token_revoked(&claims.jti)
-                    .await
-                    .map_err(|_| AppError::Forbidden)?
-                {
-                    return Err(AppError::Forbidden);
-                }
-                let user = api_state
-                    .auth_service
-                    .user_store()
-                    .get_user(&claims.sub)
-                    .await
-                    .map_err(|_| AppError::Forbidden)?
-                    .filter(|user| user.active)
-                    .ok_or(AppError::Forbidden)?;
-                let expires_at = DateTime::<Utc>::from_timestamp(claims.exp as i64, 0)
-                    .ok_or(AppError::Forbidden)?;
+#[axum::async_trait]
+impl<S> axum::extract::FromRequestParts<S> for LogoutAuthentication
+where
+    S: Send + Sync,
+    ApiState: axum::extract::FromRef<S>,
+{
+    type Rejection = AppError;
 
-                return Ok(AuthContext {
-                    user_id: user.id,
-                    username: user.username,
-                    roles: user.roles,
-                    permissions: vec![], // JWT tokens don't have granular permissions
-                    auth_type: AuthType::Jwt,
-                    access_token_id: Some(claims.jti),
-                    access_token_expires_at: Some(expires_at),
-                });
-            }
-        }
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        extract_request_authentication(parts, state).await.map(Self)
+    }
+}
 
-        // Check for API key
-        if let Some(api_key) = parts
-            .headers
-            .get("X-API-Key")
-            .and_then(|value| value.to_str().ok())
-        {
+async fn extract_request_authentication<S>(
+    parts: &mut axum::http::request::Parts,
+    state: &S,
+) -> Result<RequestAuthentication, AppError>
+where
+    S: Send + Sync,
+    ApiState: axum::extract::FromRef<S>,
+{
+    // Check for Bearer token first
+    if let Some(auth_header) = parts
+        .headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+    {
+        if let Some(token) = auth_header.strip_prefix("Bearer ") {
             let api_state = ApiState::from_ref(state);
 
-            let api_key_info = api_state
+            let claims = api_state
                 .auth_service
-                .api_key_store()
-                .validate_api_key(api_key)
+                .jwt_issuer()
+                .validate_access_token(token)
+                .map_err(|_| AppError::Forbidden)?;
+            if api_state
+                .auth_service
+                .is_access_token_revoked(&claims.jti)
                 .await
                 .map_err(|_| AppError::Forbidden)?
-                .ok_or(AppError::Forbidden)?;
-
-            // Get the user to construct AuthContext
+            {
+                return Err(AppError::Forbidden);
+            }
             let user = api_state
                 .auth_service
                 .user_store()
-                .get_user(&api_key_info.user_id)
+                .get_user(&claims.sub)
                 .await
                 .map_err(|_| AppError::Forbidden)?
                 .filter(|user| user.active)
                 .ok_or(AppError::Forbidden)?;
+            let expires_at =
+                DateTime::<Utc>::from_timestamp(claims.exp as i64, 0).ok_or(AppError::Forbidden)?;
 
-            return Ok(AuthContext {
+            return Ok(RequestAuthentication {
+                context: AuthContext {
+                    user_id: user.id,
+                    username: user.username,
+                    roles: user.roles,
+                    permissions: vec![], // User JWTs carry full user authority.
+                    auth_type: AuthType::Jwt,
+                },
+                access_token: Some(AccessTokenSession {
+                    token_id: claims.jti,
+                    expires_at,
+                }),
+            });
+        }
+    }
+
+    // Check for API key
+    if let Some(api_key) = parts
+        .headers
+        .get("X-API-Key")
+        .and_then(|value| value.to_str().ok())
+    {
+        let api_state = ApiState::from_ref(state);
+
+        let api_key_info = api_state
+            .auth_service
+            .api_key_store()
+            .validate_api_key(api_key)
+            .await
+            .map_err(|_| AppError::Forbidden)?
+            .ok_or(AppError::Forbidden)?;
+
+        // Get the user to construct AuthContext
+        let user = api_state
+            .auth_service
+            .user_store()
+            .get_user(&api_key_info.user_id)
+            .await
+            .map_err(|_| AppError::Forbidden)?
+            .filter(|user| user.active)
+            .ok_or(AppError::Forbidden)?;
+
+        return Ok(RequestAuthentication {
+            context: AuthContext {
                 user_id: user.id,
                 username: user.username,
                 roles: user.roles,
                 permissions: api_key_info.permissions,
                 auth_type: AuthType::ApiKey,
-                access_token_id: None,
-                access_token_expires_at: None,
-            });
-        }
-
-        // No valid authentication found
-        Err(AppError::Forbidden)
+            },
+            access_token: None,
+        });
     }
+
+    // No valid authentication found
+    Err(AppError::Forbidden)
 }
 
 #[cfg(test)]
@@ -1108,8 +1167,6 @@ mod authorization_tests {
                 .map(|value| (*value).to_owned())
                 .collect(),
             auth_type,
-            access_token_id: None,
-            access_token_expires_at: None,
         }
     }
 
@@ -1161,7 +1218,33 @@ mod authorization_tests {
         ));
 
         let scoped = auth(AuthType::ApiKey, &["admin"], &["write"]);
+        request.permissions = vec!["write".into()];
         assert!(authorize_api_key_creation(&scoped, "user-a", &mut request).is_ok());
+
+        let mut escalation = api_key_request("user-a");
+        escalation.permissions = vec!["write".into(), "delete".into()];
+        assert!(matches!(
+            authorize_api_key_creation(&scoped, "user-a", &mut escalation),
+            Err(AppError::Forbidden)
+        ));
+
+        let wildcard_key = auth(AuthType::ApiKey, &["admin"], &["*"]);
+        let mut privileged = api_key_request("user-a");
+        privileged.permissions = vec!["*".into()];
+        assert!(matches!(
+            authorize_api_key_creation(&wildcard_key, "user-a", &mut privileged),
+            Err(AppError::Forbidden)
+        ));
+
+        let non_admin_jwt = auth(AuthType::Jwt, &["user"], &[]);
+        privileged.permissions = vec!["admin".into()];
+        assert!(matches!(
+            authorize_api_key_creation(&non_admin_jwt, "user-a", &mut privileged),
+            Err(AppError::Forbidden)
+        ));
+
+        let admin_jwt = auth(AuthType::Jwt, &["admin"], &[]);
+        assert!(authorize_api_key_creation(&admin_jwt, "user-a", &mut privileged).is_ok());
     }
 
     #[test]

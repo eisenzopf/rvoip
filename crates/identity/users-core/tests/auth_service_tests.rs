@@ -90,6 +90,16 @@ async fn test_complete_authentication_flow() {
     assert_eq!(token_pair.refresh_token, auth_result.refresh_token); // Same refresh token
     assert!(token_pair.access_token != auth_result.access_token); // New access token
 
+    // A correctly signed token without durable issuance lineage is not active.
+    let untracked_refresh = auth_service
+        .jwt_issuer()
+        .create_refresh_token(&user.id)
+        .unwrap();
+    assert!(matches!(
+        auth_service.refresh_token(&untracked_refresh).await,
+        Err(users_core::Error::InvalidCredentials)
+    ));
+
     // 6. Test token revocation
     auth_service.revoke_tokens(&user.id).await.unwrap();
 
@@ -178,18 +188,19 @@ async fn test_api_key_authentication() {
         .await
         .unwrap();
 
-    // Authenticate with API key
-    let auth_result = auth_service.authenticate_api_key(&raw_key).await.unwrap();
+    // Direct verification retains the key's exact permission boundary.
+    let (verified_user, verified_key) = auth_service.verify_api_key_only(&raw_key).await.unwrap();
+    assert_eq!(verified_user.id, user.id);
+    assert_eq!(verified_key.permissions, vec!["read", "write"]);
 
-    assert_eq!(auth_result.user.id, user.id);
-    assert!(!auth_result.access_token.is_empty());
-    assert_eq!(auth_result.expires_in.as_secs(), 300); // API keys get shorter tokens
-
-    // Invalid API key should fail
-    let fail_result = auth_service
-        .authenticate_api_key("rvoip_ak_live_invalid")
-        .await;
-    assert!(fail_result.is_err());
+    // JWT exchange fails closed until its versioned contract can preserve
+    // permissions and durable key-specific revocation lineage.
+    let exchange = auth_service.authenticate_api_key(&raw_key).await;
+    assert!(matches!(
+        exchange,
+        Err(users_core::Error::ApiKeyTokenExchangeDisabled { contract })
+            if contract == users_core::AuthenticationService::API_KEY_TOKEN_EXCHANGE_CONTRACT
+    ));
 }
 
 #[tokio::test]

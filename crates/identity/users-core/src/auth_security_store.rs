@@ -28,7 +28,7 @@ pub trait AuthSecurityStore: Send + Sync {
         expires_at: DateTime<Utc>,
     ) -> Result<()>;
 
-    /// Reject if a refresh-token JTI has been revoked.
+    /// Reject unless a refresh-token JTI is durably known and active.
     async fn check_refresh_token_revoked(&self, jti: &str) -> Result<()>;
 
     /// Revoke all active refresh tokens for a user.
@@ -98,11 +98,12 @@ impl AuthSecurityStore for SqliteUserStore {
             .fetch_optional(self.pool())
             .await?;
 
-        if let Some(row) = row {
-            let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
-            if revoked_at.is_some() {
-                return Err(Error::InvalidCredentials);
-            }
+        let Some(row) = row else {
+            return Err(Error::InvalidCredentials);
+        };
+        let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
+        if revoked_at.is_some() {
+            return Err(Error::InvalidCredentials);
         }
         Ok(())
     }
@@ -268,11 +269,12 @@ impl AuthSecurityStore for PostgresUserStore {
             .bind(jti)
             .fetch_optional(self.pool())
             .await?;
-        if let Some(row) = row {
-            let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
-            if revoked_at.is_some() {
-                return Err(Error::InvalidCredentials);
-            }
+        let Some(row) = row else {
+            return Err(Error::InvalidCredentials);
+        };
+        let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
+        if revoked_at.is_some() {
+            return Err(Error::InvalidCredentials);
         }
         Ok(())
     }

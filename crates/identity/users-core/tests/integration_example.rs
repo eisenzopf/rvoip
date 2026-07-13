@@ -145,18 +145,14 @@ async fn example_api_key_for_pbx_system() {
     println!("  Key (store this securely): {}", raw_key);
     println!("  Permissions: {:?}", api_key.permissions);
 
-    // PBX system uses API key to authenticate
-    let auth_result = auth_service.authenticate_api_key(&raw_key).await.unwrap();
+    // PBX system verifies the API key without widening it into a user JWT.
+    let (verified_user, verified_key) = auth_service.verify_api_key_only(&raw_key).await.unwrap();
 
     println!("\nAPI key authentication successful!");
-    println!("  Service account: {}", auth_result.user.username);
-    println!(
-        "  Access token valid for: {} seconds",
-        auth_result.expires_in.as_secs()
-    );
+    println!("  Service account: {}", verified_user.username);
+    println!("  Permissions: {:?}", verified_key.permissions);
 
-    // The PBX can now use this token for SIP operations
-    assert!(auth_result.user.roles.contains(&"user".to_string()));
+    assert!(verified_user.roles.contains(&"user".to_string()));
 }
 
 /// Example: Multi-device user with presence

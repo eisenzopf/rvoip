@@ -7179,8 +7179,17 @@ impl Orchestrator {
         credential: crate::identity::Credential,
         provider: Arc<dyn crate::identity::IdentityProvider>,
     ) -> Result<crate::identity::IdentityAssurance> {
-        let (identity_id, assurance) = provider.authenticate(credential).await?;
+        let mut stepped_up = provider.authenticate_principal(credential).await?;
+        if !principal_has_complete_owner(&stepped_up)
+            || stepped_up.expires_at.is_none()
+            || stepped_up.is_expired()
+            || !principal_scopes_match_assurance(&stepped_up)
         {
+            return Err(RvoipError::AdmissionRejected(
+                "step-up credential did not produce a complete bounded principal",
+            ));
+        }
+        let assurance = {
             let _registry = self
                 .connection_registry_lock
                 .lock()
@@ -7195,29 +7204,33 @@ impl Orchestrator {
                 .ok_or(RvoipError::AdmissionRejected(
                     "step-up requires an authenticated connection owner",
                 ))?;
-            if current.is_expired() || !principal_owns_identity(current, &identity_id) {
+            if current.is_expired()
+                || !principal_has_complete_owner(current)
+                || !current.has_same_owner(&stepped_up)
+            {
                 return Err(RvoipError::AdmissionRejected(
                     "step-up credential does not belong to the connection owner",
                 ));
             }
-            let mut updated = current.clone();
-            updated.scopes = assurance_scopes(&assurance);
-            if let crate::identity::IdentityAssurance::TaskScoped { expires_at, .. } = &assurance {
-                updated.expires_at = Some(
-                    updated
-                        .expires_at
-                        .map_or(*expires_at, |current| current.min(*expires_at)),
-                );
-            }
-            updated.assurance = assurance.clone();
-            entry.principal = Some(updated);
+            let credential_expiry = stepped_up
+                .expires_at
+                .expect("complete step-up principals have a finite expiry");
+            stepped_up.expires_at = Some(
+                current
+                    .expires_at
+                    .map_or(credential_expiry, |current| current.min(credential_expiry)),
+            );
+            let assurance = stepped_up.assurance.clone();
+            let identity_id = crate::ids::IdentityId::from_string(stepped_up.subject.clone());
+            entry.principal = Some(stepped_up);
             drop(entry);
             self.emit(Event::IdentityAssuranceChanged {
                 connection_id,
                 identity_id: Some(identity_id),
                 at: Utc::now(),
             });
-        }
+            assurance
+        };
         Ok(assurance)
     }
 
@@ -8575,31 +8588,25 @@ impl Orchestrator {
     }
 }
 
-fn principal_owns_identity(
-    principal: &AuthenticatedPrincipal,
-    identity: &crate::ids::IdentityId,
-) -> bool {
-    if principal.subject == identity.as_str() {
-        return true;
-    }
-    match &principal.assurance {
-        crate::identity::IdentityAssurance::TaskScoped {
-            identity: current, ..
-        } => current == identity,
-        crate::identity::IdentityAssurance::UserAuthorized {
-            identity: current,
-            user_id,
-            ..
-        } => current == identity || user_id == identity,
-        _ => false,
-    }
+fn principal_has_complete_owner(principal: &AuthenticatedPrincipal) -> bool {
+    !principal.subject.trim().is_empty()
+        && principal
+            .issuer
+            .as_deref()
+            .is_some_and(|issuer| !issuer.trim().is_empty())
+        && principal
+            .tenant
+            .as_deref()
+            .is_some_and(|tenant| !tenant.trim().is_empty())
 }
 
-fn assurance_scopes(assurance: &crate::identity::IdentityAssurance) -> Vec<String> {
-    match assurance {
+fn principal_scopes_match_assurance(principal: &AuthenticatedPrincipal) -> bool {
+    match &principal.assurance {
         crate::identity::IdentityAssurance::TaskScoped { scopes, .. }
-        | crate::identity::IdentityAssurance::UserAuthorized { scopes, .. } => scopes.clone(),
-        _ => Vec::new(),
+        | crate::identity::IdentityAssurance::UserAuthorized { scopes, .. } => {
+            principal.scopes.as_slice() == scopes.as_slice()
+        }
+        _ => principal.scopes.is_empty(),
     }
 }
 

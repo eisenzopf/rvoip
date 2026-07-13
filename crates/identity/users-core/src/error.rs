@@ -19,6 +19,18 @@ pub enum Error {
 
     ApiKeyExpired,
 
+    /// A security-sensitive operation was attempted on an authentication
+    /// service constructed without its durable security store.
+    SecurityStoreUnavailable {
+        operation: &'static str,
+    },
+
+    /// API-key-to-JWT exchange is intentionally disabled until a versioned
+    /// contract can retain key scopes and revocation lineage end to end.
+    ApiKeyTokenExchangeDisabled {
+        contract: &'static str,
+    },
+
     Config(String),
 
     Validation(String),
@@ -37,6 +49,8 @@ impl Error {
             Self::Jwt(_) => "jwt",
             Self::ApiKeyNotFound => "api-key-not-found",
             Self::ApiKeyExpired => "api-key-expired",
+            Self::SecurityStoreUnavailable { .. } => "security-store-unavailable",
+            Self::ApiKeyTokenExchangeDisabled { .. } => "api-key-token-exchange-disabled",
             Self::Config(_) => "configuration",
             Self::Validation(_) => "validation",
             Self::Internal(_) => "internal",
