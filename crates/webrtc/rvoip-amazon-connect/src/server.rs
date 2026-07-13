@@ -44,6 +44,7 @@ use crate::config::ConnectConfig;
 use crate::control::ConnectContactStarter;
 use crate::errors::{ConnectError, Result};
 use crate::mapping::AttributeMapping;
+use crate::media::ConnectMediaConnector;
 
 /// The Connect target a [`ContactRouter`] selected for one inbound call.
 ///
@@ -675,11 +676,35 @@ pub struct ConnectScreenPopServer {
 impl ConnectScreenPopServer {
     /// Build the server: start the SIP coordinator and the Connect adapter.
     pub async fn build(config: ScreenPopServerConfig) -> Result<Arc<Self>> {
+        Self::build_inner(config, None).await
+    }
+
+    /// Build the server with an explicit Amazon media connector.
+    ///
+    /// This additive construction seam is intended for hermetic integration
+    /// tests and specialized media policy. [`Self::build`] continues to install
+    /// the production Chime + rvoip-WebRTC connector.
+    pub async fn build_with_media_connector(
+        config: ScreenPopServerConfig,
+        media_connector: Arc<dyn ConnectMediaConnector>,
+    ) -> Result<Arc<Self>> {
+        Self::build_inner(config, Some(media_connector)).await
+    }
+
+    async fn build_inner(
+        config: ScreenPopServerConfig,
+        media_connector: Option<Arc<dyn ConnectMediaConnector>>,
+    ) -> Result<Arc<Self>> {
         let mapping = config.connect.attribute_mapping.clone();
         let coordinator = UnifiedCoordinator::new(config.sip)
             .await
             .map_err(|e| ConnectError::Signaling(format!("SIP coordinator: {e}")))?;
-        let adapter = AmazonConnectAdapter::new(config.connect, config.starter);
+        let adapter = match media_connector {
+            Some(media_connector) => AmazonConnectAdapter::builder(config.connect, config.starter)
+                .with_media_connector(media_connector)
+                .build(),
+            None => AmazonConnectAdapter::new(config.connect, config.starter),
+        };
         let cleanup: Arc<dyn ScreenPopCleanupActions> = Arc::new(RuntimeCleanupActions {
             coordinator: Arc::clone(&coordinator),
             adapter: Arc::clone(&adapter),
