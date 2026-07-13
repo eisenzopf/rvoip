@@ -13,6 +13,7 @@
 //! primitives are provided as separate validators/building blocks.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -38,7 +39,7 @@ use crate::providers::{
 /// Both `scope` (space-separated string) and `scopes` (array form) are
 /// accepted to match the variety of issuer conventions in the wild.
 /// Tokens with neither map to an empty scopes Vec.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct Claims {
     sub: String,
     #[serde(default)]
@@ -63,10 +64,45 @@ struct Claims {
     tenant_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+impl fmt::Debug for Claims {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Claims")
+            .field("subject_present", &!self.sub.is_empty())
+            .field("issuer_present", &self.iss.is_some())
+            .field("issued_at_present", &self.iat.is_some())
+            .field("expires_at_present", &self.exp.is_some())
+            .field("token_id_present", &self.jti.is_some())
+            .field("scope_present", &self.scope.is_some())
+            .field("scope_bytes", &self.scope.as_ref().map_or(0, String::len))
+            .field(
+                "scope_list_count",
+                &self.scopes.as_ref().map_or(0, Vec::len),
+            )
+            .field("role_count", &self.roles.as_ref().map_or(0, Vec::len))
+            .field("realm_access_present", &self.realm_access.is_some())
+            .field(
+                "resource_access_count",
+                &self.resource_access.as_ref().map_or(0, HashMap::len),
+            )
+            .field("tenant_present", &self.tenant_id.is_some())
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 struct RoleAccess {
     #[serde(default)]
     roles: Vec<String>,
+}
+
+impl fmt::Debug for RoleAccess {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RoleAccess")
+            .field("role_count", &self.roles.len())
+            .finish()
+    }
 }
 
 /// Validate JWTs against a single signing key. Constructed from either
@@ -373,5 +409,62 @@ fn scopes_from_claims(
 fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.contains(&value) {
         values.push(value);
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    const CANARY: &str = "jwt-claims-malicious-canary\r\nAuthorization: exposed";
+
+    #[test]
+    fn decoded_claims_keep_values_out_of_debug() {
+        let claims: Claims = serde_json::from_value(serde_json::json!({
+            "sub": CANARY,
+            "iss": CANARY,
+            "iat": 1,
+            "exp": 2,
+            "jti": CANARY,
+            "scope": CANARY,
+            "scopes": [CANARY],
+            "roles": [CANARY],
+            "realm_access": { "roles": [CANARY] },
+            "resource_access": { (CANARY): { "roles": [CANARY] } },
+            "tenant_id": CANARY,
+        }))
+        .unwrap();
+
+        for rendered in [
+            format!("{claims:?}"),
+            format!("{:?}", claims.realm_access.as_ref().unwrap()),
+            format!(
+                "{:?}",
+                claims
+                    .resource_access
+                    .as_ref()
+                    .unwrap()
+                    .get(CANARY)
+                    .unwrap()
+            ),
+        ] {
+            assert!(!rendered.contains(CANARY), "claim leaked: {rendered}");
+        }
+
+        assert_eq!(claims.sub, CANARY);
+        assert_eq!(claims.iss.as_deref(), Some(CANARY));
+        assert_eq!(claims.jti.as_deref(), Some(CANARY));
+        assert_eq!(claims.scope.as_deref(), Some(CANARY));
+        assert_eq!(claims.scopes.as_deref(), Some(&[CANARY.to_string()][..]));
+        assert_eq!(claims.roles.as_deref(), Some(&[CANARY.to_string()][..]));
+        assert_eq!(claims.tenant_id.as_deref(), Some(CANARY));
+        assert_eq!(
+            claims.realm_access.as_ref().unwrap().roles,
+            [CANARY.to_string()]
+        );
+        assert_eq!(
+            claims.resource_access.as_ref().unwrap()[CANARY].roles,
+            [CANARY.to_string()]
+        );
     }
 }

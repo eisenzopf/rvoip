@@ -496,10 +496,24 @@ fn normalize_ip_text(value: &str) -> String {
         })
 }
 
-#[derive(Debug)]
 pub enum RateLimitIdentifier {
     User(String),
     Ip(String),
+}
+
+impl std::fmt::Debug for RateLimitIdentifier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (kind, value) = match self {
+            Self::User(value) => ("user", value),
+            Self::Ip(value) => ("ip", value),
+        };
+        formatter
+            .debug_struct("RateLimitIdentifier")
+            .field("kind", &kind)
+            .field("value_present", &!value.is_empty())
+            .field("value_bytes", &value.len())
+            .finish()
+    }
 }
 
 #[non_exhaustive]

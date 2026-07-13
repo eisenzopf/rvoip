@@ -6,6 +6,7 @@
 //! enforced by asking the authorization server on each validation.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,7 +48,7 @@ enum IntrospectionClientAuth {
     Bearer(String),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct IntrospectionResponse {
     active: bool,
     #[serde(default)]
@@ -74,11 +75,64 @@ struct IntrospectionResponse {
     aud: Option<IntrospectionAudience>,
 }
 
-#[derive(Debug, Deserialize)]
+impl fmt::Debug for IntrospectionResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IntrospectionResponse")
+            .field("active", &self.active)
+            .field("subject_present", &self.sub.is_some())
+            .field("username_present", &self.username.is_some())
+            .field("client_id_present", &self.client_id.is_some())
+            .field("scope_present", &self.scope.is_some())
+            .field("scope_bytes", &self.scope.as_ref().map_or(0, String::len))
+            .field(
+                "scope_list_count",
+                &self.scopes.as_ref().map_or(0, Vec::len),
+            )
+            .field("issuer_present", &self.iss.is_some())
+            .field("expires_at_present", &self.exp.is_some())
+            .field("issued_at_present", &self.iat.is_some())
+            .field("token_id_present", &self.jti.is_some())
+            .field("tenant_present", &self.tenant_id.is_some())
+            .field("audience_present", &self.aud.is_some())
+            .field(
+                "audience_count",
+                &self.aud.as_ref().map_or(0, IntrospectionAudience::len),
+            )
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(untagged)]
 enum IntrospectionAudience {
     One(String),
     Many(Vec<String>),
+}
+
+impl IntrospectionAudience {
+    fn len(&self) -> usize {
+        match self {
+            Self::One(_) => 1,
+            Self::Many(values) => values.len(),
+        }
+    }
+}
+
+impl fmt::Debug for IntrospectionAudience {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::One(value) => formatter
+                .debug_struct("One")
+                .field("value_present", &!value.is_empty())
+                .field("value_bytes", &value.len())
+                .finish(),
+            Self::Many(values) => formatter
+                .debug_struct("Many")
+                .field("value_count", &values.len())
+                .finish(),
+        }
+    }
 }
 
 impl OAuth2IntrospectionValidator {
@@ -390,4 +444,53 @@ fn scopes_from_response(scope: Option<String>, scopes: Option<Vec<String>>) -> V
         }
     }
     values
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    const CANARY: &str = "introspection-claims-malicious-canary\r\nAuthorization: exposed";
+
+    #[test]
+    fn decoded_response_keeps_values_out_of_debug() {
+        let response: IntrospectionResponse = serde_json::from_value(serde_json::json!({
+            "active": true,
+            "sub": CANARY,
+            "username": CANARY,
+            "client_id": CANARY,
+            "scope": CANARY,
+            "scopes": [CANARY],
+            "iss": CANARY,
+            "exp": 2,
+            "iat": 1,
+            "jti": CANARY,
+            "tenant_id": CANARY,
+            "aud": [CANARY],
+        }))
+        .unwrap();
+        let one: IntrospectionAudience = serde_json::from_value(serde_json::json!(CANARY)).unwrap();
+
+        for rendered in [
+            format!("{response:?}"),
+            format!("{:?}", response.aud.as_ref().unwrap()),
+            format!("{one:?}"),
+        ] {
+            assert!(!rendered.contains(CANARY), "response leaked: {rendered}");
+        }
+
+        assert_eq!(response.sub.as_deref(), Some(CANARY));
+        assert_eq!(response.username.as_deref(), Some(CANARY));
+        assert_eq!(response.client_id.as_deref(), Some(CANARY));
+        assert_eq!(response.scope.as_deref(), Some(CANARY));
+        assert_eq!(response.scopes.as_deref(), Some(&[CANARY.to_string()][..]));
+        assert_eq!(response.iss.as_deref(), Some(CANARY));
+        assert_eq!(response.jti.as_deref(), Some(CANARY));
+        assert_eq!(response.tenant_id.as_deref(), Some(CANARY));
+        assert!(matches!(
+            response.aud,
+            Some(IntrospectionAudience::Many(ref values)) if values == &[CANARY]
+        ));
+        assert!(matches!(one, IntrospectionAudience::One(ref value) if value == CANARY));
+    }
 }

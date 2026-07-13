@@ -1,4 +1,5 @@
 use chrono::Utc;
+use users_core::api::rate_limit::RateLimitIdentifier;
 use users_core::api::{
     ApiKeyResponse, AuthContext, AuthType, ChangePasswordRequest, CreateApiKeyResponse,
     ErrorDetail, ErrorResponse, LoginRequest, LoginResponse, RefreshRequest, UpdateRolesRequest,
@@ -364,4 +365,35 @@ fn security_store_and_exchange_errors_are_class_only() {
     ] {
         assert!(!rendered.contains(CANARY), "boundary leaked: {rendered}");
     }
+}
+
+#[test]
+fn rate_limit_identities_keep_values_out_of_debug() {
+    let identifiers = [
+        RateLimitIdentifier::User(CANARY.into()),
+        RateLimitIdentifier::Ip(CANARY.into()),
+    ];
+
+    for identifier in identifiers {
+        let rendered = format!("{identifier:?}");
+        assert!(!rendered.contains(CANARY), "identity leaked: {rendered}");
+        match identifier {
+            RateLimitIdentifier::User(value) | RateLimitIdentifier::Ip(value) => {
+                assert_eq!(value, CANARY)
+            }
+        }
+    }
+
+    let source = include_str!("../src/api/rate_limit.rs");
+    let declaration = "pub enum RateLimitIdentifier";
+    let declaration_offset = source.find(declaration).unwrap();
+    let prefix = &source[..declaration_offset];
+    assert!(
+        !prefix
+            .rsplit("\n\n")
+            .next()
+            .unwrap_or_default()
+            .contains("Debug"),
+        "RateLimitIdentifier regained derived Debug"
+    );
 }

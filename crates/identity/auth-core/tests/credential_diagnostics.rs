@@ -122,6 +122,36 @@ fn credential_containers_do_not_regain_derived_debug() {
 }
 
 #[test]
+fn decoded_claim_containers_do_not_regain_derived_debug() {
+    for (source, declaration) in [
+        (include_str!("../src/jwt.rs"), "struct Claims"),
+        (include_str!("../src/jwt.rs"), "struct RoleAccess"),
+        (include_str!("../src/jwks.rs"), "struct TokenClaims"),
+        (include_str!("../src/jwks.rs"), "struct RoleAccess"),
+        (
+            include_str!("../src/introspection.rs"),
+            "struct IntrospectionResponse",
+        ),
+        (
+            include_str!("../src/introspection.rs"),
+            "enum IntrospectionAudience",
+        ),
+    ] {
+        let declaration_offset = source
+            .find(declaration)
+            .unwrap_or_else(|| panic!("missing declaration: {declaration}"));
+        let prefix = &source[..declaration_offset];
+        let derive_offset = prefix
+            .rfind("#[derive(")
+            .unwrap_or_else(|| panic!("missing derive for {declaration}"));
+        assert!(
+            !prefix[derive_offset..].contains("Debug"),
+            "{declaration} regained derived Debug"
+        );
+    }
+}
+
+#[test]
 fn principal_proofs_signatures_and_errors_are_metadata_only() {
     let context = UserContext {
         user_id: CANARY.into(),
