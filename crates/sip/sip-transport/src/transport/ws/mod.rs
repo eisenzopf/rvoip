@@ -518,15 +518,15 @@ impl WebSocketTransport {
                     .expect("pre-flight guarantees tls_connector is Some when secure");
                 let server_name = server_name_hint
                     .unwrap_or_else(|| crate::transport::tls::ip_to_server_name(addr));
-                let tls_stream = connector
-                    .connect(server_name, tcp_stream)
-                    .await
-                    .map_err(|e| {
-                        Error::TlsHandshakeFailed(format!(
-                            "WSS client handshake with {}: {}",
-                            addr, e
-                        ))
-                    })?;
+                let tls_stream =
+                    connector
+                        .connect(server_name, tcp_stream)
+                        .await
+                        .map_err(|_error| {
+                            Error::TlsHandshakeFailed(format!(
+                                "WSS client TLS handshake failed for {addr}"
+                            ))
+                        })?;
                 (
                     SipWsStream::ClientTls(tls_stream),
                     SIP_WSS_SUBPROTOCOL,
@@ -547,9 +547,11 @@ impl WebSocketTransport {
         // Per RFC 7118 §4.5 the client advertises `sip` for ws:// and
         // `sips` for wss://.
         let url = format!("{}://{}/", url_scheme, addr);
-        let mut request = url
-            .into_client_request()
-            .map_err(|e| Error::WebSocketHandshakeFailed(e.to_string()))?;
+        let mut request = url.into_client_request().map_err(|_error| {
+            Error::WebSocketHandshakeFailed(format!(
+                "WebSocket client request construction failed for {addr}"
+            ))
+        })?;
         request.headers_mut().insert(
             "Sec-WebSocket-Protocol",
             http::HeaderValue::from_static(subprotocol_advertised),
@@ -560,7 +562,11 @@ impl WebSocketTransport {
         // AsyncRead+AsyncWrite via SipWsStream).
         let (ws_stream, response) = tokio_tungstenite::client_async(request, stream)
             .await
-            .map_err(|e| Error::WebSocketHandshakeFailed(e.to_string()))?;
+            .map_err(|_error| {
+                Error::WebSocketHandshakeFailed(format!(
+                    "WebSocket client handshake failed for {addr}"
+                ))
+            })?;
 
         // Capture the server's selected subprotocol so the connection
         // wrapper carries the negotiated value (mirrors what the

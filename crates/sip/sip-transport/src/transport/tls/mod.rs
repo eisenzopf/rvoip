@@ -414,7 +414,7 @@ impl TlsTransport {
                                 )
                                 .await;
                             }
-                            Err(e) => {
+                            Err(_error) => {
                                 // Warn, not error: a failed inbound
                                 // handshake is recoverable and usually
                                 // benign (misconfigured peer, expired
@@ -423,7 +423,11 @@ impl TlsTransport {
                                 // operators still see this at default
                                 // log levels; CI test output doesn't
                                 // look like a regression.
-                                warn!("TLS handshake with {} failed: {}", remote_addr, e);
+                                warn!(
+                                    destination = %remote_addr,
+                                    error_class = "tls_handshake_failed",
+                                    "TLS handshake failed"
+                                );
                             }
                         }
                     });
@@ -669,8 +673,8 @@ impl TlsTransport {
             .connector
             .connect(server_name, tcp_stream)
             .await
-            .map_err(|e| {
-                Error::TlsHandshakeFailed(format!("TLS handshake to {}: {}", remote_addr, e))
+            .map_err(|_error| {
+                Error::TlsHandshakeFailed(format!("TLS client handshake failed for {remote_addr}"))
             })?;
 
         info!("TLS handshake to {} succeeded", remote_addr);
@@ -883,6 +887,29 @@ mod auth_boundary_tests {
         }
         assert!(source.contains("sni_present"));
         assert!(source.contains("sni_len"));
+    }
+
+    #[test]
+    fn tls_and_websocket_handshakes_never_format_lower_errors() {
+        let tls = include_str!("mod.rs");
+        let websocket = include_str!("../ws/mod.rs");
+        let listener = include_str!("../ws/listener.rs");
+        for fragments in [
+            ["TLS handshake with {}", " failed: {}"],
+            ["TLS handshake to {}", ": {}"],
+            ["WSS client handshake with {}", ": {}"],
+            ["WSS TLS handshake with {}", " failed: {}"],
+            ["WebSocket handshake failed with {}", ": {}"],
+            ["WebSocketHandshakeFailed(e", ".to_string())"],
+        ] {
+            let forbidden = fragments.concat();
+            assert!(
+                !tls.contains(&forbidden)
+                    && !websocket.contains(&forbidden)
+                    && !listener.contains(&forbidden),
+                "lower handshake error relay returned: {forbidden}"
+            );
+        }
     }
 }
 
@@ -1333,7 +1360,10 @@ mod inbound_framing_tests {
             let mut buffer = BytesMut::from(bytes.as_slice());
 
             let error = try_parse_one(&mut buffer).expect_err("ambiguous frame must be rejected");
-            assert!(error.to_string().contains(class), "{error}");
+            assert!(
+                matches!(&error, Error::ParseError(detail) if detail.contains(class)),
+                "unexpected framing class: {error}"
+            );
             assert_eq!(buffer.as_ref(), original);
         }
     }
@@ -1353,7 +1383,10 @@ mod inbound_framing_tests {
         }
         let original = slow.clone();
         let error = try_parse_one(&mut slow).unwrap_err();
-        assert!(error.to_string().contains("header-too-large"), "{error}");
+        assert!(matches!(
+            &error,
+            Error::ParseError(detail) if detail.contains("header-too-large")
+        ));
         assert_eq!(slow, original);
 
         let huge = minimal_request(
@@ -1362,7 +1395,10 @@ mod inbound_framing_tests {
         );
         let mut buffer = BytesMut::from(huge.as_slice());
         let error = try_parse_one(&mut buffer).unwrap_err();
-        assert!(error.to_string().contains("body-too-large"), "{error}");
+        assert!(matches!(
+            &error,
+            Error::ParseError(detail) if detail.contains("body-too-large")
+        ));
         assert_eq!(buffer.as_ref(), huge);
     }
 }

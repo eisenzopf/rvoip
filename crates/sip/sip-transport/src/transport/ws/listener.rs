@@ -242,9 +242,15 @@ impl WebSocketListener {
                         "WSS listener marked secure but no TLS acceptor configured".into(),
                     )
                 })?;
-                let tls_stream = acceptor.accept(stream).await.map_err(|e| {
-                    error!("WSS TLS handshake with {} failed: {}", peer_addr, e);
-                    Error::TlsHandshakeFailed(format!("WSS handshake from {}: {}", peer_addr, e))
+                let tls_stream = acceptor.accept(stream).await.map_err(|_error| {
+                    error!(
+                        source = %peer_addr,
+                        error_class = "tls_handshake_failed",
+                        "WSS TLS handshake failed"
+                    );
+                    Error::TlsHandshakeFailed(format!(
+                        "WSS server TLS handshake failed for {peer_addr}"
+                    ))
                 })?;
                 let metadata = crate::transport::tls::verified_peer_metadata(
                     tls_stream.get_ref().1.peer_certificates(),
@@ -305,9 +311,15 @@ impl WebSocketListener {
         let (ws_stream, selected_protocol) =
             Self::accept_async_with_subprotocol(maybe_tls_stream, callback)
                 .await
-                .map_err(|e| {
-                    error!("WebSocket handshake failed with {}: {}", peer_addr, e);
-                    Error::WebSocketHandshakeFailed(e.to_string())
+                .map_err(|_error| {
+                    error!(
+                        source = %peer_addr,
+                        error_class = "websocket_handshake_failed",
+                        "WebSocket handshake failed"
+                    );
+                    Error::WebSocketHandshakeFailed(format!(
+                        "WebSocket server handshake failed for {peer_addr}"
+                    ))
                 })?;
 
         // Default to 'sip' if no subprotocol was selected

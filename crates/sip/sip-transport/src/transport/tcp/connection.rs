@@ -609,7 +609,10 @@ mod tests {
             let error = connection
                 .try_parse_message(&mut buffer)
                 .expect_err("ambiguous frame must be rejected");
-            assert!(error.to_string().contains(class), "{error}");
+            assert!(
+                matches!(&error, Error::ParseError(detail) if detail.contains(class)),
+                "unexpected framing class: {error}"
+            );
             assert_eq!(buffer.as_ref(), original);
             assert!(connection.is_closed());
             assert!(matches!(
@@ -634,7 +637,10 @@ mod tests {
             }
         }
         let error = connection.try_parse_message(&mut slow).unwrap_err();
-        assert!(error.to_string().contains("header-too-large"), "{error}");
+        assert!(matches!(
+            &error,
+            Error::ParseError(detail) if detail.contains("header-too-large")
+        ));
         assert!(connection.is_closed());
 
         let (connection, _peer) = buffered_test_connection().await;
@@ -644,7 +650,10 @@ mod tests {
         );
         let mut buffer = BytesMut::from(huge.as_slice());
         let error = connection.try_parse_message(&mut buffer).unwrap_err();
-        assert!(error.to_string().contains("body-too-large"), "{error}");
+        assert!(matches!(
+            &error,
+            Error::ParseError(detail) if detail.contains("body-too-large")
+        ));
         assert_eq!(buffer.as_ref(), huge);
         assert!(connection.is_closed());
     }
