@@ -5,7 +5,7 @@ mod support;
 use std::time::Duration;
 
 use rvoip_sip::types::Credentials;
-use rvoip_sip::{Config, Result, SipClientAuth, UnifiedCoordinator};
+use rvoip_sip::{Config, Result, SessionError, SipClientAuth, UnifiedCoordinator};
 use rvoip_sip_core::parser::parse_message;
 use rvoip_sip_core::types::header::HeaderName;
 use rvoip_sip_core::types::headers::HeaderAccess;
@@ -265,8 +265,14 @@ async fn message_with_basic_auth_requires_explicit_cleartext_opt_in() -> Result<
         .expect_err("Basic over cleartext should be rejected by default");
 
     assert!(
-        err.to_string().contains("cleartext"),
-        "unexpected error: {err}"
+        matches!(err, SessionError::RequestAuthConstructionFailed),
+        "cleartext Basic rejection must retain the typed outbound-auth class: {err}"
+    );
+    let captured = uas.wait_for_n(1, Duration::from_secs(2)).await;
+    assert_eq!(
+        captured.len(),
+        1,
+        "cleartext Basic rejection must not send an authenticated retry"
     );
     coord.shutdown_gracefully(None).await?;
     uas.shutdown();
