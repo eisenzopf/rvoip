@@ -13,7 +13,7 @@ use rvoip_webrtc::client::{
 };
 use rvoip_webrtc::peer::{PeerRole, RvoipPeerConnection};
 use rvoip_webrtc::signaling::websocket::serve_listener;
-use rvoip_webrtc::{WebRtcAdapter, WebRtcConfig};
+use rvoip_webrtc::{WebRtcAdapter, WebRtcConfig, WebRtcError};
 
 #[tokio::test]
 async fn ws_signaler_send_answer_routes_by_connection_id() {
@@ -88,11 +88,11 @@ async fn ws_signaler_send_answer_rejects_missing_connection_id() {
         })
         .await
         .expect_err("must require connection_id");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("connection_id"),
-        "error should mention connection_id, got: {msg}"
-    );
+    assert!(matches!(
+        &err,
+        WebRtcError::Signaling(detail) if detail.contains("connection_id")
+    ));
+    assert_eq!(err.to_string(), "WebRTC operation failed (class=signaling)");
 }
 
 #[tokio::test]
@@ -117,11 +117,12 @@ async fn ws_signaler_retries_on_connect_failure() {
         elapsed >= Duration::from_millis(200),
         "retry path did not back off; elapsed={elapsed:?}"
     );
-    let msg = err.to_string();
-    assert!(
-        msg.contains("attempt 3/3") || msg.contains("connect"),
-        "error should mention the last attempt; got {msg}"
-    );
+    assert!(matches!(
+        &err,
+        WebRtcError::Signaling(detail)
+            if detail.contains("attempt 3/3") || detail.contains("connect")
+    ));
+    assert_eq!(err.to_string(), "WebRTC operation failed (class=signaling)");
 }
 
 #[tokio::test]
@@ -137,8 +138,12 @@ async fn ws_signaler_default_no_retry() {
         elapsed < Duration::from_millis(500),
         "no-retry default should fail fast; elapsed={elapsed:?}"
     );
-    let msg = err.to_string();
-    assert!(msg.contains("attempt 1/1") || msg.contains("connect"));
+    assert!(matches!(
+        &err,
+        WebRtcError::Signaling(detail)
+            if detail.contains("attempt 1/1") || detail.contains("connect")
+    ));
+    assert_eq!(err.to_string(), "WebRTC operation failed (class=signaling)");
 }
 
 #[tokio::test]

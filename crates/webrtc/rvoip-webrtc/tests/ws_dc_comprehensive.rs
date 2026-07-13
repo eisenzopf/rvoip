@@ -10,7 +10,7 @@ use rvoip_core::adapter::ConnectionAdapter;
 use rvoip_core::commands::InboundAction;
 use rvoip_core::config::Config;
 use rvoip_core::events::Event;
-use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId};
+use rvoip_core::ids::{ParticipantId, SessionId};
 use rvoip_core::orchestrator::Orchestrator;
 use rvoip_webrtc::client::comprehensive::{
     handle_server_connection, prepare_offer_media, run_client_checks,

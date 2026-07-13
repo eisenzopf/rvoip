@@ -2,7 +2,6 @@
 
 use std::env;
 use std::process;
-use std::time::Duration;
 
 use rvoip_webrtc::client::comprehensive::run_client_checks_with_chat;
 use rvoip_webrtc::client::{CallTarget, SessionMedium, WebRtcClient, WsSignaler};
