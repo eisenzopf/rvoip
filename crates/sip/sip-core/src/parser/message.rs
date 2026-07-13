@@ -7,6 +7,7 @@ use crate::types::{Message, Request, Response};
 use crate::parser::request::parse_request_line;
 // use crate::parser::utils::crlf;
 use crate::error::{Error, Result};
+use crate::framing::{inspect_sip_frame, SipFrameStatus};
 use crate::parser::common::ParseResult;
 use crate::parser::response::parse_status_line;
 use crate::parser::separators::hcolon;
@@ -21,16 +22,15 @@ use nom::combinator::{map, map_res, recognize};
 use nom::error::{Error as NomError, ErrorKind};
 use nom::sequence::tuple;
 use nom::IResult;
-use nom::Needed;
 use std::str;
 use std::str::FromStr;
 
 /// Maximum length of a single line in a SIP message
-pub const MAX_LINE_LENGTH: usize = 4096;
+pub const MAX_LINE_LENGTH: usize = crate::framing::MAX_SIP_LINE_BYTES;
 /// Maximum number of headers in a SIP message
-pub const MAX_HEADER_COUNT: usize = 100;
+pub const MAX_HEADER_COUNT: usize = crate::framing::MAX_SIP_HEADER_COUNT;
 /// Maximum size of a SIP message body
-pub const MAX_BODY_SIZE: usize = 16 * 1024 * 1024; // 16 MB
+pub const MAX_BODY_SIZE: usize = crate::framing::MAX_SIP_BODY_BYTES;
 
 /// Mode for parsing SIP messages
 /// - Strict: Rejects messages that don't conform to RFC 3261 strictly
@@ -125,9 +125,31 @@ pub fn header_value_better(input: &[u8]) -> ParseResult<'_, &[u8]> {
 /// 2. It will parse all headers and attempt to convert them to typed headers
 /// 3. If a header can't be parsed into its typed form, it will be retained as a raw header
 ///    instead of failing the entire message parse
-/// 4. Content-Length is extracted to determine body size
-/// 5. The message body is parsed based on the Content-Length header (or 0 if absent)
+/// 4. The shared framing scanner supplies the single validated Content-Length
+/// 5. The message body is parsed from that authoritative frame boundary
+#[cfg(test)]
 fn full_message_parser(input: &[u8], mode: ParseMode) -> IResult<&[u8], Message> {
+    match inspect_sip_frame(input) {
+        Ok(SipFrameStatus::Complete(frame)) => {
+            full_message_parser_with_content_length(input, mode, frame.body_bytes)
+        }
+        Ok(SipFrameStatus::Incomplete { required_total }) => {
+            let needed = required_total
+                .and_then(|total| total.checked_sub(input.len()))
+                .and_then(std::num::NonZeroUsize::new)
+                .map(nom::Needed::Size)
+                .unwrap_or(nom::Needed::Unknown);
+            Err(nom::Err::Incomplete(needed))
+        }
+        Err(_) => Err(nom::Err::Failure(NomError::new(input, ErrorKind::Verify))),
+    }
+}
+
+fn full_message_parser_with_content_length(
+    input: &[u8],
+    _mode: ParseMode,
+    content_length: usize,
+) -> IResult<&[u8], Message> {
     // 1. Parse Start Line
     let (rest, start_line_data) = alt((
         map(parse_request_line, |(m, u, v)| {
@@ -151,25 +173,7 @@ fn full_message_parser(input: &[u8], mode: ParseMode) -> IResult<&[u8], Message>
     // 3. Convert Raw Headers to Typed Headers - with error tolerance
     let mut typed_headers: Vec<TypedHeader> = Vec::with_capacity(raw_headers.len());
 
-    // RFC 3261 §20.14 says when multiple Content-Length headers are
-    // present, the last value wins. Track that with a single `Option`
-    // — the previous `Vec::new()` always heap-allocated even though the
-    // overwhelmingly common case is exactly one Content-Length header.
-    let mut content_length_last: Option<usize> = None;
-
     for header in raw_headers {
-        // Track Content-Length: always-rewrite-last means the latest
-        // numerically-valid value wins, matching the prior `*values.last()`.
-        if header.name == HeaderName::ContentLength {
-            if let HeaderValue::Raw(bytes) = &header.value {
-                if let Ok(s) = str::from_utf8(bytes) {
-                    if let Ok(cl) = s.trim().parse::<usize>() {
-                        content_length_last = Some(cl);
-                    }
-                }
-            }
-        }
-
         // Borrow into `try_from` so we keep ownership for the error
         // fallback. The previous `header.clone()` allocated a fresh
         // `HeaderName` + `HeaderValue` per header even on the success
@@ -191,75 +195,8 @@ fn full_message_parser(input: &[u8], mode: ParseMode) -> IResult<&[u8], Message>
         }
     }
 
-    // 4. Get Content-Length — RFC 3261 §20.14 "last header wins" already
-    // honoured by the `content_length_last` tracking above.
-    let content_length = content_length_last.unwrap_or_else(|| {
-        // Fallback to typed header if no raw Content-Length was found
-        // (e.g. it arrived pre-parsed via `HeaderValue::ContentLength`).
-        typed_headers
-            .iter()
-            .find_map(|h| {
-                if let TypedHeader::ContentLength(cl) = h {
-                    Some(cl.0 as usize)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0)
-    });
-
-    // 5. Parse Body based on Content-Length
-    if rest.len() < content_length {
-        // In lenient mode, be more forgiving with incomplete bodies
-        if mode == ParseMode::Lenient {
-            let actual_length = rest.len();
-            eprintln!("Warning: Content-Length ({}) exceeds available body data ({}). Using available data.",
-                    content_length, actual_length);
-            let (final_rest, body_slice) = take(actual_length)(rest)?;
-            let body = Bytes::copy_from_slice(body_slice);
-
-            // Construct the message with what we have
-            let message = if is_request {
-                let mut req = Request::new(method.unwrap(), uri.unwrap());
-                req.version = version.unwrap();
-                req.set_headers(typed_headers);
-                if actual_length > 0 {
-                    req.body = body;
-                }
-                Message::Request(req)
-            } else {
-                let mut resp = Response::new(status_code.unwrap());
-                resp.version = version.unwrap();
-                if let Some(reason) = reason_phrase_opt {
-                    resp = resp.with_reason(reason);
-                }
-                resp.set_headers(typed_headers);
-                if actual_length > 0 {
-                    resp.body = body;
-                }
-                Message::Response(resp)
-            };
-
-            return Ok((final_rest, message));
-        } else {
-            // In strict mode, reject messages with mismatched Content-Length
-            return Err(nom::Err::Incomplete(Needed::new(
-                content_length - rest.len(),
-            )));
-        }
-    }
-
-    // Take exactly content_length bytes for the body
+    // 4. Take exactly the body size selected by the shared framing scanner.
     let (final_rest, body_slice) = take(content_length)(rest)?;
-
-    // In lenient mode, if there's extra data after consuming content_length bytes, discard it with a warning
-    if mode == ParseMode::Lenient && !final_rest.is_empty() {
-        eprintln!(
-            "Warning: Message has {} extra bytes after Content-Length: {}. Ignoring excess data.",
-            final_rest.len(),
-            content_length
-        );
-    }
 
     // 6. Construct Message
     let body = Bytes::copy_from_slice(body_slice);
@@ -301,25 +238,47 @@ pub fn parse_message_with_mode(input: &[u8], mode: ParseMode) -> Result<Message>
     eprintln!("Input as hex: {:02x?}", input);
     eprintln!("===========================");*/
 
-    // In strict mode, use all_consuming to ensure the entire input is consumed
-    // In lenient mode, don't use all_consuming to allow for excess input after valid message
+    let frame = match inspect_sip_frame(input) {
+        Ok(SipFrameStatus::Complete(frame)) => frame,
+        Ok(SipFrameStatus::Incomplete { .. }) => {
+            tracing::debug!("SIP frame incomplete");
+            return Err(Error::ParseError(
+                "Incomplete SIP message frame".to_string(),
+            ));
+        }
+        Err(error) => {
+            tracing::debug!(error_class = error.class(), "SIP framing rejected input");
+            return Err(Error::ParseError(error.to_string()));
+        }
+    };
+    let framed_input = &input[..frame.total_bytes];
+
+    // Strict mode additionally rejects bytes after the one authoritative frame.
+    // Lenient mode preserves the legacy ability to parse the first message from
+    // a larger buffer, but never guesses or repairs its Content-Length.
     let parser_result = if mode == ParseMode::Strict {
-        // For strict mode, parse first then check if everything was consumed
-        match full_message_parser(input, mode) {
-            Ok((remaining, message)) => {
-                if remaining.is_empty() {
-                    Ok((remaining, message))
-                } else {
-                    Err(nom::Err::Error(nom::error::Error::new(
-                        remaining,
-                        nom::error::ErrorKind::Eof,
-                    )))
+        if input.len() != frame.total_bytes {
+            Err(nom::Err::Error(nom::error::Error::new(
+                &input[frame.total_bytes..],
+                nom::error::ErrorKind::Eof,
+            )))
+        } else {
+            match full_message_parser_with_content_length(framed_input, mode, frame.body_bytes) {
+                Ok((remaining, message)) => {
+                    if remaining.is_empty() {
+                        Ok((remaining, message))
+                    } else {
+                        Err(nom::Err::Error(nom::error::Error::new(
+                            remaining,
+                            nom::error::ErrorKind::Eof,
+                        )))
+                    }
                 }
+                Err(e) => Err(e),
             }
-            Err(e) => Err(e),
         }
     } else {
-        full_message_parser(input, mode)
+        full_message_parser_with_content_length(framed_input, mode, frame.body_bytes)
     };
 
     match parser_result {
@@ -773,8 +732,8 @@ mod tests {
     }
 
     #[test]
-    fn test_message_missing_content_length() {
-        // RFC 3261 Section 20.14: If Content-Length header is missing, body is empty
+    fn test_message_missing_content_length_is_rejected() {
+        // One authoritative Content-Length is required at every framing boundary.
         let input = b"INVITE sip:bob@biloxi.com SIP/2.0\r\n\
                      Via: SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds\r\n\
                      To: Bob <sip:bob@biloxi.com>\r\n\
@@ -784,23 +743,10 @@ mod tests {
                      \r\n\
                      This content should be ignored";
 
-        let result = full_message_parser(input, ParseMode::Lenient);
         assert!(
-            result.is_ok(),
-            "Failed to parse message without Content-Length"
+            full_message_parser(input, ParseMode::Lenient).is_err(),
+            "missing Content-Length must never make the trailing bytes ambiguous"
         );
-
-        let (_, msg) = result.unwrap();
-        match msg {
-            Message::Request(req) => {
-                assert_eq!(
-                    req.body.len(),
-                    0,
-                    "Body should be empty when Content-Length is missing"
-                );
-            }
-            _ => panic!("Expected Request, got Response"),
-        }
     }
 
     #[test]
@@ -886,25 +832,16 @@ mod tests {
             "Should reject message with Content-Length mismatch"
         );
 
-        // 5. But lenient mode accepts mismatched Content-Length and uses available data
+        // 5. Framing is strict even when syntax parsing is lenient. Repairing an
+        // incomplete body would make following stream bytes ambiguous.
         let input = b"INVITE sip:bob@biloxi.com SIP/2.0\r\n\
                      Content-Length: 10\r\n\
                      \r\n\
                      Test"; // Only 4 bytes, but Content-Length said 10
-        let result = full_message_parser(input, ParseMode::Lenient);
         assert!(
-            result.is_ok(),
-            "Lenient mode should accept message with Content-Length mismatch"
+            full_message_parser(input, ParseMode::Lenient).is_err(),
+            "Lenient mode must reject an incomplete framed body"
         );
-        if let Ok((_, Message::Request(req))) = result {
-            assert_eq!(
-                req.body.len(),
-                4,
-                "Lenient mode should use available body data"
-            );
-        } else {
-            panic!("Expected Request in lenient parsing mode");
-        }
 
         // 6. Body longer than Content-Length - lenient mode should truncate to Content-Length
         let input = b"INVITE sip:bob@biloxi.com SIP/2.0\r\n\

@@ -200,6 +200,7 @@
 pub mod builder;
 pub mod diagnostics;
 pub mod error;
+pub mod framing;
 /// JSON representation and access layer for SIP types
 pub mod json;
 pub mod macros;

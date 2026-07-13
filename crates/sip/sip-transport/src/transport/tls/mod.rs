@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
+use rvoip_sip_core::framing::{inspect_sip_frame, SipFrameStatus};
 use rvoip_sip_core::types::uri::Host;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -477,7 +478,7 @@ impl TlsTransport {
         let mut buffer = BytesMut::with_capacity(8192);
         let mut tmp = vec![0u8; 8192];
         let tx_for_pong = tx.clone();
-        loop {
+        'connection: loop {
             match reader.read(&mut tmp).await {
                 Ok(0) => break,
                 Ok(n) => {
@@ -506,7 +507,7 @@ impl TlsTransport {
                             None => {}
                         }
                         match try_parse_one(&mut buffer) {
-                            Some((message, raw_bytes)) => {
+                            Ok(Some((message, raw_bytes))) => {
                                 let _ = event_tx
                                     .send(TransportEvent::MessageReceived {
                                         message,
@@ -519,7 +520,8 @@ impl TlsTransport {
                                     })
                                     .await;
                             }
-                            None => break,
+                            Ok(None) => break,
+                            Err(_) => break 'connection,
                         }
                     }
                 }
@@ -1227,63 +1229,140 @@ pub(crate) fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
             Error::TlsHandshakeFailed(format!("No private keys found in {}", path.display()))
         })
 }
-/// Try to parse a single complete SIP message off the front of
-/// `buffer`. Returns `Some(message)` (and removes those bytes) when a
-/// complete message is present per RFC 3261 §18.3 Content-Length
-/// framing; returns `None` when more bytes are needed. Mirrors
-/// `transport::tcp::connection::TcpConnection::try_parse_message` so
-/// TLS framing matches TCP's behaviour exactly.
-fn try_parse_one(buffer: &mut BytesMut) -> Option<(rvoip_sip_core::Message, bytes::Bytes)> {
+/// Try to parse a single complete SIP message off the front of `buffer`.
+///
+/// Returns `Ok(Some(message))` (and removes those bytes) when a complete
+/// message is present per RFC 3261 §18.3 Content-Length framing,
+/// `Ok(None)` when more bytes are needed, or an error for malformed or
+/// over-limit framing. Mirrors
+/// `transport::tcp::connection::TcpConnection::try_parse_message` so TLS
+/// framing matches TCP's behaviour exactly.
+fn try_parse_one(buffer: &mut BytesMut) -> Result<Option<(rvoip_sip_core::Message, bytes::Bytes)>> {
     if buffer.is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    // End-of-headers = double CRLF.
-    let header_end =
-        (0..buffer.len().saturating_sub(3)).find(|&i| &buffer[i..i + 4] == b"\r\n\r\n")?;
-    let body_start = header_end + 4;
-
-    // Pull Content-Length from the header section. SIP allows the
-    // compact form "l:" but the bulk of senders use the long form.
-    let content_length = {
-        let header_str = std::str::from_utf8(&buffer[..header_end + 4]).ok()?;
-        let mut len = 0usize;
-        for line in header_str.lines() {
-            let trimmed = line.trim();
-            let lower = trimmed.to_ascii_lowercase();
-            if lower.starts_with("content-length:") || lower.starts_with("l:") {
-                if let Some(value) = trimmed.split(':').nth(1) {
-                    if let Ok(n) = value.trim().parse::<usize>() {
-                        len = n;
-                    }
-                }
-            }
+    let frame = match inspect_sip_frame(buffer) {
+        Ok(SipFrameStatus::Incomplete { .. }) => return Ok(None),
+        Ok(SipFrameStatus::Complete(frame)) => frame,
+        Err(error) => {
+            warn!(
+                error_class = error.class(),
+                "Rejecting malformed SIP TLS frame"
+            );
+            return Err(Error::ParseError(error.to_string()));
         }
-        len
     };
-
-    let total = body_start + content_length;
-    if buffer.len() < total {
-        return None;
-    }
 
     // Snapshot the wire bytes BEFORE parsing so we can hand them
     // downstream byte-exact (RFC 8224 STIR/SHAKEN, SBC signature
     // preservation, replay tooling). Matches the TCP path's shape.
-    let raw_bytes = bytes::Bytes::copy_from_slice(&buffer[..total]);
+    let raw_bytes = bytes::Bytes::copy_from_slice(&buffer[..frame.total_bytes]);
     match rvoip_sip_core::parse_message(&raw_bytes) {
         Ok(message) => {
-            buffer.advance(total);
-            Some((message, raw_bytes))
+            buffer.advance(frame.total_bytes);
+            Ok(Some((message, raw_bytes)))
         }
-        Err(e) => {
+        Err(_) => {
             warn!(
-                "TLS: failed to parse SIP message ({} bytes, content_length={}): {}",
-                total, content_length, e
+                error_class = "sip-syntax",
+                "Rejecting malformed SIP TLS message"
             );
-            // Skip past the malformed message so we don't loop on it.
-            buffer.advance(total);
-            None
+            Err(Error::ParseError(
+                "SIP parser rejected framed TLS message".to_string(),
+            ))
         }
+    }
+}
+
+#[cfg(test)]
+mod inbound_framing_tests {
+    use super::*;
+    use rvoip_sip_core::framing::{MAX_SIP_BODY_BYTES, MAX_SIP_HEADER_BYTES};
+
+    fn minimal_request(content_length_headers: &[u8], body: &[u8]) -> Vec<u8> {
+        let mut message = b"OPTIONS sip:service.example SIP/2.0\r\n".to_vec();
+        message.extend_from_slice(content_length_headers);
+        message.extend_from_slice(b"\r\n\r\n");
+        message.extend_from_slice(body);
+        message
+    }
+
+    #[test]
+    fn tls_framing_accepts_compact_content_length() {
+        let message = minimal_request(b"l: 4", b"body");
+        let mut buffer = BytesMut::from(message.as_slice());
+        let (parsed, raw) = try_parse_one(&mut buffer)
+            .unwrap()
+            .expect("compact Content-Length frame");
+        assert!(buffer.is_empty());
+        assert_eq!(raw.as_ref(), message);
+        let rvoip_sip_core::Message::Request(request) = parsed else {
+            panic!("request expected");
+        };
+        assert_eq!(request.body(), b"body");
+    }
+
+    #[test]
+    fn tls_rejects_all_ambiguous_content_lengths_without_consuming_following_request() {
+        let valid_second = minimal_request(b"Content-Length: 0", b"");
+        for (headers, class) in [
+            (b"Via: missing-length".as_slice(), "missing-content-length"),
+            (
+                b"Content-Length: 0\r\nContent-Length: 0".as_slice(),
+                "duplicate-content-length",
+            ),
+            (
+                b"Content-Length: 0\r\nl: 1".as_slice(),
+                "duplicate-content-length",
+            ),
+            (
+                b"L: 1\r\nCONTENT-LENGTH: 0".as_slice(),
+                "duplicate-content-length",
+            ),
+            (b"Content-Length: nope".as_slice(), "invalid-content-length"),
+            (b"l: \xff".as_slice(), "invalid-content-length"),
+            (
+                b"Content-Length: 184467440737095516160".as_slice(),
+                "content-length-overflow",
+            ),
+        ] {
+            let mut bytes = minimal_request(headers, b"");
+            bytes.extend_from_slice(&valid_second);
+            let original = bytes.clone();
+            let mut buffer = BytesMut::from(bytes.as_slice());
+
+            let error = try_parse_one(&mut buffer).expect_err("ambiguous frame must be rejected");
+            assert!(error.to_string().contains(class), "{error}");
+            assert_eq!(buffer.as_ref(), original);
+        }
+    }
+
+    #[test]
+    fn tls_rejects_slow_endless_headers_and_huge_bodies_at_shared_bounds() {
+        let mut slow =
+            BytesMut::from(&b"OPTIONS sip:service.example SIP/2.0\r\nX-Fold: value\r\n"[..]);
+        let mut continuation = vec![b'a'; 1_022];
+        continuation[0] = b' ';
+        continuation.extend_from_slice(b"\r\n");
+        while slow.len() <= MAX_SIP_HEADER_BYTES {
+            slow.extend_from_slice(&continuation);
+            if slow.len() <= MAX_SIP_HEADER_BYTES {
+                assert!(try_parse_one(&mut slow).unwrap().is_none());
+            }
+        }
+        let original = slow.clone();
+        let error = try_parse_one(&mut slow).unwrap_err();
+        assert!(error.to_string().contains("header-too-large"), "{error}");
+        assert_eq!(slow, original);
+
+        let huge = minimal_request(
+            format!("Content-Length: {}", MAX_SIP_BODY_BYTES + 1).as_bytes(),
+            b"",
+        );
+        let mut buffer = BytesMut::from(huge.as_slice());
+        let error = try_parse_one(&mut buffer).unwrap_err();
+        assert!(error.to_string().contains("body-too-large"), "{error}");
+        assert_eq!(buffer.as_ref(), huge);
     }
 }
