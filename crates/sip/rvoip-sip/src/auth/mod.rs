@@ -230,6 +230,7 @@ use rvoip_core_traits::identity::{
     AuthenticatedPrincipal, AuthenticationMethod, CredentialKind, IdentityAssurance,
 };
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 use crate::errors::{redacted_auth_failure, AuthFailureStage, Result, SessionError};
 use crate::types::Credentials;
@@ -244,6 +245,53 @@ pub use rvoip_auth_core::{
     DigestSecretProvider, JwksJwtValidator, JwtValidator, OAuth2IntrospectionValidator,
     PasswordVerifier, TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
+
+const MAX_LOCAL_DIGEST_NONCES: usize = 4_096;
+const MAX_LOCAL_DIGEST_NONCE_COUNTS: usize = 16_384;
+
+fn digest_nonce_count(response: &DigestResponse) -> Option<u32> {
+    if !matches!(response.qop.as_deref(), Some("auth") | Some("auth-int")) {
+        return None;
+    }
+    let value = response.nc.as_deref()?;
+    if value.len() != 8 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let count = u32::from_str_radix(value, 16).ok()?;
+    let cnonce = response.cnonce.as_deref()?;
+    if count == 0 || cnonce.is_empty() || cnonce.len() > 256 {
+        return None;
+    }
+    Some(count)
+}
+
+#[derive(Clone)]
+struct DigestVerifierSet {
+    md5_ha1: String,
+    sha256_ha1: String,
+    sha512256_ha1: String,
+}
+
+impl DigestVerifierSet {
+    fn from_password(username: &str, realm: &str, mut password: String) -> Self {
+        let verifiers = Self {
+            md5_ha1: DigestAlgorithm::MD5.compute_ha1(username, realm, &password),
+            sha256_ha1: DigestAlgorithm::SHA256.compute_ha1(username, realm, &password),
+            sha512256_ha1: DigestAlgorithm::SHA512256.compute_ha1(username, realm, &password),
+        };
+        password.zeroize();
+        verifiers
+    }
+
+    fn secret(&self, algorithm: DigestAlgorithm) -> DigestSecret {
+        let ha1 = match algorithm {
+            DigestAlgorithm::MD5 | DigestAlgorithm::MD5Sess => &self.md5_ha1,
+            DigestAlgorithm::SHA256 | DigestAlgorithm::SHA256Sess => &self.sha256_ha1,
+            DigestAlgorithm::SHA512256 | DigestAlgorithm::SHA512256Sess => &self.sha512256_ha1,
+        };
+        DigestSecret::Ha1(ha1.clone())
+    }
+}
 
 /// SIP authentication scheme shared by UAC negotiation, UAS challenges, and
 /// authenticated identity results.
@@ -2736,6 +2784,7 @@ impl std::fmt::Debug for SipAuthService {
 #[derive(Clone)]
 struct DigestProviderAuthStore {
     authenticator: DigestAuthenticator,
+    algorithm: DigestAlgorithm,
     realm: String,
     provider: Arc<dyn DigestSecretProvider>,
     nonces: Arc<RwLock<HashMap<String, Instant>>>,
@@ -2749,6 +2798,7 @@ impl DigestProviderAuthStore {
         let realm = realm.into();
         Self {
             authenticator: DigestAuthenticator::new(realm.clone()),
+            algorithm: DigestAlgorithm::MD5,
             realm,
             provider,
             nonces: Arc::new(RwLock::new(HashMap::new())),
@@ -2760,6 +2810,7 @@ impl DigestProviderAuthStore {
 
     fn with_algorithm(mut self, algorithm: DigestAlgorithm) -> Self {
         self.authenticator = self.authenticator.with_algorithm(algorithm);
+        self.algorithm = algorithm;
         self
     }
 
@@ -2797,7 +2848,25 @@ impl DigestProviderAuthStore {
             .nonces
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let evicted = if nonces.len() >= MAX_LOCAL_DIGEST_NONCES {
+            nonces
+                .iter()
+                .min_by_key(|(_, expires_at)| **expires_at)
+                .map(|(nonce, _)| nonce.clone())
+        } else {
+            None
+        };
+        if let Some(evicted) = &evicted {
+            nonces.remove(evicted);
+        }
         nonces.insert(nonce.to_string(), expires_at);
+        drop(nonces);
+        if let Some(evicted) = evicted {
+            self.nonce_counts
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .retain(|(_, nonce), _| nonce != &evicted);
+        }
     }
 
     fn www_authenticate(&self, challenge: &DigestChallenge) -> String {
@@ -2825,10 +2894,28 @@ impl DigestProviderAuthStore {
             }
         };
 
-        if response.uri != request_uri || response.realm != self.realm {
+        if response.uri != request_uri
+            || response.realm != self.realm
+            || response.algorithm != self.algorithm
+            || digest_nonce_count(&response).is_none()
+        {
             return self
                 .rejected_with_reason(AuthFailureReason::InvalidCredential)
                 .await;
+        }
+
+        match self.nonce_status_async(&response.nonce).await? {
+            NonceStatus::Active => {}
+            NonceStatus::Expired => {
+                return self
+                    .rejected_stale_with_reason(AuthFailureReason::StaleNonce)
+                    .await
+            }
+            NonceStatus::Unknown => {
+                return self
+                    .rejected_with_reason(AuthFailureReason::InvalidCredential)
+                    .await
+            }
         }
 
         let secret = match self
@@ -2872,20 +2959,6 @@ impl DigestProviderAuthStore {
                 .await;
         }
 
-        match self.nonce_status_async(&response.nonce).await? {
-            NonceStatus::Active => {}
-            NonceStatus::Expired => {
-                return self
-                    .rejected_stale_with_reason(AuthFailureReason::StaleNonce)
-                    .await
-            }
-            NonceStatus::Unknown => {
-                return self
-                    .rejected_with_reason(AuthFailureReason::InvalidCredential)
-                    .await
-            }
-        }
-
         if let Some(reason) = self.accept_nonce_count_async(&response).await? {
             return self.rejected_with_reason(reason).await;
         }
@@ -2909,6 +2982,11 @@ impl DigestProviderAuthStore {
             Some(expires_at) if expires_at > now => NonceStatus::Active,
             Some(_) => {
                 nonces.remove(nonce);
+                drop(nonces);
+                self.nonce_counts
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .retain(|(_, recorded_nonce), _| recorded_nonce != nonce);
                 NonceStatus::Expired
             }
             None => NonceStatus::Unknown,
@@ -2916,31 +2994,18 @@ impl DigestProviderAuthStore {
     }
 
     fn accept_nonce_count(&self, response: &DigestResponse) -> bool {
-        let Some(qop) = response.qop.as_deref() else {
-            return true;
-        };
-        if qop != "auth" && qop != "auth-int" {
-            return false;
-        }
-        let Some(nc) = response
-            .nc
-            .as_deref()
-            .and_then(|value| u32::from_str_radix(value, 16).ok())
-        else {
+        let Some(nc) = digest_nonce_count(response) else {
             return false;
         };
-        let Some(cnonce) = response.cnonce.clone() else {
-            return false;
-        };
-        if cnonce.is_empty() {
-            return false;
-        }
         let key = (response.username.clone(), response.nonce.clone());
         let mut nonce_counts = self
             .nonce_counts
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if nonce_counts.get(&key).is_some_and(|last| nc <= *last) {
+            return false;
+        }
+        if !nonce_counts.contains_key(&key) && nonce_counts.len() >= MAX_LOCAL_DIGEST_NONCE_COUNTS {
             return false;
         }
         nonce_counts.insert(key, nc);
@@ -2966,25 +3031,9 @@ impl DigestProviderAuthStore {
         &self,
         response: &DigestResponse,
     ) -> Result<Option<AuthFailureReason>> {
-        let Some(qop) = response.qop.as_deref() else {
-            return Ok(None);
-        };
-        if qop != "auth" && qop != "auth-int" {
-            return Ok(Some(AuthFailureReason::UnsupportedScheme));
-        }
-        let Some(nc) = response
-            .nc
-            .as_deref()
-            .and_then(|value| u32::from_str_radix(value, 16).ok())
-        else {
+        let Some(nc) = digest_nonce_count(response) else {
             return Ok(Some(AuthFailureReason::MalformedCredential));
         };
-        let Some(cnonce) = response.cnonce.as_ref() else {
-            return Ok(Some(AuthFailureReason::MalformedCredential));
-        };
-        if cnonce.is_empty() {
-            return Ok(Some(AuthFailureReason::MalformedCredential));
-        }
         let accepted = if let Some(replay_store) = &self.replay_store {
             replay_store
                 .accept_nonce_count(&response.username, &response.nonce, nc)
@@ -3271,25 +3320,9 @@ async fn accept_nonce_count_with_replay_store(
     response: &DigestResponse,
     replay_store: &dyn DigestReplayStore,
 ) -> Result<bool> {
-    let Some(qop) = response.qop.as_deref() else {
-        return Ok(true);
-    };
-    if qop != "auth" && qop != "auth-int" {
-        return Ok(false);
-    }
-    let Some(nc) = response
-        .nc
-        .as_deref()
-        .and_then(|value| u32::from_str_radix(value, 16).ok())
-    else {
+    let Some(nc) = digest_nonce_count(response) else {
         return Ok(false);
     };
-    let Some(cnonce) = response.cnonce.as_ref() else {
-        return Ok(false);
-    };
-    if cnonce.is_empty() {
-        return Ok(false);
-    }
     replay_store
         .accept_nonce_count(&response.username, &response.nonce, nc)
         .await
@@ -3527,8 +3560,9 @@ impl fmt::Debug for AuthDecision {
 #[derive(Clone)]
 pub struct SipDigestAuthService {
     authenticator: DigestAuthenticator,
+    algorithm: DigestAlgorithm,
     realm: String,
-    users: Arc<RwLock<HashMap<String, String>>>,
+    users: Arc<RwLock<HashMap<String, DigestVerifierSet>>>,
     nonces: Arc<RwLock<HashMap<String, Instant>>>,
     nonce_counts: Arc<RwLock<HashMap<(String, String), u32>>>,
     nonce_ttl: Duration,
@@ -3540,6 +3574,7 @@ impl SipDigestAuthService {
         let realm = realm.into();
         Self {
             authenticator: DigestAuthenticator::new(realm.clone()),
+            algorithm: DigestAlgorithm::MD5,
             realm,
             users: Arc::new(RwLock::new(HashMap::new())),
             nonces: Arc::new(RwLock::new(HashMap::new())),
@@ -3551,6 +3586,7 @@ impl SipDigestAuthService {
     /// Select the algorithm used for generated challenges.
     pub fn with_algorithm(mut self, algorithm: DigestAlgorithm) -> Self {
         self.authenticator = self.authenticator.with_algorithm(algorithm);
+        self.algorithm = algorithm;
         self
     }
 
@@ -3562,22 +3598,44 @@ impl SipDigestAuthService {
 
     /// Add or replace a digest user.
     pub fn add_user(&self, username: impl Into<String>, password: impl Into<String>) {
+        let username = username.into();
+        let verifier = DigestVerifierSet::from_password(&username, &self.realm, password.into());
         let mut users = self
             .users
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        users.insert(username.into(), password.into());
+        users.insert(username, verifier);
     }
 
     /// Generate a fresh digest challenge.
     pub fn challenge(&self) -> DigestChallenge {
         let challenge = self.authenticator.generate_challenge();
-        let expires_at = Instant::now() + self.nonce_ttl;
+        let expires_at = Instant::now()
+            .checked_add(self.nonce_ttl)
+            .unwrap_or_else(Instant::now);
         let mut nonces = self
             .nonces
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let evicted = if nonces.len() >= MAX_LOCAL_DIGEST_NONCES {
+            nonces
+                .iter()
+                .min_by_key(|(_, expires_at)| **expires_at)
+                .map(|(nonce, _)| nonce.clone())
+        } else {
+            None
+        };
+        if let Some(evicted) = &evicted {
+            nonces.remove(evicted);
+        }
         nonces.insert(challenge.nonce.clone(), expires_at);
+        drop(nonces);
+        if let Some(evicted) = evicted {
+            self.nonce_counts
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .retain(|(_, nonce), _| nonce != &evicted);
+        }
         challenge
     }
 
@@ -3673,32 +3731,11 @@ impl SipDigestAuthService {
             Err(_) => return Ok(self.rejected()),
         };
 
-        if response.uri != request_uri {
-            return Ok(self.rejected());
-        }
-        if response.realm != self.realm {
-            return Ok(self.rejected());
-        }
-
-        let password = {
-            let users = self
-                .users
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            match users.get(&response.username) {
-                Some(password) => password.clone(),
-                None => return Ok(self.rejected()),
-            }
-        };
-
-        let valid = match self
-            .authenticator
-            .validate_response_with_body(&response, method, &password, body)
+        if response.uri != request_uri
+            || response.realm != self.realm
+            || response.algorithm != self.algorithm
+            || digest_nonce_count(&response).is_none()
         {
-            Ok(valid) => valid,
-            Err(_) => return Ok(self.rejected()),
-        };
-        if !valid {
             return Ok(self.rejected());
         }
 
@@ -3706,6 +3743,28 @@ impl SipDigestAuthService {
             NonceStatus::Active => {}
             NonceStatus::Expired => return Ok(self.rejected_stale()),
             NonceStatus::Unknown => return Ok(self.rejected()),
+        }
+
+        let secret = {
+            let users = self
+                .users
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match users.get(&response.username) {
+                Some(verifiers) => verifiers.secret(response.algorithm),
+                None => return Ok(self.rejected()),
+            }
+        };
+
+        let valid = match self
+            .authenticator
+            .validate_response_with_secret_and_body(&response, method, &secret, body)
+        {
+            Ok(valid) => valid,
+            Err(_) => return Ok(self.rejected()),
+        };
+        if !valid {
+            return Ok(self.rejected());
         }
 
         if !self.accept_nonce_count(&response) {
@@ -3733,29 +3792,11 @@ impl SipDigestAuthService {
             Err(_) => return self.rejected_with_replay_store(replay_store).await,
         };
 
-        if response.uri != request_uri || response.realm != self.realm {
-            return self.rejected_with_replay_store(replay_store).await;
-        }
-
-        let password = {
-            let users = self
-                .users
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            users.get(&response.username).cloned()
-        };
-        let Some(password) = password else {
-            return self.rejected_with_replay_store(replay_store).await;
-        };
-
-        let valid = match self
-            .authenticator
-            .validate_response_with_body(&response, method, &password, body)
+        if response.uri != request_uri
+            || response.realm != self.realm
+            || response.algorithm != self.algorithm
+            || digest_nonce_count(&response).is_none()
         {
-            Ok(valid) => valid,
-            Err(_) => return self.rejected_with_replay_store(replay_store).await,
-        };
-        if !valid {
             return self.rejected_with_replay_store(replay_store).await;
         }
 
@@ -3771,6 +3812,30 @@ impl SipDigestAuthService {
             DigestNonceStatus::Unknown => {
                 return self.rejected_with_replay_store(replay_store).await
             }
+        }
+
+        let secret = {
+            let users = self
+                .users
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            users
+                .get(&response.username)
+                .map(|verifiers| verifiers.secret(response.algorithm))
+        };
+        let Some(secret) = secret else {
+            return self.rejected_with_replay_store(replay_store).await;
+        };
+
+        let valid = match self
+            .authenticator
+            .validate_response_with_secret_and_body(&response, method, &secret, body)
+        {
+            Ok(valid) => valid,
+            Err(_) => return self.rejected_with_replay_store(replay_store).await,
+        };
+        if !valid {
+            return self.rejected_with_replay_store(replay_store).await;
         }
 
         if !accept_nonce_count_with_replay_store(&response, replay_store.as_ref()).await? {
@@ -3793,6 +3858,11 @@ impl SipDigestAuthService {
             Some(expires_at) if expires_at > now => NonceStatus::Active,
             Some(_) => {
                 nonces.remove(nonce);
+                drop(nonces);
+                self.nonce_counts
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .retain(|(_, recorded_nonce), _| recorded_nonce != nonce);
                 NonceStatus::Expired
             }
             None => NonceStatus::Unknown,
@@ -3800,31 +3870,18 @@ impl SipDigestAuthService {
     }
 
     fn accept_nonce_count(&self, response: &DigestResponse) -> bool {
-        let Some(qop) = response.qop.as_deref() else {
-            return true;
-        };
-        if qop != "auth" && qop != "auth-int" {
-            return false;
-        }
-        let Some(nc) = response
-            .nc
-            .as_deref()
-            .and_then(|value| u32::from_str_radix(value, 16).ok())
-        else {
+        let Some(nc) = digest_nonce_count(response) else {
             return false;
         };
-        let Some(cnonce) = response.cnonce.clone() else {
-            return false;
-        };
-        if cnonce.is_empty() {
-            return false;
-        }
         let key = (response.username.clone(), response.nonce.clone());
         let mut nonce_counts = self
             .nonce_counts
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if nonce_counts.get(&key).is_some_and(|last| nc <= *last) {
+            return false;
+        }
+        if !nonce_counts.contains_key(&key) && nonce_counts.len() >= MAX_LOCAL_DIGEST_NONCE_COUNTS {
             return false;
         }
         nonce_counts.insert(key, nc);
@@ -4454,6 +4511,64 @@ mod tests {
                 .expect("realm mismatch decision"),
             AuthDecision::Rejected { .. }
         ));
+    }
+
+    #[test]
+    fn sip_digest_auth_service_rejects_qop_omission_and_algorithm_downgrade() {
+        let service =
+            SipDigestAuthService::new("example.test").with_algorithm(DigestAlgorithm::SHA256);
+        service.add_user("alice", "secret");
+        let challenge = service.challenge();
+
+        let mut no_qop = challenge.clone();
+        no_qop.qop = None;
+        let authorization = authorization_for(
+            "alice",
+            "secret",
+            &no_qop,
+            "OPTIONS",
+            "sip:bob@example.test",
+            None,
+        );
+        assert!(matches!(
+            service
+                .validate_authorization(&authorization, "OPTIONS", "sip:bob@example.test", None)
+                .expect("qop omission decision"),
+            AuthDecision::Rejected { .. }
+        ));
+
+        let mut downgraded = challenge;
+        downgraded.algorithm = DigestAlgorithm::MD5;
+        let authorization = authorization_for(
+            "alice",
+            "secret",
+            &downgraded,
+            "OPTIONS",
+            "sip:bob@example.test",
+            None,
+        );
+        assert!(matches!(
+            service
+                .validate_authorization(&authorization, "OPTIONS", "sip:bob@example.test", None)
+                .expect("algorithm downgrade decision"),
+            AuthDecision::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn sip_digest_auth_service_bounds_local_nonce_state() {
+        let service = SipDigestAuthService::new("example.test");
+        for _ in 0..=MAX_LOCAL_DIGEST_NONCES {
+            service.challenge();
+        }
+        assert!(
+            service
+                .nonces
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len()
+                <= MAX_LOCAL_DIGEST_NONCES
+        );
     }
 
     #[test]

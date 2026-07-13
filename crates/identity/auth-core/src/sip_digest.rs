@@ -19,6 +19,7 @@ use rand::Rng;
 use sha2::{Digest as Sha2Digest, Sha256, Sha512_256};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
+use subtle::ConstantTimeEq;
 
 /// Digest authentication algorithm.
 ///
@@ -61,6 +62,15 @@ impl DigestAlgorithm {
             Self::SHA256 | Self::SHA256Sess => hex::encode(Sha256::digest(input)),
             Self::SHA512256 | Self::SHA512256Sess => hex::encode(Sha512_256::digest(input)),
         }
+    }
+
+    /// Compute the base RFC 7616 HA1 value for durable credential storage.
+    ///
+    /// Servers can retain this verifier instead of a recoverable plaintext
+    /// password. Session algorithms use the same base HA1 and fold nonce and
+    /// cnonce into it during response validation.
+    pub fn compute_ha1(&self, username: &str, realm: &str, password: &str) -> String {
+        self.hash(format!("{username}:{realm}:{password}").as_bytes())
     }
 }
 
@@ -456,7 +466,11 @@ impl DigestAuthenticator {
             algorithm.hash(format!("{}:{}:{}", ha1, response.nonce, ha2).as_bytes())
         };
 
-        Ok(expected == response.response)
+        // Digest values are credential proofs. Avoid the ordinary String
+        // comparison's early exit on the first mismatching byte.
+        Ok(bool::from(
+            expected.as_bytes().ct_eq(response.response.as_bytes()),
+        ))
     }
 
     /// Parse WWW-Authenticate header to extract challenge.
@@ -793,6 +807,13 @@ impl DigestClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn digest_proof_comparison_stays_constant_time() {
+        let source = include_str!("sip_digest.rs");
+        assert!(source.contains(".ct_eq(response.response.as_bytes())"));
+        assert!(!source.contains("expected == response.response"));
+    }
 
     #[test]
     fn algorithm_parser_recognises_known_tokens() {

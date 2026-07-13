@@ -5,13 +5,19 @@
 
 use crate::error::{RegistrarError, Result};
 use dashmap::DashMap;
+use rvoip_auth_core::{DigestAlgorithm, DigestSecret};
+use std::fmt;
+use zeroize::Zeroize;
 
 /// User credentials for authentication
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct UserCredentials {
     /// Username (typically SIP user part)
     pub username: String,
-    /// Password (stored in plaintext for simplicity - hash in production!)
+    /// Password accepted when provisioning or rotating a user.
+    ///
+    /// [`UserStore`] immediately converts this value into algorithm-specific
+    /// HA1 verifiers and wipes the supplied allocation; it is never retained.
     pub password: String,
     /// Authentication realm
     pub realm: String,
@@ -19,10 +25,95 @@ pub struct UserCredentials {
     pub display_name: Option<String>,
 }
 
+impl fmt::Debug for UserCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UserCredentials")
+            .field("username_present", &!self.username.is_empty())
+            .field("username_bytes", &self.username.len())
+            .field("password_present", &!self.password.is_empty())
+            .field("password_bytes", &self.password.len())
+            .field("realm_present", &!self.realm.is_empty())
+            .field("realm_bytes", &self.realm.len())
+            .field("display_name_present", &self.display_name.is_some())
+            .field(
+                "display_name_bytes",
+                &self.display_name.as_ref().map_or(0, String::len),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+struct StoredUserCredentials {
+    username: String,
+    realm: String,
+    display_name: Option<String>,
+    md5_ha1: String,
+    sha256_ha1: String,
+    sha512256_ha1: String,
+}
+
+impl StoredUserCredentials {
+    fn from_credentials(credentials: UserCredentials) -> Self {
+        let UserCredentials {
+            username,
+            mut password,
+            realm,
+            display_name,
+        } = credentials;
+        let stored = Self::from_password(username, realm, display_name, &password);
+        password.zeroize();
+        stored
+    }
+
+    fn from_password(
+        username: String,
+        realm: String,
+        display_name: Option<String>,
+        password: &str,
+    ) -> Self {
+        Self {
+            md5_ha1: DigestAlgorithm::MD5.compute_ha1(&username, &realm, password),
+            sha256_ha1: DigestAlgorithm::SHA256.compute_ha1(&username, &realm, password),
+            sha512256_ha1: DigestAlgorithm::SHA512256.compute_ha1(&username, &realm, password),
+            username,
+            realm,
+            display_name,
+        }
+    }
+
+    fn digest_secret(&self, realm: &str, algorithm: DigestAlgorithm) -> Option<DigestSecret> {
+        if self.realm != realm {
+            return None;
+        }
+        let ha1 = match algorithm {
+            DigestAlgorithm::MD5 | DigestAlgorithm::MD5Sess => &self.md5_ha1,
+            DigestAlgorithm::SHA256 | DigestAlgorithm::SHA256Sess => &self.sha256_ha1,
+            DigestAlgorithm::SHA512256 | DigestAlgorithm::SHA512256Sess => &self.sha512256_ha1,
+        };
+        Some(DigestSecret::Ha1(ha1.clone()))
+    }
+}
+
+impl fmt::Debug for StoredUserCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StoredUserCredentials")
+            .field("username_present", &!self.username.is_empty())
+            .field("username_bytes", &self.username.len())
+            .field("realm_present", &!self.realm.is_empty())
+            .field("realm_bytes", &self.realm.len())
+            .field("display_name_present", &self.display_name.is_some())
+            .field("digest_verifier_count", &3usize)
+            .finish()
+    }
+}
+
 /// In-memory user credential store
 pub struct UserStore {
     /// Username -> Credentials mapping
-    users: DashMap<String, UserCredentials>,
+    users: DashMap<String, StoredUserCredentials>,
     /// Default realm for all users
     default_realm: String,
 }
@@ -39,14 +130,15 @@ impl UserStore {
     /// Add a user with username and password
     pub fn add_user(&self, username: impl Into<String>, password: impl Into<String>) -> Result<()> {
         let username = username.into();
-        let password = password.into();
+        let mut password = password.into();
 
-        let credentials = UserCredentials {
-            username: username.clone(),
-            password,
-            realm: self.default_realm.clone(),
-            display_name: None,
-        };
+        let credentials = StoredUserCredentials::from_password(
+            username.clone(),
+            self.default_realm.clone(),
+            None,
+            &password,
+        );
+        password.zeroize();
 
         self.users.insert(username, credentials);
         Ok(())
@@ -54,18 +146,44 @@ impl UserStore {
 
     /// Add a user with full credentials
     pub fn add_user_with_credentials(&self, credentials: UserCredentials) -> Result<()> {
-        self.users.insert(credentials.username.clone(), credentials);
+        let username = credentials.username.clone();
+        self.users.insert(
+            username,
+            StoredUserCredentials::from_credentials(credentials),
+        );
         Ok(())
     }
 
-    /// Get user's password
+    /// Plaintext passwords are deliberately not recoverable from this store.
+    #[deprecated(note = "UserStore retains HA1 verifiers; use get_digest_secret")]
     pub fn get_password(&self, username: &str) -> Option<String> {
-        self.users.get(username).map(|entry| entry.password.clone())
+        let _ = username;
+        None
     }
 
-    /// Get user's full credentials
+    /// Return non-secret credential metadata.
+    ///
+    /// The compatibility `password` field is always empty because plaintext
+    /// password recovery would defeat the store's security boundary.
     pub fn get_credentials(&self, username: &str) -> Option<UserCredentials> {
-        self.users.get(username).map(|entry| entry.clone())
+        self.users.get(username).map(|entry| UserCredentials {
+            username: entry.username.clone(),
+            password: String::new(),
+            realm: entry.realm.clone(),
+            display_name: entry.display_name.clone(),
+        })
+    }
+
+    /// Return the algorithm-appropriate HA1 verifier for Digest validation.
+    pub fn get_digest_secret(
+        &self,
+        username: &str,
+        realm: &str,
+        algorithm: DigestAlgorithm,
+    ) -> Option<DigestSecret> {
+        self.users
+            .get(username)
+            .and_then(|entry| entry.digest_secret(realm, algorithm))
     }
 
     /// Check if user exists
@@ -82,7 +200,17 @@ impl UserStore {
     /// Update user's password
     pub fn update_password(&self, username: &str, new_password: impl Into<String>) -> Result<()> {
         if let Some(mut entry) = self.users.get_mut(username) {
-            entry.password = new_password.into();
+            let mut new_password = new_password.into();
+            entry.md5_ha1 =
+                DigestAlgorithm::MD5.compute_ha1(&entry.username, &entry.realm, &new_password);
+            entry.sha256_ha1 =
+                DigestAlgorithm::SHA256.compute_ha1(&entry.username, &entry.realm, &new_password);
+            entry.sha512256_ha1 = DigestAlgorithm::SHA512256.compute_ha1(
+                &entry.username,
+                &entry.realm,
+                &new_password,
+            );
+            new_password.zeroize();
             Ok(())
         } else {
             Err(RegistrarError::UserNotFound(username.to_string()))
@@ -126,7 +254,12 @@ mod tests {
         store.add_user("alice", "password123").unwrap();
 
         assert!(store.user_exists("alice"));
-        assert_eq!(store.get_password("alice"), Some("password123".to_string()));
+        assert!(matches!(
+            store.get_digest_secret("alice", "test.realm", DigestAlgorithm::MD5),
+            Some(DigestSecret::Ha1(_))
+        ));
+        let metadata = store.get_credentials("alice").unwrap();
+        assert!(metadata.password.is_empty());
     }
 
     #[test]
@@ -145,7 +278,11 @@ mod tests {
         store.add_user("charlie", "old_pass").unwrap();
 
         store.update_password("charlie", "new_pass").unwrap();
-        assert_eq!(store.get_password("charlie"), Some("new_pass".to_string()));
+        let expected = DigestAlgorithm::MD5.compute_ha1("charlie", "test.realm", "new_pass");
+        assert_eq!(
+            store.get_digest_secret("charlie", "test.realm", DigestAlgorithm::MD5),
+            Some(DigestSecret::Ha1(expected))
+        );
     }
 
     #[test]
@@ -156,5 +293,30 @@ mod tests {
         store.add_user("user1", "pass1").unwrap();
         store.add_user("user2", "pass2").unwrap();
         assert_eq!(store.user_count(), 2);
+    }
+
+    #[test]
+    fn credential_debug_never_contains_plaintext_or_verifiers() {
+        let credentials = UserCredentials {
+            username: "alice".to_string(),
+            password: "debug-password-canary".to_string(),
+            realm: "debug-realm-canary".to_string(),
+            display_name: Some("debug-name-canary".to_string()),
+        };
+        let debug = format!("{credentials:?}");
+        for canary in [
+            "alice",
+            "debug-password-canary",
+            "debug-realm-canary",
+            "debug-name-canary",
+        ] {
+            assert!(!debug.contains(canary));
+        }
+
+        let stored = StoredUserCredentials::from_credentials(credentials);
+        let debug = format!("{stored:?}");
+        assert!(!debug.contains(&stored.md5_ha1));
+        assert!(!debug.contains(&stored.sha256_ha1));
+        assert!(!debug.contains(&stored.sha512256_ha1));
     }
 }

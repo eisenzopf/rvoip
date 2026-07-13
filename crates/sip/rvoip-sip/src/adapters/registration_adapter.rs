@@ -44,6 +44,7 @@ impl RegistrationAdapter {
         &self,
         transaction_id: String,
         from_uri: String,
+        request_uri: String,
         contact_uri: String,
         expires: u32,
         authorization: Option<String>,
@@ -66,7 +67,13 @@ impl RegistrationAdapter {
         // Call registrar-core to authenticate
         let (should_register, www_auth_challenge) = self
             .registrar
-            .authenticate_register(&username, authorization.as_deref(), "REGISTER", &from_uri)
+            .authenticate_register_request(
+                &username,
+                authorization.as_deref(),
+                "REGISTER",
+                &request_uri,
+                aor.as_str(),
+            )
             .await
             .map_err(Self::registrar_authentication_failure)?;
 
@@ -186,6 +193,7 @@ impl RegistrationAdapter {
                                     contact_uri,
                                     expires,
                                     authorization,
+                                    raw_request,
                                     ..
                                 },
                             ) = concrete
@@ -197,10 +205,28 @@ impl RegistrationAdapter {
                                     "Received IncomingRegister"
                                 );
 
+                                let request_uri = raw_request
+                                    .as_ref()
+                                    .and_then(|bytes| {
+                                        rvoip_sip_core::parse_message_with_mode(
+                                            bytes,
+                                            rvoip_sip_core::ParseMode::Strict,
+                                        )
+                                        .ok()
+                                    })
+                                    .and_then(|message| match message {
+                                        rvoip_sip_core::Message::Request(request) => {
+                                            Some(request.uri().to_string())
+                                        }
+                                        rvoip_sip_core::Message::Response(_) => None,
+                                    })
+                                    .unwrap_or_else(|| from_uri.clone());
+
                                 if let Err(e) = handler
                                     .handle_incoming_register(
                                         transaction_id.clone(),
                                         from_uri.clone(),
+                                        request_uri,
                                         contact_uri.clone(),
                                         *expires,
                                         authorization.clone(),

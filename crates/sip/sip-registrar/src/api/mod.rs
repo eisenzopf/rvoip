@@ -2,8 +2,12 @@
 
 #[allow(unused_imports)] // EventPublisher trait is needed for .publish() method
 use rvoip_infra_common::events::api::{EventPublisher as _, EventSystem as EventSystemTrait};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
+use zeroize::Zeroize;
 
 use crate::error::Result;
 use crate::events::{PresenceEvent, RegistrarEvent};
@@ -14,6 +18,50 @@ use crate::types::{
     AddressOfRecord, BuddyInfo, ContactInfo, ContactReachability, PresenceState, PresenceStatus,
     RegistrarConfig,
 };
+
+const REGISTER_DIGEST_NONCE_TTL: Duration = Duration::from_secs(5 * 60);
+const REGISTER_DIGEST_NONCE_RETENTION: Duration = Duration::from_secs(10 * 60);
+const MAX_REGISTER_DIGEST_NONCES: usize = 4_096;
+const MAX_REGISTER_DIGEST_NONCE_COUNTS: usize = 16_384;
+const MAX_REGISTER_AUTHORIZATION_BYTES: usize = 8 * 1024;
+
+#[derive(Clone)]
+struct IssuedDigestNonce {
+    realm: String,
+    algorithm: rvoip_auth_core::DigestAlgorithm,
+    opaque: Option<String>,
+    expires_at: Instant,
+    retain_until: Instant,
+}
+
+#[derive(Default)]
+struct RegisterDigestReplayState {
+    nonces: HashMap<String, IssuedDigestNonce>,
+    nonce_counts: HashMap<(String, String), u32>,
+}
+
+enum IssuedNonceStatus {
+    Current(IssuedDigestNonce),
+    Expired,
+    Unknown,
+}
+
+impl RegisterDigestReplayState {
+    fn sweep(&mut self, now: Instant) {
+        self.nonces.retain(|_, issued| issued.retain_until > now);
+        let retained_nonces: HashSet<&str> = self.nonces.keys().map(String::as_str).collect();
+        self.nonce_counts
+            .retain(|(_, nonce), _| retained_nonces.contains(nonce.as_str()));
+    }
+}
+
+fn parse_nonce_count(value: &str) -> Option<u32> {
+    if value.len() != 8 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let count = u32::from_str_radix(value, 16).ok()?;
+    (count != 0).then_some(count)
+}
 
 /// High-level registrar service for session-core integration
 pub struct RegistrarService {
@@ -37,6 +85,11 @@ pub struct RegistrarService {
 
     /// Digest authenticator
     auth: Option<Arc<rvoip_auth_core::DigestAuthenticator>>,
+
+    /// Bounded, server-issued nonce and nonce-count state for the legacy
+    /// registrar API. Clustered listeners should use the provider-backed
+    /// replay store exposed by `rvoip-sip`.
+    digest_replay: Option<Mutex<RegisterDigestReplayState>>,
 
     /// Optional external identity source.
     identity_provider: Option<Arc<dyn IdentityProvider>>,
@@ -92,6 +145,7 @@ impl RegistrarService {
             mode,
             user_store: None,
             auth: None,
+            digest_replay: None,
             identity_provider: None,
             credential_provider: None,
         })
@@ -111,6 +165,7 @@ impl RegistrarService {
 
         service.auth = Some(auth);
         service.user_store = Some(user_store);
+        service.digest_replay = Some(Mutex::new(RegisterDigestReplayState::default()));
 
         Ok(service)
     }
@@ -164,20 +219,93 @@ impl RegistrarService {
         method: &str,
         uri: &str,
     ) -> Result<(bool, Option<String>)> {
+        self.authenticate_register_request(username, authorization, method, uri, uri)
+            .await
+    }
+
+    /// Authenticate a REGISTER while binding the Digest proof to the actual
+    /// Request-URI and looking credentials up by the registration AOR.
+    ///
+    /// The older [`Self::authenticate_register`] API uses one URI for both
+    /// values and remains available for source compatibility.
+    pub async fn authenticate_register_request(
+        &self,
+        username: &str,
+        authorization: Option<&str>,
+        method: &str,
+        request_uri: &str,
+        credential_aor_uri: &str,
+    ) -> Result<(bool, Option<String>)> {
         // If no auth configured, allow all
         if self.auth.is_none() {
             return Ok((true, None));
         }
 
         let auth = self.auth.as_ref().unwrap();
-        let external_password = if let Some(provider) = &self.credential_provider {
-            match AddressOfRecord::parse(uri) {
-                Ok(aor) => provider.sip_digest_secret(&aor).await?,
+        let Some(auth_header) = authorization else {
+            return Ok((false, Some(self.issue_register_digest_challenge(false))));
+        };
+        if auth_header.len() > MAX_REGISTER_AUTHORIZATION_BYTES {
+            return Ok((false, Some(self.issue_register_digest_challenge(false))));
+        }
+
+        let digest_response =
+            match rvoip_auth_core::DigestAuthenticator::parse_authorization(auth_header) {
+                Ok(response) => response,
+                Err(_) => {
+                    return Ok((false, Some(self.issue_register_digest_challenge(false))));
+                }
+            };
+
+        let issued = match self.issued_register_nonce_status(&digest_response.nonce) {
+            IssuedNonceStatus::Current(issued) => issued,
+            IssuedNonceStatus::Expired => {
+                return Ok((false, Some(self.issue_register_digest_challenge(true))));
+            }
+            IssuedNonceStatus::Unknown => {
+                return Ok((false, Some(self.issue_register_digest_challenge(false))));
+            }
+        };
+
+        // Bind every client-controlled Digest field back to the challenge and
+        // request. In particular, accepting a valid hash for a different URI
+        // turns Digest into a reusable bearer credential.
+        let cnonce_is_valid = digest_response
+            .cnonce
+            .as_deref()
+            .is_some_and(|value| !value.is_empty() && value.len() <= 256);
+        let nonce_count = digest_response.nc.as_deref().and_then(parse_nonce_count);
+        if digest_response.username != username
+            || digest_response.realm != issued.realm
+            || digest_response.uri != request_uri
+            || digest_response.algorithm != issued.algorithm
+            || digest_response.opaque != issued.opaque
+            || digest_response.qop.as_deref() != Some("auth")
+            || !cnonce_is_valid
+            || nonce_count.is_none()
+        {
+            return Ok((false, Some(self.issue_register_digest_challenge(false))));
+        }
+
+        let external_secret = if let Some(provider) = &self.credential_provider {
+            match AddressOfRecord::parse(credential_aor_uri) {
+                Ok(aor) => {
+                    let password = provider.sip_digest_secret(&aor).await?;
+                    password.map(|mut password| {
+                        let ha1 = digest_response.algorithm.compute_ha1(
+                            &digest_response.username,
+                            &digest_response.realm,
+                            &password,
+                        );
+                        password.zeroize();
+                        rvoip_auth_core::DigestSecret::Ha1(ha1)
+                    })
+                }
                 Err(_) => {
                     warn!(
                         stage = "credential-lookup",
-                        uri_present = !uri.is_empty(),
-                        uri_bytes = uri.len(),
+                        uri_present = !credential_aor_uri.is_empty(),
+                        uri_bytes = credential_aor_uri.len(),
                         "Unable to parse AOR for credential lookup"
                     );
                     None
@@ -186,11 +314,14 @@ impl RegistrarService {
         } else {
             None
         };
-        let local_password = self
-            .user_store
-            .as_ref()
-            .and_then(|user_store| user_store.get_password(username));
-        let Some(password) = external_password.or(local_password) else {
+        let local_secret = self.user_store.as_ref().and_then(|user_store| {
+            user_store.get_digest_secret(
+                username,
+                &digest_response.realm,
+                digest_response.algorithm,
+            )
+        });
+        let Some(secret) = external_secret.or(local_secret) else {
             warn!(
                 stage = "credential-lookup",
                 username_present = !username.is_empty(),
@@ -198,77 +329,141 @@ impl RegistrarService {
                 "Registration credential was not found"
             );
             // Still send challenge (don't reveal user doesn't exist)
-            let challenge = auth.generate_challenge();
-            let www_auth = auth.format_www_authenticate(&challenge);
-            return Ok((false, Some(www_auth)));
+            return Ok((false, Some(self.issue_register_digest_challenge(false))));
         };
 
-        // Check for Authorization header
-        if let Some(auth_header) = authorization {
-            // Parse authorization header
-            let digest_response = rvoip_auth_core::DigestAuthenticator::parse_authorization(
-                auth_header,
-            )
-            .map_err(|e| {
-                crate::error::RegistrarError::Internal(format!("Failed to parse auth: {}", e))
-            })?;
+        info!(
+            stage = "digest-validation",
+            username_present = !digest_response.username.is_empty(),
+            username_bytes = digest_response.username.len(),
+            realm_present = !digest_response.realm.is_empty(),
+            realm_bytes = digest_response.realm.len(),
+            nonce_present = !digest_response.nonce.is_empty(),
+            nonce_bytes = digest_response.nonce.len(),
+            uri_present = !digest_response.uri.is_empty(),
+            uri_bytes = digest_response.uri.len(),
+            response_present = !digest_response.response.is_empty(),
+            response_bytes = digest_response.response.len(),
+            "Validating SIP digest response"
+        );
 
-            // Validate digest response
-            info!(
-                stage = "digest-validation",
-                username_present = !digest_response.username.is_empty(),
-                username_bytes = digest_response.username.len(),
-                realm_present = !digest_response.realm.is_empty(),
-                realm_bytes = digest_response.realm.len(),
-                nonce_present = !digest_response.nonce.is_empty(),
-                nonce_bytes = digest_response.nonce.len(),
-                uri_present = !digest_response.uri.is_empty(),
-                uri_bytes = digest_response.uri.len(),
-                response_present = !digest_response.response.is_empty(),
-                response_bytes = digest_response.response.len(),
-                "Validating SIP digest response"
+        let is_valid = auth
+            .validate_response_with_secret(&digest_response, method, &secret)
+            .unwrap_or(false);
+        let accepted = is_valid
+            && self.accept_register_nonce_count(
+                &digest_response.username,
+                &digest_response.nonce,
+                nonce_count.expect("validated above"),
             );
 
-            let is_valid = auth
-                .validate_response(&digest_response, method, &password)
-                .map_err(|e| {
-                    crate::error::RegistrarError::Internal(format!(
-                        "Failed to validate digest: {}",
-                        e
-                    ))
-                })?;
+        info!(
+            stage = "digest-validation",
+            accepted, "SIP digest validation completed"
+        );
 
+        if accepted {
             info!(
                 stage = "digest-validation",
-                accepted = is_valid,
-                "SIP digest validation completed"
+                username_present = !username.is_empty(),
+                username_bytes = username.len(),
+                "SIP registration authenticated"
             );
-
-            if is_valid {
-                info!(
-                    stage = "digest-validation",
-                    username_present = !username.is_empty(),
-                    username_bytes = username.len(),
-                    "SIP registration authenticated"
-                );
-                Ok((true, None))
-            } else {
-                warn!(
-                    stage = "digest-validation",
-                    username_present = !username.is_empty(),
-                    username_bytes = username.len(),
-                    "SIP registration authentication failed"
-                );
-                let challenge = auth.generate_challenge();
-                let www_auth = auth.format_www_authenticate(&challenge);
-                Ok((false, Some(www_auth)))
-            }
+            Ok((true, None))
         } else {
-            // No Authorization header - send challenge
-            let challenge = auth.generate_challenge();
-            let www_auth = auth.format_www_authenticate(&challenge);
-            Ok((false, Some(www_auth)))
+            warn!(
+                stage = "digest-validation",
+                username_present = !username.is_empty(),
+                username_bytes = username.len(),
+                "SIP registration authentication failed"
+            );
+            Ok((false, Some(self.issue_register_digest_challenge(false))))
         }
+    }
+
+    fn issue_register_digest_challenge(&self, stale: bool) -> String {
+        let auth = self
+            .auth
+            .as_ref()
+            .expect("digest challenges require configured authentication");
+        let challenge = auth.generate_challenge();
+        let now = Instant::now();
+        if let Some(replay) = &self.digest_replay {
+            let mut replay = replay
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            replay.sweep(now);
+            if replay.nonces.len() >= MAX_REGISTER_DIGEST_NONCES {
+                if let Some(oldest) = replay
+                    .nonces
+                    .iter()
+                    .min_by_key(|(_, nonce)| nonce.expires_at)
+                    .map(|(nonce, _)| nonce.clone())
+                {
+                    replay.nonces.remove(&oldest);
+                    replay.nonce_counts.retain(|(_, nonce), _| nonce != &oldest);
+                }
+            }
+            replay.nonces.insert(
+                challenge.nonce.clone(),
+                IssuedDigestNonce {
+                    realm: challenge.realm.clone(),
+                    algorithm: challenge.algorithm,
+                    opaque: challenge.opaque.clone(),
+                    expires_at: now + REGISTER_DIGEST_NONCE_TTL,
+                    retain_until: now + REGISTER_DIGEST_NONCE_RETENTION,
+                },
+            );
+        }
+        auth.format_www_authenticate_with_stale(&challenge, stale)
+    }
+
+    fn issued_register_nonce_status(&self, nonce: &str) -> IssuedNonceStatus {
+        let Some(replay) = &self.digest_replay else {
+            return IssuedNonceStatus::Unknown;
+        };
+        let now = Instant::now();
+        let mut replay = replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        replay.sweep(now);
+        match replay.nonces.get(nonce) {
+            Some(issued) if issued.expires_at > now => IssuedNonceStatus::Current(issued.clone()),
+            Some(_) => IssuedNonceStatus::Expired,
+            None => IssuedNonceStatus::Unknown,
+        }
+    }
+
+    fn accept_register_nonce_count(&self, username: &str, nonce: &str, count: u32) -> bool {
+        let Some(replay) = &self.digest_replay else {
+            return false;
+        };
+        let now = Instant::now();
+        let mut replay = replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        replay.sweep(now);
+        if !replay
+            .nonces
+            .get(nonce)
+            .is_some_and(|issued| issued.expires_at > now)
+        {
+            return false;
+        }
+
+        let key = (username.to_string(), nonce.to_string());
+        if let Some(previous) = replay.nonce_counts.get_mut(&key) {
+            if count <= *previous {
+                return false;
+            }
+            *previous = count;
+            return true;
+        }
+        if replay.nonce_counts.len() >= MAX_REGISTER_DIGEST_NONCE_COUNTS {
+            return false;
+        }
+        replay.nonce_counts.insert(key, count);
+        true
     }
 
     /// Register a user with contact information
@@ -684,6 +879,140 @@ impl From<ExtendedStatus> for PresenceStatus {
 }
 
 use crate::types::ExtendedStatus;
+
+#[cfg(test)]
+mod digest_replay_tests {
+    use super::*;
+    use rvoip_auth_core::{DigestAuthenticator, DigestClient};
+
+    async fn service_and_challenge() -> (RegistrarService, rvoip_auth_core::DigestChallenge) {
+        let service = RegistrarService::with_auth(
+            ServiceMode::P2P,
+            RegistrarConfig::default(),
+            "registrar.test",
+        )
+        .await
+        .unwrap();
+        service
+            .user_store()
+            .unwrap()
+            .add_user("alice", "correct horse")
+            .unwrap();
+        let (accepted, challenge) = service
+            .authenticate_register("alice", None, "REGISTER", "sip:registrar.test")
+            .await
+            .unwrap();
+        assert!(!accepted);
+        let challenge = DigestAuthenticator::parse_challenge(&challenge.unwrap()).unwrap();
+        (service, challenge)
+    }
+
+    fn authorization(challenge: &rvoip_auth_core::DigestChallenge, uri: &str, nc: u32) -> String {
+        let computed = DigestClient::compute_response_with_state(
+            "alice",
+            "correct horse",
+            challenge,
+            "REGISTER",
+            uri,
+            nc,
+            None,
+        )
+        .unwrap();
+        DigestClient::format_authorization_with_state("alice", challenge, uri, &computed)
+    }
+
+    #[tokio::test]
+    async fn register_digest_accepts_increasing_nonce_counts_and_rejects_replay() {
+        let uri = "sip:registrar.test";
+        let (service, challenge) = service_and_challenge().await;
+        let first = authorization(&challenge, uri, 1);
+        assert_eq!(
+            service
+                .authenticate_register("alice", Some(&first), "REGISTER", uri)
+                .await
+                .unwrap(),
+            (true, None)
+        );
+
+        let replay = service
+            .authenticate_register("alice", Some(&first), "REGISTER", uri)
+            .await
+            .unwrap();
+        assert!(
+            !replay.0,
+            "the same nonce-count must not authenticate twice"
+        );
+
+        let second = authorization(&challenge, uri, 2);
+        assert!(
+            service
+                .authenticate_register("alice", Some(&second), "REGISTER", uri)
+                .await
+                .unwrap()
+                .0
+        );
+    }
+
+    #[tokio::test]
+    async fn register_digest_rejects_unissued_nonce_uri_swap_and_missing_qop() {
+        let uri = "sip:registrar.test";
+        let (service, challenge) = service_and_challenge().await;
+
+        let mut unissued = challenge.clone();
+        unissued.nonce = "not-issued-by-this-registrar".to_string();
+        let attempt = authorization(&unissued, uri, 1);
+        assert!(
+            !service
+                .authenticate_register("alice", Some(&attempt), "REGISTER", uri)
+                .await
+                .unwrap()
+                .0
+        );
+
+        let wrong_uri = authorization(&challenge, "sip:other.test", 1);
+        assert!(
+            !service
+                .authenticate_register("alice", Some(&wrong_uri), "REGISTER", uri)
+                .await
+                .unwrap()
+                .0
+        );
+
+        let mut legacy = challenge.clone();
+        legacy.qop = None;
+        let missing_qop = authorization(&legacy, uri, 1);
+        assert!(
+            !service
+                .authenticate_register("alice", Some(&missing_qop), "REGISTER", uri)
+                .await
+                .unwrap()
+                .0
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_register_digest_nonce_is_rechallenged_as_stale() {
+        let uri = "sip:registrar.test";
+        let (service, challenge) = service_and_challenge().await;
+        {
+            let mut replay = service
+                .digest_replay
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let nonce = replay.nonces.get_mut(&challenge.nonce).unwrap();
+            nonce.expires_at = Instant::now() - Duration::from_secs(1);
+        }
+        let attempt = authorization(&challenge, uri, 1);
+        let result = service
+            .authenticate_register("alice", Some(&attempt), "REGISTER", uri)
+            .await
+            .unwrap();
+        assert!(!result.0);
+        assert!(result.1.unwrap().contains("stale=true"));
+    }
+}
 
 #[cfg(test)]
 mod diagnostic_source_tests {
