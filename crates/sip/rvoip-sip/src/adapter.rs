@@ -35,17 +35,19 @@ use rvoip_sip_core::types::uri::Scheme;
 use rvoip_sip_core::Uri;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::future::Future;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Mutex as AsyncMutex, Notify};
 use tracing::{debug, warn};
 
 const MAX_SIP_INBOUND_ALLOWLIST_HEADERS: usize = 32;
 const MAX_PENDING_SIP_INBOUND_CONTEXTS: usize = 4_096;
 const PENDING_SIP_INBOUND_CONTEXT_TTL: Duration = Duration::from_secs(120);
 const PENDING_SIP_INBOUND_CONTEXT_REAPER_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(test)]
 const SIP_INBOUND_EVENT_DELIVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const SIP_ADAPTER_EVENT_CAPACITY: usize = 256;
 const DEFAULT_SIP_ACTIVE_CONNECTION_BUDGET: usize = 262_144;
@@ -53,6 +55,132 @@ const DEFAULT_SIP_RETIRED_SESSION_BUDGET: usize = 262_144;
 const SIP_OUTBOUND_EVENT_STAGE_CAPACITY: usize = 32;
 const MAX_SIP_OUTBOUND_TARGET_BYTES: usize = 4_096;
 const SIP_RETAINED_TASK_TIMEOUT: Duration = Duration::from_secs(2);
+const SIP_RETIRED_SESSION_TTL: Duration = Duration::from_secs(300);
+const SIP_ADAPTER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SipRouteEpoch {
+    session_id: SessionId,
+    connection_id: ConnectionId,
+    generation: u64,
+}
+
+#[derive(Clone)]
+struct SipSessionBinding {
+    connection_id: ConnectionId,
+    generation: u64,
+}
+
+#[derive(Clone)]
+struct SipConnectionBinding {
+    session_id: SessionId,
+    generation: u64,
+}
+
+struct SipRemovedEpoch {
+    stream: Option<Arc<crate::media_stream::SipMediaStream>>,
+}
+
+#[derive(Clone, Copy)]
+struct SipRetiredSession {
+    generation: u64,
+    expires_at: Instant,
+}
+
+struct SipRetiredSessionOrder {
+    session_id: SessionId,
+    generation: u64,
+    expires_at: Instant,
+}
+
+/// Counts every adapter-owned task through completion, including unwind.
+///
+/// A counter is used instead of detached `JoinHandle`s so nested cleanup tasks
+/// can register without retaining the adapter. `close` creates a strict spawn
+/// boundary and `wait_idle` is the async join point used by adapter drain.
+struct SipRetainedTasks {
+    accepting: AtomicBool,
+    active: AtomicUsize,
+    panicked: AtomicBool,
+    idle: Notify,
+}
+
+impl SipRetainedTasks {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            accepting: AtomicBool::new(true),
+            active: AtomicUsize::new(0),
+            panicked: AtomicBool::new(false),
+            idle: Notify::new(),
+        })
+    }
+
+    fn spawn(self: &Arc<Self>, future: impl Future<Output = ()> + Send + 'static) -> bool {
+        if !self.accepting.load(Ordering::Acquire) {
+            return false;
+        }
+        self.active.fetch_add(1, Ordering::AcqRel);
+        if !self.accepting.load(Ordering::Acquire) {
+            self.finish_one();
+            return false;
+        }
+        let tasks = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut completion = SipRetainedTaskCompletion {
+                tasks,
+                completed_normally: false,
+            };
+            future.await;
+            completion.completed_normally = true;
+        });
+        true
+    }
+
+    fn close(&self) {
+        self.accepting.store(false, Ordering::Release);
+        if self.active.load(Ordering::Acquire) == 0 {
+            self.idle.notify_one();
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
+
+    fn panicked(&self) -> bool {
+        self.panicked.load(Ordering::Acquire)
+    }
+
+    async fn wait_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            if self.active.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn finish_one(&self) {
+        if self.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.idle.notify_one();
+        }
+    }
+}
+
+struct SipRetainedTaskCompletion {
+    tasks: Arc<SipRetainedTasks>,
+    completed_normally: bool,
+}
+
+impl Drop for SipRetainedTaskCompletion {
+    fn drop(&mut self) {
+        if !self.completed_normally {
+            self.tasks.panicked.store(true, Ordering::Release);
+        }
+        self.tasks.finish_one();
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SipOutboundRoutePhase {
@@ -108,6 +236,13 @@ enum SipRouteStageDisposition {
     Discard,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SipInboundPublication {
+    Published,
+    Backpressured,
+    Retired,
+}
+
 struct SipOutboundRouteState {
     phase: SipOutboundRoutePhase,
     wire: SipOutboundWireState,
@@ -123,6 +258,7 @@ struct SipOutboundRouteState {
 struct SipOutboundRoute {
     connection_id: ConnectionId,
     session_id: SessionId,
+    generation: AtomicU64,
     target: String,
     context: Arc<SipOriginateContext>,
     sip_call_id: Arc<str>,
@@ -149,6 +285,7 @@ impl SipOutboundRoute {
         Arc::new(Self {
             connection_id,
             session_id,
+            generation: AtomicU64::new(0),
             target,
             context,
             sip_call_id,
@@ -168,6 +305,21 @@ impl SipOutboundRoute {
             cleanup,
             cancel,
         })
+    }
+
+    fn assign_generation(&self, generation: u64) -> bool {
+        generation != 0
+            && self
+                .generation
+                .compare_exchange(0, generation, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
+
+    fn generation(&self) -> Option<u64> {
+        match self.generation.load(Ordering::Acquire) {
+            0 => None,
+            generation => Some(generation),
+        }
     }
 
     fn claim_activation(&self) -> Result<bool, SipActivationFailure> {
@@ -224,13 +376,14 @@ impl SipOutboundRoute {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match state.phase {
+        let disposition = match state.phase {
             SipOutboundRoutePhase::Prepared | SipOutboundRoutePhase::Activating => {
                 if terminal {
                     state.remote_terminal_seen = true;
                     if state.terminal.is_none() {
                         state.terminal = Some(event);
                     }
+                    state.phase = SipOutboundRoutePhase::Terminating;
                 } else if state.terminal.is_none() {
                     if state.events.len() == SIP_OUTBOUND_EVENT_STAGE_CAPACITY {
                         state.overflowed = true;
@@ -246,6 +399,7 @@ impl SipOutboundRoute {
                     if state.terminal.is_none() {
                         state.terminal = Some(event);
                     }
+                    state.phase = SipOutboundRoutePhase::Terminating;
                     SipRouteStageDisposition::Retained
                 } else if state.remote_terminal_seen {
                     SipRouteStageDisposition::Discard
@@ -263,7 +417,12 @@ impl SipOutboundRoute {
                 }
             }
             SipOutboundRoutePhase::Terminated => SipRouteStageDisposition::Discard,
+        };
+        drop(state);
+        if terminal && disposition == SipRouteStageDisposition::Retained {
+            self.cancel.send_replace(true);
         }
+        disposition
     }
 
     async fn publish_staged_events(
@@ -287,8 +446,13 @@ impl SipOutboundRoute {
                 match state.events.pop_front() {
                     Some(event) => Some(event),
                     None => {
-                        state.phase = SipOutboundRoutePhase::Active;
-                        return Ok(state.remote_terminal_seen);
+                        let remote_terminal = state.remote_terminal_seen;
+                        state.phase = if remote_terminal {
+                            SipOutboundRoutePhase::Terminating
+                        } else {
+                            SipOutboundRoutePhase::Active
+                        };
+                        return Ok(remote_terminal);
                     }
                 }
             };
@@ -314,7 +478,7 @@ impl SipOutboundRoute {
         }
     }
 
-    fn complete_activation(&self, completion: SipActivationCompletion) {
+    fn complete_activation_failure(&self, failure: SipActivationFailure) {
         let publish = {
             let mut state = self
                 .state
@@ -324,20 +488,47 @@ impl SipOutboundRoute {
                 false
             } else {
                 state.activation_completed = true;
-                if matches!(completion, SipActivationCompletion::Failed(_))
-                    && !matches!(
-                        state.phase,
-                        SipOutboundRoutePhase::Terminating | SipOutboundRoutePhase::Terminated
-                    )
-                {
+                if !matches!(
+                    state.phase,
+                    SipOutboundRoutePhase::Terminating | SipOutboundRoutePhase::Terminated
+                ) {
                     state.phase = SipOutboundRoutePhase::Failed;
                 }
                 true
             }
         };
         if publish {
-            self.activation.send_replace(Some(completion));
+            self.activation
+                .send_replace(Some(SipActivationCompletion::Failed(failure)));
         }
+    }
+
+    /// Publish an activation receipt only if success linearizes before every
+    /// terminal/cancellation transition. A terminal that already became
+    /// visible makes all activation waiters fail instead of briefly exposing
+    /// a successful receipt for a dead route.
+    fn complete_activation_success(&self, receipt: OutboundActivation) -> bool {
+        let publish = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.activation_completed
+                || state.phase != SipOutboundRoutePhase::Active
+                || state.remote_terminal_seen
+                || *self.cancel.borrow()
+            {
+                false
+            } else {
+                state.activation_completed = true;
+                true
+            }
+        };
+        if publish {
+            self.activation
+                .send_replace(Some(SipActivationCompletion::Succeeded(receipt)));
+        }
+        publish
     }
 
     async fn wait_activation(&self) -> CoreResult<OutboundActivation> {
@@ -414,6 +605,10 @@ impl SipOutboundRoute {
 
     fn complete_cleanup(&self, success: bool) {
         self.cleanup.send_replace(Some(success));
+    }
+
+    fn cleanup_result(&self) -> Option<bool> {
+        *self.cleanup.borrow()
     }
 
     async fn wait_cleanup(&self) -> CoreResult<()> {
@@ -863,6 +1058,14 @@ impl SipInboundContextStore {
             .remove(session_id);
     }
 
+    fn clear(&self) {
+        self.pending_by_session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        self.by_connection.clear();
+    }
+
     #[cfg(test)]
     fn pending_len(&self) -> usize {
         self.pending_by_session
@@ -880,19 +1083,18 @@ pub struct SipAdapter {
     self_weak: Weak<SipAdapter>,
     coordinator: Arc<UnifiedCoordinator>,
     /// rvoip-core ConnectionId → SIP api SessionId.
-    by_connection: Arc<DashMap<ConnectionId, SessionId>>,
+    by_connection: Arc<DashMap<ConnectionId, SipConnectionBinding>>,
     /// SIP api SessionId → rvoip-core ConnectionId. Used by the event
     /// translator task to map outgoing api::Event → AdapterEvent.
-    by_session: Arc<DashMap<SessionId, ConnectionId>>,
+    by_session: Arc<DashMap<SessionId, SipSessionBinding>>,
     /// Serializes paired forward/reverse mapping changes and retirement.
     mapping_lock: StdMutex<()>,
-    /// Process-lifetime Session tombstones. SIP API events carry no route
-    /// epoch, so recently terminal Session IDs must not be mapped again.
-    retired_sessions: DashMap<SessionId, ()>,
-    /// Set when the finite tombstone budget is exhausted. Since SIP API
-    /// events carry no route epoch, admitting any further unknown Session ID
-    /// could resurrect an evicted route; saturation therefore fails closed.
-    lifecycle_admission_poisoned: AtomicBool,
+    /// Bounded, expiring Session tombstones. They cover the SIP transaction and
+    /// adapter-event late-delivery horizon without imposing a process-lifetime
+    /// call limit.
+    retired_sessions: DashMap<SessionId, SipRetiredSession>,
+    retired_session_order: StdMutex<VecDeque<SipRetiredSessionOrder>>,
+    next_route_generation: AtomicU64,
     /// Configurable active-route and tombstone limits. They may only be
     /// changed while the adapter has no live or retired mappings.
     active_connection_budget: AtomicUsize,
@@ -915,6 +1117,11 @@ pub struct SipAdapter {
     authenticated_inbound_sessions: DashMap<SessionId, ()>,
     lifecycle: AdapterLifecycleSinkSlot,
     translator_cancel: watch::Sender<bool>,
+    retained_tasks: Arc<SipRetainedTasks>,
+    draining: AtomicBool,
+    drained: AtomicBool,
+    drain_gate: AsyncMutex<()>,
+    observer_registered: AtomicBool,
     inbound_invite_observer_id: u64,
 }
 
@@ -980,6 +1187,7 @@ impl SipAdapter {
         let (out_tx, out_rx) = mpsc::channel(SIP_ADAPTER_EVENT_CAPACITY);
         let (translator_cancel, mut translator_cancel_rx) = watch::channel(false);
         let context_reaper_cancel_rx = translator_cancel.subscribe();
+        let retained_tasks = SipRetainedTasks::new();
         let inbound_contexts = Arc::new(SipInboundContextStore::default());
         let contexts_for_observer = Arc::downgrade(&inbound_contexts);
         let inbound_invite_observer_id = coordinator.add_inbound_invite_observer(Arc::new(
@@ -1015,7 +1223,8 @@ impl SipAdapter {
             by_session: Arc::new(DashMap::new()),
             mapping_lock: StdMutex::new(()),
             retired_sessions: DashMap::new(),
-            lifecycle_admission_poisoned: AtomicBool::new(false),
+            retired_session_order: StdMutex::new(VecDeque::new()),
+            next_route_generation: AtomicU64::new(1),
             active_connection_budget: AtomicUsize::new(DEFAULT_SIP_ACTIVE_CONNECTION_BUDGET),
             retired_session_budget: AtomicUsize::new(DEFAULT_SIP_RETIRED_SESSION_BUDGET),
             outbound_routes: DashMap::new(),
@@ -1026,6 +1235,11 @@ impl SipAdapter {
             authenticated_inbound_sessions: DashMap::new(),
             lifecycle: AdapterLifecycleSinkSlot::default(),
             translator_cancel,
+            retained_tasks: Arc::clone(&retained_tasks),
+            draining: AtomicBool::new(false),
+            drained: AtomicBool::new(false),
+            drain_gate: AsyncMutex::new(()),
+            observer_registered: AtomicBool::new(true),
             inbound_invite_observer_id,
         });
 
@@ -1033,7 +1247,7 @@ impl SipAdapter {
         // translator task. EventReceiver yields api::Event values; we map
         // each into AdapterEvent and forward.
         let me = Arc::downgrade(&adapter);
-        tokio::spawn(async move {
+        let translator_spawned = retained_tasks.spawn(async move {
             loop {
                 tokio::select! {
                     changed = translator_cancel_rx.changed() => {
@@ -1054,11 +1268,15 @@ impl SipAdapter {
             }
             debug!("SipAdapter event translator stream ended");
         });
-        tokio::spawn(Self::run_pending_context_reaper(
-            Arc::downgrade(&adapter.inbound_contexts),
-            context_reaper_cancel_rx,
-            PENDING_SIP_INBOUND_CONTEXT_REAPER_INTERVAL,
-        ));
+        debug_assert!(translator_spawned);
+        let reaper_spawned = adapter
+            .retained_tasks
+            .spawn(Self::run_pending_context_reaper(
+                Arc::downgrade(&adapter.inbound_contexts),
+                context_reaper_cancel_rx,
+                PENDING_SIP_INBOUND_CONTEXT_REAPER_INTERVAL,
+            ));
+        debug_assert!(reaper_spawned);
 
         Ok(adapter)
     }
@@ -1095,6 +1313,181 @@ impl SipAdapter {
         &self.coordinator
     }
 
+    /// Whether this adapter has crossed its one-way admission/drain boundary.
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::Acquire)
+    }
+
+    /// Number of adapter-owned supervisors that have not yet terminated.
+    /// This is intended for shutdown diagnostics and leak assertions.
+    pub fn retained_task_count(&self) -> usize {
+        self.retained_tasks.count()
+    }
+
+    /// Stop admission, compensate every live SIP route, and wait until every
+    /// adapter-owned task and media driver has terminated.
+    ///
+    /// Outbound routes use their retained wire phase: prepared routes remain
+    /// zero-wire, while possibly-sent routes receive CANCEL/BYE cleanup.
+    /// Inbound routes are rejected before answer and hung up after answer.
+    /// This operation is idempotent but intentionally one-way.
+    pub async fn drain(&self) -> CoreResult<()> {
+        let _drain = self.drain_gate.lock().await;
+        if self.drained.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        let (outbound, inbound) = {
+            let _mapping = self
+                .mapping_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.draining.store(true, Ordering::Release);
+
+            let outbound = self
+                .outbound_routes
+                .iter()
+                .map(|entry| Arc::clone(entry.value()))
+                .collect::<Vec<_>>();
+            let inbound_epochs = self
+                .by_connection
+                .iter()
+                .filter(|entry| !self.outbound_routes.contains_key(entry.key()))
+                .map(|entry| SipRouteEpoch {
+                    session_id: entry.session_id.clone(),
+                    connection_id: entry.key().clone(),
+                    generation: entry.generation,
+                })
+                .collect::<Vec<_>>();
+            let mut inbound = Vec::with_capacity(inbound_epochs.len());
+            for epoch in inbound_epochs {
+                let stream = self
+                    .remove_epoch_locked(&epoch)
+                    .and_then(|removed| removed.stream);
+                inbound.push((epoch, stream));
+            }
+            (outbound, inbound)
+        };
+
+        self.translator_cancel.send_replace(true);
+        if self.observer_registered.swap(false, Ordering::AcqRel) {
+            self.coordinator
+                .remove_inbound_invite_observer(self.inbound_invite_observer_id);
+        }
+
+        let outbound_results = outbound.clone();
+        for route in outbound {
+            route.complete_activation_failure(SipActivationFailure::RouteEnded);
+            let terminal = AdapterEvent::Ended {
+                connection_id: route.connection_id.clone(),
+                reason: EndReason::BridgeTorn,
+            };
+            begin_outbound_cleanup(
+                self.self_weak.clone(),
+                Arc::clone(&self.coordinator),
+                route,
+                self.lifecycle.clone(),
+                self.out_tx.clone(),
+                Some(terminal),
+                "adapter-drain-outbound",
+            );
+        }
+
+        let mut spawn_failed = false;
+        let mut inbound_results = Vec::with_capacity(inbound.len());
+        let fast_auto_accept = self.coordinator.fast_auto_accept_incoming_calls();
+        for (epoch, stream) in inbound {
+            if let Some(stream) = stream.as_ref() {
+                stream.request_close();
+            }
+            let coordinator = Arc::clone(&self.coordinator);
+            let lifecycle = self.lifecycle.clone();
+            let events = self.out_tx.clone();
+            let cleanup_result = Arc::new(AtomicBool::new(false));
+            inbound_results.push(Arc::clone(&cleanup_result));
+            if !self.retained_tasks.spawn(run_inbound_drain(
+                coordinator,
+                epoch,
+                stream,
+                fast_auto_accept,
+                lifecycle,
+                events,
+                cleanup_result,
+            )) {
+                spawn_failed = true;
+            }
+        }
+
+        for stream in self.streams_cache.iter() {
+            stream.value().request_close();
+        }
+        self.retained_tasks.close();
+        if tokio::time::timeout(SIP_ADAPTER_DRAIN_TIMEOUT, self.retained_tasks.wait_idle())
+            .await
+            .is_err()
+        {
+            return Err(RvoipError::Adapter(format!(
+                "SIP adapter drain timed out with {} retained tasks",
+                self.retained_tasks.count()
+            )));
+        }
+        if spawn_failed {
+            return Err(RvoipError::Adapter(
+                "SIP adapter drain could not retain an inbound cleanup task".to_string(),
+            ));
+        }
+        if self.retained_tasks.panicked() {
+            return Err(RvoipError::Adapter(
+                "SIP adapter retained task panicked during drain".to_string(),
+            ));
+        }
+        if outbound_results
+            .iter()
+            .any(|route| route.cleanup_result() != Some(true))
+            || inbound_results
+                .iter()
+                .any(|result| !result.load(Ordering::Acquire))
+        {
+            return Err(RvoipError::Adapter(
+                "SIP adapter drain could not complete network or media compensation".to_string(),
+            ));
+        }
+
+        let registry_empty = {
+            let _mapping = self
+                .mapping_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.by_connection.is_empty()
+                && self.by_session.is_empty()
+                && self.outbound_routes.is_empty()
+                && self.streams_cache.is_empty()
+                && self.authenticated_inbound_sessions.is_empty()
+        };
+        if !registry_empty {
+            return Err(RvoipError::Adapter(
+                "SIP adapter drain completed with live lifecycle registry entries".to_string(),
+            ));
+        }
+        self.inbound_contexts.clear();
+        self.retired_sessions.clear();
+        self.retired_session_order
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        self.drained.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Drain the adapter and then stop the underlying SIP coordinator.
+    pub async fn shutdown(&self) -> CoreResult<()> {
+        self.drain().await?;
+        self.coordinator
+            .shutdown_gracefully(Some(SIP_ADAPTER_DRAIN_TIMEOUT))
+            .await
+            .map_err(|error| RvoipError::Adapter(format!("SIP shutdown failed: {error}")))
+    }
+
     fn take_atomic_events(&self) -> CoreResult<mpsc::Receiver<OrchestratorAdapterEvent>> {
         self.out_rx
             .lock()
@@ -1120,24 +1513,126 @@ impl SipAdapter {
         self.take_atomic_events()
     }
 
-    fn ensure_mapped(&self, session_id: SessionId) -> Option<ConnectionId> {
+    fn next_generation(&self) -> Option<u64> {
+        self.next_route_generation
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .ok()
+    }
+
+    fn purge_retired_sessions_locked(&self, now: Instant) -> usize {
+        let mut order = self
+            .retired_session_order
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut removed = 0;
+        while order.front().is_some_and(|entry| entry.expires_at <= now) {
+            let entry = order.pop_front().expect("front entry exists");
+            let current_matches =
+                self.retired_sessions
+                    .get(&entry.session_id)
+                    .is_some_and(|current| {
+                        current.generation == entry.generation
+                            && current.expires_at == entry.expires_at
+                    });
+            if current_matches {
+                self.retired_sessions.remove(&entry.session_id);
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    fn route_epoch_for_session_locked(&self, session_id: &SessionId) -> Option<SipRouteEpoch> {
+        let binding = self.by_session.get(session_id)?;
+        let reverse = self.by_connection.get(&binding.connection_id)?;
+        if reverse.session_id != *session_id || reverse.generation != binding.generation {
+            return None;
+        }
+        Some(SipRouteEpoch {
+            session_id: session_id.clone(),
+            connection_id: binding.connection_id.clone(),
+            generation: binding.generation,
+        })
+    }
+
+    fn route_epoch_for_connection_locked(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> Option<SipRouteEpoch> {
+        let binding = self.by_connection.get(connection_id)?;
+        let reverse = self.by_session.get(&binding.session_id)?;
+        if reverse.connection_id != *connection_id || reverse.generation != binding.generation {
+            return None;
+        }
+        Some(SipRouteEpoch {
+            session_id: binding.session_id.clone(),
+            connection_id: connection_id.clone(),
+            generation: binding.generation,
+        })
+    }
+
+    fn epoch_is_current_locked(&self, epoch: &SipRouteEpoch) -> bool {
+        self.route_epoch_for_connection_locked(&epoch.connection_id)
+            .is_some_and(|current| current == *epoch)
+    }
+
+    fn ensure_mapped_epoch(&self, session_id: SessionId) -> Option<SipRouteEpoch> {
         let _mapping = self
             .mapping_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(entry) = self.by_session.get(&session_id) {
-            return Some(entry.value().clone());
+        self.purge_retired_sessions_locked(Instant::now());
+        if let Some(epoch) = self.route_epoch_for_session_locked(&session_id) {
+            return Some(epoch);
         }
         if self.retired_sessions.contains_key(&session_id)
-            || self.lifecycle_admission_poisoned.load(Ordering::Acquire)
+            || self.draining.load(Ordering::Acquire)
             || self.by_session.len() >= self.active_connection_budget.load(Ordering::Acquire)
+            || self.by_session.len() + self.retired_sessions.len()
+                >= self.retired_session_budget.load(Ordering::Acquire)
         {
             return None;
         }
-        let conn_id = ConnectionId::new();
-        self.by_session.insert(session_id.clone(), conn_id.clone());
-        self.by_connection.insert(conn_id.clone(), session_id);
-        Some(conn_id)
+        let connection_id = ConnectionId::new();
+        let generation = self.next_generation()?;
+        self.by_session.insert(
+            session_id.clone(),
+            SipSessionBinding {
+                connection_id: connection_id.clone(),
+                generation,
+            },
+        );
+        self.by_connection.insert(
+            connection_id.clone(),
+            SipConnectionBinding {
+                session_id: session_id.clone(),
+                generation,
+            },
+        );
+        Some(SipRouteEpoch {
+            session_id,
+            connection_id,
+            generation,
+        })
+    }
+
+    #[cfg(test)]
+    fn ensure_mapped(&self, session_id: SessionId) -> Option<ConnectionId> {
+        self.ensure_mapped_epoch(session_id)
+            .map(|epoch| epoch.connection_id)
+    }
+
+    #[cfg(test)]
+    fn expire_retired_sessions_for_test(&self) -> usize {
+        let _mapping = self
+            .mapping_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.purge_retired_sessions_locked(
+            Instant::now() + SIP_RETIRED_SESSION_TTL + Duration::from_secs(1),
+        )
     }
 
     fn reserve_outbound_route(&self, route: Arc<SipOutboundRoute>) -> CoreResult<()> {
@@ -1145,22 +1640,43 @@ impl SipAdapter {
             .mapping_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.purge_retired_sessions_locked(Instant::now());
         if self.retired_sessions.contains_key(&route.session_id)
-            || self.lifecycle_admission_poisoned.load(Ordering::Acquire)
+            || self.draining.load(Ordering::Acquire)
             || self.by_session.contains_key(&route.session_id)
             || self.by_connection.contains_key(&route.connection_id)
             || self.outbound_routes.contains_key(&route.connection_id)
             || self.streams_cache.contains_key(&route.connection_id)
             || self.by_session.len() >= self.active_connection_budget.load(Ordering::Acquire)
+            || self.by_session.len() + self.retired_sessions.len()
+                >= self.retired_session_budget.load(Ordering::Acquire)
         {
             return Err(RvoipError::AdmissionRejected(
                 "SIP outbound lifecycle reservation was unavailable",
             ));
         }
-        self.by_session
-            .insert(route.session_id.clone(), route.connection_id.clone());
-        self.by_connection
-            .insert(route.connection_id.clone(), route.session_id.clone());
+        let generation = self.next_generation().ok_or(RvoipError::AdmissionRejected(
+            "SIP route generation space was exhausted",
+        ))?;
+        if !route.assign_generation(generation) {
+            return Err(RvoipError::AdmissionRejected(
+                "SIP outbound route generation was already assigned",
+            ));
+        }
+        self.by_session.insert(
+            route.session_id.clone(),
+            SipSessionBinding {
+                connection_id: route.connection_id.clone(),
+                generation,
+            },
+        );
+        self.by_connection.insert(
+            route.connection_id.clone(),
+            SipConnectionBinding {
+                session_id: route.session_id.clone(),
+                generation,
+            },
+        );
         self.streams_cache
             .insert(route.connection_id.clone(), Arc::clone(&route.stream));
         self.outbound_routes
@@ -1185,29 +1701,6 @@ impl SipAdapter {
         }
     }
 
-    /// Return `None` when the event was retained by a dormant outbound route,
-    /// or the original event when it should use the normal channel.
-    fn stage_outbound_event(&self, event: AdapterEvent) -> Option<AdapterEvent> {
-        let Some(connection_id) = Self::adapter_event_connection_id(&event).cloned() else {
-            return Some(event);
-        };
-        self.stage_outbound_event_for(&connection_id, event)
-    }
-
-    fn stage_outbound_event_for(
-        &self,
-        connection_id: &ConnectionId,
-        event: AdapterEvent,
-    ) -> Option<AdapterEvent> {
-        let Some(route) = self.outbound_routes.get(connection_id) else {
-            return Some(event);
-        };
-        match route.stage_event(event.clone()) {
-            SipRouteStageDisposition::Retained | SipRouteStageDisposition::Discard => None,
-            SipRouteStageDisposition::Forward => Some(event),
-        }
-    }
-
     /// Configure the maximum number of active SIP mappings and recently
     /// retired Session-ID tombstones. Configuration is accepted only before
     /// the first route is admitted, which keeps admission deterministic.
@@ -1216,19 +1709,16 @@ impl SipAdapter {
         active_connections: usize,
         retired_sessions: usize,
     ) -> CoreResult<()> {
-        if active_connections == 0 || retired_sessions == 0 {
+        if active_connections == 0 || retired_sessions < active_connections {
             return Err(RvoipError::InvalidState(
-                "SIP lifecycle limits must both be greater than zero",
+                "SIP retired-session capacity must cover every active connection",
             ));
         }
         let _mapping = self
             .mapping_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !self.by_session.is_empty()
-            || !self.retired_sessions.is_empty()
-            || self.lifecycle_admission_poisoned.load(Ordering::Acquire)
-        {
+        if !self.by_session.is_empty() || !self.retired_sessions.is_empty() {
             return Err(RvoipError::InvalidState(
                 "SIP lifecycle limits cannot change after route admission",
             ));
@@ -1268,40 +1758,95 @@ impl SipAdapter {
         }
     }
 
+    /// Remove exactly one route generation while holding `mapping_lock`.
+    ///
+    /// The paired maps, stream cache, outbound route, authentication marker,
+    /// and tombstone change as one registry transaction. A stale supervisor
+    /// can therefore never retire a newer route that reused an identifier.
+    fn remove_epoch_locked(&self, epoch: &SipRouteEpoch) -> Option<SipRemovedEpoch> {
+        if !self.epoch_is_current_locked(epoch) {
+            return None;
+        }
+        self.by_connection.remove(&epoch.connection_id);
+        self.by_session.remove(&epoch.session_id);
+        self.outbound_routes.remove(&epoch.connection_id);
+        self.authenticated_inbound_sessions
+            .remove(&epoch.session_id);
+        self.inbound_contexts
+            .forget(&epoch.session_id, &epoch.connection_id);
+        let stream = self
+            .streams_cache
+            .remove(&epoch.connection_id)
+            .map(|(_, stream)| stream);
+        self.retire_session_locked(&epoch.session_id, epoch.generation, Instant::now());
+        Some(SipRemovedEpoch { stream })
+    }
+
+    fn close_stream_retained(&self, stream: Arc<crate::media_stream::SipMediaStream>) {
+        stream.request_close();
+        let spawned = self.retained_tasks.spawn(async move {
+            let _ = tokio::time::timeout(
+                SIP_RETAINED_TASK_TIMEOUT,
+                (stream as Arc<dyn MediaStream>).close(),
+            )
+            .await;
+        });
+        if !spawned {
+            debug!("SipAdapter stream close requested after retained-task admission closed");
+        }
+    }
+
+    fn forget_epoch(&self, epoch: &SipRouteEpoch) -> bool {
+        let removed = {
+            let _mapping = self
+                .mapping_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.remove_epoch_locked(epoch)
+        };
+        let Some(removed) = removed else {
+            return false;
+        };
+        if let Some(stream) = removed.stream {
+            self.close_stream_retained(stream);
+        }
+        true
+    }
+
     fn forget(&self, session_id: &SessionId) {
-        let stream = {
+        let (removed, stream) = {
             let _mapping = self
                 .mapping_lock
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.authenticated_inbound_sessions.remove(session_id);
-            let stream = if let Some((_, conn_id)) = self.by_session.remove(session_id) {
-                self.by_connection.remove(&conn_id);
-                self.outbound_routes.remove(&conn_id);
-                self.inbound_contexts.forget(session_id, &conn_id);
-                self.streams_cache
-                    .remove(&conn_id)
-                    .map(|(_, stream)| stream)
+            if let Some(epoch) = self.route_epoch_for_session_locked(session_id) {
+                (
+                    true,
+                    self.remove_epoch_locked(&epoch)
+                        .and_then(|removed| removed.stream),
+                )
             } else {
                 self.inbound_contexts.forget_pending(session_id);
-                None
-            };
-            self.retire_session_locked(session_id);
-            stream
+                (false, None)
+            }
         };
         if let Some(stream) = stream {
-            stream.request_close();
-            tokio::spawn(async move {
-                let _ = tokio::time::timeout(
-                    SIP_RETAINED_TASK_TIMEOUT,
-                    (stream as Arc<dyn MediaStream>).close(),
-                )
-                .await;
-            });
+            self.close_stream_retained(stream);
+        } else if removed {
+            debug!("SipAdapter retired route without a cached media stream");
         }
     }
 
     fn retire_outbound_route(&self, route: &Arc<SipOutboundRoute>) {
+        let Some(generation) = route.generation() else {
+            return;
+        };
+        let epoch = SipRouteEpoch {
+            session_id: route.session_id.clone(),
+            connection_id: route.connection_id.clone(),
+            generation,
+        };
         let stream = {
             let _mapping = self
                 .mapping_lock
@@ -1311,47 +1856,52 @@ impl SipAdapter {
                 .outbound_routes
                 .get(&route.connection_id)
                 .is_some_and(|entry| Arc::ptr_eq(entry.value(), route));
-            let exact_session = self
-                .by_connection
-                .get(&route.connection_id)
-                .is_some_and(|entry| entry.value() == &route.session_id);
-            if !exact_route || !exact_session {
+            if !exact_route {
                 return;
             }
-            self.outbound_routes.remove(&route.connection_id);
-            self.by_connection.remove(&route.connection_id);
-            self.by_session.remove(&route.session_id);
-            self.authenticated_inbound_sessions
-                .remove(&route.session_id);
-            self.inbound_contexts
-                .forget(&route.session_id, &route.connection_id);
-            let stream = self
-                .streams_cache
-                .remove(&route.connection_id)
-                .map(|(_, stream)| stream);
-            self.retire_session_locked(&route.session_id);
-            stream
+            self.remove_epoch_locked(&epoch)
+                .and_then(|removed| removed.stream)
         };
         if let Some(stream) = stream {
             stream.request_close();
         }
     }
 
-    fn retire_session_locked(&self, session_id: &SessionId) {
-        if self.retired_sessions.contains_key(session_id) {
+    fn retire_session_locked(&self, session_id: &SessionId, generation: u64, now: Instant) {
+        self.purge_retired_sessions_locked(now);
+        if self
+            .retired_sessions
+            .get(session_id)
+            .is_some_and(|current| current.generation >= generation)
+        {
             return;
         }
         let budget = self.retired_session_budget.load(Ordering::Acquire);
-        if self.retired_sessions.len() < budget {
-            self.retired_sessions.insert(session_id.clone(), ());
-        } else {
-            self.lifecycle_admission_poisoned
-                .store(true, Ordering::Release);
+        if self.retired_sessions.len() >= budget {
+            // Admission reserves a tombstone slot for every live route, so
+            // this can only indicate an internal registry invariant failure.
             warn!(
                 budget,
-                "SIP lifecycle tombstone budget exhausted; rejecting all new Session IDs"
+                "SIP lifecycle tombstone capacity invariant was violated"
             );
+            return;
         }
+        let expires_at = now + SIP_RETIRED_SESSION_TTL;
+        self.retired_sessions.insert(
+            session_id.clone(),
+            SipRetiredSession {
+                generation,
+                expires_at,
+            },
+        );
+        self.retired_session_order
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push_back(SipRetiredSessionOrder {
+                session_id: session_id.clone(),
+                generation,
+                expires_at,
+            });
     }
 
     async fn terminate_failed_inbound(
@@ -1429,7 +1979,7 @@ impl SipAdapter {
     fn lookup_session(&self, conn: &ConnectionId) -> CoreResult<SessionId> {
         self.by_connection
             .get(conn)
-            .map(|e| e.value().clone())
+            .map(|e| e.session_id.clone())
             .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))
     }
 
@@ -1495,16 +2045,18 @@ impl SipAdapter {
         conn: ConnectionId,
         stream: Arc<crate::media_stream::SipMediaStream>,
     ) {
-        let Some(session_id) = self
-            .by_connection
-            .get(&conn)
-            .map(|entry| entry.value().clone())
-        else {
-            return;
+        let epoch = {
+            let _mapping = self
+                .mapping_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.route_epoch_for_connection_locked(&conn)
         };
+        let Some(epoch) = epoch else { return };
+        let session_id = epoch.session_id.clone();
         let coordinator = Arc::clone(&self.coordinator);
         let weak_adapter = self.self_weak.clone();
-        tokio::spawn(async move {
+        let spawned = self.retained_tasks.spawn(async move {
             let binding = stream
                 .bind(Arc::clone(&coordinator), session_id.clone())
                 .await;
@@ -1531,40 +2083,49 @@ impl SipAdapter {
             };
             if failed {
                 if let Some(adapter) = weak_adapter.upgrade() {
-                    adapter
-                        .terminate_failed_media(&conn, &session_id, coordinator)
-                        .await;
+                    adapter.terminate_failed_media(&epoch, coordinator).await;
                 }
             }
         });
+        if !spawned {
+            debug!("SipAdapter skipped media bind after retained-task admission closed");
+        }
     }
 
     async fn terminate_failed_media(
         &self,
-        connection_id: &ConnectionId,
-        session_id: &SessionId,
+        epoch: &SipRouteEpoch,
         coordinator: Arc<UnifiedCoordinator>,
     ) {
-        let still_exact = self
-            .by_connection
-            .get(connection_id)
-            .is_some_and(|entry| entry.value() == session_id);
-        if !still_exact || self.outbound_routes.contains_key(connection_id) {
+        let still_exact = {
+            let _mapping = self
+                .mapping_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.epoch_is_current_locked(epoch)
+                && !self.outbound_routes.contains_key(&epoch.connection_id)
+        };
+        if !still_exact {
             return;
         }
-        self.forget(session_id);
-        let hangup =
-            tokio::time::timeout(SIP_RETAINED_TASK_TIMEOUT, coordinator.hangup(session_id)).await;
+        if !self.forget_epoch(epoch) {
+            return;
+        }
+        let hangup = tokio::time::timeout(
+            SIP_RETAINED_TASK_TIMEOUT,
+            coordinator.hangup(&epoch.session_id),
+        )
+        .await;
         if !matches!(hangup, Ok(Ok(()))) {
             let _ = tokio::time::timeout(
                 SIP_RETAINED_TASK_TIMEOUT,
-                coordinator.finalize_local_bye(session_id, "SIP media driver failed"),
+                coordinator.finalize_local_bye(&epoch.session_id, "SIP media driver failed"),
             )
             .await;
         }
         self.deliver_terminal_event(
             AdapterEvent::Failed {
-                connection_id: connection_id.clone(),
+                connection_id: epoch.connection_id.clone(),
                 detail: "SIP media driver failed".to_string(),
             },
             "media-failed",
@@ -1575,12 +2136,13 @@ impl SipAdapter {
     async fn translate_api_event(&self, event: ApiEvent) {
         match event {
             ApiEvent::IncomingCall { call_id, .. } => {
-                let Some(conn_id) = self.ensure_mapped(call_id.clone()) else {
+                let Some(epoch) = self.ensure_mapped_epoch(call_id.clone()) else {
                     warn!("SipAdapter rejected inbound route after lifecycle retirement/capacity");
                     self.terminate_failed_inbound(&call_id, 503, "Connection Capacity Exhausted")
                         .await;
                     return;
                 };
+                let conn_id = epoch.connection_id.clone();
                 let principal = match self.inbound_contexts.bind(&call_id, &conn_id) {
                     SipInboundBinding::Observed(principal) => principal,
                     SipInboundBinding::Rejected(error) => {
@@ -1641,12 +2203,23 @@ impl SipAdapter {
                 } else {
                     OrchestratorAdapterEvent::Public(AdapterEvent::InboundConnection { connection })
                 };
-                if !self.send_inbound_event(adapter_event).await {
-                    // Keep the consumed tombstone until terminal cleanup so a
-                    // replayed IncomingCall cannot recreate the secret.
-                    self.inbound_contexts.discard(&conn_id);
-                    self.terminate_failed_inbound(&call_id, 503, "Signaling Event Backpressure")
+                match self.try_publish_inbound_for_epoch(&epoch, adapter_event) {
+                    SipInboundPublication::Published => {}
+                    SipInboundPublication::Backpressured => {
+                        // Keep the consumed tombstone until terminal cleanup so a
+                        // replayed IncomingCall cannot recreate the secret.
+                        self.inbound_contexts.discard(&conn_id);
+                        self.terminate_failed_inbound(
+                            &call_id,
+                            503,
+                            "Signaling Event Backpressure",
+                        )
                         .await;
+                    }
+                    SipInboundPublication::Retired => {
+                        // Drain or a concurrent terminal already owns cleanup.
+                        self.inbound_contexts.discard(&conn_id);
+                    }
                 }
             }
             ApiEvent::IncomingCallAuthenticated { call_id, principal } => {
@@ -1672,12 +2245,15 @@ impl SipAdapter {
                 );
             }
             ApiEvent::CallAnswered { call_id, .. } => {
-                let Some(conn_id) = self.ensure_mapped(call_id) else {
+                let Some(epoch) = self.ensure_mapped_epoch(call_id) else {
                     return;
                 };
-                self.try_send(AdapterEvent::Connected {
-                    connection_id: conn_id,
-                });
+                self.try_send_for_epoch(
+                    &epoch,
+                    AdapterEvent::Connected {
+                        connection_id: epoch.connection_id.clone(),
+                    },
+                );
             }
             ApiEvent::CallProgress {
                 call_id,
@@ -1685,11 +2261,11 @@ impl SipAdapter {
                 reason,
                 ..
             } => {
-                let Some(connection_id) = self.ensure_mapped(call_id) else {
+                let Some(epoch) = self.ensure_mapped_epoch(call_id) else {
                     return;
                 };
-                self.try_send_for_connection(
-                    &connection_id,
+                self.try_send_for_epoch(
+                    &epoch,
                     AdapterEvent::Native {
                         kind: "sip.call_progress",
                         detail: format!("{} {}", status_code, reason),
@@ -1697,13 +2273,13 @@ impl SipAdapter {
                 );
             }
             ApiEvent::CallEnded { call_id, reason } => {
-                let Some(conn_id) = self.ensure_mapped(call_id.clone()) else {
+                let Some(epoch) = self.ensure_mapped_epoch(call_id) else {
                     return;
                 };
-                self.deliver_terminal_for_session(
-                    &call_id,
+                self.deliver_terminal_for_epoch(
+                    &epoch,
                     AdapterEvent::Ended {
-                        connection_id: conn_id,
+                        connection_id: epoch.connection_id.clone(),
                         reason: EndReason::Failed { detail: reason },
                     },
                     "call-ended",
@@ -1715,13 +2291,13 @@ impl SipAdapter {
                 status_code,
                 reason,
             } => {
-                let Some(conn_id) = self.ensure_mapped(call_id.clone()) else {
+                let Some(epoch) = self.ensure_mapped_epoch(call_id) else {
                     return;
                 };
-                self.deliver_terminal_for_session(
-                    &call_id,
+                self.deliver_terminal_for_epoch(
+                    &epoch,
                     AdapterEvent::Failed {
-                        connection_id: conn_id,
+                        connection_id: epoch.connection_id.clone(),
                         detail: format!("{} {}", status_code, reason),
                     },
                     "call-failed",
@@ -1729,13 +2305,13 @@ impl SipAdapter {
                 .await;
             }
             ApiEvent::CallCancelled { call_id } => {
-                let Some(conn_id) = self.ensure_mapped(call_id.clone()) else {
+                let Some(epoch) = self.ensure_mapped_epoch(call_id) else {
                     return;
                 };
-                self.deliver_terminal_for_session(
-                    &call_id,
+                self.deliver_terminal_for_epoch(
+                    &epoch,
                     AdapterEvent::Ended {
-                        connection_id: conn_id,
+                        connection_id: epoch.connection_id.clone(),
                         reason: EndReason::Cancelled,
                     },
                     "call-cancelled",
@@ -1749,14 +2325,17 @@ impl SipAdapter {
                 // Event::DtmfReceived. Duration is the typical RFC
                 // 4733 default (100ms) — the underlying ApiEvent
                 // doesn't carry per-digit timing.
-                let Some(conn_id) = self.ensure_mapped(call_id) else {
+                let Some(epoch) = self.ensure_mapped_epoch(call_id) else {
                     return;
                 };
-                self.try_send(AdapterEvent::Dtmf {
-                    connection_id: conn_id,
-                    digits: digit.to_string(),
-                    duration_ms: 100,
-                });
+                self.try_send_for_epoch(
+                    &epoch,
+                    AdapterEvent::Dtmf {
+                        connection_id: epoch.connection_id.clone(),
+                        digits: digit.to_string(),
+                        duration_ms: 100,
+                    },
+                );
             }
             ApiEvent::MediaQualityChanged {
                 call_id,
@@ -1770,17 +2349,20 @@ impl SipAdapter {
                 // media-core and is not propagated through the
                 // current ApiEvent shape; leave as `None` until the
                 // ApiEvent grows a `mos` field.
-                let Some(conn_id) = self.ensure_mapped(call_id) else {
+                let Some(epoch) = self.ensure_mapped_epoch(call_id) else {
                     return;
                 };
-                self.try_send(AdapterEvent::Quality {
-                    connection_id: conn_id,
-                    snapshot: rvoip_core::stream::QualitySnapshot {
-                        jitter_ms: jitter_ms as f32,
-                        packet_loss_pct: packet_loss_percent as f32,
-                        mos: None,
+                self.try_send_for_epoch(
+                    &epoch,
+                    AdapterEvent::Quality {
+                        connection_id: epoch.connection_id.clone(),
+                        snapshot: rvoip_core::stream::QualitySnapshot {
+                            jitter_ms: jitter_ms as f32,
+                            packet_loss_pct: packet_loss_percent as f32,
+                            mos: None,
+                        },
                     },
-                });
+                );
             }
             other => {
                 self.try_send(AdapterEvent::Native {
@@ -1792,9 +2374,16 @@ impl SipAdapter {
     }
 
     fn try_send(&self, event: AdapterEvent) -> bool {
-        let Some(event) = self.stage_outbound_event(event) else {
-            return true;
-        };
+        if let Some(connection_id) = Self::adapter_event_connection_id(&event) {
+            let epoch = {
+                let _mapping = self
+                    .mapping_lock
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                self.route_epoch_for_connection_locked(connection_id)
+            };
+            return epoch.is_none_or(|epoch| self.try_send_for_epoch(&epoch, event));
+        }
         if let Err(e) = self
             .out_tx
             .try_send(OrchestratorAdapterEvent::Public(event))
@@ -1809,10 +2398,36 @@ impl SipAdapter {
         }
     }
 
-    fn try_send_for_connection(&self, connection_id: &ConnectionId, event: AdapterEvent) -> bool {
-        let Some(event) = self.stage_outbound_event_for(connection_id, event) else {
+    /// Stage or publish an event while the route epoch remains current.
+    ///
+    /// The nonblocking channel write occurs under `mapping_lock`, so terminal
+    /// retirement cannot linearize between the liveness check and enqueue.
+    /// Stale supervisors are treated as successfully discarded.
+    fn try_send_for_epoch(&self, epoch: &SipRouteEpoch, event: AdapterEvent) -> bool {
+        let _mapping = self
+            .mapping_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.epoch_is_current_locked(epoch) {
             return true;
-        };
+        }
+        if Self::adapter_event_connection_id(&event)
+            .is_some_and(|connection_id| *connection_id != epoch.connection_id)
+        {
+            warn!("SipAdapter discarded event whose connection did not match its route epoch");
+            return true;
+        }
+        if let Some(route) = self.outbound_routes.get(&epoch.connection_id) {
+            if route.generation() != Some(epoch.generation) {
+                return true;
+            }
+            match route.stage_event(event.clone()) {
+                SipRouteStageDisposition::Retained | SipRouteStageDisposition::Discard => {
+                    return true;
+                }
+                SipRouteStageDisposition::Forward => {}
+            }
+        }
         if let Err(error) = self
             .out_tx
             .try_send(OrchestratorAdapterEvent::Public(event))
@@ -1823,10 +2438,33 @@ impl SipAdapter {
         true
     }
 
+    fn try_publish_inbound_for_epoch(
+        &self,
+        epoch: &SipRouteEpoch,
+        event: OrchestratorAdapterEvent,
+    ) -> SipInboundPublication {
+        let _mapping = self
+            .mapping_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.draining.load(Ordering::Acquire) || !self.epoch_is_current_locked(epoch) {
+            return SipInboundPublication::Retired;
+        }
+        match self.out_tx.try_send(event) {
+            Ok(()) => SipInboundPublication::Published,
+            Err(error) => {
+                warn!(%error, "SipAdapter inbound event channel full or closed");
+                SipInboundPublication::Backpressured
+            }
+        }
+    }
+
+    #[cfg(test)]
     async fn send_inbound_event(&self, event: OrchestratorAdapterEvent) -> bool {
         Self::send_inbound_event_to(&self.out_tx, event).await
     }
 
+    #[cfg(test)]
     async fn send_inbound_event_to(
         events: &mpsc::Sender<OrchestratorAdapterEvent>,
         event: OrchestratorAdapterEvent,
@@ -1848,42 +2486,59 @@ impl SipAdapter {
         Self::deliver_terminal_event_to(&self.lifecycle, &self.out_tx, event, source).await;
     }
 
-    async fn deliver_terminal_for_session(
+    async fn deliver_terminal_for_epoch(
         &self,
-        session_id: &SessionId,
+        epoch: &SipRouteEpoch,
         event: AdapterEvent,
         source: &'static str,
     ) {
-        let route = self.by_session.get(session_id).and_then(|connection| {
-            self.outbound_routes
-                .get(connection.value())
-                .map(|route| Arc::clone(route.value()))
-        });
-        if let Some(route) = route {
-            match route.stage_event(event) {
-                SipRouteStageDisposition::Retained => {
-                    begin_outbound_cleanup(
-                        self.self_weak.clone(),
-                        Arc::clone(&self.coordinator),
-                        route,
-                        self.lifecycle.clone(),
-                        self.out_tx.clone(),
-                        None,
-                        source,
-                    );
-                }
-                SipRouteStageDisposition::Forward => {
-                    // Outbound terminals are always retained by the route so
-                    // compensation and exact-map retirement precede delivery.
-                    warn!(
-                        source,
-                        "SipAdapter outbound terminal escaped retained route"
-                    );
-                }
-                SipRouteStageDisposition::Discard => {}
+        let (route, stream, deliver_inbound) = {
+            let _mapping = self
+                .mapping_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !self.epoch_is_current_locked(epoch) {
+                return;
             }
-        } else {
-            self.forget(session_id);
+            if let Some(route) = self.outbound_routes.get(&epoch.connection_id) {
+                if route.generation() != Some(epoch.generation) {
+                    return;
+                }
+                let route = Arc::clone(route.value());
+                match route.stage_event(event.clone()) {
+                    SipRouteStageDisposition::Retained => (Some(route), None, false),
+                    SipRouteStageDisposition::Forward => {
+                        warn!(
+                            source,
+                            "SipAdapter outbound terminal escaped retained route"
+                        );
+                        return;
+                    }
+                    SipRouteStageDisposition::Discard => return,
+                }
+            } else {
+                (
+                    None,
+                    self.remove_epoch_locked(epoch)
+                        .and_then(|removed| removed.stream),
+                    true,
+                )
+            }
+        };
+        if let Some(route) = route {
+            begin_outbound_cleanup(
+                self.self_weak.clone(),
+                Arc::clone(&self.coordinator),
+                route,
+                self.lifecycle.clone(),
+                self.out_tx.clone(),
+                None,
+                source,
+            );
+        } else if deliver_inbound {
+            if let Some(stream) = stream {
+                self.close_stream_retained(stream);
+            }
             self.deliver_terminal_event(event, source).await;
         }
     }
@@ -1918,36 +2573,122 @@ async fn wait_for_route_cancel(cancel: &mut watch::Receiver<bool>) {
     }
 }
 
+async fn run_inbound_drain(
+    coordinator: Arc<UnifiedCoordinator>,
+    epoch: SipRouteEpoch,
+    stream: Option<Arc<crate::media_stream::SipMediaStream>>,
+    fast_auto_accept: bool,
+    lifecycle: AdapterLifecycleSinkSlot,
+    events: mpsc::Sender<OrchestratorAdapterEvent>,
+    cleanup_result: Arc<AtomicBool>,
+) {
+    let state = tokio::time::timeout(
+        SIP_RETAINED_TASK_TIMEOUT,
+        coordinator.session_state(&epoch.session_id),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .map(|session| session.call_state);
+    let action = failed_inbound_termination(state, fast_auto_accept);
+    let network_complete = match action {
+        FailedInboundTermination::Reject => {
+            let rejected = matches!(
+                tokio::time::timeout(
+                    SIP_RETAINED_TASK_TIMEOUT,
+                    coordinator
+                        .reject(&epoch.session_id)
+                        .with_status(503)
+                        .with_reason("SIP Adapter Draining")
+                        .send(),
+                )
+                .await,
+                Ok(Ok(()))
+            );
+            rejected
+                || matches!(
+                    tokio::time::timeout(
+                        SIP_RETAINED_TASK_TIMEOUT,
+                        coordinator.hangup(&epoch.session_id),
+                    )
+                    .await,
+                    Ok(Ok(()))
+                )
+        }
+        FailedInboundTermination::Hangup => matches!(
+            tokio::time::timeout(
+                SIP_RETAINED_TASK_TIMEOUT,
+                coordinator.hangup(&epoch.session_id),
+            )
+            .await,
+            Ok(Ok(()))
+        ),
+        FailedInboundTermination::CleanupOnly => false,
+    };
+    let network_success = network_complete
+        || matches!(
+            tokio::time::timeout(
+                SIP_RETAINED_TASK_TIMEOUT,
+                coordinator.finalize_local_bye(&epoch.session_id, "SIP adapter drain"),
+            )
+            .await,
+            Ok(Ok(()))
+        );
+
+    let media_success = if let Some(stream) = stream {
+        matches!(
+            tokio::time::timeout(
+                SIP_RETAINED_TASK_TIMEOUT,
+                (stream as Arc<dyn MediaStream>).close(),
+            )
+            .await,
+            Ok(Ok(()))
+        )
+    } else {
+        true
+    };
+    cleanup_result.store(network_success && media_success, Ordering::Release);
+    SipAdapter::deliver_terminal_event_to(
+        &lifecycle,
+        &events,
+        AdapterEvent::Ended {
+            connection_id: epoch.connection_id,
+            reason: EndReason::BridgeTorn,
+        },
+        "adapter-drain-inbound",
+    )
+    .await;
+}
+
 async fn run_outbound_activation(
     weak_adapter: Weak<SipAdapter>,
     coordinator: Arc<UnifiedCoordinator>,
     route: Arc<SipOutboundRoute>,
     lifecycle: AdapterLifecycleSinkSlot,
     events: mpsc::Sender<OrchestratorAdapterEvent>,
+    retained_tasks: Arc<SipRetainedTasks>,
 ) {
     let result =
         activate_outbound_route(Arc::clone(&coordinator), Arc::clone(&route), events.clone()).await;
     match result {
-        Ok((receipt, remote_terminal)) => {
-            if !remote_terminal {
-                let media_weak_adapter = weak_adapter.clone();
-                let media_coordinator = Arc::clone(&coordinator);
-                let media_route = Arc::clone(&route);
-                let media_lifecycle = lifecycle.clone();
-                let media_events = events.clone();
-                tokio::spawn(async move {
-                    monitor_outbound_media(
-                        media_weak_adapter,
-                        media_coordinator,
-                        media_route,
-                        media_lifecycle,
-                        media_events,
-                    )
-                    .await;
-                });
-            }
-            route.complete_activation(SipActivationCompletion::Succeeded(receipt));
-            if remote_terminal {
+        Ok(receipt) => {
+            let media_weak_adapter = weak_adapter.clone();
+            let media_coordinator = Arc::clone(&coordinator);
+            let media_route = Arc::clone(&route);
+            let media_lifecycle = lifecycle.clone();
+            let media_events = events.clone();
+            let monitor_spawned = retained_tasks.spawn(async move {
+                monitor_outbound_media(
+                    media_weak_adapter,
+                    media_coordinator,
+                    media_route,
+                    media_lifecycle,
+                    media_events,
+                )
+                .await;
+            });
+            if !monitor_spawned || !route.complete_activation_success(receipt) {
+                route.complete_activation_failure(SipActivationFailure::RouteEnded);
                 begin_outbound_cleanup(
                     weak_adapter,
                     coordinator,
@@ -1960,7 +2701,7 @@ async fn run_outbound_activation(
             }
         }
         Err(failure) => {
-            route.complete_activation(SipActivationCompletion::Failed(failure));
+            route.complete_activation_failure(failure);
             begin_outbound_cleanup(
                 weak_adapter,
                 coordinator,
@@ -1981,7 +2722,7 @@ async fn activate_outbound_route(
     coordinator: Arc<UnifiedCoordinator>,
     route: Arc<SipOutboundRoute>,
     events: mpsc::Sender<OrchestratorAdapterEvent>,
-) -> Result<(OutboundActivation, bool), SipActivationFailure> {
+) -> Result<OutboundActivation, SipActivationFailure> {
     let from = route
         .context
         .from_uri()
@@ -2034,7 +2775,7 @@ async fn activate_outbound_route(
 
     let remote_terminal = route.publish_staged_events(&events).await?;
     if remote_terminal {
-        return Ok((receipt, true));
+        return Err(SipActivationFailure::RouteEnded);
     }
 
     let mut cancel = route.cancel.subscribe();
@@ -2057,7 +2798,7 @@ async fn activate_outbound_route(
         return Err(SipActivationFailure::MediaFailed);
     }
 
-    Ok((receipt, false))
+    Ok(receipt)
 }
 
 async fn monitor_outbound_media(
@@ -2106,15 +2847,23 @@ fn begin_outbound_cleanup(
     event: Option<AdapterEvent>,
     source: &'static str,
 ) {
-    route.complete_activation(SipActivationCompletion::Failed(
-        SipActivationFailure::RouteEnded,
-    ));
+    route.complete_activation_failure(SipActivationFailure::RouteEnded);
     if !route.request_cleanup(event) {
         return;
     }
-    tokio::spawn(async move {
+    let Some(adapter) = weak_adapter.upgrade() else {
+        route.complete_cleanup(false);
+        return;
+    };
+    let retained_tasks = Arc::clone(&adapter.retained_tasks);
+    drop(adapter);
+    let completion_route = Arc::clone(&route);
+    let spawned = retained_tasks.spawn(async move {
         run_outbound_cleanup(weak_adapter, coordinator, route, lifecycle, events, source).await;
     });
+    if !spawned {
+        completion_route.complete_cleanup(false);
+    }
 }
 
 async fn run_outbound_cleanup(
@@ -2162,12 +2911,16 @@ async fn run_outbound_cleanup(
 
 impl Drop for SipAdapter {
     fn drop(&mut self) {
-        let _ = self.translator_cancel.send(true);
+        self.draining.store(true, Ordering::Release);
+        self.translator_cancel.send_replace(true);
         for stream in self.streams_cache.iter() {
             stream.value().request_close();
         }
-        self.coordinator
-            .remove_inbound_invite_observer(self.inbound_invite_observer_id);
+        self.retained_tasks.close();
+        if self.observer_registered.swap(false, Ordering::AcqRel) {
+            self.coordinator
+                .remove_inbound_invite_observer(self.inbound_invite_observer_id);
+        }
     }
 }
 
@@ -2256,6 +3009,19 @@ impl ConnectionAdapter for SipAdapter {
             .get(&conn)
             .map(|entry| Arc::clone(entry.value()))
             .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
+        if self.draining.load(Ordering::Acquire) {
+            route.complete_activation_failure(SipActivationFailure::RouteEnded);
+            begin_outbound_cleanup(
+                self.self_weak.clone(),
+                Arc::clone(&self.coordinator),
+                Arc::clone(&route),
+                self.lifecycle.clone(),
+                self.out_tx.clone(),
+                None,
+                "activation-during-drain",
+            );
+            return route.wait_activation().await;
+        }
         match route.claim_activation() {
             Ok(true) => {
                 let weak_adapter = self.self_weak.clone();
@@ -2263,19 +3029,34 @@ impl ConnectionAdapter for SipAdapter {
                 let lifecycle = self.lifecycle.clone();
                 let events = self.out_tx.clone();
                 let retained_route = Arc::clone(&route);
-                tokio::spawn(async move {
+                let retained_tasks = Arc::clone(&self.retained_tasks);
+                let activation_tasks = Arc::clone(&retained_tasks);
+                let spawned = retained_tasks.spawn(async move {
                     run_outbound_activation(
                         weak_adapter,
                         coordinator,
                         retained_route,
                         lifecycle,
                         events,
+                        activation_tasks,
                     )
                     .await;
                 });
+                if !spawned {
+                    route.complete_activation_failure(SipActivationFailure::RouteEnded);
+                    begin_outbound_cleanup(
+                        self.self_weak.clone(),
+                        Arc::clone(&self.coordinator),
+                        Arc::clone(&route),
+                        self.lifecycle.clone(),
+                        self.out_tx.clone(),
+                        None,
+                        "activation-not-admitted",
+                    );
+                }
             }
             Ok(false) => {}
-            Err(error) => route.complete_activation(SipActivationCompletion::Failed(error)),
+            Err(error) => route.complete_activation_failure(error),
         }
         route.wait_activation().await
     }
@@ -2299,9 +3080,7 @@ impl ConnectionAdapter for SipAdapter {
             .get(&conn)
             .map(|entry| Arc::clone(entry.value()))
         {
-            route.complete_activation(SipActivationCompletion::Failed(
-                SipActivationFailure::RouteEnded,
-            ));
+            route.complete_activation_failure(SipActivationFailure::RouteEnded);
             begin_outbound_cleanup(
                 self.self_weak.clone(),
                 Arc::clone(&self.coordinator),
@@ -2352,9 +3131,7 @@ impl ConnectionAdapter for SipAdapter {
             .get(&conn)
             .map(|entry| Arc::clone(entry.value()))
         {
-            route.complete_activation(SipActivationCompletion::Failed(
-                SipActivationFailure::RouteEnded,
-            ));
+            route.complete_activation_failure(SipActivationFailure::RouteEnded);
             begin_outbound_cleanup(
                 self.self_weak.clone(),
                 Arc::clone(&self.coordinator),
@@ -2807,6 +3584,92 @@ mod inbound_context_tests {
             .shutdown_gracefully(Some(Duration::from_secs(1)))
             .await
             .expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn explicit_drain_is_phase_aware_and_joins_every_retained_task() {
+        let capture = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("capture socket");
+        let target = capture.local_addr().expect("capture address");
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("adapter-drain", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        assert_eq!(coordinator.inbound_invite_observer_count(), 1);
+
+        let request = OriginateRequest::new(
+            CoreSessionId::new(),
+            ParticipantId::new(),
+            format!("sip:target@{target}"),
+            Direction::Outbound,
+            CapabilityDescriptor::default(),
+        )
+        .with_transport(Transport::Sip);
+        ConnectionAdapter::originate(adapter.as_ref(), request)
+            .await
+            .expect("prepared outbound route");
+
+        let inbound_session = SessionId::new();
+        coordinator
+            .helpers
+            .create_session(
+                inbound_session.clone(),
+                "sip:bridge@example.test".into(),
+                "sip:caller@example.test".into(),
+                Role::UAS,
+            )
+            .await
+            .expect("inbound session");
+        let mut inbound_state = coordinator
+            .session_state(&inbound_session)
+            .await
+            .expect("inbound state");
+        inbound_state.call_state = CallState::Active;
+        coordinator
+            .update_session_state(inbound_state)
+            .await
+            .expect("active inbound state");
+        adapter
+            .ensure_mapped_epoch(inbound_session)
+            .expect("inbound mapping");
+
+        adapter.drain().await.expect("explicit adapter drain");
+        assert!(adapter.is_draining());
+        assert_eq!(adapter.retained_task_count(), 0);
+        assert_eq!(coordinator.inbound_invite_observer_count(), 0);
+        assert!(adapter.by_connection.is_empty());
+        assert!(adapter.by_session.is_empty());
+        assert!(adapter.outbound_routes.is_empty());
+        assert!(adapter.streams_cache.is_empty());
+        assert!(coordinator.list_sessions().await.is_empty());
+        assert!(adapter.drain().await.is_ok(), "drain is idempotent");
+
+        let mut packet = [0u8; 2_048];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), capture.recv_from(&mut packet))
+                .await
+                .is_err(),
+            "a prepared outbound route remains zero-wire during drain"
+        );
+        assert!(matches!(
+            ConnectionAdapter::originate(
+                adapter.as_ref(),
+                OriginateRequest::new(
+                    CoreSessionId::new(),
+                    ParticipantId::new(),
+                    format!("sip:target@{target}"),
+                    Direction::Outbound,
+                    CapabilityDescriptor::default(),
+                )
+                .with_transport(Transport::Sip),
+            )
+            .await,
+            Err(RvoipError::AdmissionRejected(_))
+        ));
+        adapter.shutdown().await.expect("coordinator shutdown");
     }
 
     #[tokio::test]
@@ -3593,55 +4456,83 @@ mod inbound_context_tests {
     }
 
     #[tokio::test]
-    async fn tombstone_saturation_fails_closed_and_late_events_never_remap() {
-        let coordinator = UnifiedCoordinator::new(ApiConfig::local("tombstone-saturation", 0))
+    async fn retired_epochs_expire_under_churn_and_stale_generations_are_inert() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("tombstone-churn", 0))
             .await
             .expect("coordinator");
         let adapter = SipAdapter::new(Arc::clone(&coordinator))
             .await
             .expect("adapter");
         adapter
-            .configure_lifecycle_limits(2, 1)
+            .configure_lifecycle_limits(2, 2)
             .expect("configure before admission");
         let mut events = adapter
             .try_subscribe_atomic_events()
             .expect("atomic events");
 
-        let first = SessionId::new();
-        let first_connection = adapter.ensure_mapped(first.clone()).expect("first mapping");
-        adapter.forget(&first);
-        assert!(adapter.retired_sessions.contains_key(&first));
-
-        let saturated = SessionId::new();
-        let saturated_connection = adapter
-            .ensure_mapped(saturated.clone())
-            .expect("mapping before tombstone saturation");
-        adapter.forget(&saturated);
-        assert!(adapter.lifecycle_admission_poisoned.load(Ordering::Acquire));
-        assert!(!adapter.retired_sessions.contains_key(&saturated));
-
-        assert!(adapter.ensure_mapped(first.clone()).is_none());
-        assert!(adapter.ensure_mapped(saturated.clone()).is_none());
+        let reused_session = SessionId::new();
+        let first_epoch = adapter
+            .ensure_mapped_epoch(reused_session.clone())
+            .expect("first generation");
+        assert!(adapter.forget_epoch(&first_epoch));
+        let second_epoch = adapter
+            .ensure_mapped_epoch(SessionId::new())
+            .expect("second tombstone slot");
+        assert!(adapter.forget_epoch(&second_epoch));
+        assert_eq!(adapter.retired_sessions.len(), 2);
         assert!(adapter.ensure_mapped(SessionId::new()).is_none());
-        assert!(!adapter.by_connection.contains_key(&first_connection));
-        assert!(!adapter.by_connection.contains_key(&saturated_connection));
 
-        adapter
-            .translate_api_event(ApiEvent::CallAnswered {
-                call_id: saturated,
-                sdp: None,
-            })
-            .await;
+        for _ in 0..128 {
+            assert_eq!(adapter.expire_retired_sessions_for_test(), 2);
+            assert!(adapter.retired_sessions.is_empty());
+            for _ in 0..2 {
+                let epoch = adapter
+                    .ensure_mapped_epoch(SessionId::new())
+                    .expect("capacity recovers after expiry");
+                assert!(adapter.forget_epoch(&epoch));
+            }
+            assert_eq!(adapter.retired_sessions.len(), 2);
+            assert!(adapter.retired_session_order.lock().unwrap().len() <= 2);
+            assert!(adapter.ensure_mapped(SessionId::new()).is_none());
+        }
+
+        assert_eq!(adapter.expire_retired_sessions_for_test(), 2);
+        let current_epoch = adapter
+            .ensure_mapped_epoch(reused_session)
+            .expect("same Session ID may be reused after the retirement horizon");
+        assert!(current_epoch.generation > first_epoch.generation);
+        assert!(adapter.try_send_for_epoch(
+            &first_epoch,
+            AdapterEvent::Connected {
+                connection_id: first_epoch.connection_id.clone(),
+            },
+        ));
+        assert!(!adapter.forget_epoch(&first_epoch));
         assert!(matches!(
             events.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
+        let retained_epoch = {
+            let _mapping = adapter.mapping_lock.lock().unwrap();
+            adapter
+                .route_epoch_for_connection_locked(&current_epoch.connection_id)
+                .expect("stale retirement cannot remove current generation")
+        };
+        assert_eq!(retained_epoch, current_epoch);
+        assert!(adapter.try_send_for_epoch(
+            &current_epoch,
+            AdapterEvent::Connected {
+                connection_id: current_epoch.connection_id.clone(),
+            },
+        ));
+        assert!(matches!(
+            events.recv().await,
+            Some(OrchestratorAdapterEvent::Public(AdapterEvent::Connected { connection_id }))
+                if connection_id == current_epoch.connection_id
+        ));
+        assert!(adapter.forget_epoch(&current_epoch));
 
-        drop(adapter);
-        coordinator
-            .shutdown_gracefully(Some(Duration::from_secs(1)))
-            .await
-            .expect("shutdown");
+        adapter.shutdown().await.expect("adapter shutdown");
     }
 
     #[tokio::test]
@@ -3795,16 +4686,29 @@ mod inbound_context_tests {
         }
         let reference =
             ExternalConnectionReference::new("sip.call-id", "one@example.test").expect("reference");
-        route.complete_activation(SipActivationCompletion::Succeeded(
-            OutboundActivation::with_external_reference(reference),
-        ));
+        route
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .phase = SipOutboundRoutePhase::Active;
+        assert!(route
+            .complete_activation_success(OutboundActivation::with_external_reference(reference,)));
         for waiter in waiters {
             assert!(waiter.await.expect("activation waiter").is_ok());
         }
     }
 
     #[tokio::test]
-    async fn fast_terminal_is_separate_from_public_fifo_and_survives_overflow() {
+    async fn fast_terminal_fails_every_waiter_before_any_activation_receipt() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("fast-terminal", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let mut events = adapter
+            .try_subscribe_atomic_events()
+            .expect("atomic events");
         let connection_id = ConnectionId::new();
         let route = SipOutboundRoute::new(
             connection_id.clone(),
@@ -3813,6 +4717,22 @@ mod inbound_context_tests {
             Arc::new(SipOriginateContext::default()),
             crate::media_stream::SipMediaStream::dormant(Direction::Outbound),
         );
+        adapter
+            .reserve_outbound_route(Arc::clone(&route))
+            .expect("route reservation");
+        let epoch = SipRouteEpoch {
+            session_id: route.session_id.clone(),
+            connection_id: connection_id.clone(),
+            generation: route.generation().expect("assigned generation"),
+        };
+        assert!(route.claim_activation().expect("activation claim"));
+        let mut waiters = Vec::new();
+        for _ in 0..100 {
+            let waiter_route = Arc::clone(&route);
+            waiters.push(tokio::spawn(
+                async move { waiter_route.wait_activation().await },
+            ));
+        }
         for _ in 0..SIP_OUTBOUND_EVENT_STAGE_CAPACITY {
             assert_eq!(
                 route.stage_event(AdapterEvent::Connected {
@@ -3829,23 +4749,31 @@ mod inbound_context_tests {
             }),
             SipRouteStageDisposition::Retained
         );
-        assert_eq!(
-            route.stage_event(AdapterEvent::Ended {
-                connection_id: connection_id.clone(),
-                reason: EndReason::Normal,
-            }),
-            SipRouteStageDisposition::Retained
-        );
-        assert!(matches!(
-            route.claim_activation(),
-            Err(SipActivationFailure::EventOverflow)
-        ));
-        route.request_cleanup(None);
+        adapter
+            .deliver_terminal_for_epoch(
+                &epoch,
+                AdapterEvent::Ended {
+                    connection_id: connection_id.clone(),
+                    reason: EndReason::Normal,
+                },
+                "test-fast-terminal",
+            )
+            .await;
         assert!(!route.is_publicly_live());
+        let reference = ExternalConnectionReference::new("sip.call-id", "too-late@example.test")
+            .expect("reference");
+        assert!(!route
+            .complete_activation_success(OutboundActivation::with_external_reference(reference)));
+        for waiter in waiters {
+            assert!(waiter.await.expect("activation waiter").is_err());
+        }
+        route.wait_cleanup().await.expect("zero-wire cleanup");
         assert!(matches!(
-            route.seal_cleanup_event(),
-            Some(AdapterEvent::Ended { connection_id: id, .. }) if id == connection_id
+            events.recv().await,
+            Some(OrchestratorAdapterEvent::Public(AdapterEvent::Ended { connection_id: id, .. }))
+                if id == connection_id
         ));
+        adapter.shutdown().await.expect("adapter shutdown");
     }
 
     #[tokio::test]
