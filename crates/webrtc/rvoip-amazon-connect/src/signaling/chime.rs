@@ -27,7 +27,7 @@
 //! > schema. The wire format (one protobuf `SdkSignalFrame` per binary message)
 //! > is stable; the URL/credential wiring is the piece to confirm against a
 //! > live Amazon Connect instance (feature `aws-live`). All such wiring is
-//! > localized to [`build_signaling_url`] and [`ChimeJoin::subscribe`].
+//! > localized to `build_signaling_url` and [`ChimeJoin::subscribe`].
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -160,10 +160,9 @@ pub fn frame_to_base64(frame: &SdkSignalFrame) -> String {
     base64::engine::general_purpose::STANDARD.encode(buf)
 }
 
-/// The signaling URL for logging. The join token is sent as a WebSocket
-/// subprotocol (not in the URL), so the URL is already safe to log as-is.
-pub fn redacted_signaling_url(signaling_url: &str, _join_token: &str) -> String {
-    build_signaling_url(signaling_url)
+/// Value-free signaling endpoint diagnostic.
+pub fn redacted_signaling_url(_signaling_url: &str, _join_token: &str) -> String {
+    "[redacted-signaling-url]".to_owned()
 }
 
 /// Encode and send one signal frame as a binary WebSocket message, with the
@@ -174,13 +173,13 @@ async fn send_frame(ws: &mut Ws, frame: &SdkSignalFrame) -> Result<()> {
     frame
         .encode(&mut buf)
         .map_err(|e| ConnectError::Signaling(format!("encode frame: {e}")))?;
-    // Wire trace for the protocol-oracle diff loop: enable with
-    // `RUST_LOG=rvoip_amazon_connect::chime_wire=trace`.
+    // Wire diagnostics expose shape only. Use the explicit chime-decode/probe
+    // tooling with owner-controlled captures when byte dumps are required.
     tracing::trace!(
         target: "rvoip_amazon_connect::chime_wire",
         direction = "tx",
         frame_type = frame.r#type,
-        b64 = %{ use base64::Engine as _; base64::engine::general_purpose::STANDARD.encode(&buf) },
+        encoded_bytes = buf.len(),
         "chime signal frame sent"
     );
     ws.send(WsMessage::Binary(buf.into()))
@@ -466,7 +465,7 @@ fn spawn_session_loop(
                                     tracing::warn!(
                                         target: "rvoip_amazon_connect",
                                         status = ?err.status,
-                                        description = %err.description.clone().unwrap_or_default(),
+                                        description_present = err.description.is_some(),
                                         "chime signaling server error frame"
                                     );
                                     let _ = ws.close(None).await;
@@ -626,6 +625,10 @@ mod tests {
             "wss://signal.example.com/control/m1?X-Chime-Control-Protocol-Version=3&X-Amzn-Chime-Send-Close-On-Error=1"
         );
         assert!(!url.contains("tok"));
+        assert_eq!(
+            redacted_signaling_url("wss://signal-secret", "join-token-secret"),
+            "[redacted-signaling-url]"
+        );
     }
 
     #[test]

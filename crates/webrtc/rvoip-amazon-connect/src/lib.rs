@@ -25,6 +25,7 @@ pub mod config;
 pub mod control;
 pub mod errors;
 pub mod mapping;
+pub mod originate;
 pub mod signaling;
 
 #[cfg(feature = "server")]
@@ -33,15 +34,21 @@ pub mod bridge;
 pub mod server;
 
 pub use adapter::{
-    AmazonConnectAdapter, ConnectMetrics, ContactSetupObserver, ContactSetupStage, ContactTarget,
-    ADAPTER_EVENT_CAP,
+    AmazonConnectAdapter, AmazonConnectAdapterBuilder, ConnectMetrics, ConnectProfileResolverError,
+    ContactSetupObserver, ContactSetupStage, ContactTarget, ADAPTER_EVENT_CAP,
 };
 pub use config::ConnectConfig;
 pub use control::{
     ConnectContactStarter, ConnectionData, MediaPlacement, StartContactRequest, StopContactRequest,
 };
-pub use errors::{ConnectError, Result};
+pub use errors::{ConnectError, ConnectErrorClass, Result};
 pub use mapping::{AttributeMapping, MappedAttributes, UnmappedPolicy, MAX_ATTRIBUTE_BYTES};
+pub use originate::{
+    AmazonConnectOriginateContext, AmazonConnectOriginateContextError, AmazonConnectTarget,
+    ConnectClientToken, ConnectProfileId, DEFAULT_CONNECT_PROFILE_ID, MAX_CONNECT_ATTRIBUTE_COUNT,
+    MAX_CONNECT_ATTRIBUTE_KEY_BYTES, MAX_CONNECT_CLIENT_TOKEN_BYTES, MAX_CONNECT_DESCRIPTION_BYTES,
+    MAX_CONNECT_DISPLAY_NAME_BYTES, MAX_CONNECT_PROFILE_ID_BYTES, MAX_CONNECT_RESOURCE_ID_BYTES,
+};
 
 #[cfg(feature = "aws-control")]
 pub use control::AwsConnectStarter;

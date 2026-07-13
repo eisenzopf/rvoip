@@ -98,20 +98,17 @@ async fn run(
         .await
         .map_err(|e| format!("Stage A (StartWebRTCContact): {e}"))?;
 
-    let signaling_host = url::Url::parse(&conn.media_placement.signaling_url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_string))
-        .unwrap_or_else(|| "?".into());
     println!(
-        "   contact_id={} meeting_id={} attendee_id={} region={}",
-        conn.contact_id, conn.meeting_id, conn.attendee_id, conn.media_region
+        "   response validated: contact={} meeting={} attendee={} region={}",
+        !conn.contact_id.is_empty(),
+        !conn.meeting_id.is_empty(),
+        !conn.attendee_id.is_empty(),
+        !conn.media_region.is_empty()
     );
     println!(
-        "   signaling_host={signaling_host} turn_control_url={}",
-        conn.media_placement
-            .turn_control_url
-            .as_deref()
-            .unwrap_or("none")
+        "   endpoints: signaling={} turn_control={}",
+        !conn.media_placement.signaling_url.is_empty(),
+        conn.media_placement.turn_control_url.is_some()
     );
     if dump_frames {
         println!(
@@ -149,9 +146,7 @@ async fn run_media(
     if ice.is_empty() {
         println!("   ⚠ JOIN_ACK returned no TURN credentials (relay may be unavailable)");
     } else {
-        for s in &ice {
-            println!("   TURN: {:?} (user={:?})", s.urls, s.username);
-        }
+        println!("   TURN server count: {}", ice.len());
     }
     pass("B");
 

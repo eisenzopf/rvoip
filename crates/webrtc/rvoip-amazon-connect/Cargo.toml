@@ -48,6 +48,7 @@ tracing.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 url = "2"
+zeroize.workspace = true
 
 # Chime signaling: protobuf-over-secure-WebSocket.
 prost = "0.13"

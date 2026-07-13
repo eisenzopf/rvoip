@@ -5,9 +5,11 @@
 //! runs the full control + signaling + media establishment and returns a
 //! connected [`ConnectionId`] ready to be bridged to the inbound leg via
 //! `Orchestrator::bridge_connections`. The generic [`ConnectionAdapter::originate`]
-//! delegates to it with no attributes.
+//! now admits only an exact typed context and remains I/O-dormant until the
+//! staged lifecycle lands; the legacy wrapper remains behavior-compatible.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,7 +25,7 @@ use rvoip_core::adapter::{
     RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
-use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
+use rvoip_core::connection::Transport;
 use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
@@ -36,6 +38,7 @@ use rvoip_webrtc::{PeerRole, RvoipPeerConnection, WebRtcConfig};
 use crate::config::ConnectConfig;
 use crate::control::{ConnectContactStarter, StartContactRequest, StopContactRequest};
 use crate::errors::ConnectError;
+use crate::originate::{AmazonConnectOriginateContext, ConnectProfileId};
 use crate::signaling::ChimeSignalingClient;
 
 /// Event channel depth (mirrors rvoip-webrtc's `ADAPTER_EVENT_CAP`).
@@ -47,7 +50,7 @@ pub const ADAPTER_EVENT_CAP: usize = 256;
 /// default-constructed target reproduces the classic single-target behaviour.
 /// This is the multi-tenant hook: one adapter (one credential chain, one
 /// region) can place contacts into different Connect instances/flows per call.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct ContactTarget {
     /// Amazon Connect instance id override.
     pub instance_id: Option<String>,
@@ -56,6 +59,20 @@ pub struct ContactTarget {
     /// Display-name fallback override, used when the caller supplies no
     /// per-call display name.
     pub default_display_name: Option<String>,
+}
+
+impl fmt::Debug for ContactTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ContactTarget")
+            .field("instance_id_present", &self.instance_id.is_some())
+            .field("contact_flow_id_present", &self.contact_flow_id.is_some())
+            .field(
+                "default_display_name_present",
+                &self.default_display_name.is_some(),
+            )
+            .finish()
+    }
 }
 
 /// One active Amazon Connect contact: the Chime peer connection, its signaling
@@ -69,10 +86,10 @@ struct Route {
     negotiated: NegotiatedCodecs,
     cancel: Arc<Notify>,
     failed_at: Arc<SyncMutex<Option<Instant>>>,
-    /// Amazon Connect contact id (for correlation / logging).
-    contact_id: String,
     /// Control-plane ownership retained until teardown.
     stop_request: StopContactRequest,
+    /// Exact account/region starter selected for both Start and Stop.
+    starter: Arc<dyn ConnectContactStarter>,
     cleanup_permit: Arc<OwnedSemaphorePermit>,
 }
 
@@ -80,10 +97,36 @@ const MAX_OWNED_CONTACT_CLEANUPS: usize = 4_096;
 
 struct PendingCleanupRecord {
     request: StopContactRequest,
+    starter: Arc<dyn ConnectContactStarter>,
     _permit: Arc<OwnedSemaphorePermit>,
 }
 
-type PendingCleanupMap = Arc<DashMap<String, PendingCleanupRecord>>;
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct PendingCleanupKey {
+    instance_id: String,
+    contact_id: String,
+}
+
+impl PendingCleanupKey {
+    fn from_request(request: &StopContactRequest) -> Self {
+        Self {
+            instance_id: request.instance_id.clone(),
+            contact_id: request.contact_id.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for PendingCleanupKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PendingCleanupKey")
+            .field("instance_id", &"[redacted]")
+            .field("contact_id", &"[redacted]")
+            .finish()
+    }
+}
+
+type PendingCleanupMap = Arc<DashMap<PendingCleanupKey, PendingCleanupRecord>>;
 
 /// Observable milestones inside the adapter's control/media setup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,9 +181,10 @@ impl StartedContactGuard {
             Ok(()) => Ok(()),
             Err(error) => {
                 self.pending.insert(
-                    request.contact_id.clone(),
+                    PendingCleanupKey::from_request(&request),
                     PendingCleanupRecord {
                         request,
+                        starter: Arc::clone(&self.starter),
                         _permit: Arc::clone(&self.permit),
                     },
                 );
@@ -159,8 +203,8 @@ async fn stop_contact_with_retry(
     for attempt in 1..=STOP_CONTACT_ATTEMPTS {
         match starter.stop_contact(request.clone()).await {
             Ok(()) => return Ok(()),
-            Err(ConnectError::TransientControl(detail)) if attempt < STOP_CONTACT_ATTEMPTS => {
-                warn!(attempt, %detail, "transient StopContact failure; retrying");
+            Err(error) if error.is_retryable() && attempt < STOP_CONTACT_ATTEMPTS => {
+                warn!(attempt, error_class = ?error.classification(), "transient StopContact failure; retrying");
                 tokio::time::sleep(Duration::from_millis(10 * attempt as u64)).await;
             }
             Err(error) => return Err(error),
@@ -183,9 +227,10 @@ impl Drop for StartedContactGuard {
             runtime.spawn(async move {
                 if let Err(error) = stop_contact_with_retry(&starter, request.clone()).await {
                     pending.insert(
-                        request.contact_id.clone(),
+                        PendingCleanupKey::from_request(&request),
                         PendingCleanupRecord {
                             request,
+                            starter,
                             _permit: permit,
                         },
                     );
@@ -194,16 +239,14 @@ impl Drop for StartedContactGuard {
             });
         } else {
             pending.insert(
-                request.contact_id.clone(),
+                PendingCleanupKey::from_request(&request),
                 PendingCleanupRecord {
                     request: request.clone(),
+                    starter: Arc::clone(&self.starter),
                     _permit: permit,
                 },
             );
-            warn!(
-                contact_id = %request.contact_id,
-                "cannot stop Connect contact: no Tokio runtime during cleanup"
-            );
+            warn!("cannot stop Connect contact: no Tokio runtime during cleanup");
         }
     }
 }
@@ -216,6 +259,84 @@ pub struct ConnectMetrics {
     pub failures: u64,
 }
 
+const MAX_CONNECT_PROFILES: usize = 128;
+
+/// Safe profile-registry construction failure.
+#[derive(Clone, Copy, Debug, Eq, thiserror::Error, PartialEq)]
+#[non_exhaustive]
+pub enum ConnectProfileResolverError {
+    /// The same configured profile ID was registered more than once.
+    #[error("duplicate Amazon Connect profile")]
+    DuplicateProfile,
+    /// The adapter's defensive profile cardinality bound was exceeded.
+    #[error("too many Amazon Connect profiles")]
+    TooManyProfiles,
+}
+
+/// Builder for one profile-resolving adapter.
+///
+/// `new` installs the supplied legacy starter under the non-secret `default`
+/// profile as well as retaining it for the frozen `originate_contact*` path.
+pub struct AmazonConnectAdapterBuilder {
+    config: ConnectConfig,
+    legacy_starter: Arc<dyn ConnectContactStarter>,
+    profiles: BTreeMap<ConnectProfileId, Arc<dyn ConnectContactStarter>>,
+}
+
+impl AmazonConnectAdapterBuilder {
+    /// Begin with the source-compatible legacy/default starter.
+    pub fn new(config: ConnectConfig, starter: Arc<dyn ConnectContactStarter>) -> Self {
+        let mut profiles = BTreeMap::new();
+        profiles.insert(ConnectProfileId::default(), Arc::clone(&starter));
+        Self {
+            config,
+            legacy_starter: starter,
+            profiles,
+        }
+    }
+
+    /// Register another exact profile. Duplicate IDs fail closed rather than
+    /// silently replacing an account/region client.
+    pub fn register_profile(
+        &mut self,
+        profile_id: ConnectProfileId,
+        starter: Arc<dyn ConnectContactStarter>,
+    ) -> Result<&mut Self, ConnectProfileResolverError> {
+        if self.profiles.contains_key(&profile_id) {
+            return Err(ConnectProfileResolverError::DuplicateProfile);
+        }
+        if self.profiles.len() >= MAX_CONNECT_PROFILES {
+            return Err(ConnectProfileResolverError::TooManyProfiles);
+        }
+        self.profiles.insert(profile_id, starter);
+        Ok(self)
+    }
+
+    /// Consuming builder-style profile registration.
+    pub fn with_profile(
+        mut self,
+        profile_id: ConnectProfileId,
+        starter: Arc<dyn ConnectContactStarter>,
+    ) -> Result<Self, ConnectProfileResolverError> {
+        self.register_profile(profile_id, starter)?;
+        Ok(self)
+    }
+
+    /// Build one adapter with a single profile resolver.
+    pub fn build(self) -> Arc<AmazonConnectAdapter> {
+        AmazonConnectAdapter::from_parts(self.config, self.legacy_starter, self.profiles)
+    }
+}
+
+impl fmt::Debug for AmazonConnectAdapterBuilder {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AmazonConnectAdapterBuilder")
+            .field("profile_count", &self.profiles.len())
+            .finish()
+    }
+}
+
 /// Amazon Connect interop adapter.
 pub struct AmazonConnectAdapter {
     config: ConnectConfig,
@@ -223,6 +344,7 @@ pub struct AmazonConnectAdapter {
     /// the Chime JOIN_ACK TURN credentials).
     webrtc: WebRtcConfig,
     starter: Arc<dyn ConnectContactStarter>,
+    profiles: BTreeMap<ConnectProfileId, Arc<dyn ConnectContactStarter>>,
     routes: Arc<DashMap<ConnectionId, Route>>,
     events_tx: mpsc::Sender<AdapterEvent>,
     events_rx: SyncMutex<Option<mpsc::Receiver<AdapterEvent>>>,
@@ -238,6 +360,22 @@ impl AmazonConnectAdapter {
     /// Use [`crate::control::AwsConnectStarter`] (feature `aws-control`) for the
     /// real AWS path, or a mock for tests.
     pub fn new(config: ConnectConfig, starter: Arc<dyn ConnectContactStarter>) -> Arc<Self> {
+        AmazonConnectAdapterBuilder::new(config, starter).build()
+    }
+
+    /// Build one adapter with multiple non-secret profile mappings.
+    pub fn builder(
+        config: ConnectConfig,
+        starter: Arc<dyn ConnectContactStarter>,
+    ) -> AmazonConnectAdapterBuilder {
+        AmazonConnectAdapterBuilder::new(config, starter)
+    }
+
+    fn from_parts(
+        config: ConnectConfig,
+        starter: Arc<dyn ConnectContactStarter>,
+        profiles: BTreeMap<ConnectProfileId, Arc<dyn ConnectContactStarter>>,
+    ) -> Arc<Self> {
         let (events_tx, events_rx) = mpsc::channel(ADAPTER_EVENT_CAP);
         // Full-gather (trickle off) so the SUBSCRIBE frame carries a complete
         // SDP offer — Chime's signaling expects the offer inline.
@@ -249,6 +387,7 @@ impl AmazonConnectAdapter {
             config,
             webrtc,
             starter,
+            profiles,
             routes: Arc::new(DashMap::new()),
             events_tx,
             events_rx: SyncMutex::new(Some(events_rx)),
@@ -257,6 +396,48 @@ impl AmazonConnectAdapter {
             cleanup_slots: Arc::new(Semaphore::new(MAX_OWNED_CONTACT_CLEANUPS)),
             pending_cleanups: Arc::new(DashMap::new()),
         })
+    }
+
+    /// Number of configured account/region profiles. Profile IDs are omitted
+    /// to avoid accidental high-cardinality diagnostics.
+    pub fn configured_profile_count(&self) -> usize {
+        self.profiles.len()
+    }
+
+    fn resolve_profile(
+        &self,
+        profile_id: &ConnectProfileId,
+    ) -> Option<Arc<dyn ConnectContactStarter>> {
+        self.profiles.get(profile_id).map(Arc::clone)
+    }
+
+    fn resolve_generic_context(
+        &self,
+        request: &OriginateRequest,
+    ) -> RvoipResult<(
+        Arc<AmazonConnectOriginateContext>,
+        Arc<dyn ConnectContactStarter>,
+    )> {
+        if request.context.is_empty() {
+            return Err(RvoipError::AdmissionRejected(
+                "Amazon Connect originate context is required",
+            ));
+        }
+        let context = request
+            .context
+            .downcast_arc::<AmazonConnectOriginateContext>()
+            .ok_or(RvoipError::AdmissionRejected(
+                "Amazon Connect originate context type mismatch",
+            ))?;
+        context.validate().map_err(|_| {
+            RvoipError::AdmissionRejected("Amazon Connect originate context failed validation")
+        })?;
+        let starter =
+            self.resolve_profile(context.profile_id())
+                .ok_or(RvoipError::AdmissionRejected(
+                    "Amazon Connect profile is not configured",
+                ))?;
+        Ok((context, starter))
     }
 
     /// Override the WebRTC peer/media configuration (builder-style). ICE
@@ -304,15 +485,45 @@ impl AmazonConnectAdapter {
     /// `false` when no pending ownership exists. The record and its bounded
     /// capacity permit are removed only after success/already-ended.
     pub async fn retry_pending_cleanup(&self, contact_id: &str) -> crate::errors::Result<bool> {
-        let Some(request) = self
+        let mut matches = self
             .pending_cleanups
-            .get(contact_id)
-            .map(|record| record.request.clone())
+            .iter()
+            .filter(|record| record.key().contact_id == contact_id)
+            .map(|record| record.key().clone());
+        let Some(key) = matches.next() else {
+            return Ok(false);
+        };
+        if matches.next().is_some() {
+            return Err(ConnectError::Control(
+                "pending cleanup contact is ambiguous across Connect instances".into(),
+            ));
+        }
+        drop(matches);
+        self.retry_pending_cleanup_for(&key.instance_id, &key.contact_id)
+            .await
+    }
+
+    /// Retry one retained StopContact operation using its exact instance and
+    /// contact identity. This avoids cross-account ambiguity when two profiles
+    /// return the same instance-scoped contact identifier.
+    pub async fn retry_pending_cleanup_for(
+        &self,
+        instance_id: &str,
+        contact_id: &str,
+    ) -> crate::errors::Result<bool> {
+        let key = PendingCleanupKey {
+            instance_id: instance_id.to_owned(),
+            contact_id: contact_id.to_owned(),
+        };
+        let Some((request, starter)) = self
+            .pending_cleanups
+            .get(&key)
+            .map(|record| (record.request.clone(), Arc::clone(&record.starter)))
         else {
             return Ok(false);
         };
-        stop_contact_with_retry(&self.starter, request).await?;
-        self.pending_cleanups.remove(contact_id);
+        stop_contact_with_retry(&starter, request).await?;
+        self.pending_cleanups.remove(&key);
         Ok(true)
     }
 
@@ -388,7 +599,14 @@ impl AmazonConnectAdapter {
         observer: Option<ContactSetupObserver>,
     ) -> crate::errors::Result<(ConnectionId, NegotiatedCodecs)> {
         match self
-            .establish_inner(target, attributes, display_name, description, observer)
+            .establish_inner(
+                Arc::clone(&self.starter),
+                target,
+                attributes,
+                display_name,
+                description,
+                observer,
+            )
             .await
         {
             Ok(ok) => Ok(ok),
@@ -401,6 +619,7 @@ impl AmazonConnectAdapter {
 
     async fn establish_inner(
         &self,
+        starter: Arc<dyn ConnectContactStarter>,
         target: ContactTarget,
         attributes: BTreeMap<String, String>,
         display_name: Option<String>,
@@ -430,10 +649,14 @@ impl AmazonConnectAdapter {
             client_token: None,
         };
         let instance_id = request.instance_id.clone();
-        let connection_data = self.starter.start_webrtc_contact(request).await?;
+        let mut connection_data = starter.start_webrtc_contact(request).await?;
         self.contacts_started.fetch_add(1, Ordering::Relaxed);
+        if let Err(error) = connection_data.validate_cleanup_identity() {
+            connection_data.zeroize_sensitive();
+            return Err(error);
+        }
         let mut cleanup = StartedContactGuard::new(
-            Arc::clone(&self.starter),
+            Arc::clone(&starter),
             StopContactRequest {
                 instance_id,
                 contact_id: connection_data.contact_id.clone(),
@@ -441,14 +664,20 @@ impl AmazonConnectAdapter {
             Arc::clone(&cleanup_permit),
             Arc::clone(&self.pending_cleanups),
         );
+        if let Err(response_error) = connection_data.validate() {
+            let cleanup_result = cleanup.stop_now().await;
+            connection_data.zeroize_sensitive();
+            return match cleanup_result {
+                Ok(()) => Err(response_error),
+                Err(_) => Err(ConnectError::Control(
+                    "invalid Connect response and cleanup failed".into(),
+                )),
+            };
+        }
         if let Some(observer) = observer.as_ref() {
             observer(ContactSetupStage::ContactStarted);
         }
-        info!(
-            contact_id = %connection_data.contact_id,
-            meeting_id = %connection_data.meeting_id,
-            "started Amazon Connect WebRTC contact"
-        );
+        info!("started Amazon Connect WebRTC contact");
 
         let outcome = async {
             // 2. Chime signaling JOIN → JOIN_ACK (yields TURN credentials).
@@ -499,8 +728,8 @@ impl AmazonConnectAdapter {
                 negotiated: negotiated.clone(),
                 cancel: Arc::clone(&cancel),
                 failed_at: Arc::new(SyncMutex::new(None)),
-                contact_id: connection_data.contact_id.clone(),
                 stop_request,
+                starter,
                 cleanup_permit,
             };
             self.seed_media_stream(&conn_id, &route).await;
@@ -518,6 +747,7 @@ impl AmazonConnectAdapter {
             Ok((conn_id, negotiated))
         }
         .await;
+        connection_data.zeroize_sensitive();
 
         match outcome {
             Ok(success) => Ok(success),
@@ -653,18 +883,19 @@ impl AmazonConnectAdapter {
             }
             route.peer.close().await.ok();
             if let Err(error) =
-                stop_contact_with_retry(&self.starter, route.stop_request.clone()).await
+                stop_contact_with_retry(&route.starter, route.stop_request.clone()).await
             {
                 self.pending_cleanups.insert(
-                    route.stop_request.contact_id.clone(),
+                    PendingCleanupKey::from_request(&route.stop_request),
                     PendingCleanupRecord {
                         request: route.stop_request,
+                        starter: Arc::clone(&route.starter),
                         _permit: Arc::clone(&route.cleanup_permit),
                     },
                 );
                 return Err(error);
             }
-            info!(conn = %conn, contact_id = %route.contact_id, "ended Amazon Connect contact");
+            info!(conn = %conn, "ended Amazon Connect contact");
         }
         Ok(())
     }
@@ -680,37 +911,12 @@ impl ConnectionAdapter for AmazonConnectAdapter {
         AdapterKind::Interop
     }
 
-    #[instrument(skip(self, request), fields(instance = %self.config.instance_id))]
+    #[instrument(skip(self, request), fields(context_present = !request.context.is_empty()))]
     async fn originate(&self, request: OriginateRequest) -> RvoipResult<ConnectionHandle> {
-        let (conn_id, negotiated) = self
-            .establish(
-                ContactTarget::default(),
-                BTreeMap::new(),
-                None,
-                None,
-                request.session_id.clone(),
-                request.participant_id.clone(),
-                None,
-            )
-            .await
-            .map_err(RvoipError::from)?;
-
-        let connection = Connection {
-            id: conn_id,
-            session_id: request.session_id,
-            participant_id: request.participant_id,
-            transport: Transport::AmazonConnect,
-            direction: Direction::Outbound,
-            state: ConnectionState::Connected,
-            capabilities: self.webrtc.capabilities.clone(),
-            negotiated_codecs: negotiated,
-            streams: vec![],
-            messaging_enabled: false,
-            transport_handle: TransportHandle(Arc::new(())),
-            opened_at: chrono::Utc::now(),
-            closed_at: None,
-        };
-        Ok(ConnectionHandle::new(connection))
+        let (_context, _selected_starter) = self.resolve_generic_context(&request)?;
+        Err(RvoipError::NotImplemented(
+            "Amazon Connect staged outbound activation is not implemented",
+        ))
     }
 
     async fn accept(&self, _conn: ConnectionId) -> RvoipResult<()> {
@@ -832,6 +1038,10 @@ impl ConnectionAdapter for AmazonConnectAdapter {
 mod tests {
     use super::*;
     use crate::control::ConnectionData;
+    use crate::originate::{
+        AmazonConnectOriginateContext, AmazonConnectTarget, ConnectClientToken,
+    };
+    use rvoip_core::connection::Direction;
     use std::future::pending;
     use tokio::sync::oneshot;
 
@@ -849,6 +1059,140 @@ mod tests {
     struct RecoveringStopStarter {
         attempts: AtomicUsize,
         transient_failures_remaining: AtomicUsize,
+    }
+
+    #[derive(Default)]
+    struct CountingStarter {
+        starts: AtomicUsize,
+        stops: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ConnectContactStarter for CountingStarter {
+        async fn start_webrtc_contact(
+            &self,
+            _request: StartContactRequest,
+        ) -> crate::errors::Result<ConnectionData> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            Err(ConnectError::Control("unexpected test I/O".into()))
+        }
+
+        async fn stop_contact(&self, _request: StopContactRequest) -> crate::errors::Result<()> {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn typed_context(profile_id: ConnectProfileId) -> AmazonConnectOriginateContext {
+        AmazonConnectOriginateContext::new(
+            profile_id,
+            AmazonConnectTarget::new("instance", "flow").unwrap(),
+            BTreeMap::new(),
+            "display",
+            None,
+            ConnectClientToken::new("stable-token").unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn generic_request() -> OriginateRequest {
+        OriginateRequest::new(
+            SessionId::new(),
+            ParticipantId::new(),
+            "typed-context-owned-target",
+            Direction::Outbound,
+            CapabilityDescriptor::default(),
+        )
+        .with_transport(Transport::AmazonConnect)
+    }
+
+    #[tokio::test]
+    async fn generic_originate_requires_exact_context_before_any_io() {
+        let starter = Arc::new(CountingStarter::default());
+        let adapter = AmazonConnectAdapter::new(
+            ConnectConfig::new("legacy-instance", "legacy-flow"),
+            starter.clone(),
+        );
+
+        let missing = adapter.originate(generic_request()).await.unwrap_err();
+        assert!(matches!(
+            missing,
+            RvoipError::AdmissionRejected("Amazon Connect originate context is required")
+        ));
+
+        let wrong = adapter
+            .originate(generic_request().with_context("wrong-context".to_owned()))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            wrong,
+            RvoipError::AdmissionRejected("Amazon Connect originate context type mismatch")
+        ));
+
+        let staged = adapter
+            .originate(generic_request().with_context(typed_context(ConnectProfileId::default())))
+            .await
+            .unwrap_err();
+        assert!(matches!(staged, RvoipError::NotImplemented(_)));
+        assert_eq!(starter.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(starter.stops.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.metrics().contacts_started, 0);
+        assert_eq!(adapter.metrics().active_sessions, 0);
+    }
+
+    #[tokio::test]
+    async fn profile_resolver_is_exact_isolated_and_io_dormant() {
+        let default = Arc::new(CountingStarter::default());
+        let tenant_a = Arc::new(CountingStarter::default());
+        let tenant_b = Arc::new(CountingStarter::default());
+        let profile_a = ConnectProfileId::new("tenant-a").unwrap();
+        let profile_b = ConnectProfileId::new("tenant-b").unwrap();
+        let mut builder = AmazonConnectAdapter::builder(
+            ConnectConfig::new("legacy-instance", "legacy-flow"),
+            default.clone(),
+        );
+        builder
+            .register_profile(profile_a.clone(), tenant_a.clone())
+            .unwrap()
+            .register_profile(profile_b.clone(), tenant_b.clone())
+            .unwrap();
+        let duplicate = builder
+            .register_profile(profile_a.clone(), Arc::new(CountingStarter::default()))
+            .unwrap_err();
+        assert_eq!(duplicate, ConnectProfileResolverError::DuplicateProfile);
+        let adapter = builder.build();
+        assert_eq!(adapter.configured_profile_count(), 3);
+
+        let resolved_a = adapter.resolve_profile(&profile_a).unwrap();
+        let resolved_b = adapter.resolve_profile(&profile_b).unwrap();
+        let tenant_a_trait: Arc<dyn ConnectContactStarter> = tenant_a.clone();
+        let tenant_b_trait: Arc<dyn ConnectContactStarter> = tenant_b.clone();
+        assert!(Arc::ptr_eq(&resolved_a, &tenant_a_trait));
+        assert!(Arc::ptr_eq(&resolved_b, &tenant_b_trait));
+        assert!(!Arc::ptr_eq(&resolved_a, &resolved_b));
+
+        for profile in [profile_a, profile_b] {
+            assert!(matches!(
+                adapter
+                    .originate(generic_request().with_context(typed_context(profile)))
+                    .await,
+                Err(RvoipError::NotImplemented(_))
+            ));
+        }
+        let unknown = adapter
+            .originate(generic_request().with_context(typed_context(
+                ConnectProfileId::new("not-configured").unwrap(),
+            )))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            unknown,
+            RvoipError::AdmissionRejected("Amazon Connect profile is not configured")
+        ));
+        for starter in [&default, &tenant_a, &tenant_b] {
+            assert_eq!(starter.starts.load(Ordering::SeqCst), 0);
+            assert_eq!(starter.stops.load(Ordering::SeqCst), 0);
+        }
     }
 
     #[async_trait]
@@ -970,6 +1314,7 @@ mod tests {
         assert_eq!(seen[0].instance_id, "inst-tenant");
         assert_eq!(seen[0].contact_flow_id, "flow-tenant");
         assert_eq!(seen[0].display_name, "tenant-name");
+        assert!(seen[0].client_token.is_none());
     }
 
     #[tokio::test]
@@ -982,6 +1327,7 @@ mod tests {
         assert_eq!(seen[0].instance_id, "inst-default");
         assert_eq!(seen[0].contact_flow_id, "flow-default");
         assert_eq!(seen[0].display_name, "config-default");
+        assert!(seen[0].client_token.is_none());
     }
 
     #[tokio::test]
@@ -1240,13 +1586,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_cleanup_identity_cannot_cross_profile_instances() {
+        let default = Arc::new(CountingStarter::default());
+        let profile_a = Arc::new(CountingStarter::default());
+        let profile_b = Arc::new(CountingStarter::default());
+        let adapter = AmazonConnectAdapter::new(
+            ConnectConfig::new("legacy-instance", "legacy-flow"),
+            default.clone(),
+        );
+        for (instance_id, starter) in [
+            (
+                "instance-a",
+                profile_a.clone() as Arc<dyn ConnectContactStarter>,
+            ),
+            (
+                "instance-b",
+                profile_b.clone() as Arc<dyn ConnectContactStarter>,
+            ),
+        ] {
+            let request = StopContactRequest {
+                instance_id: instance_id.into(),
+                contact_id: "same-contact".into(),
+            };
+            let permit = Arc::new(
+                Arc::clone(&adapter.cleanup_slots)
+                    .try_acquire_owned()
+                    .expect("cleanup capacity"),
+            );
+            adapter.pending_cleanups.insert(
+                PendingCleanupKey::from_request(&request),
+                PendingCleanupRecord {
+                    request,
+                    starter,
+                    _permit: permit,
+                },
+            );
+        }
+
+        assert!(adapter.retry_pending_cleanup("same-contact").await.is_err());
+        assert_eq!(profile_a.stops.load(Ordering::SeqCst), 0);
+        assert_eq!(profile_b.stops.load(Ordering::SeqCst), 0);
+        assert!(adapter
+            .retry_pending_cleanup_for("instance-a", "same-contact")
+            .await
+            .unwrap());
+        assert_eq!(profile_a.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(profile_b.stops.load(Ordering::SeqCst), 0);
+        assert!(adapter
+            .retry_pending_cleanup_for("instance-b", "same-contact")
+            .await
+            .unwrap());
+        assert_eq!(profile_b.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(default.stops.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.pending_cleanup_count(), 0);
+    }
+
+    #[tokio::test]
     async fn active_route_teardown_retains_failed_stop_until_retry_succeeds() {
+        let default_starter = Arc::new(CountingStarter::default());
         let starter = Arc::new(RecoveringStopStarter {
             attempts: AtomicUsize::new(0),
             transient_failures_remaining: AtomicUsize::new(STOP_CONTACT_ATTEMPTS),
         });
-        let adapter =
-            AmazonConnectAdapter::new(ConnectConfig::new("instance", "flow"), starter.clone());
+        let adapter = AmazonConnectAdapter::new(
+            ConnectConfig::new("instance", "flow"),
+            default_starter.clone(),
+        );
         let peer = RvoipPeerConnection::new(&WebRtcConfig::default(), PeerRole::Offerer)
             .await
             .expect("test peer");
@@ -1265,11 +1670,11 @@ mod tests {
                 negotiated: NegotiatedCodecs::default(),
                 cancel: Arc::new(Notify::new()),
                 failed_at: Arc::new(SyncMutex::new(None)),
-                contact_id: "active-pending-contact".into(),
                 stop_request: StopContactRequest {
                     instance_id: "instance".into(),
                     contact_id: "active-pending-contact".into(),
                 },
+                starter: starter.clone(),
                 cleanup_permit: permit,
             },
         );
@@ -1279,6 +1684,7 @@ mod tests {
             starter.attempts.load(Ordering::SeqCst),
             STOP_CONTACT_ATTEMPTS
         );
+        assert_eq!(default_starter.stops.load(Ordering::SeqCst), 0);
         assert_eq!(adapter.pending_cleanup_count(), 1);
 
         assert!(adapter
@@ -1289,6 +1695,7 @@ mod tests {
             starter.attempts.load(Ordering::SeqCst),
             STOP_CONTACT_ATTEMPTS + 1
         );
+        assert_eq!(default_starter.stops.load(Ordering::SeqCst), 0);
         assert_eq!(adapter.pending_cleanup_count(), 0);
     }
 

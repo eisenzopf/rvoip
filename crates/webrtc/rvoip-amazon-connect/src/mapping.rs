@@ -17,6 +17,7 @@
 //! reuse from application glue independent of the adapter.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 /// Amazon Connect's documented per-contact attribute byte budget (sum of all
 /// key + value byte lengths). See the `StartWebRTCContact` API reference.
@@ -34,7 +35,7 @@ pub enum UnmappedPolicy {
 }
 
 /// Configurable SIP-header → Connect-attribute translation.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AttributeMapping {
     /// Explicit header→attribute-key renames, applied case-insensitively on the
     /// SIP header name. Values are used verbatim as the Connect attribute key
@@ -46,6 +47,20 @@ pub struct AttributeMapping {
     pub passthrough_prefix: String,
     /// What to do with headers that are not in `rename`.
     pub unmapped: UnmappedPolicy,
+}
+
+impl fmt::Debug for AttributeMapping {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AttributeMapping")
+            .field("rename_count", &self.rename.len())
+            .field(
+                "passthrough_prefix_present",
+                &!self.passthrough_prefix.is_empty(),
+            )
+            .field("unmapped", &self.unmapped)
+            .finish()
+    }
 }
 
 impl Default for AttributeMapping {
@@ -60,7 +75,7 @@ impl Default for AttributeMapping {
 }
 
 /// Outcome of translating a header set.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct MappedAttributes {
     /// The Connect contact attributes (sanitized keys, within the byte cap).
     pub attributes: BTreeMap<String, String>,
@@ -69,6 +84,17 @@ pub struct MappedAttributes {
     /// Header names skipped because no rename matched and the unmapped policy
     /// was [`UnmappedPolicy::Drop`] (or the prefix did not match).
     pub skipped: Vec<String>,
+}
+
+impl fmt::Debug for MappedAttributes {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MappedAttributes")
+            .field("attribute_count", &self.attributes.len())
+            .field("dropped_for_size", &self.dropped_for_size)
+            .field("skipped_count", &self.skipped.len())
+            .finish()
+    }
 }
 
 impl AttributeMapping {
@@ -245,5 +271,20 @@ mod tests {
         assert_eq!(sanitize_key("X-Vapi.Customer Id"), "X-Vapi_Customer_Id");
         assert_eq!(sanitize_key("___weird@@key___"), "weird_key");
         assert_eq!(sanitize_key("clean-Key_1"), "clean-Key_1");
+    }
+
+    #[test]
+    fn mapping_diagnostics_never_render_headers_or_values() {
+        let mapping = AttributeMapping::default().rename("Authorization-secret", "customer-secret");
+        let mapped = MappedAttributes {
+            attributes: BTreeMap::from([("customer-secret".into(), "value-secret".into())]),
+            dropped_for_size: 0,
+            skipped: vec!["Authorization-secret".into()],
+        };
+        let diagnostic = format!("{mapping:?} {mapped:?}");
+        for secret in ["Authorization-secret", "customer-secret", "value-secret"] {
+            assert!(!diagnostic.contains(secret), "leaked {secret}");
+        }
+        assert!(diagnostic.contains("attribute_count: 1"));
     }
 }

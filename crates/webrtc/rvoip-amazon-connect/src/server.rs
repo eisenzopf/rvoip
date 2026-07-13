@@ -50,7 +50,7 @@ use crate::mapping::AttributeMapping;
 /// Every `None` field falls back to the server-wide [`ConnectConfig`] /
 /// [`AttributeMapping`], so a route only needs to carry what differs per
 /// tenant.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct ContactRoute {
     /// Metrics/logging label for this route (e.g. the tenant name). Keyed
     /// into [`ConnectScreenPopServer::route_metrics`].
@@ -63,6 +63,25 @@ pub struct ContactRoute {
     pub attribute_mapping: Option<AttributeMapping>,
     /// Display-name fallback override (used when the INVITE supplies none).
     pub default_display_name: Option<String>,
+}
+
+impl std::fmt::Debug for ContactRoute {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ContactRoute")
+            .field("label_present", &!self.label.is_empty())
+            .field("instance_id_present", &self.instance_id.is_some())
+            .field("contact_flow_id_present", &self.contact_flow_id.is_some())
+            .field(
+                "attribute_mapping_present",
+                &self.attribute_mapping.is_some(),
+            )
+            .field(
+                "default_display_name_present",
+                &self.default_display_name.is_some(),
+            )
+            .finish()
+    }
 }
 
 /// A [`ContactRouter`]'s verdict for one inbound INVITE.
@@ -155,12 +174,23 @@ pub enum ScreenPopLifecycleStage {
 }
 
 /// One sanitized screen-pop lifecycle notification.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ScreenPopLifecycleEvent {
     pub stage: ScreenPopLifecycleStage,
     /// Sanitized, length-bounded correlation id from `X-Correlation-Id`.
     pub correlation_id: Option<String>,
     pub occurred_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl std::fmt::Debug for ScreenPopLifecycleEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScreenPopLifecycleEvent")
+            .field("stage", &self.stage)
+            .field("correlation_id_present", &self.correlation_id.is_some())
+            .field("occurred_at", &self.occurred_at)
+            .finish()
+    }
 }
 
 #[derive(Default)]
@@ -771,8 +801,8 @@ impl ConnectScreenPopServer {
                     info!("SIP event stream ended; stopping server");
                     return Ok(());
                 }
-                Err(e) => {
-                    warn!(error = %e, "error waiting for incoming SIP call");
+                Err(_error) => {
+                    warn!(error_present = true, "error waiting for incoming SIP call");
                     continue;
                 }
             };
@@ -806,9 +836,8 @@ impl ConnectScreenPopServer {
                 RouteDecision::Route(route) => Some(route),
                 RouteDecision::Reject { status, reason } => {
                     info!(
-                        to = %call.to,
                         status,
-                        reason = %reason,
+                        reason_present = !reason.is_empty(),
                         "router rejected inbound SIP call"
                     );
                     call.reject(status, &reason);
@@ -859,14 +888,11 @@ impl ConnectScreenPopServer {
 
         // 1. Extract custom headers and translate to Connect attributes.
         let headers = extract_headers(&call);
-        // Diagnostic: the full inbound header set + the resulting attributes.
-        // Enable with `RUST_LOG=rvoip_amazon_connect::sip_headers=debug` — this is
-        // how you confirm whether a carrier preserved the custom `X-` headers
-        // across a Vapi REFER/transfer (the crux of the end-to-end test).
+        // Diagnostics deliberately expose only cardinality. Header names and
+        // values may carry authentication or customer context.
         tracing::debug!(
             target: "rvoip_amazon_connect::sip_headers",
             count = headers.len(),
-            headers = ?headers,
             "inbound INVITE headers"
         );
         let mapping = route
@@ -877,13 +903,13 @@ impl ConnectScreenPopServer {
         self.emit_lifecycle(&setup, ScreenPopLifecycleStage::AttributesMapped);
         tracing::debug!(
             target: "rvoip_amazon_connect::sip_headers",
-            attributes = ?mapped.attributes,
-            skipped = ?mapped.skipped,
+            attributes = mapped.attributes.len(),
+            skipped = mapped.skipped.len(),
+            dropped_for_size = mapped.dropped_for_size,
             "mapped Connect contact attributes"
         );
         info!(
-            from = %call.from,
-            route = route_label.as_deref().unwrap_or("-"),
+            route_present = route_label.is_some(),
             attributes = mapped.attributes.len(),
             "inbound SIP call → Amazon Connect screen pop"
         );
@@ -1110,7 +1136,7 @@ impl ConnectScreenPopServer {
         )
         .await;
         if let Err(errors) = &cleanup_result {
-            warn!(?errors, session = %attempt.session_id, "screen-pop setup cleanup incomplete");
+            warn!(error_count = errors.len(), session = %attempt.session_id, "screen-pop setup cleanup incomplete");
         }
         self.registry.finish(&attempt, connect_conn.as_ref());
         attempt.mark_cleanup_attempt_complete();
@@ -1134,7 +1160,7 @@ impl ConnectScreenPopServer {
         )
         .await;
         if let Err(errors) = &cleanup_result {
-            warn!(?errors, session = %active.setup.session_id, "active screen-pop cleanup incomplete");
+            warn!(error_count = errors.len(), session = %active.setup.session_id, "active screen-pop cleanup incomplete");
         }
         self.registry
             .finish(&active.setup, Some(&active.connect_conn));
@@ -1610,6 +1636,36 @@ mod tests {
             serde_json::to_string(&ScreenPopLifecycleStage::MediaConnected).unwrap(),
             "\"media_connected\""
         );
+    }
+
+    #[test]
+    fn route_and_lifecycle_diagnostics_are_value_free() {
+        let route = ContactRoute {
+            label: "tenant-secret".into(),
+            instance_id: Some("instance-secret".into()),
+            contact_flow_id: Some("flow-secret".into()),
+            attribute_mapping: Some(
+                AttributeMapping::default().rename("header-secret", "attribute-secret"),
+            ),
+            default_display_name: Some("display-secret".into()),
+        };
+        let event = ScreenPopLifecycleEvent {
+            stage: ScreenPopLifecycleStage::ContactStarted,
+            correlation_id: Some("correlation-secret".into()),
+            occurred_at: chrono::Utc::now(),
+        };
+        let diagnostic = format!("{route:?} {event:?}");
+        for secret in [
+            "tenant-secret",
+            "instance-secret",
+            "flow-secret",
+            "header-secret",
+            "attribute-secret",
+            "display-secret",
+            "correlation-secret",
+        ] {
+            assert!(!diagnostic.contains(secret), "leaked {secret}");
+        }
     }
 }
 
