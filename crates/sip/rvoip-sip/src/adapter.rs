@@ -9,6 +9,7 @@
 //! [`rvoip_core`] vocabulary and the [`UnifiedCoordinator`] API.
 
 use crate::api::events::Event as ApiEvent;
+use crate::api::headers::SipRequestOptions;
 use crate::api::unified::{Config as ApiConfig, InboundInviteObservation, UnifiedCoordinator};
 use crate::originate::SipOriginateContext;
 use crate::types::CallState;
@@ -18,9 +19,9 @@ use dashmap::DashMap;
 use rvoip_core::adapter::{
     legacy_normalized_event_receiver, AdapterEvent, AdapterKind, AdapterLifecycleCapabilities,
     AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter, ConnectionHandle, EndReason,
-    InboundConnectionContext, InboundContextError, InboundRoutingHint, InboundSignalingMetadata,
-    OrchestratorAdapterEvent, OriginateRequest, RejectReason, SignatureHeaders, TerminalDelivery,
-    TransferTarget,
+    ExternalConnectionReference, InboundConnectionContext, InboundContextError, InboundRoutingHint,
+    InboundSignalingMetadata, OrchestratorAdapterEvent, OriginateRequest, OutboundActivation,
+    RejectReason, SignatureHeaders, TerminalDelivery, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
@@ -29,7 +30,9 @@ use rvoip_core::identity::{AuthenticatedPrincipal, IdentityAssurance};
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId as CoreSessionId};
 use rvoip_core::message::Message;
 use rvoip_core::stream::{MediaStream, MediaStreamHandle};
-use rvoip_sip_core::types::headers::{HeaderName, TypedHeader};
+use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
+use rvoip_sip_core::types::uri::Scheme;
+use rvoip_sip_core::Uri;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::str::FromStr;
@@ -48,27 +51,382 @@ const SIP_ADAPTER_EVENT_CAPACITY: usize = 256;
 const DEFAULT_SIP_ACTIVE_CONNECTION_BUDGET: usize = 262_144;
 const DEFAULT_SIP_RETIRED_SESSION_BUDGET: usize = 262_144;
 const SIP_OUTBOUND_EVENT_STAGE_CAPACITY: usize = 32;
+const MAX_SIP_OUTBOUND_TARGET_BYTES: usize = 4_096;
+const SIP_RETAINED_TASK_TIMEOUT: Duration = Duration::from_secs(2);
 
-enum OutboundEventStageState {
-    Dormant {
-        events: VecDeque<AdapterEvent>,
-        overflowed: bool,
-    },
-    Activated,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SipOutboundRoutePhase {
+    Prepared,
+    Activating,
+    Active,
+    Terminating,
+    Terminated,
+    Failed,
 }
 
-struct OutboundEventStage {
-    state: StdMutex<OutboundEventStageState>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SipOutboundWireState {
+    NotStarted,
+    Possible,
+    Sent,
 }
 
-impl Default for OutboundEventStage {
-    fn default() -> Self {
-        Self {
-            state: StdMutex::new(OutboundEventStageState::Dormant {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SipActivationFailure {
+    RouteEnded,
+    EventOverflow,
+    EventPublication,
+    InvalidPlan,
+    InviteFailed,
+    MediaFailed,
+}
+
+impl SipActivationFailure {
+    fn into_error(self) -> RvoipError {
+        let detail = match self {
+            Self::RouteEnded => "SIP outbound route ended during activation",
+            Self::EventOverflow => "SIP outbound lifecycle event stage overflowed",
+            Self::EventPublication => "SIP outbound lifecycle event publication was unavailable",
+            Self::InvalidPlan => "SIP outbound activation plan was invalid",
+            Self::InviteFailed => "SIP outbound INVITE activation failed",
+            Self::MediaFailed => "SIP outbound media activation failed",
+        };
+        RvoipError::Adapter(detail.to_string())
+    }
+}
+
+#[derive(Clone, Debug)]
+enum SipActivationCompletion {
+    Succeeded(OutboundActivation),
+    Failed(SipActivationFailure),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SipRouteStageDisposition {
+    Retained,
+    Forward,
+    Discard,
+}
+
+struct SipOutboundRouteState {
+    phase: SipOutboundRoutePhase,
+    wire: SipOutboundWireState,
+    events: VecDeque<AdapterEvent>,
+    terminal: Option<AdapterEvent>,
+    cleanup_event: Option<AdapterEvent>,
+    remote_terminal_seen: bool,
+    overflowed: bool,
+    activation_completed: bool,
+    cleanup_started: bool,
+}
+
+struct SipOutboundRoute {
+    connection_id: ConnectionId,
+    session_id: SessionId,
+    target: String,
+    context: Arc<SipOriginateContext>,
+    sip_call_id: Arc<str>,
+    stream: Arc<crate::media_stream::SipMediaStream>,
+    state: StdMutex<SipOutboundRouteState>,
+    activation: watch::Sender<Option<SipActivationCompletion>>,
+    cleanup: watch::Sender<Option<bool>>,
+    cancel: watch::Sender<bool>,
+}
+
+impl SipOutboundRoute {
+    fn new(
+        connection_id: ConnectionId,
+        session_id: SessionId,
+        target: String,
+        context: Arc<SipOriginateContext>,
+        stream: Arc<crate::media_stream::SipMediaStream>,
+    ) -> Arc<Self> {
+        let (activation, _) = watch::channel(None);
+        let (cleanup, _) = watch::channel(None);
+        let (cancel, _) = watch::channel(false);
+        let sip_call_id: Arc<str> =
+            crate::adapters::dialog_adapter::deterministic_outbound_call_id(&session_id).into();
+        Arc::new(Self {
+            connection_id,
+            session_id,
+            target,
+            context,
+            sip_call_id,
+            stream,
+            state: StdMutex::new(SipOutboundRouteState {
+                phase: SipOutboundRoutePhase::Prepared,
+                wire: SipOutboundWireState::NotStarted,
                 events: VecDeque::with_capacity(SIP_OUTBOUND_EVENT_STAGE_CAPACITY),
+                terminal: None,
+                cleanup_event: None,
+                remote_terminal_seen: false,
                 overflowed: false,
+                activation_completed: false,
+                cleanup_started: false,
             }),
+            activation,
+            cleanup,
+            cancel,
+        })
+    }
+
+    fn claim_activation(&self) -> Result<bool, SipActivationFailure> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match state.phase {
+            SipOutboundRoutePhase::Prepared => {
+                if state.overflowed {
+                    return Err(SipActivationFailure::EventOverflow);
+                }
+                state.phase = SipOutboundRoutePhase::Activating;
+                Ok(true)
+            }
+            SipOutboundRoutePhase::Activating | SipOutboundRoutePhase::Active => Ok(false),
+            SipOutboundRoutePhase::Terminating
+            | SipOutboundRoutePhase::Terminated
+            | SipOutboundRoutePhase::Failed => Err(SipActivationFailure::RouteEnded),
         }
+    }
+
+    fn begin_wire_send(&self) -> Result<(), SipActivationFailure> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.phase != SipOutboundRoutePhase::Activating || *self.cancel.borrow() {
+            return Err(SipActivationFailure::RouteEnded);
+        }
+        if state.overflowed {
+            return Err(SipActivationFailure::EventOverflow);
+        }
+        if state.remote_terminal_seen {
+            return Err(SipActivationFailure::RouteEnded);
+        }
+        state.wire = SipOutboundWireState::Possible;
+        Ok(())
+    }
+
+    fn mark_wire_sent(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .wire = SipOutboundWireState::Sent;
+    }
+
+    fn stage_event(&self, event: AdapterEvent) -> SipRouteStageDisposition {
+        let terminal = matches!(
+            event,
+            AdapterEvent::Ended { .. } | AdapterEvent::Failed { .. }
+        );
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match state.phase {
+            SipOutboundRoutePhase::Prepared | SipOutboundRoutePhase::Activating => {
+                if terminal {
+                    state.remote_terminal_seen = true;
+                    if state.terminal.is_none() {
+                        state.terminal = Some(event);
+                    }
+                } else if state.terminal.is_none() {
+                    if state.events.len() == SIP_OUTBOUND_EVENT_STAGE_CAPACITY {
+                        state.overflowed = true;
+                    } else {
+                        state.events.push_back(event);
+                    }
+                }
+                SipRouteStageDisposition::Retained
+            }
+            SipOutboundRoutePhase::Active => {
+                if terminal {
+                    state.remote_terminal_seen = true;
+                    if state.terminal.is_none() {
+                        state.terminal = Some(event);
+                    }
+                    SipRouteStageDisposition::Retained
+                } else if state.remote_terminal_seen {
+                    SipRouteStageDisposition::Discard
+                } else {
+                    SipRouteStageDisposition::Forward
+                }
+            }
+            SipOutboundRoutePhase::Terminating | SipOutboundRoutePhase::Failed => {
+                if terminal && state.terminal.is_none() {
+                    state.remote_terminal_seen = true;
+                    state.terminal = Some(event);
+                    SipRouteStageDisposition::Retained
+                } else {
+                    SipRouteStageDisposition::Discard
+                }
+            }
+            SipOutboundRoutePhase::Terminated => SipRouteStageDisposition::Discard,
+        }
+    }
+
+    async fn publish_staged_events(
+        &self,
+        events: &mpsc::Sender<OrchestratorAdapterEvent>,
+    ) -> Result<bool, SipActivationFailure> {
+        let deadline = tokio::time::Instant::now() + SIP_RETAINED_TASK_TIMEOUT;
+        let mut cancel = self.cancel.subscribe();
+        loop {
+            let next = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if state.phase != SipOutboundRoutePhase::Activating {
+                    return Err(SipActivationFailure::RouteEnded);
+                }
+                if state.overflowed {
+                    return Err(SipActivationFailure::EventOverflow);
+                }
+                match state.events.pop_front() {
+                    Some(event) => Some(event),
+                    None => {
+                        state.phase = SipOutboundRoutePhase::Active;
+                        return Ok(state.remote_terminal_seen);
+                    }
+                }
+            };
+
+            let Some(event) = next else {
+                continue;
+            };
+            let publication = async {
+                tokio::select! {
+                    biased;
+                    _ = wait_for_route_cancel(&mut cancel) => Err(()),
+                    result = events.send(OrchestratorAdapterEvent::Public(event)) => {
+                        result.map_err(|_| ())
+                    }
+                }
+            };
+            match tokio::time::timeout_at(deadline, publication).await {
+                Ok(Ok(())) => {}
+                Ok(Err(())) | Err(_) => {
+                    return Err(SipActivationFailure::EventPublication);
+                }
+            }
+        }
+    }
+
+    fn complete_activation(&self, completion: SipActivationCompletion) {
+        let publish = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.activation_completed {
+                false
+            } else {
+                state.activation_completed = true;
+                if matches!(completion, SipActivationCompletion::Failed(_))
+                    && !matches!(
+                        state.phase,
+                        SipOutboundRoutePhase::Terminating | SipOutboundRoutePhase::Terminated
+                    )
+                {
+                    state.phase = SipOutboundRoutePhase::Failed;
+                }
+                true
+            }
+        };
+        if publish {
+            self.activation.send_replace(Some(completion));
+        }
+    }
+
+    async fn wait_activation(&self) -> CoreResult<OutboundActivation> {
+        let mut activation = self.activation.subscribe();
+        loop {
+            if let Some(completion) = activation.borrow_and_update().clone() {
+                return match completion {
+                    SipActivationCompletion::Succeeded(receipt) => Ok(receipt),
+                    SipActivationCompletion::Failed(error) => Err(error.into_error()),
+                };
+            }
+            activation.changed().await.map_err(|_| {
+                RvoipError::InvalidState("SIP outbound activation supervisor ended")
+            })?;
+        }
+    }
+
+    fn request_cleanup(&self, event: Option<AdapterEvent>) -> bool {
+        let start = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(event) = event {
+                if state.cleanup_event.is_none() {
+                    state.cleanup_event = Some(event);
+                }
+            }
+            state.phase = match state.phase {
+                SipOutboundRoutePhase::Terminated => SipOutboundRoutePhase::Terminated,
+                _ => SipOutboundRoutePhase::Terminating,
+            };
+            if state.cleanup_started {
+                false
+            } else {
+                state.cleanup_started = true;
+                true
+            }
+        };
+        self.cancel.send_replace(true);
+        self.stream.request_close();
+        start
+    }
+
+    fn cleanup_snapshot(&self) -> (SipOutboundWireState, bool) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (state.wire, state.remote_terminal_seen)
+    }
+
+    fn seal_cleanup_event(&self) -> Option<AdapterEvent> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.phase = SipOutboundRoutePhase::Terminated;
+        state.terminal.take().or_else(|| state.cleanup_event.take())
+    }
+
+    fn complete_cleanup(&self, success: bool) {
+        self.cleanup.send_replace(Some(success));
+    }
+
+    async fn wait_cleanup(&self) -> CoreResult<()> {
+        let mut cleanup = self.cleanup.subscribe();
+        loop {
+            if let Some(success) = *cleanup.borrow_and_update() {
+                return if success {
+                    Ok(())
+                } else {
+                    Err(RvoipError::Adapter(
+                        "SIP outbound network cleanup failed".to_string(),
+                    ))
+                };
+            }
+            cleanup
+                .changed()
+                .await
+                .map_err(|_| RvoipError::InvalidState("SIP outbound cleanup supervisor ended"))?;
+        }
+    }
+}
+
+impl Drop for SipOutboundRoute {
+    fn drop(&mut self) {
+        self.cancel.send_replace(true);
+        self.stream.request_close();
     }
 }
 
@@ -504,6 +862,9 @@ impl SipInboundContextStore {
 /// SIP-protocol adapter. Wraps an [`UnifiedCoordinator`]; every
 /// `ConnectionAdapter` method dispatches to it.
 pub struct SipAdapter {
+    /// Weak self-reference used by retained supervisors. Tasks never retain
+    /// the adapter that owns their route registry.
+    self_weak: Weak<SipAdapter>,
     coordinator: Arc<UnifiedCoordinator>,
     /// rvoip-core ConnectionId → SIP api SessionId.
     by_connection: Arc<DashMap<ConnectionId, SessionId>>,
@@ -523,14 +884,9 @@ pub struct SipAdapter {
     /// changed while the adapter has no live or retired mappings.
     active_connection_budget: AtomicUsize,
     retired_session_budget: AtomicUsize,
-    /// Bounded per-outbound-route FIFO released by `activate_outbound` only
-    /// after core has committed the Connection lifecycle.
-    outbound_event_stages: DashMap<ConnectionId, Arc<OutboundEventStage>>,
-    /// Validated, transport-owned options retained for each outbound route.
-    /// Gate 7's true activation path will consume these only after durable
-    /// orchestration binding; retaining them now makes wrong-context
-    /// rejection happen before any SIP side effect.
-    outbound_originate_contexts: DashMap<ConnectionId, Arc<SipOriginateContext>>,
+    /// One retained route owns local preparation, activation, event staging,
+    /// media binding, receipt capture, and terminal compensation.
+    outbound_routes: DashMap<ConnectionId, Arc<SipOutboundRoute>>,
     out_tx: mpsc::Sender<OrchestratorAdapterEvent>,
     /// Single-take receiver for [`ConnectionAdapter::subscribe_events`].
     out_rx: StdMutex<Option<mpsc::Receiver<OrchestratorAdapterEvent>>>,
@@ -567,6 +923,26 @@ impl SipAdapter {
             RvoipError::AdmissionRejected("outbound SIP originate context failed validation")
         })?;
         Ok(context)
+    }
+
+    fn validate_outbound_target(target: &str) -> CoreResult<()> {
+        if target.is_empty()
+            || target.len() > MAX_SIP_OUTBOUND_TARGET_BYTES
+            || target.chars().any(char::is_control)
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "outbound SIP target failed local validation",
+            ));
+        }
+        let uri = Uri::from_str(target).map_err(|_| {
+            RvoipError::AdmissionRejected("outbound SIP target failed local validation")
+        })?;
+        if !matches!(uri.scheme, Scheme::Sip | Scheme::Sips) {
+            return Err(RvoipError::AdmissionRejected(
+                "outbound SIP target must use sip or sips",
+            ));
+        }
+        Ok(())
     }
 
     /// Construct from a fully-configured [`UnifiedCoordinator`]. Spawns the
@@ -619,7 +995,8 @@ impl SipAdapter {
                 }
             },
         ))?;
-        let adapter = Arc::new(Self {
+        let adapter = Arc::new_cyclic(|self_weak| Self {
+            self_weak: self_weak.clone(),
             coordinator: Arc::clone(&coordinator),
             by_connection: Arc::new(DashMap::new()),
             by_session: Arc::new(DashMap::new()),
@@ -628,8 +1005,7 @@ impl SipAdapter {
             lifecycle_admission_poisoned: AtomicBool::new(false),
             active_connection_budget: AtomicUsize::new(DEFAULT_SIP_ACTIVE_CONNECTION_BUDGET),
             retired_session_budget: AtomicUsize::new(DEFAULT_SIP_RETIRED_SESSION_BUDGET),
-            outbound_event_stages: DashMap::new(),
-            outbound_originate_contexts: DashMap::new(),
+            outbound_routes: DashMap::new(),
             out_tx: out_tx.clone(),
             out_rx: StdMutex::new(Some(out_rx)),
             streams_cache: Arc::new(DashMap::new()),
@@ -751,19 +1127,17 @@ impl SipAdapter {
         Some(conn_id)
     }
 
-    fn reserve_outbound_mapping(
-        &self,
-        session_id: SessionId,
-        connection_id: ConnectionId,
-    ) -> CoreResult<()> {
+    fn reserve_outbound_route(&self, route: Arc<SipOutboundRoute>) -> CoreResult<()> {
         let _mapping = self
             .mapping_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if self.retired_sessions.contains_key(&session_id)
+        if self.retired_sessions.contains_key(&route.session_id)
             || self.lifecycle_admission_poisoned.load(Ordering::Acquire)
-            || self.by_session.contains_key(&session_id)
-            || self.by_connection.contains_key(&connection_id)
+            || self.by_session.contains_key(&route.session_id)
+            || self.by_connection.contains_key(&route.connection_id)
+            || self.outbound_routes.contains_key(&route.connection_id)
+            || self.streams_cache.contains_key(&route.connection_id)
             || self.by_session.len() >= self.active_connection_budget.load(Ordering::Acquire)
         {
             return Err(RvoipError::AdmissionRejected(
@@ -771,8 +1145,13 @@ impl SipAdapter {
             ));
         }
         self.by_session
-            .insert(session_id.clone(), connection_id.clone());
-        self.by_connection.insert(connection_id, session_id);
+            .insert(route.session_id.clone(), route.connection_id.clone());
+        self.by_connection
+            .insert(route.connection_id.clone(), route.session_id.clone());
+        self.streams_cache
+            .insert(route.connection_id.clone(), Arc::clone(&route.stream));
+        self.outbound_routes
+            .insert(route.connection_id.clone(), route);
         Ok(())
     }
 
@@ -807,28 +1186,13 @@ impl SipAdapter {
         connection_id: &ConnectionId,
         event: AdapterEvent,
     ) -> Option<AdapterEvent> {
-        let Some(stage) = self.outbound_event_stages.get(connection_id) else {
+        let Some(route) = self.outbound_routes.get(connection_id) else {
             return Some(event);
         };
-        let mut state = stage
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match &mut *state {
-            OutboundEventStageState::Dormant { events, overflowed } => {
-                if events.len() >= SIP_OUTBOUND_EVENT_STAGE_CAPACITY {
-                    *overflowed = true;
-                } else {
-                    events.push_back(event);
-                }
-                None
-            }
-            OutboundEventStageState::Activated => Some(event),
+        match route.stage_event(event.clone()) {
+            SipRouteStageDisposition::Retained | SipRouteStageDisposition::Discard => None,
+            SipRouteStageDisposition::Forward => Some(event),
         }
-    }
-
-    fn discard_outbound_stage(&self, connection_id: &ConnectionId) {
-        self.outbound_event_stages.remove(connection_id);
     }
 
     /// Configure the maximum number of active SIP mappings and recently
@@ -892,51 +1256,88 @@ impl SipAdapter {
     }
 
     fn forget(&self, session_id: &SessionId) {
-        let _mapping = self
-            .mapping_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.authenticated_inbound_sessions.remove(session_id);
-        if let Some((_, conn_id)) = self.by_session.remove(session_id) {
-            self.by_connection.remove(&conn_id);
-            if let Some((_, stream)) = self.streams_cache.remove(&conn_id) {
-                stream.request_close();
-                tokio::spawn(async move {
-                    let _ = (stream as Arc<dyn MediaStream>).close().await;
-                });
-            }
-            self.outbound_originate_contexts.remove(&conn_id);
-            self.inbound_contexts.forget(session_id, &conn_id);
-            let remove_stage = self
-                .outbound_event_stages
-                .get(&conn_id)
-                .is_some_and(|stage| {
-                    matches!(
-                        *stage
-                            .state
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-                        OutboundEventStageState::Activated
-                    )
-                });
-            if remove_stage {
-                self.outbound_event_stages.remove(&conn_id);
-            }
-        } else {
-            self.inbound_contexts.forget_pending(session_id);
-        }
-        if !self.retired_sessions.contains_key(session_id) {
-            let budget = self.retired_session_budget.load(Ordering::Acquire);
-            if self.retired_sessions.len() < budget {
-                self.retired_sessions.insert(session_id.clone(), ());
+        let stream = {
+            let _mapping = self
+                .mapping_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.authenticated_inbound_sessions.remove(session_id);
+            let stream = if let Some((_, conn_id)) = self.by_session.remove(session_id) {
+                self.by_connection.remove(&conn_id);
+                self.outbound_routes.remove(&conn_id);
+                self.inbound_contexts.forget(session_id, &conn_id);
+                self.streams_cache
+                    .remove(&conn_id)
+                    .map(|(_, stream)| stream)
             } else {
-                self.lifecycle_admission_poisoned
-                    .store(true, Ordering::Release);
-                warn!(
-                    budget,
-                    "SIP lifecycle tombstone budget exhausted; rejecting all new Session IDs"
-                );
+                self.inbound_contexts.forget_pending(session_id);
+                None
+            };
+            self.retire_session_locked(session_id);
+            stream
+        };
+        if let Some(stream) = stream {
+            stream.request_close();
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(
+                    SIP_RETAINED_TASK_TIMEOUT,
+                    (stream as Arc<dyn MediaStream>).close(),
+                )
+                .await;
+            });
+        }
+    }
+
+    fn retire_outbound_route(&self, route: &Arc<SipOutboundRoute>) {
+        let stream = {
+            let _mapping = self
+                .mapping_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let exact_route = self
+                .outbound_routes
+                .get(&route.connection_id)
+                .is_some_and(|entry| Arc::ptr_eq(entry.value(), route));
+            let exact_session = self
+                .by_connection
+                .get(&route.connection_id)
+                .is_some_and(|entry| entry.value() == &route.session_id);
+            if !exact_route || !exact_session {
+                return;
             }
+            self.outbound_routes.remove(&route.connection_id);
+            self.by_connection.remove(&route.connection_id);
+            self.by_session.remove(&route.session_id);
+            self.authenticated_inbound_sessions
+                .remove(&route.session_id);
+            self.inbound_contexts
+                .forget(&route.session_id, &route.connection_id);
+            let stream = self
+                .streams_cache
+                .remove(&route.connection_id)
+                .map(|(_, stream)| stream);
+            self.retire_session_locked(&route.session_id);
+            stream
+        };
+        if let Some(stream) = stream {
+            stream.request_close();
+        }
+    }
+
+    fn retire_session_locked(&self, session_id: &SessionId) {
+        if self.retired_sessions.contains_key(session_id) {
+            return;
+        }
+        let budget = self.retired_session_budget.load(Ordering::Acquire);
+        if self.retired_sessions.len() < budget {
+            self.retired_sessions.insert(session_id.clone(), ());
+        } else {
+            self.lifecycle_admission_poisoned
+                .store(true, Ordering::Release);
+            warn!(
+                budget,
+                "SIP lifecycle tombstone budget exhausted; rejecting all new Session IDs"
+            );
         }
     }
 
@@ -1055,20 +1456,25 @@ impl SipAdapter {
 
     /// Return the one stable dormant stream for a mapped connection.
     ///
-    /// DashMap entry insertion prevents concurrent consumers from creating
-    /// multiple streams (and therefore multiple one-shot receivers) for one
-    /// call. No coordinator or network operation occurs here.
+    /// The mapping and cache check/insert share one lock with retirement, so a
+    /// concurrent forget cannot leave an orphan stream behind. No coordinator
+    /// or network operation occurs here.
     fn get_or_insert_dormant_stream(
         &self,
         conn: &ConnectionId,
         direction: Direction,
     ) -> Option<Arc<crate::media_stream::SipMediaStream>> {
+        let _mapping = self
+            .mapping_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.by_connection.get(conn)?;
-        let entry = self
-            .streams_cache
-            .entry(conn.clone())
-            .or_insert_with(|| crate::media_stream::SipMediaStream::dormant(direction));
-        Some(Arc::clone(entry.value()))
+        if let Some(stream) = self.streams_cache.get(conn) {
+            return (stream.direction() == direction).then(|| Arc::clone(stream.value()));
+        }
+        let stream = crate::media_stream::SipMediaStream::dormant(direction);
+        self.streams_cache.insert(conn.clone(), Arc::clone(&stream));
+        Some(stream)
     }
 
     fn start_stream_bind(
@@ -1084,11 +1490,73 @@ impl SipAdapter {
             return;
         };
         let coordinator = Arc::clone(&self.coordinator);
+        let weak_adapter = self.self_weak.clone();
         tokio::spawn(async move {
-            if stream.bind(coordinator, session_id).await.is_err() {
-                warn!("SipAdapter media binding ended before becoming active");
+            let binding = stream
+                .bind(Arc::clone(&coordinator), session_id.clone())
+                .await;
+            let mut lifecycle = stream.subscribe_lifecycle();
+            let failed = if binding.is_err() {
+                matches!(
+                    *lifecycle.borrow_and_update(),
+                    crate::media_stream::SipMediaLifecycle::Failed
+                )
+            } else {
+                loop {
+                    match *lifecycle.borrow_and_update() {
+                        crate::media_stream::SipMediaLifecycle::Failed => break true,
+                        crate::media_stream::SipMediaLifecycle::Closing
+                        | crate::media_stream::SipMediaLifecycle::Closed => break false,
+                        crate::media_stream::SipMediaLifecycle::Dormant
+                        | crate::media_stream::SipMediaLifecycle::Binding
+                        | crate::media_stream::SipMediaLifecycle::Bound => {}
+                    }
+                    if lifecycle.changed().await.is_err() {
+                        break false;
+                    }
+                }
+            };
+            if failed {
+                if let Some(adapter) = weak_adapter.upgrade() {
+                    adapter
+                        .terminate_failed_media(&conn, &session_id, coordinator)
+                        .await;
+                }
             }
         });
+    }
+
+    async fn terminate_failed_media(
+        &self,
+        connection_id: &ConnectionId,
+        session_id: &SessionId,
+        coordinator: Arc<UnifiedCoordinator>,
+    ) {
+        let still_exact = self
+            .by_connection
+            .get(connection_id)
+            .is_some_and(|entry| entry.value() == session_id);
+        if !still_exact || self.outbound_routes.contains_key(connection_id) {
+            return;
+        }
+        self.forget(session_id);
+        let hangup =
+            tokio::time::timeout(SIP_RETAINED_TASK_TIMEOUT, coordinator.hangup(session_id)).await;
+        if !matches!(hangup, Ok(Ok(()))) {
+            let _ = tokio::time::timeout(
+                SIP_RETAINED_TASK_TIMEOUT,
+                coordinator.finalize_local_bye(session_id, "SIP media driver failed"),
+            )
+            .await;
+        }
+        self.deliver_terminal_event(
+            AdapterEvent::Failed {
+                connection_id: connection_id.clone(),
+                detail: "SIP media driver failed".to_string(),
+            },
+            "media-failed",
+        )
+        .await;
     }
 
     async fn translate_api_event(&self, event: ApiEvent) {
@@ -1373,12 +1841,37 @@ impl SipAdapter {
         event: AdapterEvent,
         source: &'static str,
     ) {
-        match self.stage_outbound_event(event) {
-            None => self.forget(session_id),
-            Some(event) => {
-                self.forget(session_id);
-                self.deliver_terminal_event(event, source).await;
+        let route = self.by_session.get(session_id).and_then(|connection| {
+            self.outbound_routes
+                .get(connection.value())
+                .map(|route| Arc::clone(route.value()))
+        });
+        if let Some(route) = route {
+            match route.stage_event(event) {
+                SipRouteStageDisposition::Retained => {
+                    begin_outbound_cleanup(
+                        self.self_weak.clone(),
+                        Arc::clone(&self.coordinator),
+                        route,
+                        self.lifecycle.clone(),
+                        self.out_tx.clone(),
+                        None,
+                        source,
+                    );
+                }
+                SipRouteStageDisposition::Forward => {
+                    // Outbound terminals are always retained by the route so
+                    // compensation and exact-map retirement precede delivery.
+                    warn!(
+                        source,
+                        "SipAdapter outbound terminal escaped retained route"
+                    );
+                }
+                SipRouteStageDisposition::Discard => {}
             }
+        } else {
+            self.forget(session_id);
+            self.deliver_terminal_event(event, source).await;
         }
     }
 
@@ -1399,6 +1892,259 @@ impl SipAdapter {
     fn map_session_err(err: crate::errors::SessionError) -> RvoipError {
         RvoipError::Adapter(format!("rvoip-sip: {}", err))
     }
+}
+
+async fn wait_for_route_cancel(cancel: &mut watch::Receiver<bool>) {
+    loop {
+        if *cancel.borrow_and_update() {
+            return;
+        }
+        if cancel.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn run_outbound_activation(
+    weak_adapter: Weak<SipAdapter>,
+    coordinator: Arc<UnifiedCoordinator>,
+    route: Arc<SipOutboundRoute>,
+    lifecycle: AdapterLifecycleSinkSlot,
+    events: mpsc::Sender<OrchestratorAdapterEvent>,
+) {
+    let result =
+        activate_outbound_route(Arc::clone(&coordinator), Arc::clone(&route), events.clone()).await;
+    match result {
+        Ok((receipt, remote_terminal)) => {
+            if !remote_terminal {
+                let media_weak_adapter = weak_adapter.clone();
+                let media_coordinator = Arc::clone(&coordinator);
+                let media_route = Arc::clone(&route);
+                let media_lifecycle = lifecycle.clone();
+                let media_events = events.clone();
+                tokio::spawn(async move {
+                    monitor_outbound_media(
+                        media_weak_adapter,
+                        media_coordinator,
+                        media_route,
+                        media_lifecycle,
+                        media_events,
+                    )
+                    .await;
+                });
+            }
+            route.complete_activation(SipActivationCompletion::Succeeded(receipt));
+            if remote_terminal {
+                begin_outbound_cleanup(
+                    weak_adapter,
+                    coordinator,
+                    route,
+                    lifecycle,
+                    events,
+                    None,
+                    "activation-terminal",
+                );
+            }
+        }
+        Err(failure) => {
+            route.complete_activation(SipActivationCompletion::Failed(failure));
+            begin_outbound_cleanup(
+                weak_adapter,
+                coordinator,
+                Arc::clone(&route),
+                lifecycle,
+                events,
+                Some(AdapterEvent::Failed {
+                    connection_id: route.connection_id.clone(),
+                    detail: "SIP outbound activation failed".to_string(),
+                }),
+                "activation-failed",
+            );
+        }
+    }
+}
+
+async fn activate_outbound_route(
+    coordinator: Arc<UnifiedCoordinator>,
+    route: Arc<SipOutboundRoute>,
+    events: mpsc::Sender<OrchestratorAdapterEvent>,
+) -> Result<(OutboundActivation, bool), SipActivationFailure> {
+    let from = route
+        .context
+        .from_uri()
+        .map(str::to_owned)
+        .unwrap_or_else(|| "sip:anonymous@invalid".to_string());
+    let mut builder = coordinator
+        .invite(Some(from), route.target.clone())
+        .with_reserved_session_id(route.session_id.clone());
+    if let Some(auth) = route.context.auth() {
+        builder = builder.with_auth(auth.clone());
+    }
+    let headers = route
+        .context
+        .initial_headers()
+        .iter()
+        .map(|(name, value)| {
+            TypedHeader::Other(name.clone(), HeaderValue::Raw(value.as_bytes().to_vec()))
+        })
+        .collect();
+    builder = builder
+        .with_headers(headers)
+        .map_err(|_| SipActivationFailure::InvalidPlan)?;
+
+    // `Possible` begins immediately before the first poll of `send`: cleanup
+    // must assume a packet escaped if this future is subsequently cancelled.
+    route.begin_wire_send()?;
+    let mut cancel = route.cancel.subscribe();
+    let send = builder.send();
+    tokio::pin!(send);
+    let returned_session = tokio::select! {
+        biased;
+        _ = wait_for_route_cancel(&mut cancel) => {
+            return Err(SipActivationFailure::RouteEnded);
+        }
+        result = tokio::time::timeout(SIP_RETAINED_TASK_TIMEOUT, &mut send) => {
+            result
+                .map_err(|_| SipActivationFailure::InviteFailed)?
+                .map_err(|_| SipActivationFailure::InviteFailed)?
+        },
+    };
+    if returned_session != route.session_id {
+        return Err(SipActivationFailure::InviteFailed);
+    }
+    route.mark_wire_sent();
+
+    let external_reference =
+        ExternalConnectionReference::new("sip.call-id", Arc::clone(&route.sip_call_id))
+            .map_err(|_| SipActivationFailure::InvalidPlan)?;
+    let receipt = OutboundActivation::with_external_reference(external_reference);
+
+    let remote_terminal = route.publish_staged_events(&events).await?;
+    if remote_terminal {
+        return Ok((receipt, true));
+    }
+
+    let mut cancel = route.cancel.subscribe();
+    let bind = route
+        .stream
+        .bind(Arc::clone(&coordinator), route.session_id.clone());
+    tokio::pin!(bind);
+    tokio::select! {
+        biased;
+        _ = wait_for_route_cancel(&mut cancel) => {
+            return Err(SipActivationFailure::RouteEnded);
+        }
+        result = tokio::time::timeout(SIP_RETAINED_TASK_TIMEOUT, &mut bind) => {
+            result
+                .map_err(|_| SipActivationFailure::MediaFailed)?
+                .map_err(|_| SipActivationFailure::MediaFailed)?
+        },
+    }
+    if !route.stream.is_bound_to(&coordinator, &route.session_id) {
+        return Err(SipActivationFailure::MediaFailed);
+    }
+
+    Ok((receipt, false))
+}
+
+async fn monitor_outbound_media(
+    weak_adapter: Weak<SipAdapter>,
+    coordinator: Arc<UnifiedCoordinator>,
+    route: Arc<SipOutboundRoute>,
+    lifecycle: AdapterLifecycleSinkSlot,
+    events: mpsc::Sender<OrchestratorAdapterEvent>,
+) {
+    let mut media = route.stream.subscribe_lifecycle();
+    loop {
+        match *media.borrow_and_update() {
+            crate::media_stream::SipMediaLifecycle::Failed => {
+                begin_outbound_cleanup(
+                    weak_adapter,
+                    coordinator,
+                    Arc::clone(&route),
+                    lifecycle,
+                    events,
+                    Some(AdapterEvent::Failed {
+                        connection_id: route.connection_id.clone(),
+                        detail: "SIP media driver failed".to_string(),
+                    }),
+                    "media-failed",
+                );
+                return;
+            }
+            crate::media_stream::SipMediaLifecycle::Closing
+            | crate::media_stream::SipMediaLifecycle::Closed => return,
+            crate::media_stream::SipMediaLifecycle::Dormant
+            | crate::media_stream::SipMediaLifecycle::Binding
+            | crate::media_stream::SipMediaLifecycle::Bound => {}
+        }
+        if media.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+fn begin_outbound_cleanup(
+    weak_adapter: Weak<SipAdapter>,
+    coordinator: Arc<UnifiedCoordinator>,
+    route: Arc<SipOutboundRoute>,
+    lifecycle: AdapterLifecycleSinkSlot,
+    events: mpsc::Sender<OrchestratorAdapterEvent>,
+    event: Option<AdapterEvent>,
+    source: &'static str,
+) {
+    route.complete_activation(SipActivationCompletion::Failed(
+        SipActivationFailure::RouteEnded,
+    ));
+    if !route.request_cleanup(event) {
+        return;
+    }
+    tokio::spawn(async move {
+        run_outbound_cleanup(weak_adapter, coordinator, route, lifecycle, events, source).await;
+    });
+}
+
+async fn run_outbound_cleanup(
+    weak_adapter: Weak<SipAdapter>,
+    coordinator: Arc<UnifiedCoordinator>,
+    route: Arc<SipOutboundRoute>,
+    lifecycle: AdapterLifecycleSinkSlot,
+    events: mpsc::Sender<OrchestratorAdapterEvent>,
+    source: &'static str,
+) {
+    let (wire, remote_terminal) = route.cleanup_snapshot();
+    let mut network_success = true;
+    if wire != SipOutboundWireState::NotStarted && !remote_terminal {
+        let hangup = tokio::time::timeout(
+            SIP_RETAINED_TASK_TIMEOUT,
+            coordinator.hangup(&route.session_id),
+        )
+        .await;
+        if !matches!(hangup, Ok(Ok(()))) {
+            network_success = matches!(
+                tokio::time::timeout(
+                    SIP_RETAINED_TASK_TIMEOUT,
+                    coordinator
+                        .finalize_local_bye(&route.session_id, "SIP outbound retained cleanup",),
+                )
+                .await,
+                Ok(Ok(()))
+            );
+        }
+    }
+
+    // SipMediaStream::close owns bounded driver joins and publishes Closed
+    // only after they finish or are aborted.
+    let stream: Arc<dyn MediaStream> = Arc::clone(&route.stream) as Arc<dyn MediaStream>;
+    let media_success = stream.close().await.is_ok();
+    let terminal = route.seal_cleanup_event();
+    if let Some(adapter) = weak_adapter.upgrade() {
+        adapter.retire_outbound_route(&route);
+    }
+    if let Some(event) = terminal {
+        SipAdapter::deliver_terminal_event_to(&lifecycle, &events, event, source).await;
+    }
+    route.complete_cleanup(network_success && media_success);
 }
 
 impl Drop for SipAdapter {
@@ -1446,44 +2192,23 @@ impl ConnectionAdapter for SipAdapter {
     }
 
     async fn originate(&self, request: OriginateRequest) -> CoreResult<ConnectionHandle> {
+        Self::validate_outbound_target(&request.target)?;
         let originate_context = Self::outbound_originate_context(&request)?;
-        // The OriginateRequest's `target` is the SIP URI to dial; without an
-        // explicit `from` we synthesize a local AOR. Step-7 keeps this simple;
-        // step 9 wires real auth/PAI when orchestration-core flows through.
-        let from = "sip:anonymous@invalid";
         let session_id = SessionId::new();
         let conn_id = ConnectionId::new();
-        self.reserve_outbound_mapping(session_id.clone(), conn_id.clone())?;
-        self.outbound_originate_contexts
-            .insert(conn_id.clone(), originate_context);
-        self.outbound_event_stages
-            .insert(conn_id.clone(), Arc::new(OutboundEventStage::default()));
-        let sent = self
-            .coordinator
-            .invite(Some(from.to_string()), request.target.clone())
-            .with_reserved_session_id(session_id.clone())
-            .send()
-            .await;
-        match sent {
-            Ok(returned) if returned == session_id && self.is_connection_live(&conn_id) => {}
-            Ok(_) => {
-                self.forget(&session_id);
-                self.discard_outbound_stage(&conn_id);
-                return Err(RvoipError::AdmissionRejected(
-                    "SIP outbound route ended before lifecycle activation",
-                ));
-            }
-            Err(error) => {
-                self.forget(&session_id);
-                self.discard_outbound_stage(&conn_id);
-                return Err(Self::map_session_err(error));
-            }
-        }
+        let stream = crate::media_stream::SipMediaStream::dormant(Direction::Outbound);
+        let route = SipOutboundRoute::new(
+            conn_id.clone(),
+            session_id,
+            request.target.clone(),
+            originate_context,
+            stream,
+        );
+        self.reserve_outbound_route(Arc::clone(&route))?;
         let mut connection = self
             .build_connection(conn_id.clone(), Direction::Outbound)
             .await;
         if !self.is_connection_live(&conn_id) {
-            self.discard_outbound_stage(&conn_id);
             return Err(RvoipError::AdmissionRejected(
                 "SIP outbound route ended during connection construction",
             ));
@@ -1497,55 +2222,44 @@ impl ConnectionAdapter for SipAdapter {
     }
 
     async fn activate_outbound(&self, conn: ConnectionId) -> CoreResult<()> {
-        if !self.is_connection_live(&conn) {
-            self.discard_outbound_stage(&conn);
-            return Err(RvoipError::ConnectionNotFound(conn));
-        }
-        if let Some(stream) = self
-            .streams_cache
-            .get(&conn)
-            .map(|entry| Arc::clone(entry.value()))
-        {
-            self.start_stream_bind(conn.clone(), stream);
-        }
-        let stage = self
-            .outbound_event_stages
+        self.activate_outbound_with_receipt(conn).await.map(|_| ())
+    }
+
+    async fn activate_outbound_with_receipt(
+        &self,
+        conn: ConnectionId,
+    ) -> CoreResult<OutboundActivation> {
+        let route = self
+            .outbound_routes
             .get(&conn)
             .map(|entry| Arc::clone(entry.value()))
             .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
-        let mut state = stage
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match &mut *state {
-            OutboundEventStageState::Activated => return Ok(()),
-            OutboundEventStageState::Dormant { events, overflowed } => {
-                if *overflowed {
-                    events.clear();
-                    return Err(RvoipError::AdmissionRejected(
-                        "SIP outbound lifecycle event stage overflowed",
-                    ));
-                }
-                let mut permits = self.out_tx.try_reserve_many(events.len()).map_err(|_| {
-                    RvoipError::AdmissionRejected(
-                        "SIP outbound lifecycle event publication was unavailable",
+        match route.claim_activation() {
+            Ok(true) => {
+                let weak_adapter = self.self_weak.clone();
+                let coordinator = Arc::clone(&self.coordinator);
+                let lifecycle = self.lifecycle.clone();
+                let events = self.out_tx.clone();
+                let retained_route = Arc::clone(&route);
+                tokio::spawn(async move {
+                    run_outbound_activation(
+                        weak_adapter,
+                        coordinator,
+                        retained_route,
+                        lifecycle,
+                        events,
                     )
-                })?;
-                for (permit, event) in permits.by_ref().zip(events.drain(..)) {
-                    permit.send(OrchestratorAdapterEvent::Public(event));
-                }
-                *state = OutboundEventStageState::Activated;
+                    .await;
+                });
             }
+            Ok(false) => {}
+            Err(error) => route.complete_activation(SipActivationCompletion::Failed(error)),
         }
-        if self.is_connection_live(&conn) {
-            Ok(())
-        } else {
-            Err(RvoipError::ConnectionNotFound(conn))
-        }
+        route.wait_activation().await
     }
 
     async fn accept(&self, conn: ConnectionId) -> CoreResult<()> {
-        if self.outbound_event_stages.contains_key(&conn) {
+        if self.outbound_routes.contains_key(&conn) {
             self.activate_outbound(conn.clone()).await?;
         }
         let session_id = self.lookup_session(&conn)?;
@@ -1558,7 +2272,28 @@ impl ConnectionAdapter for SipAdapter {
     async fn reject(&self, conn: ConnectionId, reason: RejectReason) -> CoreResult<()> {
         let session_id = self.lookup_session(&conn)?;
         let terminal_detail = format!("session rejected locally: {reason:?}");
-        self.discard_outbound_stage(&conn);
+        if let Some(route) = self
+            .outbound_routes
+            .get(&conn)
+            .map(|entry| Arc::clone(entry.value()))
+        {
+            route.complete_activation(SipActivationCompletion::Failed(
+                SipActivationFailure::RouteEnded,
+            ));
+            begin_outbound_cleanup(
+                self.self_weak.clone(),
+                Arc::clone(&self.coordinator),
+                Arc::clone(&route),
+                self.lifecycle.clone(),
+                self.out_tx.clone(),
+                Some(AdapterEvent::Failed {
+                    connection_id: conn,
+                    detail: terminal_detail,
+                }),
+                "reject",
+            );
+            return route.wait_cleanup().await;
+        }
         let (status, phrase) = match reason {
             RejectReason::Busy => (486, "Busy Here"),
             RejectReason::Decline => (603, "Decline"),
@@ -1590,7 +2325,28 @@ impl ConnectionAdapter for SipAdapter {
 
     async fn end(&self, conn: ConnectionId, reason: EndReason) -> CoreResult<()> {
         let session_id = self.lookup_session(&conn)?;
-        self.discard_outbound_stage(&conn);
+        if let Some(route) = self
+            .outbound_routes
+            .get(&conn)
+            .map(|entry| Arc::clone(entry.value()))
+        {
+            route.complete_activation(SipActivationCompletion::Failed(
+                SipActivationFailure::RouteEnded,
+            ));
+            begin_outbound_cleanup(
+                self.self_weak.clone(),
+                Arc::clone(&self.coordinator),
+                Arc::clone(&route),
+                self.lifecycle.clone(),
+                self.out_tx.clone(),
+                Some(AdapterEvent::Ended {
+                    connection_id: conn,
+                    reason,
+                }),
+                "end",
+            );
+            return route.wait_cleanup().await;
+        }
         self.forget(&session_id);
         let network_result = self
             .coordinator
@@ -1782,13 +2538,13 @@ mod inbound_context_tests {
     }
 
     fn request(route: &str, correlation_values: &[&str]) -> Arc<rvoip_sip_core::Request> {
-        let mut headers = format!(
+        let mut headers = String::from(
             "Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-test\r\n\
              From: <sip:caller@example.test>;tag=from-tag\r\n\
              To: <sip:bridge@example.test>\r\n\
              Call-ID: inbound-context@example.test\r\n\
              CSeq: 1 INVITE\r\n\
-             Max-Forwards: 70\r\n"
+             Max-Forwards: 70\r\n",
         );
         for value in correlation_values {
             headers.push_str(&format!("X-Correlation-Id: {value}\r\n"));
@@ -1947,8 +2703,8 @@ mod inbound_context_tests {
         ));
         assert!(adapter.by_connection.is_empty());
         assert!(adapter.by_session.is_empty());
-        assert!(adapter.outbound_event_stages.is_empty());
-        assert!(adapter.outbound_originate_contexts.is_empty());
+        assert!(adapter.outbound_routes.is_empty());
+        assert!(adapter.streams_cache.is_empty());
         assert!(adapter.retired_sessions.is_empty());
         assert!(coordinator.list_sessions().await.is_empty());
 
@@ -1959,6 +2715,280 @@ mod inbound_context_tests {
                 .is_err(),
             "wrong context must not emit a SIP packet"
         );
+
+        drop(adapter);
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn prepared_outbound_route_and_pre_send_end_are_zero_wire() {
+        let capture = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("capture socket");
+        let target = capture.local_addr().expect("capture address");
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("zero-wire-prepare", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let request = OriginateRequest::new(
+            CoreSessionId::new(),
+            ParticipantId::new(),
+            format!("sip:target@{target}"),
+            Direction::Outbound,
+            CapabilityDescriptor::default(),
+        )
+        .with_transport(Transport::Sip);
+
+        let prepared = ConnectionAdapter::originate(adapter.as_ref(), request)
+            .await
+            .expect("local preparation");
+        let connection_id = prepared.connection.id.clone();
+        let route = adapter
+            .outbound_routes
+            .get(&connection_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .expect("retained route");
+        assert_eq!(
+            route.stream.subscribe_lifecycle().borrow().to_owned(),
+            crate::media_stream::SipMediaLifecycle::Dormant
+        );
+        assert!(coordinator.list_sessions().await.is_empty());
+
+        let mut packet = [0u8; 2_048];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), capture.recv_from(&mut packet))
+                .await
+                .is_err(),
+            "preparation must not emit a SIP packet"
+        );
+
+        ConnectionAdapter::end(adapter.as_ref(), connection_id, EndReason::Cancelled)
+            .await
+            .expect("pre-send local cleanup");
+        assert!(adapter.outbound_routes.is_empty());
+        assert!(adapter.streams_cache.is_empty());
+        assert!(coordinator.list_sessions().await.is_empty());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), capture.recv_from(&mut packet))
+                .await
+                .is_err(),
+            "pre-send cleanup must not emit CANCEL, BYE, or INVITE"
+        );
+
+        drop(adapter);
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn concurrent_activation_sends_one_invite_and_receipt_matches_wire_call_id() {
+        let capture = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("capture socket");
+        let target = capture.local_addr().expect("capture address");
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("activation-singleflight", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let request = OriginateRequest::new(
+            CoreSessionId::new(),
+            ParticipantId::new(),
+            format!("sip:target@{target}"),
+            Direction::Outbound,
+            CapabilityDescriptor::default(),
+        )
+        .with_transport(Transport::Sip);
+        let prepared = ConnectionAdapter::originate(adapter.as_ref(), request)
+            .await
+            .expect("prepare route");
+        let connection_id = prepared.connection.id.clone();
+
+        let mut callers = Vec::new();
+        for _ in 0..100 {
+            let caller_adapter = Arc::clone(&adapter);
+            let caller_connection = connection_id.clone();
+            callers.push(tokio::spawn(async move {
+                ConnectionAdapter::activate_outbound_with_receipt(
+                    caller_adapter.as_ref(),
+                    caller_connection,
+                )
+                .await
+            }));
+        }
+
+        let mut packet = [0u8; 8_192];
+        let (bytes, _) =
+            tokio::time::timeout(Duration::from_secs(5), capture.recv_from(&mut packet))
+                .await
+                .expect("INVITE deadline")
+                .expect("INVITE packet");
+        let invite = std::str::from_utf8(&packet[..bytes]).expect("SIP text");
+        assert!(invite.starts_with("INVITE "));
+        let wire_call_id = invite
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("Call-ID")
+                    .then(|| value.trim().to_string())
+            })
+            .expect("wire Call-ID");
+
+        let mut expected_receipt = None;
+        for caller in callers {
+            let receipt = tokio::time::timeout(Duration::from_secs(5), caller)
+                .await
+                .expect("activation deadline")
+                .expect("activation task")
+                .expect("activation receipt");
+            let external = receipt
+                .external_references()
+                .iter()
+                .find(|reference| reference.kind() == "sip.call-id")
+                .expect("SIP Call-ID receipt")
+                .expose_secret()
+                .to_string();
+            assert_eq!(external, wire_call_id);
+            if let Some(expected) = expected_receipt.as_ref() {
+                assert_eq!(expected, &external);
+            } else {
+                expected_receipt = Some(external);
+            }
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), capture.recv_from(&mut packet))
+                .await
+                .is_err(),
+            "concurrent activation must not emit a second INVITE"
+        );
+
+        ConnectionAdapter::end(adapter.as_ref(), connection_id, EndReason::Cancelled)
+            .await
+            .expect("retained cleanup");
+        drop(adapter);
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn stream_cache_insert_and_retirement_are_atomic_under_race() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("cache-race", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+
+        for _ in 0..100 {
+            let session_id = SessionId::new();
+            let connection_id = adapter
+                .ensure_mapped(session_id.clone())
+                .expect("admit mapping");
+            let gate = Arc::new(tokio::sync::Barrier::new(3));
+            let insert_adapter = Arc::clone(&adapter);
+            let insert_connection = connection_id.clone();
+            let insert_gate = Arc::clone(&gate);
+            let insert = tokio::spawn(async move {
+                insert_gate.wait().await;
+                insert_adapter.get_or_insert_dormant_stream(&insert_connection, Direction::Inbound)
+            });
+            let retire_adapter = Arc::clone(&adapter);
+            let retire_session = session_id.clone();
+            let retire_gate = Arc::clone(&gate);
+            let retire = tokio::spawn(async move {
+                retire_gate.wait().await;
+                retire_adapter.forget(&retire_session);
+            });
+            gate.wait().await;
+            let _ = insert.await.expect("insert task");
+            retire.await.expect("retire task");
+
+            assert!(!adapter.by_session.contains_key(&session_id));
+            assert!(!adapter.by_connection.contains_key(&connection_id));
+            assert!(!adapter.streams_cache.contains_key(&connection_id));
+        }
+
+        drop(adapter);
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn cached_stream_direction_is_immutable() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("cache-direction", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let session_id = SessionId::new();
+        let connection_id = adapter
+            .ensure_mapped(session_id.clone())
+            .expect("admit mapping");
+        let inbound = adapter
+            .get_or_insert_dormant_stream(&connection_id, Direction::Inbound)
+            .expect("inbound stream");
+        assert!(adapter
+            .get_or_insert_dormant_stream(&connection_id, Direction::Outbound)
+            .is_none());
+        let cached = adapter
+            .streams_cache
+            .get(&connection_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .expect("stable cache");
+        assert!(Arc::ptr_eq(&inbound, &cached));
+
+        adapter.forget(&session_id);
+        drop(adapter);
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn inbound_media_bind_failure_retires_route_and_delivers_terminal() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("media-bind-failure", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let mut events = adapter
+            .try_subscribe_atomic_events()
+            .expect("atomic events");
+        let session_id = SessionId::new();
+        let connection_id = adapter
+            .ensure_mapped(session_id.clone())
+            .expect("admit mapping");
+        let _connection = adapter
+            .build_connection(connection_id.clone(), Direction::Inbound)
+            .await;
+
+        let terminal = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("bounded media cleanup")
+            .expect("terminal event");
+        assert!(matches!(
+            terminal,
+            OrchestratorAdapterEvent::Public(AdapterEvent::Failed { connection_id: id, .. })
+                if id == connection_id
+        ));
+        assert!(!adapter.by_session.contains_key(&session_id));
+        assert!(!adapter.by_connection.contains_key(&connection_id));
+        assert!(!adapter.streams_cache.contains_key(&connection_id));
 
         drop(adapter);
         coordinator
@@ -2593,7 +3623,7 @@ mod inbound_context_tests {
     }
 
     #[tokio::test]
-    async fn outbound_activation_reserves_the_entire_fifo_before_publication() {
+    async fn retained_publication_waits_for_capacity_and_flushes_fifo_once() {
         let coordinator = UnifiedCoordinator::new(ApiConfig::local("staged-activation", 0))
             .await
             .expect("coordinator");
@@ -2605,21 +3635,28 @@ mod inbound_context_tests {
             .expect("atomic events");
         let session_id = SessionId::new();
         let connection_id = ConnectionId::new();
-        adapter
-            .reserve_outbound_mapping(session_id.clone(), connection_id.clone())
-            .expect("reserve route");
-        adapter.outbound_event_stages.insert(
+        let route = SipOutboundRoute::new(
             connection_id.clone(),
-            Arc::new(OutboundEventStage::default()),
+            session_id,
+            "sip:target@example.test".to_string(),
+            Arc::new(SipOriginateContext::default()),
+            crate::media_stream::SipMediaStream::dormant(Direction::Outbound),
         );
-        assert!(adapter.try_send(AdapterEvent::Connected {
-            connection_id: connection_id.clone(),
-        }));
-        assert!(adapter.try_send(AdapterEvent::Dtmf {
-            connection_id: connection_id.clone(),
-            digits: "5".into(),
-            duration_ms: 100,
-        }));
+        assert!(route.claim_activation().expect("first activation"));
+        assert_eq!(
+            route.stage_event(AdapterEvent::Connected {
+                connection_id: connection_id.clone(),
+            }),
+            SipRouteStageDisposition::Retained
+        );
+        assert_eq!(
+            route.stage_event(AdapterEvent::Dtmf {
+                connection_id: connection_id.clone(),
+                digits: "5".into(),
+                duration_ms: 100,
+            }),
+            SipRouteStageDisposition::Retained
+        );
 
         for _ in 0..(SIP_ADAPTER_EVENT_CAPACITY - 1) {
             adapter
@@ -2630,10 +3667,12 @@ mod inbound_context_tests {
                 }))
                 .expect("fill all but one queue slot");
         }
-        assert!(adapter
-            .activate_outbound(connection_id.clone())
-            .await
-            .is_err());
+        let flush_route = Arc::clone(&route);
+        let flush_events = adapter.out_tx.clone();
+        let flush =
+            tokio::spawn(async move { flush_route.publish_staged_events(&flush_events).await });
+        tokio::task::yield_now().await;
+        assert!(!flush.is_finished(), "second staged event awaits capacity");
 
         for _ in 0..(SIP_ADAPTER_EVENT_CAPACITY - 1) {
             assert!(matches!(
@@ -2644,15 +3683,7 @@ mod inbound_context_tests {
                 }))
             ));
         }
-        assert!(matches!(
-            events.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
-
-        adapter
-            .activate_outbound(connection_id.clone())
-            .await
-            .expect("retry flushes the intact FIFO");
+        assert!(!flush.await.expect("retained publisher").expect("flush"));
         assert!(matches!(
             events.recv().await,
             Some(OrchestratorAdapterEvent::Public(AdapterEvent::Connected { connection_id: id }))
@@ -2663,13 +3694,135 @@ mod inbound_context_tests {
             Some(OrchestratorAdapterEvent::Public(AdapterEvent::Dtmf { connection_id: id, digits, .. }))
                 if id == connection_id && digits == "5"
         ));
+        assert_eq!(
+            route.stage_event(AdapterEvent::Connected {
+                connection_id: connection_id.clone(),
+            }),
+            SipRouteStageDisposition::Forward
+        );
 
-        adapter.forget(&session_id);
         drop(adapter);
         coordinator
             .shutdown_gracefully(Some(Duration::from_secs(1)))
             .await
             .expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn retained_publication_does_not_retry_after_terminal_failure() {
+        let (events, receiver) = mpsc::channel(1);
+        drop(receiver);
+        let connection_id = ConnectionId::new();
+        let route = SipOutboundRoute::new(
+            connection_id.clone(),
+            SessionId::new(),
+            "sip:target@example.test".to_string(),
+            Arc::new(SipOriginateContext::default()),
+            crate::media_stream::SipMediaStream::dormant(Direction::Outbound),
+        );
+        assert!(route.claim_activation().expect("claim"));
+        assert_eq!(
+            route.stage_event(AdapterEvent::Connected { connection_id }),
+            SipRouteStageDisposition::Retained
+        );
+        assert!(matches!(
+            route.publish_staged_events(&events).await,
+            Err(SipActivationFailure::EventPublication)
+        ));
+        assert!(!route.claim_activation().expect("driver remains claimed"));
+    }
+
+    #[tokio::test]
+    async fn one_hundred_activation_callers_claim_one_retained_driver() {
+        let connection_id = ConnectionId::new();
+        let route = SipOutboundRoute::new(
+            connection_id,
+            SessionId::new(),
+            "sip:target@example.test".to_string(),
+            Arc::new(SipOriginateContext::default()),
+            crate::media_stream::SipMediaStream::dormant(Direction::Outbound),
+        );
+        let gate = Arc::new(tokio::sync::Barrier::new(101));
+        let mut claims = Vec::new();
+        for _ in 0..100 {
+            let claim_route = Arc::clone(&route);
+            let claim_gate = Arc::clone(&gate);
+            claims.push(tokio::spawn(async move {
+                claim_gate.wait().await;
+                claim_route.claim_activation()
+            }));
+        }
+        gate.wait().await;
+        let mut first = 0;
+        for claim in claims {
+            if claim.await.expect("claim task").expect("live route") {
+                first += 1;
+            }
+        }
+        assert_eq!(first, 1);
+
+        let cancelled_route = Arc::clone(&route);
+        let cancelled = tokio::spawn(async move { cancelled_route.wait_activation().await });
+        cancelled.abort();
+        let mut waiters = Vec::new();
+        for _ in 0..99 {
+            let waiter_route = Arc::clone(&route);
+            waiters.push(tokio::spawn(
+                async move { waiter_route.wait_activation().await },
+            ));
+        }
+        let reference =
+            ExternalConnectionReference::new("sip.call-id", "one@example.test").expect("reference");
+        route.complete_activation(SipActivationCompletion::Succeeded(
+            OutboundActivation::with_external_reference(reference),
+        ));
+        for waiter in waiters {
+            assert!(waiter.await.expect("activation waiter").is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn fast_terminal_is_separate_from_public_fifo_and_survives_overflow() {
+        let connection_id = ConnectionId::new();
+        let route = SipOutboundRoute::new(
+            connection_id.clone(),
+            SessionId::new(),
+            "sip:target@example.test".to_string(),
+            Arc::new(SipOriginateContext::default()),
+            crate::media_stream::SipMediaStream::dormant(Direction::Outbound),
+        );
+        for _ in 0..SIP_OUTBOUND_EVENT_STAGE_CAPACITY {
+            assert_eq!(
+                route.stage_event(AdapterEvent::Connected {
+                    connection_id: connection_id.clone(),
+                }),
+                SipRouteStageDisposition::Retained
+            );
+        }
+        assert_eq!(
+            route.stage_event(AdapterEvent::Dtmf {
+                connection_id: connection_id.clone(),
+                digits: "8".to_string(),
+                duration_ms: 100,
+            }),
+            SipRouteStageDisposition::Retained
+        );
+        assert_eq!(
+            route.stage_event(AdapterEvent::Ended {
+                connection_id: connection_id.clone(),
+                reason: EndReason::Normal,
+            }),
+            SipRouteStageDisposition::Retained
+        );
+        assert!(matches!(
+            route.claim_activation(),
+            Err(SipActivationFailure::EventOverflow)
+        ));
+        route.request_cleanup(None);
+        assert!(matches!(
+            route.seal_cleanup_event(),
+            Some(AdapterEvent::Ended { connection_id: id, .. }) if id == connection_id
+        ));
     }
 
     #[tokio::test]
