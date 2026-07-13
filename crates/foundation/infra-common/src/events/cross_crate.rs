@@ -375,7 +375,7 @@ impl Default for SipTraceConfig {
 }
 
 /// SIP message observed at the transport boundary.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SipTraceEvent {
     /// Coordinator-specific owner id used to filter global trace events.
     pub owner_id: String,
@@ -404,6 +404,20 @@ pub struct SipTraceEvent {
     pub truncated: bool,
     /// Whether headers or body content were redacted.
     pub redacted: bool,
+}
+
+impl fmt::Debug for SipTraceEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SipTraceEvent")
+            .field("direction", &self.direction)
+            .field("original_len", &self.original_len)
+            .field("raw_message_bytes", &self.raw_message.len())
+            .field("truncated", &self.truncated)
+            .field("redacted", &self.redacted)
+            .field("session_present", &self.session_id.is_some())
+            .finish()
+    }
 }
 
 /// Transport metadata for SIP requests that are promoted from the transport
@@ -702,7 +716,7 @@ fn format_truncation(mut message: String, original_len: usize, truncated: bool) 
 // =============================================================================
 
 /// Events sent from session-core to dialog-core
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum SessionToDialogEvent {
     /// Request to initiate a new call
     InitiateCall {
@@ -780,6 +794,97 @@ pub enum SessionToDialogEvent {
         /// only strings here.
         extra_headers: Vec<(String, String)>,
     },
+}
+
+impl fmt::Debug for SessionToDialogEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InitiateCall {
+                from,
+                to,
+                sdp_offer,
+                headers,
+                ..
+            } => formatter
+                .debug_struct("InitiateCall")
+                .field("from_bytes", &from.len())
+                .field("to_bytes", &to.len())
+                .field("sdp_present", &sdp_offer.is_some())
+                .field("sdp_bytes", &sdp_offer.as_ref().map_or(0, String::len))
+                .field("header_count", &headers.len())
+                .finish(),
+            Self::TerminateSession { reason, .. } => formatter
+                .debug_struct("TerminateSession")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::HoldSession { .. } => formatter.write_str("HoldSession"),
+            Self::ResumeSession { sdp_offer, .. } => formatter
+                .debug_struct("ResumeSession")
+                .field("sdp_present", &sdp_offer.is_some())
+                .field("sdp_bytes", &sdp_offer.as_ref().map_or(0, String::len))
+                .finish(),
+            Self::TransferCall { transfer_type, .. } => formatter
+                .debug_struct("TransferCall")
+                .field("transfer_type", transfer_type)
+                .finish(),
+            Self::SendDtmf { tones, .. } => formatter
+                .debug_struct("SendDtmf")
+                .field("tone_count", &tones.chars().count())
+                .finish(),
+            // These exact shapes are consumed by sip-dialog's legacy string
+            // fallback parser. Keep them stable until that fallback is removed.
+            Self::StoreDialogMapping {
+                session_id,
+                dialog_id,
+            } => formatter
+                .debug_struct("StoreDialogMapping")
+                .field("session_id", session_id)
+                .field("dialog_id", dialog_id)
+                .finish(),
+            Self::ReferResponse {
+                transaction_id,
+                accept,
+                status_code,
+                reason,
+            } => formatter
+                .debug_struct("ReferResponse")
+                .field("transaction_id", transaction_id)
+                .field("accept", accept)
+                .field("status_code", status_code)
+                .field("reason", reason)
+                .finish(),
+            Self::SendRegisterResponse {
+                status_code,
+                reason,
+                www_authenticate,
+                contact,
+                expires,
+                min_expires,
+                service_route,
+                path_echo,
+                associated_uri,
+                extra_headers,
+                ..
+            } => formatter
+                .debug_struct("SendRegisterResponse")
+                .field("status_code", status_code)
+                .field("reason_bytes", &reason.len())
+                .field("www_authenticate_present", &www_authenticate.is_some())
+                .field(
+                    "www_authenticate_bytes",
+                    &www_authenticate.as_ref().map_or(0, String::len),
+                )
+                .field("contact_present", &contact.is_some())
+                .field("contact_bytes", &contact.as_ref().map_or(0, String::len))
+                .field("expires", expires)
+                .field("min_expires", min_expires)
+                .field("service_route_count", &service_route.len())
+                .field("path_echo", path_echo)
+                .field("associated_uri_count", &associated_uri.len())
+                .field("extra_header_count", &extra_headers.len())
+                .finish(),
+        }
+    }
 }
 
 /// RFC 8224 STIR/SHAKEN PASSporT verification status, surfaced from
@@ -1205,11 +1310,21 @@ fn safe_auth_method_debug_label(method: &str) -> &'static str {
     }
 }
 
+fn safe_registration_status_debug_label(status: &RegistrationStatus) -> &'static str {
+    match status {
+        RegistrationStatus::Registered => "registered",
+        RegistrationStatus::Unregistered => "unregistered",
+        RegistrationStatus::Failed(_) => "failed",
+    }
+}
+
 macro_rules! debug_dialog_variant {
     ($formatter:expr, $name:literal, $( $field:ident ),* $(,)?) => {{
-        let mut builder = $formatter.debug_struct($name);
-        $(builder.field(stringify!($field), $field);)*
-        builder.finish()
+        // Bindings remain explicit in each arm so new fields cannot be added
+        // without reviewing the formatter, but arbitrary signaling values do
+        // not cross the diagnostics boundary.
+        $(let _ = $field;)*
+        $formatter.write_str($name)
     }};
 }
 
@@ -1298,7 +1413,7 @@ impl fmt::Debug for DialogToSessionEvent {
                 debug_dialog_variant!(f, "SessionRefreshFailed", session_id, reason)
             }
             Self::AuthRequired {
-                session_id,
+                session_id: _,
                 status_code,
                 challenge,
                 realm,
@@ -1306,7 +1421,6 @@ impl fmt::Debug for DialogToSessionEvent {
                 outbound_transport,
             } => f
                 .debug_struct("AuthRequired")
-                .field("session_id", session_id)
                 .field("status_code", status_code)
                 .field("challenge_present", &!challenge.is_empty())
                 .field("challenge_bytes", &challenge.len())
@@ -1452,34 +1566,25 @@ impl fmt::Debug for DialogToSessionEvent {
                 status_code,
             } => debug_dialog_variant!(f, "MessageFailed", session_id, status_code),
             Self::IncomingRegister {
-                transaction_id,
-                from_uri,
-                to_uri,
-                contact_uri,
                 expires,
                 authorization,
-                call_id,
                 raw_request,
                 transport,
+                ..
             } => f
                 .debug_struct("IncomingRegister")
-                .field("transaction_id", transaction_id)
-                .field("from_uri", from_uri)
-                .field("to_uri", to_uri)
-                .field("contact_uri", contact_uri)
                 .field("expires", expires)
                 .field("authorization_present", &authorization.is_some())
                 .field(
                     "authorization_bytes",
                     &authorization.as_ref().map_or(0, |value| value.len()),
                 )
-                .field("call_id", call_id)
                 .field("raw_request_present", &raw_request.is_some())
                 .field(
                     "raw_request_bytes",
                     &raw_request.as_ref().map_or(0, Bytes::len),
                 )
-                .field("transport", transport)
+                .field("transport_present", &transport.is_some())
                 .finish(),
             Self::OutboundFlowFailed {
                 aor,
@@ -1496,7 +1601,7 @@ impl fmt::Debug for DialogToSessionEvent {
 // =============================================================================
 
 /// Events sent from session-core to media-core
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum SessionToMediaEvent {
     /// Start media stream for session
     StartMediaStream {
@@ -1541,6 +1646,57 @@ pub enum SessionToMediaEvent {
 
     /// Stop audio playback
     StopAudio { session_id: String },
+}
+
+impl fmt::Debug for SessionToMediaEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StartMediaStream {
+                local_sdp,
+                remote_sdp,
+                ..
+            } => formatter
+                .debug_struct("StartMediaStream")
+                .field("local_sdp_present", &local_sdp.is_some())
+                .field(
+                    "local_sdp_bytes",
+                    &local_sdp.as_ref().map_or(0, String::len),
+                )
+                .field("remote_sdp_present", &remote_sdp.is_some())
+                .field(
+                    "remote_sdp_bytes",
+                    &remote_sdp.as_ref().map_or(0, String::len),
+                )
+                .finish(),
+            Self::StopMediaStream { .. } => formatter.write_str("StopMediaStream"),
+            Self::UpdateMediaStream {
+                local_sdp,
+                remote_sdp,
+                ..
+            } => formatter
+                .debug_struct("UpdateMediaStream")
+                .field("local_sdp_present", &local_sdp.is_some())
+                .field(
+                    "local_sdp_bytes",
+                    &local_sdp.as_ref().map_or(0, String::len),
+                )
+                .field("remote_sdp_present", &remote_sdp.is_some())
+                .field(
+                    "remote_sdp_bytes",
+                    &remote_sdp.as_ref().map_or(0, String::len),
+                )
+                .finish(),
+            Self::HoldMedia { .. } => formatter.write_str("HoldMedia"),
+            Self::ResumeMedia { .. } => formatter.write_str("ResumeMedia"),
+            Self::StartRecording { .. } => formatter.write_str("StartRecording"),
+            Self::StopRecording { .. } => formatter.write_str("StopRecording"),
+            Self::PlayAudio { loop_count, .. } => formatter
+                .debug_struct("PlayAudio")
+                .field("loop_count", loop_count)
+                .finish(),
+            Self::StopAudio { .. } => formatter.write_str("StopAudio"),
+        }
+    }
 }
 
 /// Events sent from media-core to session-core
@@ -1620,7 +1776,7 @@ pub enum MediaToSessionEvent {
 // =============================================================================
 
 /// Events sent from dialog-core to sip-transport
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum DialogToTransportEvent {
     /// Send SIP message
     SendSipMessage {
@@ -1651,8 +1807,63 @@ pub enum DialogToTransportEvent {
     UnregisterEndpoint { uri: String },
 }
 
+impl fmt::Debug for DialogToTransportEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SendSipMessage {
+                destination,
+                method,
+                headers,
+                body,
+                transaction_id,
+            } => formatter
+                .debug_struct("SendSipMessage")
+                .field("destination_bytes", &destination.len())
+                .field("method", &safe_auth_method_debug_label(method))
+                .field("header_count", &headers.len())
+                .field("body_present", &body.is_some())
+                .field("body_bytes", &body.as_ref().map_or(0, String::len))
+                .field("transaction_present", &transaction_id.is_some())
+                .field(
+                    "transaction_bytes",
+                    &transaction_id.as_ref().map_or(0, String::len),
+                )
+                .finish(),
+            Self::SendSipResponse {
+                status_code,
+                reason_phrase,
+                headers,
+                body,
+                ..
+            } => formatter
+                .debug_struct("SendSipResponse")
+                .field("status_code", status_code)
+                .field("reason_phrase_bytes", &reason_phrase.len())
+                .field("header_count", &headers.len())
+                .field("body_present", &body.is_some())
+                .field("body_bytes", &body.as_ref().map_or(0, String::len))
+                .finish(),
+            Self::RegisterEndpoint {
+                uri,
+                expires,
+                contact,
+            } => formatter
+                .debug_struct("RegisterEndpoint")
+                .field("uri_bytes", &uri.len())
+                .field("expires", expires)
+                .field("contact_present", &contact.is_some())
+                .field("contact_bytes", &contact.as_ref().map_or(0, String::len))
+                .finish(),
+            Self::UnregisterEndpoint { uri } => formatter
+                .debug_struct("UnregisterEndpoint")
+                .field("uri_bytes", &uri.len())
+                .finish(),
+        }
+    }
+}
+
 /// Events sent from sip-transport to dialog-core
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum TransportToDialogEvent {
     /// SIP message received
     SipMessageReceived {
@@ -1684,6 +1895,64 @@ pub enum TransportToDialogEvent {
         status: RegistrationStatus,
         expires: Option<u32>,
     },
+}
+
+impl fmt::Debug for TransportToDialogEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SipMessageReceived {
+                source,
+                method,
+                headers,
+                body,
+                transaction_id,
+            } => formatter
+                .debug_struct("SipMessageReceived")
+                .field("source_bytes", &source.len())
+                .field("method", &safe_auth_method_debug_label(method))
+                .field("header_count", &headers.len())
+                .field("body_present", &body.is_some())
+                .field("body_bytes", &body.as_ref().map_or(0, String::len))
+                .field("transaction_bytes", &transaction_id.len())
+                .finish(),
+            Self::SipResponseReceived {
+                status_code,
+                reason_phrase,
+                headers,
+                body,
+                ..
+            } => formatter
+                .debug_struct("SipResponseReceived")
+                .field("status_code", status_code)
+                .field("reason_phrase_bytes", &reason_phrase.len())
+                .field("header_count", &headers.len())
+                .field("body_present", &body.is_some())
+                .field("body_bytes", &body.as_ref().map_or(0, String::len))
+                .finish(),
+            Self::TransportError {
+                error,
+                transaction_id,
+            } => formatter
+                .debug_struct("TransportError")
+                .field("error_bytes", &error.len())
+                .field("transaction_present", &transaction_id.is_some())
+                .field(
+                    "transaction_bytes",
+                    &transaction_id.as_ref().map_or(0, String::len),
+                )
+                .finish(),
+            Self::RegistrationStatusUpdate {
+                uri,
+                status,
+                expires,
+            } => formatter
+                .debug_struct("RegistrationStatusUpdate")
+                .field("uri_bytes", &uri.len())
+                .field("status", &safe_registration_status_debug_label(status))
+                .field("expires", expires)
+                .finish(),
+        }
+    }
 }
 
 // =============================================================================
@@ -2510,6 +2779,135 @@ mod tests {
             format!("{refer:?}"),
             "SessionToDialog(ReferResponse { transaction_id: \"legacy-transaction\", accept: true, status_code: 202, reason: \"Accepted\" })"
         );
+    }
+
+    #[test]
+    fn signaling_cross_crate_debug_is_metadata_only_while_serde_is_unchanged() {
+        const SECRET: &str = "cross-crate-signaling-secret-canary";
+        const SECRET_BYTES: &[u8] = b"cross-crate-signaling-secret-canary";
+
+        let inner_session = SessionToDialogEvent::InitiateCall {
+            session_id: SECRET.into(),
+            from: SECRET.into(),
+            to: SECRET.into(),
+            sdp_offer: Some(SECRET.into()),
+            headers: HashMap::from([("Authorization".into(), SECRET.into())]),
+        };
+        let direct_session = format!("{inner_session:?}");
+        let session = RvoipCrossCrateEvent::SessionToDialog(inner_session);
+
+        let inner_dialog = DialogToSessionEvent::IncomingCall {
+            session_id: SECRET.into(),
+            call_id: SECRET.into(),
+            from: SECRET.into(),
+            to: SECRET.into(),
+            sdp_offer: Some(SECRET.into()),
+            headers: HashMap::from([("Authorization".into(), SECRET.into())]),
+            transaction_id: SECRET.into(),
+            source_addr: SECRET.into(),
+            raw_request: Some(Bytes::from_static(SECRET_BYTES)),
+            transport: None,
+            identity_verification: None,
+        };
+        let direct_dialog = format!("{inner_dialog:?}");
+        let dialog = RvoipCrossCrateEvent::DialogToSession(inner_dialog);
+
+        let inner_media = SessionToMediaEvent::UpdateMediaStream {
+            session_id: SECRET.into(),
+            local_sdp: Some(SECRET.into()),
+            remote_sdp: Some(SECRET.into()),
+        };
+        let direct_media = format!("{inner_media:?}");
+        let media = RvoipCrossCrateEvent::SessionToMedia(inner_media);
+
+        let inner_outbound = DialogToTransportEvent::SendSipMessage {
+            destination: SECRET.into(),
+            method: SECRET.into(),
+            headers: HashMap::from([("Authorization".into(), SECRET.into())]),
+            body: Some(SECRET.into()),
+            transaction_id: Some(SECRET.into()),
+        };
+        let direct_outbound = format!("{inner_outbound:?}");
+        let outbound = RvoipCrossCrateEvent::DialogToTransport(inner_outbound);
+
+        let inner_inbound = TransportToDialogEvent::SipResponseReceived {
+            transaction_id: SECRET.into(),
+            status_code: 401,
+            reason_phrase: SECRET.into(),
+            headers: HashMap::from([("WWW-Authenticate".into(), SECRET.into())]),
+            body: Some(SECRET.into()),
+        };
+        let direct_inbound = format!("{inner_inbound:?}");
+        let inbound = RvoipCrossCrateEvent::TransportToDialog(inner_inbound);
+
+        let inner_trace = SipTraceEvent {
+            owner_id: SECRET.into(),
+            direction: SipTraceDirection::Inbound,
+            transport: SECRET.into(),
+            local_addr: SECRET.into(),
+            remote_addr: SECRET.into(),
+            timestamp_unix_millis: 1,
+            start_line: SECRET.into(),
+            sip_call_id: Some(SECRET.into()),
+            session_id: Some(SECRET.into()),
+            raw_message: SECRET.into(),
+            original_len: SECRET.len(),
+            truncated: false,
+            redacted: false,
+        };
+        let direct_trace = format!("{inner_trace:?}");
+        let trace = RvoipCrossCrateEvent::TransportToSession(inner_trace);
+
+        for rendered in [
+            direct_session,
+            direct_dialog,
+            direct_media,
+            direct_outbound,
+            direct_inbound,
+            direct_trace,
+            format!("{session:?}"),
+            format!("{dialog:?}"),
+            format!("{media:?}"),
+            format!("{outbound:?}"),
+            format!("{inbound:?}"),
+            format!("{trace:?}"),
+        ] {
+            assert!(
+                !rendered.contains(SECRET),
+                "debug leaked secret: {rendered}"
+            );
+        }
+
+        for event in [session, dialog, media, outbound, inbound, trace] {
+            let wire = serde_json::to_string(&event).expect("serialize cross-crate event");
+            assert!(wire.contains(SECRET));
+        }
+    }
+
+    #[test]
+    fn signaling_event_source_keeps_sensitive_containers_on_manual_debug() {
+        let source = include_str!("cross_crate.rs");
+        for declaration in [
+            "pub struct SipTraceEvent",
+            "pub enum SessionToDialogEvent",
+            "pub enum DialogToSessionEvent",
+            "pub enum SessionToMediaEvent",
+            "pub enum DialogToTransportEvent",
+            "pub enum TransportToDialogEvent",
+        ] {
+            let declaration_offset = source
+                .find(declaration)
+                .unwrap_or_else(|| panic!("missing declaration {declaration}"));
+            let prefix = &source[..declaration_offset];
+            let derive_offset = prefix
+                .rfind("#[derive(")
+                .unwrap_or_else(|| panic!("missing derive for {declaration}"));
+            let derive = &prefix[derive_offset..];
+            assert!(
+                !derive.contains("Debug"),
+                "{declaration} regained derived Debug"
+            );
+        }
     }
 
     #[test]

@@ -93,6 +93,33 @@ pub struct IncomingCall {
     resolved: bool,
 }
 
+impl std::fmt::Debug for IncomingCall {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IncomingCall")
+            .field("sdp_present", &self.sdp.is_some())
+            .field("sdp_bytes", &self.sdp.as_ref().map_or(0, String::len))
+            .field("legacy_header_count", &self.headers.len())
+            .field("raw_request_present", &self.request.is_some())
+            .field(
+                "raw_request_header_count",
+                &self
+                    .request
+                    .as_ref()
+                    .map_or(0, |request| request.headers.len()),
+            )
+            .field(
+                "raw_request_body_bytes",
+                &self
+                    .request
+                    .as_ref()
+                    .map_or(0, |request| request.body().len()),
+            )
+            .field("resolved", &self.resolved)
+            .finish()
+    }
+}
+
 impl IncomingCall {
     pub(crate) fn new(
         call_id: CallId,
@@ -1033,16 +1060,48 @@ pub struct IncomingRequest {
     pub(crate) coordinator: Option<Arc<UnifiedCoordinator>>,
 }
 
+fn safe_incoming_method_debug_label(method: &rvoip_sip_core::types::Method) -> &'static str {
+    use rvoip_sip_core::types::Method;
+
+    match method {
+        Method::Invite => "INVITE",
+        Method::Ack => "ACK",
+        Method::Bye => "BYE",
+        Method::Cancel => "CANCEL",
+        Method::Register => "REGISTER",
+        Method::Options => "OPTIONS",
+        Method::Subscribe => "SUBSCRIBE",
+        Method::Notify => "NOTIFY",
+        Method::Update => "UPDATE",
+        Method::Refer => "REFER",
+        Method::Info => "INFO",
+        Method::Message => "MESSAGE",
+        Method::Prack => "PRACK",
+        Method::Publish => "PUBLISH",
+        Method::Extension(_) => "extension",
+    }
+}
+
 impl std::fmt::Debug for IncomingRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IncomingRequest")
-            .field("call_id", &self.call_id)
-            .field("from", &self.from)
-            .field("to", &self.to)
-            .field("method", &self.method)
-            .field("has_request", &self.request.is_some())
-            .field("transport", &self.transport)
-            .field("has_coordinator", &self.coordinator.is_some())
+            .field("method", &safe_incoming_method_debug_label(&self.method))
+            .field("raw_request_present", &self.request.is_some())
+            .field(
+                "raw_request_header_count",
+                &self
+                    .request
+                    .as_ref()
+                    .map_or(0, |request| request.headers.len()),
+            )
+            .field(
+                "raw_request_body_bytes",
+                &self
+                    .request
+                    .as_ref()
+                    .map_or(0, |request| request.body().len()),
+            )
+            .field("coordinator_present", &self.coordinator.is_some())
             .finish()
     }
 }
@@ -1260,7 +1319,7 @@ impl SipHeaderView for IncomingRequest {
 /// `Allow` / `Supported` / `Server` / `Session-Expires`, redirect
 /// handling, and final-failure inspection (`Retry-After`, `Warning`,
 /// `Reason`).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct IncomingResponse {
     /// The session the response belongs to.
     pub call_id: CallId,
@@ -1274,6 +1333,33 @@ pub struct IncomingResponse {
     pub received_at: Instant,
     /// The parsed inbound response, when available.
     pub(crate) response: Option<Arc<Response>>,
+}
+
+impl std::fmt::Debug for IncomingResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IncomingResponse")
+            .field("status_code", &self.status_code)
+            .field("reason_phrase_bytes", &self.reason_phrase.len())
+            .field("sdp_present", &self.sdp.is_some())
+            .field("sdp_bytes", &self.sdp.as_ref().map_or(0, String::len))
+            .field("raw_response_present", &self.response.is_some())
+            .field(
+                "raw_response_header_count",
+                &self
+                    .response
+                    .as_ref()
+                    .map_or(0, |response| response.headers.len()),
+            )
+            .field(
+                "raw_response_body_bytes",
+                &self
+                    .response
+                    .as_ref()
+                    .map_or(0, |response| response.body().len()),
+            )
+            .finish()
+    }
 }
 
 impl IncomingResponse {
@@ -1445,14 +1531,27 @@ pub struct IncomingRegister {
 impl std::fmt::Debug for IncomingRegister {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IncomingRegister")
-            .field("transaction_id", &self.transaction_id)
-            .field("from_uri", &self.from_uri)
-            .field("to_uri", &self.to_uri)
-            .field("contact_uri", &self.contact_uri)
             .field("expires", &self.expires)
             .field("authorization_present", &self.authorization.is_some())
-            .field("call_id_header", &self.call_id_header)
-            .field("transport", &self.transport)
+            .field(
+                "authorization_bytes",
+                &self.authorization.as_ref().map_or(0, String::len),
+            )
+            .field("raw_request_present", &self.request.is_some())
+            .field(
+                "raw_request_header_count",
+                &self
+                    .request
+                    .as_ref()
+                    .map_or(0, |request| request.headers.len()),
+            )
+            .field(
+                "raw_request_body_bytes",
+                &self
+                    .request
+                    .as_ref()
+                    .map_or(0, |request| request.body().len()),
+            )
             .field("coordinator_present", &self.coordinator.is_some())
             .finish()
     }
@@ -1747,6 +1846,80 @@ mod tests {
             .publish_app_event_for_test(event)
             .await
             .expect("publish synthetic event");
+    }
+
+    #[test]
+    fn incoming_wrapper_debug_never_exposes_signaling_payloads() {
+        const SECRET: &str = "incoming-wrapper-secret-canary";
+        const METHOD: &str = "X-INCOMING-METHOD-SECRET-CANARY";
+        let request = Request::new(
+            rvoip_sip_core::types::Method::Refer,
+            rvoip_sip_core::types::Uri::sip("incoming-wrapper-secret-canary.example"),
+        )
+        .with_header(TypedHeader::Other(
+            HeaderName::Authorization,
+            rvoip_sip_core::types::headers::HeaderValue::Raw(SECRET.as_bytes().to_vec()),
+        ))
+        .with_body(SECRET);
+        let incoming_request = IncomingRequest::from_bus_request(
+            crate::state_table::types::SessionId(SECRET.into()),
+            SECRET.into(),
+            SECRET.into(),
+            rvoip_sip_core::types::Method::Extension(METHOD.into()),
+            Arc::new(request),
+        );
+        let incoming_response = IncomingResponse::synthetic(
+            crate::state_table::types::SessionId(SECRET.into()),
+            401,
+            SECRET.into(),
+            Some(SECRET.into()),
+        );
+        let incoming_register = IncomingRegister::synthetic(
+            SECRET.into(),
+            SECRET.into(),
+            SECRET.into(),
+            SECRET.into(),
+            300,
+            Some(SECRET.into()),
+            SECRET.into(),
+        );
+
+        for rendered in [
+            format!("{incoming_request:?}"),
+            format!("{incoming_response:?}"),
+            format!("{incoming_register:?}"),
+        ] {
+            assert!(
+                !rendered.contains(SECRET),
+                "debug leaked secret: {rendered}"
+            );
+            assert!(
+                !rendered.contains(METHOD),
+                "debug leaked method: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn incoming_source_keeps_request_response_and_register_on_manual_debug() {
+        let source = include_str!("incoming.rs");
+        for declaration in [
+            "pub struct IncomingRequest",
+            "pub struct IncomingResponse",
+            "pub struct IncomingRegister",
+        ] {
+            let declaration_offset = source
+                .find(declaration)
+                .unwrap_or_else(|| panic!("missing declaration {declaration}"));
+            let prefix = &source[..declaration_offset];
+            let derive_offset = prefix
+                .rfind("#[derive(")
+                .unwrap_or_else(|| panic!("missing derive for {declaration}"));
+            assert!(
+                !prefix[derive_offset..].contains("Debug"),
+                "{declaration} regained derived Debug"
+            );
+        }
     }
 
     #[tokio::test]
