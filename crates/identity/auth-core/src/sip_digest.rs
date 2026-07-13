@@ -811,8 +811,12 @@ mod tests {
     #[test]
     fn digest_proof_comparison_stays_constant_time() {
         let source = include_str!("sip_digest.rs");
-        assert!(source.contains(".ct_eq(response.response.as_bytes())"));
-        assert!(!source.contains("expected == response.response"));
+        let production = source
+            .split_once("#[cfg(test)]")
+            .map(|(production, _)| production)
+            .expect("test module marker");
+        assert!(production.contains(".ct_eq(response.response.as_bytes())"));
+        assert!(!production.contains("expected == response.response"));
     }
 
     #[test]
