@@ -899,7 +899,12 @@ impl SipAdapter {
         self.authenticated_inbound_sessions.remove(session_id);
         if let Some((_, conn_id)) = self.by_session.remove(session_id) {
             self.by_connection.remove(&conn_id);
-            self.streams_cache.remove(&conn_id);
+            if let Some((_, stream)) = self.streams_cache.remove(&conn_id) {
+                stream.request_close();
+                tokio::spawn(async move {
+                    let _ = (stream as Arc<dyn MediaStream>).close().await;
+                });
+            }
             self.outbound_originate_contexts.remove(&conn_id);
             self.inbound_contexts.forget(session_id, &conn_id);
             let remove_stage = self
@@ -1015,17 +1020,22 @@ impl SipAdapter {
     }
 
     async fn build_connection(&self, conn_id: ConnectionId, direction: Direction) -> Connection {
-        // Eagerly construct (and cache) one SipMediaStream so consumers
+        // Eagerly allocate (and cache) one dormant SipMediaStream so consumers
         // can read `connection.streams` synchronously off the
         // `Event::ConnectionInbound` event — QUIC/WT parity, gap plan §2.2.
-        // Stream construction can fail (e.g. coordinator is shutting
-        // down or the session was torn down before we got here); in
-        // that case we still hand back a `Connection` with an empty
-        // streams vec — that's no worse than the pre-eager behavior.
-        let streams = match self.get_or_init_stream(&conn_id, direction).await {
-            Some(stream) => vec![MediaStreamHandle::new(stream as Arc<dyn MediaStream>)],
-            None => Vec::new(),
-        };
+        // Inbound binding runs independently so a signaling-only coordinator
+        // or a media session that becomes ready later cannot block the
+        // authenticated connection event. Outbound streams remain dormant
+        // until `activate_outbound` runs after core's durable binding.
+        let streams = self
+            .get_or_insert_dormant_stream(&conn_id, direction)
+            .map(|stream| {
+                if direction == Direction::Inbound {
+                    self.start_stream_bind(conn_id.clone(), Arc::clone(&stream));
+                }
+                vec![MediaStreamHandle::new(stream as Arc<dyn MediaStream>)]
+            })
+            .unwrap_or_default();
         Connection {
             id: conn_id,
             session_id: CoreSessionId::new(),
@@ -1043,35 +1053,42 @@ impl SipAdapter {
         }
     }
 
-    /// Look up the cached `SipMediaStream` for `conn`, constructing it
-    /// (and caching) on first call. Returns `None` if construction
-    /// fails — the connection-mapping or audio subscribe may not be
-    /// ready yet (e.g. the session was cleaned up between events).
-    async fn get_or_init_stream(
+    /// Return the one stable dormant stream for a mapped connection.
+    ///
+    /// DashMap entry insertion prevents concurrent consumers from creating
+    /// multiple streams (and therefore multiple one-shot receivers) for one
+    /// call. No coordinator or network operation occurs here.
+    fn get_or_insert_dormant_stream(
         &self,
         conn: &ConnectionId,
         direction: Direction,
     ) -> Option<Arc<crate::media_stream::SipMediaStream>> {
-        if let Some(entry) = self.streams_cache.get(conn) {
-            return Some(Arc::clone(entry.value()));
-        }
-        let session_id = self.by_connection.get(conn)?.value().clone();
-        match crate::media_stream::SipMediaStream::new(
-            Arc::clone(&self.coordinator),
-            session_id,
-            direction,
-        )
-        .await
-        {
-            Ok(stream) => {
-                self.streams_cache.insert(conn.clone(), Arc::clone(&stream));
-                Some(stream)
+        self.by_connection.get(conn)?;
+        let entry = self
+            .streams_cache
+            .entry(conn.clone())
+            .or_insert_with(|| crate::media_stream::SipMediaStream::dormant(direction));
+        Some(Arc::clone(entry.value()))
+    }
+
+    fn start_stream_bind(
+        &self,
+        conn: ConnectionId,
+        stream: Arc<crate::media_stream::SipMediaStream>,
+    ) {
+        let Some(session_id) = self
+            .by_connection
+            .get(&conn)
+            .map(|entry| entry.value().clone())
+        else {
+            return;
+        };
+        let coordinator = Arc::clone(&self.coordinator);
+        tokio::spawn(async move {
+            if stream.bind(coordinator, session_id).await.is_err() {
+                warn!("SipAdapter media binding ended before becoming active");
             }
-            Err(e) => {
-                warn!(?conn, error = %e, "SipAdapter: failed to construct SipMediaStream eagerly");
-                None
-            }
-        }
+        });
     }
 
     async fn translate_api_event(&self, event: ApiEvent) {
@@ -1387,6 +1404,9 @@ impl SipAdapter {
 impl Drop for SipAdapter {
     fn drop(&mut self) {
         let _ = self.translator_cancel.send(true);
+        for stream in self.streams_cache.iter() {
+            stream.value().request_close();
+        }
         self.coordinator
             .remove_inbound_invite_observer(self.inbound_invite_observer_id);
     }
@@ -1480,6 +1500,13 @@ impl ConnectionAdapter for SipAdapter {
         if !self.is_connection_live(&conn) {
             self.discard_outbound_stage(&conn);
             return Err(RvoipError::ConnectionNotFound(conn));
+        }
+        if let Some(stream) = self
+            .streams_cache
+            .get(&conn)
+            .map(|entry| Arc::clone(entry.value()))
+        {
+            self.start_stream_bind(conn.clone(), stream);
         }
         let stage = self
             .outbound_event_stages
@@ -1615,18 +1642,14 @@ impl ConnectionAdapter for SipAdapter {
     }
 
     async fn streams(&self, conn: ConnectionId) -> CoreResult<Vec<Arc<dyn MediaStream>>> {
-        // Streams are eagerly populated in `build_connection` (gap plan
-        // §2.2 — QUIC/WT parity), so this is a straight lookup. We still
-        // construct on demand if the eager path failed earlier (e.g.
-        // `subscribe_to_audio` errored at IncomingCall time), so the
-        // existing lazy-create semantics remain a fallback.
+        // Streams are allocated locally in `build_connection`, so this lookup
+        // never waits for coordinator media. Inbound binding starts in the
+        // background; outbound binding starts only after durable activation.
         self.lookup_session(&conn)?;
-        match self.get_or_init_stream(&conn, Direction::Outbound).await {
-            Some(stream) => Ok(vec![stream as Arc<dyn MediaStream>]),
-            None => Err(RvoipError::Adapter(
-                "SipAdapter::streams: SipMediaStream construction failed".into(),
-            )),
-        }
+        self.streams_cache
+            .get(&conn)
+            .map(|entry| vec![Arc::clone(entry.value()) as Arc<dyn MediaStream>])
+            .ok_or_else(|| RvoipError::Adapter("SipAdapter media stream is unavailable".into()))
     }
 
     async fn send_message(&self, _conn: ConnectionId, _message: Message) -> CoreResult<()> {

@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use std::sync::Mutex;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
 
 use rvoip_core::capability::CodecInfo;
@@ -78,63 +78,224 @@ struct SipMediaStreamInner {
     codec: CodecInfo,
     direction: Direction,
     frames_in_rx: Mutex<Option<mpsc::Receiver<MediaFrame>>>,
+    frames_in_tx: Mutex<Option<mpsc::Sender<MediaFrame>>>,
     frames_out_tx: mpsc::Sender<MediaFrame>,
+    frames_out_rx: Mutex<Option<mpsc::Receiver<MediaFrame>>>,
     pumps: Mutex<Vec<JoinHandle<()>>>,
-    cancel: Arc<Notify>,
+    bind_task: Mutex<Option<JoinHandle<()>>>,
+    lifecycle_gate: AsyncMutex<()>,
+    lifecycle: watch::Sender<SipMediaLifecycle>,
+    cancel: watch::Sender<bool>,
 }
 
-/// Concrete `MediaStream` for the SIP transport. Built lazily by
-/// `SipAdapter::streams()` the first time a
-/// caller asks for streams on a connection that has an active audio
-/// session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SipMediaLifecycle {
+    Dormant,
+    Binding,
+    Bound,
+    Closing,
+    Closed,
+    Failed,
+}
+
+/// Concrete `MediaStream` for the SIP transport.
+///
+/// The adapter allocates it in a dormant, local-only state before exposing a
+/// connection. Binding to coordinator audio is retained, single-flight work
+/// that happens only when the corresponding signaling route is activated.
 pub struct SipMediaStream {
     inner: Arc<SipMediaStreamInner>,
 }
 
 impl SipMediaStream {
-    /// Build a new stream backed by an active SIP session. Spawns two
-    /// background tasks (inbound encoder + outbound decoder) that pump
-    /// frames between the orchestrator-facing channels and the
-    /// `UnifiedCoordinator`'s PCM audio API.
-    pub async fn new(
-        coordinator: Arc<UnifiedCoordinator>,
-        session_id: SessionId,
-        direction: Direction,
-    ) -> crate::errors::Result<Arc<Self>> {
+    /// Allocate a local-only media stream without touching a SIP session.
+    ///
+    /// This constructor allocates only bounded channels and a stable stream
+    /// identifier. It does not subscribe to coordinator audio, create media,
+    /// start a task, allocate a socket, or emit a packet. Outbound adapters use
+    /// it while their connection is durably prepared but not yet activated.
+    pub fn dormant(direction: Direction) -> Arc<Self> {
         let stream_id = StreamId::new();
         let codec = CodecInfo {
-            // D4 follow-up — matches `rvoip_core::bridge::codec_to_pt` so the
-            // orchestrator's bridge maps this stream to PT 0 (PCMU) for the
-            // transcoder. Renamed from "g.711-mulaw" which the bridge
-            // didn't recognize.
             name: "g.711-mu".to_string(),
             clock_rate_hz: G711_SAMPLE_RATE,
             channels: 1,
             fmtp: None,
         };
         let (frames_in_tx, frames_in_rx) = mpsc::channel::<MediaFrame>(FRAME_CHANNEL_CAP);
-        let (frames_out_tx, mut frames_out_rx) = mpsc::channel::<MediaFrame>(FRAME_CHANNEL_CAP);
-        let cancel = Arc::new(Notify::new());
+        let (frames_out_tx, frames_out_rx) = mpsc::channel::<MediaFrame>(FRAME_CHANNEL_CAP);
+        let (lifecycle, _) = watch::channel(SipMediaLifecycle::Dormant);
+        let (cancel, _) = watch::channel(false);
 
-        // Inbound: decoded PCM AudioFrame from SIP → G.711 encode → MediaFrame.
-        let mut subscriber = coordinator
-            .subscribe_to_audio(&session_id)
-            .await
-            .map_err(|e| crate::errors::SessionError::Other(format!("subscribe_to_audio: {e}")))?;
-        let stream_id_in = stream_id.clone();
-        let cancel_in = Arc::clone(&cancel);
-        let frames_in_tx_pump = frames_in_tx.clone();
-        let inbound_handle = tokio::spawn(async move {
-            let mut encoder = match G711Codec::mu_law(G711_SAMPLE_RATE, 1) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(target: "rvoip_sip", error = %e, "SipMediaStream: G.711 mu_law encoder init failed");
+        Arc::new(Self {
+            inner: Arc::new(SipMediaStreamInner {
+                stream_id,
+                codec,
+                direction,
+                frames_in_rx: Mutex::new(Some(frames_in_rx)),
+                frames_in_tx: Mutex::new(Some(frames_in_tx)),
+                frames_out_tx,
+                frames_out_rx: Mutex::new(Some(frames_out_rx)),
+                pumps: Mutex::new(Vec::new()),
+                bind_task: Mutex::new(None),
+                lifecycle_gate: AsyncMutex::new(()),
+                lifecycle,
+                cancel,
+            }),
+        })
+    }
+
+    /// Build a stream backed by an active SIP session.
+    ///
+    /// Kept as the compatibility surface for inbound and legacy callers. The
+    /// implementation is the same dormant allocation followed by one retained
+    /// bind, so every path shares the same lifecycle and cleanup behavior.
+    pub async fn new(
+        coordinator: Arc<UnifiedCoordinator>,
+        session_id: SessionId,
+        direction: Direction,
+    ) -> crate::errors::Result<Arc<Self>> {
+        let stream = Self::dormant(direction);
+        stream.bind(coordinator, session_id).await?;
+        Ok(stream)
+    }
+
+    /// Bind this dormant stream to one SIP session exactly once.
+    ///
+    /// The first caller starts a retained driver. Dropping that caller does not
+    /// cancel the driver, and concurrent callers observe the same terminal
+    /// outcome without creating another subscription or another pump pair.
+    pub async fn bind(
+        self: &Arc<Self>,
+        coordinator: Arc<UnifiedCoordinator>,
+        session_id: SessionId,
+    ) -> crate::errors::Result<()> {
+        let mut lifecycle = self.inner.lifecycle.subscribe();
+        {
+            let _gate = self.inner.lifecycle_gate.lock().await;
+            let state = *self.inner.lifecycle.borrow();
+            match state {
+                SipMediaLifecycle::Dormant => {
+                    self.inner
+                        .lifecycle
+                        .send_replace(SipMediaLifecycle::Binding);
+                    let stream = Arc::clone(self);
+                    let task = tokio::spawn(async move {
+                        stream.run_bind(coordinator, session_id).await;
+                    });
+                    *self
+                        .inner
+                        .bind_task
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(task);
+                }
+                SipMediaLifecycle::Binding | SipMediaLifecycle::Bound => {}
+                SipMediaLifecycle::Failed => {
+                    return Err(crate::errors::SessionError::Other(
+                        "SIP media bind failed".to_string(),
+                    ));
+                }
+                SipMediaLifecycle::Closing | SipMediaLifecycle::Closed => {
+                    return Err(crate::errors::SessionError::Other(
+                        "SIP media stream is closed".to_string(),
+                    ));
+                }
+            }
+        }
+
+        loop {
+            match *lifecycle.borrow_and_update() {
+                SipMediaLifecycle::Bound => return Ok(()),
+                SipMediaLifecycle::Failed => {
+                    return Err(crate::errors::SessionError::Other(
+                        "SIP media bind failed".to_string(),
+                    ));
+                }
+                SipMediaLifecycle::Closing | SipMediaLifecycle::Closed => {
+                    return Err(crate::errors::SessionError::Other(
+                        "SIP media stream is closed".to_string(),
+                    ));
+                }
+                SipMediaLifecycle::Dormant | SipMediaLifecycle::Binding => {}
+            }
+            if lifecycle.changed().await.is_err() {
+                return Err(crate::errors::SessionError::Other(
+                    "SIP media lifecycle ended".to_string(),
+                ));
+            }
+        }
+    }
+
+    async fn run_bind(
+        self: Arc<Self>,
+        coordinator: Arc<UnifiedCoordinator>,
+        session_id: SessionId,
+    ) {
+        let mut cancel_before_subscription = self.inner.cancel.subscribe();
+        let subscription = coordinator.subscribe_to_audio(&session_id);
+        tokio::pin!(subscription);
+        let mut subscriber = tokio::select! {
+            _ = wait_for_media_cancel(&mut cancel_before_subscription) => {
+                self.close_local_channels();
+                self.inner.lifecycle.send_replace(SipMediaLifecycle::Closed);
+                return;
+            }
+            result = &mut subscription => match result {
+                Ok(subscriber) => subscriber,
+                Err(_) => {
+                    self.close_local_channels();
+                    self.inner.lifecycle.send_replace(SipMediaLifecycle::Failed);
                     return;
                 }
-            };
+            }
+        };
+
+        if *self.inner.cancel.borrow() {
+            self.close_local_channels();
+            self.inner.lifecycle.send_replace(SipMediaLifecycle::Closed);
+            return;
+        }
+
+        let frames_in_tx = self
+            .inner
+            .frames_in_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let frames_out_rx = self
+            .inner
+            .frames_out_rx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let (Some(frames_in_tx), Some(mut frames_out_rx)) = (frames_in_tx, frames_out_rx) else {
+            self.close_local_channels();
+            self.inner.lifecycle.send_replace(SipMediaLifecycle::Failed);
+            return;
+        };
+
+        let mut encoder = match G711Codec::mu_law(G711_SAMPLE_RATE, 1) {
+            Ok(codec) => codec,
+            Err(_) => {
+                self.inner.lifecycle.send_replace(SipMediaLifecycle::Failed);
+                return;
+            }
+        };
+        let mut decoder = match G711Codec::mu_law(G711_SAMPLE_RATE, 1) {
+            Ok(codec) => codec,
+            Err(_) => {
+                self.inner.lifecycle.send_replace(SipMediaLifecycle::Failed);
+                return;
+            }
+        };
+
+        // Inbound: decoded PCM AudioFrame from SIP → G.711 encode → MediaFrame.
+        let stream_id_in = self.inner.stream_id.clone();
+        let mut cancel_in = self.inner.cancel.subscribe();
+        let inbound_handle = tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = cancel_in.notified() => break,
+                    _ = wait_for_media_cancel(&mut cancel_in) => break,
                     frame = subscriber.receiver.recv() => {
                         let Some(audio_frame) = frame else { break; };
                         let encoded = match encoder.encode(&audio_frame) {
@@ -158,7 +319,7 @@ impl SipMediaStream {
                             // so PCMU is correct for every frame here.
                             payload_type: Some(0),
                         };
-                        if frames_in_tx_pump.send(media_frame).await.is_err() {
+                        if frames_in_tx.send(media_frame).await.is_err() {
                             break;
                         }
                     }
@@ -170,19 +331,12 @@ impl SipMediaStream {
         // sent into the SIP session's audio path.
         let coordinator_out = Arc::clone(&coordinator);
         let session_id_out = session_id.clone();
-        let cancel_out = Arc::clone(&cancel);
+        let mut cancel_out = self.inner.cancel.subscribe();
         let outbound_handle = tokio::spawn(async move {
-            let mut decoder = match G711Codec::mu_law(G711_SAMPLE_RATE, 1) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(target: "rvoip_sip", error = %e, "SipMediaStream: G.711 mu_law decoder init failed");
-                    return;
-                }
-            };
             let mut next_timestamp: u32 = 0;
             loop {
                 tokio::select! {
-                    _ = cancel_out.notified() => break,
+                    _ = wait_for_media_cancel(&mut cancel_out) => break,
                     frame = frames_out_rx.recv() => {
                         let Some(media_frame) = frame else { break; };
                         // Gap plan §4.3 — RFC 4733 telephone-event
@@ -242,20 +396,111 @@ impl SipMediaStream {
             }
         });
 
-        // `frames_in_tx` only lives inside the inbound pump now.
-        drop(frames_in_tx);
+        self.inner
+            .pumps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extend([inbound_handle, outbound_handle]);
+        if *self.inner.cancel.borrow() {
+            self.inner.lifecycle.send_replace(SipMediaLifecycle::Closed);
+        } else {
+            self.inner.lifecycle.send_replace(SipMediaLifecycle::Bound);
+        }
+    }
 
-        Ok(Arc::new(Self {
-            inner: Arc::new(SipMediaStreamInner {
-                stream_id,
-                codec,
-                direction,
-                frames_in_rx: Mutex::new(Some(frames_in_rx)),
-                frames_out_tx,
-                pumps: Mutex::new(vec![inbound_handle, outbound_handle]),
-                cancel,
-            }),
-        }))
+    fn close_local_channels(&self) {
+        self.inner
+            .frames_in_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        self.inner
+            .frames_out_rx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+
+    /// Make cancellation sticky without requiring an async runtime join.
+    ///
+    /// Adapter teardown calls this before dropping its last registry handle so
+    /// a retained bind waiting in coordinator media cannot form a task/stream
+    /// cycle. [`MediaStream::close`] performs the subsequent bounded joins.
+    pub(crate) fn request_close(&self) {
+        let state = *self.inner.lifecycle.borrow();
+        if !matches!(
+            state,
+            SipMediaLifecycle::Closing | SipMediaLifecycle::Closed
+        ) {
+            self.inner
+                .lifecycle
+                .send_replace(SipMediaLifecycle::Closing);
+        }
+        self.inner.cancel.send_replace(true);
+        self.close_local_channels();
+    }
+
+    async fn close_retained(self: &Arc<Self>) {
+        let _gate = self.inner.lifecycle_gate.lock().await;
+        let state = *self.inner.lifecycle.borrow();
+        match state {
+            SipMediaLifecycle::Closed => return,
+            SipMediaLifecycle::Closing => {}
+            SipMediaLifecycle::Dormant
+            | SipMediaLifecycle::Binding
+            | SipMediaLifecycle::Bound
+            | SipMediaLifecycle::Failed => {
+                self.inner
+                    .lifecycle
+                    .send_replace(SipMediaLifecycle::Closing);
+            }
+        }
+        self.request_close();
+
+        let bind_task = self
+            .inner
+            .bind_task
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(mut task) = bind_task {
+            if tokio::time::timeout(std::time::Duration::from_secs(1), &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+                let _ = task.await;
+            }
+        }
+
+        let pumps = self
+            .inner
+            .pumps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain(..)
+            .collect::<Vec<_>>();
+        for mut pump in pumps {
+            if tokio::time::timeout(std::time::Duration::from_secs(1), &mut pump)
+                .await
+                .is_err()
+            {
+                pump.abort();
+                let _ = pump.await;
+            }
+        }
+        self.inner.lifecycle.send_replace(SipMediaLifecycle::Closed);
+    }
+}
+
+async fn wait_for_media_cancel(cancel: &mut watch::Receiver<bool>) {
+    loop {
+        if *cancel.borrow_and_update() {
+            return;
+        }
+        if cancel.changed().await.is_err() {
+            return;
+        }
     }
 }
 
@@ -304,12 +549,7 @@ impl MediaStream for SipMediaStream {
     }
 
     async fn close(self: Arc<Self>) -> RvoipResult<()> {
-        self.inner.cancel.notify_waiters();
-        if let Ok(mut guard) = self.inner.pumps.lock() {
-            for handle in guard.drain(..) {
-                handle.abort();
-            }
-        }
+        self.close_retained().await;
         Ok(())
     }
 }
@@ -439,29 +679,35 @@ mod receiver_ownership_tests {
 
     #[test]
     fn second_receiver_acquisition_is_a_typed_error() {
-        let (_frames_in_tx, frames_in_rx) = mpsc::channel(1);
-        let (frames_out_tx, _frames_out_rx) = mpsc::channel(1);
-        let stream = SipMediaStream {
-            inner: Arc::new(SipMediaStreamInner {
-                stream_id: StreamId::new(),
-                codec: CodecInfo {
-                    name: "g.711-mu".into(),
-                    clock_rate_hz: G711_SAMPLE_RATE,
-                    channels: 1,
-                    fmtp: None,
-                },
-                direction: Direction::Inbound,
-                frames_in_rx: Mutex::new(Some(frames_in_rx)),
-                frames_out_tx,
-                pumps: Mutex::new(Vec::new()),
-                cancel: Arc::new(Notify::new()),
-            }),
-        };
+        let stream = SipMediaStream::dormant(Direction::Inbound);
 
         assert!(stream.try_frames_in().is_ok());
         assert!(matches!(
             stream.try_frames_in(),
             Err(RvoipError::InvalidState(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn dormant_stream_allocates_no_task_and_close_is_sticky() {
+        let stream = SipMediaStream::dormant(Direction::Outbound);
+        assert_eq!(*stream.inner.lifecycle.borrow(), SipMediaLifecycle::Dormant);
+        assert!(stream
+            .inner
+            .pumps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
+        assert!(stream
+            .inner
+            .bind_task
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none());
+
+        Arc::clone(&stream).close().await.unwrap();
+        assert_eq!(*stream.inner.lifecycle.borrow(), SipMediaLifecycle::Closed);
+        Arc::clone(&stream).close().await.unwrap();
+        assert_eq!(*stream.inner.lifecycle.borrow(), SipMediaLifecycle::Closed);
     }
 }
