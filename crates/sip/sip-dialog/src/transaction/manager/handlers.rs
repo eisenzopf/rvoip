@@ -74,6 +74,105 @@ fn bind_client_response_route(
     Some(bound)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientResponseRouteAuthentication {
+    Authenticated,
+    UnknownTransaction,
+    Rejected,
+}
+
+impl TransactionManager {
+    /// Authenticate a response against either the active transaction route or
+    /// the bounded INVITE tombstone that replaced it. A transaction key alone
+    /// is attacker-controlled wire data and is never sufficient to revive a
+    /// retired transaction.
+    async fn authenticate_client_response_route(
+        &self,
+        transaction_id: &TransactionKey,
+        source: SocketAddr,
+        transport_type: TransportType,
+        ingress_flow_id: Option<TransportFlowId>,
+    ) -> ClientResponseRouteAuthentication {
+        let mut expected = if let Some(route) = self
+            .transaction_destinations
+            .get(transaction_id)
+            .map(|entry| entry.value().clone())
+        {
+            route
+        } else if let Some(retired) = self.retired_client_transaction(transaction_id) {
+            retired.route
+        } else {
+            return ClientResponseRouteAuthentication::UnknownTransaction;
+        };
+
+        // The transaction's initial write may have selected a concrete stream
+        // flow after the route index was first populated. Prefer that exact
+        // route before authenticating the response.
+        if expected.flow_id.is_none() {
+            if let Some(client) = self
+                .client_transactions
+                .get(transaction_id)
+                .map(|transaction| transaction.value().clone())
+            {
+                let sent_route = client.data().request_route.lock().await.clone();
+                if sent_route.destination == expected.destination
+                    && sent_route.transport_type == expected.transport_type
+                    && sent_route.authority == expected.authority
+                    && sent_route.flow_id.is_some()
+                {
+                    expected = sent_route;
+                }
+            }
+        }
+
+        let resolved_expected_flow_id = self.transport.resolve_flow_id_for_route(&expected).await;
+        let Some(bound) = bind_client_response_route(
+            &expected,
+            source,
+            transport_type,
+            ingress_flow_id,
+            resolved_expected_flow_id,
+        ) else {
+            return ClientResponseRouteAuthentication::Rejected;
+        };
+
+        if let Some(mut current) = self.transaction_destinations.get_mut(transaction_id) {
+            if current.value() != &expected && current.value() != &bound {
+                return ClientResponseRouteAuthentication::Rejected;
+            }
+            *current = bound;
+            return ClientResponseRouteAuthentication::Authenticated;
+        }
+
+        if let Some(mut retired) = self.retired_client_transactions.get_mut(transaction_id) {
+            if retired.expires_at <= Instant::now() {
+                drop(retired);
+                self.retired_client_transactions.remove(transaction_id);
+                return ClientResponseRouteAuthentication::UnknownTransaction;
+            }
+            if retired.route != expected && retired.route != bound {
+                return ClientResponseRouteAuthentication::Rejected;
+            }
+            retired.route = bound;
+            return ClientResponseRouteAuthentication::Authenticated;
+        }
+
+        // The transaction may have been retired concurrently between the
+        // active lookup and the first tombstone update. Re-read once without
+        // recursively growing the async future.
+        if let Some(mut retired) = self.retired_client_transactions.get_mut(transaction_id) {
+            if retired.expires_at > Instant::now()
+                && (retired.route == expected || retired.route == bound)
+            {
+                retired.route = bound;
+                return ClientResponseRouteAuthentication::Authenticated;
+            }
+        }
+
+        ClientResponseRouteAuthentication::UnknownTransaction
+    }
+}
+
 /// Handle transport message events and route them to appropriate transactions.
 ///
 /// This is the main entry point for all incoming SIP messages from the transport
@@ -526,50 +625,29 @@ pub(crate) async fn handle_transport_message(
                             }
                         };
 
-                    if let Some(mut expected) = manager
-                        .transaction_destinations
-                        .get(&tx_id)
-                        .map(|route| route.value().clone())
+                    match manager
+                        .authenticate_client_response_route(&tx_id, source, transport_type, flow_id)
+                        .await
                     {
-                        if expected.flow_id.is_none() {
-                            let client = client_transactions
-                                .get(&tx_id)
-                                .map(|transaction| transaction.value().clone());
-                            if let Some(client) = client {
-                                let sent_route = client.data().request_route.lock().await.clone();
-                                if sent_route.destination == expected.destination
-                                    && sent_route.transport_type == expected.transport_type
-                                    && sent_route.authority == expected.authority
-                                    && sent_route.flow_id.is_some()
-                                {
-                                    expected = sent_route;
-                                    manager
-                                        .transaction_destinations
-                                        .insert(tx_id.clone(), expected.clone());
-                                }
-                            }
-                        }
-                        let resolved_expected_flow_id =
-                            transport.resolve_flow_id_for_route(&expected).await;
-                        let Some(bound) = bind_client_response_route(
-                            &expected,
-                            source,
-                            transport_type,
-                            flow_id,
-                            resolved_expected_flow_id,
-                        ) else {
+                        ClientResponseRouteAuthentication::Authenticated => {}
+                        ClientResponseRouteAuthentication::Rejected => {
                             warn!(
                                 transport = %transport_type,
                                 "Dropping client response received outside its authenticated transaction route"
                             );
                             return Ok(());
-                        };
-                        if let Some(mut current) = manager.transaction_destinations.get_mut(&tx_id)
-                        {
-                            if current.value() != &expected && current.value() != &bound {
-                                return Ok(());
-                            }
-                            *current = bound;
+                        }
+                        ClientResponseRouteAuthentication::UnknownTransaction => {
+                            TransactionManager::broadcast_event(
+                                TransactionEvent::StrayResponse { response, source },
+                                events_tx,
+                                event_subscribers,
+                                Some(&manager.subscriber_to_transactions),
+                                Some(&manager.transaction_to_subscribers),
+                                None,
+                            )
+                            .await;
+                            return Ok(());
                         }
                     }
 
@@ -905,60 +983,36 @@ impl TransactionManager {
                     .await;
                 let transaction_key =
                     crate::transaction::utils::transaction_key_from_message(&message);
-                if matches!(&message, Message::Response(_)) {
-                    if let Some(key) = transaction_key.as_ref() {
-                        if let Some(mut expected) = self
-                            .transaction_destinations
-                            .get(key)
-                            .map(|route| route.value().clone())
-                        {
-                            if expected.flow_id.is_none() {
-                                let client = self
-                                    .client_transactions
-                                    .get(key)
-                                    .map(|transaction| transaction.value().clone());
-                                if let Some(client) = client {
-                                    let sent_route =
-                                        client.data().request_route.lock().await.clone();
-                                    if sent_route.destination == expected.destination
-                                        && sent_route.transport_type == expected.transport_type
-                                        && sent_route.authority == expected.authority
-                                        && sent_route.flow_id.is_some()
-                                    {
-                                        expected = sent_route;
-                                        self.transaction_destinations
-                                            .insert(key.clone(), expected.clone());
-                                    }
-                                }
-                            }
-                            let resolved_expected_flow_id =
-                                self.transport.resolve_flow_id_for_route(&expected).await;
-                            let Some(bound) = bind_client_response_route(
-                                &expected,
-                                source,
-                                transport_type,
-                                flow_id,
-                                resolved_expected_flow_id,
-                            ) else {
-                                warn!(
-                                    transport = %transport_type,
-                                    expected_transport = ?expected.transport_type,
-                                    expected_flow = expected.flow_id.is_some() || resolved_expected_flow_id.is_some(),
-                                    ingress_flow = flow_id.is_some(),
-                                    "Dropping client response received outside its authenticated transaction route"
-                                );
-                                return Ok(());
-                            };
-                            if let Some(mut current) = self.transaction_destinations.get_mut(key) {
-                                if current.value() != &expected && current.value() != &bound {
-                                    warn!(
-                                        transport = %transport_type,
-                                        "Dropping client response after concurrent transaction route change"
-                                    );
-                                    return Ok(());
-                                }
-                                *current = bound;
-                            }
+                if let (Message::Response(response), Some(key)) =
+                    (&message, transaction_key.as_ref())
+                {
+                    match self
+                        .authenticate_client_response_route(key, source, transport_type, flow_id)
+                        .await
+                    {
+                        ClientResponseRouteAuthentication::Authenticated => {}
+                        ClientResponseRouteAuthentication::Rejected => {
+                            warn!(
+                                transport = %transport_type,
+                                ingress_flow = flow_id.is_some(),
+                                "Dropping client response received outside its authenticated transaction route"
+                            );
+                            return Ok(());
+                        }
+                        ClientResponseRouteAuthentication::UnknownTransaction => {
+                            Self::broadcast_event(
+                                TransactionEvent::StrayResponse {
+                                    response: response.clone(),
+                                    source,
+                                },
+                                &self.events_tx,
+                                &self.event_subscribers,
+                                Some(&self.subscriber_to_transactions),
+                                Some(&self.transaction_to_subscribers),
+                                None,
+                            )
+                            .await;
+                            return Ok(());
                         }
                     }
                 }

@@ -3507,6 +3507,7 @@ impl UnifiedCoordinator {
                 "invite_2xx_response_cache": transaction_counts.invite_2xx_response_cache,
                 "invite_2xx_response_due_queue": transaction_counts.invite_2xx_response_due_queue,
                 "transaction_destinations": transaction_counts.transaction_destinations,
+                "retired_client_transactions": transaction_manager.retired_client_transaction_count(),
                 "event_subscribers": transaction_counts.event_subscribers,
                 "subscriber_to_transactions": transaction_counts.subscriber_to_transactions,
                 "transaction_to_subscribers": transaction_counts.transaction_to_subscribers,

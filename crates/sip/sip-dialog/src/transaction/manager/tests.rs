@@ -2226,6 +2226,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retired_invite_accepts_only_route_authenticated_late_2xx_and_can_ack() -> Result<()> {
+        use rvoip_sip_core::builder::SimpleResponseBuilder;
+
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, mut events) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+        let destination: SocketAddr = "192.0.2.25:5060".parse().unwrap();
+        let request = create_test_invite().map_err(|error| Error::Other(error.to_string()))?;
+        let transaction = manager
+            .create_client_transaction_on_route(
+                request.clone(),
+                rvoip_sip_transport::TransportRoute::new(destination)
+                    .with_transport_type(TransportType::Udp),
+            )
+            .await?;
+
+        manager.send_request(&transaction).await?;
+        manager.terminate_transaction(&transaction).await?;
+        while events.try_recv().is_ok() {}
+
+        assert!(manager.transaction_route(&transaction).await.is_some());
+        assert_eq!(
+            manager
+                .original_request(&transaction)
+                .await?
+                .expect("retired request")
+                .call_id()
+                .expect("Call-ID")
+                .to_string(),
+            request.call_id().expect("Call-ID").to_string()
+        );
+
+        let response =
+            SimpleResponseBuilder::response_from_request(&request, StatusCode::Ok, Some("OK"))
+                .to("Bob", "sip:bob@example.com", Some("late-fork-tag"))
+                .contact("sip:bob@192.0.2.25:5060", None)
+                .build();
+
+        manager
+            .handle_transport_event(dispatch_event_from(
+                Message::Response(response.clone()),
+                "192.0.2.99:5060".parse().unwrap(),
+            ))
+            .await?;
+        let wrong_route_deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+        loop {
+            let remaining =
+                wrong_route_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, events.recv()).await {
+                Ok(Some(TransactionEvent::SuccessResponse { transaction_id, .. }))
+                    if transaction_id == transaction =>
+                {
+                    panic!("a response from the wrong route reached the TU")
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => break,
+            }
+        }
+
+        manager
+            .handle_transport_event(dispatch_event_from(
+                Message::Response(response.clone()),
+                destination,
+            ))
+            .await?;
+        let event = tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                let event = events.recv().await.expect("late response event channel");
+                if matches!(
+                    event,
+                    TransactionEvent::SuccessResponse {
+                        ref transaction_id,
+                        need_ack: true,
+                        ..
+                    } if transaction_id == &transaction
+                ) {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("late response event timeout");
+        assert!(matches!(event, TransactionEvent::SuccessResponse { .. }));
+
+        manager.send_ack_for_2xx(&transaction, &response).await?;
+        let sent = transport.get_sent_messages().await;
+        assert!(sent.iter().any(|(message, route)| {
+            *route == destination
+                && matches!(message, Message::Request(request) if request.method() == Method::Ack)
+        }));
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expired_retired_invite_route_is_pruned_and_cannot_be_revived() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, _events) = TransactionManager::new(transport, transport_rx, Some(16)).await?;
+        let destination: SocketAddr = "192.0.2.26:5060".parse().unwrap();
+        let request = create_test_invite().map_err(|error| Error::Other(error.to_string()))?;
+        let transaction = manager
+            .create_client_transaction_on_route(
+                request,
+                rvoip_sip_transport::TransportRoute::new(destination)
+                    .with_transport_type(TransportType::Udp),
+            )
+            .await?;
+        manager.send_request(&transaction).await?;
+        manager.terminate_transaction(&transaction).await?;
+
+        manager
+            .retired_client_transactions
+            .get_mut(&transaction)
+            .expect("retired transaction")
+            .expires_at = Instant::now() - Duration::from_millis(1);
+        assert_eq!(manager.retired_client_transaction_count(), 0);
+        assert!(manager.transaction_route(&transaction).await.is_none());
+        assert!(manager.original_request(&transaction).await.is_err());
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn invite_retransmission_after_2xx_reuses_cached_response() -> Result<()> {
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
         let (transport_tx, transport_rx) = mpsc::channel(16);

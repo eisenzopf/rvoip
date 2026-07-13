@@ -258,6 +258,18 @@ pub struct TransactionManagerRetentionCounts {
     pub pending_inbound_principals: usize,
 }
 
+/// Minimal UAC state retained after an INVITE client transaction leaves the
+/// active transaction set. RFC 3261 requires the UAC core to accept and ACK
+/// additional 2xx responses after the INVITE transaction itself has
+/// terminated. Keeping the immutable request and its authenticated transport
+/// route lets us do that without keeping the transaction runner alive.
+#[derive(Clone)]
+struct RetiredClientTransaction {
+    request: Request,
+    route: TransportRoute,
+    expires_at: Instant,
+}
+
 #[derive(Clone)]
 struct InboundPrincipalBinding {
     principal: AuthenticatedPrincipal,
@@ -312,11 +324,13 @@ pub const MAX_TRANSACTION_DISPATCH_WORKERS: usize = 64;
 // so this is a tail bound for lossy/missing-ACK calls, not a full call-volume
 // retention period.
 const INVITE_2XX_RESPONSE_CACHE_TTL: Duration = Duration::from_secs(90);
+const RETIRED_CLIENT_TRANSACTION_TTL: Duration = Duration::from_secs(90);
 const INVITE_2XX_ACKED_RESPONSE_RETENTION: Duration = Duration::from_secs(2);
 const PENDING_INBOUND_BYTES_TTL: Duration = Duration::from_secs(30);
 const PENDING_INBOUND_PRINCIPAL_TTL: Duration = Duration::from_secs(90);
 const INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK: usize = 2048;
 const MIN_INVITE_2XX_RESPONSE_CACHE_CAPACITY: usize = 65_536;
+const MIN_RETIRED_CLIENT_TRANSACTION_CAPACITY: usize = 65_536;
 const TERMINATED_CLEANUP_BATCH_MAX: usize = 1024;
 const TERMINATED_CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(100);
 const TERMINATED_CLEANUP_MAX_ATTEMPTS: u16 = 50;
@@ -328,6 +342,10 @@ fn transaction_index_capacity(capacity: Option<usize>) -> usize {
 
 fn invite_2xx_response_cache_capacity(index_capacity: usize) -> usize {
     index_capacity.max(MIN_INVITE_2XX_RESPONSE_CACHE_CAPACITY)
+}
+
+fn retired_client_transaction_capacity(index_capacity: usize) -> usize {
+    index_capacity.max(MIN_RETIRED_CLIENT_TRANSACTION_CAPACITY)
 }
 
 fn transaction_dispatch_worker_count(workers: Option<usize>) -> usize {
@@ -436,6 +454,12 @@ pub struct TransactionManager {
     /// Client transaction routes, including authority and the exact response
     /// flow once one has been observed.
     transaction_destinations: Arc<DashMap<TransactionKey, TransportRoute>>,
+    /// Bounded, expiring INVITE request/route tombstones. These authenticate
+    /// late forked or retransmitted 2xx responses after transaction cleanup
+    /// and provide the request template needed to ACK them.
+    retired_client_transactions: Arc<DashMap<TransactionKey, RetiredClientTransaction>>,
+    retired_client_transaction_capacity: usize,
+    retired_client_transaction_insert_count: Arc<AtomicUsize>,
     /// Event sender
     events_tx: mpsc::Sender<TransactionEvent>,
     /// Additional event subscribers. ArcSwap so the broadcast hot path
@@ -1119,6 +1143,15 @@ impl TransactionManager {
         }
     }
 
+    /// Number of unexpired INVITE client tombstones retained for authenticated
+    /// late-2xx handling. Kept separate from `TransactionManagerRetentionCounts`
+    /// so adding this diagnostic does not break downstream exhaustive struct
+    /// literals of that compatibility type.
+    pub fn retired_client_transaction_count(&self) -> usize {
+        self.prune_retired_client_transactions();
+        self.retired_client_transactions.len()
+    }
+
     /// Return retained transaction breakdowns for perf diagnostics.
     ///
     /// This is diagnostic-only data used to attribute retained transactions by
@@ -1177,6 +1210,7 @@ impl TransactionManager {
             "server_by_state": server_by_state,
             "server_by_kind": server_by_kind,
             "server_by_lifecycle": server_by_lifecycle,
+            "retired_client_transactions": self.retired_client_transactions.len(),
         })
     }
 
@@ -1383,6 +1417,13 @@ impl TransactionManager {
             invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
             terminated_cleanup_tx: Some(terminated_cleanup_tx),
             transaction_destinations,
+            retired_client_transactions: Arc::new(DashMap::with_capacity(
+                retired_client_transaction_capacity(index_capacity),
+            )),
+            retired_client_transaction_capacity: retired_client_transaction_capacity(
+                index_capacity,
+            ),
+            retired_client_transaction_insert_count: Arc::new(AtomicUsize::new(0)),
             events_tx,
             event_subscribers,
             subscriber_to_transactions,
@@ -1527,6 +1568,13 @@ impl TransactionManager {
             invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
             terminated_cleanup_tx: Some(terminated_cleanup_tx),
             transaction_destinations,
+            retired_client_transactions: Arc::new(DashMap::with_capacity(
+                retired_client_transaction_capacity(index_capacity),
+            )),
+            retired_client_transaction_capacity: retired_client_transaction_capacity(
+                index_capacity,
+            ),
+            retired_client_transaction_insert_count: Arc::new(AtomicUsize::new(0)),
             events_tx,
             event_subscribers,
             subscriber_to_transactions,
@@ -1780,6 +1828,13 @@ impl TransactionManager {
             invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
             terminated_cleanup_tx: Some(terminated_cleanup_tx),
             transaction_destinations,
+            retired_client_transactions: Arc::new(DashMap::with_capacity(
+                retired_client_transaction_capacity(index_capacity),
+            )),
+            retired_client_transaction_capacity: retired_client_transaction_capacity(
+                index_capacity,
+            ),
+            retired_client_transaction_insert_count: Arc::new(AtomicUsize::new(0)),
             events_tx,
             event_subscribers,
             subscriber_to_transactions,
@@ -1901,6 +1956,13 @@ impl TransactionManager {
             invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
             terminated_cleanup_tx: None,
             transaction_destinations,
+            retired_client_transactions: Arc::new(DashMap::with_capacity(
+                retired_client_transaction_capacity(index_capacity),
+            )),
+            retired_client_transaction_capacity: retired_client_transaction_capacity(
+                index_capacity,
+            ),
+            retired_client_transaction_insert_count: Arc::new(AtomicUsize::new(0)),
             events_tx,
             event_subscribers,
             subscriber_to_transactions,
@@ -2002,6 +2064,13 @@ impl TransactionManager {
             timer_settings,
             running,
             transaction_destinations,
+            retired_client_transactions: Arc::new(DashMap::with_capacity(
+                retired_client_transaction_capacity(index_capacity),
+            )),
+            retired_client_transaction_capacity: retired_client_transaction_capacity(
+                index_capacity,
+            ),
+            retired_client_transaction_insert_count: Arc::new(AtomicUsize::new(0)),
             subscriber_to_transactions,
             transaction_to_subscribers,
             next_subscriber_id,
@@ -2654,9 +2723,69 @@ impl TransactionManager {
         &self,
         transaction_id: &TransactionKey,
     ) -> Option<TransportRoute> {
-        self.transaction_destinations
+        if let Some(route) = self
+            .transaction_destinations
             .get(transaction_id)
             .map(|route| route.value().clone())
+        {
+            return Some(route);
+        }
+
+        self.retired_client_transaction(transaction_id)
+            .map(|retired| retired.route)
+    }
+
+    fn retired_client_transaction(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Option<RetiredClientTransaction> {
+        let retired = self
+            .retired_client_transactions
+            .get(transaction_id)
+            .map(|entry| entry.value().clone())?;
+        if retired.expires_at <= Instant::now() {
+            self.retired_client_transactions.remove(transaction_id);
+            return None;
+        }
+        Some(retired)
+    }
+
+    fn retire_client_transaction(
+        &self,
+        transaction_id: &TransactionKey,
+        transaction: &ArcClientTransaction,
+    ) {
+        let Some((_, route)) = self.transaction_destinations.remove(transaction_id) else {
+            return;
+        };
+
+        // Only INVITE can legitimately produce dialog-forming 2xx responses
+        // after its client transaction has terminated. Other methods discard
+        // their route immediately instead of broadening the retained surface.
+        if transaction_id.is_server()
+            || transaction_id.method() != &Method::Invite
+            || !transaction.data().initial_send_succeeded()
+        {
+            return;
+        }
+
+        self.retired_client_transactions.insert(
+            transaction_id.clone(),
+            RetiredClientTransaction {
+                request: transaction.data().request.as_ref().clone(),
+                route,
+                expires_at: Instant::now() + RETIRED_CLIENT_TRANSACTION_TTL,
+            },
+        );
+        let inserts = self
+            .retired_client_transaction_insert_count
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        if inserts % 1024 == 0
+            || self.retired_client_transactions.len() > self.retired_client_transaction_capacity
+        {
+            self.prune_retired_client_transactions();
+        }
     }
 
     /// Subscribe to events from all transactions.
@@ -2929,6 +3058,7 @@ impl TransactionManager {
             queue.clear();
         }
         self.transaction_destinations.clear();
+        self.retired_client_transactions.clear();
         self.pending_inbound_bytes.clear();
         self.pending_inbound_inserted_at.clear();
         self.pending_inbound_transport.clear();
@@ -3204,7 +3334,8 @@ impl TransactionManager {
         let mut terminated = false;
         self.request_transaction_runner_stop(transaction_id);
 
-        if self.client_transactions.remove(transaction_id).is_some() {
+        if let Some((_, client_transaction)) = self.client_transactions.remove(transaction_id) {
+            self.retire_client_transaction(transaction_id, &client_transaction);
             debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Removed terminated client transaction");
             terminated = true;
         }
@@ -3216,10 +3347,11 @@ impl TransactionManager {
             terminated = true;
         }
 
-        if self
-            .transaction_destinations
-            .remove(transaction_id)
-            .is_some()
+        if (transaction_id.is_server() || !terminated)
+            && self
+                .transaction_destinations
+                .remove(transaction_id)
+                .is_some()
         {
             debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Removed transaction from destinations map");
         }
@@ -3689,6 +3821,9 @@ impl TransactionManager {
     ) -> Result<()> {
         // Create the ACK request
         let ack_request = self.create_ack_for_2xx(invite_tx_id, response).await?;
+        let original_route = self.transaction_route(invite_tx_id).await.ok_or_else(|| {
+            Error::transaction_not_found(invite_tx_id.clone(), "ACK route lookup failed")
+        })?;
 
         // ACK follows the established dialog route set: top Route if present,
         // otherwise the remote target in the Contact-derived Request-URI.
@@ -3715,21 +3850,24 @@ impl TransactionManager {
         let destination = if let Some(dest) = destination.or(contact_destination) {
             dest
         } else {
-            match self.transaction_destinations.get(invite_tx_id) {
-                Some(entry) => entry.destination,
-                None => {
-                    return Err(Error::Other(format!(
-                        "Destination for transaction {:?} not found",
-                        invite_tx_id
-                    )));
-                }
-            }
+            original_route.destination
         };
 
-        // Send the ACK directly without creating a transaction
+        let mut ack_route = original_route;
+        if ack_route.destination != destination {
+            ack_route.destination = destination;
+            // An opaque stream flow is valid only for the peer it was bound
+            // to. A Contact-selected destination must establish/select its
+            // own flow rather than inheriting the INVITE's flow identity.
+            ack_route.flow_id = None;
+        }
+
+        // Send the ACK directly without creating a transaction, while
+        // preserving the authenticated transport/authority/flow selected by
+        // the original INVITE whenever its route remains the next hop.
         rvoip_sip_core::validation::validate_wire_request(&ack_request)?;
         self.transport
-            .send_message(Message::Request(ack_request), destination)
+            .send_message_via(Message::Request(ack_request), ack_route)
             .await
             .map_err(|e| Error::transport_error(e, "Failed to send ACK"))?;
 
@@ -3851,8 +3989,12 @@ impl TransactionManager {
         }
 
         // Get the original INVITE request
-        let invite_request =
-            utils::get_transaction_request(&self.client_transactions, invite_tx_id).await?;
+        let invite_request = self.original_request(invite_tx_id).await?.ok_or_else(|| {
+            Error::transaction_not_found(
+                invite_tx_id.clone(),
+                "ACK request template is unavailable",
+            )
+        })?;
 
         // Use the original INVITE top Via sent-by for the ACK's sent-by
         // address. With multiplexed transports, `transport.local_addr()`
@@ -4353,10 +4495,47 @@ impl TransactionManager {
     fn maintenance_prune_retained_state(&self) {
         self.prune_server_invite_dialog_index();
         self.prune_invite_2xx_response_cache();
+        self.prune_retired_client_transactions();
         self.compact_invite_2xx_response_due_queue();
         self.prune_closed_event_subscribers_now();
         self.prune_stale_pending_inbound_bytes();
         self.prune_stale_pending_inbound_principals();
+    }
+
+    fn prune_retired_client_transactions(&self) {
+        if self.retired_client_transactions.is_empty() {
+            return;
+        }
+
+        let now = Instant::now();
+        let expired: Vec<TransactionKey> = self
+            .retired_client_transactions
+            .iter()
+            .filter(|entry| entry.value().expires_at <= now)
+            .map(|entry| entry.key().clone())
+            .collect();
+        for key in expired {
+            self.retired_client_transactions
+                .remove_if(&key, |_, retired| retired.expires_at <= now);
+        }
+
+        let len = self.retired_client_transactions.len();
+        if len <= self.retired_client_transaction_capacity {
+            return;
+        }
+
+        let mut oldest: Vec<(TransactionKey, Instant)> = self
+            .retired_client_transactions
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().expires_at))
+            .collect();
+        oldest.sort_by_key(|(_, expires_at)| *expires_at);
+        for (key, _) in oldest
+            .into_iter()
+            .take(len.saturating_sub(self.retired_client_transaction_capacity))
+        {
+            self.retired_client_transactions.remove(&key);
+        }
     }
 
     fn prune_closed_event_subscribers_now(&self) {
@@ -4951,6 +5130,10 @@ impl fmt::Debug for TransactionManager {
                 &self.server_invite_dialog_index.len(),
             )
             .field("transaction_destinations", &"Arc<Mutex<HashMap<...>>>")
+            .field(
+                "retired_client_transactions",
+                &self.retired_client_transactions.len(),
+            )
             .field("events_tx", &self.events_tx) // Sender might be Debug
             .field("event_subscribers", &"Arc<Mutex<Vec<Sender>>>")
             .field("transport_rx", &"Arc<Mutex<Receiver>>")

@@ -130,6 +130,10 @@ impl Drop for ClientTransactionData {
 }
 
 impl ClientTransactionData {
+    pub(crate) fn initial_send_succeeded(&self) -> bool {
+        self.initial_send_state.load(Ordering::Acquire) == 1
+    }
+
     pub(crate) fn complete_initial_send(&self, succeeded: bool) {
         let state = if succeeded { 1 } else { 2 };
         if self

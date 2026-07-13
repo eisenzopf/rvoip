@@ -89,6 +89,9 @@ impl TransactionManager {
                 return Ok(server_tx.original_request().await);
             }
         }
+        if let Some(retired) = self.retired_client_transaction(tx_id) {
+            return Ok(Some(retired.request));
+        }
         Err(Error::transaction_not_found(
             tx_id.clone(),
             "original_request - transaction not found",
@@ -499,7 +502,8 @@ impl TransactionManager {
 
         self.request_transaction_runner_stop(tx_id);
 
-        if self.client_transactions.remove(tx_id).is_some() {
+        if let Some((_, client_transaction)) = self.client_transactions.remove(tx_id) {
+            self.retire_client_transaction(tx_id, &client_transaction);
             terminated = true;
         }
         if !terminated && self.server_transactions.remove(tx_id).is_some() {
@@ -507,7 +511,9 @@ impl TransactionManager {
             terminated = true;
         }
         self.terminated_transactions.remove(tx_id);
-        self.transaction_destinations.remove(tx_id);
+        if !terminated || tx_id.is_server() {
+            self.transaction_destinations.remove(tx_id);
+        }
         self.pending_inbound_bytes.remove(tx_id);
         self.pending_inbound_inserted_at.remove(tx_id);
         self.pending_inbound_transport.remove(tx_id);
@@ -718,8 +724,10 @@ impl TransactionManager {
             if remove_client {
                 self.request_transaction_runner_stop(&key);
                 debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Removing terminated client transaction");
-                self.client_transactions.remove(&key);
-                removed = true;
+                if let Some((_, client_transaction)) = self.client_transactions.remove(&key) {
+                    self.retire_client_transaction(&key, &client_transaction);
+                    removed = true;
+                }
             }
 
             let remove_server = self
@@ -736,7 +744,9 @@ impl TransactionManager {
             }
 
             if removed {
-                self.transaction_destinations.remove(&key);
+                if key.is_server() {
+                    self.transaction_destinations.remove(&key);
+                }
                 self.pending_inbound_bytes.remove(&key);
                 self.pending_inbound_inserted_at.remove(&key);
                 self.pending_inbound_transport.remove(&key);
